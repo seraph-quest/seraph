@@ -195,6 +195,108 @@ describe("CockpitView", () => {
     vi.restoreAllMocks();
   });
 
+  async function loadAllDeepPanes() {
+    await screen.findByRole("button", { name: "load activity ledger" });
+    const loaderNames = [
+      "load activity ledger",
+      "load workflow runs",
+      "load presence continuity",
+      "load control plane",
+      "load workflow orchestration",
+      "load background continuity",
+      "load M7 cockpit",
+      "load benchmark proof",
+      "load M8 guardian brain",
+      "load guardian memory controls",
+      "load M6 memory",
+      "load M5 operating layer",
+    ];
+    loaderNames.forEach((name) => {
+      const button = screen.queryAllByRole("button", { name })[0];
+      if (button) fireEvent.click(button);
+    });
+    await waitFor(() => {
+      expect(screen.queryByRole("button", { name: /^loading /i })).not.toBeInTheDocument();
+    });
+  }
+
+  it("keeps deep operator endpoints out of the baseline cockpit refresh", async () => {
+    mockCockpitBaselineFetch(fetchMock, {});
+
+    render(<CockpitView onSend={() => {}} />);
+
+    await waitFor(() => {
+      expect(fetchMock.mock.calls.some(([input]) => String(input).includes("/api/runtime/status"))).toBe(true);
+    });
+
+    const baselineUrls = fetchMock.mock.calls.map(([input]) => String(input));
+    const deniedDeepEndpoints = [
+      "/api/observer/continuity",
+      "/api/activity/ledger",
+      "/api/operator/control-plane",
+      "/api/operator/benchmark-proof",
+      "/api/operator/guardian-state",
+      "/api/operator/workflow-orchestration",
+      "/api/operator/background-sessions",
+      "/api/operator/m5-operating-layer",
+      "/api/operator/guardian-memory-live-control",
+      "/api/operator/m6-memory-superiority",
+      "/api/operator/m7-cockpit",
+      "/api/operator/m8-guardian-brain",
+      "/api/operator/engineering-memory",
+      "/api/operator/continuity-graph",
+      "/api/workflows/runs",
+    ];
+    expect(baselineUrls.some((url) => deniedDeepEndpoints.some((endpoint) => url.includes(endpoint)))).toBe(false);
+  });
+
+  it("loads deep cockpit panes only through their explicit endpoint groups", async () => {
+    mockCockpitBaselineFetch(fetchMock, {});
+
+    render(<CockpitView onSend={() => {}} />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "load activity ledger" })).toBeInTheDocument();
+    });
+    const baselineCallCount = fetchMock.mock.calls.length;
+
+    fireEvent.click(screen.getByRole("button", { name: "load activity ledger" }));
+    await waitFor(() => {
+      expect(
+        fetchMock.mock.calls.slice(baselineCallCount).some(([input]) => String(input).includes("/api/activity/ledger")),
+      ).toBe(true);
+    });
+    let explicitUrls = fetchMock.mock.calls.slice(baselineCallCount).map(([input]) => String(input));
+    expect(explicitUrls.every((url) => url.includes("/api/activity/ledger"))).toBe(true);
+
+    const afterActivityCallCount = fetchMock.mock.calls.length;
+    fireEvent.click(screen.getAllByRole("button", { name: "load control plane" })[0]);
+    await waitFor(() => {
+      expect(
+        fetchMock.mock.calls.slice(afterActivityCallCount).some(([input]) => String(input).includes("/api/operator/control-plane")),
+      ).toBe(true);
+    });
+    explicitUrls = fetchMock.mock.calls.slice(afterActivityCallCount).map(([input]) => String(input));
+    expect(explicitUrls.every((url) => url.includes("/api/operator/control-plane"))).toBe(true);
+
+    const afterControlCallCount = fetchMock.mock.calls.length;
+    fireEvent.click(screen.getAllByRole("button", { name: "load background continuity" })[0]);
+    await waitFor(() => {
+      expect(fetchMock.mock.calls.length).toBeGreaterThanOrEqual(afterControlCallCount + 3);
+    });
+    explicitUrls = fetchMock.mock.calls.slice(afterControlCallCount).map(([input]) => String(input));
+    expect(explicitUrls).toEqual(expect.arrayContaining([
+      expect.stringContaining("/api/operator/background-sessions"),
+      expect.stringContaining("/api/operator/engineering-memory"),
+      expect.stringContaining("/api/operator/continuity-graph"),
+    ]));
+    expect(explicitUrls.every((url) => (
+      url.includes("/api/operator/background-sessions")
+      || url.includes("/api/operator/engineering-memory")
+      || url.includes("/api/operator/continuity-graph")
+    ))).toBe(true);
+  });
+
   it("renders a governed marketplace extension row with action readiness", async () => {
     mockCockpitBaselineFetch(fetchMock, {
       capabilities: emptyCapabilityOverview({
@@ -536,6 +638,8 @@ describe("CockpitView", () => {
 
     render(<CockpitView onSend={vi.fn()} />);
 
+    await loadAllDeepPanes();
+
     expect(await screen.findByText("LOCAL GEMMA · GEMMA 4 26B A4B IT QAT GGUF")).toBeInTheDocument();
     expect(screen.queryByText("UNKNOWN · UNKNOWN")).not.toBeInTheDocument();
     expect(screen.queryByText("MODEL UNAVAILABLE")).not.toBeInTheDocument();
@@ -637,6 +741,8 @@ describe("CockpitView", () => {
     });
 
     render(<CockpitView onSend={() => {}} />);
+
+    await loadAllDeepPanes();
 
     const timelineTitle = await screen.findByText("Workflow timeline");
     const timeline = timelineTitle.closest(".cockpit-window");
@@ -1308,6 +1414,8 @@ describe("CockpitView", () => {
     });
 
     render(<CockpitView onSend={() => {}} />);
+
+    await loadAllDeepPanes();
 
     await waitFor(() => expect(screen.getByText("Workflow timeline")).toBeInTheDocument());
     expect(screen.getByText("Activity ledger")).toBeInTheDocument();
@@ -2070,6 +2178,8 @@ describe("CockpitView", () => {
 
     render(<CockpitView onSend={() => {}} />);
 
+    await loadAllDeepPanes();
+
     const m7Board = await screen.findByLabelText("M7 command board");
     await waitFor(() => {
       expect(within(m7Board).getByText("active work")).toBeInTheDocument();
@@ -2815,6 +2925,8 @@ describe("CockpitView", () => {
 
     render(<CockpitView onSend={() => {}} />);
 
+    await loadAllDeepPanes();
+
     const orchestration = await screen.findByLabelText("Workflow orchestration");
     await waitFor(() => {
       expect(orchestration).toHaveTextContent(/2 workflows · 1 sessions · 1 compacted/i);
@@ -3203,6 +3315,8 @@ describe("CockpitView", () => {
 
     render(<CockpitView onSend={() => {}} />);
 
+    await loadAllDeepPanes();
+
     const continuity = await screen.findByRole("region", { name: /background continuity/i });
     await waitFor(() => expect(continuity).toHaveTextContent(/1 sessions · 1\/1 running procs · 1 bundles · 4 edges/i));
     expect(continuity).toHaveTextContent(/1 handoff-ready · 1 active sessions · 0 repos · 1 prs · 0 work items · focus Atlas background thread/i);
@@ -3459,6 +3573,8 @@ describe("CockpitView", () => {
 
     render(<CockpitView onSend={() => {}} />);
 
+    await loadAllDeepPanes();
+
     const memorySurface = await screen.findByLabelText("Guardian memory controls");
     await waitFor(() => {
       expect(memorySurface).toHaveTextContent(/guardian memory controls live · 2 memories · 1 providers · 0 quarantined · 1 rollback-ready · 1 delete\/export pending/i);
@@ -3656,6 +3772,8 @@ describe("CockpitView", () => {
     });
 
     render(<CockpitView onSend={() => {}} />);
+
+    await loadAllDeepPanes();
 
     const evidence = await screen.findByLabelText("Evidence shortcuts");
     expect(await within(evidence).findByText("artifact: notes/brief.md")).toBeInTheDocument();
@@ -4004,6 +4122,8 @@ describe("CockpitView", () => {
 
     render(<CockpitView onSend={() => {}} />);
 
+    await loadAllDeepPanes();
+
     await waitFor(() => expect(screen.getByText("Operator terminal")).toBeInTheDocument());
     fireEvent.click(await screen.findByRole("button", { name: "save macro" }, { timeout: 5000 }));
     await waitFor(() => expect(screen.getByText("1 saved")).toBeInTheDocument());
@@ -4210,6 +4330,8 @@ describe("CockpitView", () => {
     });
 
     render(<CockpitView onSend={() => {}} />);
+
+    await loadAllDeepPanes();
 
     const orchestration = await screen.findByLabelText("Workflow orchestration");
     const row = (await within(orchestration).findByText("Release thread")).closest(".cockpit-operator-row--entry");
@@ -4926,6 +5048,8 @@ describe("CockpitView", () => {
 
     render(<CockpitView onSend={() => {}} />);
 
+    await loadAllDeepPanes();
+
     await waitFor(() => expect(screen.getByText("workflow_web_brief_to_file failed at write_file")).toBeInTheDocument());
     fireEvent.click(screen.getByText("workflow_web_brief_to_file failed at write_file"));
     expect(screen.getByRole("button", { name: "Repair step" })).toBeInTheDocument();
@@ -5022,6 +5146,8 @@ describe("CockpitView", () => {
     });
 
     render(<CockpitView onSend={() => {}} />);
+
+    await loadAllDeepPanes();
 
     await waitFor(() => expect(screen.getByText("Selected openai/gpt-4o-mini for chat_agent")).toBeInTheDocument());
     expect(screen.getByText(/model openai\/gpt-4o-mini · fallback_chain · policy_guardrails · budget standard · task interactive/)).toBeInTheDocument();
@@ -5152,6 +5278,8 @@ describe("CockpitView", () => {
     });
 
     render(<CockpitView onSend={() => {}} />);
+
+    await loadAllDeepPanes();
 
     await waitFor(() => expect(screen.getByText("Conversation reasoning for Session 1 using claude-sonnet-4")).toBeInTheDocument());
     expect(
@@ -5302,6 +5430,8 @@ describe("CockpitView", () => {
     });
 
     render(<CockpitView onSend={() => {}} />);
+
+    await loadAllDeepPanes();
 
     await waitFor(() => expect(screen.getByText("Activity ledger")).toBeInTheDocument());
     expect(await screen.findByText(/spend \$0\.012/)).toBeInTheDocument();
@@ -5597,6 +5727,8 @@ describe("CockpitView", () => {
 
     render(<CockpitView onSend={() => {}} />);
 
+    await loadAllDeepPanes();
+
     await waitFor(() => expect(screen.getByText("Activity ledger")).toBeInTheDocument());
     expect(await screen.findByText(/spend \$0\.013/)).toBeInTheDocument();
     expect(screen.getByText("1 user llm")).toBeInTheDocument();
@@ -5700,6 +5832,8 @@ describe("CockpitView", () => {
 
     render(<CockpitView onSend={() => {}} />);
 
+    await loadAllDeepPanes();
+
     await waitFor(() => expect(screen.getByText("Conversation reasoning for Session 1 using claude-sonnet-4")).toBeInTheDocument());
 
     act(() => {
@@ -5711,6 +5845,8 @@ describe("CockpitView", () => {
         ],
       });
     });
+
+    fireEvent.click(screen.getByRole("button", { name: "refresh activity ledger" }));
 
     await waitFor(() => {
       expect(screen.queryByText("Conversation reasoning for Session 1 using claude-sonnet-4")).not.toBeInTheDocument();
@@ -5794,6 +5930,8 @@ describe("CockpitView", () => {
     });
 
     render(<CockpitView onSend={() => {}} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "load activity ledger" }));
 
     const row = await screen.findByText("Selected openai/gpt-4o-mini for chat_agent");
     fireEvent.click(row);
@@ -5930,6 +6068,8 @@ describe("CockpitView", () => {
 
     render(<CockpitView onSend={() => {}} />);
 
+    await loadAllDeepPanes();
+
     fireEvent.click(screen.getByRole("button", { name: "Windows" }));
     const menu = await screen.findByText("Desktop Shell");
     fireEvent.click(menu.closest("button") as HTMLButtonElement);
@@ -6030,6 +6170,8 @@ describe("CockpitView", () => {
     });
 
     render(<CockpitView onSend={() => {}} />);
+
+    await loadAllDeepPanes();
 
     expect(await screen.findByRole("button", { name: "Approve" }, { timeout: 5000 })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Deny" })).toBeInTheDocument();
@@ -7042,6 +7184,8 @@ describe("CockpitView", () => {
 
     render(<CockpitView onSend={vi.fn()} />);
 
+    await loadAllDeepPanes();
+
     const guardianTitle = await screen.findByText("Guardian state", { selector: ".cockpit-window-title" });
     const guardianWindow = guardianTitle.closest(".cockpit-window") as HTMLElement;
     const operatorTitle = await screen.findByText("Operator terminal", { selector: ".cockpit-window-title" });
@@ -7437,6 +7581,8 @@ describe("CockpitView", () => {
 
     render(<CockpitView onSend={() => {}} />);
 
+    await loadAllDeepPanes();
+
     const workflowLabel = await screen.findByText("resume-review");
     const workflowRow = workflowLabel.closest(".cockpit-row");
     expect(workflowRow).not.toBeNull();
@@ -7661,6 +7807,8 @@ describe("CockpitView", () => {
     });
 
     render(<CockpitView onSend={() => {}} />);
+
+    await loadAllDeepPanes();
 
     const rootSummary = await screen.findByText("root review workflow completed");
     const rootRow = rootSummary.closest(".cockpit-row");
@@ -7996,6 +8144,8 @@ describe("CockpitView", () => {
 
     render(<CockpitView onSend={() => {}} />);
 
+    await loadAllDeepPanes();
+
     const rootSummary = await screen.findByText("root review workflow completed");
     fireEvent.click(rootSummary);
 
@@ -8149,6 +8299,8 @@ describe("CockpitView", () => {
     });
 
     render(<CockpitView onSend={() => {}} />);
+
+    await loadAllDeepPanes();
 
     const rootSummary = await screen.findByText("root review workflow completed");
     fireEvent.click(rootSummary);
@@ -8435,6 +8587,8 @@ describe("CockpitView", () => {
 
     render(<CockpitView onSend={() => {}} />);
 
+    await loadAllDeepPanes();
+
     const evidence = await screen.findByLabelText("Evidence shortcuts");
     const draftArtifactButton = await within(evidence).findByRole("button", {
       name: "Draft next step for artifact: notes/branch-review.md",
@@ -8620,6 +8774,8 @@ describe("CockpitView", () => {
 
     render(<CockpitView onSend={() => {}} />);
 
+    await loadAllDeepPanes();
+
     const evidence = await screen.findByLabelText("Evidence shortcuts");
     expect(await within(evidence).findByText("artifact: notes/shared-brief.md")).toBeInTheDocument();
     expect(within(evidence).getByText(/research-brief · succeeded/)).toBeInTheDocument();
@@ -8765,6 +8921,8 @@ describe("CockpitView", () => {
     });
 
     render(<CockpitView onSend={() => {}} />);
+
+    await loadAllDeepPanes();
 
     const evidence = await screen.findByLabelText("Evidence shortcuts");
     expect(await within(evidence).findByText("artifact: notes/shared.md")).toBeInTheDocument();
@@ -8983,6 +9141,8 @@ describe("CockpitView", () => {
     });
 
     render(<CockpitView onSend={() => {}} />);
+
+    await loadAllDeepPanes();
 
     const workflowSummary = await screen.findByText("atlas-brief waiting on write_file approval");
     fireEvent.click(workflowSummary);
@@ -12219,11 +12379,13 @@ describe("CockpitView", () => {
 
     render(<CockpitView onSend={vi.fn()} />);
 
+    await loadAllDeepPanes();
+
     await waitFor(() => expect(screen.getByText("Daily operator rhythm")).toBeInTheDocument());
     expect(await screen.findByText(/spend \$0\.015/)).toBeInTheDocument();
     expect(screen.getByText(/conversation \$0\.015/)).toBeInTheDocument();
 
-    fireEvent.click(screen.getAllByRole("button", { name: "reload" })[0]);
+    fireEvent.click(screen.getByRole("button", { name: "refresh activity ledger" }));
 
     await waitFor(() => expect(activityLedgerCalls).toBeGreaterThan(1));
     expect(screen.getByText(/spend \$0\.015/)).toBeInTheDocument();
@@ -12627,6 +12789,8 @@ describe("CockpitView", () => {
 
     render(<CockpitView onSend={vi.fn()} />);
 
+    await loadAllDeepPanes();
+
     const controlPlane = await screen.findByRole("region", { name: /team control plane/i });
     await waitFor(() => expect(controlPlane).toHaveTextContent(/single operator guarded workspace/i));
     expect(screen.getByText(/7 llm/i)).toBeInTheDocument();
@@ -12801,6 +12965,8 @@ describe("CockpitView", () => {
     });
 
     render(<CockpitView onSend={vi.fn()} />);
+
+    await loadAllDeepPanes();
 
     const operatingLayer = await screen.findByRole("region", { name: /m5 operating layer/i });
     await waitFor(() => expect(operatingLayer).toHaveTextContent(/3 work items · 1 jobs · 1 delegations/i));

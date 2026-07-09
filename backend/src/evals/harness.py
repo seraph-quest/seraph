@@ -822,6 +822,7 @@ from src.api.observer import (
 )
 from src.api.skills import UpdateSkillRequest, reload_skills as reload_skill_api, update_skill as update_skill_api
 from src.audit.repository import audit_repository
+from src.audit.runtime import reset_integration_timeout_rate_limit_state
 from src.app import create_app
 from src.db.models import MemoryKind
 from src.llm_runtime import FallbackLiteLLMModel, _reset_target_health, completion_with_fallback_sync
@@ -10551,6 +10552,7 @@ async def _eval_cross_surface_continuity_behavior() -> dict[str, Any]:
             patch("src.api.operator._list_workflow_runs", AsyncMock(return_value=[])),
             patch("src.api.operator.approval_repository.list_pending", AsyncMock(return_value=[])),
             patch("src.api.operator.audit_repository.list_events", AsyncMock(return_value=[])),
+            patch("src.api.operator._operator_database_missing_tables", AsyncMock(return_value=[])),
             patch("src.api.activity._list_workflow_runs", AsyncMock(return_value=[])),
             patch("src.api.activity.approval_repository.list_pending", AsyncMock(return_value=[])),
             patch("src.api.activity.audit_repository.list_events", AsyncMock(return_value=[])),
@@ -11323,6 +11325,7 @@ async def _eval_threaded_operator_timeline_behavior() -> dict[str, Any]:
                 "recovery_actions": [],
             },
         ),
+        patch("src.api.operator._operator_database_missing_tables", AsyncMock(return_value=[])),
     ):
         payload = await get_operator_timeline(limit=10, session_id="thread-1")
 
@@ -12598,9 +12601,12 @@ async def _eval_operator_guardian_state_surface_behavior() -> dict[str, Any]:
         is_working_hours=True,
     )
 
-    with patch(
-        "src.api.operator.build_guardian_state",
-        AsyncMock(return_value=guardian_state),
+    with (
+        patch(
+            "src.api.operator.build_guardian_state",
+            AsyncMock(return_value=guardian_state),
+        ),
+        patch("src.api.operator._operator_database_missing_tables", AsyncMock(return_value=[])),
     ):
         payload = await get_operator_guardian_state(session_id="session-1")
 
@@ -12723,6 +12729,7 @@ async def _eval_workflow_boundary_blocked_surface_behavior() -> dict[str, Any]:
         patch("src.api.activity.guardian_feedback_repository.list_recent", return_value=[]),
         patch("src.api.activity.audit_repository.list_events", return_value=[]),
         patch("src.api.activity.list_recent_llm_calls", return_value=[]),
+        patch("src.api.operator._operator_database_missing_tables", AsyncMock(return_value=[])),
     ):
         operator_payload = await get_operator_timeline(limit=10, session_id="thread-1")
         activity_payload = await get_activity_ledger(limit=10, session_id="thread-1", window_hours=24)
@@ -12815,6 +12822,7 @@ async def _eval_approval_explainability_surface_behavior() -> dict[str, Any]:
         patch("src.api.activity.guardian_feedback_repository.list_recent", return_value=[]),
         patch("src.api.activity.audit_repository.list_events", return_value=[]),
         patch("src.api.activity.list_recent_llm_calls", return_value=[]),
+        patch("src.api.operator._operator_database_missing_tables", AsyncMock(return_value=[])),
     ):
         pending_payload = await list_pending_approvals(session_id="thread-1", limit=10)
         operator_payload = await get_operator_timeline(limit=10, session_id="thread-1")
@@ -29748,6 +29756,7 @@ async def _run_scenario(scenario: EvalScenario) -> EvalResult:
     started = time.perf_counter()
     _reset_bounded_guardian_snapshot_cache()
     _reset_vector_store_state()
+    reset_integration_timeout_rate_limit_state()
     try:
         output = scenario.runner()
         if asyncio.iscoroutine(output):
@@ -29774,6 +29783,7 @@ async def _run_scenario(scenario: EvalScenario) -> EvalResult:
     finally:
         _reset_bounded_guardian_snapshot_cache()
         _reset_vector_store_state()
+        reset_integration_timeout_rate_limit_state()
 
 
 async def run_runtime_evals(selected_names: Sequence[str] | None = None) -> EvalSummary:

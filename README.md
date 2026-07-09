@@ -92,6 +92,8 @@ open http://localhost:8004/docs   # Swagger API docs
 
 When running Seraph from a managed Codex/Desktop shell and watching a live chat session, use `./manage.sh -e dev local run` instead of fire-and-forget `local up`. The managed shell can clean up background children after a command exits even when `manage.sh` briefly reports successful PIDs, which shows up as empty `pids/`, `local status` reporting stopped, and immediate `curl` connection refused on `8004` or `3001`. Keep the `local run` session open while observing, verify with `./manage.sh -e dev local status` plus `curl -sS http://127.0.0.1:8004/health`, and stop with `./manage.sh -e dev local down` when finished. `local status` reports `running` only when the PID file and owned port listener both agree; PID-only or listener-only states are reported as degraded.
 
+If `/api/operator/database-doctor` reports missing local SQLite tables, restart through the managed local launcher with `./manage.sh -e dev local run`. Backend startup creates missing SQLModel tables and applies local legacy migrations before serving operator surfaces.
+
 For local Gemma/VLM screenshot analysis, Seraph expects the VLM wrapper to run
 through Docker Compose on the GPU server. The concrete path is
 `Seraph frontend 127.0.0.1:3001 -> Seraph backend 127.0.0.1:8004 -> GPU VLM wrapper 192.168.1.26:8001 -> GPU model server 192.168.1.26:8000/v1`.

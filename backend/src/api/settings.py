@@ -319,6 +319,8 @@ def _screenshot_folder_summary(root: Path) -> dict[str, object]:
         "last_image_at_source": latest_captured_at_source,
         "exists": True,
         "readable": True,
+        "summary_status": "ready",
+        "summary_failure": None,
     }
 
 
@@ -332,6 +334,8 @@ def _fallback_screenshot_folder_summary(root: Path, *, status: str) -> dict[str,
         "last_image_at_source": None,
         "exists": exists,
         "readable": readable,
+        "summary_status": "partial",
+        "summary_failure": status,
     }
 
 
@@ -514,6 +518,8 @@ async def _screenshot_folder_pipeline_summary(root: Path | None = None) -> dict[
         "latest_failure": latest_failure,
         "digest_count": digest_count,
         "latest_digest_at": _utc_iso(latest_digest.observed_at) if latest_digest is not None else None,
+        "metadata_status": "ready",
+        "metadata_failure": None,
     }
 
 
@@ -545,6 +551,8 @@ def _empty_screenshot_folder_pipeline_summary(*, latest_failure: str | None = No
         "latest_failure": latest_failure,
         "digest_count": 0,
         "latest_digest_at": None,
+        "metadata_status": "partial",
+        "metadata_failure": latest_failure,
     }
 
 
@@ -895,12 +903,29 @@ async def get_artifact_storage_settings():
     report_archive_dir, report_archive_source = _report_archive_dir()
     report_dir_status = _archive_dir_status(report_archive_dir)
     screenshot_folder, screenshot_folder_source = _screenshot_folder()
-    screenshot_source, report_receipts, screenshot_pipeline, local_runtime_proof = await asyncio.gather(
+    screenshot_source_result, report_receipts_result, screenshot_pipeline_result, local_runtime_proof_result = await asyncio.gather(
         _screenshot_folder_summary_fast(screenshot_folder),
         _report_receipt_summary_fast(report_archive_dir),
         _screenshot_folder_pipeline_summary_fast(screenshot_folder),
         _local_runtime_profile_proof_summary_fast(),
+        return_exceptions=True,
     )
+    screenshot_source = (
+        _fallback_screenshot_folder_summary(screenshot_folder, status="summary_unavailable")
+        if isinstance(screenshot_source_result, Exception)
+        else screenshot_source_result
+    )
+    report_receipts = (
+        {"receipt_count": 0, "last_receipt_at": None}
+        if isinstance(report_receipts_result, Exception)
+        else report_receipts_result
+    )
+    screenshot_pipeline = (
+        _empty_screenshot_folder_pipeline_summary(latest_failure="analysis metadata unavailable")
+        if isinstance(screenshot_pipeline_result, Exception)
+        else screenshot_pipeline_result
+    )
+    local_runtime_proof = None if isinstance(local_runtime_proof_result, Exception) else local_runtime_proof_result
     screenshot_image_count = int(screenshot_source["image_count"] or 0)
     screenshot_observation_count = int(screenshot_pipeline["observation_count"] or 0)
     screenshot_processed_count = int(
@@ -937,6 +962,8 @@ async def get_artifact_storage_settings():
             "status": screenshot_source["status"],
             "exists": screenshot_source["exists"],
             "readable": screenshot_source["readable"],
+            "summary_status": screenshot_source.get("summary_status", "ready"),
+            "summary_failure": screenshot_source.get("summary_failure"),
             "stored_artifacts": ["image"],
             "analysis": {
                 "provider": effective_screen_analysis_provider() or "not_configured",

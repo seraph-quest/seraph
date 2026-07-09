@@ -274,6 +274,84 @@ async def test_artifact_storage_returns_env_folder_when_pipeline_summary_times_o
 
 
 @pytest.mark.asyncio
+async def test_artifact_storage_returns_partial_status_when_screenshot_summaries_are_slow(
+    client,
+    tmp_path,
+    monkeypatch,
+):
+    screenshot_root = tmp_path / "captures"
+    screenshot_root.mkdir()
+    monkeypatch.setenv("SERAPH_SCREENSHOT_FOLDER", str(screenshot_root))
+
+    def slow_folder_summary(_root):
+        time.sleep(2)
+        return {}
+
+    async def slow_pipeline_summary(root=None):
+        await asyncio.sleep(2)
+        return {}
+
+    with (
+        patch.object(settings, "workspace_dir", str(tmp_path / "workspace")),
+        patch.object(settings, "screen_analysis_provider", "local-vlm"),
+        patch("src.api.settings._SCREENSHOT_FOLDER_SUMMARY_TIMEOUT_S", 0.01),
+        patch("src.api.settings._SCREENSHOT_PIPELINE_SUMMARY_TIMEOUT_S", 0.01),
+        patch("src.api.settings._screenshot_folder_summary", slow_folder_summary),
+        patch("src.api.settings._screenshot_folder_pipeline_summary", slow_pipeline_summary),
+    ):
+        started_at = time.monotonic()
+        resp = await client.get("/api/settings/artifact-storage")
+        elapsed = time.monotonic() - started_at
+
+    assert resp.status_code == 200
+    assert elapsed < 0.5
+    data = resp.json()
+    assert data["screenshot_folder"]["summary_status"] == "partial"
+    assert data["screenshot_folder"]["summary_failure"] == "summary_timeout"
+    assert data["screenshot_folder"]["analysis"]["metadata_status"] == "partial"
+    assert data["screenshot_folder"]["analysis"]["metadata_failure"] == "analysis metadata timed out"
+    assert data["screenshot_folder"]["analysis"]["latest_failure"] == "analysis metadata timed out"
+
+
+@pytest.mark.asyncio
+async def test_health_and_sessions_stay_fast_when_artifact_summaries_are_slow(
+    client,
+    tmp_path,
+    monkeypatch,
+):
+    screenshot_root = tmp_path / "captures"
+    screenshot_root.mkdir()
+    monkeypatch.setenv("SERAPH_SCREENSHOT_FOLDER", str(screenshot_root))
+
+    def slow_folder_summary(_root):
+        time.sleep(2)
+        return {}
+
+    async def slow_pipeline_summary(root=None):
+        await asyncio.sleep(2)
+        return {}
+
+    with (
+        patch.object(settings, "workspace_dir", str(tmp_path / "workspace")),
+        patch("src.api.settings._SCREENSHOT_FOLDER_SUMMARY_TIMEOUT_S", 0.01),
+        patch("src.api.settings._SCREENSHOT_PIPELINE_SUMMARY_TIMEOUT_S", 0.01),
+        patch("src.api.settings._screenshot_folder_summary", slow_folder_summary),
+        patch("src.api.settings._screenshot_folder_pipeline_summary", slow_pipeline_summary),
+    ):
+        health_started = time.monotonic()
+        health_resp = await client.get("/health")
+        health_elapsed = time.monotonic() - health_started
+        sessions_started = time.monotonic()
+        sessions_resp = await client.get("/api/sessions")
+        sessions_elapsed = time.monotonic() - sessions_started
+
+    assert health_resp.status_code == 200
+    assert sessions_resp.status_code == 200
+    assert health_elapsed < 1.0
+    assert sessions_elapsed < 1.0
+
+
+@pytest.mark.asyncio
 async def test_artifact_storage_prefers_seraph_screen_archive_env(client, tmp_path, monkeypatch):
     preferred = tmp_path / "seraph-screen"
     fallback = tmp_path / "fallback-screen"

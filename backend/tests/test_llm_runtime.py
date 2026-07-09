@@ -22,6 +22,7 @@ from src.llm_runtime import (
     _ordered_candidate_targets,
     _order_targets_by_policy,
     _reset_target_health,
+    _strict_local_inference_decision,
     build_completion_kwargs,
     build_model_kwargs,
     completion_with_fallback,
@@ -1615,7 +1616,9 @@ def test_completion_with_fallback_sync_keeps_remote_fallback_base_for_local_runt
     assert mock_completion.call_args_list[1].kwargs["api_base"] == "https://openrouter.ai/api/v1"
 
 
-def test_completion_with_fallback_sync_local_runtime_only_blocks_remote_fallback():
+def test_completion_with_fallback_sync_local_runtime_only_blocks_remote_fallback(async_db):
+    secret_canary = "SERAPH-PRIVATE-CANARY-9c7d2f"
+    private_prompt = f"private screenshot summary containing {secret_canary}"
     with (
         patch.object(settings, "default_model", "openrouter/anthropic/claude-sonnet-4"),
         patch.object(settings, "llm_api_key", "primary-key"),
@@ -1632,7 +1635,7 @@ def test_completion_with_fallback_sync_local_runtime_only_blocks_remote_fallback
     ):
         with pytest.raises(RuntimeError, match="local down"):
             completion_with_fallback_sync(
-                messages=[{"role": "user", "content": "private screenshot summary"}],
+                messages=[{"role": "user", "content": private_prompt}],
                 temperature=0.2,
                 max_tokens=256,
                 runtime_path="screenshot_observation_digest",
@@ -1643,6 +1646,193 @@ def test_completion_with_fallback_sync_local_runtime_only_blocks_remote_fallback
     assert mock_completion.call_args.kwargs["model"] == "ollama/llama3.2"
     assert mock_completion.call_args.kwargs["api_key"] == "local-key"
     assert mock_completion.call_args.kwargs["api_base"] == "http://localhost:11434/v1"
+
+    async def _fetch_denials():
+        events = await audit_repository.list_events(limit=20)
+        return [event for event in events if event["event_type"] == "llm_target_policy_denied"]
+
+    denials = asyncio.run(_fetch_denials())
+    assert denials
+    assert denials[0]["details"]["trust_schema_version"] == "seraph.trust.v1"
+    assert denials[0]["details"]["trust_reason"] == "local_only_egress_blocked"
+    assert denials[0]["details"]["destination_class"] == "remote_provider"
+    assert set(denials[0]["details"]) == {
+        "destination_class",
+        "model",
+        "runtime_path",
+        "runtime_profile",
+        "target_source",
+        "trust_decision_id",
+        "trust_reason",
+        "trust_schema_version",
+    }
+    serialized_denial = json.dumps(denials[0], sort_keys=True)
+    assert private_prompt not in serialized_denial
+    assert secret_canary not in serialized_denial
+
+
+def test_completion_with_fallback_sync_local_runtime_only_denies_remote_primary_before_transport(async_db):
+    with (
+        patch.object(settings, "default_model", "openrouter/anthropic/claude-sonnet-4"),
+        patch.object(settings, "llm_api_key", "primary-key"),
+        patch.object(settings, "llm_api_base", "https://openrouter.ai/api/v1"),
+        patch.object(settings, "fallback_model", ""),
+        patch.object(settings, "fallback_models", ""),
+        patch("litellm.completion") as mock_completion,
+    ):
+        with pytest.raises(
+            ProviderProfileConfigurationError,
+            match="strict-local inference denied primary target: local_only_egress_blocked",
+        ):
+            completion_with_fallback_sync(
+                messages=[{"role": "user", "content": "private operator context"}],
+                temperature=0.2,
+                max_tokens=256,
+                runtime_path="session_consolidation",
+                profile="default",
+                local_runtime_only=True,
+            )
+
+    mock_completion.assert_not_called()
+
+
+def test_strict_local_inference_decision_rejects_public_endpoint_on_local_profile():
+    decision = _strict_local_inference_decision(
+        {
+            "model_id": "openai-compatible/local-alias",
+            "api_base": "https://models.example/v1",
+            "profile": "local",
+            "source": "primary",
+        },
+        messages=[{"role": "user", "content": "private context"}],
+        runtime_path="session_consolidation",
+    )
+
+    assert decision.allowed is False
+    assert decision.reason_code == "local_only_egress_blocked"
+    assert decision.destination_class == "remote_provider"
+
+
+@pytest.mark.parametrize(
+    "api_base",
+    [
+        "http://attacker.internal:8000/v1",
+        "http://model.local:8000/v1",
+        "http://model-server:8000/v1",
+        "https://8.8.8.8/v1",
+        "http://0.0.0.0:8000/v1",
+    ],
+)
+def test_strict_local_inference_rejects_hostname_suffix_single_label_public_and_unspecified(api_base):
+    decision = _strict_local_inference_decision(
+        {
+            "model_id": "openai-compatible/untrusted-alias",
+            "api_base": api_base,
+            "profile": "local",
+            "source": "primary",
+        },
+        messages=[{"role": "user", "content": "private context"}],
+        runtime_path="session_consolidation",
+    )
+
+    assert decision.allowed is False
+    assert decision.reason_code == "local_only_egress_blocked"
+
+
+def test_strict_local_inference_rejects_private_endpoint_without_explicit_local_profile():
+    decision = _strict_local_inference_decision(
+        {
+            "model_id": "openai-compatible/profile-spoof",
+            "api_base": "http://192.168.1.26:8000/v1",
+            "profile": "default",
+            "source": "primary",
+        },
+        messages=[{"role": "user", "content": "private context"}],
+        runtime_path="session_consolidation",
+    )
+
+    assert decision.allowed is False
+    assert decision.reason_code == "local_only_egress_blocked"
+
+
+def test_strict_local_inference_rejects_capability_spoofed_openai_compatible_profile_before_transport():
+    profile_config = {
+        "profiles": {
+            "spoof-local": {
+                "provider_kind": "openai_compatible",
+                "model": "openai-compatible/attacker",
+                "api_base": "http://192.168.1.25:8000/v1",
+                "capabilities": ["local"],
+                "keyless": True,
+            }
+        }
+    }
+    with (
+        patch.object(settings, "llm_provider_profiles", json.dumps(profile_config)),
+        patch.object(settings, "fallback_model", ""),
+        patch.object(settings, "fallback_models", ""),
+        patch("litellm.completion") as mock_completion,
+    ):
+        with pytest.raises(
+            ProviderProfileConfigurationError,
+            match="strict-local inference denied primary target: local_only_egress_blocked",
+        ):
+            completion_with_fallback_sync(
+                messages=[{"role": "user", "content": "private context"}],
+                temperature=0.2,
+                max_tokens=128,
+                runtime_path="session_consolidation",
+                profile="spoof-local",
+                local_runtime_only=True,
+            )
+
+    mock_completion.assert_not_called()
+
+
+def test_strict_local_inference_accepts_configured_explicit_local_provider_kind():
+    profile_config = {
+        "profiles": {
+            "trusted-local": {
+                "provider_kind": "local",
+                "model": "openai-compatible/local-model",
+                "api_base": "http://192.168.1.26:8000/v1",
+                "capabilities": [],
+                "keyless": True,
+            }
+        }
+    }
+    with patch.object(settings, "llm_provider_profiles", json.dumps(profile_config)):
+        decision = _strict_local_inference_decision(
+            {
+                "model_id": "openai-compatible/local-model",
+                "api_base": "http://192.168.1.26:8000/v1",
+                "profile": "trusted-local",
+                "source": "primary",
+            },
+            messages=[{"role": "user", "content": "private context"}],
+            runtime_path="session_consolidation",
+        )
+
+    assert decision.allowed is True
+
+
+@pytest.mark.parametrize(
+    "api_base",
+    ["http://localhost:11434/v1", "http://127.0.0.1:8000/v1", "http://192.168.1.26:8000/v1"],
+)
+def test_strict_local_inference_accepts_localhost_and_literal_private_ip_with_local_profile(api_base):
+    decision = _strict_local_inference_decision(
+        {
+            "model_id": "openai-compatible/local",
+            "api_base": api_base,
+            "profile": "local",
+            "source": "primary",
+        },
+        messages=[{"role": "user", "content": "private context"}],
+        runtime_path="session_consolidation",
+    )
+
+    assert decision.allowed is True
 
 
 def test_fallback_litellm_model_keeps_remote_fallback_base_for_local_runtime_path():

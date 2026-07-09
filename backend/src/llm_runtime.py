@@ -6,6 +6,7 @@ import asyncio
 import contextvars
 from dataclasses import dataclass
 import hashlib
+import ipaddress
 import json
 import logging
 import math
@@ -15,6 +16,7 @@ from threading import Lock
 from time import monotonic
 from types import SimpleNamespace
 from typing import Any
+from urllib.parse import urlparse
 from uuid import uuid4
 
 from smolagents import LiteLLMModel as BaseLiteLLMModel
@@ -26,6 +28,13 @@ from src.approval.runtime import get_current_session_id
 from src.audit.repository import audit_repository
 from src.local_runtime_profiles import local_runtime_profile
 from src.operators.local_codex import is_local_codex_model, local_codex_chat_timeout_seconds, run_local_codex
+from src.security.trust_contract import (
+    DestinationClass,
+    TrustDecision,
+    TrustDestination,
+    evaluate_trust,
+    strict_local_inference_request,
+)
 from src.vlm_runtime import effective_vlm_api_key, effective_vlm_chat_api_base
 
 logger = logging.getLogger(__name__)
@@ -1368,7 +1377,91 @@ def _fallback_targets(
 
 def _target_uses_local_runtime_profile(target: dict[str, Any]) -> bool:
     profile = target.get("profile")
-    return bool(profile and is_local_runtime_profile(str(profile)))
+    if not profile:
+        return False
+    profile_id = _normal_profile_id(str(profile))
+    if profile_id == "local":
+        return True
+    resolved = _provider_profile(profile_id)
+    if resolved is None:
+        return False
+    if resolved.provider_kind in {"local", "ollama"}:
+        return True
+    builtin = _builtin_provider_profiles().get(profile_id)
+    return bool(
+        profile_id.startswith("local-gemma-")
+        and builtin is not None
+        and resolved == builtin
+    )
+
+
+_STRICT_LOCAL_PRIVATE_NETWORKS = tuple(
+    ipaddress.ip_network(cidr)
+    for cidr in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "fc00::/7")
+)
+
+
+def _strict_local_endpoint(api_base: object) -> bool:
+    """Return whether an inference endpoint is a literal local/private target."""
+    parsed = urlparse(str(api_base or ""))
+    hostname = (parsed.hostname or "").strip().lower()
+    if parsed.scheme not in {"http", "https"} or not hostname:
+        return False
+    if hostname == "localhost":
+        return True
+    try:
+        address = ipaddress.ip_address(hostname)
+    except ValueError:
+        return False
+    if address.is_unspecified:
+        return False
+    return (
+        address.is_loopback
+        or address.is_link_local
+        or any(address in network for network in _STRICT_LOCAL_PRIVATE_NETWORKS)
+    )
+
+
+def _strict_local_target_destination_class(target: dict[str, Any]) -> DestinationClass:
+    if _target_uses_local_runtime_profile(target) and _strict_local_endpoint(target.get("api_base")):
+        return DestinationClass.TRUSTED_LAN_RUNTIME
+    return DestinationClass.REMOTE_PROVIDER
+
+
+def _strict_local_inference_decision(
+    target: dict[str, Any],
+    *,
+    messages: list[dict[str, Any]],
+    runtime_path: str,
+) -> TrustDecision:
+    """Evaluate one candidate for a caller that declared a strict-local boundary."""
+    data_digest = hashlib.sha256(
+        json.dumps(messages, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
+    ).hexdigest()
+    destination_identity = hashlib.sha256(
+        json.dumps(
+            {
+                "profile": str(target.get("profile") or ""),
+                "model_id": str(target.get("model_id") or ""),
+                "api_base": str(target.get("api_base") or ""),
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    destination = TrustDestination(
+        destination_id=f"model:{destination_identity}",
+        destination_class=_strict_local_target_destination_class(target),
+        endpoint=str(target.get("api_base") or ""),
+    )
+    request = strict_local_inference_request(
+        principal_id=f"seraph-runtime:{runtime_path}",
+        capability_id=f"llm:{runtime_path}",
+        data_digest=data_digest,
+        destination=destination,
+        source_id=runtime_path,
+    )
+    return evaluate_trust(request)
 
 
 def _target_cooldown_seconds() -> int:
@@ -2912,10 +3005,6 @@ def completion_with_fallback_sync(
             "profile": resolved_profile,
             "source": "primary",
         }
-        if local_runtime_only and not _target_uses_local_runtime_profile(primary_target):
-            raise ProviderProfileConfigurationError(
-                f"Runtime path '{runtime_path}' requires a local runtime profile"
-            )
         fallback_targets = _fallback_targets(
             primary_model_id=primary_model,
             primary_api_base=primary_kwargs.get("api_base"),
@@ -2925,9 +3014,39 @@ def completion_with_fallback_sync(
             profile=profile,
         )
         if local_runtime_only:
-            fallback_targets = [
-                target for target in fallback_targets if _target_uses_local_runtime_profile(target)
-            ]
+            allowed_fallback_targets: list[dict[str, Any]] = []
+            for target in [primary_target, *fallback_targets]:
+                decision = _strict_local_inference_decision(
+                    target,
+                    messages=messages,
+                    runtime_path=runtime_path,
+                )
+                if decision.allowed:
+                    if target is not primary_target:
+                        allowed_fallback_targets.append(target)
+                    continue
+                if _can_log_request(request_id):
+                    _log_llm_runtime_event_sync(
+                        event_type="llm_target_policy_denied",
+                        summary=f"Strict-local inference denied {target['model_id']}",
+                        details={
+                            "runtime_path": runtime_path,
+                            "runtime_profile": resolved_profile,
+                            "model": str(target["model_id"]),
+                            "target_source": str(target.get("source") or "unknown"),
+                            "trust_schema_version": decision.schema_version,
+                            "trust_decision_id": decision.decision_id,
+                            "trust_reason": decision.reason_code,
+                            "destination_class": decision.destination_class,
+                        },
+                        request_id=request_id,
+                    )
+                if target is primary_target:
+                    raise ProviderProfileConfigurationError(
+                        f"Runtime path '{runtime_path}' strict-local inference denied primary target: "
+                        f"{decision.reason_code}"
+                    )
+            fallback_targets = allowed_fallback_targets
         ordered_targets = _ordered_candidate_targets(
             primary_target=primary_target,
             fallback_targets=fallback_targets,

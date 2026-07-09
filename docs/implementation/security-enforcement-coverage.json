@@ -1,0 +1,319 @@
+{
+  "schema": "seraph.security_enforcement_coverage.v1",
+  "as_of": "2026-07-10",
+  "milestone_issue": 738,
+  "critic_disposition": {
+    "original_review": "changes_requested",
+    "followup_review": "changes_requested",
+    "credential_followup_review": "changes_requested",
+    "findings": "accepted_and_fixed",
+    "fresh_review": "passed_no_material_findings",
+    "fresh_review_date": "2026-07-10",
+    "fresh_review_receipts": {
+      "focused": 251,
+      "adjacent": 10
+    }
+  },
+  "status_values": [
+    "enforced_in_738",
+    "contract_only",
+    "owned_by_downstream"
+  ],
+  "evidence_values": [
+    "real",
+    "partial",
+    "metadata",
+    "fixture",
+    "none"
+  ],
+  "entries": [
+    {
+      "id": "contract.decision_envelope",
+      "boundary": "Shared identity, authority, data, destination, approval, audit, replay, and recovery decision",
+      "milestone_status": "enforced_in_738",
+      "existing_evidence": "real",
+      "owner_issue": 738,
+      "required_proof": "backend/src/security/trust_contract.py and backend/tests/test_trust_contract.py prove explicit grants, principal-operation matrix, exact session/job and resource scope, canonical digests, bounded attempt/replay/expiry checks, transformation binding, verified-audit receipt input, typed recovery, egress constraints, and exact approval drift; audit verification and replay sets are caller-authoritative rather than repository-backed/atomic"
+    },
+    {
+      "id": "ingress.http",
+      "boundary": "LAN browser or client to reverse proxy and REST API",
+      "milestone_status": "owned_by_downstream",
+      "existing_evidence": "none",
+      "owner_issue": 741,
+      "required_proof": "Authenticated request plus anonymous, expired, CSRF, forged-origin, replay, and unauthorized-mutation negatives"
+    },
+    {
+      "id": "ingress.websocket",
+      "boundary": "Browser or channel client to WebSocket session",
+      "milestone_status": "owned_by_downstream",
+      "existing_evidence": "none",
+      "owner_issue": 741,
+      "required_proof": "Authenticated upgrade, origin binding, expiry, reconnect, replay, and revocation tests"
+    },
+    {
+      "id": "ingress.edge_channel",
+      "boundary": "Paired Mac edge or messaging identity to backend",
+      "milestone_status": "owned_by_downstream",
+      "existing_evidence": "metadata",
+      "owner_issue": 741,
+      "required_proof": "Pairing, scoped identity, rotation, stale message, replay, and revocation enforcement"
+    },
+    {
+      "id": "ingress.service_principal",
+      "boundary": "Internal service or job identity outside the named scheduled-workflow path",
+      "milestone_status": "owned_by_downstream",
+      "existing_evidence": "partial",
+      "owner_issue": 747,
+      "required_proof": "Every internal caller uses a named service identity with exact session/job, least grant, expiry, resource scope, and audit lineage"
+    },
+    {
+      "id": "service.scheduled_workflow_identity",
+      "boundary": "Scheduled workflow job to wrapped workflow capability",
+      "milestone_status": "enforced_in_738",
+      "existing_evidence": "real",
+      "owner_issue": 738,
+      "required_proof": "backend/src/approval/runtime.py, backend/src/scheduler/scheduled_jobs.py, and backend/tests/test_scheduled_jobs.py prove explicit SERVICE identity, exact session/job binding, CAPABILITY_EXECUTE-only grant, and context cleanup"
+    },
+    {
+      "id": "model.local_route",
+      "boundary": "Backend to local model or VLM endpoint",
+      "milestone_status": "owned_by_downstream",
+      "existing_evidence": "partial",
+      "owner_issue": 740,
+      "required_proof": "Universal capability and endpoint validation, resolver/address pinning, redirect revalidation, classified payload, actual-route receipt, and failure behavior"
+    },
+    {
+      "id": "model.strict_local_candidate_gate",
+      "boundary": "Strict-local synchronous completion candidate to primary or fallback transport",
+      "milestone_status": "enforced_in_738",
+      "existing_evidence": "real",
+      "owner_issue": 738,
+      "required_proof": "backend/src/llm_runtime.py and backend/tests/test_llm_runtime.py prove every local_runtime_only primary/fallback candidate is evaluated before transport; only trusted local provider kinds plus HTTP(S) localhost or literal RFC1918/ULA/loopback/link-local addresses pass, while free-form local capability, suffix, single-label, public, unspecified, and profile-spoof targets are not called"
+    },
+    {
+      "id": "model.remote_egress",
+      "boundary": "Backend to OpenRouter or generic OpenAI-compatible endpoint",
+      "milestone_status": "owned_by_downstream",
+      "existing_evidence": "metadata",
+      "owner_issue": 740,
+      "required_proof": "Data-class compatibility, destination allowlist, resolver pinning, redirect revalidation, pre-network redaction, zero-byte denial, and no silent fallback"
+    },
+    {
+      "id": "model.output_to_action",
+      "boundary": "Untrusted model output to planner or capability request",
+      "milestone_status": "owned_by_downstream",
+      "existing_evidence": "partial",
+      "owner_issue": 747,
+      "required_proof": "Independent post-model authorization and hostile tool-call denial"
+    },
+    {
+      "id": "external_content.context",
+      "boundary": "Web, browser, document, repository, message, or retrieved content to model context",
+      "milestone_status": "owned_by_downstream",
+      "existing_evidence": "fixture",
+      "owner_issue": 747,
+      "required_proof": "Provenance retention and indirect prompt-injection tests through the real authorization path"
+    },
+    {
+      "id": "capability.policy",
+      "boundary": "Planner request to tool or capability policy",
+      "milestone_status": "owned_by_downstream",
+      "existing_evidence": "partial",
+      "owner_issue": 747,
+      "required_proof": "Typed manifest, deny-by-default mode, principal, authority, destination, resource, and receipt enforcement"
+    },
+    {
+      "id": "capability.protected_tool_authority_gate",
+      "boundary": "Wrapped high-risk tool invocation to approval lookup or tool execution",
+      "milestone_status": "enforced_in_738",
+      "existing_evidence": "real",
+      "owner_issue": 738,
+      "required_proof": "backend/src/tools/approval.py and backend/tests/test_approval_tools.py prove wrapped high-risk/forced calls require explicit session/principal plus exact CAPABILITY_EXECUTE grant/session/job/resource scope; missing, under-scoped, or mismatched authority denies before repository/execution and model-origin arguments have no instruction authority"
+    },
+    {
+      "id": "capability.approval",
+      "boundary": "Protected capability request to operator approval and consumption",
+      "milestone_status": "owned_by_downstream",
+      "existing_evidence": "partial",
+      "owner_issue": 747,
+      "required_proof": "Bound scope, expiry, single use, revocation, drift, replay, and no-session tests"
+    },
+    {
+      "id": "capability.audit",
+      "boundary": "Protected capability decision and result to durable audit",
+      "milestone_status": "owned_by_downstream",
+      "existing_evidence": "partial",
+      "owner_issue": 747,
+      "required_proof": "Connect evaluator verified-audit receipt input to authoritative durable repository/outbox state; prove caller booleans cannot self-attest, storage failure denies before effect, and decision/result lineage is redacted"
+    },
+    {
+      "id": "capability.filesystem_process",
+      "boundary": "Capability host to filesystem, subprocess, environment, and runtime resources",
+      "milestone_status": "owned_by_downstream",
+      "existing_evidence": "partial",
+      "owner_issue": 747,
+      "required_proof": "Root/path/symlink, environment, executable, timeout, output, cleanup, and resource-limit negatives"
+    },
+    {
+      "id": "capability.browser_network",
+      "boundary": "Capability host to browser, network, download, upload, cookie, and private-address surfaces",
+      "milestone_status": "owned_by_downstream",
+      "existing_evidence": "fixture",
+      "owner_issue": 747,
+      "required_proof": "Session partition, endpoint allowlist, redirect/DNS/SSRF, credential, download/upload, and hostile-content negatives"
+    },
+    {
+      "id": "capability.connector",
+      "boundary": "Capability host to MCP, managed connector, or external account",
+      "milestone_status": "owned_by_downstream",
+      "existing_evidence": "partial",
+      "owner_issue": 747,
+      "required_proof": "Authenticated source identity, declared operation, destination/account scope, mutation approval, egress, and revocation"
+    },
+    {
+      "id": "secret.vault_and_refs",
+      "boundary": "Vault to opaque reference issuance and resolution",
+      "milestone_status": "owned_by_downstream",
+      "existing_evidence": "real",
+      "owner_issue": 747,
+      "required_proof": "Preserve existing scoped resolution and extend it to every secret-bearing capability host"
+    },
+    {
+      "id": "secret.runtime_authority_gate",
+      "boundary": "Secret-bearing wrapped tool call to opaque reference resolution",
+      "milestone_status": "enforced_in_738",
+      "existing_evidence": "real",
+      "owner_issue": 738,
+      "required_proof": "backend/src/tools/secret_ref_tools.py, backend/src/security/trust_contract.py, and backend/tests/test_secret_ref_tools.py prove secret-bearing wrapped calls preflight the actual CREDENTIAL_EGRESS operation through shared principal_operation_reason before resolution, then evaluate capability scope; missing, unauthenticated, revoked, under-scoped, mismatched, SERVICE, and paired-edge authority denies even with grant strings; full destination-bound repository-backed durable credential approval/audit/replay remains downstream"
+    },
+    {
+      "id": "secret.model_request_output",
+      "boundary": "Secret-bearing data to remote model request, prompt, response, or stream",
+      "milestone_status": "owned_by_downstream",
+      "existing_evidence": "partial",
+      "owner_issue": 740,
+      "required_proof": "Secret-canary denial or pre-network redaction across model prompts, requests, provider errors, responses, and streams"
+    },
+    {
+      "id": "secret.artifact_backup_output",
+      "boundary": "Secret-bearing data to artifact, checkpoint, migration, backup, restore, or report",
+      "milestone_status": "owned_by_downstream",
+      "existing_evidence": "partial",
+      "owner_issue": 742,
+      "required_proof": "Secret-canary denial, encryption, redaction, retention, restore, and revocation preservation across durable outputs"
+    },
+    {
+      "id": "secret.capability_log_audit_output",
+      "boundary": "Resolved capability secret to result, error, log, audit, or operator receipt",
+      "milestone_status": "owned_by_downstream",
+      "existing_evidence": "partial",
+      "owner_issue": 747,
+      "required_proof": "Secret-canary denial or redaction across capability results, errors, logs, durable audit, and operator receipts"
+    },
+    {
+      "id": "secret.backup_key",
+      "boundary": "Vault key and encrypted values to migration, backup, restore, and rollback",
+      "milestone_status": "owned_by_downstream",
+      "existing_evidence": "none",
+      "owner_issue": 742,
+      "required_proof": "Key separation, encrypted backup, restore, revocation preservation, no logging, and corrupt-archive denial"
+    },
+    {
+      "id": "artifact.ingress",
+      "boundary": "Edge, channel, browser, connector, or capability output to artifact ingestion",
+      "milestone_status": "owned_by_downstream",
+      "existing_evidence": "metadata",
+      "owner_issue": 742,
+      "required_proof": "Owner, provenance, data class, content type, active-content, integrity, size, and quarantine enforcement"
+    },
+    {
+      "id": "artifact.governed_builder",
+      "boundary": "Opt-in governed artifact content to registry trust record",
+      "milestone_status": "enforced_in_738",
+      "existing_evidence": "real",
+      "owner_issue": 738,
+      "required_proof": "backend/src/artifacts/registry.py and backend/tests/test_artifact_registry.py prove exact canonical content digest, current allow decision, digested principal/source/provenance receipt metadata, secret-like metadata canaries, and legacy-unclassified behavior"
+    },
+    {
+      "id": "artifact.storage_export",
+      "boundary": "Stored artifact to consumer, model context, download, export, retention, or deletion",
+      "milestone_status": "owned_by_downstream",
+      "existing_evidence": "metadata",
+      "owner_issue": 742,
+      "required_proof": "Allowed consumer/export, path/archive traversal, hash, retention, deletion, backup, and restore tests"
+    },
+    {
+      "id": "durable.replay_resume",
+      "boundary": "Recorded job, checkpoint, approval, or artifact to replay/resume",
+      "milestone_status": "owned_by_downstream",
+      "existing_evidence": "real",
+      "owner_issue": 747,
+      "required_proof": "Preserve covered workflow drift blocking, adopt v1 lineage for every privileged durable path, and connect caller-authoritative replay inputs to an atomic durable reservation/consumption ledger"
+    },
+    {
+      "id": "recovery.workspace_restore_rollback",
+      "boundary": "Workspace, artifact, database, vault, backup, or migration failure to quarantine, restore, or rollback",
+      "milestone_status": "owned_by_downstream",
+      "existing_evidence": "partial",
+      "owner_issue": 742,
+      "required_proof": "Verified restore, incompatible-state quarantine, revocation preservation, key handling, and security-preserving data rollback"
+    },
+    {
+      "id": "recovery.capability_compensation_irreversible",
+      "boundary": "Capability or external side effect to retry, resume, compensation, quarantine, or irreversible outcome",
+      "milestone_status": "owned_by_downstream",
+      "existing_evidence": "partial",
+      "owner_issue": 747,
+      "required_proof": "Typed recovery-class execution, independent authorization for compensation, replay safety, and truthful irreversible-effect handling"
+    },
+    {
+      "id": "admin.host_lifecycle",
+      "boundary": "Administrator or lifecycle command to GPU host services and private listeners",
+      "milestone_status": "owned_by_downstream",
+      "existing_evidence": "partial",
+      "owner_issue": 741,
+      "required_proof": "Private listener inventory, managed ownership, authenticated product transport, and SSH/admin separation"
+    },
+    {
+      "id": "availability.ingress_limits",
+      "boundary": "HTTP, WebSocket, edge, or channel ingress to connection and request budgets",
+      "milestone_status": "owned_by_downstream",
+      "existing_evidence": "partial",
+      "owner_issue": 741,
+      "required_proof": "Connection/request rate limits, payload bounds, backpressure, cancellation, abuse recovery, and authenticated health behavior"
+    },
+    {
+      "id": "availability.model_gpu_admission",
+      "boundary": "Model and VLM requests to the one-GPU queue and inference budgets",
+      "milestone_status": "owned_by_downstream",
+      "existing_evidence": "partial",
+      "owner_issue": 744,
+      "required_proof": "Serial admission, priority, cancellation, timeout, queue caps, interactive non-starvation, and background progress"
+    },
+    {
+      "id": "availability.workspace_storage_pressure",
+      "boundary": "Artifact, backup, database, and workspace writes to storage budgets",
+      "milestone_status": "owned_by_downstream",
+      "existing_evidence": "partial",
+      "owner_issue": 742,
+      "required_proof": "Storage quotas, reserve policy, partial-write denial, retention, cleanup, disk-pressure recovery, and restore integrity"
+    },
+    {
+      "id": "availability.capability_limits",
+      "boundary": "Capability invocation to process, CPU, memory, network, output, time, and cost budgets",
+      "milestone_status": "owned_by_downstream",
+      "existing_evidence": "partial",
+      "owner_issue": 747,
+      "required_proof": "Per-capability limits, admission, timeout, cancellation, output bounds, cleanup, and cost enforcement"
+    },
+    {
+      "id": "release.cumulative_security",
+      "boundary": "All adopted security decisions to epic release and operator health receipt",
+      "milestone_status": "owned_by_downstream",
+      "existing_evidence": "fixture",
+      "owner_issue": 754,
+      "required_proof": "Cumulative auth, egress, sandbox, replay, edge, backup, restart, rollback, redaction, and residual-risk gates"
+    }
+  ]
+}

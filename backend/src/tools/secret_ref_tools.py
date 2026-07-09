@@ -6,8 +6,15 @@ from urllib.parse import urlparse
 
 from smolagents import Tool, tool
 
-from src.approval.runtime import get_current_session_id
+from src.approval.runtime import get_current_session_id, get_current_trust_principal
+from src.security.trust_contract import (
+    AuthorityGrant,
+    TrustOperation,
+    evaluate_trust,
+    principal_operation_reason,
+)
 from src.security.site_policy import evaluate_site_access
+from src.tools.approval import _capability_authority_request
 from src.tools.policy import (
     get_tool_credential_egress_policy,
     get_tool_secret_ref_fields,
@@ -52,6 +59,35 @@ class SecretRefResolvingTool(Tool):
         session_id = get_current_session_id()
         invocation = self._normalize_invocation(args, kwargs)
         has_secret_refs = any(_contains_secret_ref(value) for value in invocation.values())
+        principal = get_current_trust_principal()
+        if has_secret_refs and (session_id is None or principal is None):
+            raise PermissionError(
+                f"Tool '{self.name}' cannot resolve secret references without authenticated runtime authority."
+            )
+        if has_secret_refs:
+            credential_reason = principal_operation_reason(
+                principal=principal,
+                operation=TrustOperation.CREDENTIAL_EGRESS,
+                required_grant=AuthorityGrant.CREDENTIAL_EGRESS,
+            )
+            if credential_reason is not None:
+                raise PermissionError(
+                    f"Tool '{self.name}' cannot resolve secret references without authenticated "
+                    f"runtime authority ({credential_reason})."
+                )
+            authority_decision = evaluate_trust(
+                _capability_authority_request(
+                    session_id=session_id,
+                    principal=principal,
+                    tool_name=self.name,
+                    arguments=invocation,
+                )
+            )
+            if not authority_decision.allowed:
+                raise PermissionError(
+                    f"Tool '{self.name}' cannot resolve secret references without authenticated "
+                    f"runtime authority ({authority_decision.reason_code})."
+                )
         if not tool_accepts_secret_refs(self.name, is_mcp=self._is_mcp, tool=self.wrapped_tool):
             if has_secret_refs:
                 raise ValueError(

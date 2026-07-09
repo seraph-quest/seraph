@@ -411,7 +411,7 @@ describe("ArtifactStoragePanel", () => {
 
     render(<ArtifactStoragePanel />);
 
-    expect(await screen.findByText("Local Gemma runtime")).toBeInTheDocument();
+    expect(await screen.findByText("openai/unsloth/gemma-4-26B-A4B-it-qat-GGUF")).toBeInTheDocument();
     expect(screen.getByText("direct route failing · chat:missing")).toBeInTheDocument();
     expect(screen.queryByText("direct route ok")).not.toBeInTheDocument();
   });

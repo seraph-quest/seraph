@@ -1,192 +1,70 @@
 ---
-title: 08. Docs Contract
+title: 08. Documentation Contract
 ---
 
-# 08. Docs Contract
+# 08. Documentation Contract
 
-## Status On `develop`
+The [Project Constitution](./00-project-constitution.md) is the sole authority
+for Seraph's product definition and accepted target architecture. Its ADRs own
+locked decisions. No roadmap, research document, issue, or archived strategy
+document can define a competing target.
 
-- [x] Seraph now has an explicit docs contract, but it still depends on contributors following it consistently.
+## Ownership
 
-## Paired Research
+| Surface | Owns | Does not own |
+| --- | --- | --- |
+| Project Constitution and ADRs | Product definition, accepted target, vocabulary, invariants | Shipped capability claims or live execution state |
+| `docs/implementation/STATUS.md` and implementation guides | Shipped/Partial behavior on `develop`, validation, operator contracts | Target architecture or project queue |
+| `docs/research/` | Evidence, alternatives, dated comparisons, uncertainty | Accepted target or shipped truth |
+| `/legacy` and explicit archived stubs | Historical context and links to Git history | Current instructions, roadmap, or supported behavior |
+| GitHub Project, issues, and PRs | Queue, ownership, review, integration, completion receipts | Product constitution |
 
-- evidence and comparison rules: [09. Reference Systems And Evidence](/research/reference-systems-and-evidence)
-- M0 competitor truth: [18. Agent Competition Truth Table](/research/agent-competition-truth-table)
-- M0 claim and wording gate: [19. Strategy Claim Ledger](/research/strategy-claim-ledger)
+## Status Rules
 
-## Purpose
+Capabilities use exactly these lifecycle states:
 
-This file explains how research truth, implementation truth, and GitHub execution state fit together.
+- **Shipped** — available on `develop` with named proof.
+- **Partial** — usable on `develop` with named missing boundaries.
+- **Experimental** — opt-in canary with explicit limits and rollback.
+- **Planned** — accepted tracked work with no shipped implementation.
+- **Deprecated** — present temporarily with a replacement/removal issue.
+- **Excluded** — intentionally outside Seraph's capability boundary.
 
-It is a cross-cutting implementation mirror, not a workstream doc.
+**Target**, **Research**, **Archived**, and **Blocked** classify decisions,
+documents, or work—not capabilities. A capability must never be labeled Target.
+Configured state, a branch-local change, or a deterministic fixture is not
+evidence of Shipped.
 
-Research and implementation should not compete with each other:
+## Change Rules
 
-- research owns target product shape, evidence rules, benchmark logic, and superiority logic
-- implementation owns shipped truth on `develop`, delivery ownership, and strategic implementation translation
-- GitHub owns active execution state, review state, and merge state
+- Change the accepted target only through the constitution and a new or
+  superseding ADR, tracked issue, and independent Critic/Contrarian review.
+- Update STATUS and the owning implementation guide when merged behavior changes.
+- Preserve legitimate transitional shipped facts, but label Deprecated paths
+  and name their replacement/removal issue.
+- Keep research comparative claims dated, sourced, and separate from decisions.
+- Archived stubs may summarize provenance and link Git history; they must not
+  contain executable prompts, commands, TODO sequences, or imperative roadmaps.
+- Never mirror Project Queue, Code Review, PR, or slice state in documentation.
 
-If a major concept appears in research but not implementation, or vice versa, the docs are incomplete.
+## Required Checks
 
-## Ownership Rules
+Run:
 
-- [x] `docs/research/00-synthesis.md` owns the target-product synthesis
-- [x] `docs/research/10-competitive-benchmark.md` owns the comparative judgment
-- [x] `docs/research/11-superiority-program.md` owns the design-level superiority program
-- [x] `docs/research/18-agent-competition-truth-table.md` owns M0 competitor truth and capability benchmark pressure
-- [x] `docs/research/19-strategy-claim-ledger.md` owns claim status, allowed wording, and proof-gate review rules
-- [x] `docs/research/20-seraph-agent-parity-and-exceedance-goals.md` owns the Hermes/OpenClaw/IronClaw parity pressure overlay and guardian-preserving target feature set
-- [x] `docs/implementation/STATUS.md` owns the fastest shipped snapshot
-- [x] `docs/implementation/00-master-roadmap.md` owns the strategic implementation program, completed-program record, and workstream-to-gap translation
-- [x] `docs/implementation/09-benchmark-status.md` mirrors the benchmark on shipped implementation terms
-- [x] `docs/implementation/10-superiority-delivery.md` mirrors the superiority program on delivery terms
-- [x] `docs/implementation/11-world-class-strategy-delivery.md` mirrors the cross-cutting world-class strategy translation on delivery terms
-- [x] `docs/implementation/16-agent-parity-execution-roadmap.md` mirrors the agent parity and targeted exceedance goal on implementation sequencing, proof gates, board linkage, and duplicate-issue avoidance
-- [x] the GitHub Project owns execution state
-- [x] GitHub issues and PRs own active work tracking, review state, and merge state
-- [x] `docs/docs/` owns historical/archive material that is no longer current truth
+```bash
+python3 scripts/check_docs_contract.py
+python3 scripts/check_strategy_claims.py
+cd docs && npm run typecheck && npm run build
+```
 
-## Update Rules
+The contract checker enforces canonical ownership, the mirrored public use-case
+block, public help links, capability/document status separation, ADR structure,
+sole root-route ownership, sidebar placement, and non-operational archive stubs.
+Docusaurus treats broken links as build failures.
 
-- [x] If research adds a new benchmark or program layer, implementation needs a mirror doc in the same PR.
-- [x] If implementation changes shipped truth, update `STATUS.md`, the owning workstream file, and any affected mirror docs in the same PR.
-- [x] If active execution state changes, update the GitHub Project, issue, or PR instead of mirroring that state in docs.
-- [x] If the strategic implementation program or cross-cutting strategy translation changes materially, update the roadmap and any affected mirror docs in the same PR.
-- [x] If a doc introduces world-class, best, strongest, superior, secure, private, production-ready, complete, or ahead-of-competitor wording, check the M0 claim ledger and use only wording allowed for the claim status.
-- [x] Open PRs, review state, and branch state belong in issues, PRs, and the GitHub Project, not in docs that claim to describe `develop`.
+## Historical Context
 
-## Project Workflow
-
-Project fields:
-
-- `Queue`: `Now`, `Next`, `Background`, `Blocked`
-- `Status`: `Todo`, `In Progress`, `Done`
-- `Lane`: `Trust Boundaries`, `Execution Plane`, `Runtime Reliability`, `Presence and Reach`, `Guardian Intelligence`, `Embodied UX`, `Ecosystem and Leverage`, `Docs / Meta`
-- `Priority`: `P0`, `P1`, `P2`
-- `Size`: `S`, `M`, `L`
-- `Code Review`: `Not Ready`, `Pending`, `Running`, `Passed`, `Changes Requested`
-- `Linked pull requests`: built-in GitHub linkage
-- `PR`: `Not Ready`, `Open`, `Merged`
-
-### Untracked Request Intake
-
-Chat-originated bugs, requested changes, architecture issues, runtime
-complaints, workflow changes, and docs-truth changes are not exempt from the
-execution layer. If no matching issue exists, agents must search open and closed
-issues first, then create or refine a tracked issue before PR-sized
-implementation.
-
-Emergency investigation may happen before issue creation when a service is down
-or evidence would disappear, but no commit, PR, merge, or completion claim should
-happen before the issue exists unless the user explicitly says not to create a
-ticket.
-
-The issue or a linked comment should capture:
-
-- observed symptom or requested behavior
-- root cause or implementation plan
-- acceptance criteria
-- expected validation
-- docs or operator surfaces that should change
-
-Expected flow:
-
-1. Create or refine the tracked issue.
-   - set `Queue`, `Lane`, `Priority`, `Size`
-   - set `Status=Todo`
-   - set `Code Review=Not Ready`
-   - set `PR=Not Ready`
-   - record issue, project item, or field receipts before claiming tracking is correct
-2. Start execution.
-   - set `Status=In Progress`
-   - move `Queue=Now` if the task is active now
-3. Open the PR.
-   - link the PR to the issue
-   - keep the issue as the project item and use built-in linked pull requests for the PR relationship
-   - set issue `PR=Open`
-   - set issue `Code Review=Pending`
-4. Run review.
-   - set `Code Review=Running` while review is active
-   - move to `Changes Requested` or `Passed`
-   - every PR-sized slice must be reviewed before merge; non-trivial PR-sized slices require an independent subagent review
-   - material findings must be fixed, explicitly rejected with rationale, or converted into tracked follow-up work before merge
-   - PR bodies must record reviewer identity, reviewed branch/commit or diff, material findings or an explicit no-findings result, disposition, and validation receipts
-5. Merge and close.
-   - set `PR=Merged`
-   - set `Status=Done`
-
-## Batch Mode
-
-Use this as the default execution model when several internal slices will land through one GitHub PR.
-
-- create one parent batch issue as the project item
-- keep one aggregate PR linked to that parent issue
-- use the parent batch issue checklist as the authoritative internal-slice list by default
-- only create child slice issues when a slice has separate ownership, is a blocker, has independent acceptance criteria, or could be reprioritized separately
-- if child slice issues exist, they may carry their own `Queue` and `Status`, but leave `PR=Not Ready` and `Code Review=Not Ready` unless that slice gets its own PR
-- do not mirror one aggregate PR across all child slice issues; the parent batch issue remains the main project item for aggregate `PR` and `Code Review` state
-- use issue comments or the PR body for receipts and progress notes, not as a second authoritative slice-state surface
-
-## M1 Capability Contract Updates
-
-M1 capability-kernel docs are contract docs. They define the reusable capability taxonomy and manifest semantics that M2, M3, and M9 depend on; they must not become a live issue mirror.
-
-When a PR changes capability identity, manifest contribution semantics, permission vocabulary, provenance, health, compatibility, lifecycle state, or package ownership, update all affected durable truth surfaces in the same PR:
-
-- [00. Master Roadmap](./00-master-roadmap.md): strategic contract and completed-program context
-- [11. World-Class Strategy Delivery](./11-world-class-strategy-delivery.md): milestone consumer rules and proof language
-- owning workstream docs: shipped behavior, missing gap, validation, and review receipts when shipped truth changes
-- [STATUS](./STATUS.md): only when the branch changes the fastest shipped snapshot after merge
-
-M1 acceptance language should identify:
-
-- capability classes covered, including core tools, workflow tools, MCP tools, skills, workflows, runbooks, starter packs, automations, browser or computer-use surfaces, managed connectors, memory providers, and extension-owned contributions
-- the source and owner for each class, including whether the behavior is core-owned, package-owned, connector-owned, or transitional compatibility behavior
-- declared permissions, mutation rights, provenance, trust level, health, dependencies, compatibility, and available operator actions
-- the proof surface, such as API payloads, manifest validation, lifecycle receipts, audit or activity receipts, cockpit inventory, deterministic tests, or benchmark suites
-
-Do not mark M1 complete from docs alone. Completion requires implementation receipts on `develop`, linked issue or PR proof, and operator-visible inventory that downstream M2/M3/M9 work can rely on.
-
-## Latest Workflow Contract Update
-
-- [x] GitHub Project now owns the active execution layer for Seraph.
-- subagent review:
-  - reviewer: `Fermat` (`019d2bff-cf88-70f0-a8cd-772182c834d1`)
-  - concrete findings fixed before the slice stayed final:
-    - removed tracked issue form fields that duplicated `Queue`, `Lane`, `Priority`, and `Size` outside the project
-    - removed manual `Queue`, `Lane`, `Code Review`, and `PR` fields from the PR template so PR bodies stop mirroring board state
-    - removed current workflow guidance from `docs/docs/setup.md` so the archive tree stays archival
-    - normalized project seeding to issue-first tracking with built-in linked pull requests instead of a mixed issue-plus-standalone-PR model
-    - corrected the repo-local push skill so it no longer falsely implies automatic board mutation
-  - final verification:
-    - project item `#233` links PR `#238` with `PR=Open` and `Code Review=Pending`
-    - project item `#239` links PR `#232` with `PR=Open` and `Code Review=Pending`
-    - the project no longer uses standalone PR items for tracked work that already has an issue item
-- [x] Batch execution now defaults to one parent issue plus one aggregate PR.
-- subagent follow-up review:
-  - reviewer: `Fermat` (`019d2bff-cf88-70f0-a8cd-772182c834d1`)
-  - concrete findings fixed before the slice stayed final:
-    - removed PR-template wording that would duplicate internal slice tracking in the PR body
-    - made the parent batch issue checklist the authoritative batch-decomposition surface unless a slice becomes its own child issue
-    - defined child-slice board semantics under an aggregate PR: child issues may move through `Queue` and `Status`, but keep `PR=Not Ready` and `Code Review=Not Ready` unless they get their own PR
-    - clarified the tracked-work issue template so the batch-decomposition section is only for parent batch issues and can be left blank on standalone or child issues
-    - generalized the PR-template tracking label back to `Linked tracked issue` so standalone tracked work and batch-parent linking both match the same template
-  - final verification:
-    - the parent batch issue owns aggregate `PR` and `Code Review` state
-    - child slice issues no longer imply duplicated aggregate-PR state
-    - issue comments and PR bodies are now receipts and notes, not a second authoritative slice-status surface
-    - the PR template now supports both standalone tracked issues and parent batch issues without implying every PR must close a batch parent
-
-## Parity Rules
-
-- [x] Every implementation workstream should link to its paired research doc or docs.
-- [x] Research should not carry a stale duplicate of GitHub execution state.
-- [x] Implementation should not make benchmark or superiority claims without a research-side source.
-- [ ] The trees are only “in parity” when a reader can move from synthesis -> benchmark/program -> shipped implementation -> cross-cutting strategy mirror without guessing which file owns what.
-
-## Acceptance Checklist
-
-- [x] The docs now explain where research truth ends and implementation truth begins.
-- [x] The benchmark/program layers have explicit implementation mirrors.
-- [x] The entry-point docs can link a reader to the right owner instead of repeating stale fragments or stale board state.
-- [ ] Future PRs still need to follow this contract for the parity fix to hold.
+The previous master roadmap and parity program remain discoverable only as
+historical summaries. Full content is preserved in Git history and closed issue
+[#475](https://github.com/seraph-quest/seraph/issues/475). They are not active
+instructions or target owners.

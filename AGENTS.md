@@ -1,5 +1,21 @@
 # Agent Guidelines
 
+## Canonical Project Contract
+
+Before substantial work, read the
+[Project Constitution](docs/implementation/00-project-constitution.md) and its
+ADRs. Use [Current App Guide](docs/implementation/12-current-app-guide.md) for
+the current topology, [Development Status](docs/implementation/STATUS.md) for
+shipped/partial truth, and
+[Documentation Contract](docs/implementation/08-docs-contract.md) for ownership
+and status vocabulary. GitHub issues, PRs, and the Project remain the execution
+layer; these docs do not replace tracked work.
+
+For Epic #736, [ADR-005](docs/implementation/decisions/005-epic-integration-branch-workflow.md)
+locks the integration workflow: milestone branches start from the latest epic
+branch, ready PRs target it, and only the final reviewed epic PR targets
+`develop`.
+
 ## What Seraph Is
 
 Seraph is a local-first operator cockpit and agent runtime. The repo spans a
@@ -228,7 +244,7 @@ needs, then track broader proof work separately when necessary.
   `frontend/src/components/chat/`, and related tests.
 - Lifecycle scripts and env loading: `manage.sh`, `env.dev.example`,
   `env.prod.example`, Docker/VLM wrapper docs.
-- Shipped-truth docs: `docs/implementation/`; target-shape and evidence docs:
+- Shipped-truth docs: `docs/implementation/`; evidence and alternatives:
   `docs/research/`; historical/archive docs: `docs/docs/`.
 
 Prefer these extension points before adding new broad modules or parallel UI
@@ -293,8 +309,10 @@ feat/batch-three -> feat/batch-two
 
 ## Docs And Execution Contract
 
-- `docs/research/` is the target-shape, evidence, and comparative-truth layer.
-- `docs/implementation/` is the shipped-truth and strategic implementation layer for `develop`.
+- `docs/implementation/00-project-constitution.md` and its ADRs are the sole
+  product-definition and accepted-target authority.
+- `docs/research/` is the evidence, alternatives, and dated comparative-analysis layer; it cannot accept a target or claim shipping.
+- other `docs/implementation/` pages own shipped/partial truth and durable operator contracts for `develop`.
 - `docs/docs/` is the archive and historical layer.
 - The GitHub Project is the execution layer.
 - GitHub issues and PRs are the active work-tracking layer.
@@ -414,6 +432,21 @@ relevant docs.
 - While review is running, set `Code Review=Running`, then move to
   `Changes Requested` or `Passed`.
 - When the PR merges, set `PR=Merged` and `Status=Done`.
+
+### GitHub Approval Discipline
+
+- Reuse the operator's existing scoped approvals for routine `gh issue`,
+  `gh pr`, `gh project`, `gh api`, and related Git operations. Do not request
+  repeated approval for operations already covered by those scopes.
+- For issue comments, PR bodies, and other multiline GitHub text, write the
+  content to a workspace or `/tmp` file with `apply_patch`, then pass it with
+  `--body-file`. Avoid shell-expanded inline bodies such as `$'...'`, command
+  substitution, or heredocs that turn a routine `gh` call into a new approval
+  shape.
+- If an optional GitHub receipt cannot run under the existing scoped approvals,
+  skip it and report the omission instead of interrupting the operator. Request
+  a new permission only when the operation is required to complete the task;
+  keep that request narrow and reusable.
 
 ## Review Rule
 

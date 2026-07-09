@@ -5,141 +5,135 @@ title: Current App Guide
 
 # Current App Guide
 
-This is the short reader-facing guide to Seraph as it exists in the current
-`v2026.6.30` era. For exhaustive shipped-state detail, use
-[Development Status](./STATUS.md). For target shape and comparative evidence,
-use the [research tree](/research).
+**Status:** Partial
+**Scope:** current `develop` baseline; target changes in Epic #736 are not yet shipped
 
-Seraph is a cockpit-first AI guardian workspace. It remembers, watches, and
-acts through a browser cockpit, a FastAPI runtime, a local observer daemon,
-workflow and tool execution, approval gates, audit trails, memory, settings,
-and governed extension surfaces. The old village and editor direction is
-archive-only and is not the active app contract.
+This is the short operator-facing description of the current application. For
+the target product and locked decisions, read the
+[Project Constitution](./00-project-constitution.md). For exhaustive shipped
+detail, read [Development Status](./STATUS.md).
 
-## First Run
+## Current Topology
 
-Use the managed local lifecycle script for local development:
-
-```bash
-./manage.sh -e dev local up
+```text
+Seraph frontend       http://127.0.0.1:3001
+  -> Seraph backend   http://127.0.0.1:8004
+  -> GPU VLM wrapper  http://192.168.1.26:8001
+  -> GPU model server http://192.168.1.26:8000/v1
 ```
 
-The managed dev stack starts the local backend and frontend, prints their
-ports, and keeps local paths consistent with the app settings. Use
-`./manage.sh -e dev local status` to check backend, frontend, and daemon state.
-Use `./manage.sh -e dev local down` before restarting the stack.
+The accepted architecture decision places the core on the GPU host and uses a
+paired Mac edge. Until their
+migration tickets ship, the backend and frontend remain local and GPU services
+are reached over documented HTTP APIs. `ssh jupyter` is an administrator path
+for inventory and maintenance, not application transport or a required tunnel.
 
-The browser cockpit normally runs on `http://127.0.0.1:3001`, and the backend
-API normally runs on `http://127.0.0.1:8004` in the managed dev environment.
+## Run The Current App
 
-## The Cockpit
+```bash
+cp env.dev.example .env.dev
+./manage.sh -e dev local up
+./manage.sh -e dev local status
+```
 
-The cockpit is the primary interface. It is not a landing page and not a
-marketing shell. It is an operator workspace for active work:
+Open `http://127.0.0.1:3001` for the cockpit and
+`http://127.0.0.1:8004/docs` for API documentation. Stop with
+`./manage.sh -e dev local down`.
 
-- conversation and live response state
-- guardian state, restraint reasons, and user-model evidence
-- workflow runs, branch families, recovery controls, and artifact handoff
-- approvals, audit activity, and the Activity Ledger
-- capability discovery, starter packs, runbooks, and extension governance
-- continuity, reach health, native notification state, and desktop presence
-- settings for runtime policy, daemon/screen analysis, artifact storage, and
-  connector or MCP posture
+In a managed development shell, use `./manage.sh -e dev local run` and keep the
+foreground session open while verifying live behavior. Direct `uvicorn`, Vite,
+or detached child-process launches are not the supported lifecycle path.
 
-The cockpit is dense by design. It should tell the operator what Seraph is
-doing, why it is doing it, what is blocked, what can be recovered, and which
-actions require approval.
+Useful probes:
 
-## Actions And Workflows
+```bash
+./manage.sh -e dev local status
+curl -sS http://127.0.0.1:8004/health
+curl -sS http://127.0.0.1:8004/api/runtime/status
+curl -sS http://127.0.0.1:8004/api/settings/artifact-storage
+curl -sS http://192.168.1.26:8001/health
+curl -sS http://192.168.1.26:8001/health/backend
+curl -sS http://192.168.1.26:8001/queue/status
+```
 
-Seraph can route work through native tools, workflows, skills, MCP surfaces,
-starter packs, runbooks, and managed extension contributions. Important
-execution paths are approval-aware and audit-visible.
+The wrapper's `/health` and model backend's `/health/backend` are separate
+truths. A configured endpoint is not evidence that its backend is healthy.
 
-Current workflow surfaces include run history, step records, checkpoint truth,
-branch/resume controls, artifact lineage, source-run follow-through, recovery
-drafts, and workflow-family comparison. These controls are intended to make
-longer work inspectable and recoverable, not to claim crash-proof production
-workflow orchestration.
+## Current Capability Summary
 
-## Runtime And Providers
+**Shipped foundations:** the browser cockpit, FastAPI backend, conversation,
+goals, memory and guardian state, settings, scheduler jobs, approvals, activity
+and audit views, tools and workflows, artifacts, reports, extension adapters,
+screen-observation storage, and VLM integration points exist on `develop`.
 
-Seraph uses a provider-neutral runtime layer for remote LLM/provider routing
-and a separate local Codex operator adapter for command-backed local Codex
-execution. Provider profiles decide who thinks. Tool policy, MCP policy,
-approval policy, and execution boundaries decide what the agent may do.
+**Partial:** long-horizon guardian behavior, durable execution, isolation,
+cross-surface identity, selected voice/messaging channels, and outcome-first UX
+need Epic #736 milestones. Existing canaries or deterministic receipts do not
+make those product capabilities complete.
 
-Supported configuration families include OpenRouter, OpenAI-compatible routes,
-remote OpenAI API routes, Anthropic/Claude-oriented routes, local Ollama, and
-the separate `codex-local` command-backed operator path. Missing credentials
-or missing local commands should fail closed with operator-visible state.
+## Models And Runtime
+
+The target provider contract is inference through local models, OpenRouter, and
+generic OpenAI-compatible systems. The UI and `/api/runtime/status` must report
+the effective route, including degraded state and fallback.
+
+**Partial/transitional:** `develop` still contains older provider-specific and
+command-backed operator paths. They are implementation history scheduled for
+removal under issue #739, not part of the target architecture. Do not configure
+new deployments around them.
 
 ## Screen Awareness And Reports
 
-The local observer daemon can capture screen context and route screen analysis
-through local Apple Vision, local Codex CLI parsing, or explicitly configured
-cloud OCR. Screen capture and analysis artifacts can be preserved locally when
-enabled in settings, so future better models can re-analyze the same evidence.
+**Shipped foundation:** the observer can ingest permitted context, store screen
+artifacts, route screenshot analysis through configured VLM paths, and feed
+report infrastructure. Capture, analysis, and report synthesis are separate
+stages and should expose separate failures.
 
-End-of-day report infrastructure is part of the local guardian direction:
-screen-derived summaries, goals, activity, and analysis records can be stored
-locally and used for configured report delivery. Email delivery remains a
-configuration-sensitive integration surface; local previews and stored reports
-are the safer default while mail settings are being validated.
+**Planned:** a paired, revocable Mac edge supplies observation and native
+interaction to the GPU core. Pairing must not implicitly authorize execution or
+data egress.
 
-## Memory And Guardian State
+## Memory
 
-Seraph has canonical local memory plus guarded external memory-provider
-augmentation. External providers can add evidence and recall, but they do not
-replace canonical guardian memory. Stale, conflicting, privacy-limited, or
-low-confidence provider evidence should be visible as such.
+**Shipped foundation:** Seraph owns canonical local memory and can augment
+retrieval through guarded provider integrations.
 
-Guardian state exposes intent, confidence, restraint, judgment risks, user-model
-evidence, and next-step guidance. The goal is useful restraint and grounded
-follow-through, not unbounded autonomy.
+The accepted memory-boundary decision requires goals, approved facts, jobs, artifacts, checkpoints,
+approvals, and audit records stay canonical in Seraph-owned storage. Graph or
+external memory systems may be benchmarked only as advisory providers with
+provenance, conflict, deletion, export, and failure handling.
 
-## Presence And Reach
+## Actions, Workflows, And Extensions
 
-Seraph currently centers on the browser cockpit plus a macOS observer/desktop
-presence path. The app surfaces browser WebSocket state, daemon state, screen
-analysis settings, native notification continuity, route health, and degraded
-reach reasons.
+**Shipped foundation:** tools, workflows, skills, runbooks, starter packs, MCP
+integrations, connectors, approvals, activity receipts, workflow history, and
+extension governance exist in the current codebase.
 
-Broader mobile, messaging, always-available reach, voice, and media claims stay
-bounded. Some receipts and canaries exist, but the public docs should not
-claim OpenClaw-class reach, full voice/media parity, always-available mobile
-operation, or production-ready broad channel coverage unless the claim ledger
-permits exact wording.
+**Partial:** breadth and deterministic receipts are not equivalent to a fully
+durable or isolated runtime. The target gives every capability typed
+inputs/outputs, permissions, limits, checkpoints, artifacts, and visible
+receipts without depending on an external coding-agent runtime.
 
-## Extensions And Source Adapters
+## One-GPU Behavior
 
-Seraph's extension platform packages skills, workflows, runbooks, starter
-packs, MCP definitions, browser providers, messaging connectors, observer
-sources, channel adapters, node adapters, canvas outputs, and workflow runtimes
-under governed manifests.
+The accepted scheduling decision requires serial GPU execution: the active job finishes, then the
+highest-priority ready job runs. Interactive work outranks scheduled and
+background observation work; background work uses idle capacity without
+starving. Existing queues remain **Partial** until the global broker proves
+mutual exclusion, priority, and non-starvation across every GPU consumer.
 
-The current app includes extension lifecycle APIs, an extension studio,
-catalog/marketplace flow composition, diagnostics, compatibility metadata,
-rollback/quarantine/re-entry concepts, and source-adapter contracts for
-provider-neutral evidence and bounded authenticated source actions.
+## Failure And Recovery
 
-## Proof And Boundaries
+- Trust effective API/UI state, not a default provider label.
+- Keep settings usable through partial metadata failure and show last-known state.
+- Treat Codex/Desktop LAN failures as an environment limitation when an
+  operator-shell receipt proves the route; do not redesign around an SSH tunnel.
+- Never describe branch-local or target behavior as Shipped before merge and
+  validation on `develop`.
 
-Seraph has many deterministic benchmark, proof, and receipt surfaces, but those
-are claim boundaries, not blanket product claims. The public docs should keep
-these distinctions clear:
+## Next Reading
 
-- bounded proof is not production readiness
-- provider configurability is not provider parity
-- deterministic or recorded-live receipts are not broad outcome superiority
-- local Codex command execution is not an OpenAI API dependency
-- full parity, security superiority, solved operator control, safe autonomous
-  computer use, and broad reference-system exceedance remain blocked unless
-  the claim ledger permits exact wording
-
-## Where Truth Lives
-
-- `docs/implementation/` is shipped-state and delivery truth.
-- `docs/research/` is product thesis, target shape, and evidence logic.
-- GitHub issues, Project items, and PRs are the live execution layer.
-- `/legacy` is historical archive material and may contradict the current app.
+- [Project Constitution](./00-project-constitution.md)
+- [Development Status](./STATUS.md)
+- [Documentation Contract](./08-docs-contract.md)
+- [ADR-004: GPU Core And Paired Mac Edge](./decisions/004-gpu-core-mac-edge-topology.md)

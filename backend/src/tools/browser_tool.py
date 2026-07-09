@@ -7,7 +7,7 @@ from urllib.parse import urlparse
 from smolagents import tool
 
 from config.settings import settings
-from src.audit.runtime import log_integration_event_sync
+from src.audit.runtime import log_integration_event_sync, log_integration_timeout_event_sync
 from src.security.site_policy import SiteAccessDecision, evaluate_site_access
 
 logger = logging.getLogger(__name__)
@@ -163,10 +163,9 @@ def browse_webpage(url: str, action: str = "extract") -> str:
         )
         return result
     except (TimeoutError, PlaywrightTimeoutError) as e:
-        log_integration_event_sync(
+        log_integration_timeout_event_sync(
             integration_type="browser",
             name="playwright",
-            outcome="timed_out",
             details={
                 **_browser_details(url, action, decision),
                 "timeout_seconds": settings.browser_timeout,

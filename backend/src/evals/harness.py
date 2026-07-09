@@ -822,6 +822,7 @@ from src.api.observer import (
 )
 from src.api.skills import UpdateSkillRequest, reload_skills as reload_skill_api, update_skill as update_skill_api
 from src.audit.repository import audit_repository
+from src.audit.runtime import reset_integration_timeout_rate_limit_state
 from src.app import create_app
 from src.db.models import MemoryKind
 from src.llm_runtime import FallbackLiteLLMModel, _reset_target_health, completion_with_fallback_sync
@@ -29748,6 +29749,7 @@ async def _run_scenario(scenario: EvalScenario) -> EvalResult:
     started = time.perf_counter()
     _reset_bounded_guardian_snapshot_cache()
     _reset_vector_store_state()
+    reset_integration_timeout_rate_limit_state()
     try:
         output = scenario.runner()
         if asyncio.iscoroutine(output):
@@ -29774,6 +29776,7 @@ async def _run_scenario(scenario: EvalScenario) -> EvalResult:
     finally:
         _reset_bounded_guardian_snapshot_cache()
         _reset_vector_store_state()
+        reset_integration_timeout_rate_limit_state()
 
 
 async def run_runtime_evals(selected_names: Sequence[str] | None = None) -> EvalSummary:

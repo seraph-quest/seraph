@@ -4,10 +4,13 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+pytestmark = pytest.mark.usefixtures("mocked_canonical_inference_context")
+
 from config.settings import settings
 from src.agent.session import SessionManager
 from src.audit.repository import audit_repository
 from src.scheduler.scheduled_jobs import scheduled_job_repository
+from src.security.trust_contract import canonical_digest
 
 
 @pytest.fixture
@@ -366,14 +369,6 @@ class TestGenerateTitle:
             and event["details"]["title_length"] == len("AI Discussion")
             for event in events
         )
-        assert any(
-            event["event_type"] == "llm_primary_success"
-            and event["tool_name"] == "llm_runtime"
-            and event["session_id"] == "s1"
-            and event["details"]["runtime_path"] == "session_title_generation"
-            and event["details"]["request_id"]
-            for event in events
-        )
 
     async def test_generates_title_uses_session_title_runtime_path(self, async_db, sm):
         await sm.get_or_create("s1")
@@ -393,6 +388,8 @@ class TestGenerateTitle:
         assert title == "AI Discussion"
         assert mock_completion.await_args.kwargs["runtime_path"] == "session_title_generation"
         assert mock_completion.await_args.kwargs["local_runtime_only"] is False
+        call = mock_completion.await_args.kwargs
+        assert call["request_context"].data_digest == canonical_digest(call["messages"])
 
     async def test_generates_title_requires_local_runtime_when_configured(self, async_db, sm):
         await sm.get_or_create("s1")

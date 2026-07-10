@@ -723,6 +723,132 @@ describe("CockpitView", () => {
     expect(screen.queryByText("LOCAL GEMMA · GEMMA 4 26B A4B IT QAT GGUF")).not.toBeInTheDocument();
   });
 
+  it("renders the last actual text route and marks a degraded fallback attempt", async () => {
+    mockCockpitBaselineFetch(fetchMock, {
+      runtimeStatus: {
+        version: "test",
+        build_id: "SERAPH_TEST",
+        provider: "configured-provider",
+        model: "configured-model",
+        model_label: "configured-model",
+        model_fabric: {
+          status: "degraded",
+          configuration_status: "ready",
+          configuration_error: null,
+          configured_chat_profile: "configured-primary",
+          profiles: [],
+          topology: { text: ["interactive", "background", "report"], vlm: ["vision"] },
+          workloads: {
+            interactive: {
+              selected: { profile_id: "configured-primary", model: "primary-model", adapter: "litellm", destination_class: "remote", outcome: "selected", latency_ms: 0 },
+              attempted: { profile_id: "fallback-attempt", model: "fallback-model", adapter: "litellm", destination_class: "remote", outcome: "timeout", latency_ms: 5000 },
+              attempt_count: 2,
+              last_outcome: "failed",
+              fallback_used: true,
+              fallback_reason_code: "primary_timeout",
+              degradation_codes: ["receipt_persistence_failed"],
+              succeeded: { profile_id: "last-actual", model: "actual-model", adapter: "litellm", receipt_id: "receipt-actual", finished_at: "2026-07-10T12:00:00Z" },
+              persistence: "degraded",
+              receipt_persistence_degraded: true,
+            },
+          },
+        },
+      },
+    });
+
+    render(<CockpitView onSend={vi.fn()} />);
+
+    await waitFor(() => {
+      expect(screen.getByText("TEXT LAST ACTUAL FALLBACK DEGRADED · ACTUAL MODEL")).toBeInTheDocument();
+    });
+    expect(screen.queryByText(/CONFIGURED PRIMARY/)).not.toBeInTheDocument();
+  });
+
+  it("does not mark a persisted succeeded text route degraded", async () => {
+    mockCockpitBaselineFetch(fetchMock, {
+      runtimeStatus: {
+        version: "test",
+        build_id: "SERAPH_TEST",
+        provider: "configured-provider",
+        model: "configured-model",
+        model_label: "configured-model",
+        model_fabric: {
+          status: "ready",
+          configuration_status: "ready",
+          configuration_error: null,
+          configured_chat_profile: "local-text",
+          profiles: [],
+          proofs: [],
+          topology: { text: ["interactive"], vlm: ["vision"] },
+          workloads: {
+            interactive: {
+              selected: { profile_id: "local-text", model: "gemma-text", adapter: "litellm", destination_class: "trusted_lan", outcome: "selected", latency_ms: 0 },
+              attempted: { profile_id: "local-text", model: "gemma-text", adapter: "litellm", destination_class: "trusted_lan", outcome: "succeeded", latency_ms: 22 },
+              attempt_count: 1,
+              last_outcome: "succeeded",
+              fallback_used: false,
+              fallback_reason_code: null,
+              degradation_codes: [],
+              succeeded: { profile_id: "local-text", model: "gemma-text", adapter: "litellm", receipt_id: "receipt-ok", finished_at: "2026-07-10T12:00:00Z" },
+              persistence: "persisted",
+              persistence_error_code: null,
+              receipt_persistence_degraded: false,
+            },
+          },
+        },
+      },
+    });
+
+    render(<CockpitView onSend={vi.fn()} />);
+
+    await waitFor(() => {
+      expect(screen.getByText("TEXT LOCAL TEXT · GEMMA TEXT")).toBeInTheDocument();
+    });
+    expect(screen.queryByText(/TEXT LOCAL TEXT DEGRADED/)).not.toBeInTheDocument();
+  });
+
+  it("labels a failed-only route as attempted instead of actual text", async () => {
+    mockCockpitBaselineFetch(fetchMock, {
+      runtimeStatus: {
+        version: "test",
+        build_id: "SERAPH_TEST",
+        provider: "configured-provider",
+        model: "configured-model",
+        model_fabric: {
+          status: "degraded",
+          configuration_status: "ready",
+          configuration_error: null,
+          configured_chat_profile: "local-text",
+          profiles: [],
+          proofs: [],
+          topology: { text: ["chat_agent"], vlm: ["screenshot_image_analysis"] },
+          workloads: {
+            interactive: {
+              selected: { profile_id: "local-text", model: "gemma-text", adapter: "litellm_chat", destination_class: "trusted_lan", outcome: "selected", latency_ms: 0 },
+              attempted: { profile_id: "local-text", model: "gemma-text", adapter: "litellm_chat", destination_class: "trusted_lan", outcome: "failed", latency_ms: 22 },
+              attempt_count: 1,
+              last_outcome: "failed",
+              fallback_used: false,
+              fallback_reason_code: null,
+              degradation_codes: [],
+              succeeded: null,
+              persistence: "persisted",
+              persistence_error_code: null,
+              receipt_persistence_degraded: false,
+            },
+          },
+        },
+      },
+    });
+
+    render(<CockpitView onSend={vi.fn()} />);
+
+    await waitFor(() => {
+      expect(screen.getByText("ATTEMPTED LOCAL TEXT FAILED DEGRADED · GEMMA TEXT")).toBeInTheDocument();
+    });
+    expect(screen.queryByText(/TEXT LOCAL TEXT/)).not.toBeInTheDocument();
+  });
+
   it("uses operator runtime posture when runtime status is temporarily unavailable", async () => {
     fetchMock.mockImplementation((input: RequestInfo | URL) => {
       const url = String(input);

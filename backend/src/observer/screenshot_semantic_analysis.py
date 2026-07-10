@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 from pathlib import Path
+import time
 from typing import Any
 from datetime import datetime, timezone
 
@@ -16,6 +18,17 @@ from src.local_runtime_profiles import (
     local_runtime_profile_form_fields,
     local_runtime_profile_headers,
 )
+from src.llm_runtime import provider_profiles
+from src.model_fabric import (
+    PersistedRouteReceiptHooks,
+    ProviderProfile,
+    bind_final_inference_payload,
+    candidate_from_profile,
+    model_fabric_repository,
+    run_preflighted_adapter,
+    select_route,
+)
+from src.model_fabric.caller_context import build_canonical_inference_context
 from src.observer.screen_analysis_settings import (
     effective_screen_analysis_enabled,
     effective_screen_analysis_model,
@@ -30,7 +43,7 @@ from src.observer.screenshot_analysis_contract import (
     screenshot_analysis_prompt,
 )
 from src.vlm_runtime import (
-    effective_vlm_api_key,
+    SCREENSHOT_VLM_PROFILE_ID,
     effective_vlm_base_url,
     effective_vlm_feeder_window,
 )
@@ -306,34 +319,108 @@ async def _analyze_with_local_vlm(image_path: Path, artifacts: dict[str, Any]) -
         "height": artifacts.get("height"),
     }
     prompt = screenshot_analysis_prompt(metadata)
-    endpoint = effective_vlm_base_url() + "/v1/analyze-file"
+    profile = provider_profiles().get(SCREENSHOT_VLM_PROFILE_ID)
+    if profile is None:
+        raise ScreenshotSemanticAnalysisError("canonical screenshot VLM profile is not configured")
     data = {
         "prompt": prompt,
         **local_runtime_profile_form_fields("screenshot_fast"),
+        "model": profile.model,
     }
-    model = effective_screen_analysis_model()
-    if model:
-        data["model"] = model
     headers = local_runtime_profile_headers("screenshot_fast")
-    api_key = effective_vlm_api_key()
+    api_key = profile.api_key
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
 
-    try:
-        image_bytes = await asyncio.to_thread(image_path.read_bytes)
-        async with httpx.AsyncClient(timeout=max(settings.local_vlm_timeout_seconds, 1)) as client:
+    image_bytes = await asyncio.to_thread(image_path.read_bytes)
+    media_type = _image_media_type(image_path)
+    transport_body = {
+        "fields": data,
+        "file": {
+            "filename": image_path.name,
+            "content_type": media_type,
+            "sha256": hashlib.sha256(image_bytes).hexdigest(),
+        },
+    }
+    context = build_canonical_inference_context(
+        "screenshot_image_analysis",
+        payload=transport_body,
+        output_tokens=1400,
+        timeout_seconds=settings.local_vlm_timeout_seconds,
+    )
+    context = bind_final_inference_payload(context, transport_body)
+
+    async def _transport(candidate, follow_redirects: bool) -> ScreenshotAnalysis:
+        if follow_redirects:
+            raise ScreenshotSemanticAnalysisError("VLM redirects are forbidden")
+        endpoint = candidate.endpoint
+        remaining_seconds = context.deadline_at - time.time()
+        if remaining_seconds <= 0:
+            raise ScreenshotSemanticAnalysisError("VLM inference deadline expired")
+        async with httpx.AsyncClient(
+            timeout=httpx.Timeout(remaining_seconds),
+            follow_redirects=False,
+        ) as client:
             response = await client.post(
                 endpoint,
                 data=data,
-                files={"file": (image_path.name, image_bytes, _image_media_type(image_path))},
+                files={"file": (image_path.name, image_bytes, media_type)},
                 headers=headers,
             )
         response.raise_for_status()
         payload = response.json()
         return parse_screenshot_analysis_output(_provider_analysis_payload(payload))
+
+    try:
+        result = await _run_governed_vlm_adapter(
+            context=context,
+            profile=profile,
+            transport=_transport,
+        )
+        if not isinstance(result, ScreenshotAnalysis):
+            raise ScreenshotSemanticAnalysisError("VLM adapter returned an invalid analysis result")
+        return result
     except (OSError, httpx.HTTPError, ValueError, ScreenshotAnalysisContractError) as exc:
         logger.warning("screenshot semantic analysis failed for %s: %s", image_path, exc)
         raise ScreenshotSemanticAnalysisError(str(exc)) from exc
+
+
+async def _run_governed_vlm_adapter(*, context, profile: ProviderProfile, transport):
+    """Preflight and receipt-wrap the retained VLM analyze-file transport."""
+    candidate = candidate_from_profile(profile)
+    if candidate.adapter != "vlm_analyze_file":
+        raise ScreenshotSemanticAnalysisError(
+            "screenshot VLM profile requires the vlm_analyze_file adapter"
+        )
+    capabilities = {*context.requirements.capabilities, "latency_ms", "health"}
+    proofs = []
+    for capability in sorted(capabilities):
+        proof = await model_fabric_repository.latest_capability_proof(
+            profile_schema_version=profile.schema_version,
+            profile_contract_hash=profile.contract_hash,
+            profile_id=profile.id,
+            model=profile.model,
+            endpoint=candidate.endpoint,
+            endpoint_class=candidate.endpoint_class,
+            adapter=candidate.adapter,
+            capability=capability,
+        )
+        if proof is not None:
+            proofs.append(proof)
+    decision = select_route(context, (candidate,), tuple(proofs))
+    hooks = PersistedRouteReceiptHooks(
+        capability_proof_hashes=tuple(proof.proof_hash for proof in proofs),
+    )
+    result = await run_preflighted_adapter(
+        context=context,
+        decision=decision,
+        adapter=transport,
+        hooks=hooks,
+    )
+    persistence = await hooks.persistence_result(context.request_id)
+    if persistence is None or not persistence.persisted:
+        raise ScreenshotSemanticAnalysisError("VLM route receipt persistence failed")
+    return result
 
 
 def _provider_analysis_payload(payload: Any) -> str | dict[str, Any]:

@@ -11,8 +11,9 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlmodel import select, col
 
 from config.settings import settings
-from src.approval.runtime import reset_runtime_context, set_runtime_context
+from src.approval.runtime import get_current_trust_principal, reset_runtime_context, set_runtime_context
 from src.audit.runtime import log_background_task_event
+from src.model_fabric.caller_context import build_canonical_inference_context
 from src.db.engine import get_session
 from src.db.models import (
     ApprovalRequest,
@@ -933,16 +934,27 @@ class SessionManager:
         try:
             from src.llm_runtime import completion_with_fallback, prefers_local_runtime_path
 
-            runtime_tokens = set_runtime_context(session_id, "high_risk")
-            response = await completion_with_fallback(
-                messages=[{
+            runtime_tokens = set_runtime_context(
+                session_id,
+                "high_risk",
+                trust_principal=get_current_trust_principal(),
+            )
+            transport_messages = [{
                     "role": "user",
                     "content": f"Generate a very short title (3-6 words, no quotes) for this conversation. Respond with ONLY the title.\n\n{transcript}",
-                }],
+                }]
+            response = await completion_with_fallback(
+                messages=transport_messages,
                 temperature=0.3,
                 max_tokens=20,
                 runtime_path="session_title_generation",
                 local_runtime_only=prefers_local_runtime_path("session_title_generation"),
+                request_context=build_canonical_inference_context(
+                    "session_title_generation",
+                    payload=transport_messages,
+                    output_tokens=20,
+                    timeout_seconds=settings.agent_chat_timeout,
+                ),
             )
 
             title = response.choices[0].message.content.strip().strip('"\'')

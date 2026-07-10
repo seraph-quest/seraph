@@ -3,7 +3,10 @@ from unittest.mock import patch
 
 import pytest
 
+pytestmark = pytest.mark.usefixtures("mocked_canonical_inference_context")
+
 from config.settings import settings
+from src.security.trust_contract import canonical_digest
 from src.agent.direct_chat import (
     _stream_chunk_delta,
     looks_like_tool_or_web_request,
@@ -152,18 +155,20 @@ def test_stream_chunk_delta_reads_openai_compatible_content():
 
 
 @pytest.mark.asyncio
-async def test_stream_direct_local_chat_yields_litellm_deltas():
-    chunks = [
-        {"choices": [{"delta": {"content": "Hel"}}]},
-        {"choices": [{"delta": {"content": "lo"}}]},
-    ]
+async def test_stream_direct_local_chat_uses_governed_streaming_facade():
+    async def governed_stream(**_kwargs):
+        yield "Hel"
+        yield "lo"
 
     with (
         patch.object(settings, "model_max_tokens", 4096),
         patch.object(settings, "local_model", "openai/local-gemma"),
         patch.object(settings, "local_llm_api_base", "http://127.0.0.1:8000/v1"),
         patch.object(settings, "runtime_profile_preferences", "onboarding_agent=local"),
-        patch("litellm.completion", return_value=iter(chunks)) as mock_completion,
+        patch(
+            "src.agent.direct_chat.stream_completion_with_fallback",
+            side_effect=governed_stream,
+        ) as mock_completion,
     ):
         result = [
             delta
@@ -176,6 +181,7 @@ async def test_stream_direct_local_chat_yields_litellm_deltas():
 
     assert result == ["Hel", "lo"]
     call_kwargs = mock_completion.call_args.kwargs
-    assert call_kwargs["stream"] is True
-    assert call_kwargs["model"] == "openai/local-gemma"
-    assert call_kwargs["api_base"] == "http://127.0.0.1:8000/v1"
+    assert call_kwargs["runtime_path"] == "onboarding_agent"
+    assert call_kwargs["request_context"].request_id == "test-inference-request"
+    assert call_kwargs["request_context"].data_digest == canonical_digest(call_kwargs["messages"])
+    assert call_kwargs["request_id"] == "test-inference-request"

@@ -4600,7 +4600,9 @@ def test_runtime_eval_scenarios_expose_expected_details():
     assert details_by_name["helper_local_runtime_paths"]["routed_models"]["context_window_summary"] == "ollama/llama3.2"
     assert details_by_name["helper_local_runtime_paths"]["routed_models"]["session_title_generation"] == "ollama/llama3.2"
     assert details_by_name["helper_local_runtime_paths"]["routed_models"]["session_consolidation"] == "ollama/llama3.2"
-    assert details_by_name["context_window_summary_audit"]["success_model"] == "ollama/llama3.2"
+    assert details_by_name["context_window_summary_audit"]["routing_verification"] == (
+        "not_in_scope_transport_mocked_above_model_route"
+    )
     assert details_by_name["context_window_summary_audit"]["success_runtime_path"] == "context_window_summary"
     assert details_by_name["context_window_summary_audit"]["degraded_runtime_path"] == "context_window_summary"
     assert details_by_name["context_window_summary_audit"]["degraded_fallback"] == "truncation"

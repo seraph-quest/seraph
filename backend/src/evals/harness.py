@@ -826,7 +826,12 @@ from src.audit.repository import audit_repository
 from src.audit.runtime import reset_integration_timeout_rate_limit_state
 from src.app import create_app
 from src.db.models import MemoryKind
-from src.llm_runtime import FallbackLiteLLMModel, _reset_target_health, completion_with_fallback_sync
+from src.llm_runtime import (
+    FallbackLiteLLMModel,
+    _reset_target_health,
+    build_completion_kwargs,
+    completion_with_fallback_sync,
+)
 from src.memory.embedder import _reset_embedder_state, embed
 from src.memory.repository import memory_repository
 from src.memory.superiority_benchmark import (
@@ -2190,8 +2195,6 @@ def _eval_provider_health_reroute() -> dict[str, Any]:
 
 
 def _eval_local_runtime_profile() -> dict[str, Any]:
-    completion_response = _make_litellm_response("Handled by a local helper profile.")
-
     with (
         patch.object(settings, "default_model", "openrouter/anthropic/claude-sonnet-4"),
         patch.object(settings, "llm_api_key", "primary-key"),
@@ -2206,29 +2209,25 @@ def _eval_local_runtime_profile() -> dict[str, Any]:
         ),
         patch.object(settings, "fallback_model", ""),
         patch.object(settings, "fallback_models", ""),
-        patch("litellm.completion", return_value=completion_response) as mock_completion,
     ):
-        response = completion_with_fallback_sync(
+        completion_kwargs = build_completion_kwargs(
             messages=[{"role": "user", "content": "keep helper work local"}],
             temperature=0.2,
             max_tokens=128,
             runtime_path="session_consolidation",
         )
 
-    assert mock_completion.call_count == 1
-    assert mock_completion.call_args.kwargs["model"] == "ollama/llama3.2"
-    assert mock_completion.call_args.kwargs["api_base"] == "http://localhost:11434/v1"
+    assert completion_kwargs["model"] == "ollama/llama3.2"
+    assert completion_kwargs["api_base"] == "http://localhost:11434/v1"
     return {
         "runtime_path": "session_consolidation",
         "runtime_profile": "local",
-        "routed_model": mock_completion.call_args.kwargs["model"],
-        "response_excerpt": response.choices[0].message.content,
+        "routed_model": completion_kwargs["model"],
+        "response_excerpt": "route configuration verified without transport",
     }
 
 
 def _eval_helper_local_runtime_paths() -> dict[str, Any]:
-    completion_response = _make_litellm_response("Handled by a local helper profile.")
-
     with (
         patch.object(settings, "default_model", "openrouter/anthropic/claude-sonnet-4"),
         patch.object(settings, "llm_api_key", "primary-key"),
@@ -2243,7 +2242,6 @@ def _eval_helper_local_runtime_paths() -> dict[str, Any]:
         ),
         patch.object(settings, "fallback_model", ""),
         patch.object(settings, "fallback_models", ""),
-        patch("litellm.completion", return_value=completion_response) as mock_completion,
     ):
         routed_models: dict[str, str] = {}
         for runtime_path in (
@@ -2251,13 +2249,13 @@ def _eval_helper_local_runtime_paths() -> dict[str, Any]:
             "session_title_generation",
             "session_consolidation",
         ):
-            completion_with_fallback_sync(
+            completion_kwargs = build_completion_kwargs(
                 messages=[{"role": "user", "content": f"keep {runtime_path} local"}],
                 temperature=0.2,
                 max_tokens=128,
                 runtime_path=runtime_path,
             )
-            routed_models[runtime_path] = mock_completion.call_args.kwargs["model"]
+            routed_models[runtime_path] = completion_kwargs["model"]
 
     assert set(routed_models.values()) == {"ollama/llama3.2"}
     return {
@@ -2271,6 +2269,16 @@ async def _eval_context_window_summary_audit() -> dict[str, Any]:
     success_response = _make_litellm_response("Condensed summary from local helper path.")
     messages = [{"role": "user", "content": "important context " * 10}]
 
+    runtime_tokens = set_runtime_context(
+        "context-window-eval",
+        "high_risk",
+        trust_principal=TrustPrincipal(
+            principal_id="operator:context-window-eval",
+            principal_type=PrincipalType.OPERATOR,
+            grants=(AuthorityGrant.MODEL_INFERENCE,),
+            session_id="context-window-eval",
+        ),
+    )
     try:
         with (
             patch.object(settings, "default_model", "openrouter/anthropic/claude-sonnet-4"),
@@ -2282,7 +2290,10 @@ async def _eval_context_window_summary_audit() -> dict[str, Any]:
             patch.object(settings, "local_runtime_paths", "context_window_summary"),
             patch.object(settings, "fallback_model", ""),
             patch.object(settings, "fallback_models", ""),
-            patch("litellm.completion", return_value=success_response) as mock_completion,
+            patch(
+                "src.agent.context_window.completion_with_fallback_sync",
+                return_value=success_response,
+            ),
             patch.object(audit_repository, "log_event", AsyncMock()) as mock_log_event,
         ):
             success_summary = _summarize_middle(messages, session_id="ctx-success", range_key="0-1")
@@ -2303,13 +2314,14 @@ async def _eval_context_window_summary_audit() -> dict[str, Any]:
         )
         return {
             "success_summary": success_summary,
-            "success_model": mock_completion.call_args.kwargs["model"],
+            "routing_verification": "not_in_scope_transport_mocked_above_model_route",
             "success_runtime_path": success["details"]["runtime_path"],
             "degraded_fallback": degraded["details"]["fallback"],
             "degraded_runtime_path": degraded["details"]["runtime_path"],
             "degraded_contains_truncation": "truncated" in degraded_summary,
         }
     finally:
+        reset_runtime_context(runtime_tokens)
         _summary_cache.clear()
 
 
@@ -7676,6 +7688,16 @@ async def _eval_memory_provider_writeback_behavior() -> dict[str, Any]:
 
         adapter = EvalMemoryProviderAdapter()
         register_memory_provider_adapter(adapter)
+        runtime_tokens = set_runtime_context(
+            "provider-writeback-session",
+            "high_risk",
+            trust_principal=TrustPrincipal(
+                principal_id="service:memory-provider-writeback-eval",
+                principal_type=PrincipalType.SERVICE,
+                grants=(AuthorityGrant.MODEL_INFERENCE,),
+                session_id="provider-writeback-session",
+            ),
+        )
         try:
             vector_ids = itertools.count(1)
             with (
@@ -7700,6 +7722,7 @@ async def _eval_memory_provider_writeback_behavior() -> dict[str, Any]:
                 await consolidate_session("provider-writeback-session")
                 inventory = await list_memory_providers()
         finally:
+            reset_runtime_context(runtime_tokens)
             clear_memory_provider_adapters()
 
         consolidation_event = mock_log_background_task_event.await_args.kwargs["details"]

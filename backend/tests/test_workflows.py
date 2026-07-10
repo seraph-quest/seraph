@@ -24,6 +24,7 @@ from src.workflows.manager import (
 )
 from src.approval.exceptions import ApprovalRequired
 from src.approval.runtime import reset_runtime_context, set_runtime_context
+from src.security.trust_contract import AuthorityGrant, PrincipalType, TrustPrincipal
 from src.agent.factory import get_tools
 from src.agent.session import SessionManager
 from src.audit.repository import audit_repository
@@ -4777,7 +4778,16 @@ class TestWorkflowSurfaces:
         ):
             workflow_tool = next(tool for tool in get_tools() if tool.name == "workflow_shell_run")
 
-        tokens = set_runtime_context("s1", "high_risk")
+        tokens = set_runtime_context(
+            "s1",
+            "high_risk",
+            trust_principal=TrustPrincipal(
+                principal_id="operator:workflow-approval-test",
+                principal_type=PrincipalType.OPERATOR,
+                grants=(AuthorityGrant.CAPABILITY_EXECUTE,),
+                session_id="s1",
+            ),
+        )
         try:
             with pytest.raises(ApprovalRequired):
                 workflow_tool(code="print('hi')")
@@ -4847,7 +4857,16 @@ class TestWorkflowSurfaces:
         ):
             workflow_tool = next(tool for tool in get_tools() if tool.name == "workflow_mcp_export")
 
-        tokens = set_runtime_context("s1", "off")
+        tokens = set_runtime_context(
+            "s1",
+            "off",
+            trust_principal=TrustPrincipal(
+                principal_id="operator:mcp-workflow-approval-test",
+                principal_type=PrincipalType.OPERATOR,
+                grants=(AuthorityGrant.CAPABILITY_EXECUTE,),
+                session_id="s1",
+            ),
+        )
         try:
             with pytest.raises(ApprovalRequired):
                 workflow_tool(file_path="tasks.md")

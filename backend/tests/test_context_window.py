@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from src.audit.repository import audit_repository
+from src.security.trust_contract import canonical_digest
 from src.agent.context_window import (
     build_context_window,
     _format_messages,
@@ -166,6 +167,24 @@ class TestSummaryCache:
         )
         assert result == "cached summary"
 
+    def test_context_summary_binds_exact_transported_messages(self, mocked_canonical_inference_context, monkeypatch):
+        from src.agent import context_window
+
+        response = MagicMock()
+        response.choices = [MagicMock(message=MagicMock(content="bounded summary"))]
+        completion = MagicMock(return_value=response)
+        monkeypatch.setattr(context_window, "completion_with_fallback_sync", completion)
+
+        result = context_window._summarize_middle(
+            [_msg("user", "private exact content")],
+            session_id="sess-exact",
+            range_key="0-1",
+        )
+
+        assert result == "bounded summary"
+        call = completion.call_args.kwargs
+        assert call["request_context"].data_digest == canonical_digest(call["messages"])
+
     def test_cache_miss_with_fallback(self):
         """When litellm.completion raises, fallback truncation is used."""
         from src.agent.context_window import _summarize_middle
@@ -182,7 +201,11 @@ class TestSummaryCache:
             assert "truncated" in result or len(result) > 0
 
     @patch("src.agent.context_window.completion_with_fallback_sync")
-    def test_cache_miss_routes_summary_through_context_window_runtime_path(self, mock_completion):
+    def test_cache_miss_routes_summary_through_context_window_runtime_path(
+        self,
+        mock_completion,
+        mocked_canonical_inference_context,
+    ):
         from src.agent.context_window import _summarize_middle
 
         mock_response = MagicMock()
@@ -199,7 +222,7 @@ class TestSummaryCache:
         assert result == "short summary"
         assert mock_completion.call_args.kwargs["runtime_path"] == "context_window_summary"
 
-    def test_cache_miss_logs_runtime_audit_success(self, async_db):
+    def test_cache_miss_logs_runtime_audit_success(self, async_db, mocked_canonical_inference_context):
         from src.agent.context_window import _summarize_middle
 
         mock_response = MagicMock()
@@ -312,7 +335,7 @@ class TestOfflineReliability:
         finally:
             context_window._load_encoding.cache_clear()
 
-    def test_sync_summary_persists_runtime_audit_without_running_loop(self):
+    def test_sync_summary_persists_runtime_audit_without_running_loop(self, mocked_canonical_inference_context):
         from src.agent.context_window import _summarize_middle
 
         mock_response = MagicMock()

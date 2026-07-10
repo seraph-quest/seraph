@@ -164,7 +164,11 @@ class TestSchedulerEngine:
             await gate.wait()
             completed = True
 
-        wrapper = _async_job_wrapper(slow_job, asyncio.get_running_loop())
+        wrapper = _async_job_wrapper(
+            slow_job,
+            asyncio.get_running_loop(),
+            job_id="slow_job",
+        )
         task = asyncio.create_task(wrapper())
         await asyncio.sleep(0)
 
@@ -175,6 +179,60 @@ class TestSchedulerEngine:
         await task
 
         assert completed
+
+    @pytest.mark.asyncio
+    async def test_async_job_wrapper_binds_unique_model_service_identity_and_cleans_up(self):
+        from src.approval.runtime import get_current_trust_principal
+        from src.scheduler.engine import _async_job_wrapper
+        from src.security.trust_contract import AuthorityGrant, PrincipalType
+
+        observed = []
+
+        async def model_job():
+            observed.append(get_current_trust_principal())
+
+        wrapper = _async_job_wrapper(
+            model_job,
+            asyncio.get_running_loop(),
+            job_id="daily_briefing",
+            allow_model_inference=True,
+        )
+        await wrapper()
+        await wrapper()
+
+        assert len(observed) == 2
+        assert all(principal is not None for principal in observed)
+        assert all(principal.principal_type is PrincipalType.SERVICE for principal in observed)
+        assert all(principal.grants == (AuthorityGrant.MODEL_INFERENCE,) for principal in observed)
+        assert observed[0].job_id.startswith("scheduler:daily_briefing:")
+        assert observed[0].job_id != observed[1].job_id
+        assert get_current_trust_principal() is None
+
+    @pytest.mark.asyncio
+    async def test_async_job_wrapper_does_not_grant_model_inference_to_non_model_job(self):
+        from src.approval.runtime import get_current_trust_principal
+        from src.model_fabric.caller_context import build_canonical_inference_context
+        from src.scheduler.engine import _async_job_wrapper
+
+        async def non_model_job():
+            principal = get_current_trust_principal()
+            assert principal is not None
+            assert principal.grants == ()
+            with pytest.raises(PermissionError, match="lacks model_inference authority"):
+                build_canonical_inference_context(
+                    "daily_briefing",
+                    payload="private briefing",
+                    output_tokens=100,
+                    timeout_seconds=10,
+                    job_id=principal.job_id,
+                )
+
+        wrapper = _async_job_wrapper(
+            non_model_job,
+            asyncio.get_running_loop(),
+            job_id="screen_cleanup",
+        )
+        await wrapper()
 
     def test_shutdown_when_not_running(self):
         from src.scheduler.engine import shutdown_scheduler

@@ -554,6 +554,114 @@ class AuditEvent(SQLModel, table=True):
     created_at: datetime = Field(default_factory=_now, index=True)
 
 
+# ─── Model Fabric Proofs And Receipts ─────────────────────────
+
+class ModelCapabilityProofRecord(SQLModel, table=True):
+    """Sanitized empirical proof for one exact model capability binding."""
+
+    __tablename__ = "model_capability_proofs"
+    __table_args__ = (
+        Index("ix_model_capability_proofs_binding", "profile_id", "model", "adapter", "capability"),
+    )
+
+    id: str = Field(default_factory=_uuid, primary_key=True)
+    proof_hash: str = Field(unique=True, index=True)
+    profile_schema_version: str = Field(index=True)
+    profile_contract_hash: str = Field(index=True)
+    profile_id: str = Field(index=True)
+    model: str = Field(index=True)
+    endpoint: str
+    endpoint_digest: str = Field(index=True)
+    endpoint_class: str = Field(index=True)
+    adapter: str = Field(index=True)
+    capability: str = Field(index=True)
+    canary_version: str
+    outcome: str = Field(index=True)
+    checked_at: float = Field(index=True)
+    expires_at: float = Field(index=True)
+    proven_value_json: Optional[str] = Field(default=None)
+    receipt_id: str = Field(index=True)
+    receipt_hash: str = Field(index=True)
+    created_at: datetime = Field(default_factory=_now, index=True)
+
+
+class ModelRouteReceiptRecord(SQLModel, table=True):
+    """Sanitized final inference-route receipt."""
+
+    __tablename__ = "model_route_receipts"
+    __table_args__ = (
+        Index("ix_model_route_receipts_workload_success", "workload", "outcome", "finished_at"),
+    )
+
+    id: str = Field(default_factory=_uuid, primary_key=True)
+    receipt_id: str = Field(unique=True, index=True)
+    receipt_hash: str = Field(unique=True, index=True)
+    request_id: str = Field(index=True)
+    route_decision_id: str = Field(index=True)
+    runtime_path: str = Field(index=True)
+    workload: str = Field(index=True)
+    outcome: str = Field(index=True)
+    actual_profile_id: Optional[str] = Field(default=None, index=True)
+    actual_model: Optional[str] = Field(default=None)
+    actual_adapter: Optional[str] = Field(default=None)
+    destination_class: Optional[str] = Field(default=None)
+    egress_class: str = Field(index=True)
+    trust_decision_id: Optional[str] = Field(default=None)
+    fallback_used: bool = Field(default=False)
+    fallback_reason_code: Optional[str] = Field(default=None)
+    degradation_codes_json: str = Field(default="[]")
+    cost_kind: str = Field(default="unknown")
+    cost_amount: Optional[float] = Field(default=None)
+    cost_currency: Optional[str] = Field(default=None)
+    cost_source: Optional[str] = Field(default=None)
+    cost_source_updated_at: Optional[datetime] = Field(default=None)
+    usage_input_tokens: Optional[int] = Field(default=None)
+    usage_output_tokens: Optional[int] = Field(default=None)
+    usage_total_tokens: Optional[int] = Field(default=None)
+    started_at: datetime = Field(index=True)
+    finished_at: datetime = Field(index=True)
+    latency_ms: int
+    created_at: datetime = Field(default_factory=_now, index=True)
+
+
+class ModelRouteAttemptReceiptRecord(SQLModel, table=True):
+    """Sanitized receipt for one model transport attempt."""
+
+    __tablename__ = "model_route_attempt_receipts"
+    __table_args__ = (
+        Index("ux_model_route_attempt_receipts_order", "route_receipt_id", "attempt_index", unique=True),
+    )
+
+    id: str = Field(default_factory=_uuid, primary_key=True)
+    route_receipt_id: str = Field(foreign_key="model_route_receipts.receipt_id", index=True)
+    attempt_id: str = Field(unique=True, index=True)
+    attempt_index: int
+    profile_id: str = Field(index=True)
+    model: str
+    endpoint: str
+    endpoint_digest: str = Field(index=True)
+    adapter: str
+    destination_class: str
+    egress_class: str
+    trust_decision_id: str
+    capability_proof_hashes_json: str = Field(default="[]")
+    outcome: str = Field(index=True)
+    error_code: Optional[str] = Field(default=None)
+    degradation_code: Optional[str] = Field(default=None)
+    usage_input_tokens: Optional[int] = Field(default=None)
+    usage_output_tokens: Optional[int] = Field(default=None)
+    usage_total_tokens: Optional[int] = Field(default=None)
+    cost_kind: str = Field(default="unknown")
+    cost_amount: Optional[float] = Field(default=None)
+    cost_currency: Optional[str] = Field(default=None)
+    cost_source: Optional[str] = Field(default=None)
+    cost_source_updated_at: Optional[datetime] = Field(default=None)
+    started_at: datetime
+    finished_at: datetime
+    latency_ms: int
+    created_at: datetime = Field(default_factory=_now, index=True)
+
+
 # ─── ApprovalRequest ────────────────────────────────────
 
 class ApprovalRequest(SQLModel, table=True):

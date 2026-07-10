@@ -1,6 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
 
 import { appEventBus } from "../../lib/appEventBus";
+import {
+  isSuccessfulModelFabricOutcome,
+  normalizeModelFabricRuntime,
+  type ModelFabricRuntimeStatus,
+} from "../../lib/modelFabric";
 import { API_URL } from "../../config/constants";
 import { SERAPH_BUILD_ID } from "../../config/release";
 import { useChatStore } from "../../stores/chatStore";
@@ -81,6 +86,7 @@ interface RuntimeStatus {
   };
   timezone?: string;
   llm_logging_enabled?: boolean;
+  model_fabric?: ModelFabricRuntimeStatus;
 }
 
 type RuntimeReceiptSource = "runtime_status" | "operator_posture" | "retained";
@@ -6664,6 +6670,7 @@ function normalizeRuntimeStatus(value: unknown): RuntimeStatus | null {
     model_label: modelLabel || model,
     api_base: typeof record.api_base === "string" ? record.api_base : undefined,
     effective_runtime: effectiveRuntime ?? undefined,
+    model_fabric: normalizeModelFabricRuntime(record.model_fabric) ?? undefined,
     timezone: typeof record.timezone === "string" ? record.timezone : undefined,
     llm_logging_enabled: typeof record.llm_logging_enabled === "boolean" ? record.llm_logging_enabled : undefined,
   };
@@ -8407,11 +8414,32 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     || runtimeStatus?.provider
     || "unknown";
   const runtimeProviderBaseLabel = runtimeRouteLabel.replace(/[_.-]+/g, " ").toUpperCase();
-  const runtimeProviderLabel = runtimeReceipt?.source === "retained"
-    ? `${runtimeProviderBaseLabel} STALE`
-    : runtimeProviderBaseLabel;
+  const interactiveFabricRoute = runtimeStatus?.model_fabric?.runtime_paths.chat_agent
+    ?? runtimeStatus?.model_fabric?.workloads.interactive;
+  const actualFabricRoute = interactiveFabricRoute?.succeeded;
+  const attemptedFabricRoute = interactiveFabricRoute?.attempted;
+  const selectedFabricRoute = interactiveFabricRoute?.selected;
+  const runtimeProviderLabelBase = actualFabricRoute
+    ? `TEXT ${actualFabricRoute.profile_id.replace(/[_.-]+/g, " ").toUpperCase()}`
+    : attemptedFabricRoute
+      ? `ATTEMPTED ${attemptedFabricRoute.profile_id.replace(/[_.-]+/g, " ").toUpperCase()} ${attemptedFabricRoute.outcome.replace(/[_.-]+/g, " ").toUpperCase()}`
+      : selectedFabricRoute
+        ? `SELECTED ${selectedFabricRoute.profile_id.replace(/[_.-]+/g, " ").toUpperCase()}`
+        : runtimeProviderBaseLabel;
+  const runtimeDegraded = runtimeStatus?.model_fabric?.status === "degraded"
+    || (interactiveFabricRoute?.last_outcome != null && !isSuccessfulModelFabricOutcome(interactiveFabricRoute.last_outcome))
+    || (interactiveFabricRoute?.persistence != null && interactiveFabricRoute.persistence !== "persisted");
+  const runtimeProviderLabel = [
+    runtimeProviderLabelBase,
+    interactiveFabricRoute?.fallback_used ? "FALLBACK" : "",
+    runtimeDegraded ? "DEGRADED" : "",
+    runtimeReceipt?.source === "retained" ? "STALE" : "",
+  ].filter(Boolean).join(" ");
   const runtimeModelLabel = (
-    runtimeStatus?.effective_runtime?.model_label
+    actualFabricRoute?.model
+    ?? attemptedFabricRoute?.model
+    ?? selectedFabricRoute?.model
+    ?? runtimeStatus?.effective_runtime?.model_label
     ?? runtimeStatus?.effective_runtime?.model
     ?? runtimeStatus?.model_label
     ?? runtimeStatus?.model

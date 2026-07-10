@@ -153,6 +153,7 @@ async def chat(request: ChatRequest):
                     request.message,
                     runtime_path=direct_runtime_path,
                     is_onboarding=is_onboarding,
+                    session_id=session.id,
                     request_id=llm_request_id,
                 ),
                 timeout=min(settings.agent_chat_timeout, 60),

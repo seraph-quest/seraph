@@ -1,5 +1,17 @@
 import { useEffect, useRef, useState } from "react";
 import { API_URL } from "../../config/constants";
+import {
+  loadRetainedModelFabricSettings,
+  isGreenModelFabricCanary,
+  isSuccessfulModelFabricOutcome,
+  normalizeModelFabricCanary,
+  normalizeModelFabricRuntime,
+  normalizeModelFabricSettings,
+  retainModelFabricSettings,
+  type ModelFabricCanaryResult,
+  type ModelFabricRuntimeStatus,
+  type ModelFabricSettingsStatus,
+} from "../../lib/modelFabric";
 
 interface VlmRuntimeStatus {
   mode: string;
@@ -154,6 +166,13 @@ const FALLBACK_SCREEN_ANALYSIS_SETTINGS: ScreenAnalysisSettings = {
 };
 
 const ARTIFACT_METADATA_TIMEOUT_MS = import.meta.env.MODE === "test" ? 100 : 30_000;
+const MODEL_FABRIC_EMPIRICAL_CANARY_CAPABILITIES = new Set([
+  "text",
+  "vision",
+  "streaming",
+  "structured_output",
+  "tool_use",
+]);
 
 interface ReportActionResult {
   action?: string;
@@ -292,6 +311,23 @@ async function fetchJsonWithTimeout(path: string, timeoutMs = 3_000, init?: Requ
     }
   }
   throw lastError ?? new Error("Request failed.");
+}
+
+async function postModelFabricCanary(path: string, body: Record<string, unknown>): Promise<unknown> {
+  const controller = new AbortController();
+  const timeout = window.setTimeout(() => controller.abort(), 35_000);
+  try {
+    const response = await fetch(`${API_URL}${path}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
+    if (!response.ok) throw new Error(`Canary request failed: ${response.status}`);
+    return await response.json();
+  } finally {
+    window.clearTimeout(timeout);
+  }
 }
 
 function settingsFromScreenAnalysis(screen: ScreenAnalysisSettings): ArtifactStorageSettings {
@@ -473,6 +509,42 @@ function vlmReachabilityTone(runtime?: VlmRuntimeStatus): "normal" | "good" | "w
     : "warn";
 }
 
+function modelFabricWorkloadLabel(runtime: ModelFabricRuntimeStatus | null, workload: string): string {
+  const route = runtime?.runtime_paths[workload]
+    ?? runtime?.workloads[workload === "chat_agent" ? "interactive" : workload === "screenshot_image_analysis" ? "vision" : workload];
+  if (!route) return "no route receipt";
+  const selected = route.selected ? `selected ${route.selected.profile_id}` : "selected none";
+  const attempted = route.attempted ? `attempted ${route.attempted.profile_id}:${route.attempted.outcome}` : "attempted none";
+  const succeeded = route.succeeded
+    ? `actual ${route.succeeded.profile_id}/${route.succeeded.model}`
+    : "actual none";
+  const fallback = route.fallback_used
+    ? `fallback ${route.fallback_reason_code ?? "used"}`
+    : route.fallback_used === false
+      ? "no fallback"
+      : "fallback unknown";
+  const degraded = route.degradation_codes.length ? `degraded ${route.degradation_codes.join(",")}` : "";
+  const persistence = route.persistence_error_code ? `persistence ${route.persistence_error_code}` : "";
+  return `${selected} · ${attempted} · ${succeeded} · ${fallback}${degraded ? ` · ${degraded}` : ""}${persistence ? ` · ${persistence}` : ""}`;
+}
+
+function modelFabricWorkloadTone(runtime: ModelFabricRuntimeStatus | null, workload: string): "normal" | "good" | "warn" {
+  const route = runtime?.runtime_paths[workload]
+    ?? runtime?.workloads[workload === "chat_agent" ? "interactive" : workload === "screenshot_image_analysis" ? "vision" : workload];
+  if (!route) return "normal";
+  if (route.last_outcome === null) return "normal";
+  return isSuccessfulModelFabricOutcome(route.last_outcome) && route.persistence === "persisted" ? "good" : "warn";
+}
+
+function modelFabricProofLabel(runtime: ModelFabricRuntimeStatus | null): string {
+  if (!runtime?.proofs.length) return "no capability proof metadata";
+  const counts = runtime.proofs.reduce<Record<string, number>>((summary, proof) => {
+    summary[proof.status] = (summary[proof.status] ?? 0) + 1;
+    return summary;
+  }, {});
+  return Object.entries(counts).map(([status, count]) => `${count} ${status}`).join(" · ");
+}
+
 export function ArtifactStoragePanel() {
   const mountedRef = useRef(true);
   const fetchGenerationRef = useRef(0);
@@ -494,6 +566,15 @@ export function ArtifactStoragePanel() {
   const [screenshotFolderPicking, setScreenshotFolderPicking] = useState(false);
   const [screenshotFolderClearingStale, setScreenshotFolderClearingStale] = useState(false);
   const [screenshotFolderDraft, setScreenshotFolderDraft] = useState("");
+  const [modelFabric, setModelFabric] = useState<ModelFabricSettingsStatus | null>(loadRetainedModelFabricSettings);
+  const [modelFabricRuntime, setModelFabricRuntime] = useState<ModelFabricRuntimeStatus | null>(null);
+  const [modelFabricStale, setModelFabricStale] = useState(() => loadRetainedModelFabricSettings() !== null);
+  const [modelFabricError, setModelFabricError] = useState<string | null>(null);
+  const [canaryProfile, setCanaryProfile] = useState("");
+  const [canaryCapability, setCanaryCapability] = useState("text");
+  const [canaryRunning, setCanaryRunning] = useState(false);
+  const [canaryResult, setCanaryResult] = useState<ModelFabricCanaryResult | null>(null);
+  const [canaryError, setCanaryError] = useState<string | null>(null);
 
   async function fetchSettings(isCancelled: () => boolean = () => !mountedRef.current) {
     const generation = fetchGenerationRef.current + 1;
@@ -549,11 +630,65 @@ export function ArtifactStoragePanel() {
       }
     }
   }
+
+  async function fetchModelFabric(isCancelled: () => boolean = () => !mountedRef.current) {
+    try {
+      const [settingsPayload, runtimePayload] = await Promise.all([
+        fetchJsonWithTimeout("/api/settings/model-fabric", 5_000),
+        fetchJsonWithTimeout("/api/runtime/status", 5_000),
+      ]);
+      const nextSettings = normalizeModelFabricSettings(settingsPayload);
+      const runtimeRecord = runtimePayload && typeof runtimePayload === "object" && !Array.isArray(runtimePayload)
+        ? runtimePayload as Record<string, unknown>
+        : null;
+      const nextRuntime = normalizeModelFabricRuntime(runtimeRecord?.model_fabric);
+      if (!nextSettings) throw new Error("Model-fabric settings response is invalid.");
+      if (isCancelled()) return;
+      retainModelFabricSettings(nextSettings);
+      setModelFabric(nextSettings);
+      setModelFabricRuntime(nextRuntime);
+      setModelFabricStale(false);
+      setModelFabricError(nextRuntime ? null : "Runtime route receipts are unavailable; configuration remains usable.");
+      setCanaryProfile((current) => current || nextSettings.profiles.find((profile) => profile.enabled)?.id || "");
+    } catch {
+      if (isCancelled()) return;
+      setModelFabricStale(true);
+      setModelFabricError("Model-fabric metadata is temporarily unavailable; showing last-known settings.");
+    }
+  }
+
+  async function runModelFabricCanary() {
+    if (!modelFabric || !canaryProfile || canaryRunning) return;
+    setCanaryRunning(true);
+    setCanaryResult(null);
+    setCanaryError(null);
+    try {
+      const selectedProfile = modelFabric.profiles.find((profile) => profile.id === canaryProfile);
+      const payload = await postModelFabricCanary(modelFabric.canary_endpoint, {
+        profile_id: canaryProfile,
+        capability: selectedCanaryCapability,
+        timeout_seconds: selectedProfile?.canary_timeout_seconds ?? 10,
+        proof_ttl_seconds: 3600,
+      });
+      const result = normalizeModelFabricCanary(payload);
+      if (!result) throw new Error("Canary response is invalid.");
+      if (!mountedRef.current) return;
+      setCanaryResult(result);
+      await fetchModelFabric();
+    } catch (error) {
+      if (mountedRef.current) {
+        setCanaryError(error instanceof Error ? error.message : "Model-fabric canary failed.");
+      }
+    } finally {
+      if (mountedRef.current) setCanaryRunning(false);
+    }
+  }
   useEffect(() => {
     let cancelled = false;
     mountedRef.current = true;
 
     void fetchSettings(() => cancelled);
+    void fetchModelFabric(() => cancelled);
     return () => {
       cancelled = true;
       mountedRef.current = false;
@@ -579,6 +714,15 @@ export function ArtifactStoragePanel() {
   };
 
   const screenshotFolderSource = settings?.screenshot_folder ?? null;
+  const canaryProfileStatus = modelFabric?.profiles.find((profile) => profile.id === canaryProfile);
+  const availableCanaryCapabilities = Array.from(new Set([
+    ...(canaryProfileStatus?.capabilities.filter((capability) => MODEL_FABRIC_EMPIRICAL_CANARY_CAPABILITIES.has(capability)) ?? []),
+    "health",
+    "latency_ms",
+  ]));
+  const selectedCanaryCapability = availableCanaryCapabilities.includes(canaryCapability)
+    ? canaryCapability
+    : availableCanaryCapabilities[0] ?? "health";
   const screenshotFolderPath = screenshotFolderSource?.path ?? null;
   const screenshotFolderPathSource = screenshotFolderSource?.path_source ?? "";
   const screenshotFolderStaleCount = screenshotFolderSource?.analysis?.stale_count ?? 0;
@@ -971,6 +1115,143 @@ export function ArtifactStoragePanel() {
                 <option value="local-vlm">local-vlm</option>
                 <option value="openrouter">openrouter</option>
               </select>
+            </div>
+
+            <div className="border-t border-retro-text/10 pt-2 mt-1">
+              <div className="flex items-center justify-between gap-2 mb-1">
+                <div className="text-[10px] text-retro-text">Model fabric</div>
+                <div className={`text-[9px] uppercase tracking-wider ${
+                  modelFabricStale || modelFabric?.status === "degraded" || modelFabricRuntime?.status === "degraded"
+                    ? "text-yellow-400"
+                    : modelFabric
+                      ? "text-green-400"
+                      : "text-retro-text/40"
+                }`}>
+                  {modelFabricStale ? "stale" : modelFabricRuntime?.status ?? modelFabric?.status ?? "loading"}
+                </div>
+              </div>
+              {modelFabricError && (
+                <div className="border border-yellow-400/40 px-2 py-1 mb-1 text-[9px] text-yellow-400">
+                  {modelFabricError}
+                </div>
+              )}
+              <ArtifactRow
+                label="Topology"
+                value={
+                  modelFabricRuntime
+                    ? `text: ${modelFabricRuntime.topology.text.join(", ") || "none"} · VLM: ${modelFabricRuntime.topology.vlm.join(", ") || "none"}`
+                    : "text and screenshot VLM route receipts unavailable"
+                }
+                tone={modelFabricRuntime ? "good" : "normal"}
+              />
+              <ArtifactRow
+                label="Configured"
+                value={
+                  modelFabric?.profiles.length
+                    ? modelFabric.profiles.map((profile) => (
+                        `${profile.id}/${profile.model}:${profile.routable ? "routable" : `not routable (${profile.non_routable_reasons.join(", ") || profile.model_fabric_exclusion_reason || "unknown"})`}:cost ${profile.cost_source ?? "unknown"}`
+                      )).join(" · ")
+                    : "no candidates"
+                }
+                tone={modelFabric?.profiles.some((profile) => profile.routable) ? "good" : "warn"}
+              />
+              <ArtifactRow
+                label="Excluded"
+                value={
+                  modelFabric?.excluded_profiles.length
+                    ? modelFabric.excluded_profiles.map((profile) => (
+                        `${profile.id}/${profile.model}:${profile.model_fabric_exclusion_reason ?? (profile.non_routable_reasons.join(", ") || "excluded")}`
+                      )).join(" · ")
+                    : "none"
+                }
+                tone={modelFabric?.excluded_profiles.length ? "warn" : "good"}
+              />
+              <ArtifactRow
+                label="Text"
+                value={modelFabricWorkloadLabel(modelFabricRuntime, "chat_agent")}
+                tone={modelFabricWorkloadTone(modelFabricRuntime, "chat_agent")}
+              />
+              <ArtifactRow
+                label="VLM"
+                value={modelFabricWorkloadLabel(modelFabricRuntime, "screenshot_image_analysis")}
+                tone={modelFabricWorkloadTone(modelFabricRuntime, "screenshot_image_analysis")}
+              />
+              <ArtifactRow
+                label="Fallback"
+                value={
+                  `${(modelFabricRuntime?.runtime_paths.chat_agent ?? modelFabricRuntime?.workloads.interactive)?.fallback_used ? `last used:${(modelFabricRuntime?.runtime_paths.chat_agent ?? modelFabricRuntime?.workloads.interactive)?.fallback_reason_code ?? "reason unknown"}` : "last not used"} · ` +
+                  (modelFabric?.workload_policies.length
+                    ? modelFabric.workload_policies.map((policy) => `${policy.runtime_path}:${policy.fallback_allowed ? "allowed" : "blocked"}`).join(" · ")
+                    : `default ${modelFabric?.defaults.fallback_allowed ? "allowed" : "blocked"}`)
+                }
+                tone={modelFabric?.workload_policies.some((policy) => policy.fallback_allowed) ? "normal" : "good"}
+              />
+              <ArtifactRow
+                label="Proofs"
+                value={modelFabricProofLabel(modelFabricRuntime)}
+                tone={
+                  modelFabricRuntime?.proofs.some((proof) => proof.status === "stale" || proof.status === "missing")
+                    ? "warn"
+                    : modelFabricRuntime?.proofs.length
+                      ? "good"
+                      : "normal"
+                }
+              />
+              <div className="mt-2 border border-retro-text/10 px-2 py-2">
+                <div className="text-[9px] text-retro-text/50 mb-1">
+                  Manual exact-route canary. This runs inference only when you press Run; status refreshes never probe.
+                </div>
+                <div className="flex flex-wrap items-center gap-1">
+                  <label className="text-[9px] text-retro-text/40" htmlFor="model-fabric-canary-profile">Profile</label>
+                  <select
+                    id="model-fabric-canary-profile"
+                    aria-label="Canary profile"
+                    value={canaryProfile}
+                    disabled={canaryRunning || !modelFabric}
+                    onChange={(event) => setCanaryProfile(event.target.value)}
+                    className="min-w-0 border border-retro-text/20 bg-retro-bg px-1 py-0.5 text-[9px] text-retro-text disabled:opacity-40"
+                  >
+                    <option value="">choose profile</option>
+                    {modelFabric?.profiles.map((profile) => (
+                      <option key={profile.id} value={profile.id}>
+                        {profile.id} · {profile.transport_adapter}
+                      </option>
+                    ))}
+                  </select>
+                  <label className="text-[9px] text-retro-text/40" htmlFor="model-fabric-canary-capability">Capability</label>
+                  <select
+                    id="model-fabric-canary-capability"
+                    aria-label="Canary capability"
+                    value={selectedCanaryCapability}
+                    disabled={canaryRunning || !modelFabric}
+                    onChange={(event) => setCanaryCapability(event.target.value)}
+                    className="min-w-0 border border-retro-text/20 bg-retro-bg px-1 py-0.5 text-[9px] text-retro-text disabled:opacity-40"
+                  >
+                    {availableCanaryCapabilities.map((capability) => (
+                      <option key={capability} value={capability}>{capability.replace(/_/g, " ")}</option>
+                    ))}
+                  </select>
+                  <button
+                    type="button"
+                    disabled={canaryRunning || !canaryProfile || modelFabricStale}
+                    onClick={() => void runModelFabricCanary()}
+                    className="border border-retro-text/20 px-2 py-1 text-[9px] uppercase tracking-wider text-retro-text/70 hover:text-retro-text disabled:opacity-40"
+                  >
+                    {canaryRunning ? "Running" : "Run canary"}
+                  </button>
+                </div>
+                {canaryError && <div className="mt-1 text-[9px] text-red-400">{canaryError}</div>}
+                {canaryResult && (
+                  <div className={`mt-1 text-[9px] ${isGreenModelFabricCanary(canaryResult) ? "text-green-400" : "text-yellow-400"}`}>
+                    {canaryResult.profile_id}/{canaryResult.capability} · {canaryResult.outcome}
+                    {canaryResult.error_code ? ` · ${canaryResult.error_code}` : ""}
+                    {canaryResult.proof ? ` · proof ${canaryResult.proof.proof_hash.slice(0, 12)}` : " · no proof"}
+                    {` · receipt ${canaryResult.receipt_persistence}`}
+                    {` · proof persistence ${canaryResult.proof_persistence}`}
+                    {!isGreenModelFabricCanary(canaryResult) ? " · not authorizing" : ""}
+                  </div>
+                )}
+              </div>
             </div>
 
             {settings.local_runtime && (

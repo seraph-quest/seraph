@@ -1,6 +1,6 @@
 import os
 from contextlib import asynccontextmanager
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlsplit, urlunsplit
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -26,6 +26,44 @@ from src.workflows.manager import workflow_manager
 
 limiter = Limiter(key_func=get_remote_address, default_limits=["60/minute"])
 _LOCAL_DEV_ORIGIN_REGEX = r"https?://(localhost|127\.0\.0\.1)(:\d+)?$"
+
+
+def _safe_runtime_endpoint(value: object) -> str:
+    """Return a credential-free absolute HTTP(S) endpoint or blank unsafe legacy input."""
+    raw = str(value or "").strip()
+    try:
+        parsed = urlsplit(raw)
+        port = parsed.port
+    except ValueError:
+        return ""
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not parsed.hostname
+        or parsed.username
+        or parsed.password
+        or parsed.query
+        or parsed.fragment
+    ):
+        return ""
+    host = parsed.hostname
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    netloc = f"{host}:{port}" if port is not None else host
+    return urlunsplit((parsed.scheme.lower(), netloc, parsed.path, "", ""))
+
+
+def _sanitize_runtime_endpoints(value: object, *, key: str = "") -> object:
+    if isinstance(value, dict):
+        return {
+            item_key: _sanitize_runtime_endpoints(item, key=str(item_key))
+            for item_key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_sanitize_runtime_endpoints(item, key=key) for item in value]
+    endpoint_key = key in {"api_base", "base_url", "backend_url", "default_api_base"} or key.endswith(
+        ("_endpoint", "_api_base", "_base_url", "_backend_url")
+    )
+    return _safe_runtime_endpoint(value) if endpoint_key else value
 
 
 def _runtime_provider_label(
@@ -72,14 +110,14 @@ def _active_chat_runtime_status() -> dict[str, str]:
             "provider": "codex-local",
             "model": default_model,
             "model_label": _runtime_model_label(default_model),
-            "api_base": settings.llm_api_base.strip(),
+            "api_base": _safe_runtime_endpoint(settings.llm_api_base),
             "active_profile": "codex-local",
         }
 
     active_profile = resolve_runtime_profile(runtime_path="chat_agent")
     profile = provider_profiles().get(active_profile)
     model = (profile.model if profile is not None else default_model).strip()
-    api_base = (profile.api_base if profile is not None else settings.llm_api_base).strip()
+    api_base = _safe_runtime_endpoint(profile.api_base if profile is not None else settings.llm_api_base)
     return {
         "provider": _runtime_provider_label(model, profile=active_profile, api_base=api_base),
         "model": model,
@@ -96,15 +134,35 @@ def _effective_runtime_route_status(runtime: dict[str, str], vlm_status: dict[st
     profile = runtime.get("active_profile", "")
     if provider == "local-gemma":
         mode = str(vlm_status.get("mode") or "not_configured")
-        if mode == "gpu-server":
-            route_label = "GPU VLM"
-            provider_label = "local-gemma/gpu-vlm"
-        elif mode == "mac-wrapper":
-            route_label = "Mac VLM"
-            provider_label = "local-gemma/mac-vlm"
-        elif bool(vlm_status.get("configured")):
-            route_label = "VLM wrapper"
-            provider_label = "local-gemma/vlm"
+        text_api_base = _safe_runtime_endpoint(runtime.get("api_base", ""))
+        wrapper_base_url = _safe_runtime_endpoint(vlm_status.get("base_url", ""))
+        advertised_backend_url = _safe_runtime_endpoint(vlm_status.get("backend_url", ""))
+        wrapper_chat_api_base = (
+            wrapper_base_url
+            if wrapper_base_url.rstrip("/").endswith("/v1")
+            else f"{wrapper_base_url.rstrip('/')}/v1" if wrapper_base_url else ""
+        )
+        uses_wrapper_chat = bool(
+            text_api_base and wrapper_chat_api_base and text_api_base == wrapper_chat_api_base
+        )
+        text_hostname = urlparse(text_api_base).hostname if text_api_base else ""
+        uses_direct_gpu_text = bool(
+            mode == "gpu-server"
+            and text_api_base
+            and advertised_backend_url
+            and text_api_base == advertised_backend_url
+            and text_hostname not in {"localhost", "127.0.0.1", "::1"}
+            and not uses_wrapper_chat
+        )
+        if uses_direct_gpu_text:
+            route_label = "GPU text"
+            provider_label = "local-gemma/gpu-text"
+        elif uses_wrapper_chat and mode == "gpu-server":
+            route_label = "GPU wrapper chat"
+            provider_label = "local-gemma/gpu-wrapper-chat"
+        elif uses_wrapper_chat and mode == "mac-wrapper":
+            route_label = "Mac wrapper chat"
+            provider_label = "local-gemma/mac-wrapper-chat"
         else:
             route_label = "local Gemma"
             provider_label = "local-gemma"
@@ -246,20 +304,29 @@ def create_app() -> FastAPI:
     @app.get("/api/runtime/status")
     async def runtime_status():
         runtime = _active_chat_runtime_status()
-        vlm_status = effective_vlm_status(live_probe=deferred_vlm_live_probe())
+        vlm_status = _sanitize_runtime_endpoints(
+            effective_vlm_status(live_probe=deferred_vlm_live_probe())
+        )
         default_model = settings.default_model.strip()
+        from src.api.model_fabric_settings import model_fabric_runtime_status
+
+        fabric_status = await model_fabric_runtime_status(str(runtime.get("active_profile") or ""))
         return {
             "version": app.version,
             "build_id": f"SERAPH_PRIME_v{app.version}",
             **runtime,
             "effective_runtime": _effective_runtime_route_status(runtime, vlm_status),
-            "default_provider": _runtime_provider_label(default_model),
+            "default_provider": _runtime_provider_label(
+                default_model,
+                api_base=_safe_runtime_endpoint(settings.llm_api_base),
+            ),
             "default_model": default_model,
             "default_model_label": _runtime_model_label(default_model),
-            "default_api_base": settings.llm_api_base.strip(),
-            "provider_profiles": provider_profile_statuses(),
+            "default_api_base": _safe_runtime_endpoint(settings.llm_api_base),
+            "provider_profiles": _sanitize_runtime_endpoints(provider_profile_statuses()),
             "local_operators": local_operator_statuses(probe=False),
             "vlm_runtime": vlm_status,
+            "model_fabric": fabric_status,
             "timezone": settings.user_timezone,
             "llm_logging_enabled": settings.llm_log_enabled,
         }

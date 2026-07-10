@@ -7,6 +7,7 @@ import pytest
 
 from src.agent.session import SessionManager
 from src.approval.runtime import reset_runtime_context, set_runtime_context
+from src.security.trust_contract import AuthorityGrant, PrincipalType, TrustPrincipal
 from src.memory.consolidator import ConsolidationResult
 from src.db.models import MemoryKind
 from src.memory.flush import flush_session_memory
@@ -149,26 +150,39 @@ async def test_retry_after_snapshot_partial_does_not_double_strengthen(async_db)
         "soul_updates": {},
     })
 
-    with patch(
-        "src.memory.consolidator.completion_with_fallback",
-        AsyncMock(return_value=mock_resp),
-    ), patch(
-        "src.memory.consolidator.add_memory",
-        return_value="vec-1",
-    ) as mock_add_memory, patch(
-        "src.memory.consolidator.refresh_bounded_guardian_snapshot",
-        AsyncMock(side_effect=[RuntimeError("snapshot down"), None]),
-    ):
-        first = await flush_session_memory(
-            "flush-idempotent",
-            trigger="post_response",
-            manager=manager,
-        )
-        second = await flush_session_memory(
-            "flush-idempotent",
-            trigger="session_end",
-            manager=manager,
-        )
+    tokens = set_runtime_context(
+        "flush-idempotent",
+        "high_risk",
+        trust_principal=TrustPrincipal(
+            principal_id="service:memory-flush-test",
+            principal_type=PrincipalType.SERVICE,
+            grants=(AuthorityGrant.MODEL_INFERENCE,),
+            session_id="flush-idempotent",
+        ),
+    )
+    try:
+        with patch(
+            "src.memory.consolidator.completion_with_fallback",
+            AsyncMock(return_value=mock_resp),
+        ), patch(
+            "src.memory.consolidator.add_memory",
+            return_value="vec-1",
+        ) as mock_add_memory, patch(
+            "src.memory.consolidator.refresh_bounded_guardian_snapshot",
+            AsyncMock(side_effect=[RuntimeError("snapshot down"), None]),
+        ):
+            first = await flush_session_memory(
+                "flush-idempotent",
+                trigger="post_response",
+                manager=manager,
+            )
+            second = await flush_session_memory(
+                "flush-idempotent",
+                trigger="session_end",
+                manager=manager,
+            )
+    finally:
+        reset_runtime_context(tokens)
 
     memories = await memory_repository.list_memories_by_kinds(
         kinds=(MemoryKind.communication_preference,),

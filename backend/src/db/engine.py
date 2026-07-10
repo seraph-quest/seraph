@@ -162,6 +162,82 @@ async def _ensure_legacy_columns(conn) -> None:
             "ALTER TABLE memories ADD COLUMN last_confirmed_at DATETIME"
         )
 
+    async def _add_missing_columns(
+        table_name: str,
+        definitions: dict[str, str],
+    ) -> set[str]:
+        columns = await _table_columns(table_name)
+        if not columns:
+            return columns
+        for column, sql_type in definitions.items():
+            if column not in columns:
+                await conn.exec_driver_sql(
+                    f"ALTER TABLE {table_name} ADD COLUMN {column} {sql_type}"
+                )
+                columns.add(column)
+        return columns
+
+    proof_columns = await _add_missing_columns(
+        "model_capability_proofs",
+        {
+            "receipt_id": "VARCHAR DEFAULT 'legacy-unbound'",
+            # A syntactically bounded sentinel keeps legacy rows ORM-readable but
+            # cannot authorize them because it is not linked to a real receipt.
+            "receipt_hash": (
+                "VARCHAR DEFAULT "
+                "'0000000000000000000000000000000000000000000000000000000000000000'"
+            ),
+        },
+    )
+    if "receipt_id" in proof_columns:
+        await conn.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_model_capability_proofs_receipt_id "
+            "ON model_capability_proofs (receipt_id)"
+        )
+    if "receipt_hash" in proof_columns:
+        await conn.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_model_capability_proofs_receipt_hash "
+            "ON model_capability_proofs (receipt_hash)"
+        )
+
+    route_columns = await _add_missing_columns(
+        "model_route_receipts",
+        {
+            "runtime_path": "VARCHAR DEFAULT 'legacy_unknown'",
+            "fallback_used": "BOOLEAN DEFAULT 0",
+            "fallback_reason_code": "VARCHAR",
+            "degradation_codes_json": "VARCHAR DEFAULT '[]'",
+            "cost_kind": "VARCHAR DEFAULT 'unknown'",
+            "cost_amount": "FLOAT",
+            "cost_currency": "VARCHAR",
+            "cost_source": "VARCHAR",
+            "cost_source_updated_at": "DATETIME",
+            "usage_input_tokens": "INTEGER",
+            "usage_output_tokens": "INTEGER",
+            "usage_total_tokens": "INTEGER",
+        },
+    )
+    if "runtime_path" in route_columns:
+        await conn.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_model_route_receipts_runtime_path "
+            "ON model_route_receipts (runtime_path)"
+        )
+
+    await _add_missing_columns(
+        "model_route_attempt_receipts",
+        {
+            "degradation_code": "VARCHAR",
+            "usage_input_tokens": "INTEGER",
+            "usage_output_tokens": "INTEGER",
+            "usage_total_tokens": "INTEGER",
+            "cost_kind": "VARCHAR DEFAULT 'unknown'",
+            "cost_amount": "FLOAT",
+            "cost_currency": "VARCHAR",
+            "cost_source": "VARCHAR",
+            "cost_source_updated_at": "DATETIME",
+        },
+    )
+
 
 async def _ensure_search_indexes(conn) -> None:
     await conn.exec_driver_sql(

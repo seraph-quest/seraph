@@ -5,6 +5,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+pytestmark = pytest.mark.usefixtures("mocked_canonical_inference_context")
+
 from config.settings import settings
 from src.audit.repository import audit_repository
 from src.db.models import MemoryKind, MemorySnapshotKind
@@ -13,6 +15,7 @@ from src.memory.consolidator import consolidate_session
 from src.memory.decay import DecayMaintenanceResult
 from src.memory.pipeline.merge import PersistedMemoryStats
 from src.memory.providers import MemoryProviderWritebackAggregateResult
+from src.security.trust_contract import canonical_digest
 from src.memory.repository import memory_repository
 from src.memory.types import ConsolidatedMemoryItem, kind_to_category, normalize_memory_kind
 
@@ -686,7 +689,12 @@ class TestConsolidateSession:
         assert "Identity: Builder" in snapshot.content
         assert "Atlas launch" in snapshot.content
 
-    async def test_extracts_facts_uses_session_consolidation_runtime_path(self, async_db, sm):
+    async def test_extracts_facts_uses_session_consolidation_runtime_path(
+        self,
+        async_db,
+        sm,
+        mocked_canonical_inference_context,
+    ):
         await sm.get_or_create("s1")
         await sm.add_message("s1", "user", "My name is Alice and I work at ACME Corp as a software engineer.")
         await sm.add_message("s1", "assistant", "Nice to meet you, Alice! That sounds like a great position at ACME Corp.")
@@ -709,6 +717,8 @@ class TestConsolidateSession:
 
         assert mock_completion.await_args.kwargs["runtime_path"] == "session_consolidation"
         assert mock_completion.await_args.kwargs["local_runtime_only"] is False
+        call = mock_completion.await_args.kwargs
+        assert call["request_context"].data_digest == canonical_digest(call["messages"])
 
     async def test_extracts_facts_requires_local_runtime_when_configured(self, async_db, sm):
         await sm.get_or_create("s1")

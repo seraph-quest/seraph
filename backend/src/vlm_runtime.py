@@ -9,6 +9,8 @@ import httpx
 
 from config.settings import settings
 
+SCREENSHOT_VLM_PROFILE_ID = "local-vlm-screenshot-fast"
+
 
 def effective_vlm_base_url() -> str:
     """Return the configured Seraph VLM wrapper base URL without a trailing slash."""
@@ -24,6 +26,14 @@ def effective_vlm_chat_api_base() -> str:
     if not base_url:
         return ""
     return base_url + "/v1"
+
+
+def effective_vlm_wrapper_chat_api_base() -> str:
+    """Return the wrapper's own optional chat-proxy API, independent of direct text routing."""
+    base_url = effective_vlm_base_url()
+    if not base_url:
+        return ""
+    return base_url if base_url.endswith("/v1") else base_url + "/v1"
 
 
 def effective_vlm_backend_url() -> str:
@@ -69,9 +79,9 @@ def effective_vlm_status(*, live_probe: dict[str, object] | None = None) -> dict
         "configured": bool(base_url),
         "base_url": base_url,
         "backend_url": backend_url,
-        "chat_api_base": effective_vlm_chat_api_base(),
-        "chat_completion_endpoint": f"{effective_vlm_chat_api_base()}/chat/completions"
-        if effective_vlm_chat_api_base()
+        "chat_api_base": effective_vlm_wrapper_chat_api_base(),
+        "chat_completion_endpoint": f"{effective_vlm_wrapper_chat_api_base()}/chat/completions"
+        if effective_vlm_wrapper_chat_api_base()
         else "",
         "chat_health_endpoint": f"{base_url}/health/chat" if base_url else "",
         "queue_status_endpoint": f"{base_url}/queue/status" if base_url else "",
@@ -140,7 +150,7 @@ async def direct_local_chat_route_error(*, timeout_seconds: float = 0.75) -> str
     """Return an operator-readable route error when local chat cannot run."""
     status = effective_vlm_status()
     base_url = str(status.get("base_url") or "")
-    chat_api_base = str(status.get("chat_api_base") or "")
+    chat_api_base = effective_vlm_chat_api_base()
     chat_health_endpoint = str(status.get("chat_health_endpoint") or "")
     if not chat_api_base:
         return (
@@ -148,6 +158,12 @@ async def direct_local_chat_route_error(*, timeout_seconds: float = 0.75) -> str
             "Set SERAPH_VLM_BASE_URL or LOCAL_VLM_BASE_URL before using direct local chat."
         )
     if not base_url:
+        return None
+
+    wrapper_chat_api_base = effective_vlm_wrapper_chat_api_base()
+    if _trim_url(chat_api_base) != _trim_url(wrapper_chat_api_base):
+        # An explicitly configured text endpoint is independent of the VLM
+        # wrapper. The completion transport reports its own reachability error.
         return None
 
     probe = await probe_effective_vlm_runtime(timeout_seconds=timeout_seconds)

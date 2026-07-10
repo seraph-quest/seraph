@@ -114,7 +114,7 @@ def _default_screen_analysis_settings() -> dict[str, object]:
         os.environ.get("SERAPH_SCREEN_ANALYSIS_PROVIDER", "").strip()
         or settings.screen_analysis_provider.strip()
     )
-    model = settings.local_vlm_model.strip() or settings.codex_local_model.strip()
+    model = settings.local_vlm_model.strip()
     screen_archive_dir = _screen_archive_dir()
     env_screenshot_folder = os.environ.get(SCREENSHOT_FOLDER_ENV, "").strip()
     payload: dict[str, object] = {

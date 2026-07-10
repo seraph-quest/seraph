@@ -2,7 +2,7 @@ import pytest
 from unittest.mock import patch
 
 from config.settings import settings
-from src.app import _effective_runtime_route_status, _safe_runtime_endpoint
+from src.app import _active_chat_runtime_status, _effective_runtime_route_status, _safe_runtime_endpoint
 
 
 _DEFERRED_VLM_PROBE = {
@@ -32,6 +32,21 @@ def test_runtime_endpoint_sanitizer_blanks_unsafe_values(unsafe_endpoint):
 
 def test_runtime_endpoint_sanitizer_preserves_safe_absolute_value():
     assert _safe_runtime_endpoint("HTTP://[::1]:8000/v1") == "http://[::1]:8000/v1"
+
+
+def test_active_runtime_validates_transport_model_but_displays_profile_model():
+    with (
+        patch.object(settings, "default_model", "openrouter/x-ai/grok-4.1-fast"),
+        patch.object(settings, "local_model", "openai/unsloth/gemma-4-26B-A4B-it-qat-GGUF"),
+        patch.object(settings, "local_llm_api_base", "http://127.0.0.1:8000/v1"),
+        patch.object(settings, "local_llm_api_key", "not-needed"),
+        patch.object(settings, "runtime_profile_preferences", "chat_agent=local-gemma-chat-thinking"),
+        patch.object(settings, "runtime_model_overrides", ""),
+    ):
+        runtime = _active_chat_runtime_status()
+
+    assert runtime["model"] == "unsloth/gemma-4-26B-A4B-it-qat-GGUF"
+    assert runtime["active_profile"] == "local-gemma-chat-thinking"
 
 
 def test_effective_runtime_distinguishes_direct_gpu_text_from_wrapper_chat():
@@ -109,23 +124,19 @@ async def test_runtime_status_exposes_release_and_model(client):
     assert payload["default_provider"] == "openrouter"
     assert payload["default_model"] == settings.default_model
     assert isinstance(payload["provider_profiles"], list)
-    assert isinstance(payload["local_operators"], list)
+    assert "local_operators" not in payload
     assert any(item["id"] == "openrouter" for item in payload["provider_profiles"])
-    assert any(item["id"] == "codex-local" for item in payload["local_operators"])
     assert all("api_key" not in item for item in payload["provider_profiles"])
 
 
 @pytest.mark.asyncio
-async def test_runtime_status_reports_local_codex_when_selected(client):
-    with patch.object(settings, "default_model", "codex-local"), patch.object(settings, "codex_local_model", "gpt-5.5"):
+async def test_runtime_status_rejects_removed_local_codex_when_selected(client):
+    with patch.object(settings, "default_model", "codex-local"):
         response = await client.get("/api/runtime/status")
 
-    assert response.status_code == 200
+    assert response.status_code == 410
     payload = response.json()
-    assert payload["provider"] == "codex-local"
-    assert payload["model"] == "codex-local"
-    assert payload["model_label"] == "gpt-5.5"
-    assert payload["active_profile"] == "codex-local"
+    assert payload["detail"]["code"] == "external_agent_runtime_removed"
 
 
 @pytest.mark.asyncio

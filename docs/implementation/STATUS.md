@@ -11,12 +11,9 @@ Seraph is an AI guardian that remembers, watches, and acts. This page is the fas
 **Target authority:** [Project Constitution](./00-project-constitution.md).
 
 The detailed inventory below records the large existing baseline. Some shipped
-surfaces are transitional and intentionally conflict with the new target—for
-example command-backed external-agent routes and the Mac-hosted core. Their
-presence here means only that they exist on `develop`; it does not make them
-part of the target architecture. Epic #736 tracks their replacement. New target
-capabilities remain **Planned** until merged to `develop` with the required
-validation receipts.
+surfaces remain transitional, including the Mac-hosted core, and Epic #736
+tracks their replacement. New target capabilities remain **Planned** until
+merged to `develop` with the required validation receipts.
 
 For a shorter reader-facing overview of the current app, start with
 [Current App Guide](./12-current-app-guide.md). This status page remains the
@@ -233,7 +230,7 @@ High-risk strategic wording in this status page remains governed by [19. Strateg
 - [x] browser-based guardian workspace as the only supported browser shell
 - [x] FastAPI backend with chat, WebSocket, goals, tools, observer, settings, audit, approvals, vault, skills, and MCP APIs
 - [x] native macOS observer daemon for screen/window ingest
-- [x] screen analysis provider choice now includes local Apple Vision, local Codex CLI parsing, and explicit OpenRouter cloud OCR, with local Codex temp-image cleanup documented and optional durable local image/output/analysis artifacts available through localhost-only observer inspection endpoints
+- [x] screen analysis supports configured local or remote inference routes, with optional durable local image/provider-output/analysis artifacts available through localhost-only observer inspection endpoints; legacy stored `codex_output_path` metadata and the deprecated `/codex-output` route remain read-compatible while new links use `/provider-output`
 - [x] persistent guardian record, vector memory, sessions, and goal storage
 
 ### Trust and control

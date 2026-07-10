@@ -13,14 +13,11 @@ from pydantic import BaseModel, Field
 
 from config.settings import settings
 from src.agent.session import session_manager
-from src.app import _runtime_model_label, _runtime_provider_label
-from src.llm_runtime import provider_profile_statuses, resolve_runtime_profile
+from src.app import _active_chat_runtime_status
+from src.llm_runtime import provider_profile_statuses
 from src.operators.local_codex import (
-    is_local_codex_model,
-    LocalCodexConfigurationError,
-    local_codex_status,
-    local_operator_statuses,
-    run_local_codex,
+    ExternalAgentRuntimeRemovedError,
+    removed_external_agent_payload,
 )
 from src.extensions.lifecycle import list_extensions
 from src.llm_logger import list_recent_llm_calls
@@ -256,7 +253,7 @@ def _memory_live_control_acknowledgement(request: MemoryLiveControlActionRequest
 
 @router.get("/operator/local-codex/status")
 async def operator_local_codex_status():
-    return local_codex_status()
+    raise HTTPException(status_code=410, detail=removed_external_agent_payload("codex-local"))
 
 
 @router.get("/operator/database-doctor")
@@ -266,23 +263,7 @@ async def get_operator_database_doctor():
 
 @router.post("/operator/local-codex/exec")
 async def operator_local_codex_exec(request: LocalCodexExecRequest):
-    try:
-        return await run_local_codex(
-            request.prompt,
-            cwd=request.cwd,
-            model=request.model,
-            timeout_seconds=request.timeout_seconds,
-            session_id=request.session_id,
-        )
-    except LocalCodexConfigurationError as exc:
-        raise HTTPException(
-            status_code=503,
-            detail={
-                "adapter": "codex-local",
-                "status": "blocked",
-                "failure_reason": str(exc),
-            },
-        ) from exc
+    raise HTTPException(status_code=410, detail=removed_external_agent_payload(request.model or "codex-local"))
 
 
 _ENGINEERING_PULL_REQUEST_RE = re.compile(
@@ -1307,18 +1288,15 @@ def _continuity_operator_items(
 
 
 def _runtime_status_payload() -> dict[str, Any]:
-    model = settings.default_model.strip()
-    active_profile = "codex-local" if is_local_codex_model(model) else resolve_runtime_profile(runtime_path="chat_agent")
+    try:
+        runtime = _active_chat_runtime_status()
+    except ExternalAgentRuntimeRemovedError as exc:
+        raise HTTPException(status_code=410, detail=exc.payload()) from exc
     return {
         "version": "2026.4.11",
         "build_id": "SERAPH_PRIME_v2026.4.11",
-        "provider": _runtime_provider_label(),
-        "model": model,
-        "model_label": _runtime_model_label(model),
-        "api_base": settings.llm_api_base.strip(),
-        "active_profile": active_profile,
+        **runtime,
         "provider_profiles": provider_profile_statuses(),
-        "local_operators": local_operator_statuses(probe=False),
         "timezone": settings.user_timezone,
         "llm_logging_enabled": settings.llm_log_enabled,
     }

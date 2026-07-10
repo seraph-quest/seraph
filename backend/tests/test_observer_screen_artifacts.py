@@ -20,7 +20,7 @@ async def test_screen_artifacts_are_persisted_listed_and_served(async_db, client
     monkeypatch.setattr("src.api.observer.settings.workspace_dir", str(tmp_path / "workspace"))
     monkeypatch.setattr("src.api.observer.settings.screen_capture_archive_dir", str(tmp_path))
     image_path = tmp_path / "capture.png"
-    output_path = tmp_path / "capture.codex.txt"
+    output_path = tmp_path / "capture.provider.txt"
     analysis_path = tmp_path / "capture.analysis.json"
     image_path.write_bytes(b"png bytes")
     output_path.write_text('{"summary":"Codex saw the editor"}', encoding="utf-8")
@@ -32,7 +32,7 @@ async def test_screen_artifacts_are_persisted_listed_and_served(async_db, client
     artifacts = {
         "id": "artifact-1",
         "image_path": str(image_path),
-        "codex_output_path": str(output_path),
+        "provider_output_path": str(output_path),
         "analysis_path": str(analysis_path),
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
@@ -68,21 +68,50 @@ async def test_screen_artifacts_are_persisted_listed_and_served(async_db, client
     item = list_resp.json()["items"][0]
     assert item["observation_id"] == observation.id
     assert item["artifacts"]["image_url"].endswith(f"/{observation.id}/image")
-    assert item["artifacts"]["codex_output_url"].endswith(f"/{observation.id}/codex-output")
-    assert item["artifacts"]["provider_output_url"].endswith(f"/{observation.id}/codex-output")
+    assert "codex_output_url" not in item["artifacts"]
+    assert item["artifacts"]["provider_output_url"].endswith(f"/{observation.id}/provider-output")
 
     image_resp = await client.get(f"/api/observer/screen-artifacts/{observation.id}/image")
     assert image_resp.status_code == 200
     assert image_resp.content == b"png bytes"
     assert image_resp.headers["content-type"] == "image/png"
 
-    output_resp = await client.get(f"/api/observer/screen-artifacts/{observation.id}/codex-output")
+    output_resp = await client.get(f"/api/observer/screen-artifacts/{observation.id}/provider-output")
     assert output_resp.status_code == 200
     assert output_resp.text == '{"summary":"Codex saw the editor"}'
+
+    legacy_output_resp = await client.get(f"/api/observer/screen-artifacts/{observation.id}/codex-output")
+    assert legacy_output_resp.status_code == 200
+    assert legacy_output_resp.text == output_resp.text
 
     analysis_resp = await client.get(f"/api/observer/screen-artifacts/{observation.id}/analysis")
     assert analysis_resp.status_code == 200
     assert analysis_resp.json()["summary"] == "Codex saw the editor"
+
+
+@pytest.mark.asyncio
+async def test_legacy_codex_output_path_remains_readable(async_db, client, tmp_path, monkeypatch):
+    monkeypatch.setattr("src.api.observer.settings.screen_capture_archive_dir", str(tmp_path))
+    output_path = tmp_path / "legacy.codex.txt"
+    output_path.write_text("legacy provider output", encoding="utf-8")
+    artifacts = {
+        "id": "legacy-artifact",
+        "image_path": str(tmp_path / "missing.png"),
+        "codex_output_path": str(output_path),
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    async with async_db() as db:
+        observation = ScreenObservation(
+            app_name="Legacy capture",
+            summary="Legacy output metadata",
+            details_json=json.dumps(["capture_artifacts:" + json.dumps(artifacts)]),
+        )
+        db.add(observation)
+
+    response = await client.get(f"/api/observer/screen-artifacts/{observation.id}/provider-output")
+
+    assert response.status_code == 200
+    assert response.text == "legacy provider output"
 
 
 @pytest.mark.asyncio
@@ -256,7 +285,7 @@ async def test_screenshot_folder_scan_persists_observation_and_serves_image(asyn
     assert analysis["analysis"]["report_ready"] is True
     assert analysis["image_sha256"] == image_sha256
 
-    output_resp = await client.get(f"/api/observer/screen-artifacts/{observation.id}/codex-output")
+    output_resp = await client.get(f"/api/observer/screen-artifacts/{observation.id}/provider-output")
     assert output_resp.status_code == 200
     assert "screenshot folder source only provided the image file" in output_resp.text
 

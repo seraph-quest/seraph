@@ -37,6 +37,7 @@ from src.security.trust_contract import (
     evaluate_trust,
 )
 from src.tools.policy import get_tool_approval_behavior, get_tool_risk_level
+from src.auth.cancellation import assert_runtime_not_revoked
 
 
 def _run_async(coro):
@@ -173,6 +174,7 @@ class ApprovalTool(Tool):
         return self.wrapped_tool(*args, **kwargs)
 
     def __call__(self, *args, sanitize_inputs_outputs: bool = False, **kwargs):
+        assert_runtime_not_revoked()
         approval_mode = get_current_approval_mode()
         session_id = get_current_session_id()
         arguments = self._normalize_invocation(args, kwargs)

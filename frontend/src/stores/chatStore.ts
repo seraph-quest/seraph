@@ -62,6 +62,7 @@ interface ChatStore {
   deleteSession: (sessionId: string) => Promise<void>;
   renameSession: (sessionId: string, title: string) => Promise<void>;
   generateSessionTitle: (sessionId: string) => Promise<void>;
+  clearAuthenticatedContinuity: () => void;
 }
 
 const LAST_SESSION_KEY = "seraph_last_session_id";
@@ -434,5 +435,23 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     } catch (err) {
       console.error("Failed to generate session title:", err);
     }
+  },
+
+  clearAuthenticatedContinuity: () => {
+    safeStorageRemove(LAST_SESSION_KEY);
+    restoreLastSessionPromise = null;
+    set({
+      messages: [],
+      sessionId: null,
+      sessions: [],
+      sessionContinuity: {},
+      connectionStatus: "disconnected",
+      isAgentBusy: false,
+      agentVisual: { ...defaultVisual },
+      ambientState: "idle",
+      ambientTooltip: "",
+      onboardingCompleted: null,
+      toolRegistry: [],
+    });
   },
 }));

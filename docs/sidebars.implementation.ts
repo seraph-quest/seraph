@@ -22,6 +22,7 @@ const sidebars: SidebarsConfig = {
           ],
         },
         'docs-contract',
+        'gpu-core-lan-operations',
         'screenshot-folder-source',
         'release-2026-07-04',
         'release-2026-06-30',

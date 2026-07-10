@@ -1,26 +1,122 @@
-# ------------------------------------------------------------------
-#         Infrastructure Services (Third-Party)
-# ------------------------------------------------------------------
-# Defines the core third-party services like databases and message queues.
+name: seraph-prod
 
 services:
-  backend-prod:
-    container_name: backend-prod
+  ingress:
+    image: seraph/frontend-ingress:${SERAPH_IMAGE_TAG:-current}
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.prod
+      args:
+        SERAPH_BUILD_REVISION: ${SERAPH_IMAGE_TAG:?set exact git revision}
+    restart: unless-stopped
+    depends_on:
+      backend:
+        condition: service_healthy
+    ports:
+      - "${SERAPH_HTTPS_BIND:-0.0.0.0}:${SERAPH_HTTPS_PORT:-443}:443"
+    secrets:
+      - tls_cert
+      - tls_key
+    networks:
+      seraph-core:
+        ipv4_address: 172.30.0.10
+    healthcheck:
+      test: ["CMD", "nginx", "-t"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+
+  backend:
+    image: seraph/backend:${SERAPH_IMAGE_TAG:-current}
     build:
       context: ./backend
-      dockerfile: ./Dockerfile
-    volumes:
-      - ${BACKEND_DATA_PATH_PROD}:/app/data
-      - ${BACKEND_LOGS_PATH_PROD}:/app/logs
-      - ./shared:/app/shared
+      dockerfile: Dockerfile
+      args:
+        SERAPH_BUILD_REVISION: ${SERAPH_IMAGE_TAG:?set exact git revision}
+    restart: unless-stopped
+    depends_on:
+      vlm-wrapper:
+        condition: service_healthy
     env_file:
       - .env.prod
+    environment:
+      DEPLOYMENT_ENVIRONMENT: production
+      OPERATOR_AUTH_COOKIE_SECURE: "true"
+      OPERATOR_AUTH_BACKEND_WORKERS: "1"
+      OPERATOR_AUTH_TRUSTED_PROXY_IPS: "172.30.0.10"
+      OPERATOR_AUTH_SECRET_FILE: /run/secrets/operator_auth_secret
+      OPERATOR_AUTH_SECRET_HASH_FILE: /run/secrets/operator_auth_secret_hash
+      LOCAL_LLM_API_KEY_FILE: /run/secrets/local_llm_api_key
+      SERAPH_VLM_API_KEY_FILE: /run/secrets/vlm_api_key
+      SERAPH_VLM_BASE_URL: http://vlm-wrapper:8001
+      SERAPH_VLM_BACKEND_URL: http://host.docker.internal:8000/v1
+      WORKSPACE_DIR: /app/data
+      LLM_LOG_DIR: /app/logs
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ${BACKEND_DATA_PATH_PROD:?set BACKEND_DATA_PATH_PROD}:/app/data
+      - ${BACKEND_LOGS_PATH_PROD:?set BACKEND_LOGS_PATH_PROD}:/app/logs
+      - ./shared:/app/shared:ro
+    secrets:
+      - operator_auth_secret
+      - operator_auth_secret_hash
+      - local_llm_api_key
+      - vlm_api_key
     networks:
-      - seraph-network-prod
-    ports:
-      - "8003:8003"
+      seraph-core:
+        ipv4_address: 172.30.0.20
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "--header", "Host: ${SERAPH_LAN_HOST:?set SERAPH_LAN_HOST}", "http://127.0.0.1:8004/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  vlm-wrapper:
+    image: ${SERAPH_VLM_IMAGE:?set immutable SERAPH_VLM_IMAGE}
     restart: unless-stopped
+    environment:
+      HOST: 0.0.0.0
+      PORT: "8001"
+      VLM_BASE_URL: http://host.docker.internal:8000/v1
+      VLM_MODEL: ${LOCAL_VLM_MODEL:?set LOCAL_VLM_MODEL}
+      CHAT_PROXY_ENABLED: "true"
+      CHAT_PROXY_API_KEY_FILE: /run/secrets/vlm_api_key
+      QUEUE_WORKERS: "1"
+      QUEUE_BACKGROUND_WORKERS: "1"
+      QUEUE_MAX_SIZE: ${SERAPH_VLM_QUEUE_MAX_SIZE:-1000}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    secrets:
+      - vlm_api_key
+    networks:
+      seraph-core:
+        ipv4_address: 172.30.0.30
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:8001/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
 
 networks:
-  seraph-network-prod:
-    name: seraph-network-prod
+  seraph-core:
+    name: seraph-core-prod
+    ipam:
+      config:
+        - subnet: 172.30.0.0/24
+
+secrets:
+  tls_cert:
+    file: ${SERAPH_TLS_CERT_FILE:?set SERAPH_TLS_CERT_FILE}
+  tls_key:
+    file: ${SERAPH_TLS_KEY_FILE:?set SERAPH_TLS_KEY_FILE}
+  operator_auth_secret:
+    file: ${OPERATOR_AUTH_SECRET_FILE:-/dev/null}
+  operator_auth_secret_hash:
+    file: ${OPERATOR_AUTH_SECRET_HASH_FILE:-/dev/null}
+  local_llm_api_key:
+    file: ${LOCAL_LLM_API_KEY_FILE:-/dev/null}
+  vlm_api_key:
+    file: ${SERAPH_VLM_API_KEY_FILE:-/dev/null}

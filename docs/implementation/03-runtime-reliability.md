@@ -27,6 +27,11 @@
 - [ ] **Branch-local #740; intended until the epic integration PR lands:** the model-fabric operator surface separates configured candidates from selected/attempted routes and the last actual successful route. The intended `model_fabric` status also exposes runtime-path-specific text/VLM truth, fallback and degradation codes, receipt persistence, and fresh/stale/missing capability proof.
 - [ ] **Branch-local #740; intended until the epic integration PR lands:** `/api/settings/model-fabric` exposes sanitized configuration and policy truth, while the Settings canary is explicit, authenticated, exact-profile, bounded, and no-fallback. Metadata polling never launches inference.
 - [ ] Interactive REST/WebSocket ingress intentionally remains zero-transport when no authenticated principal is bound. The model fabric does not synthesize identity; #741 owns authenticated LAN/operator identity binding before this path is functional.
+- [ ] #741 also owns the one-origin trusted-CA HTTPS deployment contract,
+  session lifecycle, ingress rejection/throttling, single-worker lifecycle,
+  degraded-state, and rollback receipts documented in
+  [GPU Core LAN Operations](./19-gpu-core-lan-operations.md). No live GPU-core
+  deployment is claimed before those receipts exist.
 - [x] cockpit baseline refresh now stays bounded to cheap status, observer, audit, approval, capability, extension, browser, and settings calls; deep continuity, activity-ledger, workflow-run, control-plane, orchestration, background, M5/M6/M7/M8, guardian-memory, benchmark-proof, engineering-memory, and continuity-graph panes load through explicit operator controls with stale/unavailable states instead of rejoining the global heartbeat
 - [x] timeout-safe audit visibility into primary-vs-fallback completion and agent-model behavior
 - [x] browser and sandbox timeout receipts are grouped and rate-limited per integration/action window, so repeated provider timeouts still leave one operator-visible degraded audit receipt without flooding status/audit surfaces while chat or VLM work is active

@@ -6,9 +6,15 @@ import { useKeyboardShortcuts } from "./hooks/useKeyboardShortcuts";
 import { CockpitView } from "./components/cockpit/CockpitView";
 import { applyThemePreference } from "./lib/theme";
 import { useChatStore } from "./stores/chatStore";
+import { AuthGate } from "./auth/AuthGate";
+import { useAuthStore } from "./auth/authStore";
 
 export default function App() {
-  const { sendMessage, skipOnboarding } = useWebSocket();
+  const authenticated = useAuthStore((state) => state.status === "authenticated");
+  const authRevision = useAuthStore((state) => state.revision);
+  const operatorName = useAuthStore((state) => state.operatorName);
+  const logout = useAuthStore((state) => state.logout);
+  const { sendMessage, skipOnboarding } = useWebSocket(authenticated, authRevision);
   const themePreference = useChatStore((s) => s.themePreference);
   useKeyboardShortcuts();
 
@@ -39,11 +45,14 @@ export default function App() {
     return () => media.removeListener(handleChange);
   }, [themePreference]);
 
-  return (
+  return <AuthGate>{(
     <>
       <CockpitView onSend={sendMessage} onSkipOnboarding={skipOnboarding} />
       <QuestPanel />
       <SettingsPanel />
+      <button className="auth-logout" onClick={() => void logout()} type="button" title="Lock operator cockpit">
+        LOCK{operatorName ? ` · ${operatorName}` : ""}
+      </button>
     </>
-  );
+  )}</AuthGate>;
 }

@@ -122,7 +122,7 @@ export function buildClarificationMessage(
   };
 }
 
-export function useWebSocket() {
+export function useWebSocket(enabled = true, authRevision = 0) {
   const wsRef = useRef<WebSocket | null>(null);
   const pingRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const reconnectRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -383,6 +383,7 @@ export function useWebSocket() {
   }, [addMessage, buildErrorMessage, buildUserMessage, onThinking, setAgentBusy, setSessionId]);
 
   const connect = useCallback(() => {
+    if (!enabled) return;
     if (wsRef.current?.readyState === WebSocket.OPEN) return;
 
     setConnectionStatus("connecting");
@@ -613,7 +614,7 @@ export function useWebSocket() {
       setConnectionStatus("error");
       ws.close();
     };
-  }, [addMessage, appendAssistantDelta, clearResponseTimeout, clearStreamingMessage, markSessionContinuity, reconcileFinalAnswer, setSessionId, setConnectionStatus, setAgentBusy, setAmbientState, setChatPanelOpen]);
+  }, [addMessage, appendAssistantDelta, clearResponseTimeout, clearStreamingMessage, enabled, markSessionContinuity, reconcileFinalAnswer, setSessionId, setConnectionStatus, setAgentBusy, setAmbientState, setChatPanelOpen]);
 
   const skipOnboarding = useCallback(() => {
     if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
@@ -655,7 +656,7 @@ export function useWebSocket() {
     };
 
     appEventBus.on("approval-resume", handleApprovalResume);
-    connect();
+    if (enabled) connect();
     return () => {
       appEventBus.off("approval-resume", handleApprovalResume);
       if (pingRef.current) clearInterval(pingRef.current);
@@ -666,7 +667,7 @@ export function useWebSocket() {
       wsRef.current = null;
       ws?.close();
     };
-  }, [connect]);
+  }, [authRevision, clearResponseTimeout, connect, enabled]);
 
   return { sendMessage, skipOnboarding };
 }

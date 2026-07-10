@@ -88,6 +88,13 @@ High-risk strategic wording in this status page remains governed by [19. Strateg
 - [x] Runtime status retains the legacy route-aware `effective_runtime` metadata for compatibility, including wrapper/backend/queue endpoints and active profile.
 - [ ] **Branch-local #740; intended until the epic integration PR lands:** model-fabric runtime and settings truth distinguish configured profiles, selected and attempted routes, last actual success, runtime-path-specific text/VLM topology, fallback, degradation, receipt persistence, and capability proof. This is not shipped `develop` truth yet.
 - [ ] Model-fabric interactive REST/WebSocket ingress is deliberately fail-closed with zero transport when no authenticated principal is bound. #741 owns LAN/operator identity binding; #740 does not synthesize identity to make chat appear functional.
+- [ ] The authenticated GPU-core LAN deployment remains Planned under #741:
+  one trusted-CA HTTPS origin, login/session/refresh/logout, ingress trust and
+  throttle boundaries, internal-only service ports, managed lifecycle and
+  rollback receipts are not shipped merely because the branch is configured.
+  See [GPU Core LAN Operations](./19-gpu-core-lan-operations.md).
+- [ ] Remote browser use cannot invoke the Mac native screenshot-folder picker.
+  Mac capture and native selection remain degraded until the paired edge ships.
 - [x] The extension platform now also exposes package version lines, compatibility truth, publisher metadata, and diagnostics summaries consistently across lifecycle, catalog, and capability surfaces, while the cockpit operator surface summarizes extension health plus update/studio actions instead of leaving package triage buried in separate inventories.
 - [x] M9 governed ecosystem foundations now have deterministic local proof: `m9_governed_ecosystem` plus `/api/operator/m9-governed-ecosystem-benchmark` cover manifest governance, lifecycle review gates, managed-connector degradation truth, marketplace governance flow, diagnostics/update triage, benchmark-proof posture, and the claim boundary that this is not competitor superiority or production marketplace security proof.
 - [x] Backend CI now also applies per-file watchdog timeouts for the heaviest backend suites, so hung `test_workflows.py` or `test_eval_harness.py` files stop consuming an entire shard budget on hosted runners.

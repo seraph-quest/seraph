@@ -142,6 +142,13 @@ Seraph can keep screenshot production separate from analysis while still using a
 2. Seraph scans that folder and owns observation/report persistence.
 3. A separate image-analysis service accepts image bytes and forwards them to a private LAN/VPN vision-language model backend.
 
+This section describes the current transitional direct-route evidence. Under
+the accepted GPU-core target, model and wrapper ports become host-internal and
+operators enter through the single authenticated HTTPS origin described in
+[GPU Core LAN Operations](./19-gpu-core-lan-operations.md). The existing queue,
+wrapper/backend health, and direct-route receipts remain useful migration
+evidence; they do not authorize anonymous public service ports.
+
 The reusable service repo is public under the Seraph organization:
 
 - repo: [seraph-quest/vlm-screenshot-server](https://github.com/seraph-quest/vlm-screenshot-server)

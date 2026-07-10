@@ -3,7 +3,7 @@ import json
 import logging
 from time import perf_counter
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 
 from src.approval.exceptions import ApprovalRequired
 from src.approval.repository import approval_repository
@@ -30,6 +30,7 @@ from src.llm_runtime import (
     reset_current_llm_request_id,
     set_current_llm_request_id,
 )
+from src.auth.service import bind_operator_principal
 
 logger = logging.getLogger(__name__)
 
@@ -37,7 +38,7 @@ router = APIRouter()
 
 
 @router.post("/chat", response_model=ChatResponse)
-async def chat(request: ChatRequest):
+async def chat(request: ChatRequest, http_request: Request):
     """Send a message and receive an AI response."""
     session = await session_manager.get_or_create(request.session_id)
     await session_manager.add_message(session.id, "user", request.message)
@@ -79,16 +80,25 @@ async def chat(request: ChatRequest):
         llm_request_id = f"direct-rest:{session.id}:{started_at}"
         _register_request(llm_request_id)
         try:
-            response_text = await asyncio.wait_for(
-                run_direct_local_chat(
-                    request.message,
-                    runtime_path=direct_runtime_path,
-                    is_onboarding=is_onboarding,
-                    session_id=session.id,
-                    request_id=llm_request_id,
-                ),
-                timeout=min(settings.agent_chat_timeout, 60),
+            operator = getattr(http_request.state, "operator", None)
+            auth_tokens = set_runtime_context(
+                session.id,
+                "high_risk",
+                trust_principal=bind_operator_principal(operator, session.id) if operator else None,
             )
+            try:
+                response_text = await asyncio.wait_for(
+                    run_direct_local_chat(
+                        request.message,
+                        runtime_path=direct_runtime_path,
+                        is_onboarding=is_onboarding,
+                        session_id=session.id,
+                        request_id=llm_request_id,
+                    ),
+                    timeout=min(settings.agent_chat_timeout, 60),
+                )
+            finally:
+                reset_runtime_context(auth_tokens)
             response_text = await redact_secrets_in_text(response_text)
         except asyncio.TimeoutError:
             _mark_request_timed_out(llm_request_id)
@@ -169,7 +179,12 @@ async def chat(request: ChatRequest):
         started_at = perf_counter()
         llm_request_id = f"agent-rest:{session.id}:{started_at}"
         _register_request(llm_request_id)
-        tokens = set_runtime_context(session.id, obs_manager.get_context().approval_mode)
+        operator = getattr(http_request.state, "operator", None)
+        tokens = set_runtime_context(
+            session.id,
+            obs_manager.get_context().approval_mode,
+            trust_principal=bind_operator_principal(operator, session.id) if operator else None,
+        )
         llm_request_token = set_current_llm_request_id(llm_request_id)
         run_ctx = contextvars.copy_context()
         reset_runtime_context(tokens)

@@ -1,5 +1,7 @@
 # Use a Python image with uv pre-installed
 FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim
+ARG SERAPH_BUILD_REVISION
+LABEL org.opencontainers.image.revision=$SERAPH_BUILD_REVISION
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 
 RUN apt update
@@ -14,7 +16,7 @@ RUN apt install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy the project into the image
-ADD . /app
+COPY . /app
 
 # Sync the project into a new environment, using the frozen lockfile
 WORKDIR /app
@@ -23,4 +25,8 @@ RUN uv sync --frozen
 # Install Playwright Chromium browser
 RUN uv run playwright install chromium
 
-CMD ["uv", "run", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8003", "--reload"]
+RUN chmod 0755 /app/docker-entrypoint.sh
+
+EXPOSE 8004
+ENTRYPOINT ["/app/docker-entrypoint.sh"]
+CMD ["uv", "run", "uvicorn", "src.app:create_app", "--factory", "--host", "0.0.0.0", "--port", "8004", "--workers", "1", "--no-server-header"]

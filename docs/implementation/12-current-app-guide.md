@@ -27,6 +27,9 @@ paired Mac edge. Until their
 migration tickets ship, the backend and frontend remain local and GPU services
 are reached over documented HTTP APIs. `ssh jupyter` is an administrator path
 for inventory and maintenance, not application transport or a required tunnel.
+The planned authenticated deployment and its acceptance boundaries are defined
+in [GPU Core LAN Operations](./19-gpu-core-lan-operations.md); it is not yet a
+live-deployment receipt.
 
 ## Run The Current App
 
@@ -122,6 +125,10 @@ stages and should expose separate failures.
 **Planned:** a paired, revocable Mac edge supplies observation and native
 interaction to the GPU core. Pairing must not implicitly authorize execution or
 data egress.
+
+Until that edge ships, a browser connected to a remote GPU core cannot invoke
+the Mac native folder picker. Screenshot-folder selection must show that edge as
+unavailable/degraded rather than presenting a GPU-host path as a Mac folder.
 
 ## Memory
 

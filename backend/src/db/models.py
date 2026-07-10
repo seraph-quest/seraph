@@ -677,3 +677,18 @@ class ApprovalRequest(SQLModel, table=True):
     details_json: Optional[str] = Field(default=None)
     created_at: datetime = Field(default_factory=_now, index=True)
     resolved_at: Optional[datetime] = Field(default=None)
+
+
+class OperatorSession(SQLModel, table=True):
+    """Revocable single-operator browser session; raw bearer tokens never persist."""
+
+    __tablename__ = "operator_sessions"
+
+    id: str = Field(default_factory=_uuid, primary_key=True)
+    token_hash: str = Field(unique=True, index=True)
+    created_at: datetime = Field(default_factory=_now, index=True)
+    last_seen_at: datetime = Field(default_factory=_now, index=True)
+    idle_expires_at: datetime = Field(index=True)
+    absolute_expires_at: datetime = Field(index=True)
+    revoked_at: Optional[datetime] = Field(default=None, index=True)
+    replaced_by_id: Optional[str] = Field(default=None, index=True)

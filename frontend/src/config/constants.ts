@@ -23,6 +23,11 @@ const localApiUrl = () => {
 export const API_URL = configuredApiUrl === "/api" ? "" : configuredApiUrl || localApiUrl();
 export const WS_URL = import.meta.env.VITE_WS_URL || localWsUrl();
 
+export function apiUrl(path: string): string {
+  const normalized = path.startsWith("/") ? path : `/${path}`;
+  return `${API_URL}${normalized}`;
+}
+
 export const WALK_DURATION_MS = 800;
 export const SPEECH_DISPLAY_MS = 3000;
 export const WS_RECONNECT_DELAY_MS = 3000;

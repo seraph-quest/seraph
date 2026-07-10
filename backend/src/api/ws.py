@@ -3,6 +3,7 @@ import contextvars
 import json
 import logging
 from contextlib import suppress
+from threading import Event
 from time import perf_counter
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
@@ -35,6 +36,9 @@ from src.llm_runtime import (
     reset_current_llm_request_id,
     set_current_llm_request_id,
 )
+from src.auth.middleware import validate_request_boundary
+from src.auth.service import AuthFailure, auth_enabled, authenticate_token, bind_operator_principal
+from src.auth.cancellation import reset_revocation_guard, set_revocation_guard
 
 logger = logging.getLogger(__name__)
 
@@ -100,7 +104,52 @@ async def _build_agent(session_id: str, message: str):
 @router.websocket("/chat")
 async def websocket_chat(websocket: WebSocket):
     """WebSocket endpoint for streaming chat responses."""
+    operator = None
+    if not auth_enabled() and not (
+        settings.operator_auth_allow_unauthenticated_tests
+        and settings.deployment_environment == "test"
+    ):
+        await websocket.close(code=4401, reason="auth_not_configured")
+        return
+    if auth_enabled():
+        boundary_error = validate_request_boundary(
+            host=websocket.headers.get("host", ""),
+            origin=websocket.headers.get("origin"),
+            method="POST",
+        )
+        if boundary_error:
+            await websocket.close(code=4403, reason=boundary_error)
+            return
+        try:
+            operator = await authenticate_token(websocket.cookies.get(settings.operator_auth_cookie_name))
+        except AuthFailure as exc:
+            await websocket.close(code=4401, reason=exc.code)
+            return
     await websocket.accept()
+    auth_revoked = asyncio.Event()
+    thread_revocation_guard = Event()
+    revocation_token = set_revocation_guard(thread_revocation_guard)
+    connection_task = asyncio.current_task()
+
+    async def _auth_watchdog() -> None:
+        if not auth_enabled():
+            return
+        while True:
+            await asyncio.sleep(0.25)
+            try:
+                await authenticate_token(
+                    websocket.cookies.get(settings.operator_auth_cookie_name), touch=False
+                )
+            except AuthFailure as exc:
+                thread_revocation_guard.set()
+                auth_revoked.set()
+                with suppress(Exception):
+                    await websocket.close(code=4401, reason=exc.code)
+                if connection_task is not None:
+                    connection_task.cancel()
+                return
+
+    auth_watchdog = asyncio.create_task(_auth_watchdog())
     ws_manager.connect(websocket)
     _seq = 0
     active_turn_session_id: str | None = None
@@ -143,6 +192,12 @@ async def websocket_chat(websocket: WebSocket):
     try:
         while True:
             raw = await websocket.receive_text()
+            if auth_enabled():
+                try:
+                    operator = await authenticate_token(websocket.cookies.get(settings.operator_auth_cookie_name))
+                except AuthFailure as exc:
+                    await websocket.close(code=4401, reason=exc.code)
+                    return
             try:
                 data = json.loads(raw)
                 ws_msg = WSMessage(**data)
@@ -245,6 +300,11 @@ async def websocket_chat(websocket: WebSocket):
                     continue
                 llm_request_id = f"direct-ws:{session.id}:{started_at}"
                 _register_request(llm_request_id)
+                direct_tokens = set_runtime_context(
+                    session.id,
+                    "high_risk",
+                    trust_principal=bind_operator_principal(operator, session.id) if operator else None,
+                )
                 try:
                     await websocket.send_text(
                         WSResponse(
@@ -265,6 +325,8 @@ async def websocket_chat(websocket: WebSocket):
                             is_onboarding=direct_is_onboarding,
                             session_id=session.id,
                         ):
+                            if auth_revoked.is_set():
+                                raise AuthFailure("session_revoked")
                             streamed_parts.append(delta)
                             safe_delta, emitted_safe_chars = await redact_secrets_for_streaming_snapshot(
                                 "".join(streamed_parts),
@@ -301,6 +363,8 @@ async def websocket_chat(websocket: WebSocket):
                         final_result = ""
 
                     if not final_result:
+                        if auth_revoked.is_set():
+                            raise AuthFailure("session_revoked")
                         final_result = await run_direct_local_chat(
                             ws_msg.message,
                             runtime_path=direct_runtime_path,
@@ -309,6 +373,8 @@ async def websocket_chat(websocket: WebSocket):
                             request_id=llm_request_id,
                         )
                     final_result = await redact_secrets_in_text(final_result, fail_closed=True)
+                except AuthFailure:
+                    return
                 except asyncio.TimeoutError:
                     _mark_request_timed_out(llm_request_id)
                     await log_agent_run_event(
@@ -363,9 +429,12 @@ async def websocket_chat(websocket: WebSocket):
                     )
                     continue
                 finally:
+                    reset_runtime_context(direct_tokens)
                     _finish_request(llm_request_id)
 
                 await session_manager.add_message(session.id, "assistant", final_result)
+                if auth_revoked.is_set():
+                    return
                 active_turn_completed = True
                 await log_agent_run_event(
                     session_id=session.id,
@@ -420,7 +489,11 @@ async def websocket_chat(websocket: WebSocket):
                 loop = asyncio.get_running_loop()
                 llm_request_id = f"agent-ws:{session.id}:{started_at}"
                 _register_request(llm_request_id)
-                tokens = set_runtime_context(session.id, context_manager.get_context().approval_mode)
+                tokens = set_runtime_context(
+                    session.id,
+                    context_manager.get_context().approval_mode,
+                    trust_principal=bind_operator_principal(operator, session.id) if operator else None,
+                )
                 llm_request_token = set_current_llm_request_id(llm_request_id)
                 run_ctx = contextvars.copy_context()
                 reset_runtime_context(tokens)
@@ -433,6 +506,8 @@ async def websocket_chat(websocket: WebSocket):
                         step = await queue.get()
                         if step is _DONE:
                             break
+                        if auth_revoked.is_set():
+                            raise AuthFailure("session_revoked")
                         if isinstance(step, Exception):
                             raise step
 
@@ -482,6 +557,8 @@ async def websocket_chat(websocket: WebSocket):
                             await drain_task
                     raise
 
+            except AuthFailure:
+                return
             except asyncio.TimeoutError:
                 logger.warning("Agent timed out after %ds for session %s", settings.agent_chat_timeout, session.id)
                 run_outcome = "timed_out"
@@ -605,6 +682,8 @@ async def websocket_chat(websocket: WebSocket):
                 if "llm_request_id" in locals():
                     _finish_request(llm_request_id)
 
+            if auth_revoked.is_set():
+                return
             await session_manager.add_message(session.id, "assistant", final_result)
             active_turn_completed = True
             if run_outcome == "succeeded":
@@ -662,3 +741,9 @@ async def websocket_chat(websocket: WebSocket):
             logger.info("WebSocket client disconnected before next receive")
             return
         raise
+    finally:
+        thread_revocation_guard.set()
+        reset_revocation_guard(revocation_token)
+        auth_watchdog.cancel()
+        with suppress(asyncio.CancelledError):
+            await auth_watchdog

@@ -345,9 +345,11 @@ def build_all_specialists() -> list[ToolCallingAgent]:
         skill.name
         for skill in skill_manager.get_active_skills([tool.name for tool in executable_tools])
     ]
-    workflow_tools = workflow_manager.build_workflow_tools(
-        executable_tools,
-        active_skill_names,
+    workflow_tools = wrap_tools_for_audit(
+        workflow_manager.build_workflow_tools(
+            executable_tools,
+            active_skill_names,
+        )
     )
     forced_approval_workflows: list = []
     normal_workflows: list = []

@@ -40,6 +40,19 @@ body {
   line-height: 1.6;
 }
 
+.auth-lock { min-height: 100%; display: grid; place-items: center; background: radial-gradient(circle at 50% 35%, rgba(27, 111, 139, .2), transparent 42%), var(--app-bg); }
+.auth-card { width: min(420px, calc(100vw - 48px)); padding: 32px; display: grid; gap: 16px; box-shadow: 0 24px 90px rgba(0, 0, 0, .45); }
+.auth-card h1 { margin: 0; color: #d8fbff; font-size: 20px; }
+.auth-kicker { color: #58d4e8; letter-spacing: .15em; margin: 0; }
+.auth-copy { color: #9bb2bd; margin: 0 0 8px; }
+.auth-card label { display: grid; gap: 7px; color: #a9c5ce; }
+.auth-card input { font: inherit; color: var(--app-text); background: rgba(0, 0, 0, .28); border: 1px solid var(--app-glass-border); padding: 12px; outline: none; }
+.auth-card input:focus { border-color: #58d4e8; box-shadow: 0 0 0 2px rgba(88, 212, 232, .16); }
+.auth-card button, .auth-logout { font: inherit; cursor: pointer; border: 1px solid rgba(88, 212, 232, .5); color: #baf7ff; background: rgba(16, 87, 105, .42); padding: 11px 14px; }
+.auth-card button:disabled { opacity: .55; cursor: wait; }
+.auth-error { color: #ff8e8e; margin: 0; }
+.auth-logout { position: fixed; z-index: 80; top: 12px; right: 14px; font-size: 8px; opacity: .76; }
+
 .glow-text {
   text-shadow: 0 0 10px currentColor;
 }

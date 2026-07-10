@@ -22,6 +22,8 @@ from src.starter_packs.manager import starter_pack_manager
 from src.tools.mcp_manager import mcp_manager
 from src.utils.background import drain_tracked_tasks
 from src.vlm_runtime import deferred_vlm_live_probe, effective_vlm_status
+from src.auth.middleware import OperatorAuthMiddleware
+from src.auth.service import validate_auth_configuration
 from src.workflows.manager import workflow_manager
 
 limiter = Limiter(key_func=get_remote_address, default_limits=["60/minute"])
@@ -193,6 +195,7 @@ def _effective_runtime_route_status(runtime: dict[str, str], vlm_status: dict[st
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    validate_auth_configuration()
     await init_db()
     ensure_soul_exists()
     init_llm_logging()
@@ -278,10 +281,18 @@ def create_app() -> FastAPI:
 
     app.state.limiter = limiter
     app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+    app.add_middleware(OperatorAuthMiddleware)
 
+    configured_origins = [
+        value.strip().rstrip("/")
+        for value in settings.operator_auth_allowed_origins.split(",")
+        if value.strip()
+    ]
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["http://localhost:3000", "http://localhost:5173"],
+        allow_origins=list(dict.fromkeys([
+            "http://localhost:3000", "http://localhost:5173", *configured_origins
+        ])),
         allow_origin_regex=_LOCAL_DEV_ORIGIN_REGEX,
         allow_credentials=True,
         allow_methods=["*"],

@@ -16,6 +16,8 @@ from sqlmodel import SQLModel
 
 os.environ.setdefault("OPENROUTER_API_KEY", "test-key")
 os.environ.setdefault("WORKSPACE_DIR", "/tmp/seraph-test")
+os.environ.setdefault("DEPLOYMENT_ENVIRONMENT", "test")
+os.environ.setdefault("OPERATOR_AUTH_ALLOW_UNAUTHENTICATED_TESTS", "true")
 
 from config.settings import settings
 from src.app import create_app
@@ -29,6 +31,7 @@ from src.utils.background import drain_tracked_tasks
 # Every place get_session is imported — use the local attribute name.
 _PATCH_TARGETS = [
     "src.db.engine.get_session",
+    "src.auth.service.get_session",
     "src.agent.session.get_session",
     "src.approval.repository.get_session",
     "src.goals.repository.get_session",

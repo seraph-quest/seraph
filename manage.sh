@@ -66,6 +66,7 @@ function display_help() {
     echo "  local   Manage the direct local frontend/backend stack: up, down, status, logs, run."
     echo "  daemon  Manage screen daemon: start, stop, status, logs."
     echo "  proxy   Manage stdio-to-HTTP MCP proxy: start, stop, status, logs."
+    echo "  production  Validated GPU/LAN lifecycle: config-validate, start, stop, restart, status, logs, rollback."
     echo
     echo "Examples:"
     echo "  $PROG_NAME -e dev up -d"
@@ -748,6 +749,273 @@ function local_run() {
     local_logs all
 }
 
+# --- Production GPU/LAN Stack Functions ---
+function production_require_file() {
+    local variable="$1"
+    local value="${!variable:-}"
+    [ -n "$value" ] || error_exit "$variable is required for production"
+    [ -r "$value" ] || error_exit "$variable does not name a readable file: $value"
+}
+
+function production_config_validate() {
+    [ "$ENV" = "prod" ] || error_exit "production lifecycle requires -e prod"
+    production_require_file SERAPH_TLS_CERT_FILE
+    production_require_file SERAPH_TLS_KEY_FILE
+    local credential_count=0
+    if [ -n "${OPERATOR_AUTH_SECRET_FILE:-}" ] && [ -s "$OPERATOR_AUTH_SECRET_FILE" ]; then credential_count=$((credential_count + 1)); fi
+    if [ -n "${OPERATOR_AUTH_SECRET_HASH_FILE:-}" ] && [ -s "$OPERATOR_AUTH_SECRET_HASH_FILE" ]; then credential_count=$((credential_count + 1)); fi
+    [ "$credential_count" -eq 1 ] || error_exit "exactly one non-empty operator raw-secret or hash file is required"
+    [ "${DEPLOYMENT_ENVIRONMENT:-}" = "production" ] || error_exit "DEPLOYMENT_ENVIRONMENT must be production"
+    [ "${OPERATOR_AUTH_COOKIE_SECURE:-}" = "true" ] || error_exit "OPERATOR_AUTH_COOKIE_SECURE must be true"
+    [ "${OPERATOR_AUTH_BACKEND_WORKERS:-}" = "1" ] || error_exit "OPERATOR_AUTH_BACKEND_WORKERS must be 1"
+    [ "${OPERATOR_AUTH_TRUSTED_PROXY_IPS:-}" = "172.30.0.10" ] || error_exit "trusted proxy must be exactly 172.30.0.10"
+    [ -n "${OPERATOR_AUTH_ALLOWED_HOSTS:-}" ] || error_exit "OPERATOR_AUTH_ALLOWED_HOSTS must be exact and non-empty"
+    [ -n "${OPERATOR_AUTH_ALLOWED_ORIGINS:-}" ] || error_exit "OPERATOR_AUTH_ALLOWED_ORIGINS must be exact and non-empty"
+    case "${OPERATOR_AUTH_ALLOWED_HOSTS},${OPERATOR_AUTH_ALLOWED_ORIGINS}" in
+        *'*'*|*example.invalid*) error_exit "replace wildcard/example auth hosts and origins" ;;
+    esac
+    case "${OPERATOR_AUTH_ALLOWED_ORIGINS}" in https://*) ;; *) error_exit "OPERATOR_AUTH_ALLOWED_ORIGINS must use https" ;; esac
+    local current_revision
+    current_revision=$(git -C "$SCRIPT_DIR" rev-parse HEAD) || error_exit "cannot determine source revision"
+    [[ "${SERAPH_IMAGE_TAG:-}" =~ ^[0-9a-f]{40}$ ]] || error_exit "SERAPH_IMAGE_TAG must be an exact full git SHA"
+    if [ "${SERAPH_VALIDATING_ROLLBACK:-false}" != "true" ]; then
+        [ "$SERAPH_IMAGE_TAG" = "$current_revision" ] || error_exit "SERAPH_IMAGE_TAG must equal current HEAD $current_revision"
+        [ -z "$(git -C "$SCRIPT_DIR" status --porcelain)" ] || error_exit "production builds require a clean working tree"
+    fi
+    [[ "${SERAPH_VLM_IMAGE:-}" =~ ^[^[:space:]@]+@sha256:[0-9a-fA-F]{64}$ ]] || error_exit "SERAPH_VLM_IMAGE must use an exact hexadecimal @sha256 digest"
+    [ -n "${SERAPH_VLM_INTERFACE_CONTRACT:-}" ] || error_exit "SERAPH_VLM_INTERFACE_CONTRACT is required"
+    [ -n "${SERAPH_GPU_SSH_HOST:-}" ] || error_exit "SERAPH_GPU_SSH_HOST is required"
+    [ -n "${SERAPH_GPU_SSH_HOST_FINGERPRINT:-}" ] || error_exit "SERAPH_GPU_SSH_HOST_FINGERPRINT is required"
+    local config_file
+    config_file=$(mktemp /tmp/seraph-prod-compose.XXXXXX.json)
+    if ! docker compose --env-file "$ENV_FILE" "${COMPOSE_FILES[@]}" config --format json >"$config_file"; then
+        rm -f "$config_file"
+        return 1
+    fi
+    python3 "$SCRIPT_DIR/scripts/validate_production_topology.py" <"$config_file" || { rm -f "$config_file"; return 1; }
+    rm -f "$config_file"
+    echo "compose config valid; host inference privacy is not asserted until the separate inventory gate passes"
+}
+
+function production_host_inventory_validate() {
+    local receipt="${1:-${SERAPH_HOST_INVENTORY_RECEIPT:-}}"
+    local vlm_image="${2:-${SERAPH_VLM_IMAGE:-}}"
+    [ -r "$receipt" ] || error_exit "host inventory receipt is unreadable: $receipt"
+    SERAPH_VLM_IMAGE="$vlm_image" python3 "$SCRIPT_DIR/scripts/validate_gpu_host_inventory.py" <"$receipt"
+}
+
+function production_status() {
+    production_config_validate
+    production_host_inventory_validate
+    production_compose_state_validate
+    echo "Published TLS listener owned by this compose project:"
+    docker compose --env-file "$ENV_FILE" "${COMPOSE_FILES[@]}" port ingress 443 2>/dev/null || echo "ingress not running"
+    echo "Docker container listener ownership:"
+    production_docker_inventory_validate true
+}
+
+function production_docker_inventory_validate() {
+    local require_nonempty="${1:-false}"
+    local inventory
+    inventory=$(mktemp /tmp/seraph-docker-inventory.XXXXXX)
+    if ! docker ps --format '{{json .}}' >"$inventory"; then rm -f "$inventory"; return 1; fi
+    if [ "$require_nonempty" = true ] && [ ! -s "$inventory" ]; then rm -f "$inventory"; echo "Docker inventory is unexpectedly empty" >&2; return 1; fi
+    python3 "$SCRIPT_DIR/scripts/validate_production_listeners.py" <"$inventory"
+    local rc=$?
+    rm -f "$inventory"
+    return "$rc"
+}
+
+function production_compose_state_validate() {
+    local state
+    state=$(mktemp /tmp/seraph-compose-state.XXXXXX)
+    if ! docker compose --env-file "$ENV_FILE" "${COMPOSE_FILES[@]}" ps --format json >"$state"; then rm -f "$state"; return 1; fi
+    python3 "$SCRIPT_DIR/scripts/validate_production_compose_state.py" <"$state"
+    local rc=$?
+    rm -f "$state"
+    return "$rc"
+}
+
+function production_restore_previous() {
+    local previous_tag="$1"
+    local previous_vlm="$2"
+    local previous_receipt="$3"
+    if [ -n "$previous_tag" ] && [ -n "$previous_vlm" ] && [ -r "$previous_receipt" ] && docker image inspect "seraph/backend:$previous_tag" >/dev/null 2>&1 && docker image inspect "seraph/frontend-ingress:$previous_tag" >/dev/null 2>&1 && docker image inspect "$previous_vlm" >/dev/null 2>&1 && SERAPH_ALLOW_PREVIOUS_ACCEPTED_RECEIPT=true production_host_inventory_validate "$previous_receipt" "$previous_vlm"; then
+        echo "restoring previous production release tuple $previous_tag + $previous_vlm" >&2
+        if ! SERAPH_IMAGE_TAG="$previous_tag" SERAPH_VLM_IMAGE="$previous_vlm" docker compose --env-file "$ENV_FILE" "${COMPOSE_FILES[@]}" up -d --no-build --wait --wait-timeout 120; then
+            echo "CATASTROPHIC: previous production release tuple could not be restored; diagnostics retained in $LOG_DIR" >&2
+            return 2
+        fi
+        if ! SERAPH_IMAGE_TAG="$previous_tag" SERAPH_VLM_IMAGE="$previous_vlm" docker compose --env-file "$ENV_FILE" "${COMPOSE_FILES[@]}" exec -T backend uv run python production_preflight.py; then
+            docker compose --env-file "$ENV_FILE" "${COMPOSE_FILES[@]}" logs --no-color --tail 500 >"$LOG_DIR/seraph-prod-failed-restore.log" 2>&1 || true
+            echo "CATASTROPHIC: previous release restored containers but failed inference preflight" >&2
+            return 2
+        fi
+        return 0
+    else
+        echo "no verified previous release is available; stopping failed first deployment" >&2
+        docker compose --env-file "$ENV_FILE" "${COMPOSE_FILES[@]}" down
+        return 1
+    fi
+}
+
+function production_restore_after_failure() {
+    production_restore_previous "$1" "$2" "$3"
+    local restore_rc=$?
+    [ "$restore_rc" -eq 2 ] && return 2
+    return 1
+}
+
+function production_prepare_app_images() {
+    local present=0
+    local image revision
+    for image in "seraph/backend:$SERAPH_IMAGE_TAG" "seraph/frontend-ingress:$SERAPH_IMAGE_TAG"; do
+        if docker image inspect "$image" >/dev/null 2>&1; then
+            revision=$(docker image inspect "$image" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')
+            [ "$revision" = "$SERAPH_IMAGE_TAG" ] || error_exit "existing $image has mismatched build identity; refusing overwrite"
+            present=$((present + 1))
+        fi
+    done
+    [ "$present" -ne 1 ] || error_exit "partial release image tuple exists; refusing overwrite"
+    if [ "$present" -eq 0 ]; then
+        docker compose --env-file "$ENV_FILE" "${COMPOSE_FILES[@]}" build ingress backend
+    else
+        echo "reusing verified application images for $SERAPH_IMAGE_TAG"
+    fi
+}
+
+function production_start() {
+    production_config_validate
+    production_host_inventory_validate || return 1
+    production_docker_inventory_validate false || return 1
+    ensure_runtime_dirs
+    local active_tag_file="$PID_DIR/seraph-prod-active-release"
+    local previous_tag=""
+    local previous_vlm=""
+    local previous_receipt=""
+    local running_backend_id running_vlm_id
+    running_backend_id=$(docker compose --env-file "$ENV_FILE" "${COMPOSE_FILES[@]}" ps -q backend 2>/dev/null || true)
+    running_vlm_id=$(docker compose --env-file "$ENV_FILE" "${COMPOSE_FILES[@]}" ps -q vlm-wrapper 2>/dev/null || true)
+    if { [ -n "$running_backend_id" ] || [ -n "$running_vlm_id" ]; } && [ ! -r "$active_tag_file" ]; then
+        echo "running production containers lack an accepted release tuple; explicit adoption is required" >&2
+        return 1
+    fi
+    if [ -r "$active_tag_file" ]; then
+        production_read_validate_accepted_state "$active_tag_file" || { echo "accepted release state is invalid; explicit adoption is required" >&2; return 1; }
+        previous_tag="$ACCEPTED_APP_TAG"
+        previous_vlm="$ACCEPTED_VLM_IMAGE"
+        previous_receipt="$ACCEPTED_INVENTORY_RECEIPT"
+    fi
+    production_prepare_app_images || return 1
+    docker compose --env-file "$ENV_FILE" "${COMPOSE_FILES[@]}" pull vlm-wrapper || return 1
+    production_host_inventory_validate "$SERAPH_HOST_INVENTORY_RECEIPT" "$SERAPH_VLM_IMAGE" || return 1
+    if ! docker compose --env-file "$ENV_FILE" "${COMPOSE_FILES[@]}" up -d --no-build --wait --wait-timeout 120; then
+        echo "candidate containers did not become healthy" >&2
+        docker compose --env-file "$ENV_FILE" "${COMPOSE_FILES[@]}" logs --no-color --tail 500 >"$LOG_DIR/seraph-prod-failed-candidate.log" 2>&1 || true
+        production_restore_after_failure "$previous_tag" "$previous_vlm" "$previous_receipt"; return $?
+    fi
+    if ! docker compose --env-file "$ENV_FILE" "${COMPOSE_FILES[@]}" exec -T backend uv run python production_preflight.py; then
+        echo "candidate GPU model/VLM preflight failed" >&2
+        docker compose --env-file "$ENV_FILE" "${COMPOSE_FILES[@]}" logs --no-color --tail 500 >"$LOG_DIR/seraph-prod-failed-candidate.log" 2>&1 || true
+        production_restore_after_failure "$previous_tag" "$previous_vlm" "$previous_receipt"; return $?
+    fi
+    if ! production_host_inventory_validate "$SERAPH_HOST_INVENTORY_RECEIPT" "$SERAPH_VLM_IMAGE" || ! production_docker_inventory_validate true || ! production_compose_state_validate; then
+        echo "final production acceptance gate failed" >&2
+        production_restore_after_failure "$previous_tag" "$previous_vlm" "$previous_receipt"; return $?
+    fi
+    if ! production_write_accepted_state "$active_tag_file" "$SERAPH_HOST_INVENTORY_RECEIPT"; then
+        echo "failed to persist accepted release state" >&2
+        production_restore_after_failure "$previous_tag" "$previous_vlm" "$previous_receipt"; return $?
+    fi
+    echo "production release tuple accepted"
+}
+
+function production_write_accepted_state() {
+    local state_file="$1"
+    local receipt="$2"
+    local release_dir="$PID_DIR/releases"
+    mkdir -p "$release_dir"
+    local receipt_hash receipt_copy receipt_tmp state_tmp
+    receipt_hash=$(sha256sum "$receipt" | awk '{print $1}') || return 1
+    receipt_copy="$release_dir/$SERAPH_IMAGE_TAG-$receipt_hash.json"
+    receipt_tmp="$receipt_copy.tmp.$$"
+    cp "$receipt" "$receipt_tmp" || return 1
+    chmod 0444 "$receipt_tmp" || return 1
+    sync "$receipt_tmp" 2>/dev/null || true
+    mv "$receipt_tmp" "$receipt_copy" || return 1
+    state_tmp="$state_file.tmp.$$"
+    printf '%s\n%s\n%s\n' "$SERAPH_IMAGE_TAG" "$SERAPH_VLM_IMAGE" "$receipt_copy" >"$state_tmp" || return 1
+    chmod 0600 "$state_tmp" || return 1
+    sync "$state_tmp" 2>/dev/null || true
+    mv "$state_tmp" "$state_file"
+}
+
+function production_read_validate_accepted_state() {
+    local state_file="$1"
+    [ -r "$state_file" ] || { echo "accepted release state is missing" >&2; return 1; }
+    [ "$(awk 'END {print NR}' "$state_file")" -eq 3 ] || { echo "accepted release state must contain exactly three lines" >&2; return 1; }
+    local tag vlm receipt hash expected_name mode revision image
+    tag=$(sed -n '1p' "$state_file")
+    vlm=$(sed -n '2p' "$state_file")
+    receipt=$(sed -n '3p' "$state_file")
+    [[ "$tag" =~ ^[0-9a-f]{40}$ ]] || { echo "accepted application SHA is invalid" >&2; return 1; }
+    [[ "$vlm" =~ ^[^[:space:]@]+@sha256:[0-9a-fA-F]{64}$ ]] || { echo "accepted VLM digest is invalid" >&2; return 1; }
+    [ -r "$receipt" ] || { echo "accepted inventory copy is unreadable" >&2; return 1; }
+    hash=$(sha256sum "$receipt" | awk '{print $1}') || return 1
+    expected_name="$tag-$hash.json"
+    [ "$(basename "$receipt")" = "$expected_name" ] || { echo "accepted inventory copy is not hash-bound" >&2; return 1; }
+    mode=$(stat -c '%a' "$receipt" 2>/dev/null || stat -f '%Lp' "$receipt")
+    [ "$mode" = "444" ] || { echo "accepted inventory copy must be mode 0444" >&2; return 1; }
+    for image in "seraph/backend:$tag" "seraph/frontend-ingress:$tag"; do
+        docker image inspect "$image" >/dev/null 2>&1 || { echo "accepted image missing: $image" >&2; return 1; }
+        revision=$(docker image inspect "$image" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')
+        [ "$revision" = "$tag" ] || { echo "accepted image label mismatch: $image" >&2; return 1; }
+    done
+    docker image inspect "$vlm" >/dev/null 2>&1 || { echo "accepted VLM image missing" >&2; return 1; }
+    SERAPH_ALLOW_PREVIOUS_ACCEPTED_RECEIPT=true production_host_inventory_validate "$receipt" "$vlm" || return 1
+    ACCEPTED_APP_TAG="$tag"
+    ACCEPTED_VLM_IMAGE="$vlm"
+    ACCEPTED_INVENTORY_RECEIPT="$receipt"
+}
+
+function production_rollback() {
+    local tag="${1:-}"
+    local vlm_image="${2:-}"
+    local target_receipt="${3:-}"
+    [ -n "$tag" ] && [ -n "$vlm_image" ] && [ -n "$target_receipt" ] || error_exit "rollback requires application SHA, VLM digest, and target inventory receipt"
+    [[ "$tag" =~ ^[0-9a-f]{40}$ ]] || error_exit "rollback application tag must be a full git SHA"
+    [[ "$vlm_image" =~ ^[^[:space:]@]+@sha256:[0-9a-fA-F]{64}$ ]] || error_exit "rollback VLM image must use an exact hexadecimal @sha256 digest"
+    docker image inspect "seraph/backend:$tag" >/dev/null 2>&1 || error_exit "missing seraph/backend:$tag"
+    docker image inspect "seraph/frontend-ingress:$tag" >/dev/null 2>&1 || error_exit "missing seraph/frontend-ingress:$tag"
+    docker image inspect "$vlm_image" >/dev/null 2>&1 || error_exit "missing $vlm_image"
+    SERAPH_IMAGE_TAG="$tag" SERAPH_VLM_IMAGE="$vlm_image" SERAPH_VALIDATING_ROLLBACK=true production_config_validate
+    production_host_inventory_validate "$target_receipt" "$vlm_image"
+    ensure_runtime_dirs
+    local active_tag_file="$PID_DIR/seraph-prod-active-release"
+    local original_tag=""
+    local original_vlm=""
+    local original_receipt=""
+    local running_backend_id running_vlm_id
+    running_backend_id=$(docker compose --env-file "$ENV_FILE" "${COMPOSE_FILES[@]}" ps -q backend 2>/dev/null || true)
+    running_vlm_id=$(docker compose --env-file "$ENV_FILE" "${COMPOSE_FILES[@]}" ps -q vlm-wrapper 2>/dev/null || true)
+    if { [ -n "$running_backend_id" ] || [ -n "$running_vlm_id" ]; } && [ ! -r "$active_tag_file" ]; then echo "running production containers require explicit adoption before rollback" >&2; return 1; fi
+    if [ -r "$active_tag_file" ]; then
+        production_read_validate_accepted_state "$active_tag_file" || { echo "accepted release state is invalid; refusing rollback cutover" >&2; return 1; }
+        original_tag="$ACCEPTED_APP_TAG"; original_vlm="$ACCEPTED_VLM_IMAGE"; original_receipt="$ACCEPTED_INVENTORY_RECEIPT"
+    fi
+    production_host_inventory_validate "$target_receipt" "$vlm_image" || return 1
+    if ! SERAPH_IMAGE_TAG="$tag" SERAPH_VLM_IMAGE="$vlm_image" docker compose --env-file "$ENV_FILE" "${COMPOSE_FILES[@]}" up -d --no-build --wait --wait-timeout 120 || ! SERAPH_IMAGE_TAG="$tag" SERAPH_VLM_IMAGE="$vlm_image" docker compose --env-file "$ENV_FILE" "${COMPOSE_FILES[@]}" exec -T backend uv run python production_preflight.py; then
+        docker compose --env-file "$ENV_FILE" "${COMPOSE_FILES[@]}" logs --no-color --tail 500 >"$LOG_DIR/seraph-prod-failed-rollback.log" 2>&1 || true
+        echo "requested rollback tuple failed; restoring original active tuple" >&2
+        production_restore_after_failure "$original_tag" "$original_vlm" "$original_receipt"; return $?
+    fi
+    production_host_inventory_validate "$target_receipt" "$vlm_image" || { production_restore_after_failure "$original_tag" "$original_vlm" "$original_receipt"; return $?; }
+    if ! SERAPH_IMAGE_TAG="$tag" SERAPH_VLM_IMAGE="$vlm_image" production_write_accepted_state "$active_tag_file" "$target_receipt"; then
+        production_restore_after_failure "$original_tag" "$original_vlm" "$original_receipt"; return $?
+    fi
+    echo "rolled back production containers to release tuple $tag + $vlm_image"
+}
+
 if [ "${SERAPH_MANAGE_SOURCE_ONLY:-false}" = "true" ]; then
     return 0 2>/dev/null || exit 0
 fi
@@ -842,6 +1110,21 @@ if [ "$COMMAND" = "local" ]; then
 fi
 
 # --- Execution ---
+
+if [ "$COMMAND" = "production" ]; then
+    PROD_SUB="${1:-}"
+    case "$PROD_SUB" in
+        config-validate) production_config_validate ;;
+        start) production_start ;;
+        stop) docker compose --env-file "$ENV_FILE" "${COMPOSE_FILES[@]}" down ;;
+        restart) production_start ;;
+        status) production_status ;;
+        logs) shift || true; docker compose --env-file "$ENV_FILE" "${COMPOSE_FILES[@]}" logs "$@" ;;
+        rollback) production_rollback "${2:-}" "${3:-}" "${4:-}" ;;
+        *) error_exit "Unknown production subcommand '$PROD_SUB'. Use: config-validate, start, stop, restart, status, logs, rollback" ;;
+    esac
+    exit 0
+fi
 
 if [ "$COMMAND" = "local" ]; then
     LOCAL_SUB="${1:-}"

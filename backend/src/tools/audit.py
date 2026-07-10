@@ -13,6 +13,7 @@ from src.audit.formatting import format_tool_call_summary, redact_for_audit, sum
 from src.audit.repository import audit_repository
 from src.llm_runtime import get_current_llm_request_id
 from src.tools.policy import get_current_tool_policy_mode, get_tool_risk_level, get_tool_source_context
+from src.auth.cancellation import assert_runtime_not_revoked
 
 logger = logging.getLogger(__name__)
 
@@ -129,6 +130,7 @@ class AuditedTool(Tool):
         return None
 
     def __call__(self, *args, sanitize_inputs_outputs: bool = False, **kwargs):
+        assert_runtime_not_revoked()
         session_id = get_current_session_id()
         arguments = self._normalize_invocation(args, kwargs)
         audit_arguments = _custom_audit_arguments(self.wrapped_tool, arguments)

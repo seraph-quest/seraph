@@ -103,8 +103,11 @@ def _active_chat_runtime_status() -> dict[str, str]:
     default_model = settings.default_model.strip()
     active_profile = resolve_runtime_profile(runtime_path="chat_agent")
     profile = provider_profiles().get(active_profile)
-    model = effective_runtime_model_id(runtime_path="chat_agent", profile=active_profile).strip()
-    reject_legacy_external_agent_model(model)
+    effective_model = effective_runtime_model_id(runtime_path="chat_agent", profile=active_profile).strip()
+    reject_legacy_external_agent_model(effective_model)
+    model = effective_model
+    if profile is not None and effective_model == (profile.routing_model or profile.model):
+        model = profile.model.strip()
     api_base = _safe_runtime_endpoint(profile.api_base if profile is not None else settings.llm_api_base)
     return {
         "provider": _runtime_provider_label(model, profile=active_profile, api_base=api_base),

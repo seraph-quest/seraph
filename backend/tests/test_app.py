@@ -2,7 +2,7 @@ import pytest
 from unittest.mock import patch
 
 from config.settings import settings
-from src.app import _effective_runtime_route_status, _safe_runtime_endpoint
+from src.app import _active_chat_runtime_status, _effective_runtime_route_status, _safe_runtime_endpoint
 
 
 _DEFERRED_VLM_PROBE = {
@@ -32,6 +32,21 @@ def test_runtime_endpoint_sanitizer_blanks_unsafe_values(unsafe_endpoint):
 
 def test_runtime_endpoint_sanitizer_preserves_safe_absolute_value():
     assert _safe_runtime_endpoint("HTTP://[::1]:8000/v1") == "http://[::1]:8000/v1"
+
+
+def test_active_runtime_validates_transport_model_but_displays_profile_model():
+    with (
+        patch.object(settings, "default_model", "openrouter/x-ai/grok-4.1-fast"),
+        patch.object(settings, "local_model", "openai/unsloth/gemma-4-26B-A4B-it-qat-GGUF"),
+        patch.object(settings, "local_llm_api_base", "http://127.0.0.1:8000/v1"),
+        patch.object(settings, "local_llm_api_key", "not-needed"),
+        patch.object(settings, "runtime_profile_preferences", "chat_agent=local-gemma-chat-thinking"),
+        patch.object(settings, "runtime_model_overrides", ""),
+    ):
+        runtime = _active_chat_runtime_status()
+
+    assert runtime["model"] == "unsloth/gemma-4-26B-A4B-it-qat-GGUF"
+    assert runtime["active_profile"] == "local-gemma-chat-thinking"
 
 
 def test_effective_runtime_distinguishes_direct_gpu_text_from_wrapper_chat():

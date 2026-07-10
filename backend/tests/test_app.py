@@ -109,23 +109,19 @@ async def test_runtime_status_exposes_release_and_model(client):
     assert payload["default_provider"] == "openrouter"
     assert payload["default_model"] == settings.default_model
     assert isinstance(payload["provider_profiles"], list)
-    assert isinstance(payload["local_operators"], list)
+    assert "local_operators" not in payload
     assert any(item["id"] == "openrouter" for item in payload["provider_profiles"])
-    assert any(item["id"] == "codex-local" for item in payload["local_operators"])
     assert all("api_key" not in item for item in payload["provider_profiles"])
 
 
 @pytest.mark.asyncio
-async def test_runtime_status_reports_local_codex_when_selected(client):
-    with patch.object(settings, "default_model", "codex-local"), patch.object(settings, "codex_local_model", "gpt-5.5"):
+async def test_runtime_status_rejects_removed_local_codex_when_selected(client):
+    with patch.object(settings, "default_model", "codex-local"):
         response = await client.get("/api/runtime/status")
 
-    assert response.status_code == 200
+    assert response.status_code == 410
     payload = response.json()
-    assert payload["provider"] == "codex-local"
-    assert payload["model"] == "codex-local"
-    assert payload["model_label"] == "gpt-5.5"
-    assert payload["active_profile"] == "codex-local"
+    assert payload["detail"]["code"] == "external_agent_runtime_removed"
 
 
 @pytest.mark.asyncio

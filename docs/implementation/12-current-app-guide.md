@@ -108,10 +108,9 @@ transport when ingress has not bound an authenticated principal. Issue #741
 owns binding LAN/operator identity and making that interactive path functional;
 #740 supplies the governed inference route but does not weaken identity checks.
 
-**Partial/transitional:** `develop` still contains older provider-specific and
-command-backed operator paths. They are implementation history scheduled for
-removal under issue #739, not part of the target architecture. Do not configure
-new deployments around them.
+Named profiles such as `codex-openai` and `claude-anthropic` are API model-route
+names only. They do not invoke Codex CLI, Claude Code, or another external agent
+runtime. Seraph owns planning, capabilities, tools, approvals, and receipts.
 
 ## Screen Awareness And Reports
 
@@ -144,6 +143,12 @@ extension governance exist in the current codebase.
 durable or isolated runtime. The target gives every capability typed
 inputs/outputs, permissions, limits, checkpoints, artifacts, and visible
 receipts without depending on an external coding-agent runtime.
+
+The earlier command-backed runtime direction from
+[#613](https://github.com/seraph-quest/seraph/issues/613) and
+[#615](https://github.com/seraph-quest/seraph/issues/615) is explicitly reversed
+by Epic #736 and removal issue #739. Those tickets remain historical evidence,
+not current setup guidance.
 
 ## One-GPU Behavior
 

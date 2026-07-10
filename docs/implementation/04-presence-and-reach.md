@@ -13,7 +13,7 @@
 - [x] browser-based guardian cockpit as the only supported browser shell
 - [x] WebSocket conversation path
 - [x] native macOS observer daemon for screen and OCR ingest
-- [x] daemon screen analysis can now choose local Apple Vision, local `codex exec`, or explicit OpenRouter cloud OCR; local Codex writes only a temporary PNG for the CLI invocation and deletes it after analysis or failure unless local capture preservation is explicitly enabled
+- [x] daemon screen analysis can use configured local or remote inference routes; preserved captures expose provider-neutral image/output/analysis artifacts, while the removed `codex exec` path remains only as deprecated artifact-read compatibility under #739
 - [x] screen captures can be preserved as durable local artifacts for future re-analysis, pairing each allowed image with redacted provider output and normalized JSON behind localhost-only observer artifact endpoints
 - [x] observer refresh pipeline across time, calendar, git, goals, and screen context
 - [x] proactive delivery gating and queued-bundle delivery inside the current product

@@ -1,328 +1,332 @@
-import subprocess
+import json
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from httpx import ASGITransport, AsyncClient
+from fastapi import WebSocketDisconnect
 
-from config.settings import REPO_ROOT, settings
-from src.audit.repository import audit_repository
+from config.settings import settings
+from src.app import create_app
+from src.approval.runtime import reset_runtime_context, set_runtime_context
+from src.llm_runtime import FallbackLiteLLMModel, completion_with_fallback_sync
 from src.operators.local_codex import (
-    LocalCodexConfigurationError,
-    _codex_env,
-    _truncate_output,
-    local_codex_chat_timeout_seconds,
-    local_codex_command,
-    local_codex_status,
+    EXTERNAL_AGENT_RUNTIME_REMOVED,
+    ExternalAgentRuntimeRemovedError,
+    is_legacy_external_agent_model,
     run_local_codex,
+)
+from src.security.trust_contract import AuthorityGrant, PrincipalType, TrustPrincipal
+
+_REMOVED_PROFILE_CONFIG = json.dumps(
+    {
+        "profiles": {
+            "removed-agent": {
+                "provider_kind": "openai_compatible",
+                "model": "codex-local/custom",
+                "api_base": "https://models.example.test/v1",
+                "keyless": True,
+                "enabled": True,
+            }
+        }
+    }
 )
 
 
-def test_local_codex_command_uses_local_exec_contract():
-    with (
-        patch.object(settings, "codex_local_command", "codex"),
-        patch.object(settings, "codex_local_model", "gpt-5.5"),
-        patch.object(settings, "codex_local_sandbox", "workspace-write"),
-        patch.object(settings, "codex_local_approval_policy", "never"),
-        patch.object(settings, "codex_local_allow_workspace_write", True),
-        patch.object(settings, "codex_local_timeout_seconds", 42),
-    ):
-        command = local_codex_command("fix the thing")
-
-    assert command.argv[:15] == [
-        "codex",
-        "--ask-for-approval",
-        "never",
-        "exec",
-        "-C",
-        str(REPO_ROOT),
-        "--sandbox",
-        "workspace-write",
-        "--ephemeral",
-        "--ignore-rules",
-        "--ignore-user-config",
-        "--color",
-        "never",
-        "--model",
-        "gpt-5.5",
-    ]
-    assert command.argv[15:18] == [
-        "-c",
-        'model_reasoning_effort="low"',
-        "--output-last-message",
-    ]
-    assert command.argv[-1] == "fix the thing"
-    assert command.output_path is not None
-    assert command.output_path.name.startswith("seraph-codex-last-")
-    assert command.output_path.suffix == ".txt"
-    command.output_path.unlink(missing_ok=True)
-    assert command.cwd == REPO_ROOT
-    assert command.timeout_seconds == 42
-
-
-def test_local_codex_chat_timeout_caps_interactive_turns():
-    with (
-        patch.object(settings, "agent_chat_timeout", 120),
-        patch.object(settings, "codex_local_timeout_seconds", 600),
-    ):
-        assert local_codex_chat_timeout_seconds() == 30
-
-
-@pytest.mark.parametrize("approval_policy", ["bogus", "always"])
-def test_local_codex_command_rejects_unknown_approval_policy(approval_policy):
-    with pytest.raises(LocalCodexConfigurationError):
-        local_codex_command("do it", approval_policy=approval_policy)
-
-
-def test_local_codex_command_rejects_danger_full_access_sandbox():
-    with pytest.raises(LocalCodexConfigurationError, match="read-only or workspace-write"):
-        local_codex_command("do it", sandbox="danger-full-access")
-
-
-def test_local_codex_command_rejects_shell_metacharacters():
-    with patch.object(settings, "codex_local_command", "codex; rm -rf /"):
-        with pytest.raises(LocalCodexConfigurationError):
-            local_codex_command("do it")
-
-
-def test_local_codex_command_rejects_cwd_outside_repo(tmp_path):
-    with pytest.raises(LocalCodexConfigurationError, match="inside the Seraph repo"):
-        local_codex_command("do it", cwd=str(tmp_path))
-
-
-def test_local_codex_status_fails_closed_when_binary_missing():
-    with (
-        patch.object(settings, "codex_local_enabled", True),
-        patch.object(settings, "codex_local_command", "missing-codex"),
-        patch("src.operators.local_codex.shutil.which", return_value=None),
-    ):
-        status = local_codex_status()
-
-    assert status["id"] == "codex-local"
-    assert status["operator_kind"] == "local_command"
-    assert status["ready"] is False
-    assert status["unavailable_reason"] == "codex command was not found on PATH"
-    assert status["requires_api_key"] is False
-
-
-def test_local_codex_status_fails_closed_when_sandbox_config_is_unsafe():
-    with (
-        patch.object(settings, "codex_local_enabled", True),
-        patch.object(settings, "codex_local_sandbox", "danger-full-access"),
-    ):
-        status = local_codex_status()
-
-    assert status["ready"] is False
-    assert status["unavailable_reason"] == "Local Codex sandbox mode must be read-only or workspace-write."
-
-
-def test_local_codex_command_rejects_workspace_write_without_explicit_opt_in():
-    with (
-        patch.object(settings, "codex_local_allow_workspace_write", False),
-        pytest.raises(LocalCodexConfigurationError, match="CODEX_LOCAL_ALLOW_WORKSPACE_WRITE=true"),
-    ):
-        local_codex_command("do it", sandbox="workspace-write")
-
-
-def test_local_codex_status_reports_version_without_api_key_requirement():
-    completed = subprocess.CompletedProcess(["codex", "--version"], 0, stdout="codex 1.2.3\n", stderr="")
-    with (
-        patch.object(settings, "codex_local_enabled", True),
-        patch.object(settings, "codex_local_command", "codex"),
-        patch("src.operators.local_codex.shutil.which", return_value="/usr/local/bin/codex"),
-        patch("src.operators.local_codex.subprocess.run", return_value=completed) as mock_run,
-    ):
-        status = local_codex_status()
-
-    assert status["ready"] is True
-    assert status["command_path"] == "/usr/local/bin/codex"
-    assert status["version"] == "codex 1.2.3"
-    assert status["requires_api_key"] is False
-    assert mock_run.call_args.args[0] == ["codex", "--version"]
-    assert "OPENAI_API_KEY" not in mock_run.call_args.kwargs["env"]
+@pytest.mark.parametrize(
+    "selection",
+    ["codex", "codex-local", "local-codex", "codex-local/gpt-5.5"],
+)
+def test_legacy_external_agent_aliases_are_recognized(selection):
+    assert is_legacy_external_agent_model(selection)
 
 
 @pytest.mark.asyncio
-async def test_run_local_codex_audits_without_prompt_or_raw_output(async_db):
-    secret_value = "secret-value"
-    completed = subprocess.CompletedProcess(
-        ["codex", "exec"],
-        7,
-        stdout="done",
-        stderr=f"token: {secret_value}",
+async def test_removed_adapter_never_invokes_subprocess():
+    with patch("subprocess.run") as run, patch("subprocess.Popen") as popen:
+        with pytest.raises(ExternalAgentRuntimeRemovedError) as exc_info:
+            await run_local_codex("do work")
+
+    assert exc_info.value.code == EXTERNAL_AGENT_RUNTIME_REMOVED
+    run.assert_not_called()
+    popen.assert_not_called()
+
+
+def test_completion_rejects_legacy_primary_without_transport_or_fallback():
+    tokens = set_runtime_context(
+        "external-agent-migration-test",
+        "high_risk",
+        trust_principal=TrustPrincipal(
+            principal_id="operator:external-agent-migration-test",
+            principal_type=PrincipalType.OPERATOR,
+            grants=(AuthorityGrant.MODEL_INFERENCE,),
+            session_id="external-agent-migration-test",
+        ),
     )
+    try:
+        with (
+            patch.object(settings, "default_model", "codex-local"),
+            patch.object(settings, "runtime_profile_preferences", ""),
+            patch.object(settings, "runtime_model_overrides", ""),
+            patch.object(settings, "fallback_model", "openrouter/openai/gpt-4.1-mini"),
+            patch.object(settings, "fallback_models", ""),
+            patch("litellm.completion") as completion,
+        ):
+            with pytest.raises(ExternalAgentRuntimeRemovedError) as exc_info:
+                completion_with_fallback_sync(
+                    messages=[{"role": "user", "content": "hello"}],
+                    temperature=0.2,
+                    max_tokens=64,
+                    runtime_path="session_title_generation",
+                )
+    finally:
+        reset_runtime_context(tokens)
+
+    assert exc_info.value.code == EXTERNAL_AGENT_RUNTIME_REMOVED
+    completion.assert_not_called()
+
+
+def test_completion_rejects_legacy_fallback_before_any_transport():
+    tokens = set_runtime_context(
+        "external-agent-fallback-test",
+        "high_risk",
+        trust_principal=TrustPrincipal(
+            principal_id="operator:external-agent-fallback-test",
+            principal_type=PrincipalType.OPERATOR,
+            grants=(AuthorityGrant.MODEL_INFERENCE,),
+            session_id="external-agent-fallback-test",
+        ),
+    )
+    try:
+        with (
+            patch.object(settings, "default_model", "openai/gpt-4.1-mini"),
+            patch.object(settings, "llm_api_base", "https://api.openai.com/v1"),
+            patch.object(settings, "runtime_profile_preferences", ""),
+            patch.object(settings, "runtime_model_overrides", ""),
+            patch.object(settings, "fallback_model", "codex-local"),
+            patch.object(settings, "fallback_models", ""),
+            patch("src.llm_runtime._log_llm_runtime_event_sync"),
+            patch("litellm.completion", side_effect=RuntimeError("primary unavailable")) as completion,
+        ):
+            with pytest.raises(ExternalAgentRuntimeRemovedError):
+                completion_with_fallback_sync(
+                    messages=[{"role": "user", "content": "hello"}],
+                    temperature=0.2,
+                    max_tokens=64,
+                    runtime_path="session_title_generation",
+                )
+    finally:
+        reset_runtime_context(tokens)
+
+    completion.assert_not_called()
+
+
+def test_agent_model_rejects_legacy_primary_without_transport():
+    with patch("litellm.completion") as completion:
+        with pytest.raises(ExternalAgentRuntimeRemovedError):
+            FallbackLiteLLMModel(model_id="local-codex").generate(
+                [{"role": "user", "content": "hello"}]
+            )
+
+    completion.assert_not_called()
+
+
+def test_agent_model_prevalidates_global_legacy_fallback_before_primary_transport():
     with (
-        patch.object(settings, "openai_api_key", secret_value),
-        patch("src.operators.local_codex.shutil.which", return_value="/usr/local/bin/codex"),
-        patch("src.operators.local_codex._run_codex_subprocess", AsyncMock(return_value=completed)),
+        patch.object(settings, "fallback_model", "CoDeX-LoCaL"),
+        patch.object(settings, "fallback_models", ""),
+        patch("litellm.completion") as completion,
     ):
-        result = await run_local_codex("private task prompt")
+        model = FallbackLiteLLMModel(model_id="openrouter/openai/gpt-4.1-mini")
+        with pytest.raises(ExternalAgentRuntimeRemovedError):
+            model.generate([{"role": "user", "content": "hello"}])
 
-    assert result["ok"] is False
-    assert result["exit_code"] == 7
-    assert result["stdout"] == "done"
-    assert result["stderr"] == "[redacted]"
+    completion.assert_not_called()
 
-    events = await audit_repository.list_events(limit=5)
-    local_events = [event for event in events if event["tool_name"] == "codex-local"]
-    assert [event["event_type"] for event in reversed(local_events)] == [
-        "local_operator_started",
-        "local_operator_completed",
-    ]
-    serialized = str(local_events)
-    assert "private task prompt" not in serialized
-    assert "[redacted]" not in serialized
-    assert "prompt_sha256" in serialized
-    assert "prompt_chars" in serialized
+
+def test_completion_prevalidates_runtime_override_legacy_fallback_before_primary_transport():
+    with (
+        patch.object(settings, "default_model", "openrouter/openai/gpt-4.1-mini"),
+        patch.object(settings, "runtime_profile_preferences", ""),
+        patch.object(settings, "runtime_model_overrides", ""),
+        patch.object(settings, "runtime_fallback_overrides", "migration_test=local-codex"),
+        patch.object(settings, "fallback_model", ""),
+        patch.object(settings, "fallback_models", ""),
+        patch("litellm.completion") as completion,
+    ):
+        with pytest.raises(ExternalAgentRuntimeRemovedError):
+            completion_with_fallback_sync(
+                messages=[{"role": "user", "content": "hello"}],
+                temperature=0.2,
+                max_tokens=64,
+                runtime_path="migration_test",
+            )
+
+    completion.assert_not_called()
 
 
 @pytest.mark.asyncio
-async def test_run_local_codex_subprocess_env_strips_provider_api_keys(monkeypatch, async_db):
-    monkeypatch.setenv("OPENAI_API_KEY", "openai-secret")
-    monkeypatch.setenv("OPENROUTER_API_KEY", "openrouter-secret")
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-secret")
-    monkeypatch.setenv("LLM_API_KEY", "llm-secret")
-    completed = subprocess.CompletedProcess(["codex", "exec"], 0, stdout="ok", stderr="")
-    with (
-        patch("src.operators.local_codex.shutil.which", return_value="/usr/local/bin/codex"),
-        patch("src.operators.local_codex._run_codex_subprocess", AsyncMock(return_value=completed)) as mock_exec,
+async def test_legacy_operator_endpoints_return_migration_response(client):
+    for method, path, kwargs in (
+        (client.get, "/api/operator/local-codex/status", {}),
+        (client.post, "/api/operator/local-codex/exec", {"json": {"prompt": "hello"}}),
     ):
-        result = await run_local_codex("inspect local state")
-
-    assert result["ok"] is True
-    exec_command = mock_exec.await_args.args[0]
-    exec_env = _codex_env()
-    assert "OPENAI_API_KEY" not in exec_env
-    assert "OPENROUTER_API_KEY" not in exec_env
-    assert "ANTHROPIC_API_KEY" not in exec_env
-    assert "LLM_API_KEY" not in exec_env
-    assert exec_env["SERAPH_LOCAL_OPERATOR"] == "codex-local"
-    assert exec_command.display == (
-        f"codex --ask-for-approval never exec -C {REPO_ROOT} "
-        "--sandbox read-only --ephemeral --ignore-rules --ignore-user-config "
-        '--color never --model gpt-5.5 -c model_reasoning_effort="low" '
-    ) + f"--output-last-message {exec_command.output_path} 'inspect local state'"
-    exec_command.output_path.unlink(missing_ok=True)
-
-
-def test_local_codex_output_redaction_covers_env_configured_and_pattern_secrets(monkeypatch):
-    monkeypatch.setenv("CUSTOM_TOKEN", "env-token-value")
-    with patch.object(settings, "openai_api_key", "configured-secret"):
-        output, truncated = _truncate_output(
-            "api_key=inline-secret bearer abc.def configured-secret env-token-value"
-        )
-
-    assert truncated is False
-    assert "inline-secret" not in output
-    assert "abc.def" not in output
-    assert "configured-secret" not in output
-    assert "env-token-value" not in output
-    assert output.count("[redacted]") >= 4
+        response = await method(path, **kwargs)
+        assert response.status_code == 410
+        assert response.json()["detail"]["code"] == EXTERNAL_AGENT_RUNTIME_REMOVED
 
 
 @pytest.mark.asyncio
-async def test_runtime_status_exposes_local_operator_separately_from_provider_profiles(client):
-    with patch("src.operators.local_codex.shutil.which", return_value=None):
+async def test_legacy_operator_handlers_raise_structured_migration_tombstones():
+    from fastapi import HTTPException
+    from src.api.operator import (
+        LocalCodexExecRequest,
+        operator_local_codex_exec,
+        operator_local_codex_status,
+    )
+
+    for call in (
+        operator_local_codex_status(),
+        operator_local_codex_exec(LocalCodexExecRequest(prompt="hello")),
+    ):
+        with pytest.raises(HTTPException) as exc_info:
+            await call
+        assert exc_info.value.status_code == 410
+        assert exc_info.value.detail["code"] == EXTERNAL_AGENT_RUNTIME_REMOVED
+
+
+@pytest.mark.asyncio
+async def test_runtime_status_rejects_legacy_default_without_advertising_operator(client):
+    with patch.object(settings, "default_model", "codex-local"):
         response = await client.get("/api/runtime/status")
 
+    assert response.status_code == 410
+    assert response.json()["detail"]["code"] == EXTERNAL_AGENT_RUNTIME_REMOVED
+
+
+@pytest.mark.asyncio
+async def test_runtime_status_has_no_external_operator_inventory(client):
+    response = await client.get("/api/runtime/status")
     assert response.status_code == 200
-    payload = response.json()
-    assert "local_operators" in payload
-    assert any(item["id"] == "codex-local" for item in payload["local_operators"])
-    assert all(item["id"] != "codex-local" for item in payload["provider_profiles"])
+    assert "local_operators" not in response.json()
 
 
 @pytest.mark.asyncio
-async def test_rest_chat_uses_local_codex_when_selected(client):
+async def test_runtime_status_rejects_legacy_runtime_override():
+    with patch.object(settings, "runtime_model_overrides", "chat_agent=CoDeX-LoCaL"):
+        async with AsyncClient(transport=ASGITransport(app=create_app()), base_url="http://test") as client:
+            response = await client.get("/api/runtime/status")
+
+    assert response.status_code == 410
+    assert response.json()["detail"]["code"] == EXTERNAL_AGENT_RUNTIME_REMOVED
+
+
+@pytest.mark.asyncio
+async def test_runtime_status_rejects_legacy_custom_profile():
     with (
-        patch.object(settings, "default_model", "codex-local"),
-        patch(
-            "src.api.chat.run_local_codex",
-            AsyncMock(return_value={
-                "ok": True,
-                "stdout": "hello from local codex",
-                "stderr": "",
-            }),
-        ) as mock_run,
+        patch.object(settings, "llm_provider_profiles", _REMOVED_PROFILE_CONFIG),
+        patch.object(settings, "runtime_profile_preferences", "chat_agent=removed-agent"),
+        patch.object(settings, "runtime_model_overrides", ""),
     ):
-        response = await client.post("/api/chat", json={"message": "hello"})
+        async with AsyncClient(transport=ASGITransport(app=create_app()), base_url="http://test") as client:
+            response = await client.get("/api/runtime/status")
 
-    assert response.status_code == 200
-    payload = response.json()
-    assert payload["response"] == "hello from local codex"
-    assert payload["session_id"]
-    mock_run.assert_awaited_once()
-    assert mock_run.await_args.kwargs["session_id"] == payload["session_id"]
-    assert mock_run.await_args.kwargs["timeout_seconds"] == 30
-    assert mock_run.await_args.kwargs["sandbox"] == "read-only"
+    assert response.status_code == 410
+    assert response.json()["detail"]["code"] == EXTERNAL_AGENT_RUNTIME_REMOVED
 
 
 @pytest.mark.asyncio
-async def test_rest_chat_local_codex_times_out_instead_of_hanging(client):
+@pytest.mark.parametrize(
+    ("runtime_override", "profile_preference", "profile_config"),
+    [
+        ("chat_agent=local-codex", "", ""),
+        ("", "chat_agent=removed-agent", _REMOVED_PROFILE_CONFIG),
+    ],
+)
+async def test_rest_chat_rejects_effective_removed_route(
+    runtime_override,
+    profile_preference,
+    profile_config,
+):
+    session = SimpleNamespace(id="legacy-session")
+    profile = SimpleNamespace(onboarding_completed=True)
     with (
-        patch.object(settings, "default_model", "codex-local"),
-        patch("src.api.chat.local_codex_chat_timeout_seconds", return_value=1),
-        patch("src.api.chat.run_local_codex", AsyncMock(return_value={"ok": False, "timed_out": True})),
+        patch.object(settings, "runtime_model_overrides", runtime_override),
+        patch.object(settings, "runtime_profile_preferences", profile_preference),
+        patch.object(settings, "llm_provider_profiles", profile_config),
+        patch("src.api.chat.session_manager.get_or_create", new=AsyncMock(return_value=session)),
+        patch("src.api.chat.session_manager.add_message", new=AsyncMock()),
+        patch("src.api.chat.get_or_create_profile", new=AsyncMock(return_value=profile)),
+        patch("litellm.completion") as completion,
     ):
-        response = await client.post("/api/chat", json={"message": "hello"})
+        async with AsyncClient(transport=ASGITransport(app=create_app()), base_url="http://test") as client:
+            response = await client.post("/api/chat", json={"message": "hello"})
 
-    assert response.status_code == 504
-    assert response.json()["detail"] == "Local Codex timed out after 1s."
+    assert response.status_code == 410
+    assert response.json()["detail"]["code"] == EXTERNAL_AGENT_RUNTIME_REMOVED
+    completion.assert_not_called()
+
+
+def test_operator_runtime_payload_rejects_effective_legacy_override():
+    from fastapi import HTTPException
+    from src.api.operator import _runtime_status_payload
+
+    with patch.object(settings, "runtime_model_overrides", "chat_agent=codex"):
+        with pytest.raises(HTTPException) as exc_info:
+            _runtime_status_payload()
+
+    assert exc_info.value.status_code == 410
+    assert exc_info.value.detail["code"] == EXTERNAL_AGENT_RUNTIME_REMOVED
 
 
 @pytest.mark.asyncio
-async def test_operator_local_codex_status_endpoint_reports_blocked(client):
+@pytest.mark.parametrize(
+    ("runtime_override", "profile_preference", "profile_config"),
+    [
+        ("chat_agent=codex-local", "", ""),
+        ("", "chat_agent=removed-agent", _REMOVED_PROFILE_CONFIG),
+    ],
+)
+async def test_websocket_handler_rejects_effective_removed_route_without_transport(
+    runtime_override,
+    profile_preference,
+    profile_config,
+):
+    from src.api.ws import websocket_chat
+
+    class FakeWebSocket:
+        def __init__(self):
+            self.sent: list[dict[str, object]] = []
+            self.received = False
+
+        async def accept(self):
+            return None
+
+        async def receive_text(self):
+            if self.received:
+                raise WebSocketDisconnect()
+            self.received = True
+            return json.dumps({"type": "message", "message": "hello"})
+
+        async def send_text(self, payload: str):
+            self.sent.append(json.loads(payload))
+
+    websocket = FakeWebSocket()
+    session = SimpleNamespace(id="legacy-ws-session")
+    profile = SimpleNamespace(onboarding_completed=True)
     with (
-        patch.object(settings, "codex_local_command", "missing-codex"),
-        patch("src.operators.local_codex.shutil.which", return_value=None),
+        patch.object(settings, "runtime_model_overrides", runtime_override),
+        patch.object(settings, "runtime_profile_preferences", profile_preference),
+        patch.object(settings, "llm_provider_profiles", profile_config),
+        patch("src.api.ws.get_or_create_profile", new=AsyncMock(return_value=profile)),
+        patch("src.api.ws.session_manager.get_or_create", new=AsyncMock(return_value=session)),
+        patch("src.api.ws.session_manager.add_message", new=AsyncMock()),
+        patch("src.api.ws.ws_manager.connect"),
+        patch("src.api.ws.ws_manager.disconnect"),
+        patch("litellm.completion") as completion,
     ):
-        response = await client.get("/api/operator/local-codex/status")
+        await websocket_chat(websocket)  # type: ignore[arg-type]
 
-    assert response.status_code == 200
-    payload = response.json()
-    assert payload["operator_kind"] == "local_command"
-    assert payload["ready"] is False
-    assert payload["unavailable_reason"] == "codex command was not found on PATH"
-
-
-@pytest.mark.asyncio
-async def test_operator_local_codex_exec_endpoint_fails_closed_when_binary_missing(client):
-    with (
-        patch.object(settings, "codex_local_command", "missing-codex"),
-        patch("src.operators.local_codex.shutil.which", return_value=None),
-        patch("src.operators.local_codex.audit_repository.log_event", AsyncMock()) as mock_audit,
-    ):
-        response = await client.post(
-            "/api/operator/local-codex/exec",
-            json={"prompt": "hello"},
-        )
-
-    assert response.status_code == 503
-    payload = response.json()
-    assert payload["detail"]["adapter"] == "codex-local"
-    assert payload["detail"]["status"] == "blocked"
-    assert mock_audit.await_count == 1
-
-
-@pytest.mark.asyncio
-async def test_operator_local_codex_exec_endpoint_does_not_accept_sandbox_or_approval_overrides(client):
-    with patch(
-        "src.api.operator.run_local_codex",
-        AsyncMock(return_value={"ok": True, "operator_id": "codex-local"}),
-    ) as mock_run:
-        response = await client.post(
-            "/api/operator/local-codex/exec",
-            json={
-                "prompt": "hello",
-                "sandbox": "danger-full-access",
-                "approval_policy": "on-request",
-            },
-        )
-
-    assert response.status_code == 200
-    assert response.json()["ok"] is True
-    _, kwargs = mock_run.call_args
-    assert kwargs == {
-        "cwd": None,
-        "model": None,
-        "timeout_seconds": None,
-        "session_id": None,
-    }
+    error = next(item for item in websocket.sent if item["type"] == "error")
+    assert json.loads(str(error["content"]))["code"] == EXTERNAL_AGENT_RUNTIME_REMOVED
+    completion.assert_not_called()

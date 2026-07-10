@@ -23,13 +23,7 @@ from src.audit.repository import audit_repository
 from src.api.profile import get_or_create_profile, mark_onboarding_complete, reset_onboarding
 from src.guardian.state import build_guardian_state
 from src.models.schemas import WSMessage, WSResponse
-from src.operators.local_codex import (
-    LocalCodexConfigurationError,
-    is_local_codex_model,
-    local_codex_chat_sandbox,
-    local_codex_chat_timeout_seconds,
-    run_local_codex,
-)
+from src.operators.local_codex import ExternalAgentRuntimeRemovedError
 from src.scheduler.connection_manager import ws_manager
 from src.tools.policy import get_current_tool_policy_mode
 from src.vault.redaction import redact_secrets_for_streaming_snapshot, redact_secrets_in_text
@@ -197,104 +191,25 @@ async def websocket_chat(websocket: WebSocket):
             except Exception:
                 pass
 
-            if is_local_codex_model(settings.default_model):
-                started_at = perf_counter()
-                timeout_seconds = local_codex_chat_timeout_seconds()
-                try:
-                    result = await run_local_codex(
-                        ws_msg.message,
-                        session_id=session.id,
-                        timeout_seconds=timeout_seconds,
-                        sandbox=local_codex_chat_sandbox(),
-                    )
-                    output = (result.get("stdout") or "").strip()
-                    stderr = (result.get("stderr") or "").strip()
-                    if result.get("timed_out"):
-                        raise asyncio.TimeoutError
-                    if not result.get("ok"):
-                        raise LocalCodexConfigurationError(stderr or "Local Codex returned a non-zero exit code.")
-                    final_result = await redact_secrets_in_text(
-                        output or stderr or "Local Codex completed without output."
-                    )
-                except asyncio.TimeoutError:
-                    safe_error = await redact_secrets_in_text(f"Local Codex timed out after {timeout_seconds}s.")
-                    await log_agent_run_event(
-                        session_id=session.id,
-                        transport="websocket",
-                        is_onboarding=False,
-                        outcome="timed_out",
-                        policy_mode=get_current_tool_policy_mode(),
-                        details={
-                            "duration_ms": int((perf_counter() - started_at) * 1000),
-                            "message_length": len(ws_msg.message),
-                            "timeout_seconds": timeout_seconds,
-                            "runtime": "codex-local",
-                        },
-                    )
-                    active_turn_completed = True
-                    await websocket.send_text(
-                        WSResponse(
-                            type="error",
-                            content=safe_error,
-                            session_id=session.id,
-                            seq=_next_seq(),
-                        ).model_dump_json()
-                    )
-                    continue
-                except LocalCodexConfigurationError as exc:
-                    safe_error = await redact_secrets_in_text(f"Local Codex unavailable: {exc}")
-                    await log_agent_run_event(
-                        session_id=session.id,
-                        transport="websocket",
-                        is_onboarding=False,
-                        outcome="failed",
-                        policy_mode=get_current_tool_policy_mode(),
-                        details={
-                            "duration_ms": int((perf_counter() - started_at) * 1000),
-                            "message_length": len(ws_msg.message),
-                            "error": safe_error,
-                            "runtime": "codex-local",
-                        },
-                    )
-                    active_turn_completed = True
-                    await websocket.send_text(
-                        WSResponse(
-                            type="error",
-                            content=safe_error,
-                            session_id=session.id,
-                            seq=_next_seq(),
-                        ).model_dump_json()
-                    )
-                    continue
+            profile = await get_or_create_profile()
+            direct_is_onboarding = not profile.onboarding_completed
+            direct_runtime_path = "onboarding_agent" if direct_is_onboarding else "chat_agent"
+            try:
+                from src.llm_runtime import reject_removed_external_agent_route
 
-                await session_manager.add_message(session.id, "assistant", final_result)
+                reject_removed_external_agent_route(runtime_path=direct_runtime_path)
+            except ExternalAgentRuntimeRemovedError as exc:
                 active_turn_completed = True
-                await log_agent_run_event(
-                    session_id=session.id,
-                    transport="websocket",
-                    is_onboarding=False,
-                    outcome="succeeded",
-                    policy_mode=get_current_tool_policy_mode(),
-                    details={
-                        "duration_ms": int((perf_counter() - started_at) * 1000),
-                        "message_length": len(ws_msg.message),
-                        "response_length": len(final_result),
-                        "runtime": "codex-local",
-                    },
-                )
                 await websocket.send_text(
                     WSResponse(
-                        type="final",
-                        content=final_result,
+                        type="error",
+                        content=json.dumps(exc.payload()),
                         session_id=session.id,
                         seq=_next_seq(),
                     ).model_dump_json()
                 )
                 continue
 
-            profile = await get_or_create_profile()
-            direct_is_onboarding = not profile.onboarding_completed
-            direct_runtime_path = "onboarding_agent" if direct_is_onboarding else "chat_agent"
             if should_use_direct_local_chat(
                 ws_msg.message,
                 runtime_path=direct_runtime_path,

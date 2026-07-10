@@ -35,7 +35,7 @@ from src.model_fabric.contracts import (
     finalized_openai_compatible_body,
     transport_model_for_provider,
 )
-from src.operators.local_codex import is_local_codex_model, local_codex_chat_timeout_seconds, run_local_codex
+from src.operators.local_codex import reject_legacy_external_agent_model
 from src.security.trust_contract import (
     DestinationClass,
     TrustDecision,
@@ -1136,6 +1136,19 @@ def _resolved_primary_model_id(
     return _profile_model_id(profile)
 
 
+def effective_runtime_model_id(*, runtime_path: str, profile: str | None = None) -> str:
+    """Return the effective primary model after profile and path overrides."""
+    resolved_profile = resolve_runtime_profile(runtime_path=runtime_path, profile=profile)
+    return _resolved_primary_model_id(runtime_path=runtime_path, profile=resolved_profile)
+
+
+def reject_removed_external_agent_route(*, runtime_path: str, profile: str | None = None) -> str:
+    """Fail closed when an effective runtime route selects a removed agent CLI."""
+    model_id = effective_runtime_model_id(runtime_path=runtime_path, profile=profile)
+    reject_legacy_external_agent_model(model_id)
+    return model_id
+
+
 def _profile_model_id(profile: str) -> str:
     if profile == "local" and has_local_model_profile():
         return settings.local_model
@@ -1353,26 +1366,6 @@ def _message_value(message: Any, key: str, default: Any = None) -> Any:
     return getattr(message, key, default)
 
 
-def _messages_to_local_operator_prompt(messages: list[Any]) -> str:
-    parts: list[str] = []
-    for message in messages:
-        role = str(_message_value(message, "role", "user") or "user").strip() or "user"
-        content = str(_message_value(message, "content", "") or "").strip()
-        if content:
-            parts.append(f"{role}: {content}")
-    return "\n\n".join(parts).strip()
-
-
-def _local_operator_completion_response(content: str) -> SimpleNamespace:
-    return SimpleNamespace(
-        choices=[
-            SimpleNamespace(
-                message=SimpleNamespace(content=content),
-            )
-        ],
-    )
-
-
 def _openai_message_payload(message: Any) -> dict[str, Any]:
     if isinstance(message, dict):
         return dict(message)
@@ -1506,19 +1499,6 @@ def _trim_after_stop_sequences(content: str, stop_sequences: list[str] | None) -
     return content[:earliest_stop]
 
 
-def _local_operator_chat_message(
-    content: str,
-    *,
-    raw: Any | None = None,
-    stop_sequences: list[str] | None = None,
-) -> ChatMessage:
-    return ChatMessage(
-        role=MessageRole.ASSISTANT,
-        content=_trim_after_stop_sequences(content, stop_sequences),
-        raw=raw,
-    )
-
-
 def _governed_agent_chat_message(
     response: SimpleNamespace,
     *,
@@ -1548,25 +1528,6 @@ def _governed_agent_chat_message(
     if isinstance(content, str):
         content = _trim_after_stop_sequences(content, stop_sequences)
     return replace(message, content=content, raw=raw)
-
-
-def _run_local_codex_completion(prompt: str, *, session_id: str | None) -> dict[str, Any]:
-    async def _run() -> dict[str, Any]:
-        return await run_local_codex(
-            prompt,
-            timeout_seconds=local_codex_chat_timeout_seconds(),
-            session_id=session_id,
-        )
-
-    try:
-        asyncio.get_running_loop()
-    except RuntimeError:
-        return asyncio.run(_run())
-
-    return {
-        "ok": False,
-        "stderr": "Local Codex completion is unavailable from synchronous code inside an active event loop.",
-    }
 
 
 def has_fallback_model(*, runtime_path: str | None = None) -> bool:
@@ -3160,6 +3121,7 @@ class FallbackLiteLLMModel(BaseLiteLLMModel):
     ):
         request_context = kwargs.pop("request_context", None)
         primary_model = self.model_id
+        reject_legacy_external_agent_model(primary_model)
         runtime_path = self._runtime_path or "agent_generate"
         reserved_output_tokens = _reserved_output_tokens_from_kwargs(
             kwargs=kwargs,
@@ -3222,6 +3184,8 @@ class FallbackLiteLLMModel(BaseLiteLLMModel):
             fallback_targets=fallback_targets,
             runtime_path=runtime_path,
         )
+        for target in ordered_targets:
+            reject_legacy_external_agent_model(target.get("model_id"))
         primary_unhealthy = not _is_target_healthy(
             model_id=primary_model,
             api_base=self.api_base,
@@ -3286,6 +3250,7 @@ class FallbackLiteLLMModel(BaseLiteLLMModel):
         primary_preflight_rejected = False
 
         for index, target in enumerate(attempt_targets):
+            reject_legacy_external_agent_model(target.get("model_id"))
             is_primary = target["source"] == "primary"
             route_attempt_started = False
             try:
@@ -3341,45 +3306,26 @@ class FallbackLiteLLMModel(BaseLiteLLMModel):
                     route_attempt_started = True
                 if is_primary:
                     primary_attempted = True
-                    if is_local_codex_model(primary_model) and governed_context is None:
-                        local_result = _run_local_codex_completion(
-                            _messages_to_local_operator_prompt(target_messages),
-                            session_id=get_current_session_id(),
+                    if governed_context is not None:
+                        governed_response, raw_payload = _governed_openai_chat_completion(
+                            decision=route_decision,
+                            context=governed_context,
+                            body=transport_body,
+                            api_key=target.get("api_key"),
                         )
-                        if not local_result.get("ok", False):
-                            raise RuntimeError(
-                                str(
-                                    local_result.get("stderr")
-                                    or local_result.get("stdout")
-                                    or "Local Codex operator failed."
-                                ).strip()
-                            )
-                        response = _local_operator_chat_message(
-                            str(local_result.get("stdout") or "").strip(),
-                            raw=local_result,
+                        response = _governed_agent_chat_message(
+                            governed_response,
+                            raw=raw_payload,
                             stop_sequences=stop_sequences,
                         )
                     else:
-                        if governed_context is not None:
-                            governed_response, raw_payload = _governed_openai_chat_completion(
-                                decision=route_decision,
-                                context=governed_context,
-                                body=transport_body,
-                                api_key=target.get("api_key"),
-                            )
-                            response = _governed_agent_chat_message(
-                                governed_response,
-                                raw=raw_payload,
-                                stop_sequences=stop_sequences,
-                            )
-                        else:
-                            response = super().generate(
-                                target_messages,
-                                stop_sequences=stop_sequences,
-                                response_format=response_format,
-                                tools_to_call_from=tools_to_call_from,
-                                **kwargs,
-                            )
+                        response = super().generate(
+                            target_messages,
+                            stop_sequences=stop_sequences,
+                            response_format=response_format,
+                            tools_to_call_from=tools_to_call_from,
+                            **kwargs,
+                        )
                     _mark_target_succeeded(
                         model_id=primary_model,
                         api_base=self.api_base,
@@ -3416,45 +3362,26 @@ class FallbackLiteLLMModel(BaseLiteLLMModel):
 
                 fallback_model = target["model"]
                 attempted_fallback_models.append(fallback_model.model_id)
-                if is_local_codex_model(fallback_model.model_id) and governed_context is None:
-                    local_result = _run_local_codex_completion(
-                        _messages_to_local_operator_prompt(target_messages),
-                        session_id=get_current_session_id(),
+                if governed_context is not None:
+                    governed_response, raw_payload = _governed_openai_chat_completion(
+                        decision=route_decision,
+                        context=governed_context,
+                        body=transport_body,
+                        api_key=target.get("api_key"),
                     )
-                    if not local_result.get("ok", False):
-                        raise RuntimeError(
-                            str(
-                                local_result.get("stderr")
-                                or local_result.get("stdout")
-                                or "Local Codex operator failed."
-                            ).strip()
-                        )
-                    response = _local_operator_chat_message(
-                        str(local_result.get("stdout") or "").strip(),
-                        raw=local_result,
+                    response = _governed_agent_chat_message(
+                        governed_response,
+                        raw=raw_payload,
                         stop_sequences=stop_sequences,
                     )
                 else:
-                    if governed_context is not None:
-                        governed_response, raw_payload = _governed_openai_chat_completion(
-                            decision=route_decision,
-                            context=governed_context,
-                            body=transport_body,
-                            api_key=target.get("api_key"),
-                        )
-                        response = _governed_agent_chat_message(
-                            governed_response,
-                            raw=raw_payload,
-                            stop_sequences=stop_sequences,
-                        )
-                    else:
-                        response = fallback_model.generate(
-                            target_messages,
-                            stop_sequences=stop_sequences,
-                            response_format=response_format,
-                            tools_to_call_from=tools_to_call_from,
-                            **kwargs,
-                        )
+                    response = fallback_model.generate(
+                        target_messages,
+                        stop_sequences=stop_sequences,
+                        response_format=response_format,
+                        tools_to_call_from=tools_to_call_from,
+                        **kwargs,
+                    )
                 _mark_target_succeeded(
                     model_id=fallback_model.model_id,
                     api_base=fallback_model.api_base,
@@ -3650,6 +3577,7 @@ def completion_with_fallback_sync(
             profile=profile,
         )
         primary_model = _safe_model_name(primary_kwargs)
+        reject_legacy_external_agent_model(primary_model)
         primary_target = {
             "model_id": primary_model,
             "api_base": primary_kwargs.get("api_base"),
@@ -3705,6 +3633,8 @@ def completion_with_fallback_sync(
             fallback_targets=fallback_targets,
             runtime_path=runtime_path,
         )
+        for target in ordered_targets:
+            reject_legacy_external_agent_model(target.get("model_id"))
         primary_unhealthy = not _is_target_healthy(
             model_id=primary_model,
             api_base=primary_kwargs.get("api_base"),
@@ -3770,6 +3700,7 @@ def completion_with_fallback_sync(
         primary_preflight_rejected = False
 
         for index, target in enumerate(attempt_targets):
+            reject_legacy_external_agent_model(target.get("model_id"))
             is_primary = target["source"] == "primary"
             route_attempt_started = False
             try:
@@ -3812,33 +3743,17 @@ def completion_with_fallback_sync(
                     route_attempt_started = True
                 if is_primary:
                     primary_attempted = True
-                    if is_local_codex_model(primary_model) and governed_context is None:
-                        local_prompt = _messages_to_local_operator_prompt(target_messages)
-                        if not local_prompt:
-                            raise ValueError("Local Codex completion requires at least one non-empty message")
-                        local_result = _run_local_codex_completion(
-                            local_prompt,
-                            session_id=get_current_session_id(),
+                    if governed_context is not None:
+                        response, _raw_payload = _governed_openai_chat_completion(
+                            decision=route_decision,
+                            context=governed_context,
+                            body=transport_body,
+                            api_key=target.get("api_key"),
                         )
-                        if not local_result.get("ok"):
-                            if local_result.get("timed_out"):
-                                raise TimeoutError("Local Codex completion timed out")
-                            raise RuntimeError(
-                                (local_result.get("stderr") or local_result.get("stdout") or "Local Codex completion failed").strip()
-                            )
-                        response = _local_operator_completion_response(str(local_result.get("stdout") or "").strip())
                     else:
-                        if governed_context is not None:
-                            response, _raw_payload = _governed_openai_chat_completion(
-                                decision=route_decision,
-                                context=governed_context,
-                                body=transport_body,
-                                api_key=target.get("api_key"),
-                            )
-                        else:
-                            response = litellm.completion(
-                                **{**primary_kwargs, "messages": target_messages}
-                            )
+                        response = litellm.completion(
+                            **{**primary_kwargs, "messages": target_messages}
+                        )
                     _mark_target_succeeded(
                         model_id=primary_model,
                         api_base=primary_kwargs.get("api_base"),

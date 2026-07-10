@@ -2,7 +2,7 @@ import os
 from contextlib import asynccontextmanager
 from urllib.parse import urlparse, urlsplit, urlunsplit
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
@@ -12,9 +12,9 @@ from config.settings import settings
 from src.db import init_db, close_db
 from src.extensions.registry import default_manifest_roots_for_workspace
 from src.llm_logger import init_llm_logging
-from src.llm_runtime import provider_profile_statuses, provider_profiles, resolve_runtime_profile
+from src.llm_runtime import effective_runtime_model_id, provider_profile_statuses, provider_profiles, resolve_runtime_profile
 from src.memory.soul import ensure_soul_exists
-from src.operators.local_codex import is_local_codex_model, local_operator_statuses
+from src.operators.local_codex import ExternalAgentRuntimeRemovedError, reject_legacy_external_agent_model
 from src.runbooks.manager import runbook_manager
 from src.scheduler.engine import init_scheduler, shutdown_scheduler, sync_scheduled_jobs
 from src.skills.manager import skill_manager
@@ -77,8 +77,6 @@ def _runtime_provider_label(
         return "local-gemma"
     model = (model or settings.default_model).strip()
     api_base = (api_base if api_base is not None else settings.llm_api_base).strip()
-    if is_local_codex_model(model):
-        return "codex-local"
     if model.startswith("openrouter/") or "openrouter" in api_base:
         return "openrouter"
     if normalized_profile == "local" or model.startswith("ollama/") or settings.local_model.strip().startswith("ollama/"):
@@ -98,25 +96,15 @@ def _runtime_model_label(model: str) -> str:
     normalized = model.strip()
     if not normalized:
         return "unknown"
-    if is_local_codex_model(normalized):
-        return settings.codex_local_model.strip() or "codex"
     return normalized.split("/")[-1]
 
 
 def _active_chat_runtime_status() -> dict[str, str]:
     default_model = settings.default_model.strip()
-    if is_local_codex_model(default_model):
-        return {
-            "provider": "codex-local",
-            "model": default_model,
-            "model_label": _runtime_model_label(default_model),
-            "api_base": _safe_runtime_endpoint(settings.llm_api_base),
-            "active_profile": "codex-local",
-        }
-
     active_profile = resolve_runtime_profile(runtime_path="chat_agent")
     profile = provider_profiles().get(active_profile)
-    model = (profile.model if profile is not None else default_model).strip()
+    model = effective_runtime_model_id(runtime_path="chat_agent", profile=active_profile).strip()
+    reject_legacy_external_agent_model(model)
     api_base = _safe_runtime_endpoint(profile.api_base if profile is not None else settings.llm_api_base)
     return {
         "provider": _runtime_provider_label(model, profile=active_profile, api_base=api_base),
@@ -193,7 +181,7 @@ def _effective_runtime_route_status(runtime: dict[str, str], vlm_status: dict[st
         "provider_label": provider_label,
         "model": model,
         "model_label": model_label,
-        "mode": "remote_provider" if provider not in {"codex-local", "local"} else provider,
+        "mode": "remote_provider" if provider != "local" else provider,
         "route_label": provider_label,
         "summary_label": f"{provider_label} · {model_label or model or 'unknown'}",
         "api_base": runtime.get("api_base", ""),
@@ -303,7 +291,10 @@ def create_app() -> FastAPI:
 
     @app.get("/api/runtime/status")
     async def runtime_status():
-        runtime = _active_chat_runtime_status()
+        try:
+            runtime = _active_chat_runtime_status()
+        except ExternalAgentRuntimeRemovedError as exc:
+            raise HTTPException(status_code=410, detail=exc.payload()) from exc
         vlm_status = _sanitize_runtime_endpoints(
             effective_vlm_status(live_probe=deferred_vlm_live_probe())
         )
@@ -324,7 +315,6 @@ def create_app() -> FastAPI:
             "default_model_label": _runtime_model_label(default_model),
             "default_api_base": _safe_runtime_endpoint(settings.llm_api_base),
             "provider_profiles": _sanitize_runtime_endpoints(provider_profile_statuses()),
-            "local_operators": local_operator_statuses(probe=False),
             "vlm_runtime": vlm_status,
             "model_fabric": fabric_status,
             "timezone": settings.user_timezone,

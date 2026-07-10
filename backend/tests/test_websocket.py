@@ -17,6 +17,7 @@ from starlette.testclient import TestClient
 
 # Ensure models are registered in SQLModel.metadata before create_all
 import src.db.models  # noqa: F401
+from config.settings import settings
 from src.agent.direct_chat import should_use_direct_local_chat as real_should_use_direct_local_chat
 from src.api.ws import _build_agent
 from src.utils.background import drain_tracked_tasks
@@ -107,6 +108,32 @@ def _close_sync_client_with_db(patches, stack):
 
 
 class TestWebSocket:
+    def test_websocket_rejects_effective_legacy_runtime_override(self):
+        client, patches, stack = _make_sync_client_with_db()
+        try:
+            with (
+                patch.object(
+                    settings,
+                    "runtime_model_overrides",
+                    "chat_agent=codex-local,onboarding_agent=codex-local",
+                ),
+                patch("litellm.completion") as completion,
+                client.websocket_connect("/ws/chat") as ws,
+            ):
+                _ = ws.receive_text()
+                ws.send_text(json.dumps({"type": "message", "message": "Hello"}))
+                status = json.loads(ws.receive_text())
+                response = json.loads(ws.receive_text())
+
+            assert status["type"] == "status"
+            assert response["type"] == "error"
+            assert json.loads(response["content"])["code"] == "external_agent_runtime_removed"
+            completion.assert_not_called()
+        finally:
+            stack.close()
+            for p in patches:
+                p.stop()
+
     def test_websocket_ping(self):
         client, patches, stack = _make_sync_client_with_db()
         try:

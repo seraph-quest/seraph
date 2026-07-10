@@ -523,8 +523,7 @@ def _screen_artifact_response(observation: ScreenObservation) -> dict[str, Any] 
         "analysis_url": f"/api/observer/screen-artifacts/{observation.id}/analysis",
     }
     if artifacts.get("provider") != "screenshot_folder":
-        artifact_links["codex_output_url"] = f"/api/observer/screen-artifacts/{observation.id}/codex-output"
-        artifact_links["provider_output_url"] = f"/api/observer/screen-artifacts/{observation.id}/codex-output"
+        artifact_links["provider_output_url"] = f"/api/observer/screen-artifacts/{observation.id}/provider-output"
     return {
         "observation_id": observation.id,
         "timestamp": observation.timestamp.isoformat(),
@@ -550,7 +549,7 @@ async def _screen_artifact_observation(observation_id: str) -> ScreenObservation
 
 @router.get("/observer/screen-artifacts")
 async def list_screen_artifacts(request: Request, limit: int = 20) -> dict[str, Any]:
-    """List recent preserved screen captures with links to image and Codex output."""
+    """List recent preserved screen captures with provider-neutral artifact links."""
     _require_local_artifact_request(request)
     capped_limit = min(max(limit, 1), 100)
     async with get_session() as db:
@@ -583,23 +582,36 @@ async def get_screen_artifact_image(observation_id: str, request: Request) -> Fi
     return FileResponse(path, media_type=_image_media_type(path))
 
 
-@router.get("/observer/screen-artifacts/{observation_id}/codex-output")
-async def get_screen_artifact_codex_output(observation_id: str, request: Request) -> PlainTextResponse:
-    """Return the redacted local Codex text output for a preserved screenshot."""
+async def _get_screen_artifact_provider_output(
+    observation_id: str,
+    request: Request,
+) -> PlainTextResponse:
     _require_local_artifact_request(request)
     observation = await _screen_artifact_observation(observation_id)
     artifacts = _screen_capture_artifacts(observation) or {}
     if artifacts.get("provider") == "screenshot_folder" and not (
-        artifacts.get("codex_output_path") or artifacts.get("provider_output_path")
+        artifacts.get("provider_output_path") or artifacts.get("codex_output_path")
     ):
         return PlainTextResponse(
             "The screenshot folder source only provided the image file. Seraph has no provider output for this capture."
         )
     path = _artifact_path(
-        str(artifacts.get("codex_output_path") or artifacts.get("provider_output_path") or ""),
+        str(artifacts.get("provider_output_path") or artifacts.get("codex_output_path") or ""),
         allowed_roots=_artifact_allowed_roots(artifacts),
     )
     return PlainTextResponse(path.read_text(encoding="utf-8"))
+
+
+@router.get("/observer/screen-artifacts/{observation_id}/provider-output")
+async def get_screen_artifact_provider_output(observation_id: str, request: Request) -> PlainTextResponse:
+    """Return redacted inference-provider output for a preserved screenshot."""
+    return await _get_screen_artifact_provider_output(observation_id, request)
+
+
+@router.get("/observer/screen-artifacts/{observation_id}/codex-output", deprecated=True)
+async def get_screen_artifact_codex_output(observation_id: str, request: Request) -> PlainTextResponse:
+    """Deprecated compatibility alias for older observer clients and artifacts."""
+    return await _get_screen_artifact_provider_output(observation_id, request)
 
 
 @router.get("/observer/screen-artifacts/{observation_id}/analysis")

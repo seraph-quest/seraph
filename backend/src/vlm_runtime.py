@@ -150,7 +150,7 @@ async def direct_local_chat_route_error(*, timeout_seconds: float = 0.75) -> str
     """Return an operator-readable route error when local chat cannot run."""
     status = effective_vlm_status()
     base_url = str(status.get("base_url") or "")
-    chat_api_base = str(status.get("chat_api_base") or "")
+    chat_api_base = effective_vlm_chat_api_base()
     chat_health_endpoint = str(status.get("chat_health_endpoint") or "")
     if not chat_api_base:
         return (
@@ -158,6 +158,12 @@ async def direct_local_chat_route_error(*, timeout_seconds: float = 0.75) -> str
             "Set SERAPH_VLM_BASE_URL or LOCAL_VLM_BASE_URL before using direct local chat."
         )
     if not base_url:
+        return None
+
+    wrapper_chat_api_base = effective_vlm_wrapper_chat_api_base()
+    if _trim_url(chat_api_base) != _trim_url(wrapper_chat_api_base):
+        # An explicitly configured text endpoint is independent of the VLM
+        # wrapper. The completion transport reports its own reachability error.
         return None
 
     probe = await probe_effective_vlm_runtime(timeout_seconds=timeout_seconds)

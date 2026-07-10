@@ -61,6 +61,10 @@ def test_effective_runtime_distinguishes_direct_gpu_text_from_wrapper_chat():
         {**base_runtime, "api_base": "http://127.0.0.1:8000/v1"},
         vlm,
     )
+    unrelated_remote = _effective_runtime_route_status(
+        {**base_runtime, "api_base": "https://api.example.com/v1"},
+        vlm,
+    )
 
     assert direct["route_label"] == "GPU text"
     assert direct["provider_label"] == "local-gemma/gpu-text"
@@ -68,6 +72,8 @@ def test_effective_runtime_distinguishes_direct_gpu_text_from_wrapper_chat():
     assert wrapper["provider_label"] == "local-gemma/gpu-wrapper-chat"
     assert mac_local["route_label"] == "local Gemma"
     assert mac_local["provider_label"] == "local-gemma"
+    assert unrelated_remote["route_label"] == "local Gemma"
+    assert unrelated_remote["provider_label"] == "local-gemma"
 
 
 @pytest.mark.asyncio

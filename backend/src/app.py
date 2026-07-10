@@ -136,12 +136,12 @@ def _effective_runtime_route_status(runtime: dict[str, str], vlm_status: dict[st
         mode = str(vlm_status.get("mode") or "not_configured")
         text_api_base = _safe_runtime_endpoint(runtime.get("api_base", ""))
         wrapper_base_url = _safe_runtime_endpoint(vlm_status.get("base_url", ""))
+        advertised_backend_url = _safe_runtime_endpoint(vlm_status.get("backend_url", ""))
         wrapper_chat_api_base = (
             wrapper_base_url
             if wrapper_base_url.rstrip("/").endswith("/v1")
             else f"{wrapper_base_url.rstrip('/')}/v1" if wrapper_base_url else ""
         )
-        configured_text_api_base = _safe_runtime_endpoint(settings.local_llm_api_base)
         uses_wrapper_chat = bool(
             text_api_base and wrapper_chat_api_base and text_api_base == wrapper_chat_api_base
         )
@@ -149,7 +149,8 @@ def _effective_runtime_route_status(runtime: dict[str, str], vlm_status: dict[st
         uses_direct_gpu_text = bool(
             mode == "gpu-server"
             and text_api_base
-            and configured_text_api_base == text_api_base
+            and advertised_backend_url
+            and text_api_base == advertised_backend_url
             and text_hostname not in {"localhost", "127.0.0.1", "::1"}
             and not uses_wrapper_chat
         )

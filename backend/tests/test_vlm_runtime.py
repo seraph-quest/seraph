@@ -279,3 +279,19 @@ async def test_direct_local_chat_route_error_allows_explicit_api_base_without_wr
         error = await direct_local_chat_route_error()
 
     assert error is None
+
+
+@pytest.mark.asyncio
+async def test_direct_local_chat_route_error_does_not_gate_direct_text_on_wrapper_health():
+    with (
+        patch.object(settings, "seraph_vlm_base_url", "http://192.168.1.26:8001"),
+        patch.object(settings, "local_vlm_base_url", ""),
+        patch.object(settings, "local_llm_api_base", "http://192.168.1.26:8000/v1"),
+        patch(
+            "src.vlm_runtime.probe_effective_vlm_runtime",
+            side_effect=AssertionError("direct text must not probe the wrapper"),
+        ),
+    ):
+        error = await direct_local_chat_route_error()
+
+    assert error is None

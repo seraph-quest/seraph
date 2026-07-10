@@ -8,7 +8,17 @@ from src.approval.exceptions import ApprovalRequired
 from src.approval.runtime import reset_runtime_context, set_runtime_context
 from src.audit.repository import audit_repository
 from src.observer.context import CurrentContext
+from src.security.trust_contract import AuthorityGrant, PrincipalType, TrustPrincipal
 from src.skills.loader import Skill
+
+
+def _operator_capability_principal(session_id: str = "s1") -> TrustPrincipal:
+    return TrustPrincipal(
+        principal_id="operator:agent-factory-test",
+        principal_type=PrincipalType.OPERATOR,
+        grants=(AuthorityGrant.CAPABILITY_EXECUTE,),
+        session_id=session_id,
+    )
 
 
 class TestAgentFactory:
@@ -67,7 +77,11 @@ class TestAgentFactory:
     def test_get_tools_wraps_execute_code_for_approval(self, _mock_context, mock_mcp, async_db):
         mock_mcp.get_tools.return_value = []
         tools = {tool.name: tool for tool in get_tools()}
-        tokens = set_runtime_context("s1", "high_risk")
+        tokens = set_runtime_context(
+            "s1",
+            "high_risk",
+            trust_principal=_operator_capability_principal(),
+        )
         try:
             with pytest.raises(ApprovalRequired):
                 tools["execute_code"](code="print('hi')")
@@ -79,7 +93,11 @@ class TestAgentFactory:
     def test_get_tools_wraps_run_command_for_approval(self, _mock_context, mock_mcp, async_db):
         mock_mcp.get_tools.return_value = []
         tools = {tool.name: tool for tool in get_tools()}
-        tokens = set_runtime_context("s1", "high_risk")
+        tokens = set_runtime_context(
+            "s1",
+            "high_risk",
+            trust_principal=_operator_capability_principal(),
+        )
         try:
             with pytest.raises(ApprovalRequired):
                 tools["run_command"](command="pwd")
@@ -91,7 +109,11 @@ class TestAgentFactory:
     def test_get_tools_wraps_start_process_for_approval_even_when_mode_is_off(self, _mock_context, mock_mcp, async_db):
         mock_mcp.get_tools.return_value = []
         tools = {tool.name: tool for tool in get_tools()}
-        tokens = set_runtime_context("s1", "off")
+        tokens = set_runtime_context(
+            "s1",
+            "off",
+            trust_principal=_operator_capability_principal(),
+        )
         try:
             with pytest.raises(ApprovalRequired):
                 tools["start_process"](command="pwd")
@@ -112,7 +134,11 @@ class TestAgentFactory:
         MockClient.return_value.__exit__ = MagicMock(return_value=False)
 
         tools = {tool.name: tool for tool in get_tools()}
-        tokens = set_runtime_context("s1", "off")
+        tokens = set_runtime_context(
+            "s1",
+            "off",
+            trust_principal=_operator_capability_principal(),
+        )
         try:
             assert "wrapped" in tools["execute_code"](code="print('wrapped')")
         finally:
@@ -126,6 +152,27 @@ class TestAgentFactory:
         event_types = {event["event_type"] for event in events}
         assert "tool_call" in event_types
         assert "tool_result" in event_types
+
+    @patch("src.tools.shell_tool.httpx.Client")
+    @patch("src.agent.factory.mcp_manager")
+    @patch("src.tools.policy.context_manager.get_context", return_value=CurrentContext(tool_policy_mode="full", mcp_policy_mode="full"))
+    def test_get_tools_denies_session_only_high_risk_execution(
+        self,
+        _mock_context,
+        mock_mcp,
+        MockClient,
+        async_db,
+    ):
+        mock_mcp.get_tools.return_value = []
+        tools = {tool.name: tool for tool in get_tools()}
+        tokens = set_runtime_context("s1", "off")
+        try:
+            with pytest.raises(PermissionError, match="runtime authority is unavailable"):
+                tools["execute_code"](code="print('must not run')")
+        finally:
+            reset_runtime_context(tokens)
+
+        MockClient.assert_not_called()
 
     @patch("src.agent.factory.mcp_manager")
     @patch("src.tools.policy.context_manager.get_context", return_value=CurrentContext(tool_policy_mode="full", mcp_policy_mode="full"))

@@ -1,19 +1,51 @@
 """Approval wrappers for high-risk tool invocations."""
 
 import asyncio
+import json
+import time
 from typing import Any
+from uuid import uuid4
 
 from smolagents import Tool
 
 from src.approval.exceptions import ApprovalRequired
 from src.approval.repository import approval_repository, fingerprint_tool_call
-from src.approval.runtime import get_current_approval_mode, get_current_session_id
+from src.approval.runtime import (
+    get_current_approval_mode,
+    get_current_session_id,
+    get_current_trust_principal,
+)
 from src.audit.formatting import format_tool_call_summary, redact_for_audit
+from src.security.trust_contract import (
+    AuthorityGrant,
+    ContentOrigin,
+    DestinationClass,
+    EgressClass,
+    NO_OBJECT,
+    NO_RESOURCE_LIMITS,
+    NO_SECRET_SCOPE,
+    NO_TRANSFORMATION,
+    PrincipalType,
+    TrustDestination,
+    TrustOperation,
+    TrustPrincipal,
+    TrustProvenance,
+    TrustRequest,
+    TrustResource,
+    authority_scope_digest,
+    canonical_digest,
+    evaluate_trust,
+)
 from src.tools.policy import get_tool_approval_behavior, get_tool_risk_level
 
 
 def _run_async(coro):
     return asyncio.run(coro)
+
+
+def _canonical_metadata_digest(value: Any) -> str:
+    normalized = json.loads(json.dumps(value, sort_keys=True, default=str))
+    return canonical_digest(normalized)
 
 
 def _tool_approval_context(tool: Tool, arguments: dict[str, Any]) -> dict[str, Any] | None:
@@ -24,6 +56,88 @@ def _tool_approval_context(tool: Tool, arguments: dict[str, Any]) -> dict[str, A
     if isinstance(payload, dict) and payload:
         return payload
     return None
+
+
+def _secret_ref_fields(arguments: dict[str, Any]) -> list[str]:
+    def _contains_ref(value: Any) -> bool:
+        if isinstance(value, str):
+            return "secret://" in value
+        if isinstance(value, dict):
+            return any(_contains_ref(item) for item in value.values())
+        if isinstance(value, (list, tuple)):
+            return any(_contains_ref(item) for item in value)
+        return False
+
+    return sorted(str(key) for key, value in arguments.items() if _contains_ref(value))
+
+
+def _capability_authority_request(
+    *,
+    session_id: str | None,
+    principal: TrustPrincipal | None,
+    tool_name: str,
+    arguments: dict[str, Any],
+) -> TrustRequest:
+    safe_arguments = redact_for_audit(arguments)
+    data_digest = _canonical_metadata_digest(safe_arguments)
+    secret_ref_fields = _secret_ref_fields(arguments)
+    effective_principal = principal
+    if effective_principal is None:
+        effective_principal = TrustPrincipal(
+            principal_id="unbound-runtime",
+            principal_type=PrincipalType.ANONYMOUS,
+            authenticated=False,
+        )
+    destination = TrustDestination(
+        destination_id="seraph-capability-runtime",
+        destination_class=DestinationClass.LOCAL_RUNTIME,
+    )
+    resource = TrustResource(
+        resource_type="capability",
+        resource_id=f"capability:{canonical_digest(tool_name)[:24]}",
+        object_digest=NO_OBJECT,
+    )
+    request_session_id = session_id or ""
+    request_job_id = effective_principal.job_id
+    return TrustRequest(
+        principal=effective_principal,
+        provenance=(
+            TrustProvenance(
+                origin=ContentOrigin.PROVIDER_OUTPUT,
+                source_id="provider-output",
+                data_digest=data_digest,
+                egress_class=EgressClass.LOCAL_ONLY,
+                instruction_authority=False,
+            ),
+        ),
+        destination=destination,
+        operation=TrustOperation.CAPABILITY_CALL,
+        required_grant=AuthorityGrant.CAPABILITY_EXECUTE,
+        capability_id=tool_name,
+        capability_version="legacy",
+        data_digest=data_digest,
+        secret_scope_digest=(
+            canonical_digest({"secret_ref_fields": secret_ref_fields})
+            if secret_ref_fields
+            else NO_SECRET_SCOPE
+        ),
+        resource_limits_digest=NO_RESOURCE_LIMITS,
+        transformation_digest=NO_TRANSFORMATION,
+        authority_scope_digest=authority_scope_digest(
+            required_grant=AuthorityGrant.CAPABILITY_EXECUTE,
+            capability_id=tool_name,
+            destination=destination,
+            resource=resource,
+        ),
+        resource=resource,
+        session_id=request_session_id,
+        job_id=request_job_id,
+        request_id=f"request:{uuid4().hex}",
+        attempt_id=f"attempt:{uuid4().hex}",
+        replay_id=f"replay:{uuid4().hex}",
+        decision_expires_at=time.time() + 60.0,
+        egress_class=EgressClass.LOCAL_ONLY,
+    )
 
 
 class ApprovalTool(Tool):
@@ -61,14 +175,31 @@ class ApprovalTool(Tool):
     def __call__(self, *args, sanitize_inputs_outputs: bool = False, **kwargs):
         approval_mode = get_current_approval_mode()
         session_id = get_current_session_id()
-        if session_id is None:
-            return self.wrapped_tool(*args, sanitize_inputs_outputs=sanitize_inputs_outputs, **kwargs)
+        arguments = self._normalize_invocation(args, kwargs)
+        principal = get_current_trust_principal()
+        if session_id is None or principal is None:
+            raise PermissionError(
+                f"Tool '{self.name}' is blocked because runtime authority is unavailable."
+            )
+
+        authority_decision = evaluate_trust(
+            _capability_authority_request(
+                session_id=session_id,
+                principal=principal,
+                tool_name=self.name,
+                arguments=arguments,
+            )
+        )
+        if not authority_decision.allowed:
+            raise PermissionError(
+                f"Tool '{self.name}' is blocked because runtime authority is unavailable "
+                f"({authority_decision.reason_code})."
+            )
 
         approval_behavior = "always" if self.force_approval else get_tool_approval_behavior(self.name, is_mcp=self.is_mcp)
         if approval_behavior != "always" and approval_mode != "high_risk":
             return self.wrapped_tool(*args, sanitize_inputs_outputs=sanitize_inputs_outputs, **kwargs)
 
-        arguments = self._normalize_invocation(args, kwargs)
         approval_context = _tool_approval_context(self.wrapped_tool, arguments)
         fingerprint = fingerprint_tool_call(
             self.name,

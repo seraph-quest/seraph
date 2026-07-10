@@ -796,6 +796,7 @@ from src.workflows.post_dx_live_durable_orchestration import (
 from src.evolution.engine import evolution_benchmark_gate_policy
 from src.approval.exceptions import ApprovalRequired
 from src.approval.runtime import reset_runtime_context, set_runtime_context
+from src.security.trust_contract import AuthorityGrant, PrincipalType, TrustPrincipal
 from src.agent.session import SessionManager, session_manager
 from src.agent.context_window import _summarize_middle, _summary_cache
 from src.agent.factory import create_agent, create_orchestrator, get_model
@@ -2491,6 +2492,18 @@ def _eval_delegation_secret_boundary_behavior() -> dict[str, Any]:
     }
 
 
+def _eval_secret_ref_operator_principal(session_id: str) -> TrustPrincipal:
+    return TrustPrincipal(
+        principal_id="operator:runtime-eval",
+        principal_type=PrincipalType.OPERATOR,
+        grants=(
+            AuthorityGrant.CAPABILITY_EXECUTE,
+            AuthorityGrant.CREDENTIAL_EGRESS,
+        ),
+        session_id=session_id,
+    )
+
+
 def _eval_secret_ref_egress_boundary_behavior() -> dict[str, Any]:
     class _EvalMCPTool:
         def __init__(self, name: str, allowed_hosts: list[str] | None) -> None:
@@ -2517,7 +2530,11 @@ def _eval_secret_ref_egress_boundary_behavior() -> dict[str, Any]:
                 self.observed_authorization = headers.get("Authorization")
             return {"status": "sent", "headers": {"Authorization": "[REDACTED]"}}
 
-    context_tokens = set_runtime_context("session-1", "high_risk")
+    context_tokens = set_runtime_context(
+        "session-1",
+        "high_risk",
+        trust_principal=_eval_secret_ref_operator_principal("session-1"),
+    )
     try:
         raw_allowlisted_tool = _EvalMCPTool("mcp_allowlisted", ["api.example.com"])
         secret_ref = issue_secret_ref(
@@ -2588,7 +2605,11 @@ def _eval_secure_host_secret_ref_fail_closed_behavior() -> dict[str, Any]:
                 self.observed_authorization = headers.get("Authorization")
             return {"status": "sent", "headers": {"Authorization": "[REDACTED]"}}
 
-    context_tokens = set_runtime_context("secure-host-session", "high_risk")
+    context_tokens = set_runtime_context(
+        "secure-host-session",
+        "high_risk",
+        trust_principal=_eval_secret_ref_operator_principal("secure-host-session"),
+    )
     try:
         raw_tool = _EvalMCPTool()
         secret_ref = issue_secret_ref(
@@ -2617,7 +2638,13 @@ def _eval_secure_host_secret_ref_fail_closed_behavior() -> dict[str, Any]:
     finally:
         reset_runtime_context(context_tokens)
 
-    other_tokens = set_runtime_context("other-secure-host-session", "high_risk")
+    other_tokens = set_runtime_context(
+        "other-secure-host-session",
+        "high_risk",
+        trust_principal=_eval_secret_ref_operator_principal(
+            "other-secure-host-session"
+        ),
+    )
     try:
         cross_session_error = ""
         try:

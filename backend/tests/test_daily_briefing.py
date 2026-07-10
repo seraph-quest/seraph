@@ -4,7 +4,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+pytestmark = pytest.mark.usefixtures("mocked_canonical_inference_context")
+
 from src.audit.repository import audit_repository
+from src.security.trust_contract import canonical_digest
 from src.observer.context import CurrentContext
 from src.scheduler.jobs.daily_briefing import run_daily_briefing
 
@@ -99,6 +102,8 @@ async def test_daily_briefing_uses_named_runtime_path():
         await run_daily_briefing()
 
     assert mock_completion.await_args.kwargs["runtime_path"] == "daily_briefing"
+    call = mock_completion.await_args.kwargs
+    assert call["request_context"].data_digest == canonical_digest(call["messages"])
 
 
 @pytest.mark.asyncio

@@ -7,6 +7,7 @@ from time import perf_counter
 from config.settings import settings
 from src.audit.runtime import log_background_task_event, log_scheduler_job_event
 from src.llm_runtime import completion_with_fallback
+from src.model_fabric.caller_context import build_canonical_inference_context
 from src.models.schemas import WSResponse
 
 logger = logging.getLogger(__name__)
@@ -105,12 +106,19 @@ async def run_daily_briefing() -> None:
         )
 
         try:
+            transport_messages = [{"role": "user", "content": prompt}]
             response = await completion_with_fallback(
-                messages=[{"role": "user", "content": prompt}],
+                messages=transport_messages,
                 temperature=0.6,
                 max_tokens=512,
                 timeout=settings.agent_briefing_timeout,
                 runtime_path="daily_briefing",
+                request_context=build_canonical_inference_context(
+                    "daily_briefing",
+                    payload=transport_messages,
+                    output_tokens=512,
+                    timeout_seconds=settings.agent_briefing_timeout,
+                ),
             )
         except asyncio.TimeoutError:
             logger.warning("daily_briefing: LLM timed out after %ds", settings.agent_briefing_timeout)

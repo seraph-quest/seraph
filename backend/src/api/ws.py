@@ -348,6 +348,7 @@ async def websocket_chat(websocket: WebSocket):
                             ws_msg.message,
                             runtime_path=direct_runtime_path,
                             is_onboarding=direct_is_onboarding,
+                            session_id=session.id,
                         ):
                             streamed_parts.append(delta)
                             safe_delta, emitted_safe_chars = await redact_secrets_for_streaming_snapshot(
@@ -389,6 +390,7 @@ async def websocket_chat(websocket: WebSocket):
                             ws_msg.message,
                             runtime_path=direct_runtime_path,
                             is_onboarding=direct_is_onboarding,
+                            session_id=session.id,
                             request_id=llm_request_id,
                         )
                     final_result = await redact_secrets_in_text(final_result, fail_closed=True)

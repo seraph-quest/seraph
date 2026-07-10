@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import pytest
+
+pytestmark = pytest.mark.usefixtures("mocked_vlm_model_fabric_adoption")
+
 from src.observer.screenshot_semantic_analysis import (
     analyze_screenshot_image,
     screenshot_semantic_analysis_accepting_background_work,
@@ -45,8 +49,9 @@ async def test_local_vlm_analyzer_posts_prompt_file_and_validates_response(tmp_p
             }
 
     class FakeAsyncClient:
-        def __init__(self, *, timeout):
+        def __init__(self, *, timeout, follow_redirects=False):
             self.timeout = timeout
+            self.follow_redirects = follow_redirects
 
         async def __aenter__(self):
             return self
@@ -65,6 +70,7 @@ async def test_local_vlm_analyzer_posts_prompt_file_and_validates_response(tmp_p
                     "media_type": media_type,
                     "headers": headers,
                     "timeout": self.timeout,
+                    "follow_redirects": self.follow_redirects,
                 }
             )
             return FakeResponse()
@@ -110,7 +116,9 @@ async def test_local_vlm_analyzer_posts_prompt_file_and_validates_response(tmp_p
         "X-Seraph-Runtime-Path": "screenshot_image_analysis",
         "X-Seraph-Runtime-Profile": "screenshot_fast",
     }
-    assert calls[0]["timeout"] == 9
+    assert calls[0]["timeout"].connect <= 9
+    assert calls[0]["timeout"].connect > 0
+    assert calls[0]["follow_redirects"] is False
 
 
 async def test_gpu_vlm_runtime_overrides_legacy_local_vlm_base_url(tmp_path, monkeypatch):
@@ -132,7 +140,7 @@ async def test_gpu_vlm_runtime_overrides_legacy_local_vlm_base_url(tmp_path, mon
             }
 
     class FakeAsyncClient:
-        def __init__(self, *, timeout):
+        def __init__(self, *, timeout, follow_redirects=False):
             self.timeout = timeout
 
         async def __aenter__(self):
@@ -149,6 +157,7 @@ async def test_gpu_vlm_runtime_overrides_legacy_local_vlm_base_url(tmp_path, mon
     monkeypatch.setattr("src.observer.screenshot_semantic_analysis.settings.local_vlm_base_url", "http://127.0.0.1:8000")
     monkeypatch.setattr("src.observer.screenshot_semantic_analysis.settings.seraph_vlm_base_url", "http://192.168.1.26:8001")
     monkeypatch.setattr("src.observer.screenshot_semantic_analysis.settings.seraph_vlm_api_key", "gpu-token")
+    monkeypatch.setattr("src.observer.screenshot_semantic_analysis.settings.local_vlm_model", "gpu-vlm")
     monkeypatch.setattr("src.observer.screenshot_semantic_analysis.httpx.AsyncClient", FakeAsyncClient)
 
     analysis = await analyze_screenshot_image(image, {})
@@ -191,7 +200,7 @@ async def test_local_vlm_analyzer_uses_persisted_screen_analysis_provider(tmp_pa
             }
 
     class FakeAsyncClient:
-        def __init__(self, *, timeout):
+        def __init__(self, *, timeout, follow_redirects=False):
             self.timeout = timeout
 
         async def __aenter__(self):
@@ -239,7 +248,7 @@ async def test_local_vlm_analyzer_honors_persisted_disabled_toggle(tmp_path, mon
     calls = []
 
     class FakeAsyncClient:
-        def __init__(self, *, timeout):
+        def __init__(self, *, timeout, follow_redirects=False):
             self.timeout = timeout
 
         async def __aenter__(self):
@@ -292,7 +301,7 @@ async def test_local_vlm_background_capacity_requires_free_worker(monkeypatch):
             return self._payload
 
     class FakeAsyncClient:
-        def __init__(self, *, timeout):
+        def __init__(self, *, timeout, follow_redirects=False):
             self.timeout = timeout
 
         async def __aenter__(self):
@@ -338,7 +347,7 @@ async def test_local_vlm_background_capacity_requires_backend_health(monkeypatch
             return self._payload
 
     class FakeAsyncClient:
-        def __init__(self, *, timeout):
+        def __init__(self, *, timeout, follow_redirects=False):
             self.timeout = timeout
 
         async def __aenter__(self):
@@ -376,7 +385,7 @@ async def test_local_vlm_background_capacity_normalizes_nested_queue_payload(mon
             return self._payload
 
     class FakeAsyncClient:
-        def __init__(self, *, timeout):
+        def __init__(self, *, timeout, follow_redirects=False):
             self.timeout = timeout
 
         async def __aenter__(self):

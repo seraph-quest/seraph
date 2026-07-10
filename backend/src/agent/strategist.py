@@ -15,6 +15,7 @@ from src.llm_runtime import (
     build_model_kwargs,
     completion_with_fallback,
 )
+from src.model_fabric.caller_context import build_canonical_inference_context
 from src.tools.audit import wrap_tools_for_audit
 from src.tools.soul_tool import view_soul
 from src.tools.goal_tools import get_goals, get_goal_progress
@@ -115,18 +116,25 @@ async def run_strategist_decision_completion(
         proactivity_level=settings.proactivity_level,
         context_block=context_block,
     )
-    response = await completion_with_fallback(
-        messages=[
+    transport_messages = [
             {
                 "role": "system",
                 "content": "You return only one valid JSON object. Do not call tools. Do not include markdown.",
             },
             {"role": "user", "content": prompt},
-        ],
+        ]
+    response = await completion_with_fallback(
+        messages=transport_messages,
         temperature=0.2,
         max_tokens=512,
         timeout=settings.agent_strategist_timeout,
         runtime_path="strategist_agent",
+        request_context=build_canonical_inference_context(
+            "strategist_agent",
+            payload=transport_messages,
+            output_tokens=512,
+            timeout_seconds=settings.agent_strategist_timeout,
+        ),
     )
     return str(response.choices[0].message.content or "").strip()
 

@@ -7,6 +7,8 @@ from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+
+pytestmark = pytest.mark.usefixtures("mocked_canonical_inference_context")
 from sqlmodel import select
 
 import src.db.models  # noqa: F401

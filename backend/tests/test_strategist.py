@@ -11,6 +11,7 @@ from src.agent.strategist import (
     run_strategist_decision_completion,
 )
 from src.tools.audit import AuditedTool
+from src.security.trust_contract import canonical_digest
 
 
 # ── parse_strategist_response tests ──────────────────────
@@ -146,7 +147,7 @@ def test_create_strategist_agent_max_steps(mock_model_cls):
 
 
 @pytest.mark.asyncio
-async def test_run_strategist_decision_completion_uses_bounded_runtime_path():
+async def test_run_strategist_decision_completion_uses_bounded_runtime_path(mocked_canonical_inference_context):
     response = MagicMock()
     response.choices = [
         MagicMock(
@@ -166,3 +167,5 @@ async def test_run_strategist_decision_completion_uses_bounded_runtime_path():
     assert completion.await_args.kwargs["temperature"] == 0.2
     assert completion.await_args.kwargs["max_tokens"] == 512
     assert "Do not call tools" in completion.await_args.kwargs["messages"][0]["content"]
+    call = completion.await_args.kwargs
+    assert call["request_context"].data_digest == canonical_digest(call["messages"])

@@ -77,6 +77,37 @@ The target provider contract is inference through local models, OpenRouter, and
 generic OpenAI-compatible systems. The UI and `/api/runtime/status` must report
 the effective route, including degraded state and fallback.
 
+> **Branch-local #740 target, not shipped `develop` truth:** the model-fabric
+> settings, canary, proof, receipt, and runtime-path status surfaces below remain
+> intended behavior until the reviewed epic integration PR lands.
+
+The target GPU topology has three distinct inference transports:
+
+- `LOCAL_LLM_API_BASE=http://192.168.1.26:8000/v1` is the chosen direct GPU text
+  endpoint for Seraph text workloads;
+- `SERAPH_VLM_BASE_URL=http://192.168.1.26:8001` also exposes an optional
+  OpenAI-compatible text chat proxy under `/v1`;
+- that same wrapper performs screenshot vision through `/v1/analyze-file`.
+
+They share the model-fabric selection, trust, proof, and receipt vocabulary but
+remain separate transport adapters. `/api/settings/model-fabric` reports
+configured profiles and policies. The `model_fabric` field in
+`/api/runtime/status` reports
+selected and attempted routes, the last actual successful route, fallback,
+degradation, receipt persistence, and fresh/stale/missing capability proof.
+Settings retains last-known metadata if a refresh fails and labels it `STALE`.
+
+Capability canaries are intended to run only from an explicit authenticated operator action through
+`POST /api/settings/model-fabric/canary`. Each canary targets one exact profile,
+capability, endpoint/model/adapter binding with a bounded deadline and no
+fallback. Status and settings reads never launch inference.
+
+**Integration dependency:** the fabric does not synthesize operator identity.
+On the #740 epic branch, REST/WebSocket chat remains fail-closed with zero model
+transport when ingress has not bound an authenticated principal. Issue #741
+owns binding LAN/operator identity and making that interactive path functional;
+#740 supplies the governed inference route but does not weaken identity checks.
+
 **Partial/transitional:** `develop` still contains older provider-specific and
 command-backed operator paths. They are implementation history scheduled for
 removal under issue #739, not part of the target architecture. Do not configure

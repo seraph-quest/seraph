@@ -9,11 +9,12 @@ from typing import Any
 
 from config.settings import settings
 from src.llm_runtime import (
-    build_completion_kwargs,
     completion_with_fallback_sync,
     is_local_runtime_profile,
     resolve_runtime_profile,
+    stream_completion_with_fallback,
 )
+from src.model_fabric.caller_context import build_canonical_inference_context
 
 
 _LIGHTWEIGHT_PREFIXES = (
@@ -141,17 +142,27 @@ async def run_direct_local_chat(
     *,
     runtime_path: str,
     is_onboarding: bool,
+    session_id: str = "",
     request_id: str | None = None,
 ) -> str:
     """Run a single bounded local completion without invoking the tool agent loop."""
+    messages = _direct_local_chat_messages(message, is_onboarding=is_onboarding)
     response = await asyncio.to_thread(
         completion_with_fallback_sync,
-        messages=_direct_local_chat_messages(message, is_onboarding=is_onboarding),
+        messages=messages,
         temperature=settings.model_temperature,
         max_tokens=min(settings.model_max_tokens, 512),
         runtime_path=runtime_path,
         request_id=request_id,
         local_runtime_only=True,
+        request_context=build_canonical_inference_context(
+            runtime_path,
+            payload=messages,
+            output_tokens=min(settings.model_max_tokens, 512),
+            timeout_seconds=settings.agent_chat_timeout,
+            session_id=session_id,
+            request_id=request_id or "",
+        ),
     )
     content = _message_content(response)
     return content or "I am here. What should we focus on first?"
@@ -162,46 +173,30 @@ async def stream_direct_local_chat(
     *,
     runtime_path: str,
     is_onboarding: bool,
+    session_id: str = "",
 ) -> AsyncIterator[str]:
     """Yield local chat token deltas and return the full response when complete."""
     if not _uses_local_gemma_profile(runtime_path):
         raise RuntimeError(f"Runtime path '{runtime_path}' is not configured for local Gemma chat streaming")
 
-    kwargs = build_completion_kwargs(
-        messages=_direct_local_chat_messages(message, is_onboarding=is_onboarding),
+    messages = _direct_local_chat_messages(message, is_onboarding=is_onboarding)
+    context = build_canonical_inference_context(
+        runtime_path,
+        payload=messages,
+        output_tokens=min(settings.model_max_tokens, 512),
+        timeout_seconds=settings.agent_chat_timeout,
+        session_id=session_id,
+        streaming=True,
+    )
+    parts: list[str] = []
+    async for delta in stream_completion_with_fallback(
+        messages=messages,
         temperature=settings.model_temperature,
         max_tokens=min(settings.model_max_tokens, 512),
         runtime_path=runtime_path,
-    )
-    kwargs["stream"] = True
-
-    queue: asyncio.Queue[str | BaseException | object] = asyncio.Queue()
-    done = object()
-    loop = asyncio.get_running_loop()
-
-    def _run_stream() -> None:
-        try:
-            import litellm
-
-            for chunk in litellm.completion(**kwargs):
-                delta = _stream_chunk_delta(chunk)
-                if delta:
-                    loop.call_soon_threadsafe(queue.put_nowait, delta)
-        except BaseException as exc:
-            loop.call_soon_threadsafe(queue.put_nowait, exc)
-        finally:
-            loop.call_soon_threadsafe(queue.put_nowait, done)
-
-    loop.run_in_executor(None, _run_stream)
-
-    parts: list[str] = []
-    while True:
-        item = await queue.get()
-        if item is done:
-            break
-        if isinstance(item, BaseException):
-            raise item
-        delta = str(item)
+        request_context=context,
+        request_id=context.request_id,
+    ):
         parts.append(delta)
         yield delta
 

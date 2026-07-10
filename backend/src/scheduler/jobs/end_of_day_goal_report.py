@@ -23,6 +23,7 @@ from config.settings import settings
 from src.audit.runtime import log_integration_event, log_scheduler_job_event
 from src.db.models import GoalStatus, MemoryEpisode, MemoryEpisodeType, ScreenObservation
 from src.llm_runtime import completion_with_fallback
+from src.model_fabric.caller_context import build_canonical_inference_context
 from src.observer.image_metadata import image_metadata_label
 from src.observer.screenshot_folder_source import resolve_screenshot_folder
 from src.observer.screenshot_semantic_analysis import semantic_analysis_status_from_details
@@ -805,13 +806,20 @@ async def build_end_of_day_goal_report(report_day: date | None = None) -> dict[s
         completed_goals=_format_goals(completed_goals),
     )
 
+    transport_messages = [{"role": "user", "content": prompt}]
     response = await completion_with_fallback(
-        messages=[{"role": "user", "content": prompt}],
+        messages=transport_messages,
         temperature=0.4,
         max_tokens=900,
         timeout=settings.agent_briefing_timeout,
         runtime_path="end_of_day_goal_report",
         local_runtime_only=not settings.screen_derived_llm_allow_remote,
+        request_context=build_canonical_inference_context(
+            "end_of_day_goal_report",
+            payload=transport_messages,
+            output_tokens=900,
+            timeout_seconds=settings.agent_briefing_timeout,
+        ),
     )
     body = str(response.choices[0].message.content or "").strip()
     if not body:

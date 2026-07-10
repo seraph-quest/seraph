@@ -2,6 +2,7 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { ArtifactStoragePanel } from "./ArtifactStoragePanel";
+import { isGreenModelFabricCanary } from "../../lib/modelFabric";
 
 function mockResponse(data: unknown, ok = true) {
   return {
@@ -9,6 +10,18 @@ function mockResponse(data: unknown, ok = true) {
     json: async () => data,
   };
 }
+
+it("does not treat persistence-degraded canaries as green", () => {
+  expect(isGreenModelFabricCanary({
+    profile_id: "local-text",
+    capability: "text",
+    outcome: "passed",
+    error_code: "proof_persistence_failed",
+    proof: null,
+    receipt_persistence: "persisted",
+    proof_persistence: "degraded",
+  })).toBe(false);
+});
 
 function settingsFromScreenAnalysisFixture(screen: {
   enabled: boolean;
@@ -149,13 +162,199 @@ describe("ArtifactStoragePanel", () => {
   const fetchMock = vi.fn();
 
   beforeEach(() => {
+    window.localStorage.clear();
     fetchMock.mockReset();
     vi.stubGlobal("fetch", fetchMock);
   });
 
   afterEach(() => {
+    window.localStorage.clear();
     vi.unstubAllGlobals();
     vi.restoreAllMocks();
+  });
+
+  it("shows configured, attempted, actual text and VLM routes without probing on status reads", async () => {
+    const artifactStorage = settingsFromScreenAnalysisFixture({
+      enabled: true,
+      provider: "local-vlm",
+      model: "gemma-vlm",
+      preserve_captures: true,
+      archive_dir: "/tmp/seraph/artifacts",
+      screenshot_folder: "/tmp/screenshots",
+      capture_mode: "on_switch",
+      cadence_seconds: null,
+      daemon_connected: true,
+      artifact_count: 2,
+      last_artifact_at: null,
+    });
+    const profile = {
+      id: "local-text",
+      provider_kind: "openai-compatible",
+      model: "gemma-text",
+      api_base: "http://192.168.1.26:8000/v1",
+      enabled: true,
+      secret_configured: true,
+      missing_secret: false,
+      capabilities: ["text", "streaming"],
+      transport_adapter: "litellm",
+      model_fabric_eligible: true,
+      model_fabric_exclusion_reason: null,
+      routable: true,
+      non_routable_reasons: [],
+    };
+    const vlmProfile = { ...profile, id: "local-vlm", model: "gemma-vlm", transport_adapter: "vlm_analyze_file" };
+    const settingsPayload = {
+      schema_version: "seraph.model-fabric.settings.v1",
+      status: "ready",
+      error_code: null,
+      updated_at: "2026-07-10T12:00:00Z",
+      profiles: [profile, vlmProfile],
+      persisted_profile_ids: ["local-text", "local-vlm"],
+      workload_policies: [{
+        runtime_path: "interactive",
+        egress_class: "local_only",
+        cloud_egress_acknowledged: false,
+        allowed_profile_ids: ["local-text"],
+        allowed_provider_kinds: [],
+        fallback_allowed: false,
+      }],
+      defaults: { egress_class: "local_only", fallback_allowed: false },
+      canary_endpoint: "/api/settings/model-fabric/canary",
+    };
+    const workload = (profileId: string, model: string) => ({
+      selected: { profile_id: profileId, model, adapter: "litellm", destination_class: "private", outcome: "selected", latency_ms: 0 },
+      attempted: { profile_id: profileId, model, adapter: "litellm", destination_class: "private", outcome: "succeeded", latency_ms: 18 },
+      attempt_count: 1,
+      last_outcome: "succeeded",
+      succeeded: { profile_id: profileId, model, adapter: "litellm", receipt_id: `receipt-${profileId}`, finished_at: "2026-07-10T12:01:00Z" },
+      persistence: "persisted",
+    });
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/settings/artifact-storage")) return Promise.resolve(mockResponse(artifactStorage));
+      if (url.includes("/api/settings/model-fabric")) return Promise.resolve(mockResponse(settingsPayload));
+      if (url.includes("/api/runtime/status")) return Promise.resolve(mockResponse({
+        provider: "local",
+        model: "gemma-text",
+        model_fabric: {
+          status: "ready",
+          configuration_status: "ready",
+          configuration_error: null,
+          configured_chat_profile: "local-text",
+          profiles: [profile, vlmProfile],
+          proofs: [
+            { profile_id: "local-text", capability: "text", status: "fresh", outcome: "passed", checked_at: "2026-07-10T12:00:00Z", expires_at: "2026-07-10T13:00:00Z" },
+            { profile_id: "local-text", capability: "streaming", status: "stale", outcome: "passed", checked_at: "2026-07-09T12:00:00Z", expires_at: "2026-07-09T13:00:00Z" },
+            { profile_id: "local-vlm", capability: "vision", status: "missing", outcome: null, checked_at: null, expires_at: null },
+          ],
+          topology: { text: ["interactive", "background", "report"], vlm: ["vision"] },
+          workloads: { interactive: workload("local-text", "gemma-text"), vision: workload("local-vlm", "gemma-vlm") },
+        },
+      }));
+      return Promise.reject(new Error(`unexpected ${url}`));
+    });
+
+    render(<ArtifactStoragePanel />);
+
+    expect(await screen.findByText("Model fabric")).toBeInTheDocument();
+    expect(screen.getByText("text: interactive, background, report · VLM: vision")).toBeInTheDocument();
+    expect(screen.getByText(/local-text\/gemma-text:routable/)).toBeInTheDocument();
+    const textRoute = screen.getByText(/selected local-text · attempted local-text:succeeded · actual local-text\/gemma-text/);
+    expect(textRoute).toHaveClass("text-green-400");
+    expect(screen.getByText(/selected local-vlm · attempted local-vlm:succeeded · actual local-vlm\/gemma-vlm/)).toHaveClass("text-green-400");
+    expect(screen.getByText("1 fresh · 1 stale · 1 missing")).toBeInTheDocument();
+    expect(fetchMock.mock.calls.some(([input]) => String(input).includes("/canary"))).toBe(false);
+  });
+
+  it("runs one manual bounded canary only after the operator clicks", async () => {
+    const artifactStorage = settingsFromScreenAnalysisFixture({
+      enabled: true,
+      provider: "local-vlm",
+      model: "gemma",
+      preserve_captures: true,
+      archive_dir: "/tmp/seraph/artifacts",
+      capture_mode: "on_switch",
+      cadence_seconds: null,
+      daemon_connected: true,
+      artifact_count: 0,
+      last_artifact_at: null,
+    });
+    const profile = {
+      id: "local-text", provider_kind: "openai-compatible", model: "gemma", api_base: "http://127.0.0.1:8000/v1",
+      enabled: true, secret_configured: true, missing_secret: false, capabilities: ["text"], transport_adapter: "litellm",
+      model_fabric_eligible: true, model_fabric_exclusion_reason: null, routable: true, non_routable_reasons: [],
+      canary_timeout_seconds: 120,
+    };
+    const settingsPayload = {
+      schema_version: "seraph.model-fabric.settings.v1", status: "ready", error_code: null, updated_at: null,
+      profiles: [profile], persisted_profile_ids: ["local-text"], workload_policies: [],
+      defaults: { egress_class: "local_only", fallback_allowed: false }, canary_endpoint: "/api/settings/model-fabric/canary",
+    };
+    fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes("/api/settings/artifact-storage")) return Promise.resolve(mockResponse(artifactStorage));
+      if (url.includes("/api/settings/model-fabric/canary") && init?.method === "POST") {
+        return Promise.resolve(mockResponse({
+          profile_id: "local-text", capability: "text", outcome: "passed", error_code: null,
+          proof: { proof_hash: "abcdef1234567890", profile_id: "local-text", model: "gemma", adapter: "litellm", capability: "text", outcome: "passed", checked_at: "2026-07-10T12:00:00Z", expires_at: "2026-07-10T13:00:00Z", proven_value: "verified" },
+          receipt_persistence: "persisted", proof_persistence: "persisted",
+        }));
+      }
+      if (url.includes("/api/settings/model-fabric")) return Promise.resolve(mockResponse(settingsPayload));
+      if (url.includes("/api/runtime/status")) return Promise.resolve(mockResponse({ provider: "local", model: "gemma", model_fabric: { status: "ready", configuration_status: "ready", configuration_error: null, configured_chat_profile: "local-text", profiles: [profile], topology: { text: ["interactive"], vlm: ["vision"] }, workloads: {} } }));
+      return Promise.reject(new Error(`unexpected ${url}`));
+    });
+
+    render(<ArtifactStoragePanel />);
+    const runButton = await screen.findByRole("button", { name: "Run canary" });
+    expect(screen.getByRole("option", { name: "health" })).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "latency ms" })).toBeInTheDocument();
+    expect(screen.queryByRole("option", { name: "context tokens" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("option", { name: "output tokens" })).not.toBeInTheDocument();
+    expect(fetchMock.mock.calls.some(([input]) => String(input).includes("/canary"))).toBe(false);
+    fireEvent.click(runButton);
+
+    expect(await screen.findByText(/local-text\/text · passed · proof abcdef123456/)).toHaveClass("text-green-400");
+    const canaryCalls = fetchMock.mock.calls.filter(([input]) => String(input).includes("/canary"));
+    expect(canaryCalls).toHaveLength(1);
+    expect(JSON.parse(String(canaryCalls[0][1]?.body))).toEqual({
+      profile_id: "local-text", capability: "text", timeout_seconds: 120, proof_ttl_seconds: 3600,
+    });
+  });
+
+  it("keeps retained model-fabric controls visible but disables canaries while metadata is stale", async () => {
+    window.localStorage.setItem("seraph.settings.modelFabric.v1", JSON.stringify({
+      schema_version: "seraph.model-fabric.settings.v1",
+      status: "ready",
+      error_code: null,
+      updated_at: "2026-07-10T12:00:00Z",
+      profiles: [{
+        id: "retained-local", provider_kind: "openai-compatible", model: "retained-gemma", api_base: "http://127.0.0.1:8000/v1",
+        enabled: true, secret_configured: true, missing_secret: false, capabilities: ["text"], transport_adapter: "litellm",
+        model_fabric_eligible: true, model_fabric_exclusion_reason: null, routable: true, non_routable_reasons: [],
+      }],
+      persisted_profile_ids: ["retained-local"],
+      workload_policies: [],
+      defaults: { egress_class: "local_only", fallback_allowed: false },
+      canary_endpoint: "/api/settings/model-fabric/canary",
+    }));
+    const artifactStorage = settingsFromScreenAnalysisFixture({
+      enabled: true, provider: "local-vlm", model: "gemma", preserve_captures: true,
+      archive_dir: "/tmp/seraph/artifacts", capture_mode: "on_switch", cadence_seconds: null,
+      daemon_connected: true, artifact_count: 0, last_artifact_at: null,
+    });
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/settings/artifact-storage")) return Promise.resolve(mockResponse(artifactStorage));
+      return Promise.reject(new Error("metadata offline"));
+    });
+
+    render(<ArtifactStoragePanel />);
+
+    expect(await screen.findByText(/retained-local\/retained-gemma:routable/)).toBeInTheDocument();
+    expect(screen.getByText("stale")).toBeInTheDocument();
+    expect(screen.getByText("Model-fabric metadata is temporarily unavailable; showing last-known settings.")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Run canary" })).toBeDisabled();
   });
 
   it("renders screen, report, and email artifact configuration", async () => {
@@ -434,10 +633,10 @@ describe("ArtifactStoragePanel", () => {
     artifactStorage.email.recipient_configured = true;
     artifactStorage.email.allowlist_configured = true;
     artifactStorage.email.sender_configured = true;
-    fetchMock
-      .mockResolvedValueOnce(mockResponse(artifactStorage))
-      .mockResolvedValueOnce(
-        mockResponse({
+    fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes("/api/settings/end-of-day-report/manual") && init?.method === "POST") {
+        return Promise.resolve(mockResponse({
           status: "ok",
           action: "manual-preview",
           report: {
@@ -453,9 +652,11 @@ describe("ArtifactStoragePanel", () => {
             receipt_sha256: "abcdef1234567890",
             status: "succeeded",
           },
-        }),
-      )
-      .mockResolvedValueOnce(mockResponse(artifactStorage));
+        }));
+      }
+      if (url.includes("/api/settings/artifact-storage")) return Promise.resolve(mockResponse(artifactStorage));
+      return Promise.reject(new Error(`unavailable ${url}`));
+    });
 
     render(<ArtifactStoragePanel />);
 
@@ -603,10 +804,18 @@ describe("ArtifactStoragePanel", () => {
       },
     };
 
-    fetchMock
-      .mockResolvedValueOnce(mockResponse(storageWithStaleRows))
-      .mockResolvedValueOnce(mockResponse({ archived: 2, source_missing: 1, stale_root: 1 }))
-      .mockResolvedValueOnce(mockResponse(refreshedStorage));
+    let artifactReads = 0;
+    fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes("/api/settings/screen-analysis/screenshot-folder/clear-stale") && init?.method === "POST") {
+        return Promise.resolve(mockResponse({ archived: 2, source_missing: 1, stale_root: 1 }));
+      }
+      if (url.includes("/api/settings/artifact-storage")) {
+        artifactReads += 1;
+        return Promise.resolve(mockResponse(artifactReads === 1 ? storageWithStaleRows : refreshedStorage));
+      }
+      return Promise.reject(new Error(`unavailable ${url}`));
+    });
 
     render(<ArtifactStoragePanel />);
 
@@ -694,15 +903,21 @@ describe("ArtifactStoragePanel", () => {
         path_source: "screen-analysis-settings",
       },
     };
-    fetchMock
-      .mockResolvedValueOnce(mockResponse(artifactStorage))
-      .mockResolvedValueOnce(
-        mockResponse({
+    let artifactReads = 0;
+    fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes("/api/settings/screen-analysis/screenshot-folder/pick") && init?.method === "POST") {
+        return Promise.resolve(mockResponse({
           screenshot_folder: pickedRoot,
           screenshot_folder_source: "screen-analysis-settings",
-        }),
-      )
-      .mockResolvedValueOnce(mockResponse(refreshedStorage));
+        }));
+      }
+      if (url.includes("/api/settings/artifact-storage")) {
+        artifactReads += 1;
+        return Promise.resolve(mockResponse(artifactReads === 1 ? artifactStorage : refreshedStorage));
+      }
+      return Promise.reject(new Error(`unavailable ${url}`));
+    });
 
     render(<ArtifactStoragePanel />);
 
@@ -837,10 +1052,13 @@ describe("ArtifactStoragePanel", () => {
   });
 
   it("shows degraded metadata warning when artifact metadata has an invalid shape", async () => {
-    fetchMock
-      .mockResolvedValueOnce(mockResponse({ screen: { archive_dir: "/tmp/broken" } }))
-      .mockResolvedValueOnce(
-        mockResponse({
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/settings/artifact-storage")) {
+        return Promise.resolve(mockResponse({ screen: { archive_dir: "/tmp/broken" } }));
+      }
+      if (url.includes("/api/settings/screen-analysis")) {
+        return Promise.resolve(mockResponse({
           enabled: true,
           provider: "local-vlm",
           model: "gemma-4-26b",
@@ -851,8 +1069,10 @@ describe("ArtifactStoragePanel", () => {
           daemon_connected: true,
           artifact_count: 0,
           last_artifact_at: null,
-        }),
-      );
+        }));
+      }
+      return Promise.reject(new Error(`unavailable ${url}`));
+    });
 
     render(<ArtifactStoragePanel />);
 

@@ -1,7 +1,17 @@
 from sqlalchemy import event
-from sqlalchemy.ext.asyncio import create_async_engine
+from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
+from sqlalchemy.orm import sessionmaker
 
-from src.db.engine import _configure_sqlite_connection, _ensure_legacy_columns, _ensure_search_indexes
+from src.db.engine import (
+    _configure_sqlite_connection,
+    _ensure_legacy_columns,
+    _ensure_search_indexes,
+)
+from src.db.models import (
+    ModelCapabilityProofRecord,
+    ModelRouteAttemptReceiptRecord,
+    ModelRouteReceiptRecord,
+)
 
 
 async def test_ensure_legacy_columns_backfills_kind_from_category(tmp_path):
@@ -83,6 +93,127 @@ async def test_ensure_legacy_columns_adds_guardian_intervention_active_project(t
 
             assert "active_project" in columns
             assert "ix_guardian_interventions_active_project" in indexes
+    finally:
+        await engine.dispose()
+
+
+async def test_ensure_legacy_columns_upgrades_early_model_fabric_tables_idempotently(
+    tmp_path,
+):
+    db_path = tmp_path / "legacy-model-fabric.db"
+    engine = create_async_engine(f"sqlite+aiosqlite:///{db_path}")
+    event.listen(engine.sync_engine, "connect", _configure_sqlite_connection)
+
+    try:
+        async with engine.begin() as conn:
+            await conn.exec_driver_sql(
+                """
+                CREATE TABLE model_capability_proofs (
+                    id VARCHAR PRIMARY KEY, proof_hash VARCHAR, profile_schema_version VARCHAR,
+                    profile_contract_hash VARCHAR, profile_id VARCHAR, model VARCHAR,
+                    endpoint VARCHAR, endpoint_digest VARCHAR, endpoint_class VARCHAR,
+                    adapter VARCHAR, capability VARCHAR, canary_version VARCHAR,
+                    outcome VARCHAR, checked_at FLOAT, expires_at FLOAT,
+                    proven_value_json VARCHAR, created_at DATETIME
+                )
+                """
+            )
+            await conn.exec_driver_sql(
+                """
+                CREATE TABLE model_route_receipts (
+                    id VARCHAR PRIMARY KEY, receipt_id VARCHAR, receipt_hash VARCHAR,
+                    request_id VARCHAR, route_decision_id VARCHAR, workload VARCHAR,
+                    outcome VARCHAR, actual_profile_id VARCHAR, actual_model VARCHAR,
+                    actual_adapter VARCHAR, destination_class VARCHAR, egress_class VARCHAR,
+                    trust_decision_id VARCHAR, started_at DATETIME, finished_at DATETIME,
+                    latency_ms INTEGER, created_at DATETIME
+                )
+                """
+            )
+            await conn.exec_driver_sql(
+                """
+                CREATE TABLE model_route_attempt_receipts (
+                    id VARCHAR PRIMARY KEY, route_receipt_id VARCHAR, attempt_id VARCHAR,
+                    attempt_index INTEGER, profile_id VARCHAR, model VARCHAR, endpoint VARCHAR,
+                    endpoint_digest VARCHAR, adapter VARCHAR, destination_class VARCHAR,
+                    egress_class VARCHAR, trust_decision_id VARCHAR,
+                    capability_proof_hashes_json VARCHAR, outcome VARCHAR, error_code VARCHAR,
+                    started_at DATETIME, finished_at DATETIME, latency_ms INTEGER,
+                    created_at DATETIME
+                )
+                """
+            )
+            await conn.exec_driver_sql(
+                """
+                INSERT INTO model_capability_proofs VALUES (
+                    'proof-row', 'proof-hash', 'seraph.model-fabric.v1', 'contract-hash',
+                    'legacy-profile', 'legacy-model', 'http://127.0.0.1:8000/v1',
+                    'endpoint-hash', 'loopback', 'openai_compatible_chat', 'text',
+                    'canary-v1', 'passed', 10.0, 20.0, '"verified"',
+                    '2026-07-01T00:00:00Z'
+                )
+                """
+            )
+            await conn.exec_driver_sql(
+                """
+                INSERT INTO model_route_receipts VALUES (
+                    'route-row', 'legacy-receipt', 'route-hash', 'request-1', 'decision-1',
+                    'capability_probe', 'succeeded', 'legacy-profile', 'legacy-model',
+                    'openai_compatible_chat', 'loopback', 'local_only', 'trust-1',
+                    '2026-07-01T00:00:00Z', '2026-07-01T00:00:01Z', 1000,
+                    '2026-07-01T00:00:01Z'
+                )
+                """
+            )
+            await conn.exec_driver_sql(
+                """
+                INSERT INTO model_route_attempt_receipts VALUES (
+                    'attempt-row', 'legacy-receipt', 'attempt-1', 0, 'legacy-profile',
+                    'legacy-model', 'http://127.0.0.1:8000/v1', 'endpoint-hash',
+                    'openai_compatible_chat', 'loopback', 'local_only', 'trust-1', '[]',
+                    'succeeded', NULL, '2026-07-01T00:00:00Z',
+                    '2026-07-01T00:00:01Z', 1000, '2026-07-01T00:00:01Z'
+                )
+                """
+            )
+
+            await _ensure_legacy_columns(conn)
+            await _ensure_legacy_columns(conn)
+
+        factory = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+        async with factory() as session:
+            proof = await session.get(ModelCapabilityProofRecord, "proof-row")
+            route = await session.get(ModelRouteReceiptRecord, "route-row")
+            attempt = await session.get(ModelRouteAttemptReceiptRecord, "attempt-row")
+            assert proof is not None and proof.receipt_id == "legacy-unbound"
+            assert proof.receipt_hash == "0" * 64
+            assert route is not None and route.runtime_path == "legacy_unknown"
+            assert route.degradation_codes_json == "[]"
+            assert attempt is not None and attempt.cost_kind == "unknown"
+            proof.receipt_hash = "a" * 64
+            route.usage_total_tokens = 7
+            attempt.degradation_code = "legacy_checked"
+            await session.commit()
+
+        async with engine.connect() as conn:
+            preserved = (
+                await conn.exec_driver_sql(
+                    "SELECT profile_id, receipt_hash FROM model_capability_proofs WHERE id='proof-row'"
+                )
+            ).one()
+            route_update = (
+                await conn.exec_driver_sql(
+                    "SELECT usage_total_tokens FROM model_route_receipts WHERE id='route-row'"
+                )
+            ).one()
+            attempt_update = (
+                await conn.exec_driver_sql(
+                    "SELECT degradation_code FROM model_route_attempt_receipts WHERE id='attempt-row'"
+                )
+            ).one()
+            assert preserved == ("legacy-profile", "a" * 64)
+            assert route_update == (7,)
+            assert attempt_update == ("legacy_checked",)
     finally:
         await engine.dispose()
 

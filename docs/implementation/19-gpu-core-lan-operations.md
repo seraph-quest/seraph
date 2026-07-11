@@ -60,8 +60,12 @@ Production commands are explicit and always use the production environment:
 ```
 
 `SERAPH_IMAGE_TAG` must equal the full current Git `HEAD`, and production builds
-require a clean worktree. The wrapper image is digest-pinned. The active release
-record stores the application SHA, wrapper digest, and accepted inventory
+require a clean worktree. The wrapper is pinned either by a real registry
+`name@sha256:<64-hex>` RepoDigest or by an exact local Docker
+`sha256:<64-hex>` image ID. For the current local wrapper repository, build it,
+read `.Id` with `docker image inspect`, and configure that exact ID; do not
+assume a nonexistent GHCR package. Mutable tags are rejected. The active release
+record stores the application SHA, wrapper immutable reference, and accepted inventory
 receipt path so a failed candidate or rollback can restore the entire tuple.
 
 `production start` is a staged operation. Before cutover it automatically
@@ -112,7 +116,8 @@ local and Mac evidence copies, validates the completed immutable bundle, and
 prepares the consumed nonce/challenge ledger and active state before publishing
 the active state last. The immutable bundle contains the app/VLM tuple, Compose
 project and network ID, ingress/backend/VLM container IDs, ingress/backend image
-IDs and revision labels through the local attestation, the wrapper RepoDigest,
+IDs and revision labels through the local attestation, the configured immutable
+wrapper reference and observed image ID (plus RepoDigest when registry-backed),
 hashed evidence copies, and expected origin/client identity. Live identities
 are read again immediately before publication. A failed pre-publication attempt
 can leave only hash-named, read-only orphan evidence in `releases/`; it cannot
@@ -142,8 +147,9 @@ python3 scripts/generate_local_gpu_inventory.py \
 The script hashes the local machine-id in memory and emits only its SHA-256
 digest. It inspects all three containers, their immutable image identities,
 revision labels, shared network identity and fixed private addresses, the
-running wrapper's RepoDigest, network/port state, and tested interface
-behaviors. Locally built legacy images without the pinned identity are
+running wrapper's configured immutable reference and observed image ID, plus
+its RepoDigest when registry-backed, network/port state, and tested interface
+behaviors. Local images whose ID differs from the configured pin are
 non-accepted. Local firewall parsing is not an acceptance gate; the Mac-side
 negative reachability receipt is authoritative for LAN isolation.
 

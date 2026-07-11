@@ -49,7 +49,9 @@ container = json.loads(inspect.stdout)[0]
 image_inspect = run(["docker", "image", "inspect", str(container.get("Image", ""))])
 image_details = json.loads(image_inspect.stdout)[0] if image_inspect.returncode == 0 else {}
 repo_digests = image_details.get("RepoDigests") or []
-actual_image = args.expected_vlm_image if args.expected_vlm_image in repo_digests else "unverified"
+observed_image_id = image_details.get("Id", "")
+is_local_id = args.expected_vlm_image.startswith("sha256:") and "@" not in args.expected_vlm_image
+actual_image = args.expected_vlm_image if ((is_local_id and observed_image_id == args.expected_vlm_image) or (not is_local_id and args.expected_vlm_image in repo_digests)) else "unverified"
 container_running = bool(container.get("State", {}).get("Running"))
 published_ports = container.get("NetworkSettings", {}).get("Ports", {})
 networks = container.get("NetworkSettings", {}).get("Networks", {})
@@ -80,7 +82,7 @@ payload = {
     "docker_bridge_addresses": bridges, "docker_network_bindings": bindings,
     "vlm_image": actual_image, "vlm_interface_contract": "vlm-health-backend-queue-chat-auth-v1",
     "vlm_wrapper_contract_verified": container_running and actual_image != "unverified" and all(checks.values()),
-    "vlm_observation": {"container": args.vlm_container, "container_id": container.get("Id", ""), "running": container_running, "repo_digests": repo_digests, "networks": networks, "published_ports": published_ports, "checks": checks},
+    "vlm_observation": {"container": args.vlm_container, "container_id": container.get("Id", ""), "image_id": observed_image_id, "running": container_running, "repo_digests": repo_digests, "networks": networks, "published_ports": published_ports, "checks": checks},
     "compose_observation":{"project":"seraph-prod","network_name":"seraph-core-prod","containers":compose_containers},
 }
 print(json.dumps(payload, indent=2, sort_keys=True))

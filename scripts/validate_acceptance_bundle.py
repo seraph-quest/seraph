@@ -47,9 +47,12 @@ def validate_attestation(kind):
     if network_ids != {bundle.get("network_id")}: fail(kind + " network ID mismatch")
     for service in ("ingress", "backend"):
         if observed[service].get("image_revision") != bundle["app_sha"]: fail(kind + " application image identity mismatch: " + service)
-    repo_digests = local.get("vlm_observation", {}).get("repo_digests", [])
-    if bundle["vlm_image"] not in repo_digests: fail(kind + " VLM RepoDigest mismatch")
-    immutable = {"project":compose.get("project"),"network_name":compose.get("network_name"),"containers":{s:{k:observed[s].get(k) for k in ("container_id","image_id","image_revision","project","service","network_name","network_id","ip_address")} for s in expected_ips},"vlm_repo_digest":bundle["vlm_image"]}
+    vlm_observation = local.get("vlm_observation", {}); configured_vlm = bundle["vlm_image"]
+    if not vlm_observation.get("image_id"): fail(kind + " VLM observed image ID missing")
+    if configured_vlm.startswith("sha256:") and "@" not in configured_vlm:
+        if vlm_observation.get("image_id") != configured_vlm: fail(kind + " VLM local image ID mismatch")
+    elif configured_vlm not in vlm_observation.get("repo_digests", []): fail(kind + " VLM RepoDigest mismatch")
+    immutable = {"project":compose.get("project"),"network_name":compose.get("network_name"),"containers":{s:{k:observed[s].get(k) for k in ("container_id","image_id","image_revision","project","service","network_name","network_id","ip_address")} for s in expected_ips},"vlm_configured_ref":configured_vlm,"vlm_observed_image_id":vlm_observation.get("image_id")}
     return local, observed, immutable
 
 challenged, challenged_observed, challenged_immutable = validate_attestation("challenged_attestation")

@@ -105,7 +105,8 @@ def test_release_identity_requires_clean_exact_head_and_hex_vlm_digest():
     assert 'git -C "$SCRIPT_DIR" rev-parse HEAD' in manage
     assert 'git -C "$SCRIPT_DIR" status --porcelain' in manage
     assert 'SERAPH_IMAGE_TAG:-}" =~ ^[0-9a-f]{40}$' in manage
-    assert '@sha256:[0-9a-fA-F]{64}$' in manage
+    assert 'sha256:[0-9a-fA-F]{64})$' in manage
+    assert "registry RepoDigest or exact local sha256 image ID" in manage
     assert "mismatched build identity; refusing overwrite" in manage
     non_hex_digest = "ghcr.io/example/wrapper@sha256:" + "z" * 64
     assert not __import__("re").match(r"^[^\s@]+@sha256:[0-9a-fA-F]{64}$", non_hex_digest)
@@ -174,7 +175,7 @@ def test_compose_state_validator_rejects_duplicate_missing_and_extra_rows():
 def test_acceptance_bundle_cross_binds_local_container_and_network_evidence(tmp_path):
     ids={s:s+'-id' for s in ('ingress','backend','vlm-wrapper')}; ips={'ingress':'172.30.0.10','backend':'172.30.0.20','vlm-wrapper':'172.30.0.30'}; app='a'*40
     vlm='repo/vlm@sha256:'+'b'*64
-    local={"captured_at":"2026-01-01T00:00:00+00:00","compose_observation":{"project":"seraph-prod","network_name":"seraph-core-prod","containers":{s:{"container_id":ids[s],"image_id":s+'-image',"image_revision":app if s in {'ingress','backend'} else '',"project":"seraph-prod","service":s,"network_name":"seraph-core-prod","network_id":"net-id","ip_address":ips[s]} for s in ids}},"vlm_observation":{"repo_digests":[vlm]}}
+    local={"captured_at":"2026-01-01T00:00:00+00:00","compose_observation":{"project":"seraph-prod","network_name":"seraph-core-prod","containers":{s:{"container_id":ids[s],"image_id":s+'-image',"image_revision":app if s in {'ingress','backend'} else '',"project":"seraph-prod","service":s,"network_name":"seraph-core-prod","network_id":"net-id","ip_address":ips[s]} for s in ids}},"vlm_observation":{"image_id":"vlm-wrapper-image","repo_digests":[vlm]}}
     local_path=tmp_path/'challenged.json'; local_path.write_text(json.dumps(local)); final_path=tmp_path/'final.json'; final={**local,"captured_at":"2026-01-01T00:01:00+00:00"}; final_path.write_text(json.dumps(final))
     mac_path, mac_env = _signed_mac_receipt(tmp_path, datetime.now(timezone.utc).isoformat())
     sha=lambda p: hashlib.sha256(p.read_bytes()).hexdigest()
@@ -394,12 +395,12 @@ def test_entrypoint_accepts_exactly_one_raw_or_hash_credential(tmp_path):
     assert _entrypoint(tmp_path, "", "").returncode == 78
 
 
-def _inventory(receipt: dict[str, object]) -> subprocess.CompletedProcess[str]:
+def _inventory(receipt: dict[str, object], vlm_image: str = "") -> subprocess.CompletedProcess[str]:
     env = os.environ.copy()
     env.update(
         SERAPH_GPU_EXPECTED_HOSTNAME="jupyter",
         SERAPH_GPU_MACHINE_IDENTITY_SHA256="c" * 64,
-        SERAPH_VLM_IMAGE="ghcr.io/seraph-quest/vlm-screenshot-server@sha256:" + "a" * 64,
+        SERAPH_VLM_IMAGE=vlm_image or "ghcr.io/seraph-quest/vlm-screenshot-server@sha256:" + "a" * 64,
         SERAPH_VLM_INTERFACE_CONTRACT="vlm-health-backend-queue-chat-auth-v1",
         SERAPH_HOST_INVENTORY_MAX_AGE_SECONDS="900",
     )
@@ -426,10 +427,15 @@ def test_host_inventory_gate_accepts_private_listener_and_rejects_lan_listener()
         "vlm_image": "ghcr.io/seraph-quest/vlm-screenshot-server@sha256:" + "a" * 64,
         "vlm_interface_contract": "vlm-health-backend-queue-chat-auth-v1",
         "vlm_wrapper_contract_verified": True,
-        "vlm_observation": {"container_id": "candidate-1", "running": True, "published_ports": {}, "checks": {"health": True, "backend": True, "queue": True, "auth_closed": True, "auth_interface": True}},
+        "vlm_observation": {"container_id": "candidate-1", "image_id": "vlm-wrapper-image", "repo_digests": ["ghcr.io/seraph-quest/vlm-screenshot-server@sha256:" + "a" * 64], "running": True, "published_ports": {}, "checks": {"health": True, "backend": True, "queue": True, "auth_closed": True, "auth_interface": True}},
         "compose_observation": {"project": "seraph-prod", "network_name": "seraph-core-prod", "containers": {service: {"container_id": service+"-1", "image_id": service+"-image", "image_revision": "a"*40 if service in {"ingress","backend"} else "", "project": "seraph-prod", "service": service, "network_name": "seraph-core-prod", "network_id": "net-1", "ip_address": ip} for service,ip in {"ingress":"172.30.0.10","backend":"172.30.0.20","vlm-wrapper":"172.30.0.30"}.items()}},
     }
     assert _inventory(receipt).returncode == 0
+    local_id = "sha256:" + "d" * 64
+    local_receipt = json.loads(json.dumps(receipt)); local_receipt["vlm_image"] = local_id; local_receipt["vlm_observation"]["image_id"] = local_id; local_receipt["vlm_observation"]["repo_digests"] = []
+    assert _inventory(local_receipt, local_id).returncode == 0
+    local_receipt["vlm_observation"]["image_id"] = "sha256:" + "e" * 64
+    assert _inventory(local_receipt, local_id).returncode != 0
     receipt["vlm_observation"]["checks"]["auth_interface"] = False
     forged_contract = _inventory(receipt)
     assert forged_contract.returncode != 0
@@ -457,7 +463,7 @@ def test_host_inventory_gate_rejects_stale_and_identity_or_contract_mismatch():
         "vlm_image": "ghcr.io/seraph-quest/vlm-screenshot-server@sha256:" + "a" * 64,
         "vlm_interface_contract": "vlm-health-backend-queue-chat-auth-v1",
         "vlm_wrapper_contract_verified": True,
-        "vlm_observation": {"container_id": "candidate-1", "running": True, "published_ports": {}, "checks": {"health": True, "backend": True, "queue": True, "auth_closed": True, "auth_interface": True}},
+        "vlm_observation": {"container_id": "candidate-1", "image_id": "vlm-wrapper-image", "repo_digests": ["ghcr.io/seraph-quest/vlm-screenshot-server@sha256:" + "a" * 64], "running": True, "published_ports": {}, "checks": {"health": True, "backend": True, "queue": True, "auth_closed": True, "auth_interface": True}},
         "compose_observation": {"project": "seraph-prod", "network_name": "seraph-core-prod", "containers": {service: {"container_id": service+"-1", "image_id": service+"-image", "image_revision": "a"*40 if service in {"ingress","backend"} else "", "project": "seraph-prod", "service": service, "network_name": "seraph-core-prod", "network_id": "net-1", "ip_address": ip} for service,ip in {"ingress":"172.30.0.10","backend":"172.30.0.20","vlm-wrapper":"172.30.0.30"}.items()}},
     }
     assert "stale" in _inventory(receipt).stderr

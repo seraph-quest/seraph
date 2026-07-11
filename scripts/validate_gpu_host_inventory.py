@@ -60,12 +60,17 @@ if unsafe:
     fail(f"private ports have wildcard/LAN listeners: {unsafe}")
 
 if receipt.get("vlm_image") != expected_vlm_image:
-    fail("managed VLM wrapper digest does not match configured release")
+    fail("managed VLM wrapper immutable reference does not match configured release")
 if receipt.get("vlm_interface_contract") != expected_vlm_contract:
     fail("managed VLM wrapper interface contract does not match configured contract")
 if receipt.get("vlm_wrapper_contract_verified") is not True:
     fail("managed VLM wrapper image/interface contract is unverified")
 vlm_observation = receipt.get("vlm_observation", {})
+if not vlm_observation.get("image_id"): fail("managed VLM observed image ID missing")
+if expected_vlm_image.startswith("sha256:") and "@" not in expected_vlm_image:
+    if vlm_observation.get("image_id") != expected_vlm_image: fail("managed VLM local image ID mismatch")
+elif expected_vlm_image not in vlm_observation.get("repo_digests", []):
+    fail("managed VLM RepoDigest mismatch")
 if vlm_observation.get("running") is not True:
     fail("managed VLM wrapper container is not running")
 if any(value for value in vlm_observation.get("published_ports", {}).values()):

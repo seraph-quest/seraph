@@ -788,7 +788,7 @@ function production_config_validate() {
         [ "$SERAPH_IMAGE_TAG" = "$current_revision" ] || error_exit "SERAPH_IMAGE_TAG must equal current HEAD $current_revision"
         [ -z "$(git -C "$SCRIPT_DIR" status --porcelain)" ] || error_exit "production builds require a clean working tree"
     fi
-    [[ "${SERAPH_VLM_IMAGE:-}" =~ ^[^[:space:]@]+@sha256:[0-9a-fA-F]{64}$ ]] || error_exit "SERAPH_VLM_IMAGE must use an exact hexadecimal @sha256 digest"
+    [[ "${SERAPH_VLM_IMAGE:-}" =~ ^([^[:space:]@]+@sha256:[0-9a-fA-F]{64}|sha256:[0-9a-fA-F]{64})$ ]] || error_exit "SERAPH_VLM_IMAGE must use a registry RepoDigest or exact local sha256 image ID"
     [ -n "${SERAPH_VLM_INTERFACE_CONTRACT:-}" ] || error_exit "SERAPH_VLM_INTERFACE_CONTRACT is required"
     [ -n "${SERAPH_GPU_EXPECTED_HOSTNAME:-}" ] || error_exit "SERAPH_GPU_EXPECTED_HOSTNAME is required"
     [[ "${SERAPH_GPU_MACHINE_IDENTITY_SHA256:-}" =~ ^[0-9a-fA-F]{64}$ ]] || error_exit "SERAPH_GPU_MACHINE_IDENTITY_SHA256 must be a SHA-256 digest"
@@ -1000,7 +1000,11 @@ function production_start() {
         previous_receipt="$ACCEPTED_INVENTORY_RECEIPT"
     fi
     production_prepare_app_images || return 1
-    docker compose --env-file "$ENV_FILE" "${COMPOSE_FILES[@]}" pull vlm-wrapper || return 1
+    if [[ "$SERAPH_VLM_IMAGE" =~ ^sha256:[0-9a-fA-F]{64}$ ]]; then
+        docker image inspect "$SERAPH_VLM_IMAGE" >/dev/null 2>&1 || { echo "pinned local VLM image ID is missing" >&2; return 1; }
+    else
+        docker compose --env-file "$ENV_FILE" "${COMPOSE_FILES[@]}" pull vlm-wrapper || return 1
+    fi
     python3 "$SCRIPT_DIR/scripts/generate_local_gpu_predeploy.py" >"$predeploy_receipt" || return 1
     python3 "$SCRIPT_DIR/scripts/validate_gpu_predeploy.py" <"$predeploy_receipt" || return 1
     if ! docker compose --env-file "$ENV_FILE" "${COMPOSE_FILES[@]}" up -d --no-build --wait --wait-timeout 120; then
@@ -1154,7 +1158,7 @@ function production_read_validate_accepted_state() {
     vlm=$(sed -n '2p' "$state_file")
     receipt=$(sed -n '3p' "$state_file")
     [[ "$tag" =~ ^[0-9a-f]{40}$ ]] || { echo "accepted application SHA is invalid" >&2; return 1; }
-    [[ "$vlm" =~ ^[^[:space:]@]+@sha256:[0-9a-fA-F]{64}$ ]] || { echo "accepted VLM digest is invalid" >&2; return 1; }
+    [[ "$vlm" =~ ^([^[:space:]@]+@sha256:[0-9a-fA-F]{64}|sha256:[0-9a-fA-F]{64})$ ]] || { echo "accepted VLM immutable reference is invalid" >&2; return 1; }
     [ -r "$receipt" ] || { echo "accepted inventory copy is unreadable" >&2; return 1; }
     hash=$(sha256sum "$receipt" | awk '{print $1}') || return 1
     expected_name="$tag-$hash.json"
@@ -1190,7 +1194,7 @@ function production_rollback() {
     ensure_runtime_dirs
     production_any_staged_state && error_exit "rollback refused while another stage awaits LAN acceptance"
     [[ "$tag" =~ ^[0-9a-f]{40}$ ]] || error_exit "rollback application tag must be a full git SHA"
-    [[ "$vlm_image" =~ ^[^[:space:]@]+@sha256:[0-9a-fA-F]{64}$ ]] || error_exit "rollback VLM image must use an exact hexadecimal @sha256 digest"
+    [[ "$vlm_image" =~ ^([^[:space:]@]+@sha256:[0-9a-fA-F]{64}|sha256:[0-9a-fA-F]{64})$ ]] || error_exit "rollback VLM image must use a registry RepoDigest or exact local sha256 image ID"
     docker image inspect "seraph/backend:$tag" >/dev/null 2>&1 || error_exit "missing seraph/backend:$tag"
     docker image inspect "seraph/frontend-ingress:$tag" >/dev/null 2>&1 || error_exit "missing seraph/frontend-ingress:$tag"
     docker image inspect "$vlm_image" >/dev/null 2>&1 || error_exit "missing $vlm_image"

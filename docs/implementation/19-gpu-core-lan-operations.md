@@ -101,7 +101,7 @@ python3 scripts/generate_mac_lan_acceptance.py \
   --client-identity operator-mac > /path/to/signed-mac-receipt.json
 ```
 
-The generator requires DNS for the HTTPS hostname to include the pinned LAN IP,
+The generator requires the HTTPS host or address to resolve exclusively to the pinned LAN IP,
 logs in, proves the authenticated session, actively attempts TCP connections to
 that exact IP on 8000/8001/8004, records only bounded refusal/timeout classes,
 and signs canonical JSON with HMAC-SHA256. DNS mismatch, no-route, and
@@ -173,7 +173,7 @@ URL alone.
 From the operator machine, verify the public origin with the trusted CA file:
 
 ```bash
-curl --cacert /path/to/seraph-lan-ca.pem https://seraph.lan/health
+curl --cacert /path/to/seraph-lan-ca.pem https://192.168.1.26:8443/health
 ```
 
 Never use `curl -k` or disabled certificate verification as an acceptance

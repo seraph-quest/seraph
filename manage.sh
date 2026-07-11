@@ -1341,7 +1341,7 @@ if [ "$COMMAND" = "production" ]; then
         rollback) production_lock_run production_rollback "${2:-}" "${3:-}" ;;
         *) error_exit "Unknown production subcommand '$PROD_SUB'. Use: config-validate, start, accept, rollback, accept-rollback, restart, accept-restart, accept-restore, abort, status, logs, stop" ;;
     esac
-    exit 0
+    exit $?
 fi
 
 if [ "$COMMAND" = "local" ]; then

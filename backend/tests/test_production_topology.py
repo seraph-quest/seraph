@@ -84,6 +84,9 @@ def test_managed_start_probes_private_gpu_routes_and_rolls_back_on_failure():
     assert start.index("production_prepare_app_images") < start.index(" up -d --no-build --wait")
     assert start.index(" up -d --no-build --wait") < start.index("production_preflight.py")
     assert start.index("production_restore_after_failure") > start.index("candidate containers did not become healthy")
+    production_dispatch = manage.split('if [ "$COMMAND" = "production" ]', 1)[1].split('if [ "$COMMAND" = "local" ]', 1)[0]
+    assert "exit $?" in production_dispatch
+    assert "exit 0" not in production_dispatch
 
 
 def test_release_tuple_failure_paths_restore_or_emit_catastrophic_diagnostics():

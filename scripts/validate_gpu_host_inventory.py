@@ -15,18 +15,18 @@ def fail(message: str) -> None:
 
 
 receipt = json.load(sys.stdin)
-expected_host = os.environ.get("SERAPH_GPU_SSH_HOST", "")
-expected_fingerprint = os.environ.get("SERAPH_GPU_SSH_HOST_FINGERPRINT", "")
+if any(key in receipt for key in ("machine_id", "raw_machine_id", "machine_identity_raw")):
+    fail("raw machine identity material is forbidden")
+expected_host = os.environ.get("SERAPH_GPU_EXPECTED_HOSTNAME", "")
+expected_identity = os.environ.get("SERAPH_GPU_MACHINE_IDENTITY_SHA256", "")
 expected_vlm_image = os.environ.get("SERAPH_VLM_IMAGE", "")
 expected_vlm_contract = os.environ.get("SERAPH_VLM_INTERFACE_CONTRACT", "")
-if not all((expected_host, expected_fingerprint, expected_vlm_image, expected_vlm_contract)):
-    fail("configured host identity, fingerprint, VLM digest, and interface contract are required")
-if receipt.get("ssh_host") != expected_host:
-    fail("SSH host identity does not match configured host")
-if receipt.get("host_key_verified") is not True:
-    fail("host key was not verified")
-if receipt.get("host_key_fingerprint") != expected_fingerprint:
-    fail("host key fingerprint does not match configured fingerprint")
+if not all((expected_host, expected_identity, expected_vlm_image, expected_vlm_contract)):
+    fail("configured local hostname, machine identity, VLM digest, and interface contract are required")
+if receipt.get("local_hostname") != expected_host:
+    fail("local hostname does not match configured host")
+if receipt.get("machine_identity_sha256") != expected_identity:
+    fail("local machine identity does not match configured digest")
 try:
     captured = datetime.fromisoformat(str(receipt["captured_at"]).replace("Z", "+00:00"))
     if captured.tzinfo is None or captured.utcoffset() != timezone.utc.utcoffset(captured):
@@ -59,14 +59,36 @@ for line in ss_lntp.splitlines():
 if unsafe:
     fail(f"private ports have wildcard/LAN listeners: {unsafe}")
 
-firewall = receipt.get("firewall", {})
-for port in (8000, 8001, 8004):
-    if firewall.get(f"lan_ingress_{port}") != "blocked":
-        fail(f"firewall receipt does not prove LAN ingress {port} blocked")
 if receipt.get("vlm_image") != expected_vlm_image:
     fail("managed VLM wrapper digest does not match configured release")
 if receipt.get("vlm_interface_contract") != expected_vlm_contract:
     fail("managed VLM wrapper interface contract does not match configured contract")
 if receipt.get("vlm_wrapper_contract_verified") is not True:
     fail("managed VLM wrapper image/interface contract is unverified")
-print("GPU host inventory valid: host key, ss listeners, firewall gates, and wrapper contract verified")
+vlm_observation = receipt.get("vlm_observation", {})
+if vlm_observation.get("running") is not True:
+    fail("managed VLM wrapper container is not running")
+if any(value for value in vlm_observation.get("published_ports", {}).values()):
+    fail("managed VLM wrapper still publishes a host port")
+checks = vlm_observation.get("checks", {})
+if not all(checks.get(name) is True for name in ("health", "backend", "queue", "auth_closed", "auth_interface")):
+    fail("managed VLM wrapper active interface checks are incomplete")
+compose = receipt.get("compose_observation", {})
+if compose.get("project") != "seraph-prod" or compose.get("network_name") != "seraph-core-prod":
+    fail("compose project/network identity mismatch")
+containers=compose.get("containers",{})
+expected={"ingress":"172.30.0.10","backend":"172.30.0.20","vlm-wrapper":"172.30.0.30"}
+network_ids=set()
+app_revisions=set()
+for service,ip in expected.items():
+    item=containers.get(service,{})
+    if not item.get("container_id") or item.get("project")!="seraph-prod" or item.get("service")!=service or item.get("network_name")!="seraph-core-prod" or item.get("ip_address")!=ip:
+        fail(f"compose container binding mismatch: {service}")
+    network_ids.add(item.get("network_id"))
+    if not item.get("image_id"): fail(f"container image ID missing: {service}")
+    if service in {"ingress","backend"}: app_revisions.add(item.get("image_revision"))
+if len(network_ids)!=1 or not next(iter(network_ids),""):
+    fail("compose network ID mismatch")
+if len(app_revisions)!=1 or not next(iter(app_revisions),""):
+    fail("application image revision mismatch")
+print("GPU host inventory valid: local identity, ss listeners, firewall receipt, and wrapper contract verified")

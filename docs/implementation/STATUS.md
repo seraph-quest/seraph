@@ -11,7 +11,7 @@ Seraph is an AI guardian that remembers, watches, and acts. This page is the fas
 **Target authority:** [Project Constitution](./00-project-constitution.md).
 
 The detailed inventory below records the large existing baseline. Some shipped
-surfaces remain transitional, including the Mac-hosted core, and Epic #736
+surfaces remain transitional, including production acceptance of the jupyter-hosted core, and Epic #736
 tracks their replacement. New target capabilities remain **Planned** until
 merged to `develop` with the required validation receipts.
 

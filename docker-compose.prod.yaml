@@ -82,7 +82,6 @@ services:
       VLM_BASE_URL: http://host.docker.internal:8000/v1
       VLM_MODEL: ${LOCAL_VLM_MODEL:?set LOCAL_VLM_MODEL}
       CHAT_PROXY_ENABLED: "true"
-      CHAT_PROXY_API_KEY_FILE: /run/secrets/vlm_api_key
       QUEUE_WORKERS: "1"
       QUEUE_BACKGROUND_WORKERS: "1"
       QUEUE_MAX_SIZE: ${SERAPH_VLM_QUEUE_MAX_SIZE:-1000}
@@ -90,6 +89,10 @@ services:
       - "host.docker.internal:host-gateway"
     secrets:
       - vlm_api_key
+    command:
+      - sh
+      - -c
+      - 'set -eu; CHAT_PROXY_API_KEY="$$(cat /run/secrets/vlm_api_key)"; [ -n "$${CHAT_PROXY_API_KEY}" ]; export CHAT_PROXY_API_KEY; exec sh -c "python scripts/preflight.py && exec uvicorn app.main:app --host $${HOST} --port $${PORT}"'
     networks:
       seraph-core:
         ipv4_address: 172.30.0.30

@@ -158,22 +158,29 @@ The reusable service repo is public under the Seraph organization:
 
 ### Current Local Topology
 
+> **Historical migration evidence — do not run these wildcard/direct-LAN
+> recipes.** The command blocks and `192.168.1.26:8000/8001` examples in this
+> section document the pre-#741 topology only. Active operation uses the private
+> loopback/bridge/service routes in GPU Core LAN Operations, and LAN acceptance
+> requires the Mac negative-port receipt.
+
 The development topology is concrete and should be verified exactly before debugging screenshot or chat routing:
 
 ```text
-Seraph frontend       http://127.0.0.1:3001
-  -> Seraph backend   http://127.0.0.1:8004
-  -> GPU VLM wrapper  http://192.168.1.26:8001
-  -> GPU model server http://192.168.1.26:8000/v1
+GPU host `jupyter` (`192.168.1.26`)
+  Seraph frontend/backend + canonical data
+    -> private VLM wrapper
+    -> private GPU model server
+Mac paired edge
+  capture -> authenticated screenshot ingest on jupyter
 ```
 
 The VLM wrapper runs through Docker Compose on the GPU server to avoid local Python/runtime drift and to keep request admission next to the one GPU:
 
 ```bash
-ssh jupyter
 cd /home/pawel/repos/vlm-screenshot-server
 HOST_BIND=0.0.0.0 HOST_PORT=8001 PORT=8001 \
-  VLM_BASE_URL=http://192.168.1.26:8000/v1 \
+  VLM_BASE_URL=http://host.docker.internal:8000/v1 \
   VLM_MODEL=unsloth/gemma-4-26B-A4B-it-qat-GGUF \
   CHAT_PROXY_ENABLED=true \
   CHAT_PROXY_API_KEY=<strong-token> \
@@ -181,51 +188,51 @@ HOST_BIND=0.0.0.0 HOST_PORT=8001 PORT=8001 \
   docker compose up -d --build screenshot-vlm
 ```
 
-The container publishes `192.168.1.26:8001` and forwards to `http://192.168.1.26:8000/v1`. Docker Desktop on the Mac is not part of the healthy product path for the wrapper.
+The wrapper and model are local services on `jupyter`. Under the authenticated
+LAN topology their ports are private; the Seraph backend reaches them through
+local Docker/service HTTP routes. Docker Desktop on the Mac is not part of the
+product path. Administer them directly from this workspace rather than using an
+SSH hop to the same host.
 
-SSH is only the admin channel for deploying, restarting, and inspecting the GPU-hosted wrapper. Seraph runtime traffic must stay on direct HTTP API calls to `SERAPH_VLM_BASE_URL=http://192.168.1.26:8001`; do not encode SSH forwards, SOCKS proxies, or tunnels into Seraph config or status receipts.
-
-Required readiness checks from the Mac:
+Required local service checks on `jupyter`:
 
 ```bash
-cd /Users/bigcube/Desktop/repos/seraph
 ./manage.sh -e dev local status
 curl http://127.0.0.1:8004/health
-curl http://192.168.1.26:8001/health
-curl http://192.168.1.26:8001/health/backend
-curl http://192.168.1.26:8001/queue/status
+curl http://127.0.0.1:8001/health
+curl http://127.0.0.1:8001/health/backend
+curl http://127.0.0.1:8001/queue/status
 set -a && source .env.dev && set +a
-curl http://192.168.1.26:8001/health/chat \
+curl http://127.0.0.1:8001/health/chat \
   -H "Authorization: Bearer $SERAPH_VLM_API_KEY"
 PYTHONPATH=backend backend/.venv/bin/python scripts/diagnose_gpu_vlm_route.py
 ```
 
+Verified local evidence on this host: `jupyter` is `192.168.1.26` with an RTX
+3090; `unsloth/gemma-4-26B-A4B-it-qat-GGUF` answers on local port 8000; the
+wrapper is healthy on local port 8001; and its default `/v1/analyze-file`
+canary returns HTTP 200. The legacy wrapper currently binds `0.0.0.0:8001`;
+#741 must make that service private before LAN acceptance.
+
+There is no shipped Seraph screenshot-upload API. The Mac-to-jupyter capture
+push is the paired-edge target owned by #749. Current folder ingestion remains
+server-local/transitional and must not be described as a working remote Mac
+push path.
+
 Interpretation:
 
 - `127.0.0.1:8004/health` proves Seraph backend is running.
-- `192.168.1.26:8001/health` proves the Dockerized GPU VLM wrapper is reachable from the Mac.
-- `192.168.1.26:8001/health/backend` proves the wrapper can reach the GPU model server at `192.168.1.26:8000/v1`.
-- `192.168.1.26:8001/queue/status` proves Seraph can observe admission pressure before feeding screenshot work.
-- `192.168.1.26:8001/health/chat` proves the chat proxy is enabled and accepts Seraph's configured bearer key without running inference or adding GPU queue work.
+- `127.0.0.1:8001/health` proves the local wrapper is healthy.
+- `127.0.0.1:8001/health/backend` proves the wrapper can reach the local GPU model server.
+- `127.0.0.1:8001/queue/status` proves Seraph can observe admission pressure.
+- `127.0.0.1:8001/health/chat` proves the local chat proxy accepts the configured bearer key.
 - The direct-route diagnostic also checks authenticated chat readiness. This catches `CHAT_PROXY_ENABLED=false`, missing `CHAT_PROXY_API_KEY`, and Seraph/wrapper key mismatches that ordinary health checks cannot see.
 - A `502` from `/health/backend` means the wrapper is up but the GPU backend edge is broken.
 - A `disabled`, `auth_not_configured`, or `auth_failed` result from `/health/chat` means screenshot analysis may still work but Seraph chat is not ready.
 
-Run the direct-route receipt from the normal operator shell that starts Seraph
-when Codex/Desktop reports a LAN failure. A normal Terminal-launched receipt on
-July 3, 2026 proved `ssh -o BatchMode=yes -o ConnectTimeout=5 jupyter true`
-exits `0` for this GPU host, even though Codex/Desktop-launched direct SSH can
-report `No route to host` for the same alias. If Codex reports `No route to
-host` or connection failures for `192.168.1.26` while the operator shell can
-reach `jupyter`, record the Codex result as an agent-network limitation, not as
-evidence that the product topology requires a tunnel.
-
-Codex maintenance access is allowed to use `ssh jupyter` for GPU-host
-administration. That route has confirmed host `jupyter`, user `pawel`, and the
-GPU wrapper repo at `/home/pawel/repos/vlm-screenshot-server`. Use it for
-inventory, Docker Compose checks, process inspection, listener checks, and log
-reads. Do not use it as a Seraph runtime base URL or a passing direct-route
-acceptance receipt.
+Run service receipts directly on `jupyter`, the host of this workspace. Use
+local Docker, process, listener, filesystem, and log inspection; an SSH hop to
+`jupyter` is not part of administration or runtime validation.
 
 Fast metadata endpoints must not block on live GPU route probes. `/api/runtime/status` and `/api/settings/artifact-storage` expose the configured and effective VLM runtime shape with `vlm_runtime.live_probe.checked=false` and `reason=deferred_fast_metadata`; that keeps cockpit and settings refreshes usable even when the LAN route is slow, down, or unreachable from the Codex process. The explicit route receipts remain the wrapper `/health`, `/health/backend`, `/queue/status`, authenticated `/health/chat`, and `scripts/diagnose_gpu_vlm_route.py` checks below. Diagnostic SSH forwards are still not a substitute for a passing direct `SERAPH_VLM_BASE_URL` route receipt.
 
@@ -252,16 +259,15 @@ llama serve \
 The GPU model backend exposes an OpenAI-compatible API on the GPU host at:
 
 ```text
-http://192.168.1.26:8000/v1
+http://127.0.0.1:8000/v1
 ```
 
 Run the screenshot-analysis wrapper on the GPU server with Docker Compose. The
-repo on the GPU host is `/home/pawel/repos/vlm-screenshot-server`; the wrapper
-publishes `http://192.168.1.26:8001` and forwards to the local GPU model
-backend above.
+local repo is `/home/pawel/repos/vlm-screenshot-server`. The legacy wrapper
+currently publishes `0.0.0.0:8001`; this is transitional evidence only. Issue
+#741 makes the wrapper private behind the authenticated Seraph ingress.
 
 ```bash
-ssh jupyter
 cd /home/pawel/repos/vlm-screenshot-server
 cp .env.example .env
 ```
@@ -273,7 +279,7 @@ HOST=0.0.0.0
 PORT=8001
 HOST_BIND=0.0.0.0
 HOST_PORT=8001
-VLM_BASE_URL=http://192.168.1.26:8000/v1
+VLM_BASE_URL=http://host.docker.internal:8000/v1
 VLM_MODEL=unsloth/gemma-4-26B-A4B-it-qat-GGUF
 VLM_API_KEY=
 VLM_TIMEOUT_SECONDS=180
@@ -291,15 +297,14 @@ Then start the wrapper:
 docker compose up -d --build
 ```
 
-Test the wrapper and backend from the Mac/operator shell through direct HTTP
-API calls:
+Test the wrapper and backend locally on `jupyter`:
 
 ```bash
-curl http://192.168.1.26:8001/health
-curl http://192.168.1.26:8001/health/backend
-curl http://192.168.1.26:8001/queue/status
+curl http://127.0.0.1:8001/health
+curl http://127.0.0.1:8001/health/backend
+curl http://127.0.0.1:8001/queue/status
 curl -F "file=@/path/to/screenshot.png" \
-  http://192.168.1.26:8001/v1/analyze-file
+  http://127.0.0.1:8001/v1/analyze-file
 ```
 
 Seraph-side first-class `local-vlm` wiring is available behind explicit settings:
@@ -307,8 +312,8 @@ Seraph-side first-class `local-vlm` wiring is available behind explicit settings
 ```env
 SCREEN_ANALYSIS_PROVIDER=local-vlm
 SERAPH_VLM_MODE=gpu-server
-SERAPH_VLM_BASE_URL=http://192.168.1.26:8001
-SERAPH_VLM_BACKEND_URL=http://192.168.1.26:8000/v1
+SERAPH_VLM_BASE_URL=http://vlm-wrapper:8001
+SERAPH_VLM_BACKEND_URL=http://host.docker.internal:8000/v1
 SERAPH_VLM_API_KEY=<same-token-as-wrapper-CHAT_PROXY_API_KEY>
 SERAPH_VLM_FEEDER_WINDOW=2
 LOCAL_VLM_MODEL=unsloth/gemma-4-26B-A4B-it-qat-GGUF
@@ -321,25 +326,19 @@ SCREEN_DERIVED_LLM_REQUIRE_PROFILE_PROOF=true
 
 Quote `RUNTIME_PROFILE_PREFERENCES` whenever it contains semicolons. The managed local launcher sources `.env.dev` as shell, so an unquoted value is split into partial shell assignments and Seraph can silently lose the `chat_agent` profile preference.
 
-The production-like local topology is direct private LAN, not an SSH tunnel:
+The target production topology uses private same-host service routes:
 
 ```text
 Seraph backend     http://127.0.0.1:8004
-  -> GPU VLM       http://192.168.1.26:8001
-  -> llama.cpp     http://192.168.1.26:8000/v1
+  -> GPU VLM       http://vlm-wrapper:8001
+  -> llama.cpp     http://host.docker.internal:8000/v1
 ```
 
-SSH forwarding is acceptable only as a diagnostic bridge for an agent sandbox that cannot open the LAN route. It is not the operator runtime contract, and Seraph status must not require or imply a tunnel.
+This workspace is already on the GPU host. Use the private local service routes;
+SSH forwarding is neither necessary nor accepted as runtime proof.
 
-The user should not have to set up tunnels to access Seraph's GPU VLM API. If a
-tunnel is needed for a Codex diagnostic session, keep it out of `.env.dev`, do
-not use it as a passing acceptance receipt, and prefer an operator-shell
-`scripts/diagnose_gpu_vlm_route.py` receipt against
-`http://192.168.1.26:8001`.
-
-When Codex needs to administer the GPU host, use `ssh jupyter` for admin work
-only. Keep that maintenance route labeled separately from the product topology
-above.
+Administer the GPU host directly from this workspace. The Mac must not use these
+internal URLs.
 
 When configured, `screenshot_folder_analysis` posts the screenshot image plus Seraph's strict analysis prompt to `/v1/analyze-file`, validates the returned JSON against `seraph.screenshot_analysis.v1`, and stores the privacy-safe semantic payload inside the existing Seraph `ScreenObservation`.
 If the provider is not configured or fails, Seraph still keeps the screenshot metadata observation and records a bounded analyzer status instead of retrying the same image as a new screenshot.
@@ -377,7 +376,7 @@ Seraph-side controls:
 - `GUARDIAN_STATE_TIMEOUT_SECONDS` bounds chat context assembly. If guardian/operator context is slow or degraded, chat falls back to a minimal agent context instead of leaving the operator stuck at "responding" before the model request is dispatched.
 - `LOCAL_RUNTIME_CONTEXT_WINDOW_TOKENS` is Seraph's configured prompt budget for local Gemma-compatible chat backends. It must match the GPU server `--ctx-size` operationally; the current local target is `32768`.
 - `LOCAL_RUNTIME_PROMPT_SAFETY_RATIO`, `LOCAL_RUNTIME_TOOL_RESERVE_TOKENS`, and `LOCAL_RUNTIME_MIN_SECTION_TOKENS` control deterministic prompt compaction for local runtime profiles. Seraph compacts guardian state, observer context, memories, active skills, and conversation history before creating the `ToolCallingAgent`, while preserving the fixed Seraph identity instructions. `FallbackLiteLLMModel.generate` and `completion_with_fallback_sync` also run a final profile-aware message compaction pass for local-profile targets, preserving the current user turn and reserving the effective output-token budget before LiteLLM sees the request. Local profile status exposes the configured context window, safety ratio, tool reserve, and prompt budget so operators can verify the runtime contract. This is the Seraph-side guardrail that prevents oversized local prompts from reaching the backend as raw `exceed_context_size_error`.
-- **Branch-local #740 target; not shipped `develop` truth:** governed model-fabric text calls use Seraph's direct HTTPX OpenAI-compatible adapter, not LiteLLM transport. Canonical model-fabric profiles therefore carry the exact model identifier accepted by their configured backend. The legacy `LOCAL_MODEL`/`local-gemma-*` registration path still uses its existing LiteLLM-oriented `openai/` naming until #739 removes that transitional path. The target topology sends text to `LOCAL_LLM_API_BASE=http://192.168.1.26:8000/v1`; `${SERAPH_VLM_BASE_URL}/v1` remains an optional wrapper chat proxy, while screenshot analysis remains the distinct `${SERAPH_VLM_BASE_URL}/v1/analyze-file` adapter.
+- **Branch-local #740 target; not shipped `develop` truth:** governed model-fabric text calls use Seraph's direct HTTPX OpenAI-compatible adapter, not LiteLLM transport. Canonical model-fabric profiles therefore carry the exact model identifier accepted by their configured backend. The legacy `LOCAL_MODEL`/`local-gemma-*` registration path still uses its existing LiteLLM-oriented `openai/` naming until #739 removes that transitional path. The target topology sends text through the private `LOCAL_LLM_API_BASE=http://host.docker.internal:8000/v1`; `${SERAPH_VLM_BASE_URL}/v1` remains an optional wrapper chat proxy, while screenshot analysis remains the distinct `${SERAPH_VLM_BASE_URL}/v1/analyze-file` adapter.
 - **Branch-local #740 pricing provenance:** remote profile `cost_source` is a bounded source identifier (`[A-Za-z0-9_.:-]`, at most 128 characters), not a free-form label or URL. This matches the sanitized receipt contract, so accepted configuration cannot fail only after a model response is transported and receipt construction begins.
 - Fresh profiles use `onboarding_agent` before normal chat. Configure `onboarding_agent=local-gemma-chat-thinking` alongside `chat_agent=local-gemma-chat-thinking`, or the first "Hello" from a new operator can still route through the cloud default while the normal chat profile is correctly registered.
 - If delegation is enabled, chat uses `orchestrator_agent`, so `orchestrator_agent=local-gemma-chat-thinking` must also be configured. Otherwise the delegated chat surface can still route through the cloud default while the local chat profile is correctly registered.
@@ -403,7 +402,7 @@ Seraph ships a proof harness for local Gemma profile behavior:
 ```bash
 PYTHONPATH=. WORKSPACE_DIR=/tmp/seraph-dev-data \
   uv run python ../scripts/verify_local_gemma_profiles.py \
-  --base-url http://192.168.1.26:8001/v1 \
+  --base-url http://127.0.0.1:8001/v1 \
   --timeout-seconds 120
 ```
 

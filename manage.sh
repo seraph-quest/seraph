@@ -66,7 +66,7 @@ function display_help() {
     echo "  local   Manage the direct local frontend/backend stack: up, down, status, logs, run."
     echo "  daemon  Manage screen daemon: start, stop, status, logs."
     echo "  proxy   Manage stdio-to-HTTP MCP proxy: start, stop, status, logs."
-    echo "  production  Validated GPU/LAN lifecycle: config-validate, start, stop, restart, status, logs, rollback."
+    echo "  production  GPU/LAN lifecycle: start/accept, rollback/accept-rollback, restart/accept-restart, accept-restore, status, logs, stop."
     echo
     echo "Examples:"
     echo "  $PROG_NAME -e dev up -d"
@@ -761,6 +761,12 @@ function production_config_validate() {
     [ "$ENV" = "prod" ] || error_exit "production lifecycle requires -e prod"
     production_require_file SERAPH_TLS_CERT_FILE
     production_require_file SERAPH_TLS_KEY_FILE
+    production_require_file SERAPH_MAC_PROBE_KEY_FILE
+    [ -s "$SERAPH_MAC_PROBE_KEY_FILE" ] || error_exit "SERAPH_MAC_PROBE_KEY_FILE must be nonempty"
+    [ -n "${SERAPH_LAN_IP:-}" ] || error_exit "SERAPH_LAN_IP is required"
+    [ -s "${SERAPH_VLM_API_KEY_FILE:-/dev/null}" ] || error_exit "SERAPH_VLM_API_KEY_FILE must be nonempty"
+    [ -n "${SERAPH_EXPECTED_HTTPS_ORIGIN:-}" ] || error_exit "SERAPH_EXPECTED_HTTPS_ORIGIN is required"
+    [ -n "${SERAPH_MAC_PROBE_CLIENT_ID:-}" ] || error_exit "SERAPH_MAC_PROBE_CLIENT_ID is required"
     local credential_count=0
     if [ -n "${OPERATOR_AUTH_SECRET_FILE:-}" ] && [ -s "$OPERATOR_AUTH_SECRET_FILE" ]; then credential_count=$((credential_count + 1)); fi
     if [ -n "${OPERATOR_AUTH_SECRET_HASH_FILE:-}" ] && [ -s "$OPERATOR_AUTH_SECRET_HASH_FILE" ]; then credential_count=$((credential_count + 1)); fi
@@ -784,8 +790,8 @@ function production_config_validate() {
     fi
     [[ "${SERAPH_VLM_IMAGE:-}" =~ ^[^[:space:]@]+@sha256:[0-9a-fA-F]{64}$ ]] || error_exit "SERAPH_VLM_IMAGE must use an exact hexadecimal @sha256 digest"
     [ -n "${SERAPH_VLM_INTERFACE_CONTRACT:-}" ] || error_exit "SERAPH_VLM_INTERFACE_CONTRACT is required"
-    [ -n "${SERAPH_GPU_SSH_HOST:-}" ] || error_exit "SERAPH_GPU_SSH_HOST is required"
-    [ -n "${SERAPH_GPU_SSH_HOST_FINGERPRINT:-}" ] || error_exit "SERAPH_GPU_SSH_HOST_FINGERPRINT is required"
+    [ -n "${SERAPH_GPU_EXPECTED_HOSTNAME:-}" ] || error_exit "SERAPH_GPU_EXPECTED_HOSTNAME is required"
+    [[ "${SERAPH_GPU_MACHINE_IDENTITY_SHA256:-}" =~ ^[0-9a-fA-F]{64}$ ]] || error_exit "SERAPH_GPU_MACHINE_IDENTITY_SHA256 must be a SHA-256 digest"
     local config_file
     config_file=$(mktemp /tmp/seraph-prod-compose.XXXXXX.json)
     if ! docker compose --env-file "$ENV_FILE" "${COMPOSE_FILES[@]}" config --format json >"$config_file"; then
@@ -798,7 +804,7 @@ function production_config_validate() {
 }
 
 function production_host_inventory_validate() {
-    local receipt="${1:-${SERAPH_HOST_INVENTORY_RECEIPT:-}}"
+    local receipt="${1:-}"
     local vlm_image="${2:-${SERAPH_VLM_IMAGE:-}}"
     [ -r "$receipt" ] || error_exit "host inventory receipt is unreadable: $receipt"
     SERAPH_VLM_IMAGE="$vlm_image" python3 "$SCRIPT_DIR/scripts/validate_gpu_host_inventory.py" <"$receipt"
@@ -806,12 +812,71 @@ function production_host_inventory_validate() {
 
 function production_status() {
     production_config_validate
-    production_host_inventory_validate
-    production_compose_state_validate
+    ensure_runtime_dirs
+    if [ -r "$PID_DIR/seraph-prod-restore-release" ]; then
+        production_read_validate_accepted_state "$PID_DIR/seraph-prod-restore-release" || return 1
+        echo "Release state: restore awaiting LAN acceptance (previous accepted evidence retained, not current)"
+    elif [ -r "$PID_DIR/seraph-prod-rollback-release" ]; then
+        production_read_validate_accepted_state "$PID_DIR/seraph-prod-rollback-release" || return 1
+        echo "Release state: rollback awaiting LAN acceptance (previous accepted tuple retained, not current)"
+    elif [ -r "$PID_DIR/seraph-prod-restart-release" ]; then
+        production_read_validate_accepted_state "$PID_DIR/seraph-prod-restart-release" || return 1
+        echo "Release state: restart awaiting LAN acceptance (prior accepted receipt is stale)"
+    elif [ -r "$PID_DIR/seraph-prod-candidate-release" ]; then
+        production_read_validate_accepted_state "$PID_DIR/seraph-prod-candidate-release" || return 1
+        if [ -r "$PID_DIR/seraph-prod-active-release" ]; then echo "Release state: candidate awaiting Mac LAN acceptance (previous accepted tuple retained for rollback)"; else echo "Release state: candidate awaiting Mac LAN acceptance"; fi
+    elif [ -r "$PID_DIR/seraph-prod-active-release" ]; then
+        production_read_validate_accepted_state "$PID_DIR/seraph-prod-active-release" || return 1
+        echo "Release state: accepted"
+    else
+        echo "Release state: none"
+    fi
+    docker compose --env-file "$ENV_FILE" "${COMPOSE_FILES[@]}" ps
     echo "Published TLS listener owned by this compose project:"
     docker compose --env-file "$ENV_FILE" "${COMPOSE_FILES[@]}" port ingress 443 2>/dev/null || echo "ingress not running"
     echo "Docker container listener ownership:"
     production_docker_inventory_validate true
+}
+
+function production_cleanup_candidate_state() {
+    local stage="${1:-candidate}"
+    rm -f "$PID_DIR/seraph-prod-$stage-release" "$PID_DIR/seraph-prod-$stage-challenge.json" "$PID_DIR/seraph-prod-final-attestation.json"
+    [ "$stage" = candidate ] && rm -f "$PID_DIR/seraph-prod-candidate-attestation.json"
+}
+
+function production_lock_run() {
+    ensure_runtime_dirs
+    exec 9>"$PID_DIR/seraph-prod-lifecycle.lock"
+    flock -n 9 || { echo "another production lifecycle mutation is running" >&2; return 1; }
+    "$@"
+}
+
+function production_any_staged_state() {
+    [ -r "$PID_DIR/seraph-prod-candidate-release" ] || [ -r "$PID_DIR/seraph-prod-rollback-release" ] || [ -r "$PID_DIR/seraph-prod-restore-release" ] || [ -r "$PID_DIR/seraph-prod-restart-release" ]
+}
+
+function production_validate_mac_receipt() {
+    local receipt="$1"
+    local challenge_file="${2:-}"
+    [ -r "$challenge_file" ] || { echo "acceptance challenge is missing" >&2; return 1; }
+    SERAPH_ACCEPTANCE_CHALLENGE_FILE="$challenge_file" python3 "$SCRIPT_DIR/scripts/validate_mac_lan_negative.py" <"$receipt" || return 1
+    MAC_RECEIPT_NONCE=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["nonce"])' "$receipt") || return 1
+    MAC_CHALLENGE_NONCE=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["challenge"]["server_nonce"])' "$receipt") || return 1
+    local consumed_file="$PID_DIR/seraph-prod-consumed-acceptance"
+    if [ -r "$consumed_file" ] && grep -Fx "nonce:$MAC_RECEIPT_NONCE" "$consumed_file" >/dev/null; then
+        echo "Mac acceptance nonce was already used" >&2
+        return 1
+    fi
+    if [ -r "$consumed_file" ] && grep -Fx "challenge:$MAC_CHALLENGE_NONCE" "$consumed_file" >/dev/null; then
+        echo "server acceptance challenge was already used" >&2
+        return 1
+    fi
+}
+
+function production_issue_challenge() {
+    local stage="$1" app="$2" vlm="$3" attestation="$4" output="$PID_DIR/seraph-prod-$1-challenge.json" tmp="$output.tmp.$$"
+    python3 "$SCRIPT_DIR/scripts/generate_acceptance_challenge.py" --stage "$stage" --app-sha "$app" --vlm-image "$vlm" --local-attestation "$attestation" --origin "$SERAPH_EXPECTED_HTTPS_ORIGIN" --lan-host "$SERAPH_LAN_HOST" --lan-ip "$SERAPH_LAN_IP" --client-identity "$SERAPH_MAC_PROBE_CLIENT_ID" >"$tmp" || return 1
+    chmod 0444 "$tmp" && mv "$tmp" "$output"
 }
 
 function production_docker_inventory_validate() {
@@ -836,11 +901,25 @@ function production_compose_state_validate() {
     return "$rc"
 }
 
+function production_generate_local_attestation() {
+    local output="$1" vlm_image="$2"
+    local ingress_id backend_id vlm_id
+    ingress_id=$(docker compose --env-file "$ENV_FILE" "${COMPOSE_FILES[@]}" ps -q ingress) || return 1
+    backend_id=$(docker compose --env-file "$ENV_FILE" "${COMPOSE_FILES[@]}" ps -q backend) || return 1
+    vlm_id=$(docker compose --env-file "$ENV_FILE" "${COMPOSE_FILES[@]}" ps -q vlm-wrapper) || return 1
+    python3 "$SCRIPT_DIR/scripts/generate_local_gpu_inventory.py" --expected-vlm-image "$vlm_image" --ingress-container "$ingress_id" --backend-container "$backend_id" --vlm-container "$vlm_id" --vlm-api-key-file "$SERAPH_VLM_API_KEY_FILE" >"$output"
+}
+
 function production_restore_previous() {
     local previous_tag="$1"
     local previous_vlm="$2"
     local previous_receipt="$3"
-    if [ -n "$previous_tag" ] && [ -n "$previous_vlm" ] && [ -r "$previous_receipt" ] && docker image inspect "seraph/backend:$previous_tag" >/dev/null 2>&1 && docker image inspect "seraph/frontend-ingress:$previous_tag" >/dev/null 2>&1 && docker image inspect "$previous_vlm" >/dev/null 2>&1 && SERAPH_ALLOW_PREVIOUS_ACCEPTED_RECEIPT=true production_host_inventory_validate "$previous_receipt" "$previous_vlm"; then
+    local previous_local_receipt="$previous_receipt" previous_schema
+    if [ -r "$previous_receipt" ]; then
+        previous_schema=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("schema",""))' "$previous_receipt" 2>/dev/null || true)
+        if [ "$previous_schema" = "seraph.production-acceptance.v1" ]; then previous_local_receipt=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["final_attestation"]["path"])' "$previous_receipt") || return 2; fi
+    fi
+    if [ -n "$previous_tag" ] && [ -n "$previous_vlm" ] && [ -r "$previous_local_receipt" ] && docker image inspect "seraph/backend:$previous_tag" >/dev/null 2>&1 && docker image inspect "seraph/frontend-ingress:$previous_tag" >/dev/null 2>&1 && docker image inspect "$previous_vlm" >/dev/null 2>&1 && SERAPH_ALLOW_PREVIOUS_ACCEPTED_RECEIPT=true production_host_inventory_validate "$previous_local_receipt" "$previous_vlm"; then
         echo "restoring previous production release tuple $previous_tag + $previous_vlm" >&2
         if ! SERAPH_IMAGE_TAG="$previous_tag" SERAPH_VLM_IMAGE="$previous_vlm" docker compose --env-file "$ENV_FILE" "${COMPOSE_FILES[@]}" up -d --no-build --wait --wait-timeout 120; then
             echo "CATASTROPHIC: previous production release tuple could not be restored; diagnostics retained in $LOG_DIR" >&2
@@ -851,6 +930,14 @@ function production_restore_previous() {
             echo "CATASTROPHIC: previous release restored containers but failed inference preflight" >&2
             return 2
         fi
+        ensure_runtime_dirs
+        local restore_attestation="$PID_DIR/seraph-prod-restore-attestation.json"
+        if ! SERAPH_IMAGE_TAG="$previous_tag" SERAPH_VLM_IMAGE="$previous_vlm" production_generate_local_attestation "$restore_attestation" "$previous_vlm" || ! SERAPH_VLM_IMAGE="$previous_vlm" production_host_inventory_validate "$restore_attestation" "$previous_vlm" || ! SERAPH_IMAGE_TAG="$previous_tag" SERAPH_VLM_IMAGE="$previous_vlm" production_write_accepted_state "$PID_DIR/seraph-prod-restore-release" "$restore_attestation"; then
+            echo "CATASTROPHIC: restored tuple failed fresh local attestation" >&2
+            return 2
+        fi
+        production_issue_challenge restore "$previous_tag" "$previous_vlm" "$restore_attestation" || return 2
+        echo "previous tuple restored locally; restore awaiting fresh Mac LAN acceptance" >&2
         return 0
     else
         echo "no verified previous release is available; stopping failed first deployment" >&2
@@ -886,9 +973,15 @@ function production_prepare_app_images() {
 
 function production_start() {
     production_config_validate
-    production_host_inventory_validate || return 1
-    production_docker_inventory_validate false || return 1
     ensure_runtime_dirs
+    if production_any_staged_state; then
+        echo "a production stage already awaits LAN acceptance; complete that exact stage before starting another mutation" >&2
+        return 1
+    fi
+    local predeploy_receipt="$PID_DIR/seraph-gpu-predeploy.json"
+    python3 "$SCRIPT_DIR/scripts/generate_local_gpu_predeploy.py" >"$predeploy_receipt" || return 1
+    python3 "$SCRIPT_DIR/scripts/validate_gpu_predeploy.py" <"$predeploy_receipt" || return 1
+    production_docker_inventory_validate false || return 1
     local active_tag_file="$PID_DIR/seraph-prod-active-release"
     local previous_tag=""
     local previous_vlm=""
@@ -908,7 +1001,8 @@ function production_start() {
     fi
     production_prepare_app_images || return 1
     docker compose --env-file "$ENV_FILE" "${COMPOSE_FILES[@]}" pull vlm-wrapper || return 1
-    production_host_inventory_validate "$SERAPH_HOST_INVENTORY_RECEIPT" "$SERAPH_VLM_IMAGE" || return 1
+    python3 "$SCRIPT_DIR/scripts/generate_local_gpu_predeploy.py" >"$predeploy_receipt" || return 1
+    python3 "$SCRIPT_DIR/scripts/validate_gpu_predeploy.py" <"$predeploy_receipt" || return 1
     if ! docker compose --env-file "$ENV_FILE" "${COMPOSE_FILES[@]}" up -d --no-build --wait --wait-timeout 120; then
         echo "candidate containers did not become healthy" >&2
         docker compose --env-file "$ENV_FILE" "${COMPOSE_FILES[@]}" logs --no-color --tail 500 >"$LOG_DIR/seraph-prod-failed-candidate.log" 2>&1 || true
@@ -919,15 +1013,86 @@ function production_start() {
         docker compose --env-file "$ENV_FILE" "${COMPOSE_FILES[@]}" logs --no-color --tail 500 >"$LOG_DIR/seraph-prod-failed-candidate.log" 2>&1 || true
         production_restore_after_failure "$previous_tag" "$previous_vlm" "$previous_receipt"; return $?
     fi
-    if ! production_host_inventory_validate "$SERAPH_HOST_INVENTORY_RECEIPT" "$SERAPH_VLM_IMAGE" || ! production_docker_inventory_validate true || ! production_compose_state_validate; then
+    local candidate_receipt="$PID_DIR/seraph-prod-candidate-attestation.json"
+    local candidate_state="$PID_DIR/seraph-prod-candidate-release"
+    local vlm_container
+    vlm_container=$(docker compose --env-file "$ENV_FILE" "${COMPOSE_FILES[@]}" ps -q vlm-wrapper) || return 1
+    if ! production_generate_local_attestation "$candidate_receipt" "$SERAPH_VLM_IMAGE" || ! production_host_inventory_validate "$candidate_receipt" "$SERAPH_VLM_IMAGE" || ! production_docker_inventory_validate true || ! production_compose_state_validate; then
         echo "final production acceptance gate failed" >&2
         production_restore_after_failure "$previous_tag" "$previous_vlm" "$previous_receipt"; return $?
     fi
-    if ! production_write_accepted_state "$active_tag_file" "$SERAPH_HOST_INVENTORY_RECEIPT"; then
-        echo "failed to persist accepted release state" >&2
+    if ! production_write_accepted_state "$candidate_state" "$candidate_receipt"; then
+        echo "failed to persist candidate release state" >&2
         production_restore_after_failure "$previous_tag" "$previous_vlm" "$previous_receipt"; return $?
     fi
-    echo "production release tuple accepted"
+    production_issue_challenge candidate "$SERAPH_IMAGE_TAG" "$SERAPH_VLM_IMAGE" "$candidate_receipt" || return 1
+    echo "candidate awaiting Mac LAN acceptance; run: ./manage.sh -e prod production accept <mac-negative-receipt>"
+}
+
+function production_accept() {
+    production_accept_staged "candidate" "$1"
+}
+
+function production_abort() {
+    local stage="${1:-}"
+    if [ "$stage" != candidate ] && [ "$stage" != rollback ] && [ "$stage" != restore ] && [ "$stage" != restart ]; then
+        error_exit "production abort requires one exact stage: candidate, rollback, restore, or restart"
+    fi
+    local staged="$PID_DIR/seraph-prod-$stage-release" active="$PID_DIR/seraph-prod-active-release"
+    [ -r "$staged" ] || error_exit "production $stage stage does not exist"
+    local previous_tag="" previous_vlm="" previous_receipt=""
+    if [ -r "$active" ]; then
+        production_read_validate_accepted_state "$active" || return 1
+        previous_tag="$ACCEPTED_APP_TAG"; previous_vlm="$ACCEPTED_VLM_IMAGE"; previous_receipt="$ACCEPTED_INVENTORY_RECEIPT"
+    fi
+    production_cleanup_candidate_state "$stage"
+    if [ -n "$previous_tag" ]; then
+        production_restore_previous "$previous_tag" "$previous_vlm" "$previous_receipt" || return $?
+        echo "production $stage aborted; previous accepted tuple restored locally and awaits a fresh restore acceptance"
+    else
+        docker compose --env-file "$ENV_FILE" "${COMPOSE_FILES[@]}" down || return 1
+        echo "production $stage aborted; no previously accepted tuple existed, so production was stopped"
+    fi
+}
+
+function production_accept_staged() {
+    local stage="$1"
+    local mac_receipt="${1:-}"
+    mac_receipt="${2:-}"
+    [ -r "$mac_receipt" ] || error_exit "production accept requires a readable Mac negative receipt"
+    ensure_runtime_dirs
+    local candidate_state="$PID_DIR/seraph-prod-$stage-release"
+    local active_state="$PID_DIR/seraph-prod-active-release"
+    production_read_validate_accepted_state "$candidate_state" || return 1
+    production_validate_mac_receipt "$mac_receipt" "$PID_DIR/seraph-prod-$stage-challenge.json" || return 1
+    local prior_binding fresh_binding fresh_receipt challenged_receipt
+    challenged_receipt="$ACCEPTED_INVENTORY_RECEIPT"
+    prior_binding=$(python3 -c 'import json,sys; print(json.dumps(json.load(open(sys.argv[1]))["compose_observation"]["containers"],sort_keys=True))' "$challenged_receipt") || return 1
+    fresh_receipt="$PID_DIR/seraph-prod-final-attestation.json"
+    production_generate_local_attestation "$fresh_receipt" "$ACCEPTED_VLM_IMAGE" || return 1
+    fresh_binding=$(python3 -c 'import json,sys; print(json.dumps(json.load(open(sys.argv[1]))["compose_observation"]["containers"],sort_keys=True))' "$fresh_receipt") || return 1
+    [ "$prior_binding" = "$fresh_binding" ] || { echo "$stage container/network binding changed before acceptance" >&2; return 1; }
+    SERAPH_VLM_IMAGE="$ACCEPTED_VLM_IMAGE" production_host_inventory_validate "$fresh_receipt" "$ACCEPTED_VLM_IMAGE" || return 1
+    production_compose_state_validate || return 1
+    SERAPH_IMAGE_TAG="$ACCEPTED_APP_TAG" SERAPH_VLM_IMAGE="$ACCEPTED_VLM_IMAGE" production_write_acceptance_bundle "$active_state" "$challenged_receipt" "$fresh_receipt" "$mac_receipt" "$stage" || return 1
+    production_cleanup_candidate_state "$stage"
+    echo "production $stage release accepted with fresh local and Mac evidence"
+}
+
+function production_restart() {
+    production_config_validate
+    ensure_runtime_dirs
+    production_any_staged_state && error_exit "restart refused while another stage awaits LAN acceptance"
+    local active="$PID_DIR/seraph-prod-active-release"
+    production_read_validate_accepted_state "$active" || error_exit "restart requires an accepted release"
+    [ "$ACCEPTED_APP_TAG" = "$SERAPH_IMAGE_TAG" ] && [ "$ACCEPTED_VLM_IMAGE" = "$SERAPH_VLM_IMAGE" ] || error_exit "restart only supports the identical accepted tuple; use start for a new candidate"
+    production_cleanup_candidate_state restart
+    docker compose --env-file "$ENV_FILE" "${COMPOSE_FILES[@]}" up -d --no-build --force-recreate --wait --wait-timeout 120 || return 1
+    docker compose --env-file "$ENV_FILE" "${COMPOSE_FILES[@]}" exec -T backend uv run python production_preflight.py || return 1
+    local receipt="$PID_DIR/seraph-prod-restart-attestation.json"
+    production_generate_local_attestation "$receipt" "$SERAPH_VLM_IMAGE" && production_host_inventory_validate "$receipt" "$SERAPH_VLM_IMAGE" && production_write_accepted_state "$PID_DIR/seraph-prod-restart-release" "$receipt" || return 1
+    production_issue_challenge restart "$SERAPH_IMAGE_TAG" "$SERAPH_VLM_IMAGE" "$receipt" || return 1
+    echo "restart locally attested; restart awaiting fresh Mac LAN acceptance"
 }
 
 function production_write_accepted_state() {
@@ -947,6 +1112,36 @@ function production_write_accepted_state() {
     printf '%s\n%s\n%s\n' "$SERAPH_IMAGE_TAG" "$SERAPH_VLM_IMAGE" "$receipt_copy" >"$state_tmp" || return 1
     chmod 0600 "$state_tmp" || return 1
     sync "$state_tmp" 2>/dev/null || true
+    mv "$state_tmp" "$state_file"
+}
+
+function production_write_acceptance_bundle() {
+    local state_file="$1" challenged_receipt="$2" final_receipt="$3" mac_receipt="$4" stage="$5"
+    local release_dir="$PID_DIR/releases" challenged_hash final_hash mac_hash challenged_copy final_copy mac_copy bundle_tmp bundle_hash bundle_copy state_tmp
+    local consumed_file="$PID_DIR/seraph-prod-consumed-acceptance" consumed_tmp="$PID_DIR/seraph-prod-consumed-acceptance.tmp.$$"
+    mkdir -p "$release_dir"
+    if [ -r "$consumed_file" ] && grep -Fx "nonce:$MAC_RECEIPT_NONCE" "$consumed_file" >/dev/null; then echo "Mac acceptance nonce was already used" >&2; return 1; fi
+    if [ -r "$consumed_file" ] && grep -Fx "challenge:$MAC_CHALLENGE_NONCE" "$consumed_file" >/dev/null; then echo "server acceptance challenge was already used" >&2; return 1; fi
+    challenged_hash=$(sha256sum "$challenged_receipt" | awk '{print $1}') || return 1
+    final_hash=$(sha256sum "$final_receipt" | awk '{print $1}') || return 1
+    mac_hash=$(sha256sum "$mac_receipt" | awk '{print $1}') || return 1
+    challenged_copy="$release_dir/$SERAPH_IMAGE_TAG-challenged-$challenged_hash.json"; final_copy="$release_dir/$SERAPH_IMAGE_TAG-final-$final_hash.json"; mac_copy="$release_dir/$SERAPH_IMAGE_TAG-mac-$mac_hash.json"
+    cp "$challenged_receipt" "$challenged_copy" && cp "$final_receipt" "$final_copy" && cp "$mac_receipt" "$mac_copy" && chmod 0444 "$challenged_copy" "$final_copy" "$mac_copy" || return 1
+    local ingress_id backend_id vlm_id network_id
+    ingress_id=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["compose_observation"]["containers"]["ingress"]["container_id"])' "$final_receipt") || return 1
+    backend_id=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["compose_observation"]["containers"]["backend"]["container_id"])' "$final_receipt") || return 1
+    vlm_id=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["compose_observation"]["containers"]["vlm-wrapper"]["container_id"])' "$final_receipt") || return 1
+    network_id=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["compose_observation"]["containers"]["ingress"]["network_id"])' "$final_receipt") || return 1
+    bundle_tmp="$release_dir/bundle.tmp.$$"
+    python3 -c 'import json,sys; print(json.dumps({"schema":"seraph.production-acceptance.v1","stage":sys.argv[15],"app_sha":sys.argv[1],"vlm_image":sys.argv[2],"compose_project":"seraph-prod","network_name":"seraph-core-prod","network_id":sys.argv[3],"container_ids":{"ingress":sys.argv[4],"backend":sys.argv[5],"vlm-wrapper":sys.argv[6]},"challenged_attestation":{"path":sys.argv[7],"sha256":sys.argv[8]},"final_attestation":{"path":sys.argv[9],"sha256":sys.argv[10]},"mac_receipt":{"path":sys.argv[11],"sha256":sys.argv[12]},"acceptance_challenge":json.load(open(sys.argv[11]))["challenge"],"expected_origin":sys.argv[13],"client_identity":sys.argv[14]},sort_keys=True,separators=(",",":")))' "$SERAPH_IMAGE_TAG" "$SERAPH_VLM_IMAGE" "$network_id" "$ingress_id" "$backend_id" "$vlm_id" "$challenged_copy" "$challenged_hash" "$final_copy" "$final_hash" "$mac_copy" "$mac_hash" "$SERAPH_EXPECTED_HTTPS_ORIGIN" "$SERAPH_MAC_PROBE_CLIENT_ID" "$stage" >"$bundle_tmp" || return 1
+    SERAPH_BUNDLE_APP_SHA="$SERAPH_IMAGE_TAG" SERAPH_BUNDLE_VLM_IMAGE="$SERAPH_VLM_IMAGE" python3 "$SCRIPT_DIR/scripts/validate_acceptance_bundle.py" <"$bundle_tmp" || return 1
+    bundle_hash=$(sha256sum "$bundle_tmp" | awk '{print $1}'); bundle_copy="$release_dir/$SERAPH_IMAGE_TAG-$bundle_hash.json"
+    state_tmp="$state_file.tmp.$$"; printf '%s\n%s\n%s\n' "$SERAPH_IMAGE_TAG" "$SERAPH_VLM_IMAGE" "$bundle_copy" >"$state_tmp" || return 1
+    { [ -r "$consumed_file" ] && cat "$consumed_file"; printf 'nonce:%s\nchallenge:%s\n' "$MAC_RECEIPT_NONCE" "$MAC_CHALLENGE_NONCE"; } >"$consumed_tmp" || return 1
+    chmod 0444 "$bundle_tmp" && chmod 0600 "$state_tmp" "$consumed_tmp" || return 1
+    sync "$challenged_copy" "$final_copy" "$mac_copy" "$bundle_tmp" "$state_tmp" "$consumed_tmp" 2>/dev/null || true
+    mv "$bundle_tmp" "$bundle_copy" || return 1
+    mv "$consumed_tmp" "$consumed_file" || return 1
     mv "$state_tmp" "$state_file"
 }
 
@@ -972,7 +1167,17 @@ function production_read_validate_accepted_state() {
         [ "$revision" = "$tag" ] || { echo "accepted image label mismatch: $image" >&2; return 1; }
     done
     docker image inspect "$vlm" >/dev/null 2>&1 || { echo "accepted VLM image missing" >&2; return 1; }
-    SERAPH_ALLOW_PREVIOUS_ACCEPTED_RECEIPT=true production_host_inventory_validate "$receipt" "$vlm" || return 1
+    local receipt_schema challenged_attestation final_attestation
+    receipt_schema=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("schema",""))' "$receipt") || return 1
+    if [ "$receipt_schema" = "seraph.production-acceptance.v1" ]; then
+        SERAPH_BUNDLE_APP_SHA="$tag" SERAPH_BUNDLE_VLM_IMAGE="$vlm" python3 "$SCRIPT_DIR/scripts/validate_acceptance_bundle.py" <"$receipt" || return 1
+        challenged_attestation=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["challenged_attestation"]["path"])' "$receipt") || return 1
+        final_attestation=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["final_attestation"]["path"])' "$receipt") || return 1
+        SERAPH_ALLOW_PREVIOUS_ACCEPTED_RECEIPT=true production_host_inventory_validate "$challenged_attestation" "$vlm" || return 1
+        SERAPH_ALLOW_PREVIOUS_ACCEPTED_RECEIPT=true production_host_inventory_validate "$final_attestation" "$vlm" || return 1
+    else
+        SERAPH_ALLOW_PREVIOUS_ACCEPTED_RECEIPT=true production_host_inventory_validate "$receipt" "$vlm" || return 1
+    fi
     ACCEPTED_APP_TAG="$tag"
     ACCEPTED_VLM_IMAGE="$vlm"
     ACCEPTED_INVENTORY_RECEIPT="$receipt"
@@ -981,15 +1186,15 @@ function production_read_validate_accepted_state() {
 function production_rollback() {
     local tag="${1:-}"
     local vlm_image="${2:-}"
-    local target_receipt="${3:-}"
-    [ -n "$tag" ] && [ -n "$vlm_image" ] && [ -n "$target_receipt" ] || error_exit "rollback requires application SHA, VLM digest, and target inventory receipt"
+    [ -n "$tag" ] && [ -n "$vlm_image" ] || error_exit "rollback requires application SHA and VLM digest"
+    ensure_runtime_dirs
+    production_any_staged_state && error_exit "rollback refused while another stage awaits LAN acceptance"
     [[ "$tag" =~ ^[0-9a-f]{40}$ ]] || error_exit "rollback application tag must be a full git SHA"
     [[ "$vlm_image" =~ ^[^[:space:]@]+@sha256:[0-9a-fA-F]{64}$ ]] || error_exit "rollback VLM image must use an exact hexadecimal @sha256 digest"
     docker image inspect "seraph/backend:$tag" >/dev/null 2>&1 || error_exit "missing seraph/backend:$tag"
     docker image inspect "seraph/frontend-ingress:$tag" >/dev/null 2>&1 || error_exit "missing seraph/frontend-ingress:$tag"
     docker image inspect "$vlm_image" >/dev/null 2>&1 || error_exit "missing $vlm_image"
     SERAPH_IMAGE_TAG="$tag" SERAPH_VLM_IMAGE="$vlm_image" SERAPH_VALIDATING_ROLLBACK=true production_config_validate
-    production_host_inventory_validate "$target_receipt" "$vlm_image"
     ensure_runtime_dirs
     local active_tag_file="$PID_DIR/seraph-prod-active-release"
     local original_tag=""
@@ -1003,17 +1208,21 @@ function production_rollback() {
         production_read_validate_accepted_state "$active_tag_file" || { echo "accepted release state is invalid; refusing rollback cutover" >&2; return 1; }
         original_tag="$ACCEPTED_APP_TAG"; original_vlm="$ACCEPTED_VLM_IMAGE"; original_receipt="$ACCEPTED_INVENTORY_RECEIPT"
     fi
-    production_host_inventory_validate "$target_receipt" "$vlm_image" || return 1
     if ! SERAPH_IMAGE_TAG="$tag" SERAPH_VLM_IMAGE="$vlm_image" docker compose --env-file "$ENV_FILE" "${COMPOSE_FILES[@]}" up -d --no-build --wait --wait-timeout 120 || ! SERAPH_IMAGE_TAG="$tag" SERAPH_VLM_IMAGE="$vlm_image" docker compose --env-file "$ENV_FILE" "${COMPOSE_FILES[@]}" exec -T backend uv run python production_preflight.py; then
         docker compose --env-file "$ENV_FILE" "${COMPOSE_FILES[@]}" logs --no-color --tail 500 >"$LOG_DIR/seraph-prod-failed-rollback.log" 2>&1 || true
         echo "requested rollback tuple failed; restoring original active tuple" >&2
         production_restore_after_failure "$original_tag" "$original_vlm" "$original_receipt"; return $?
     fi
-    production_host_inventory_validate "$target_receipt" "$vlm_image" || { production_restore_after_failure "$original_tag" "$original_vlm" "$original_receipt"; return $?; }
-    if ! SERAPH_IMAGE_TAG="$tag" SERAPH_VLM_IMAGE="$vlm_image" production_write_accepted_state "$active_tag_file" "$target_receipt"; then
+    local target_attestation="$PID_DIR/seraph-prod-rollback-attestation.json" target_container
+    target_container=$(SERAPH_IMAGE_TAG="$tag" SERAPH_VLM_IMAGE="$vlm_image" docker compose --env-file "$ENV_FILE" "${COMPOSE_FILES[@]}" ps -q vlm-wrapper) || return 1
+    if ! production_generate_local_attestation "$target_attestation" "$vlm_image" || ! SERAPH_VLM_IMAGE="$vlm_image" production_host_inventory_validate "$target_attestation" "$vlm_image"; then
         production_restore_after_failure "$original_tag" "$original_vlm" "$original_receipt"; return $?
     fi
-    echo "rolled back production containers to release tuple $tag + $vlm_image"
+    if ! SERAPH_IMAGE_TAG="$tag" SERAPH_VLM_IMAGE="$vlm_image" production_write_accepted_state "$PID_DIR/seraph-prod-rollback-release" "$target_attestation"; then
+        production_restore_after_failure "$original_tag" "$original_vlm" "$original_receipt"; return $?
+    fi
+    production_issue_challenge rollback "$tag" "$vlm_image" "$target_attestation" || { production_restore_after_failure "$original_tag" "$original_vlm" "$original_receipt"; return $?; }
+    echo "rollback deployed and locally attested; rollback awaiting fresh Mac LAN acceptance"
 }
 
 if [ "${SERAPH_MANAGE_SOURCE_ONLY:-false}" = "true" ]; then
@@ -1115,13 +1324,18 @@ if [ "$COMMAND" = "production" ]; then
     PROD_SUB="${1:-}"
     case "$PROD_SUB" in
         config-validate) production_config_validate ;;
-        start) production_start ;;
-        stop) docker compose --env-file "$ENV_FILE" "${COMPOSE_FILES[@]}" down ;;
-        restart) production_start ;;
+        start) production_lock_run production_start ;;
+        stop) production_lock_run docker compose --env-file "$ENV_FILE" "${COMPOSE_FILES[@]}" down ;;
+        restart) production_lock_run production_restart ;;
         status) production_status ;;
+        accept) production_lock_run production_accept "${2:-}" ;;
+        accept-rollback) production_lock_run production_accept_staged "rollback" "${2:-}" ;;
+        accept-restore) production_lock_run production_accept_staged "restore" "${2:-}" ;;
+        accept-restart) production_lock_run production_accept_staged "restart" "${2:-}" ;;
+        abort) production_lock_run production_abort "${2:-}" ;;
         logs) shift || true; docker compose --env-file "$ENV_FILE" "${COMPOSE_FILES[@]}" logs "$@" ;;
-        rollback) production_rollback "${2:-}" "${3:-}" "${4:-}" ;;
-        *) error_exit "Unknown production subcommand '$PROD_SUB'. Use: config-validate, start, stop, restart, status, logs, rollback" ;;
+        rollback) production_lock_run production_rollback "${2:-}" "${3:-}" ;;
+        *) error_exit "Unknown production subcommand '$PROD_SUB'. Use: config-validate, start, accept, rollback, accept-rollback, restart, accept-restart, accept-restore, abort, status, logs, stop" ;;
     esac
     exit 0
 fi

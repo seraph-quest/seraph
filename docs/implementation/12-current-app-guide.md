@@ -16,17 +16,21 @@ detail, read [Development Status](./STATUS.md).
 ## Current Topology
 
 ```text
-Seraph frontend       http://127.0.0.1:3001
-  -> Seraph backend   http://127.0.0.1:8004
-  -> GPU VLM wrapper  http://192.168.1.26:8001
-  -> GPU model server http://192.168.1.26:8000/v1
+GPU host `jupyter` (`192.168.1.26`)
+  Seraph frontend/backend + canonical data
+    -> private VLM wrapper
+    -> private GPU model server
+Mac paired edge
+  capture -> authenticated HTTPS ingress on jupyter
 ```
 
-The accepted architecture decision places the core on the GPU host and uses a
-paired Mac edge. Until their
-migration tickets ship, the backend and frontend remain local and GPU services
-are reached over documented HTTP APIs. `ssh jupyter` is an administrator path
-for inventory and maintenance, not application transport or a required tunnel.
+The repository and Codex workspace are already local to `jupyter`; administer
+the host directly rather than using an SSH hop to itself. Canonical authority
+stays on this GPU core. The target Mac edge is paired and revocable: it captures
+consented screenshots and pushes them through authenticated Seraph ingest for
+storage and analysis. That upload API is not shipped yet and is owned by #749.
+Until then, screenshot push is a visible gap, not a working capability. The Mac
+does not connect directly to backend, wrapper, or model ports.
 The planned authenticated deployment and its acceptance boundaries are defined
 in [GPU Core LAN Operations](./19-gpu-core-lan-operations.md); it is not yet a
 live-deployment receipt.
@@ -54,9 +58,9 @@ Useful probes:
 curl -sS http://127.0.0.1:8004/health
 curl -sS http://127.0.0.1:8004/api/runtime/status
 curl -sS http://127.0.0.1:8004/api/settings/artifact-storage
-curl -sS http://192.168.1.26:8001/health
-curl -sS http://192.168.1.26:8001/health/backend
-curl -sS http://192.168.1.26:8001/queue/status
+curl -sS http://127.0.0.1:8001/health
+curl -sS http://127.0.0.1:8001/health/backend
+curl -sS http://127.0.0.1:8001/queue/status
 ```
 
 The wrapper's `/health` and model backend's `/health/backend` are separate
@@ -86,9 +90,9 @@ the effective route, including degraded state and fallback.
 
 The target GPU topology has three distinct inference transports:
 
-- `LOCAL_LLM_API_BASE=http://192.168.1.26:8000/v1` is the chosen direct GPU text
-  endpoint for Seraph text workloads;
-- `SERAPH_VLM_BASE_URL=http://192.168.1.26:8001` also exposes an optional
+- `LOCAL_LLM_API_BASE=http://host.docker.internal:8000/v1` is the private local
+  GPU text route used from the backend container;
+- `SERAPH_VLM_BASE_URL=http://vlm-wrapper:8001` also exposes an optional
   OpenAI-compatible text chat proxy under `/v1`;
 - that same wrapper performs screenshot vision through `/v1/analyze-file`.
 

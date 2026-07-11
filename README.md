@@ -60,17 +60,22 @@ agent to operate. See the constitution's five
 
 ## Current Development Topology
 
-The currently shipped development path is transitional but supported:
+The current workspace is on GPU host `jupyter` (`192.168.1.26`):
 
 ```text
-Seraph frontend       http://127.0.0.1:3001
-  -> Seraph backend   http://127.0.0.1:8004
-  -> GPU VLM wrapper  http://192.168.1.26:8001
-  -> GPU model server http://192.168.1.26:8000/v1
+GPU host jupyter
+  Seraph frontend/backend + canonical data
+    -> private VLM wrapper
+    -> private GPU model server
+Mac paired edge target (#749)
+  screenshot capture -> future authenticated Seraph upload API
 ```
 
-Runtime traffic uses HTTP APIs. `ssh jupyter` is only an administrator route for
-GPU inventory and maintenance; it is not a Seraph runtime requirement or tunnel.
+The Mac must not call internal ports 8000, 8001, or 8004. Its screenshot push
+is planned in #749; no screenshot upload API is currently shipped.
+
+Runtime traffic uses private HTTP/service routes. This workspace is already on
+`jupyter`, so administration is direct and does not use `ssh jupyter`.
 
 ## Quick Start
 

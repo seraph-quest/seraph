@@ -7,9 +7,9 @@ title: 19. GPU Core LAN Operations
 
 **Status:** Planned for issue [#741](https://github.com/seraph-quest/seraph/issues/741)
 
-This runbook defines the acceptance contract for moving the Seraph core to the
-GPU host. It does not claim that the deployment is live. The current shipped
-Mac-core topology remains in [Current App Guide](./12-current-app-guide.md).
+This runbook defines the acceptance contract for operating the Seraph core on
+the current GPU host, `jupyter` (`192.168.1.26`). It does not by itself claim
+that every production acceptance gate is complete.
 
 ## Supported Boundary
 
@@ -26,6 +26,15 @@ throttles, and trusts forwarded client information only from the configured
 local reverse proxy. Seraph runs as a single application worker while SQLite
 and in-process scheduling remain authoritative.
 
+The repository, frontend, backend, canonical data, VLM wrapper, and model
+server are local to `jupyter`. Administrators use direct Docker, process,
+listener, filesystem, and log inspection; they do not SSH from jupyter back to
+jupyter. The target Mac edge captures consented screenshots and pushes them
+through authenticated ingest. That paired-edge upload is planned in #749; no
+current screenshot upload API exists, so this is not shipped push support. The
+Mac owns no canonical state and has no direct access to ports 8000, 8001, or
+8004.
+
 The Mac native folder picker is not remotely available through the browser.
 Screenshot-folder selection and Mac capture therefore remain explicitly
 degraded until the paired edge ships; a server-local path is not presented as
@@ -38,10 +47,15 @@ Production commands are explicit and always use the production environment:
 ```bash
 ./manage.sh -e prod production config-validate
 ./manage.sh -e prod production start
+./manage.sh -e prod production accept /path/to/signed-mac-receipt.json
 ./manage.sh -e prod production status
 ./manage.sh -e prod production logs
 ./manage.sh -e prod production restart
-./manage.sh -e prod production rollback <40-hex-app-sha> <wrapper-image@sha256:64-hex-digest> </path/to/target-inventory.json>
+./manage.sh -e prod production accept-restart /path/to/signed-mac-receipt.json
+./manage.sh -e prod production rollback <40-hex-app-sha> <wrapper-image@sha256:64-hex-digest>
+./manage.sh -e prod production accept-rollback /path/to/signed-mac-receipt.json
+./manage.sh -e prod production accept-restore /path/to/signed-mac-receipt.json
+./manage.sh -e prod production abort <candidate|rollback|restore|restart>
 ./manage.sh -e prod production stop
 ```
 
@@ -50,15 +64,94 @@ require a clean worktree. The wrapper image is digest-pinned. The active release
 record stores the application SHA, wrapper digest, and accepted inventory
 receipt path so a failed candidate or rollback can restore the entire tuple.
 
-Before `start` or `rollback`, generate a fresh inventory JSON from the verified
-GPU administrator shell. It must contain the configured SSH alias and exact
-out-of-band-verified host-key fingerprint, an explicit UTC `captured_at`, raw
-`ss -lntp` output, current Docker bridge addresses and `host-gateway` binding,
-firewall results proving LAN ingress to 8000/8001/8004 is blocked, and the exact
-wrapper digest/interface contract being accepted. Set its path in
-`SERAPH_HOST_INVENTORY_RECEIPT`; rollback takes the target tuple's receipt as an
-explicit third argument. Missing, stale, mismatched, wildcard-listener, or
-unverified receipts fail closed.
+`production start` is a staged operation. Before cutover it automatically
+generates a local identity/listener receipt and refuses a wildcard/LAN model
+listener, an old wrapper on 8001, or an unexpected backend on 8004. After the
+private Compose candidate starts, it automatically binds an attestation to the
+actual wrapper container/image/network and tests `/health`, `/health/backend`,
+`/queue/status`, unauthenticated `/health/chat` denial, and authenticated
+`/health/chat` success. It then stops at `candidate awaiting LAN acceptance`
+without writing accepted state.
+
+From the operator Mac, generate measured and signed evidence (this is deployment
+acceptance, not #749 paired-edge identity). First copy the non-secret exact
+stage challenge from
+`$PID_DIR/seraph-prod-<candidate|rollback|restore|restart>-challenge.json` on
+the GPU host to the Mac. Then run:
+
+```bash
+python3 scripts/generate_mac_lan_acceptance.py \
+  --challenge-file /path/to/seraph-prod-candidate-challenge.json \
+  --https-origin https://seraph.lan \
+  --lan-host seraph.lan \
+  --lan-ip 192.168.1.26 \
+  --trusted-ca /path/to/seraph-lan-ca.pem \
+  --operator-secret-file /path/to/operator-login-secret \
+  --probe-key-file /path/to/distinct-mac-probe-hmac-key \
+  --client-identity operator-mac > /path/to/signed-mac-receipt.json
+```
+
+The generator requires DNS for the HTTPS hostname to include the pinned LAN IP,
+logs in, proves the authenticated session, actively attempts TCP connections to
+that exact IP on 8000/8001/8004, records only bounded refusal/timeout classes,
+and signs canonical JSON with HMAC-SHA256. DNS mismatch, no-route, and
+unclassified network errors fail closed. The GPU host pins the exact expected
+origin, LAN hostname, LAN IP, client label, and a distinct nonempty probe HMAC
+key file. That HMAC key is separate from the operator login secret. The receipt
+must contain the exact server challenge and its digest. Mac receipt nonces and
+server challenge nonces are recorded as separate consumed authorities and
+neither can be replayed. Operator login and probe key material never appear in
+the receipt.
+
+Start, rollback, restart, and automatic restoration stop in explicit
+candidate/rollback/restart/restore-awaiting-LAN states. Their matching
+`accept*` command freshly reattests the unchanged three-container/network
+binding. Every mutating production command is serialized by one nonblocking
+lifecycle `flock`; a concurrent mutation is rejected. Acceptance prepares the
+local and Mac evidence copies, validates the completed immutable bundle, and
+prepares the consumed nonce/challenge ledger and active state before publishing
+the active state last. The immutable bundle contains the app/VLM tuple, Compose
+project and network ID, ingress/backend/VLM container IDs, ingress/backend image
+IDs and revision labels through the local attestation, the wrapper RepoDigest,
+hashed evidence copies, and expected origin/client identity. Live identities
+are read again immediately before publication. A failed pre-publication attempt
+can leave only hash-named, read-only orphan evidence in `releases/`; it cannot
+create active state, and those unreferenced files may be removed during a later
+maintenance cleanup after confirming no state or bundle references them.
+
+`production abort <stage>` runs under the same lifecycle lock, removes only the
+named stage and its challenge, and never accepts it. When previous accepted
+state exists, abort restores that tuple locally and leaves it in `restore
+awaiting LAN acceptance`, requiring fresh `accept-restore` evidence. With no
+previously accepted tuple, abort stops production. A failed local restoration
+is catastrophic; a successful restoration is not called accepted until
+`accept-restore` receives new Mac evidence.
+
+The candidate attestation can also be reproduced locally for diagnosis:
+
+```bash
+python3 scripts/generate_local_gpu_inventory.py \
+  --expected-vlm-image "$SERAPH_VLM_IMAGE" \
+  --ingress-container seraph-prod-ingress-1 \
+  --backend-container seraph-prod-backend-1 \
+  --vlm-container seraph-prod-vlm-wrapper-1 \
+  --vlm-api-key-file "$SERAPH_VLM_API_KEY_FILE" \
+  > /path/to/gpu-host-inventory.json
+```
+
+The script hashes the local machine-id in memory and emits only its SHA-256
+digest. It inspects all three containers, their immutable image identities,
+revision labels, shared network identity and fixed private addresses, the
+running wrapper's RepoDigest, network/port state, and tested interface
+behaviors. Locally built legacy images without the pinned identity are
+non-accepted. Local firewall parsing is not an acceptance gate; the Mac-side
+negative reachability receipt is authoritative for LAN isolation.
+
+Bootstrap `SERAPH_GPU_MACHINE_IDENTITY_SHA256` once at a trusted local console
+by hashing `/etc/machine-id` without printing its raw value. Review and pin the
+digest in protected deployment configuration. Inventory generation reports the
+observed digest but never updates the expected value; mismatches require an
+explicit identity investigation and repinning ceremony.
 
 The acceptance receipt must cover start, status, health, logs, restart
 persistence, degraded dependency reporting, and rollback to the previous
@@ -78,16 +171,11 @@ payload. Exercise Host, Origin, unauthenticated, revoked-session, and throttle
 negative cases. Confirm internal service ports are not reachable as product
 entry points from the LAN.
 
-If an SSH host key changes, stop and compare the observed fingerprint with a
-trusted out-of-band administrator record. A changed or unverified fingerprint
-is a deployment blocker; do not bypass host-key verification. SSH remains an
-administrator route for inventory, deployment, process inspection, and logs.
-It is never Seraph application transport and must not become a user tunnel.
-
-Operator-shell receipts are authoritative. When a Codex/Desktop process cannot
-reach the LAN but the normal shell that launches Seraph can, record the agent
-network limitation and retain the direct HTTPS operator-shell receipt. Do not
-replace the product topology with a tunnel.
+Administration from this workspace is local. A separate remote administrator
+would still verify host identity normally, but that is not the repository's
+local lifecycle path and never becomes Seraph application transport. LAN
+acceptance uses the authenticated HTTPS origin plus negative reachability proof
+for internal ports; do not replace the product topology with a tunnel.
 
 ## Degraded Operation And Rollback
 

@@ -1,12 +1,26 @@
 import json
 import os
+import hashlib
+import hmac
 from pathlib import Path
 import subprocess
 import sys
+import time
 from datetime import datetime, timedelta, timezone
 
 
 ROOT = Path(__file__).resolve().parents[2]
+
+def _signed_mac_receipt(tmp_path: Path, captured_at: str, *, open_port: str = "", denied_error: str = "connection_refused", origin: str = "https://seraph.lan", host: str = "seraph.lan", client: str = "operator-mac", nonce: str = "a" * 48) -> tuple[Path, dict[str, str]]:
+    key_file=tmp_path/'probe.key'; key_file.write_bytes(b'k'*32)
+    challenge={'schema':'seraph.acceptance-challenge.v1','stage':'candidate','expected_origin':'https://seraph.lan','lan_host':'seraph.lan','lan_ip':'192.168.1.26','client_identity':'operator-mac','server_nonce':'f'*64}
+    challenge_file=tmp_path/'challenge.json'; challenge_file.write_text(json.dumps(challenge))
+    challenge_hash=hashlib.sha256(json.dumps(challenge,sort_keys=True,separators=(',',':')).encode()).hexdigest()
+    receipt={'schema':'seraph.mac-lan-acceptance.v1','challenge':challenge,'challenge_sha256':challenge_hash,'https_origin':origin,'lan_host':host,'lan_ip':'192.168.1.26','client_identity':client,'captured_at':captured_at,'nonce':nonce,'authenticated_session':True,'port_probes':{p:{'connected':p==open_port,'error_class':'' if p==open_port else denied_error,'latency_ms':1} for p in ('8000','8001','8004')}}
+    receipt['hmac_sha256']=hmac.new(key_file.read_bytes(),json.dumps(receipt,sort_keys=True,separators=(',',':')).encode(),hashlib.sha256).hexdigest()
+    path=tmp_path/('mac-'+nonce[:8]+'-'+client+'-'+captured_at.replace(':','_')+'.json'); path.write_text(json.dumps(receipt))
+    env=os.environ.copy(); env.update(SERAPH_EXPECTED_HTTPS_ORIGIN='https://seraph.lan',SERAPH_LAN_HOST='seraph.lan',SERAPH_LAN_IP='192.168.1.26',SERAPH_MAC_PROBE_CLIENT_ID='operator-mac',SERAPH_MAC_PROBE_KEY_FILE=str(key_file),SERAPH_ACCEPTANCE_CHALLENGE_FILE=str(challenge_file))
+    return path,env
 
 
 def test_production_compose_has_one_tls_ingress_and_no_backend_publication():
@@ -18,6 +32,8 @@ def test_production_compose_has_one_tls_ingress_and_no_backend_publication():
     assert "OPERATOR_AUTH_BACKEND_WORKERS: \"1\"" in backend
     assert 'OPERATOR_AUTH_TRUSTED_PROXY_IPS: "172.30.0.10"' in backend
     assert "--reload" not in (ROOT / "backend" / "Dockerfile").read_text()
+    assert 'CHAT_PROXY_API_KEY="$$(cat /run/secrets/vlm_api_key)"' in compose
+    assert "CHAT_PROXY_API_KEY_FILE" not in compose
     assert "npm\", \"run\", \"dev" not in (ROOT / "frontend" / "Dockerfile.prod").read_text()
 
 
@@ -61,7 +77,7 @@ def test_managed_start_probes_private_gpu_routes_and_rolls_back_on_failure():
     assert "validate_production_listeners.py" in manage
     assert "validate_gpu_host_inventory.py" in manage
     restart_case = manage.split('restart)', 1)[1].split(';;', 1)[0]
-    assert "production_start" in restart_case
+    assert "production_restart" in restart_case
     assert " down " not in restart_case
     assert "restoring previous production release" in manage
     start = manage.split("function production_start()", 1)[1].split("function production_rollback()", 1)[0]
@@ -80,7 +96,8 @@ def test_release_tuple_failure_paths_restore_or_emit_catastrophic_diagnostics():
     assert "requested rollback tuple failed; restoring original active tuple" in rollback
     assert 'production_restore_after_failure "$original_tag" "$original_vlm" "$original_receipt"' in rollback
     assert "seraph-prod-failed-rollback.log" in rollback
-    assert 'production_host_inventory_validate "$target_receipt" "$vlm_image"' in rollback
+    assert 'production_host_inventory_validate "$target_attestation" "$vlm_image"' in rollback
+    assert "rollback awaiting fresh Mac LAN acceptance" in rollback
 
 
 def test_release_identity_requires_clean_exact_head_and_hex_vlm_digest():
@@ -94,12 +111,26 @@ def test_release_identity_requires_clean_exact_head_and_hex_vlm_digest():
     assert not __import__("re").match(r"^[^\s@]+@sha256:[0-9a-fA-F]{64}$", non_hex_digest)
 
 
+def test_candidate_generator_observes_container_and_auth_without_firewall_claims():
+    generator = (ROOT / "scripts" / "generate_local_gpu_inventory.py").read_text()
+    assert 'default="bridge"' in generator
+    assert 'default="seraph-core-prod"' not in generator
+    assert '"nft"' not in generator
+    assert "--lan-ingress-" not in generator
+    assert "--vlm-contract-verified" not in generator
+    assert 'run(["docker", "inspect", args.vlm_container])' in generator
+    assert "'/health/chat'" in generator
+    assert "auth_closed" in generator
+
+
 def test_restore_adoption_inventory_and_atomic_state_failure_contracts():
     manage = (ROOT / "manage.sh").read_text()
     restore = manage.split("function production_restore_previous()", 1)[1].split("function production_restore_after_failure()", 1)[0]
     assert "production_preflight.py" in restore
     assert "seraph-prod-failed-restore.log" in restore
     assert "failed inference preflight" in restore
+    assert '["final_attestation"]["path"]' in restore
+    assert '["local_attestation"]["path"]' not in restore
     start = manage.split("function production_start()", 1)[1].split("function production_write_accepted_state()", 1)[0]
     refusal = start.index("explicit adoption is required")
     assert refusal < start.index("production_prepare_app_images")
@@ -138,6 +169,116 @@ def test_compose_state_validator_rejects_duplicate_missing_and_extra_rows():
         )
         assert result.returncode != 0
         assert "exactly one row per service" in result.stderr
+
+
+def test_acceptance_bundle_cross_binds_local_container_and_network_evidence(tmp_path):
+    ids={s:s+'-id' for s in ('ingress','backend','vlm-wrapper')}; ips={'ingress':'172.30.0.10','backend':'172.30.0.20','vlm-wrapper':'172.30.0.30'}; app='a'*40
+    vlm='repo/vlm@sha256:'+'b'*64
+    local={"captured_at":"2026-01-01T00:00:00+00:00","compose_observation":{"project":"seraph-prod","network_name":"seraph-core-prod","containers":{s:{"container_id":ids[s],"image_id":s+'-image',"image_revision":app if s in {'ingress','backend'} else '',"project":"seraph-prod","service":s,"network_name":"seraph-core-prod","network_id":"net-id","ip_address":ips[s]} for s in ids}},"vlm_observation":{"repo_digests":[vlm]}}
+    local_path=tmp_path/'challenged.json'; local_path.write_text(json.dumps(local)); final_path=tmp_path/'final.json'; final={**local,"captured_at":"2026-01-01T00:01:00+00:00"}; final_path.write_text(json.dumps(final))
+    mac_path, mac_env = _signed_mac_receipt(tmp_path, datetime.now(timezone.utc).isoformat())
+    sha=lambda p: hashlib.sha256(p.read_bytes()).hexdigest()
+    challenge={"schema":"seraph.acceptance-challenge.v1","stage":"candidate","app_sha":app,"vlm_image":vlm,"local_attestation_sha256":sha(local_path),"compose_project":"seraph-prod","network_name":"seraph-core-prod","network_id":"net-id","container_ids":ids,"image_identities":{s:{"image_id":s+'-image',"image_revision":app if s in {'ingress','backend'} else ''} for s in ids},"expected_origin":"https://seraph.lan","lan_host":"seraph.lan","lan_ip":"192.168.1.26","client_identity":"operator-mac","server_nonce":"f"*64,"issued_at":datetime.now(timezone.utc).isoformat()}
+    mac=json.loads(mac_path.read_text()); mac["challenge"]=challenge; mac["challenge_sha256"]=hashlib.sha256(json.dumps(challenge,sort_keys=True,separators=(',',':')).encode()).hexdigest(); mac.pop("hmac_sha256"); mac["hmac_sha256"]=hmac.new(Path(mac_env["SERAPH_MAC_PROBE_KEY_FILE"]).read_bytes(),json.dumps(mac,sort_keys=True,separators=(',',':')).encode(),hashlib.sha256).hexdigest(); mac_path.write_text(json.dumps(mac))
+    bundle={"schema":"seraph.production-acceptance.v1","stage":"candidate","app_sha":app,"vlm_image":vlm,"compose_project":"seraph-prod","network_name":"seraph-core-prod","network_id":"net-id","container_ids":ids,"challenged_attestation":{"path":str(local_path),"sha256":sha(local_path)},"final_attestation":{"path":str(final_path),"sha256":sha(final_path)},"mac_receipt":{"path":str(mac_path),"sha256":sha(mac_path)},"acceptance_challenge":challenge,"expected_origin":"https://seraph.lan","client_identity":"operator-mac"}
+    env=os.environ.copy(); env.update(mac_env); env.update(SERAPH_BUNDLE_APP_SHA=app,SERAPH_BUNDLE_VLM_IMAGE=vlm,SERAPH_EXPECTED_HTTPS_ORIGIN='https://seraph.lan',SERAPH_MAC_PROBE_CLIENT_ID='operator-mac',SERAPH_LAN_HOST='seraph.lan',SERAPH_LAN_IP='192.168.1.26')
+    validator=ROOT/'scripts'/'validate_acceptance_bundle.py'
+    assert subprocess.run([sys.executable,str(validator)],input=json.dumps(bundle),env=env,text=True).returncode == 0
+    bundle['container_ids']['backend']='swapped'
+    assert subprocess.run([sys.executable,str(validator)],input=json.dumps(bundle),env=env,text=True,capture_output=True).returncode != 0
+    bundle['container_ids']['backend']='backend-id'; bundle['acceptance_challenge']['container_ids']['backend']='backend-id'; bundle['acceptance_challenge']['image_identities']['backend']['image_revision']='c'*40
+    mismatch=subprocess.run([sys.executable,str(validator)],input=json.dumps(bundle),env=env,text=True,capture_output=True)
+    assert mismatch.returncode != 0 and 'challenge immutable field mismatch' in mismatch.stderr
+    bundle['acceptance_challenge']['image_identities']['backend']['image_revision']=app
+    mutated=json.loads(final_path.read_text()); mutated['compose_observation']['containers']['backend']['image_id']='raced-image'; final_path.write_text(json.dumps(mutated)); bundle['final_attestation']['sha256']=sha(final_path)
+    race=subprocess.run([sys.executable,str(validator)],input=json.dumps(bundle),env=env,text=True,capture_output=True)
+    assert race.returncode != 0 and ('immutable binding mismatch' in race.stderr or 'container binding mismatch' in race.stderr)
+
+
+def test_two_phase_predeploy_and_mac_negative_validators(tmp_path):
+    env = os.environ.copy()
+    env.update(SERAPH_GPU_EXPECTED_HOSTNAME="jupyter", SERAPH_GPU_MACHINE_IDENTITY_SHA256="c" * 64)
+    predeploy = {"local_hostname": "jupyter", "machine_identity_sha256": "c" * 64, "captured_at": datetime.now(timezone.utc).isoformat(), "ss_lntp": "LISTEN 0 4096 172.17.0.1:8000 0.0.0.0:*", "docker_bridge_addresses": ["172.17.0.1"], "docker_network_bindings": {"host-gateway": "172.17.0.1"}}
+    validator = ROOT / "scripts" / "validate_gpu_predeploy.py"
+    assert subprocess.run([sys.executable, str(validator)], input=json.dumps(predeploy), env=env, text=True).returncode == 0
+    predeploy["ss_lntp"] += "\nLISTEN 0 4096 0.0.0.0:8001 0.0.0.0:*"
+    assert subprocess.run([sys.executable, str(validator)], input=json.dumps(predeploy), env=env, text=True, capture_output=True).returncode != 0
+    mac_validator = ROOT / "scripts" / "validate_mac_lan_negative.py"
+    mac_path, mac_env = _signed_mac_receipt(tmp_path, datetime.now(timezone.utc).isoformat())
+    assert subprocess.run([sys.executable, str(mac_validator)], input=mac_path.read_text(), env=mac_env, text=True).returncode == 0
+    open_path, open_env = _signed_mac_receipt(tmp_path, datetime.now(timezone.utc).isoformat(), open_port="8001")
+    assert subprocess.run([sys.executable, str(mac_validator)], input=open_path.read_text(), env=open_env, text=True, capture_output=True).returncode != 0
+    assert "container/network binding changed before acceptance" in (ROOT / "manage.sh").read_text()
+
+
+def test_mac_hmac_identity_tamper_and_nonce_replay(tmp_path):
+    validator=ROOT/"scripts"/"validate_mac_lan_negative.py"; now=datetime.now(timezone.utc).isoformat()
+    valid,env=_signed_mac_receipt(tmp_path,now,nonce="1"*48)
+    tampered=json.loads(valid.read_text()); tampered["port_probes"]["8000"]["latency_ms"]=999
+    assert "HMAC mismatch" in subprocess.run([sys.executable,str(validator)],input=json.dumps(tampered),env=env,text=True,capture_output=True).stderr
+    for kwargs in ({"origin":"https://wrong.lan","nonce":"2"*48},{"host":"wrong.lan","nonce":"3"*48},{"client":"wrong-mac","nonce":"4"*48}):
+        path,bad_env=_signed_mac_receipt(tmp_path,now,**kwargs)
+        result=subprocess.run([sys.executable,str(validator)],input=path.read_text(),env=env,text=True,capture_output=True)
+        assert result.returncode != 0
+    script=f'''export SERAPH_MANAGE_SOURCE_ONLY=true SERAPH_EXPECTED_HTTPS_ORIGIN=https://seraph.lan SERAPH_LAN_HOST=seraph.lan SERAPH_MAC_PROBE_CLIENT_ID=operator-mac SERAPH_MAC_PROBE_KEY_FILE="{env['SERAPH_MAC_PROBE_KEY_FILE']}"; source "{ROOT/'manage.sh'}"; PID_DIR="{tmp_path/'nonce-pids'}"; mkdir -p "$PID_DIR"; production_validate_mac_receipt "{valid}"; production_record_mac_nonce; production_validate_mac_receipt "{valid}" && exit 9; exit 0'''
+    assert subprocess.run(["bash","-c",script],text=True,capture_output=True).returncode == 0
+
+
+def test_mac_challenge_mismatch_and_unclassified_network_error_fail_closed(tmp_path):
+    validator = ROOT / "scripts" / "validate_mac_lan_negative.py"
+    receipt, env = _signed_mac_receipt(tmp_path, datetime.now(timezone.utc).isoformat())
+    other = json.loads(Path(env["SERAPH_ACCEPTANCE_CHALLENGE_FILE"]).read_text())
+    other["server_nonce"] = "e" * 64
+    other_path = tmp_path / "other-challenge.json"
+    other_path.write_text(json.dumps(other))
+    mismatch_env = env.copy()
+    mismatch_env["SERAPH_ACCEPTANCE_CHALLENGE_FILE"] = str(other_path)
+    mismatch = subprocess.run([sys.executable, str(validator)], input=receipt.read_text(), env=mismatch_env, text=True, capture_output=True)
+    assert mismatch.returncode != 0
+    assert "acceptance challenge mismatch" in mismatch.stderr
+    mismatch_env["SERAPH_MAC_RECEIPT_HISTORICAL"] = "true"
+    historical_mismatch = subprocess.run([sys.executable, str(validator)], input=receipt.read_text(), env=mismatch_env, text=True, capture_output=True)
+    assert historical_mismatch.returncode != 0
+    assert "acceptance challenge mismatch" in historical_mismatch.stderr
+
+    no_route, no_route_env = _signed_mac_receipt(
+        tmp_path,
+        datetime.now(timezone.utc).isoformat(),
+        denied_error="invalid_network_error",
+        nonce="d" * 48,
+    )
+    rejected = subprocess.run([sys.executable, str(validator)], input=no_route.read_text(), env=no_route_env, text=True, capture_output=True)
+    assert rejected.returncode != 0
+    assert "measured LAN denial missing" in rejected.stderr
+    generator = (ROOT / "scripts" / "generate_mac_lan_acceptance.py").read_text()
+    assert "socket.getaddrinfo" in generator and "resolved!={a.lan_ip}" in generator
+    assert "socket.create_connection((a.lan_ip,port)" in generator
+    assert "server_hostname=expected_host" in generator
+    assert "self.sock.getpeername()[0]!=a.lan_ip" in generator
+
+
+def test_lifecycle_lock_and_server_challenge_ledger_reject_reuse(tmp_path):
+    lock_file = tmp_path / "pids" / "seraph-prod-lifecycle.lock"
+    lock_file.parent.mkdir()
+    holder = subprocess.Popen(["flock", str(lock_file), "sleep", "2"])
+    try:
+        time.sleep(0.1)
+        probe = f'''export SERAPH_MANAGE_SOURCE_ONLY=true; source "{ROOT/'manage.sh'}"; PID_DIR="{lock_file.parent}"; production_lock_run true'''
+        result = subprocess.run(["bash", "-c", probe], text=True, capture_output=True)
+        assert result.returncode != 0
+        assert "another production lifecycle mutation is running" in result.stderr
+    finally:
+        holder.terminate()
+        holder.wait(timeout=3)
+
+    receipt, env = _signed_mac_receipt(tmp_path, datetime.now(timezone.utc).isoformat(), nonce="9" * 48)
+    consumed = tmp_path / "ledger-pids"
+    consumed.mkdir()
+    (consumed / "seraph-prod-consumed-acceptance").write_text("challenge:" + "f" * 64 + "\n")
+    script = f'''export SERAPH_MANAGE_SOURCE_ONLY=true SERAPH_EXPECTED_HTTPS_ORIGIN=https://seraph.lan SERAPH_LAN_HOST=seraph.lan SERAPH_LAN_IP=192.168.1.26 SERAPH_MAC_PROBE_CLIENT_ID=operator-mac SERAPH_MAC_PROBE_KEY_FILE="{env['SERAPH_MAC_PROBE_KEY_FILE']}"; source "{ROOT/'manage.sh'}"; PID_DIR="{consumed}"; production_validate_mac_receipt "{receipt}" "{env['SERAPH_ACCEPTANCE_CHALLENGE_FILE']}"'''
+    replay = subprocess.run(["bash", "-c", script], text=True, capture_output=True)
+    assert replay.returncode != 0
+    assert "server acceptance challenge was already used" in replay.stderr
 
 
 def test_sourced_lifecycle_behavior_with_fake_docker(tmp_path):
@@ -181,6 +322,50 @@ production_write_accepted_state "{tmp_path / 'accepted'}" "{receipt}" || exit 23
     assert "compose" in call_text and "exec -T backend" in call_text
 
 
+def test_sourced_two_phase_accept_rejects_container_swap_and_stale_mac(tmp_path):
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    (fake_bin / "docker").write_text('#!/bin/sh\n[ "$CONTAINER_MODE" = swapped ] && echo candidate-2 || echo candidate-1\n')
+    (fake_bin / "docker").chmod(0o755)
+    (fake_bin / "python3").write_text('#!/bin/sh\ncase "$*" in *validate_mac_lan_negative.py*) exec /usr/bin/python3 "$@";; *"-c"*) echo candidate-1;; *generate_local_gpu_inventory.py*) echo "{}";; esac\nexec /usr/bin/python3 "$@"\n')
+    (fake_bin / "python3").chmod(0o755)
+    now = datetime.now(timezone.utc).isoformat()
+    stale = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+    valid_mac, mac_env = _signed_mac_receipt(tmp_path, now)
+    stale_mac, _ = _signed_mac_receipt(tmp_path, stale)
+    rollback_mac, _ = _signed_mac_receipt(tmp_path, now, nonce="b"*48)
+    restore_mac, _ = _signed_mac_receipt(tmp_path, now, nonce="c"*48)
+    script = f'''
+export SERAPH_MANAGE_SOURCE_ONLY=true PATH="{fake_bin}:$PATH" CONTAINER_MODE=stable SERAPH_EXPECTED_HTTPS_ORIGIN=https://seraph.lan SERAPH_LAN_HOST=seraph.lan SERAPH_LAN_IP=192.168.1.26 SERAPH_MAC_PROBE_CLIENT_ID=operator-mac SERAPH_MAC_PROBE_KEY_FILE="{mac_env['SERAPH_MAC_PROBE_KEY_FILE']}" SERAPH_ACCEPTANCE_CHALLENGE_FILE="{mac_env['SERAPH_ACCEPTANCE_CHALLENGE_FILE']}"
+source "{ROOT / 'manage.sh'}"
+python3() {{ if [ "$1" = "-c" ]; then echo candidate-1; elif echo "$1" | grep -q generate_local_gpu_inventory; then echo '{{}}'; else /usr/bin/python3 "$@"; fi; }}
+production_validate_mac_receipt() {{ /usr/bin/python3 "{ROOT/'scripts/validate_mac_lan_negative.py'}" <"$1" || return 1; MAC_RECEIPT_NONCE=$(/usr/bin/python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["nonce"])' "$1"); local nf="$PID_DIR/seraph-prod-mac-nonces"; [ -r "$nf" ] && grep -Fx "$MAC_RECEIPT_NONCE" "$nf" >/dev/null && return 1; return 0; }}
+PID_DIR="{tmp_path / 'pids'}"; LOG_DIR="{tmp_path / 'logs'}"; mkdir -p "$PID_DIR" "$LOG_DIR"
+ENV_FILE=/dev/null; COMPOSE_FILES=(-f /dev/null); SERAPH_VLM_API_KEY_FILE=/dev/null
+touch "$PID_DIR/seraph-prod-candidate-release"
+echo '{{"vlm_observation":{{"container_id":"candidate-1"}}}}' >"{tmp_path / 'candidate.json'}"
+production_read_validate_accepted_state() {{ ACCEPTED_APP_TAG={'a' * 40}; ACCEPTED_VLM_IMAGE='repo/vlm@sha256:{'b' * 64}'; ACCEPTED_INVENTORY_RECEIPT="{tmp_path / 'candidate.json'}"; return 0; }}
+production_host_inventory_validate() {{ return 0; }}
+production_compose_state_validate() {{ return 0; }}
+production_generate_local_attestation() {{ [ "$CONTAINER_MODE" != swapped ] || return 1; echo '{{}}' >"$1"; }}
+production_write_accepted_state() {{ touch "$1"; return 0; }}
+production_write_acceptance_bundle() {{ touch "$1"; return 0; }}
+production_accept "{valid_mac}" || exit 31
+[ -f "$PID_DIR/seraph-prod-active-release" ] || exit 32
+touch "$PID_DIR/seraph-prod-candidate-release"; export CONTAINER_MODE=swapped
+production_accept "{valid_mac}" && exit 33
+export CONTAINER_MODE=stable
+production_accept "{stale_mac}" && exit 34
+touch "$PID_DIR/seraph-prod-rollback-release"; export CONTAINER_MODE=stable
+production_accept_staged rollback "{rollback_mac}" || exit 35
+touch "$PID_DIR/seraph-prod-restore-release"
+production_accept_staged restore "{restore_mac}" || exit 36
+exit 0
+'''
+    result = subprocess.run(["bash", "-c", script], text=True, capture_output=True)
+    assert result.returncode == 0, result.stderr
+
+
 def _entrypoint(tmp_path: Path, raw: str, hashed: str) -> subprocess.CompletedProcess[str]:
     raw_file = tmp_path / "raw"
     hash_file = tmp_path / "hash"
@@ -212,10 +397,10 @@ def test_entrypoint_accepts_exactly_one_raw_or_hash_credential(tmp_path):
 def _inventory(receipt: dict[str, object]) -> subprocess.CompletedProcess[str]:
     env = os.environ.copy()
     env.update(
-        SERAPH_GPU_SSH_HOST="jupyter",
-        SERAPH_GPU_SSH_HOST_FINGERPRINT="SHA256:test-receipt",
+        SERAPH_GPU_EXPECTED_HOSTNAME="jupyter",
+        SERAPH_GPU_MACHINE_IDENTITY_SHA256="c" * 64,
         SERAPH_VLM_IMAGE="ghcr.io/seraph-quest/vlm-screenshot-server@sha256:" + "a" * 64,
-        SERAPH_VLM_INTERFACE_CONTRACT="vlm-screenshot-server/v0.2-file-secrets",
+        SERAPH_VLM_INTERFACE_CONTRACT="vlm-health-backend-queue-chat-auth-v1",
         SERAPH_HOST_INVENTORY_MAX_AGE_SECONDS="900",
     )
     return subprocess.run(
@@ -230,19 +415,29 @@ def _inventory(receipt: dict[str, object]) -> subprocess.CompletedProcess[str]:
 
 def test_host_inventory_gate_accepts_private_listener_and_rejects_lan_listener():
     receipt = {
-        "ssh_host": "jupyter",
-        "host_key_verified": True,
-        "host_key_fingerprint": "SHA256:test-receipt",
+        "local_hostname": "jupyter",
+        "machine_identity_sha256": "c" * 64,
         "captured_at": datetime.now(timezone.utc).isoformat(),
         "ss_lntp": 'LISTEN 0 4096 172.17.0.1:8000 0.0.0.0:* users:(("model",pid=1,fd=1))',
         "docker_bridge_addresses": ["172.17.0.1"],
         "docker_network_bindings": {"host-gateway": "172.17.0.1"},
         "firewall": {f"lan_ingress_{port}": "blocked" for port in (8000, 8001, 8004)},
+        "firewall_provenance": {"source_command": "nft list ruleset", "captured_at": datetime.now(timezone.utc).isoformat(), "raw_output": "table inet filter { chain input { drop } }", "output_sha256": __import__("hashlib").sha256(b"table inet filter { chain input { drop } }").hexdigest()},
         "vlm_image": "ghcr.io/seraph-quest/vlm-screenshot-server@sha256:" + "a" * 64,
-        "vlm_interface_contract": "vlm-screenshot-server/v0.2-file-secrets",
+        "vlm_interface_contract": "vlm-health-backend-queue-chat-auth-v1",
         "vlm_wrapper_contract_verified": True,
+        "vlm_observation": {"container_id": "candidate-1", "running": True, "published_ports": {}, "checks": {"health": True, "backend": True, "queue": True, "auth_closed": True, "auth_interface": True}},
+        "compose_observation": {"project": "seraph-prod", "network_name": "seraph-core-prod", "containers": {service: {"container_id": service+"-1", "image_id": service+"-image", "image_revision": "a"*40 if service in {"ingress","backend"} else "", "project": "seraph-prod", "service": service, "network_name": "seraph-core-prod", "network_id": "net-1", "ip_address": ip} for service,ip in {"ingress":"172.30.0.10","backend":"172.30.0.20","vlm-wrapper":"172.30.0.30"}.items()}},
     }
     assert _inventory(receipt).returncode == 0
+    receipt["vlm_observation"]["checks"]["auth_interface"] = False
+    forged_contract = _inventory(receipt)
+    assert forged_contract.returncode != 0
+    assert "active interface checks" in forged_contract.stderr
+    receipt["vlm_observation"]["checks"]["auth_interface"] = True
+    receipt["vlm_observation"]["checks"]["auth_closed"] = False
+    assert "active interface checks" in _inventory(receipt).stderr
+    receipt["vlm_observation"]["checks"]["auth_closed"] = True
     receipt["ss_lntp"] = "LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*"
     result = _inventory(receipt)
     assert result.returncode != 0
@@ -251,22 +446,30 @@ def test_host_inventory_gate_accepts_private_listener_and_rejects_lan_listener()
 
 def test_host_inventory_gate_rejects_stale_and_identity_or_contract_mismatch():
     receipt = {
-        "ssh_host": "jupyter",
-        "host_key_verified": True,
-        "host_key_fingerprint": "SHA256:test-receipt",
+        "local_hostname": "jupyter",
+        "machine_identity_sha256": "c" * 64,
         "captured_at": (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat(),
         "ss_lntp": "LISTEN 0 4096 172.17.0.1:8000 0.0.0.0:*",
         "docker_bridge_addresses": ["172.17.0.1"],
         "docker_network_bindings": {"host-gateway": "172.17.0.1"},
         "firewall": {f"lan_ingress_{port}": "blocked" for port in (8000, 8001, 8004)},
+        "firewall_provenance": {"source_command": "nft list ruleset", "captured_at": datetime.now(timezone.utc).isoformat(), "raw_output": "table inet filter { chain input { drop } }", "output_sha256": __import__("hashlib").sha256(b"table inet filter { chain input { drop } }").hexdigest()},
         "vlm_image": "ghcr.io/seraph-quest/vlm-screenshot-server@sha256:" + "a" * 64,
-        "vlm_interface_contract": "vlm-screenshot-server/v0.2-file-secrets",
+        "vlm_interface_contract": "vlm-health-backend-queue-chat-auth-v1",
         "vlm_wrapper_contract_verified": True,
+        "vlm_observation": {"container_id": "candidate-1", "running": True, "published_ports": {}, "checks": {"health": True, "backend": True, "queue": True, "auth_closed": True, "auth_interface": True}},
+        "compose_observation": {"project": "seraph-prod", "network_name": "seraph-core-prod", "containers": {service: {"container_id": service+"-1", "image_id": service+"-image", "image_revision": "a"*40 if service in {"ingress","backend"} else "", "project": "seraph-prod", "service": service, "network_name": "seraph-core-prod", "network_id": "net-1", "ip_address": ip} for service,ip in {"ingress":"172.30.0.10","backend":"172.30.0.20","vlm-wrapper":"172.30.0.30"}.items()}},
     }
     assert "stale" in _inventory(receipt).stderr
     receipt["captured_at"] = datetime.now(timezone.utc).isoformat()
-    receipt["ssh_host"] = "unexpected"
-    assert "identity" in _inventory(receipt).stderr
-    receipt["ssh_host"] = "jupyter"
+    receipt["local_hostname"] = "unexpected"
+    assert "hostname" in _inventory(receipt).stderr
+    receipt["local_hostname"] = "jupyter"
+    receipt["machine_identity_sha256"] = "d" * 64
+    assert "machine identity" in _inventory(receipt).stderr
+    receipt["machine_identity_sha256"] = "c" * 64
     receipt["vlm_interface_contract"] = "wrong"
     assert "interface contract" in _inventory(receipt).stderr
+    receipt["vlm_interface_contract"] = "vlm-health-backend-queue-chat-auth-v1"
+    receipt["raw_machine_id"] = "forged-secret-machine-id"
+    assert "raw machine identity" in _inventory(receipt).stderr

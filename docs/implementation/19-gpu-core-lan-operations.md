@@ -18,6 +18,12 @@ connect directly to backend, VLM-wrapper, model-server, database, or worker
 ports. Those services remain host-internal; the HTTPS ingress is the sole
 product entry point.
 
+On the current rootless-Docker `jupyter` host, that origin is
+`https://192.168.1.26:8443`. Rootless Docker cannot publish privileged port
+443 with the host's current `net.ipv4.ip_unprivileged_port_start=1024`
+setting. Port 8443 preserves the same TLS and authentication boundary without
+granting Docker extra privilege or changing a host-wide sysctl.
+
 Authentication must provide login, server-side session validation, bounded
 session refresh, and logout/revocation. Session cookies are `Secure`,
 `HttpOnly`, and use an explicit `SameSite` policy. Ingress rejects unexpected
@@ -86,8 +92,8 @@ the GPU host to the Mac. Then run:
 ```bash
 python3 scripts/generate_mac_lan_acceptance.py \
   --challenge-file /path/to/seraph-prod-candidate-challenge.json \
-  --https-origin https://seraph.lan \
-  --lan-host seraph.lan \
+  --https-origin https://192.168.1.26:8443 \
+  --lan-host 192.168.1.26 \
   --lan-ip 192.168.1.26 \
   --trusted-ca /path/to/seraph-lan-ca.pem \
   --operator-secret-file /path/to/operator-login-secret \

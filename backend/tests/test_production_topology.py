@@ -532,7 +532,8 @@ def _inventory(receipt: dict[str, object], vlm_image: str = "") -> subprocess.Co
     model_dir=Path(tempfile.mkdtemp()); (model_dir/"model.gguf").write_bytes(b"model"); (model_dir/"mmproj.gguf").write_bytes(b"mmproj")
     gpu_ref = "ghcr.io/ggml-org/llama.cpp:server-cuda@sha256:" + "d" * 64
     containers = receipt.setdefault("compose_observation", {}).setdefault("containers", {})
-    containers.setdefault("gpu-model", {"container_id":"gpu-model-1","image_id":"gpu-model-image","image_revision":"","repo_digests":[gpu_ref],"project":"seraph-prod","service":"gpu-model","network_name":"seraph-core-prod","network_id":"net-1","ip_address":"172.30.0.40"})
+    canonical_gpu_ref = gpu_ref.replace(":server-cuda@", "@")
+    containers.setdefault("gpu-model", {"container_id":"gpu-model-1","image_id":"gpu-model-image","image_revision":"","repo_digests":[canonical_gpu_ref],"project":"seraph-prod","service":"gpu-model","network_name":"seraph-core-prod","network_id":"net-1","ip_address":"172.30.0.40"})
     receipt.setdefault("gpu_model_observation", {"image_ref":gpu_ref,"image_id":"gpu-model-image","alias":"gemma-test","health":True})
     receipt.setdefault("gpu_release", {"image_ref":gpu_ref,"alias":"gemma-test","artifact_root":str(model_dir.resolve()),"model":{"filename":"model.gguf","sha256":hashlib.sha256(b"model").hexdigest(),"size":5},"mmproj":{"filename":"mmproj.gguf","sha256":hashlib.sha256(b"mmproj").hexdigest(),"size":6},"ctx_size":32768,"layers":999,"command_contract":"llama-server-gemma4-v1"})
     env = os.environ.copy()
@@ -573,6 +574,13 @@ def test_host_inventory_gate_accepts_private_listener_and_rejects_lan_listener()
         "compose_observation": {"project": "seraph-prod", "network_name": "seraph-core-prod", "containers": {service: {"container_id": service+"-1", "image_id": service+"-image", "image_revision": "a"*40 if service in {"ingress","backend"} else "", "project": "seraph-prod", "service": service, "network_name": "seraph-core-prod", "network_id": "net-1", "ip_address": ip} for service,ip in {"ingress":"172.30.0.10","backend":"172.30.0.20","vlm-wrapper":"172.30.0.30"}.items()}},
     }
     assert _inventory(receipt).returncode == 0
+    tagged_vlm="ghcr.io/seraph-quest/vlm-screenshot-server:cuda@sha256:"+"a"*64
+    tagged_receipt=json.loads(json.dumps(receipt)); tagged_receipt["vlm_image"]=tagged_vlm; tagged_receipt["vlm_observation"]["repo_digests"]=["ghcr.io/seraph-quest/vlm-screenshot-server@sha256:"+"a"*64]
+    assert _inventory(tagged_receipt,tagged_vlm).returncode == 0
+    wrong_gpu=json.loads(json.dumps(receipt)); wrong_gpu["compose_observation"]["containers"]["gpu-model"]={"container_id":"gpu-model-1","image_id":"gpu-model-image","image_revision":"","repo_digests":["ghcr.io/wrong/llama.cpp@sha256:"+"d"*64],"project":"seraph-prod","service":"gpu-model","network_name":"seraph-core-prod","network_id":"net-1","ip_address":"172.30.0.40"}
+    assert "immutable identity" in _inventory(wrong_gpu).stderr
+    wrong_digest=json.loads(json.dumps(wrong_gpu)); wrong_digest["compose_observation"]["containers"]["gpu-model"]["repo_digests"]=["ghcr.io/ggml-org/llama.cpp@sha256:"+"e"*64]
+    assert "immutable identity" in _inventory(wrong_digest).stderr
     local_id = "sha256:" + "d" * 64
     local_receipt = json.loads(json.dumps(receipt)); local_receipt["vlm_image"] = local_id; local_receipt["vlm_observation"]["image_id"] = local_id; local_receipt["vlm_observation"]["repo_digests"] = []
     assert _inventory(local_receipt, local_id).returncode == 0

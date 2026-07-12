@@ -187,6 +187,10 @@ backend, queue, unauthenticated `auth_failed`/`auth_ok=false`, and authenticated
 `status=ok`/`auth_ok=true` interface checks use wrapper loopback; the API key is
 supplied over probe stdin. Probe bodies are bounded and reduced to booleans in
 the receipt. GPU health uses the pinned model container's loopback interface.
+Registry comparisons canonicalize only Docker's tag-stripping representation:
+`repository:tag@sha256:digest` and `repository@sha256:digest` are equivalent.
+The repository and digest must still match exactly, and accepted bundles retain
+the operator-configured immutable reference.
 
 Bootstrap `SERAPH_GPU_MACHINE_IDENTITY_SHA256` once at a trusted local console
 by hashing `/etc/machine-id` without printing its raw value. Review and pin the

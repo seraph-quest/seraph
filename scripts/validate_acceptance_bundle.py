@@ -11,6 +11,17 @@ def fail(message):
     raise SystemExit("acceptance bundle invalid: " + message)
 
 
+def canonical_repo_digest(reference):
+    if "@sha256:" not in reference: return reference
+    name,digest=reference.rsplit("@",1); slash=name.rfind("/"); colon=name.rfind(":")
+    if colon > slash: name=name[:colon]
+    return name+"@"+digest
+
+
+def repo_digest_matches(configured, observed):
+    return canonical_repo_digest(configured) in {canonical_repo_digest(value) for value in observed}
+
+
 bundle = json.load(sys.stdin)
 if bundle.get("schema") != "seraph.production-acceptance.v2":
     fail("schema")
@@ -51,9 +62,9 @@ def validate_attestation(kind):
     if not vlm_observation.get("image_id"): fail(kind + " VLM observed image ID missing")
     if configured_vlm.startswith("sha256:") and "@" not in configured_vlm:
         if vlm_observation.get("image_id") != configured_vlm: fail(kind + " VLM local image ID mismatch")
-    elif configured_vlm not in vlm_observation.get("repo_digests", []): fail(kind + " VLM RepoDigest mismatch")
+    elif not repo_digest_matches(configured_vlm,vlm_observation.get("repo_digests", [])): fail(kind + " VLM RepoDigest mismatch")
     gpu=local.get("gpu_model_observation",{}); release=bundle.get("gpu_release",{}); expected_gpu=release.get("image_ref"); expected_alias=release.get("alias")
-    if gpu.get("image_ref")!=expected_gpu or gpu.get("alias")!=expected_alias or gpu.get("image_id")!=observed["gpu-model"].get("image_id") or expected_gpu not in observed["gpu-model"].get("repo_digests",[]) or gpu.get("health") is not True: fail(kind + " GPU model identity/health mismatch")
+    if gpu.get("image_ref")!=expected_gpu or gpu.get("alias")!=expected_alias or gpu.get("image_id")!=observed["gpu-model"].get("image_id") or not repo_digest_matches(expected_gpu,observed["gpu-model"].get("repo_digests",[])) or gpu.get("health") is not True: fail(kind + " GPU model identity/health mismatch")
     if local.get("gpu_release")!=release: fail(kind + " GPU release manifest mismatch")
     immutable = {"project":compose.get("project"),"network_name":compose.get("network_name"),"containers":{s:{k:observed[s].get(k) for k in ("container_id","image_id","image_revision","project","service","network_name","network_id","ip_address")} for s in expected_ips},"vlm_configured_ref":configured_vlm,"vlm_observed_image_id":vlm_observation.get("image_id"),"gpu_model_image":gpu.get("image_ref"),"gpu_model_alias":gpu.get("alias")}
     return local, observed, immutable

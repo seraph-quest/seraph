@@ -31,6 +31,12 @@ def gpu_healthy(container_id: str) -> bool:
     result=run(['docker','exec',container_id,'curl','--fail','--silent','--show-error','--max-time','5','http://127.0.0.1:8000/health'])
     return result.returncode == 0
 
+def canonical_repo_digest(reference: str) -> str:
+    if '@sha256:' not in reference: return reference
+    name,digest=reference.rsplit('@',1); slash=name.rfind('/'); colon=name.rfind(':')
+    if colon > slash: name=name[:colon]
+    return name+'@'+digest
+
 p = argparse.ArgumentParser()
 p.add_argument("--expected-vlm-image", required=True)
 p.add_argument("--vlm-container", required=True)
@@ -82,7 +88,7 @@ image_details = json.loads(image_inspect.stdout)[0] if image_inspect.returncode 
 repo_digests = image_details.get("RepoDigests") or []
 observed_image_id = image_details.get("Id", "")
 is_local_id = args.expected_vlm_image.startswith("sha256:") and "@" not in args.expected_vlm_image
-actual_image = args.expected_vlm_image if ((is_local_id and observed_image_id == args.expected_vlm_image) or (not is_local_id and args.expected_vlm_image in repo_digests)) else "unverified"
+actual_image = args.expected_vlm_image if ((is_local_id and observed_image_id == args.expected_vlm_image) or (not is_local_id and canonical_repo_digest(args.expected_vlm_image) in {canonical_repo_digest(x) for x in repo_digests})) else "unverified"
 container_running = bool(container.get("State", {}).get("Running"))
 published_ports = container.get("NetworkSettings", {}).get("Ports", {})
 networks = container.get("NetworkSettings", {}).get("Networks", {})

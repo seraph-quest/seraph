@@ -16,6 +16,17 @@ def fail(message: str) -> None:
     raise SystemExit(f"GPU host inventory invalid: {message}")
 
 
+def canonical_repo_digest(reference: str) -> str:
+    if "@sha256:" not in reference: return reference
+    name,digest=reference.rsplit("@",1); slash=name.rfind("/"); colon=name.rfind(":")
+    if colon > slash: name=name[:colon]
+    return name+"@"+digest
+
+
+def repo_digest_matches(configured: str, observed: list[str]) -> bool:
+    return canonical_repo_digest(configured) in {canonical_repo_digest(value) for value in observed}
+
+
 receipt = json.load(sys.stdin)
 if any(key in receipt for key in ("machine_id", "raw_machine_id", "machine_identity_raw")):
     fail("raw machine identity material is forbidden")
@@ -65,7 +76,7 @@ vlm_observation = receipt.get("vlm_observation", {})
 if not vlm_observation.get("image_id"): fail("managed VLM observed image ID missing")
 if expected_vlm_image.startswith("sha256:") and "@" not in expected_vlm_image:
     if vlm_observation.get("image_id") != expected_vlm_image: fail("managed VLM local image ID mismatch")
-elif expected_vlm_image not in vlm_observation.get("repo_digests", []):
+elif not repo_digest_matches(expected_vlm_image, vlm_observation.get("repo_digests", [])):
     fail("managed VLM RepoDigest mismatch")
 if vlm_observation.get("running") is not True:
     fail("managed VLM wrapper container is not running")
@@ -93,7 +104,7 @@ if len(network_ids)!=1 or not next(iter(network_ids),""):
 if len(app_revisions)!=1 or not next(iter(app_revisions),""):
     fail("application image revision mismatch")
 gpu=receipt.get("gpu_model_observation",{})
-if gpu.get("image_ref")!=expected_gpu_model_image or expected_gpu_model_image not in containers.get("gpu-model",{}).get("repo_digests",[]) or gpu.get("image_id")!=containers.get("gpu-model",{}).get("image_id") or gpu.get("alias")!=expected_gpu_model_alias or gpu.get("health") is not True:
+if gpu.get("image_ref")!=expected_gpu_model_image or not repo_digest_matches(expected_gpu_model_image,containers.get("gpu-model",{}).get("repo_digests",[])) or gpu.get("image_id")!=containers.get("gpu-model",{}).get("image_id") or gpu.get("alias")!=expected_gpu_model_alias or gpu.get("health") is not True:
     fail("GPU model immutable identity/health mismatch")
 def artifact(path):
     p=Path(path); h=hashlib.sha256()

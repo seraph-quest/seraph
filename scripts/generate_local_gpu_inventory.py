@@ -2,20 +2,30 @@
 """Observe local host/firewall/wrapper state and emit a sanitized receipt."""
 from __future__ import annotations
 
-import argparse, hashlib, json, socket, subprocess, urllib.request, urllib.error
+import argparse, hashlib, json, socket, subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 
 def run(args: list[str]) -> subprocess.CompletedProcess[str]:
     return subprocess.run(args, text=True, capture_output=True, check=False)
 
-def get(url: str, key: str = "") -> int:
-    headers = {"Authorization": f"Bearer {key}"} if key else {}
-    try:
-        with urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=5) as response:  # noqa: S310
-            response.read(4096); return response.status
-    except urllib.error.HTTPError as exc:
-        return exc.code
+VLM_PROBE = """import sys,urllib.error,urllib.request
+path=sys.argv[1]; key=sys.stdin.read().strip(); headers={'Authorization':'Bearer '+key} if key else {}
+try:
+    with urllib.request.urlopen(urllib.request.Request('http://127.0.0.1:8001'+path,headers=headers),timeout=5) as response:
+        response.read(4096); print(response.status)
+except urllib.error.HTTPError as exc: print(exc.code)
+except Exception: raise SystemExit(1)
+"""
+
+def vlm_status(container_id: str, path: str, key: str = "") -> int:
+    result=subprocess.run(['docker','exec','-i',container_id,'python','-c',VLM_PROBE,path],input=key,text=True,capture_output=True,check=False)
+    try: return int(result.stdout.strip()) if result.returncode == 0 else 0
+    except ValueError: return 0
+
+def gpu_healthy(container_id: str) -> bool:
+    result=run(['docker','exec',container_id,'curl','--fail','--silent','--show-error','--max-time','5','http://127.0.0.1:8000/health'])
+    return result.returncode == 0
 
 p = argparse.ArgumentParser()
 p.add_argument("--expected-vlm-image", required=True)
@@ -72,18 +82,12 @@ actual_image = args.expected_vlm_image if ((is_local_id and observed_image_id ==
 container_running = bool(container.get("State", {}).get("Running"))
 published_ports = container.get("NetworkSettings", {}).get("Ports", {})
 networks = container.get("NetworkSettings", {}).get("Networks", {})
-container_ip = next((str(value.get("IPAddress", "")) for value in networks.values() if value.get("IPAddress")), "")
-base_url = f"http://{container_ip}:8001" if container_ip else ""
 api_key = args.vlm_api_key_file.read_text().strip() if args.vlm_api_key_file else ""
 checks = {}
 for name, path in (("health", "/health"), ("backend", "/health/backend"), ("queue", "/queue/status")):
-    try: checks[name] = get(base_url + path) == 200
-    except Exception: checks[name] = False
-try:
-    checks['auth_closed'] = get(base_url + '/health/chat') in (401,403)
-    checks['auth_interface'] = get(base_url + '/health/chat', api_key) == 200
-except Exception:
-    checks['auth_closed'] = checks['auth_interface'] = False
+    checks[name] = vlm_status(args.vlm_container,path) == 200
+checks['auth_closed'] = vlm_status(args.vlm_container,'/health/chat') in (401,403)
+checks['auth_interface'] = vlm_status(args.vlm_container,'/health/chat',api_key) == 200
 
 compose_containers={}
 for service, container_id, expected_ip in (("ingress",args.ingress_container,"172.30.0.10"),("backend",args.backend_container,"172.30.0.20"),("vlm-wrapper",args.vlm_container,"172.30.0.30"),("gpu-model",args.gpu_model_container,"172.30.0.40")):
@@ -101,7 +105,7 @@ payload = {
     "vlm_wrapper_contract_verified": container_running and actual_image != "unverified" and all(checks.values()),
     "vlm_observation": {"container": args.vlm_container, "container_id": container.get("Id", ""), "image_id": observed_image_id, "running": container_running, "repo_digests": repo_digests, "networks": networks, "published_ports": published_ports, "checks": checks},
     "gpu_release":gpu_release,
-    "gpu_model_observation":{"image_ref":args.expected_gpu_model_image,"image_id":compose_containers["gpu-model"]["image_id"],"alias":args.expected_gpu_model_alias,"health":get("http://172.30.0.40:8000/health")==200},
+    "gpu_model_observation":{"image_ref":args.expected_gpu_model_image,"image_id":compose_containers["gpu-model"]["image_id"],"alias":args.expected_gpu_model_alias,"health":gpu_healthy(args.gpu_model_container)},
     "compose_observation":{"project":"seraph-prod","network_name":"seraph-core-prod","containers":compose_containers},
 }
 print(json.dumps(payload, indent=2, sort_keys=True))

@@ -143,6 +143,12 @@ def test_candidate_generator_observes_container_and_auth_without_firewall_claims
     assert 'run(["docker", "inspect", args.vlm_container])' in generator
     assert "'/health/chat'" in generator
     assert "auth_closed" in generator
+    assert "['docker','exec','-i',container_id,'python','-c',VLM_PROBE,path]" in generator
+    assert "input=key" in generator
+    assert "['docker','exec',container_id,'curl'" in generator
+    assert "http://127.0.0.1:8000/health" in generator
+    assert "http://172.30.0.40:8000/health" not in generator
+    assert "base_url" not in generator
 
 
 def test_restore_adoption_inventory_and_atomic_state_failure_contracts():

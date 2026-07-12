@@ -181,6 +181,11 @@ its RepoDigest when registry-backed, network/port state, and tested interface
 behaviors. Local images whose ID differs from the configured pin are
 non-accepted. Local firewall parsing is not an acceptance gate; the Mac-side
 negative reachability receipt is authoritative for LAN isolation.
+Private service behavior is probed from inside the owning container namespace,
+not by routing from the rootless Docker host to `172.30.0.0/24`. VLM health,
+backend, queue, unauthenticated rejection, and authenticated interface checks
+use wrapper loopback; the API key is supplied over probe stdin. GPU health uses
+the pinned model container's loopback interface.
 
 Bootstrap `SERAPH_GPU_MACHINE_IDENTITY_SHA256` once at a trusted local console
 by hashing `/etc/machine-id` without printing its raw value. Review and pin the

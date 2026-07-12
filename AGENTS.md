@@ -37,8 +37,9 @@ Mac paired edge target (#749; upload API not shipped)
 
 This Codex workspace already runs on the GPU server, hostname `jupyter`, at
 `/home/pawel/repos/seraph`. The VLM wrapper is run through Docker locally from
-`/home/pawel/repos/vlm-screenshot-server`. The GPU model server is a separate
-local process and may already be running. Use direct local Docker, process,
+`/home/pawel/repos/vlm-screenshot-server`. Production manages the GPU model as
+the private `gpu-model` Compose service; an old host launcher must be stopped
+before managed cutover. Use direct local Docker, process,
 listener, filesystem, and log inspection for administration; `ssh jupyter` is
 neither required nor valid as a hop from this workspace back to its own host.
 Seraph runtime traffic still uses private HTTP/service routes. Operators enter

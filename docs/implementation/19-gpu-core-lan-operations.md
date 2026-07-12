@@ -115,16 +115,36 @@ the receipt.
 
 Start, rollback, restart, and automatic restoration stop in explicit
 candidate/rollback/restart/restore-awaiting-LAN states. Their matching
-`accept*` command freshly reattests the unchanged three-container/network
+`accept*` command freshly reattests the unchanged four-container/network
 binding. Every mutating production command is serialized by one nonblocking
 lifecycle `flock`; a concurrent mutation is rejected. Acceptance prepares the
 local and Mac evidence copies, validates the completed immutable bundle, and
 prepares the consumed nonce/challenge ledger and active state before publishing
 the active state last. The immutable bundle contains the app/VLM tuple, Compose
-project and network ID, ingress/backend/VLM container IDs, ingress/backend image
+project and network ID, ingress/backend/VLM/GPU-model container IDs, ingress/backend image
 IDs and revision labels through the local attestation, the configured immutable
 wrapper reference and observed image ID (plus RepoDigest when registry-backed),
-hashed evidence copies, and expected origin/client identity. Live identities
+and the complete version-2 GPU release tuple: image RepoDigest, alias, normalized
+absolute artifact root, model and mmproj filenames/SHA-256 hashes/sizes, context
+size, GPU layers, and command contract.
+The challenged and final attestations must carry the identical tuple; artifacts
+are rehashed before start, restart, rollback, restoration, and acceptance.
+Historical validation and recovery load the accepted artifact root from that
+tuple rather than the current environment, so changing `SERAPH_GPU_MODEL_DIR`
+cannot redirect an older accepted release to a different model directory.
+Staged candidate, rollback, restart, and restore receipts carry the same complete
+tuple. A later acceptance process restores and exports it before revalidation or
+final attestation; incomplete staged receipts are rejected.
+Authority reads used only to capture a recovery tuple run in preserve mode: a
+new candidate keeps its requested GPU tuple, and rollback keeps its selected
+historical target while recording the current active tuple for failure recovery.
+Active state is distinct from staged local evidence: only a v2 Mac-accepted
+bundle can authorize active state. The active-state file atomically carries the
+hash-bound accepted-release history index used by rollback, so unindexed orphan
+files under `releases/` are never rollback authority. Managed Compose cutovers
+use a 300-second wait timeout, covering the GPU model's 180-second health start
+window plus initialization buffer.
+Hashed evidence copies and expected origin/client identity are also retained. Live identities
 are read again immediately before publication. A failed pre-publication attempt
 can leave only hash-named, read-only orphan evidence in `releases/`; it cannot
 create active state, and those unreferenced files may be removed during a later
@@ -146,12 +166,15 @@ python3 scripts/generate_local_gpu_inventory.py \
   --ingress-container seraph-prod-ingress-1 \
   --backend-container seraph-prod-backend-1 \
   --vlm-container seraph-prod-vlm-wrapper-1 \
+  --gpu-model-container seraph-prod-gpu-model-1 \
+  --expected-gpu-model-image "$SERAPH_GPU_MODEL_IMAGE" \
+  --expected-gpu-model-alias "$SERAPH_GPU_MODEL_ALIAS" \
   --vlm-api-key-file "$SERAPH_VLM_API_KEY_FILE" \
   > /path/to/gpu-host-inventory.json
 ```
 
 The script hashes the local machine-id in memory and emits only its SHA-256
-digest. It inspects all three containers, their immutable image identities,
+digest. It inspects all four containers, their immutable image identities,
 revision labels, shared network identity and fixed private addresses, the
 running wrapper's configured immutable reference and observed image ID, plus
 its RepoDigest when registry-backed, network/port state, and tested interface

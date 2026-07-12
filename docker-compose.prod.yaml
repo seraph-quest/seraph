@@ -37,6 +37,8 @@ services:
     depends_on:
       vlm-wrapper:
         condition: service_healthy
+      gpu-model:
+        condition: service_healthy
     env_file:
       - .env.prod
     environment:
@@ -49,11 +51,10 @@ services:
       LOCAL_LLM_API_KEY_FILE: /run/secrets/local_llm_api_key
       SERAPH_VLM_API_KEY_FILE: /run/secrets/vlm_api_key
       SERAPH_VLM_BASE_URL: http://vlm-wrapper:8001
-      SERAPH_VLM_BACKEND_URL: http://host.docker.internal:8000/v1
+      LOCAL_LLM_API_BASE: http://gpu-model:8000/v1
+      SERAPH_VLM_BACKEND_URL: http://gpu-model:8000/v1
       WORKSPACE_DIR: /app/data
       LLM_LOG_DIR: /app/logs
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
     volumes:
       - ${BACKEND_DATA_PATH_PROD:?set BACKEND_DATA_PATH_PROD}:/app/data
       - ${BACKEND_LOGS_PATH_PROD:?set BACKEND_LOGS_PATH_PROD}:/app/logs
@@ -76,17 +77,18 @@ services:
   vlm-wrapper:
     image: ${SERAPH_VLM_IMAGE:?set immutable SERAPH_VLM_IMAGE}
     restart: unless-stopped
+    depends_on:
+      gpu-model:
+        condition: service_healthy
     environment:
       HOST: 0.0.0.0
       PORT: "8001"
-      VLM_BASE_URL: http://host.docker.internal:8000/v1
+      VLM_BASE_URL: http://gpu-model:8000/v1
       VLM_MODEL: ${LOCAL_VLM_MODEL:?set LOCAL_VLM_MODEL}
       CHAT_PROXY_ENABLED: "true"
       QUEUE_WORKERS: "1"
       QUEUE_BACKGROUND_WORKERS: "1"
       QUEUE_MAX_SIZE: ${SERAPH_VLM_QUEUE_MAX_SIZE:-1000}
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
     secrets:
       - vlm_api_key
     command:
@@ -102,6 +104,51 @@ services:
       timeout: 5s
       retries: 5
       start_period: 30s
+
+  gpu-model:
+    image: ${SERAPH_GPU_MODEL_IMAGE:?set immutable SERAPH_GPU_MODEL_IMAGE}
+    restart: unless-stopped
+    command:
+      - --model
+      - /models/${SERAPH_GPU_MODEL_FILE:?set SERAPH_GPU_MODEL_FILE}
+      - --mmproj
+      - /models/${SERAPH_GPU_MMPROJ_FILE:?set SERAPH_GPU_MMPROJ_FILE}
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+      - --ctx-size
+      - ${SERAPH_GPU_MODEL_CTX_SIZE:-32768}
+      - --n-gpu-layers
+      - ${SERAPH_GPU_MODEL_LAYERS:-999}
+      - --temp
+      - "1.0"
+      - --top-p
+      - "0.95"
+      - --top-k
+      - "64"
+      - --alias
+      - ${SERAPH_GPU_MODEL_ALIAS:?set SERAPH_GPU_MODEL_ALIAS}
+      - --chat-template-kwargs
+      - '{"enable_thinking":false}'
+    volumes:
+      - ${SERAPH_GPU_MODEL_DIR:?set protected SERAPH_GPU_MODEL_DIR}:/models:ro
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    networks:
+      seraph-core:
+        ipv4_address: 172.30.0.40
+    healthcheck:
+      test: ["CMD-SHELL", "curl --fail --silent http://127.0.0.1:8000/health >/dev/null"]
+      interval: 15s
+      timeout: 5s
+      retries: 20
+      start_period: 180s
 
 networks:
   seraph-core:

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sys
 
 
@@ -17,8 +18,8 @@ def fail(message: str) -> None:
 def main() -> None:
     config = json.load(sys.stdin)
     services = config.get("services", {})
-    if set(services) != {"ingress", "backend", "vlm-wrapper"}:
-        fail("compose must contain exactly ingress, backend, and private VLM wrapper services")
+    if set(services) != {"ingress", "backend", "vlm-wrapper", "gpu-model"}:
+        fail("compose must contain exactly ingress, backend, VLM wrapper, and GPU model services")
     published: list[tuple[str, int, int]] = []
     for name, service in services.items():
         for port in service.get("ports", []) or []:
@@ -44,7 +45,25 @@ def main() -> None:
         fail("backend must not publish a host port")
     if services["vlm-wrapper"].get("ports"):
         fail("VLM wrapper must not publish a host port")
-    print("compose topology valid: one TLS ingress; backend and VLM wrapper have no Docker publications")
+    if services["gpu-model"].get("ports"):
+        fail("GPU model must not publish a host port")
+    if environment.get("LOCAL_LLM_API_BASE") != "http://gpu-model:8000/v1" or environment.get("SERAPH_VLM_BACKEND_URL") != "http://gpu-model:8000/v1":
+        fail("backend model routes must use private gpu-model service")
+    if services["vlm-wrapper"].get("environment", {}).get("VLM_BASE_URL") != "http://gpu-model:8000/v1":
+        fail("VLM wrapper backend must use private gpu-model service")
+    devices = services["gpu-model"].get("deploy", {}).get("resources", {}).get("reservations", {}).get("devices", [])
+    if not any(device.get("driver") == "nvidia" and "gpu" in (device.get("capabilities") or []) for device in devices):
+        fail("GPU model must reserve an NVIDIA GPU")
+    model = services["gpu-model"]
+    if not re.fullmatch(r"[^\s@]+@sha256:[0-9a-fA-F]{64}", str(model.get("image", ""))):
+        fail("GPU model image must be pinned by registry RepoDigest")
+    model_mounts = model.get("volumes", []) or []
+    if len(model_mounts) != 1 or model_mounts[0].get("target") != "/models" or model_mounts[0].get("read_only") is not True:
+        fail("GPU model artifact directory must be one read-only /models bind mount")
+    command = model.get("command", []) or []
+    for flag in ("--model", "--mmproj", "--alias", "--ctx-size", "--n-gpu-layers"):
+        if flag not in command: fail(f"GPU model command missing {flag}")
+    print("compose topology valid: one TLS ingress; backend, VLM wrapper, and GPU model are private")
 
 
 if __name__ == "__main__":

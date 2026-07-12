@@ -90,7 +90,7 @@ the effective route, including degraded state and fallback.
 
 The target GPU topology has three distinct inference transports:
 
-- `LOCAL_LLM_API_BASE=http://host.docker.internal:8000/v1` is the private local
+- `LOCAL_LLM_API_BASE=http://gpu-model:8000/v1` is the private local
   GPU text route used from the backend container;
 - `SERAPH_VLM_BASE_URL=http://vlm-wrapper:8001` also exposes an optional
   OpenAI-compatible text chat proxy under `/v1`;

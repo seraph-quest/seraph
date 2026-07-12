@@ -6,6 +6,7 @@ from pathlib import Path
 import subprocess
 import sys
 import time
+import tempfile
 from datetime import datetime, timedelta, timezone
 
 
@@ -34,6 +35,11 @@ def test_production_compose_has_one_tls_ingress_and_no_backend_publication():
     assert "--reload" not in (ROOT / "backend" / "Dockerfile").read_text()
     assert 'CHAT_PROXY_API_KEY="$$(cat /run/secrets/vlm_api_key)"' in compose
     assert "CHAT_PROXY_API_KEY_FILE" not in compose
+    assert "  gpu-model:" in compose
+    assert "172.30.0.40" in compose
+    assert "capabilities: [gpu]" in compose
+    assert "http://gpu-model:8000/v1" in compose
+    assert "host.docker.internal" not in compose
     assert "npm\", \"run\", \"dev" not in (ROOT / "frontend" / "Dockerfile.prod").read_text()
 
 
@@ -59,7 +65,9 @@ def test_production_example_uses_file_backed_secrets_and_exact_origin_placeholde
     assert "SERAPH_TLS_CERT_FILE=" in env
     assert "SERAPH_TLS_KEY_FILE=" in env
     assert "OPERATOR_AUTH_ALLOWED_ORIGINS=https://seraph.example.invalid" in env
-    assert "LOCAL_LLM_API_BASE=http://host.docker.internal:8000/v1" in env
+    assert "LOCAL_LLM_API_BASE=http://gpu-model:8000/v1" in env
+    assert "SERAPH_VLM_BACKEND_URL=http://gpu-model:8000/v1" in env
+    assert "SERAPH_GPU_MODEL_IMAGE=ghcr.io/ggml-org/llama.cpp:server-cuda@sha256:" in env
     assert "SERAPH_VLM_BASE_URL=http://vlm-wrapper:8001" in env
     assert "SERAPH_VLM_IMAGE=" in env
     assert "@sha256:" in env
@@ -111,6 +119,16 @@ def test_release_identity_requires_clean_exact_head_and_hex_vlm_digest():
     assert 'sha256:[0-9a-fA-F]{64})$' in manage
     assert "registry RepoDigest or exact local sha256 image ID" in manage
     assert "mismatched build identity; refusing overwrite" in manage
+    assert "seraph.production-acceptance.v2" in manage
+    assert "rollback requires exactly one previously accepted complete GPU release bundle" in manage
+    assert "ACCEPTED_GPU_MODEL_IMAGE" in manage
+    assert 'authority_mode="${2:-active}"' in manage
+    assert "active release requires a v2 Mac-accepted bundle" in manage
+    assert "staged release must contain raw local attestation" in manage
+    assert "glob.glob" not in manage
+    assert "accepted release history index is invalid" in manage
+    assert "--wait-timeout 120" not in manage
+    assert manage.count("--wait-timeout 300") == 4
     non_hex_digest = "ghcr.io/example/wrapper@sha256:" + "z" * 64
     assert not __import__("re").match(r"^[^\s@]+@sha256:[0-9a-fA-F]{64}$", non_hex_digest)
 
@@ -148,7 +166,7 @@ def test_restore_adoption_inventory_and_atomic_state_failure_contracts():
 
 def test_compose_state_validator_requires_complete_healthy_runtime():
     validator = ROOT / "scripts" / "validate_production_compose_state.py"
-    rows = [{"Service": service, "State": "running", "Health": "healthy"} for service in ("backend", "ingress", "vlm-wrapper")]
+    rows = [{"Service": service, "State": "running", "Health": "healthy"} for service in ("backend", "ingress", "vlm-wrapper", "gpu-model")]
     good = subprocess.run([sys.executable, str(validator)], input=json.dumps(rows), text=True, capture_output=True)
     assert good.returncode == 0
     rows[0]["Health"] = "unhealthy"
@@ -176,18 +194,29 @@ def test_compose_state_validator_rejects_duplicate_missing_and_extra_rows():
 
 
 def test_acceptance_bundle_cross_binds_local_container_and_network_evidence(tmp_path):
-    ids={s:s+'-id' for s in ('ingress','backend','vlm-wrapper')}; ips={'ingress':'172.30.0.10','backend':'172.30.0.20','vlm-wrapper':'172.30.0.30'}; app='a'*40
+    ids={s:s+'-id' for s in ('ingress','backend','vlm-wrapper','gpu-model')}; ips={'ingress':'172.30.0.10','backend':'172.30.0.20','vlm-wrapper':'172.30.0.30','gpu-model':'172.30.0.40'}; app='a'*40
     vlm='repo/vlm@sha256:'+'b'*64
-    local={"captured_at":"2026-01-01T00:00:00+00:00","compose_observation":{"project":"seraph-prod","network_name":"seraph-core-prod","containers":{s:{"container_id":ids[s],"image_id":s+'-image',"image_revision":app if s in {'ingress','backend'} else '',"project":"seraph-prod","service":s,"network_name":"seraph-core-prod","network_id":"net-id","ip_address":ips[s]} for s in ids}},"vlm_observation":{"image_id":"vlm-wrapper-image","repo_digests":[vlm]}}
+    gpu_ref='ghcr.io/ggml-org/llama.cpp:server-cuda@sha256:'+'c'*64
+    gpu_release={"image_ref":gpu_ref,"alias":"gemma-test","artifact_root":str(tmp_path.resolve()),"model":{"filename":"model.gguf","sha256":"1"*64,"size":10},"mmproj":{"filename":"mmproj.gguf","sha256":"2"*64,"size":5},"ctx_size":32768,"layers":999,"command_contract":"llama-server-gemma4-v1"}
+    local={"captured_at":"2026-01-01T00:00:00+00:00","compose_observation":{"project":"seraph-prod","network_name":"seraph-core-prod","containers":{s:{"container_id":ids[s],"image_id":s+'-image',"image_revision":app if s in {'ingress','backend'} else '',"repo_digests":[gpu_ref] if s=='gpu-model' else [],"project":"seraph-prod","service":s,"network_name":"seraph-core-prod","network_id":"net-id","ip_address":ips[s]} for s in ids}},"vlm_observation":{"image_id":"vlm-wrapper-image","repo_digests":[vlm]},"gpu_model_observation":{"image_ref":gpu_ref,"image_id":"gpu-model-image","alias":"gemma-test","health":True}}
+    local["gpu_release"]=gpu_release
     local_path=tmp_path/'challenged.json'; local_path.write_text(json.dumps(local)); final_path=tmp_path/'final.json'; final={**local,"captured_at":"2026-01-01T00:01:00+00:00"}; final_path.write_text(json.dumps(final))
     mac_path, mac_env = _signed_mac_receipt(tmp_path, datetime.now(timezone.utc).isoformat())
     sha=lambda p: hashlib.sha256(p.read_bytes()).hexdigest()
-    challenge={"schema":"seraph.acceptance-challenge.v1","stage":"candidate","app_sha":app,"vlm_image":vlm,"local_attestation_sha256":sha(local_path),"compose_project":"seraph-prod","network_name":"seraph-core-prod","network_id":"net-id","container_ids":ids,"image_identities":{s:{"image_id":s+'-image',"image_revision":app if s in {'ingress','backend'} else ''} for s in ids},"expected_origin":"https://seraph.lan","lan_host":"seraph.lan","lan_ip":"192.168.1.26","client_identity":"operator-mac","server_nonce":"f"*64,"issued_at":datetime.now(timezone.utc).isoformat()}
+    challenge={"schema":"seraph.acceptance-challenge.v1","stage":"candidate","app_sha":app,"vlm_image":vlm,"gpu_model_image":gpu_ref,"gpu_model_alias":"gemma-test","gpu_release":gpu_release,"local_attestation_sha256":sha(local_path),"compose_project":"seraph-prod","network_name":"seraph-core-prod","network_id":"net-id","container_ids":ids,"image_identities":{s:{"image_id":s+'-image',"image_revision":app if s in {'ingress','backend'} else ''} for s in ids},"expected_origin":"https://seraph.lan","lan_host":"seraph.lan","lan_ip":"192.168.1.26","client_identity":"operator-mac","server_nonce":"f"*64,"issued_at":datetime.now(timezone.utc).isoformat()}
     mac=json.loads(mac_path.read_text()); mac["challenge"]=challenge; mac["challenge_sha256"]=hashlib.sha256(json.dumps(challenge,sort_keys=True,separators=(',',':')).encode()).hexdigest(); mac.pop("hmac_sha256"); mac["hmac_sha256"]=hmac.new(Path(mac_env["SERAPH_MAC_PROBE_KEY_FILE"]).read_bytes(),json.dumps(mac,sort_keys=True,separators=(',',':')).encode(),hashlib.sha256).hexdigest(); mac_path.write_text(json.dumps(mac))
-    bundle={"schema":"seraph.production-acceptance.v1","stage":"candidate","app_sha":app,"vlm_image":vlm,"compose_project":"seraph-prod","network_name":"seraph-core-prod","network_id":"net-id","container_ids":ids,"challenged_attestation":{"path":str(local_path),"sha256":sha(local_path)},"final_attestation":{"path":str(final_path),"sha256":sha(final_path)},"mac_receipt":{"path":str(mac_path),"sha256":sha(mac_path)},"acceptance_challenge":challenge,"expected_origin":"https://seraph.lan","client_identity":"operator-mac"}
-    env=os.environ.copy(); env.update(mac_env); env.update(SERAPH_BUNDLE_APP_SHA=app,SERAPH_BUNDLE_VLM_IMAGE=vlm,SERAPH_EXPECTED_HTTPS_ORIGIN='https://seraph.lan',SERAPH_MAC_PROBE_CLIENT_ID='operator-mac',SERAPH_LAN_HOST='seraph.lan',SERAPH_LAN_IP='192.168.1.26')
+    bundle={"schema":"seraph.production-acceptance.v2","stage":"candidate","app_sha":app,"vlm_image":vlm,"gpu_release":gpu_release,"compose_project":"seraph-prod","network_name":"seraph-core-prod","network_id":"net-id","container_ids":ids,"challenged_attestation":{"path":str(local_path),"sha256":sha(local_path)},"final_attestation":{"path":str(final_path),"sha256":sha(final_path)},"mac_receipt":{"path":str(mac_path),"sha256":sha(mac_path)},"acceptance_challenge":challenge,"expected_origin":"https://seraph.lan","client_identity":"operator-mac"}
+    env=os.environ.copy(); env.update(mac_env); env.update(SERAPH_BUNDLE_APP_SHA=app,SERAPH_BUNDLE_VLM_IMAGE=vlm,SERAPH_GPU_MODEL_IMAGE=gpu_ref,SERAPH_GPU_MODEL_ALIAS='gemma-test',SERAPH_EXPECTED_HTTPS_ORIGIN='https://seraph.lan',SERAPH_MAC_PROBE_CLIENT_ID='operator-mac',SERAPH_LAN_HOST='seraph.lan',SERAPH_LAN_IP='192.168.1.26')
     validator=ROOT/'scripts'/'validate_acceptance_bundle.py'
     assert subprocess.run([sys.executable,str(validator)],input=json.dumps(bundle),env=env,text=True).returncode == 0
+    drift_root=tmp_path/'current-models'; drift_root.mkdir()
+    drift_env=env.copy(); drift_env["SERAPH_GPU_MODEL_IMAGE"]="repo/other@sha256:"+"e"*64; drift_env["SERAPH_GPU_MODEL_ALIAS"]="other"; drift_env["SERAPH_GPU_MODEL_DIR"]=str(drift_root)
+    assert subprocess.run([sys.executable,str(validator)],input=json.dumps(bundle),env=drift_env,text=True,capture_output=True).returncode == 0
+    assert bundle["gpu_release"]["artifact_root"] == str(tmp_path.resolve())
+    manage=(ROOT/'manage.sh').read_text()
+    assert 'ACCEPTED_GPU_MODEL_DIR=' in manage
+    assert 'SERAPH_GPU_MODEL_DIR="$ACCEPTED_GPU_MODEL_DIR"' in manage
+    assert '["gpu_release"]["artifact_root"]' in manage
     bundle['container_ids']['backend']='swapped'
     assert subprocess.run([sys.executable,str(validator)],input=json.dumps(bundle),env=env,text=True,capture_output=True).returncode != 0
     bundle['container_ids']['backend']='backend-id'; bundle['acceptance_challenge']['container_ids']['backend']='backend-id'; bundle['acceptance_challenge']['image_identities']['backend']['image_revision']='c'*40
@@ -201,10 +230,16 @@ def test_acceptance_bundle_cross_binds_local_container_and_network_evidence(tmp_
 
 def test_two_phase_predeploy_and_mac_negative_validators(tmp_path):
     env = os.environ.copy()
-    env.update(SERAPH_GPU_EXPECTED_HOSTNAME="jupyter", SERAPH_GPU_MACHINE_IDENTITY_SHA256="c" * 64)
-    predeploy = {"local_hostname": "jupyter", "machine_identity_sha256": "c" * 64, "captured_at": datetime.now(timezone.utc).isoformat(), "ss_lntp": "LISTEN 0 4096 172.17.0.1:8000 0.0.0.0:*", "docker_bridge_addresses": ["172.17.0.1"], "docker_network_bindings": {"host-gateway": "172.17.0.1"}}
+    (tmp_path/"model.gguf").write_bytes(b"model"); (tmp_path/"mmproj.gguf").write_bytes(b"mmproj")
+    gpu_release={"image_ref":"repo/model@sha256:"+"d"*64,"alias":"gemma-test","artifact_root":str(tmp_path.resolve()),"model":{"filename":"model.gguf","sha256":hashlib.sha256(b"model").hexdigest(),"size":5},"mmproj":{"filename":"mmproj.gguf","sha256":hashlib.sha256(b"mmproj").hexdigest(),"size":6},"ctx_size":32768,"layers":999,"command_contract":"llama-server-gemma4-v1"}
+    env.update(SERAPH_GPU_EXPECTED_HOSTNAME="jupyter", SERAPH_GPU_MACHINE_IDENTITY_SHA256="c" * 64,SERAPH_GPU_MODEL_DIR=str(tmp_path),SERAPH_GPU_MODEL_FILE="model.gguf",SERAPH_GPU_MMPROJ_FILE="mmproj.gguf",SERAPH_GPU_MODEL_IMAGE=gpu_release["image_ref"],SERAPH_GPU_MODEL_ALIAS="gemma-test",SERAPH_GPU_MODEL_CTX_SIZE="32768",SERAPH_GPU_MODEL_LAYERS="999")
+    predeploy = {"local_hostname": "jupyter", "machine_identity_sha256": "c" * 64, "captured_at": datetime.now(timezone.utc).isoformat(), "ss_lntp": "", "docker_bridge_addresses": ["172.17.0.1"], "docker_network_bindings": {"host-gateway": "172.17.0.1"}, "gpu_release":gpu_release}
     validator = ROOT / "scripts" / "validate_gpu_predeploy.py"
     assert subprocess.run([sys.executable, str(validator)], input=json.dumps(predeploy), env=env, text=True).returncode == 0
+    (tmp_path/"model.gguf").write_bytes(b"mutated")
+    mutated=subprocess.run([sys.executable,str(validator)],input=json.dumps(predeploy),env=env,text=True,capture_output=True)
+    assert mutated.returncode != 0 and "artifact manifest mismatch" in mutated.stderr
+    (tmp_path/"model.gguf").write_bytes(b"model")
     predeploy["ss_lntp"] += "\nLISTEN 0 4096 0.0.0.0:8001 0.0.0.0:*"
     assert subprocess.run([sys.executable, str(validator)], input=json.dumps(predeploy), env=env, text=True, capture_output=True).returncode != 0
     mac_validator = ROOT / "scripts" / "validate_mac_lan_negative.py"
@@ -323,7 +358,86 @@ production_write_accepted_state "{tmp_path / 'accepted'}" "{receipt}" || exit 23
     result = subprocess.run(["bash", "-c", script], text=True, capture_output=True)
     assert result.returncode == 0, result.stderr
     call_text = calls.read_text()
-    assert "compose" in call_text and "exec -T backend" in call_text
+    assert "ps --format" in call_text
+
+
+def test_active_history_uses_persisted_bundle_path_and_hash(tmp_path):
+    content=tmp_path/"bundle.tmp"; persisted=tmp_path/"bundle-final.json"; state=tmp_path/"active"; prepared=tmp_path/"active.tmp"
+    content.write_text('{"schema":"seraph.production-acceptance.v2"}')
+    persisted.write_bytes(content.read_bytes())
+    app="a"*40; vlm="repo/vlm@sha256:"+"b"*64
+    script=f'''export SERAPH_MANAGE_SOURCE_ONLY=true; source "{ROOT/'manage.sh'}"; production_prepare_active_state "{state}" "{prepared}" "{content}" "{persisted}" "{app}" "{vlm}"'''
+    result=subprocess.run(["bash","-c",script],text=True,capture_output=True)
+    assert result.returncode == 0, result.stderr
+    lines=prepared.read_text().splitlines(); assert len(lines)==4 and lines[2]==str(persisted)
+    history=json.loads(lines[3]); assert len(history)==1 and history[0]["bundle"]==lines[2]
+    assert Path(history[0]["bundle"]).is_file()
+    assert history[0]["sha256"]==hashlib.sha256(persisted.read_bytes()).hexdigest()
+
+
+def test_staged_reader_restores_gpu_tuple_before_cross_process_validation(tmp_path):
+    fake_bin=tmp_path/'bin'; fake_bin.mkdir(); tag='a'*40; vlm='repo/vlm@sha256:'+'b'*64
+    docker=fake_bin/'docker'; docker.write_text(f'''#!/bin/sh
+case " $* " in *" --format "*) echo "{tag}";; esac
+exit 0
+'''); docker.chmod(0o755)
+    accepted_root=tmp_path/'accepted-models'; accepted_root.mkdir()
+    (accepted_root/'model.gguf').write_bytes(b'model'); (accepted_root/'mmproj.gguf').write_bytes(b'mmproj')
+    release={"image_ref":"repo/model@sha256:"+'c'*64,"alias":"accepted-alias","artifact_root":str(accepted_root.resolve()),"model":{"filename":"model.gguf","sha256":hashlib.sha256(b'model').hexdigest(),"size":5},"mmproj":{"filename":"mmproj.gguf","sha256":hashlib.sha256(b'mmproj').hexdigest(),"size":6},"ctx_size":16384,"layers":77,"command_contract":"llama-server-gemma4-v1"}
+    receipt_data={"gpu_release":release}
+    content=json.dumps(receipt_data).encode(); receipt=tmp_path/f'{tag}-{hashlib.sha256(content).hexdigest()}.json'; receipt.write_bytes(content); receipt.chmod(0o444)
+    state=tmp_path/'staged'; state.write_text(f'{tag}\n{vlm}\n{receipt}\n')
+    drift=tmp_path/'current-models'; drift.mkdir()
+    script=f'''
+export SERAPH_MANAGE_SOURCE_ONLY=true PATH="{fake_bin}:$PATH"
+export SERAPH_GPU_MODEL_DIR="{drift}" SERAPH_GPU_MODEL_IMAGE="repo/other@sha256:{'d'*64}" SERAPH_GPU_MODEL_ALIAS=other
+source "{ROOT/'manage.sh'}"
+production_host_inventory_validate() {{ [ "$SERAPH_GPU_MODEL_DIR" = "{accepted_root.resolve()}" ] && [ "$SERAPH_GPU_MODEL_ALIAS" = accepted-alias ] && [ "$SERAPH_GPU_MODEL_CTX_SIZE" = 16384 ]; }}
+production_read_validate_accepted_state "{state}" staged || exit 41
+[ "$ACCEPTED_GPU_MODEL_DIR" = "{accepted_root.resolve()}" ] || exit 42
+[ "$SERAPH_GPU_MODEL_DIR" = "{accepted_root.resolve()}" ] || exit 43
+[ "$SERAPH_GPU_MODEL_LAYERS" = 77 ] || exit 44
+'''
+    result=subprocess.run(['bash','-c',script],text=True,capture_output=True)
+    assert result.returncode == 0, result.stderr
+    incomplete=dict(receipt_data); incomplete['gpu_release']=dict(release); incomplete['gpu_release'].pop('artifact_root')
+    bad_content=json.dumps(incomplete).encode(); bad=tmp_path/f'{tag}-{hashlib.sha256(bad_content).hexdigest()}.json'; bad.write_bytes(bad_content); bad.chmod(0o444)
+    bad_state=tmp_path/'bad-staged'; bad_state.write_text(f'{tag}\n{vlm}\n{bad}\n')
+    rejected=subprocess.run(['bash','-c',script.replace(str(state),str(bad_state))],text=True,capture_output=True)
+    assert rejected.returncode != 0 and 'complete absolute GPU release tuple' in rejected.stderr
+
+
+def test_preserve_mode_keeps_candidate_and_rollback_target_gpu_precedence(tmp_path):
+    fake_bin=tmp_path/'bin'; fake_bin.mkdir(); tag='a'*40; vlm='repo/vlm@sha256:'+'b'*64
+    docker=fake_bin/'docker'; docker.write_text(f'''#!/bin/sh
+case " $* " in *" --format "*) echo "{tag}";; esac
+exit 0
+'''); docker.chmod(0o755)
+    active_root=tmp_path/'active-models'; active_root.mkdir()
+    (active_root/'model.gguf').write_bytes(b'active'); (active_root/'mmproj.gguf').write_bytes(b'mmproj')
+    release={"image_ref":"repo/active@sha256:"+'c'*64,"alias":"active","artifact_root":str(active_root.resolve()),"model":{"filename":"model.gguf","sha256":hashlib.sha256(b'active').hexdigest(),"size":6},"mmproj":{"filename":"mmproj.gguf","sha256":hashlib.sha256(b'mmproj').hexdigest(),"size":6},"ctx_size":8192,"layers":55,"command_contract":"llama-server-gemma4-v1"}
+    content=json.dumps({"gpu_release":release}).encode(); receipt=tmp_path/f'{tag}-{hashlib.sha256(content).hexdigest()}.json'; receipt.write_bytes(content); receipt.chmod(0o444)
+    state=tmp_path/'authority'; state.write_text(f'{tag}\n{vlm}\n{receipt}\n')
+    requested_root=tmp_path/'requested-models'; requested_root.mkdir()
+    target_root=tmp_path/'rollback-target-models'; target_root.mkdir()
+    script=f'''
+export SERAPH_MANAGE_SOURCE_ONLY=true PATH="{fake_bin}:$PATH"
+source "{ROOT/'manage.sh'}"
+production_host_inventory_validate() {{ [ "$SERAPH_GPU_MODEL_DIR" = "{active_root.resolve()}" ]; }}
+export SERAPH_GPU_MODEL_DIR="{requested_root}" SERAPH_GPU_MODEL_IMAGE="repo/candidate@sha256:{'d'*64}" SERAPH_GPU_MODEL_ALIAS=candidate SERAPH_GPU_MODEL_CTX_SIZE=32768 SERAPH_GPU_MODEL_LAYERS=99
+production_read_validate_accepted_state "{state}" staged preserve || exit 51
+[ "$SERAPH_GPU_MODEL_DIR" = "{requested_root}" ] && [ "$SERAPH_GPU_MODEL_ALIAS" = candidate ] || exit 52
+export SERAPH_GPU_MODEL_DIR="{target_root}" SERAPH_GPU_MODEL_IMAGE="repo/target@sha256:{'e'*64}" SERAPH_GPU_MODEL_ALIAS=rollback-target SERAPH_GPU_MODEL_CTX_SIZE=16384 SERAPH_GPU_MODEL_LAYERS=77
+production_read_validate_accepted_state "{state}" staged preserve || exit 53
+[ "$SERAPH_GPU_MODEL_DIR" = "{target_root}" ] && [ "$SERAPH_GPU_MODEL_ALIAS" = rollback-target ] || exit 54
+'''
+    result=subprocess.run(['bash','-c',script],text=True,capture_output=True)
+    assert result.returncode == 0, result.stderr
+    manage=(ROOT/'manage.sh').read_text()
+    start=manage.split('function production_start()',1)[1].split('function production_accept()',1)[0]
+    rollback=manage.split('function production_rollback()',1)[1].split('if [ "${SERAPH_MANAGE_SOURCE_ONLY',1)[0]
+    assert 'production_read_validate_accepted_state "$active_tag_file" active preserve' in start
+    assert 'production_read_validate_accepted_state "$active_tag_file" active preserve' in rollback
 
 
 def test_sourced_two_phase_accept_rejects_container_swap_and_stale_mac(tmp_path):
@@ -399,12 +513,22 @@ def test_entrypoint_accepts_exactly_one_raw_or_hash_credential(tmp_path):
 
 
 def _inventory(receipt: dict[str, object], vlm_image: str = "") -> subprocess.CompletedProcess[str]:
+    receipt = json.loads(json.dumps(receipt))
+    model_dir=Path(tempfile.mkdtemp()); (model_dir/"model.gguf").write_bytes(b"model"); (model_dir/"mmproj.gguf").write_bytes(b"mmproj")
+    gpu_ref = "ghcr.io/ggml-org/llama.cpp:server-cuda@sha256:" + "d" * 64
+    containers = receipt.setdefault("compose_observation", {}).setdefault("containers", {})
+    containers.setdefault("gpu-model", {"container_id":"gpu-model-1","image_id":"gpu-model-image","image_revision":"","repo_digests":[gpu_ref],"project":"seraph-prod","service":"gpu-model","network_name":"seraph-core-prod","network_id":"net-1","ip_address":"172.30.0.40"})
+    receipt.setdefault("gpu_model_observation", {"image_ref":gpu_ref,"image_id":"gpu-model-image","alias":"gemma-test","health":True})
+    receipt.setdefault("gpu_release", {"image_ref":gpu_ref,"alias":"gemma-test","artifact_root":str(model_dir.resolve()),"model":{"filename":"model.gguf","sha256":hashlib.sha256(b"model").hexdigest(),"size":5},"mmproj":{"filename":"mmproj.gguf","sha256":hashlib.sha256(b"mmproj").hexdigest(),"size":6},"ctx_size":32768,"layers":999,"command_contract":"llama-server-gemma4-v1"})
     env = os.environ.copy()
     env.update(
         SERAPH_GPU_EXPECTED_HOSTNAME="jupyter",
         SERAPH_GPU_MACHINE_IDENTITY_SHA256="c" * 64,
         SERAPH_VLM_IMAGE=vlm_image or "ghcr.io/seraph-quest/vlm-screenshot-server@sha256:" + "a" * 64,
         SERAPH_VLM_INTERFACE_CONTRACT="vlm-health-backend-queue-chat-auth-v1",
+        SERAPH_GPU_MODEL_IMAGE=gpu_ref,
+        SERAPH_GPU_MODEL_ALIAS="gemma-test",
+        SERAPH_GPU_MODEL_DIR=str(model_dir),SERAPH_GPU_MODEL_FILE="model.gguf",SERAPH_GPU_MMPROJ_FILE="mmproj.gguf",SERAPH_GPU_MODEL_CTX_SIZE="32768",SERAPH_GPU_MODEL_LAYERS="999",
         SERAPH_HOST_INVENTORY_MAX_AGE_SECONDS="900",
     )
     return subprocess.run(
@@ -422,7 +546,7 @@ def test_host_inventory_gate_accepts_private_listener_and_rejects_lan_listener()
         "local_hostname": "jupyter",
         "machine_identity_sha256": "c" * 64,
         "captured_at": datetime.now(timezone.utc).isoformat(),
-        "ss_lntp": 'LISTEN 0 4096 172.17.0.1:8000 0.0.0.0:* users:(("model",pid=1,fd=1))',
+        "ss_lntp": 'LISTEN 0 4096 127.0.0.1:22 0.0.0.0:* users:(("sshd",pid=1,fd=1))',
         "docker_bridge_addresses": ["172.17.0.1"],
         "docker_network_bindings": {"host-gateway": "172.17.0.1"},
         "firewall": {f"lan_ingress_{port}": "blocked" for port in (8000, 8001, 8004)},
@@ -458,7 +582,7 @@ def test_host_inventory_gate_rejects_stale_and_identity_or_contract_mismatch():
         "local_hostname": "jupyter",
         "machine_identity_sha256": "c" * 64,
         "captured_at": (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat(),
-        "ss_lntp": "LISTEN 0 4096 172.17.0.1:8000 0.0.0.0:*",
+        "ss_lntp": "LISTEN 0 4096 127.0.0.1:22 0.0.0.0:*",
         "docker_bridge_addresses": ["172.17.0.1"],
         "docker_network_bindings": {"host-gateway": "172.17.0.1"},
         "firewall": {f"lan_ingress_{port}": "blocked" for port in (8000, 8001, 8004)},

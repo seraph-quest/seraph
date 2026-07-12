@@ -12,7 +12,7 @@ def fail(message):
 
 
 bundle = json.load(sys.stdin)
-if bundle.get("schema") != "seraph.production-acceptance.v1":
+if bundle.get("schema") != "seraph.production-acceptance.v2":
     fail("schema")
 if bundle.get("app_sha") != os.environ.get("SERAPH_BUNDLE_APP_SHA") or bundle.get("vlm_image") != os.environ.get("SERAPH_BUNDLE_VLM_IMAGE"):
     fail("release tuple mismatch")
@@ -31,9 +31,9 @@ for kind in ("challenged_attestation", "final_attestation", "mac_receipt"):
         fail(kind + " hash mismatch")
 
 ids = bundle.get("container_ids", {})
-if set(ids) != {"ingress", "backend", "vlm-wrapper"} or not all(ids.values()):
+if set(ids) != {"ingress", "backend", "vlm-wrapper", "gpu-model"} or not all(ids.values()):
     fail("container identity incomplete")
-expected_ips = {"ingress": "172.30.0.10", "backend": "172.30.0.20", "vlm-wrapper": "172.30.0.30"}
+expected_ips = {"ingress": "172.30.0.10", "backend": "172.30.0.20", "vlm-wrapper": "172.30.0.30", "gpu-model": "172.30.0.40"}
 def validate_attestation(kind):
     local = json.load(open(bundle[kind]["path"]))
     compose = local.get("compose_observation", {})
@@ -52,7 +52,10 @@ def validate_attestation(kind):
     if configured_vlm.startswith("sha256:") and "@" not in configured_vlm:
         if vlm_observation.get("image_id") != configured_vlm: fail(kind + " VLM local image ID mismatch")
     elif configured_vlm not in vlm_observation.get("repo_digests", []): fail(kind + " VLM RepoDigest mismatch")
-    immutable = {"project":compose.get("project"),"network_name":compose.get("network_name"),"containers":{s:{k:observed[s].get(k) for k in ("container_id","image_id","image_revision","project","service","network_name","network_id","ip_address")} for s in expected_ips},"vlm_configured_ref":configured_vlm,"vlm_observed_image_id":vlm_observation.get("image_id")}
+    gpu=local.get("gpu_model_observation",{}); release=bundle.get("gpu_release",{}); expected_gpu=release.get("image_ref"); expected_alias=release.get("alias")
+    if gpu.get("image_ref")!=expected_gpu or gpu.get("alias")!=expected_alias or gpu.get("image_id")!=observed["gpu-model"].get("image_id") or expected_gpu not in observed["gpu-model"].get("repo_digests",[]) or gpu.get("health") is not True: fail(kind + " GPU model identity/health mismatch")
+    if local.get("gpu_release")!=release: fail(kind + " GPU release manifest mismatch")
+    immutable = {"project":compose.get("project"),"network_name":compose.get("network_name"),"containers":{s:{k:observed[s].get(k) for k in ("container_id","image_id","image_revision","project","service","network_name","network_id","ip_address")} for s in expected_ips},"vlm_configured_ref":configured_vlm,"vlm_observed_image_id":vlm_observation.get("image_id"),"gpu_model_image":gpu.get("image_ref"),"gpu_model_alias":gpu.get("alias")}
     return local, observed, immutable
 
 challenged, challenged_observed, challenged_immutable = validate_attestation("challenged_attestation")
@@ -65,6 +68,9 @@ expected_challenge_fields = {
     "stage": bundle.get("stage"),
     "app_sha": bundle["app_sha"],
     "vlm_image": bundle["vlm_image"],
+    "gpu_model_image": bundle.get("gpu_release",{}).get("image_ref"),
+    "gpu_model_alias": bundle.get("gpu_release",{}).get("alias"),
+    "gpu_release": bundle.get("gpu_release"),
     "local_attestation_sha256": bundle["challenged_attestation"]["sha256"],
     "compose_project": bundle["compose_project"],
     "network_name": bundle["network_name"],

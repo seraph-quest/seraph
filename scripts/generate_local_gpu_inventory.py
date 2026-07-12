@@ -22,9 +22,26 @@ p.add_argument("--expected-vlm-image", required=True)
 p.add_argument("--vlm-container", required=True)
 p.add_argument("--ingress-container", required=True)
 p.add_argument("--backend-container", required=True)
+p.add_argument("--gpu-model-container", required=True)
+p.add_argument("--expected-gpu-model-image", required=True)
+p.add_argument("--expected-gpu-model-alias", required=True)
+p.add_argument("--gpu-model-dir", type=Path, required=True)
+p.add_argument("--gpu-model-file", required=True)
+p.add_argument("--gpu-mmproj-file", required=True)
+p.add_argument("--gpu-ctx-size", type=int, required=True)
+p.add_argument("--gpu-layers", type=int, required=True)
 p.add_argument("--vlm-api-key-file", type=Path)
 p.add_argument("--docker-network", default="bridge")
 args = p.parse_args()
+def artifact(path: Path):
+    h=hashlib.sha256()
+    with path.open('rb') as stream:
+        for chunk in iter(lambda:stream.read(8*1024*1024),b''): h.update(chunk)
+    return {'filename':path.name,'sha256':h.hexdigest(),'size':path.stat().st_size}
+if not args.gpu_model_dir.is_absolute(): raise SystemExit('GPU artifact root must be an absolute existing directory')
+gpu_root=args.gpu_model_dir.resolve(strict=True)
+if not gpu_root.is_dir(): raise SystemExit('GPU artifact root must be an absolute existing directory')
+gpu_release={'image_ref':args.expected_gpu_model_image,'alias':args.expected_gpu_model_alias,'artifact_root':str(gpu_root),'model':artifact(gpu_root/args.gpu_model_file),'mmproj':artifact(gpu_root/args.gpu_mmproj_file),'ctx_size':args.gpu_ctx_size,'layers':args.gpu_layers,'command_contract':'llama-server-gemma4-v1'}
 
 machine_path = next((x for x in (Path("/etc/machine-id"), Path("/var/lib/dbus/machine-id")) if x.is_file()), None)
 if machine_path is None:
@@ -69,12 +86,12 @@ except Exception:
     checks['auth_closed'] = checks['auth_interface'] = False
 
 compose_containers={}
-for service, container_id, expected_ip in (("ingress",args.ingress_container,"172.30.0.10"),("backend",args.backend_container,"172.30.0.20"),("vlm-wrapper",args.vlm_container,"172.30.0.30")):
+for service, container_id, expected_ip in (("ingress",args.ingress_container,"172.30.0.10"),("backend",args.backend_container,"172.30.0.20"),("vlm-wrapper",args.vlm_container,"172.30.0.30"),("gpu-model",args.gpu_model_container,"172.30.0.40")):
     observed=json.loads(run(["docker","inspect",container_id]).stdout)[0]
     observed_image=json.loads(run(["docker","image","inspect",str(observed.get("Image",""))]).stdout)[0]
     labels=observed.get("Config",{}).get("Labels",{}) or {}
     net=observed.get("NetworkSettings",{}).get("Networks",{}).get("seraph-core-prod",{})
-    compose_containers[service]={"container_id":observed.get("Id",""),"image_id":observed_image.get("Id",""),"image_revision":(observed_image.get("Config",{}).get("Labels",{}) or {}).get("org.opencontainers.image.revision","") ,"project":labels.get("com.docker.compose.project",""),"service":labels.get("com.docker.compose.service",""),"network_name":"seraph-core-prod" if net else "","network_id":net.get("NetworkID",""),"ip_address":net.get("IPAddress",""),"expected_ip":expected_ip}
+    compose_containers[service]={"container_id":observed.get("Id",""),"image_id":observed_image.get("Id",""),"image_revision":(observed_image.get("Config",{}).get("Labels",{}) or {}).get("org.opencontainers.image.revision","") ,"repo_digests":observed_image.get("RepoDigests",[]) or [],"project":labels.get("com.docker.compose.project",""),"service":labels.get("com.docker.compose.service",""),"network_name":"seraph-core-prod" if net else "","network_id":net.get("NetworkID",""),"ip_address":net.get("IPAddress",""),"expected_ip":expected_ip}
 
 payload = {
     "local_hostname": socket.gethostname(), "machine_identity_sha256": machine_digest,
@@ -83,6 +100,8 @@ payload = {
     "vlm_image": actual_image, "vlm_interface_contract": "vlm-health-backend-queue-chat-auth-v1",
     "vlm_wrapper_contract_verified": container_running and actual_image != "unverified" and all(checks.values()),
     "vlm_observation": {"container": args.vlm_container, "container_id": container.get("Id", ""), "image_id": observed_image_id, "running": container_running, "repo_digests": repo_digests, "networks": networks, "published_ports": published_ports, "checks": checks},
+    "gpu_release":gpu_release,
+    "gpu_model_observation":{"image_ref":args.expected_gpu_model_image,"image_id":compose_containers["gpu-model"]["image_id"],"alias":args.expected_gpu_model_alias,"health":get("http://172.30.0.40:8000/health")==200},
     "compose_observation":{"project":"seraph-prod","network_name":"seraph-core-prod","containers":compose_containers},
 }
 print(json.dumps(payload, indent=2, sort_keys=True))

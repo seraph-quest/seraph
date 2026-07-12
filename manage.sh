@@ -789,6 +789,13 @@ function production_config_validate() {
         [ -z "$(git -C "$SCRIPT_DIR" status --porcelain)" ] || error_exit "production builds require a clean working tree"
     fi
     [[ "${SERAPH_VLM_IMAGE:-}" =~ ^([^[:space:]@]+@sha256:[0-9a-fA-F]{64}|sha256:[0-9a-fA-F]{64})$ ]] || error_exit "SERAPH_VLM_IMAGE must use a registry RepoDigest or exact local sha256 image ID"
+    [[ "${SERAPH_GPU_MODEL_IMAGE:-}" =~ ^[^[:space:]@]+@sha256:[0-9a-fA-F]{64}$ ]] || error_exit "SERAPH_GPU_MODEL_IMAGE must use an exact registry RepoDigest"
+    [[ "${SERAPH_GPU_MODEL_DIR:-}" = /* ]] || error_exit "SERAPH_GPU_MODEL_DIR must be an absolute protected host path"
+    [[ "${SERAPH_GPU_MODEL_FILE:-}" =~ ^[^/]+\.gguf$ ]] || error_exit "SERAPH_GPU_MODEL_FILE must be one GGUF filename"
+    [[ "${SERAPH_GPU_MMPROJ_FILE:-}" =~ ^[^/]+\.gguf$ ]] || error_exit "SERAPH_GPU_MMPROJ_FILE must be one GGUF filename"
+    [ -r "$SERAPH_GPU_MODEL_DIR/$SERAPH_GPU_MODEL_FILE" ] || error_exit "configured GPU model artifact is unreadable"
+    [ -r "$SERAPH_GPU_MODEL_DIR/$SERAPH_GPU_MMPROJ_FILE" ] || error_exit "configured GPU mmproj artifact is unreadable"
+    [ -n "${SERAPH_GPU_MODEL_ALIAS:-}" ] || error_exit "SERAPH_GPU_MODEL_ALIAS is required"
     [ -n "${SERAPH_VLM_INTERFACE_CONTRACT:-}" ] || error_exit "SERAPH_VLM_INTERFACE_CONTRACT is required"
     [ -n "${SERAPH_GPU_EXPECTED_HOSTNAME:-}" ] || error_exit "SERAPH_GPU_EXPECTED_HOSTNAME is required"
     [[ "${SERAPH_GPU_MACHINE_IDENTITY_SHA256:-}" =~ ^[0-9a-fA-F]{64}$ ]] || error_exit "SERAPH_GPU_MACHINE_IDENTITY_SHA256 must be a SHA-256 digest"
@@ -811,25 +818,35 @@ function production_host_inventory_validate() {
 }
 
 function production_status() {
-    production_config_validate
     ensure_runtime_dirs
+    local loaded_release=false
     if [ -r "$PID_DIR/seraph-prod-restore-release" ]; then
-        production_read_validate_accepted_state "$PID_DIR/seraph-prod-restore-release" || return 1
+        production_read_validate_accepted_state "$PID_DIR/seraph-prod-restore-release" staged || return 1
+        loaded_release=true
         echo "Release state: restore awaiting LAN acceptance (previous accepted evidence retained, not current)"
     elif [ -r "$PID_DIR/seraph-prod-rollback-release" ]; then
-        production_read_validate_accepted_state "$PID_DIR/seraph-prod-rollback-release" || return 1
+        production_read_validate_accepted_state "$PID_DIR/seraph-prod-rollback-release" staged || return 1
+        loaded_release=true
         echo "Release state: rollback awaiting LAN acceptance (previous accepted tuple retained, not current)"
     elif [ -r "$PID_DIR/seraph-prod-restart-release" ]; then
-        production_read_validate_accepted_state "$PID_DIR/seraph-prod-restart-release" || return 1
+        production_read_validate_accepted_state "$PID_DIR/seraph-prod-restart-release" staged || return 1
+        loaded_release=true
         echo "Release state: restart awaiting LAN acceptance (prior accepted receipt is stale)"
     elif [ -r "$PID_DIR/seraph-prod-candidate-release" ]; then
-        production_read_validate_accepted_state "$PID_DIR/seraph-prod-candidate-release" || return 1
+        production_read_validate_accepted_state "$PID_DIR/seraph-prod-candidate-release" staged || return 1
+        loaded_release=true
         if [ -r "$PID_DIR/seraph-prod-active-release" ]; then echo "Release state: candidate awaiting Mac LAN acceptance (previous accepted tuple retained for rollback)"; else echo "Release state: candidate awaiting Mac LAN acceptance"; fi
     elif [ -r "$PID_DIR/seraph-prod-active-release" ]; then
-        production_read_validate_accepted_state "$PID_DIR/seraph-prod-active-release" || return 1
+        production_read_validate_accepted_state "$PID_DIR/seraph-prod-active-release" active || return 1
+        loaded_release=true
         echo "Release state: accepted"
     else
         echo "Release state: none"
+    fi
+    if [ "$loaded_release" = true ]; then
+        SERAPH_IMAGE_TAG="$ACCEPTED_APP_TAG" SERAPH_VLM_IMAGE="$ACCEPTED_VLM_IMAGE" SERAPH_VALIDATING_ROLLBACK=true production_config_validate
+    else
+        production_config_validate
     fi
     docker compose --env-file "$ENV_FILE" "${COMPOSE_FILES[@]}" ps
     echo "Published TLS listener owned by this compose project:"
@@ -903,11 +920,12 @@ function production_compose_state_validate() {
 
 function production_generate_local_attestation() {
     local output="$1" vlm_image="$2"
-    local ingress_id backend_id vlm_id
+    local ingress_id backend_id vlm_id gpu_model_id
     ingress_id=$(docker compose --env-file "$ENV_FILE" "${COMPOSE_FILES[@]}" ps -q ingress) || return 1
     backend_id=$(docker compose --env-file "$ENV_FILE" "${COMPOSE_FILES[@]}" ps -q backend) || return 1
     vlm_id=$(docker compose --env-file "$ENV_FILE" "${COMPOSE_FILES[@]}" ps -q vlm-wrapper) || return 1
-    python3 "$SCRIPT_DIR/scripts/generate_local_gpu_inventory.py" --expected-vlm-image "$vlm_image" --ingress-container "$ingress_id" --backend-container "$backend_id" --vlm-container "$vlm_id" --vlm-api-key-file "$SERAPH_VLM_API_KEY_FILE" >"$output"
+    gpu_model_id=$(docker compose --env-file "$ENV_FILE" "${COMPOSE_FILES[@]}" ps -q gpu-model) || return 1
+    python3 "$SCRIPT_DIR/scripts/generate_local_gpu_inventory.py" --expected-vlm-image "$vlm_image" --expected-gpu-model-image "$SERAPH_GPU_MODEL_IMAGE" --expected-gpu-model-alias "$SERAPH_GPU_MODEL_ALIAS" --gpu-model-dir "$SERAPH_GPU_MODEL_DIR" --gpu-model-file "$SERAPH_GPU_MODEL_FILE" --gpu-mmproj-file "$SERAPH_GPU_MMPROJ_FILE" --gpu-ctx-size "$SERAPH_GPU_MODEL_CTX_SIZE" --gpu-layers "$SERAPH_GPU_MODEL_LAYERS" --ingress-container "$ingress_id" --backend-container "$backend_id" --vlm-container "$vlm_id" --gpu-model-container "$gpu_model_id" --vlm-api-key-file "$SERAPH_VLM_API_KEY_FILE" >"$output"
 }
 
 function production_restore_previous() {
@@ -917,11 +935,23 @@ function production_restore_previous() {
     local previous_local_receipt="$previous_receipt" previous_schema
     if [ -r "$previous_receipt" ]; then
         previous_schema=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("schema",""))' "$previous_receipt" 2>/dev/null || true)
-        if [ "$previous_schema" = "seraph.production-acceptance.v1" ]; then previous_local_receipt=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["final_attestation"]["path"])' "$previous_receipt") || return 2; fi
+        if [ "$previous_schema" = "seraph.production-acceptance.v2" ]; then
+            previous_local_receipt=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["final_attestation"]["path"])' "$previous_receipt") || return 2
+            SERAPH_GPU_MODEL_IMAGE=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["gpu_release"]["image_ref"])' "$previous_receipt") || return 2
+            SERAPH_GPU_MODEL_ALIAS=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["gpu_release"]["alias"])' "$previous_receipt") || return 2
+            SERAPH_GPU_MODEL_DIR=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["gpu_release"]["artifact_root"])' "$previous_receipt") || return 2
+            SERAPH_GPU_MODEL_FILE=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["gpu_release"]["model"]["filename"])' "$previous_receipt") || return 2
+            SERAPH_GPU_MMPROJ_FILE=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["gpu_release"]["mmproj"]["filename"])' "$previous_receipt") || return 2
+            SERAPH_GPU_MODEL_CTX_SIZE=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["gpu_release"]["ctx_size"])' "$previous_receipt") || return 2
+            SERAPH_GPU_MODEL_LAYERS=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["gpu_release"]["layers"])' "$previous_receipt") || return 2
+            export SERAPH_GPU_MODEL_IMAGE SERAPH_GPU_MODEL_ALIAS SERAPH_GPU_MODEL_DIR SERAPH_GPU_MODEL_FILE SERAPH_GPU_MMPROJ_FILE SERAPH_GPU_MODEL_CTX_SIZE SERAPH_GPU_MODEL_LAYERS
+        else
+            echo "previous release lacks complete GPU tuple" >&2; return 2
+        fi
     fi
     if [ -n "$previous_tag" ] && [ -n "$previous_vlm" ] && [ -r "$previous_local_receipt" ] && docker image inspect "seraph/backend:$previous_tag" >/dev/null 2>&1 && docker image inspect "seraph/frontend-ingress:$previous_tag" >/dev/null 2>&1 && docker image inspect "$previous_vlm" >/dev/null 2>&1 && SERAPH_ALLOW_PREVIOUS_ACCEPTED_RECEIPT=true production_host_inventory_validate "$previous_local_receipt" "$previous_vlm"; then
         echo "restoring previous production release tuple $previous_tag + $previous_vlm" >&2
-        if ! SERAPH_IMAGE_TAG="$previous_tag" SERAPH_VLM_IMAGE="$previous_vlm" docker compose --env-file "$ENV_FILE" "${COMPOSE_FILES[@]}" up -d --no-build --wait --wait-timeout 120; then
+        if ! SERAPH_IMAGE_TAG="$previous_tag" SERAPH_VLM_IMAGE="$previous_vlm" docker compose --env-file "$ENV_FILE" "${COMPOSE_FILES[@]}" up -d --no-build --wait --wait-timeout 300; then
             echo "CATASTROPHIC: previous production release tuple could not be restored; diagnostics retained in $LOG_DIR" >&2
             return 2
         fi
@@ -994,7 +1024,7 @@ function production_start() {
         return 1
     fi
     if [ -r "$active_tag_file" ]; then
-        production_read_validate_accepted_state "$active_tag_file" || { echo "accepted release state is invalid; explicit adoption is required" >&2; return 1; }
+        production_read_validate_accepted_state "$active_tag_file" active preserve || { echo "accepted release state is invalid; explicit adoption is required" >&2; return 1; }
         previous_tag="$ACCEPTED_APP_TAG"
         previous_vlm="$ACCEPTED_VLM_IMAGE"
         previous_receipt="$ACCEPTED_INVENTORY_RECEIPT"
@@ -1005,9 +1035,10 @@ function production_start() {
     else
         docker compose --env-file "$ENV_FILE" "${COMPOSE_FILES[@]}" pull vlm-wrapper || return 1
     fi
+    docker compose --env-file "$ENV_FILE" "${COMPOSE_FILES[@]}" pull gpu-model || return 1
     python3 "$SCRIPT_DIR/scripts/generate_local_gpu_predeploy.py" >"$predeploy_receipt" || return 1
     python3 "$SCRIPT_DIR/scripts/validate_gpu_predeploy.py" <"$predeploy_receipt" || return 1
-    if ! docker compose --env-file "$ENV_FILE" "${COMPOSE_FILES[@]}" up -d --no-build --wait --wait-timeout 120; then
+    if ! docker compose --env-file "$ENV_FILE" "${COMPOSE_FILES[@]}" up -d --no-build --wait --wait-timeout 300; then
         echo "candidate containers did not become healthy" >&2
         docker compose --env-file "$ENV_FILE" "${COMPOSE_FILES[@]}" logs --no-color --tail 500 >"$LOG_DIR/seraph-prod-failed-candidate.log" 2>&1 || true
         production_restore_after_failure "$previous_tag" "$previous_vlm" "$previous_receipt"; return $?
@@ -1046,7 +1077,7 @@ function production_abort() {
     [ -r "$staged" ] || error_exit "production $stage stage does not exist"
     local previous_tag="" previous_vlm="" previous_receipt=""
     if [ -r "$active" ]; then
-        production_read_validate_accepted_state "$active" || return 1
+        production_read_validate_accepted_state "$active" active || return 1
         previous_tag="$ACCEPTED_APP_TAG"; previous_vlm="$ACCEPTED_VLM_IMAGE"; previous_receipt="$ACCEPTED_INVENTORY_RECEIPT"
     fi
     production_cleanup_candidate_state "$stage"
@@ -1067,7 +1098,7 @@ function production_accept_staged() {
     ensure_runtime_dirs
     local candidate_state="$PID_DIR/seraph-prod-$stage-release"
     local active_state="$PID_DIR/seraph-prod-active-release"
-    production_read_validate_accepted_state "$candidate_state" || return 1
+    production_read_validate_accepted_state "$candidate_state" staged || return 1
     production_validate_mac_receipt "$mac_receipt" "$PID_DIR/seraph-prod-$stage-challenge.json" || return 1
     local prior_binding fresh_binding fresh_receipt challenged_receipt
     challenged_receipt="$ACCEPTED_INVENTORY_RECEIPT"
@@ -1084,14 +1115,17 @@ function production_accept_staged() {
 }
 
 function production_restart() {
-    production_config_validate
     ensure_runtime_dirs
     production_any_staged_state && error_exit "restart refused while another stage awaits LAN acceptance"
     local active="$PID_DIR/seraph-prod-active-release"
-    production_read_validate_accepted_state "$active" || error_exit "restart requires an accepted release"
-    [ "$ACCEPTED_APP_TAG" = "$SERAPH_IMAGE_TAG" ] && [ "$ACCEPTED_VLM_IMAGE" = "$SERAPH_VLM_IMAGE" ] || error_exit "restart only supports the identical accepted tuple; use start for a new candidate"
+    production_read_validate_accepted_state "$active" active || error_exit "restart requires an accepted release"
+    SERAPH_IMAGE_TAG="$ACCEPTED_APP_TAG"; SERAPH_VLM_IMAGE="$ACCEPTED_VLM_IMAGE"
+    SERAPH_GPU_MODEL_IMAGE="$ACCEPTED_GPU_MODEL_IMAGE"; SERAPH_GPU_MODEL_ALIAS="$ACCEPTED_GPU_MODEL_ALIAS"; SERAPH_GPU_MODEL_DIR="$ACCEPTED_GPU_MODEL_DIR"; SERAPH_GPU_MODEL_FILE="$ACCEPTED_GPU_MODEL_FILE"; SERAPH_GPU_MMPROJ_FILE="$ACCEPTED_GPU_MMPROJ_FILE"; SERAPH_GPU_MODEL_CTX_SIZE="$ACCEPTED_GPU_MODEL_CTX_SIZE"; SERAPH_GPU_MODEL_LAYERS="$ACCEPTED_GPU_MODEL_LAYERS"
+    export SERAPH_GPU_MODEL_IMAGE SERAPH_GPU_MODEL_ALIAS SERAPH_GPU_MODEL_DIR SERAPH_GPU_MODEL_FILE SERAPH_GPU_MMPROJ_FILE SERAPH_GPU_MODEL_CTX_SIZE SERAPH_GPU_MODEL_LAYERS
+    export SERAPH_IMAGE_TAG SERAPH_VLM_IMAGE
+    SERAPH_VALIDATING_ROLLBACK=true production_config_validate || return 1
     production_cleanup_candidate_state restart
-    docker compose --env-file "$ENV_FILE" "${COMPOSE_FILES[@]}" up -d --no-build --force-recreate --wait --wait-timeout 120 || return 1
+    docker compose --env-file "$ENV_FILE" "${COMPOSE_FILES[@]}" up -d --no-build --force-recreate --wait --wait-timeout 300 || return 1
     docker compose --env-file "$ENV_FILE" "${COMPOSE_FILES[@]}" exec -T backend uv run python production_preflight.py || return 1
     local receipt="$PID_DIR/seraph-prod-restart-attestation.json"
     production_generate_local_attestation "$receipt" "$SERAPH_VLM_IMAGE" && production_host_inventory_validate "$receipt" "$SERAPH_VLM_IMAGE" && production_write_accepted_state "$PID_DIR/seraph-prod-restart-release" "$receipt" || return 1
@@ -1119,6 +1153,20 @@ function production_write_accepted_state() {
     mv "$state_tmp" "$state_file"
 }
 
+function production_prepare_active_state() {
+    local active_state="$1" state_tmp="$2" bundle_content="$3" persisted_bundle="$4" app="$5" vlm="$6" history_json
+    history_json=$(python3 -c 'import hashlib,json,os,sys; state,content,persisted,app,vlm=sys.argv[1:]; history=[]
+if os.path.isfile(state):
+ lines=open(state).read().splitlines()
+ if len(lines)==4: history=json.loads(lines[3])
+history=[e for e in history if e.get("bundle")!=persisted]
+history.append({"app_sha":app,"vlm_image":vlm,"bundle":persisted,"sha256":hashlib.sha256(open(content,"rb").read()).hexdigest()})
+print(json.dumps(history,sort_keys=True,separators=(",",":")))' "$active_state" "$bundle_content" "$persisted_bundle" "$app" "$vlm") || return 1
+    printf '%s\n%s\n%s\n%s\n' "$app" "$vlm" "$persisted_bundle" "$history_json" >"$state_tmp" || return 1
+    chmod 0600 "$state_tmp" || return 1
+    sync "$state_tmp" 2>/dev/null || true
+}
+
 function production_write_acceptance_bundle() {
     local state_file="$1" challenged_receipt="$2" final_receipt="$3" mac_receipt="$4" stage="$5"
     local release_dir="$PID_DIR/releases" challenged_hash final_hash mac_hash challenged_copy final_copy mac_copy bundle_tmp bundle_hash bundle_copy state_tmp
@@ -1137,12 +1185,13 @@ function production_write_acceptance_bundle() {
     vlm_id=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["compose_observation"]["containers"]["vlm-wrapper"]["container_id"])' "$final_receipt") || return 1
     network_id=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["compose_observation"]["containers"]["ingress"]["network_id"])' "$final_receipt") || return 1
     bundle_tmp="$release_dir/bundle.tmp.$$"
-    python3 -c 'import json,sys; print(json.dumps({"schema":"seraph.production-acceptance.v1","stage":sys.argv[15],"app_sha":sys.argv[1],"vlm_image":sys.argv[2],"compose_project":"seraph-prod","network_name":"seraph-core-prod","network_id":sys.argv[3],"container_ids":{"ingress":sys.argv[4],"backend":sys.argv[5],"vlm-wrapper":sys.argv[6]},"challenged_attestation":{"path":sys.argv[7],"sha256":sys.argv[8]},"final_attestation":{"path":sys.argv[9],"sha256":sys.argv[10]},"mac_receipt":{"path":sys.argv[11],"sha256":sys.argv[12]},"acceptance_challenge":json.load(open(sys.argv[11]))["challenge"],"expected_origin":sys.argv[13],"client_identity":sys.argv[14]},sort_keys=True,separators=(",",":")))' "$SERAPH_IMAGE_TAG" "$SERAPH_VLM_IMAGE" "$network_id" "$ingress_id" "$backend_id" "$vlm_id" "$challenged_copy" "$challenged_hash" "$final_copy" "$final_hash" "$mac_copy" "$mac_hash" "$SERAPH_EXPECTED_HTTPS_ORIGIN" "$SERAPH_MAC_PROBE_CLIENT_ID" "$stage" >"$bundle_tmp" || return 1
+    python3 -c 'import json,sys; final=json.load(open(sys.argv[9])); print(json.dumps({"schema":"seraph.production-acceptance.v2","stage":sys.argv[15],"app_sha":sys.argv[1],"vlm_image":sys.argv[2],"gpu_release":final["gpu_release"],"compose_project":"seraph-prod","network_name":"seraph-core-prod","network_id":sys.argv[3],"container_ids":{k:v["container_id"] for k,v in final["compose_observation"]["containers"].items()},"challenged_attestation":{"path":sys.argv[7],"sha256":sys.argv[8]},"final_attestation":{"path":sys.argv[9],"sha256":sys.argv[10]},"mac_receipt":{"path":sys.argv[11],"sha256":sys.argv[12]},"acceptance_challenge":json.load(open(sys.argv[11]))["challenge"],"expected_origin":sys.argv[13],"client_identity":sys.argv[14]},sort_keys=True,separators=(",",":")))' "$SERAPH_IMAGE_TAG" "$SERAPH_VLM_IMAGE" "$network_id" "$ingress_id" "$backend_id" "$vlm_id" "$challenged_copy" "$challenged_hash" "$final_copy" "$final_hash" "$mac_copy" "$mac_hash" "$SERAPH_EXPECTED_HTTPS_ORIGIN" "$SERAPH_MAC_PROBE_CLIENT_ID" "$stage" >"$bundle_tmp" || return 1
     SERAPH_BUNDLE_APP_SHA="$SERAPH_IMAGE_TAG" SERAPH_BUNDLE_VLM_IMAGE="$SERAPH_VLM_IMAGE" python3 "$SCRIPT_DIR/scripts/validate_acceptance_bundle.py" <"$bundle_tmp" || return 1
     bundle_hash=$(sha256sum "$bundle_tmp" | awk '{print $1}'); bundle_copy="$release_dir/$SERAPH_IMAGE_TAG-$bundle_hash.json"
-    state_tmp="$state_file.tmp.$$"; printf '%s\n%s\n%s\n' "$SERAPH_IMAGE_TAG" "$SERAPH_VLM_IMAGE" "$bundle_copy" >"$state_tmp" || return 1
+    state_tmp="$state_file.tmp.$$"
+    production_prepare_active_state "$state_file" "$state_tmp" "$bundle_tmp" "$bundle_copy" "$SERAPH_IMAGE_TAG" "$SERAPH_VLM_IMAGE" || return 1
     { [ -r "$consumed_file" ] && cat "$consumed_file"; printf 'nonce:%s\nchallenge:%s\n' "$MAC_RECEIPT_NONCE" "$MAC_CHALLENGE_NONCE"; } >"$consumed_tmp" || return 1
-    chmod 0444 "$bundle_tmp" && chmod 0600 "$state_tmp" "$consumed_tmp" || return 1
+    chmod 0444 "$bundle_tmp" && chmod 0600 "$consumed_tmp" || return 1
     sync "$challenged_copy" "$final_copy" "$mac_copy" "$bundle_tmp" "$state_tmp" "$consumed_tmp" 2>/dev/null || true
     mv "$bundle_tmp" "$bundle_copy" || return 1
     mv "$consumed_tmp" "$consumed_file" || return 1
@@ -1151,8 +1200,13 @@ function production_write_acceptance_bundle() {
 
 function production_read_validate_accepted_state() {
     local state_file="$1"
+    local authority_mode="${2:-active}"
+    local apply_mode="${3:-apply}"
+    [ "$apply_mode" = apply ] || [ "$apply_mode" = preserve ] || { echo "release tuple apply mode must be apply or preserve" >&2; return 1; }
     [ -r "$state_file" ] || { echo "accepted release state is missing" >&2; return 1; }
-    [ "$(awk 'END {print NR}' "$state_file")" -eq 3 ] || { echo "accepted release state must contain exactly three lines" >&2; return 1; }
+    local line_count
+    line_count=$(awk 'END {print NR}' "$state_file")
+    if [ "$authority_mode" = active ]; then [ "$line_count" -eq 4 ] || { echo "active release state must contain tuple, bundle, and accepted history index" >&2; return 1; }; else [ "$line_count" -eq 3 ] || { echo "staged release state must contain exactly three lines" >&2; return 1; }; fi
     local tag vlm receipt hash expected_name mode revision image
     tag=$(sed -n '1p' "$state_file")
     vlm=$(sed -n '2p' "$state_file")
@@ -1173,14 +1227,31 @@ function production_read_validate_accepted_state() {
     docker image inspect "$vlm" >/dev/null 2>&1 || { echo "accepted VLM image missing" >&2; return 1; }
     local receipt_schema challenged_attestation final_attestation
     receipt_schema=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("schema",""))' "$receipt") || return 1
-    if [ "$receipt_schema" = "seraph.production-acceptance.v1" ]; then
+    if [ "$authority_mode" = active ] && [ "$receipt_schema" != "seraph.production-acceptance.v2" ]; then echo "active release requires a v2 Mac-accepted bundle" >&2; return 1; fi
+    if [ "$authority_mode" = staged ] && [ "$receipt_schema" = "seraph.production-acceptance.v2" ]; then echo "staged release must contain raw local attestation, not accepted authority" >&2; return 1; fi
+    if [ "$authority_mode" = active ]; then
+        python3 -c 'import hashlib,json,sys; bundle=sys.argv[1]; entries=json.loads(open(sys.argv[2]).read().splitlines()[3]); matches=[e for e in entries if e.get("bundle")==bundle]; assert len(matches)==1 and matches[0].get("sha256")==hashlib.sha256(open(bundle,"rb").read()).hexdigest()' "$receipt" "$state_file" || { echo "accepted release history index is invalid" >&2; return 1; }
+    fi
+    python3 -c 'import json,os,sys; g=json.load(open(sys.argv[1])).get("gpu_release"); assert isinstance(g,dict); assert all(k in g for k in ("image_ref","alias","artifact_root","model","mmproj","ctx_size","layers","command_contract")); assert os.path.isabs(g["artifact_root"]); assert all(k in g["model"] and k in g["mmproj"] for k in ("filename","sha256","size"))' "$receipt" 2>/dev/null || { echo "release receipt lacks a complete absolute GPU release tuple" >&2; return 1; }
+    ACCEPTED_GPU_MODEL_IMAGE=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["gpu_release"]["image_ref"])' "$receipt") || return 1
+    ACCEPTED_GPU_MODEL_ALIAS=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["gpu_release"]["alias"])' "$receipt") || return 1
+    ACCEPTED_GPU_MODEL_DIR=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["gpu_release"]["artifact_root"])' "$receipt") || return 1
+    ACCEPTED_GPU_MODEL_FILE=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["gpu_release"]["model"]["filename"])' "$receipt") || return 1
+    ACCEPTED_GPU_MMPROJ_FILE=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["gpu_release"]["mmproj"]["filename"])' "$receipt") || return 1
+    ACCEPTED_GPU_MODEL_CTX_SIZE=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["gpu_release"]["ctx_size"])' "$receipt") || return 1
+    ACCEPTED_GPU_MODEL_LAYERS=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["gpu_release"]["layers"])' "$receipt") || return 1
+    if [ "$apply_mode" = apply ]; then
+        SERAPH_GPU_MODEL_IMAGE="$ACCEPTED_GPU_MODEL_IMAGE"; SERAPH_GPU_MODEL_ALIAS="$ACCEPTED_GPU_MODEL_ALIAS"; SERAPH_GPU_MODEL_DIR="$ACCEPTED_GPU_MODEL_DIR"; SERAPH_GPU_MODEL_FILE="$ACCEPTED_GPU_MODEL_FILE"; SERAPH_GPU_MMPROJ_FILE="$ACCEPTED_GPU_MMPROJ_FILE"; SERAPH_GPU_MODEL_CTX_SIZE="$ACCEPTED_GPU_MODEL_CTX_SIZE"; SERAPH_GPU_MODEL_LAYERS="$ACCEPTED_GPU_MODEL_LAYERS"
+        export SERAPH_GPU_MODEL_IMAGE SERAPH_GPU_MODEL_ALIAS SERAPH_GPU_MODEL_DIR SERAPH_GPU_MODEL_FILE SERAPH_GPU_MMPROJ_FILE SERAPH_GPU_MODEL_CTX_SIZE SERAPH_GPU_MODEL_LAYERS
+    fi
+    if [ "$receipt_schema" = "seraph.production-acceptance.v2" ]; then
         SERAPH_BUNDLE_APP_SHA="$tag" SERAPH_BUNDLE_VLM_IMAGE="$vlm" python3 "$SCRIPT_DIR/scripts/validate_acceptance_bundle.py" <"$receipt" || return 1
         challenged_attestation=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["challenged_attestation"]["path"])' "$receipt") || return 1
         final_attestation=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["final_attestation"]["path"])' "$receipt") || return 1
-        SERAPH_ALLOW_PREVIOUS_ACCEPTED_RECEIPT=true production_host_inventory_validate "$challenged_attestation" "$vlm" || return 1
-        SERAPH_ALLOW_PREVIOUS_ACCEPTED_RECEIPT=true production_host_inventory_validate "$final_attestation" "$vlm" || return 1
+        SERAPH_GPU_MODEL_IMAGE="$ACCEPTED_GPU_MODEL_IMAGE" SERAPH_GPU_MODEL_ALIAS="$ACCEPTED_GPU_MODEL_ALIAS" SERAPH_GPU_MODEL_DIR="$ACCEPTED_GPU_MODEL_DIR" SERAPH_GPU_MODEL_FILE="$ACCEPTED_GPU_MODEL_FILE" SERAPH_GPU_MMPROJ_FILE="$ACCEPTED_GPU_MMPROJ_FILE" SERAPH_GPU_MODEL_CTX_SIZE="$ACCEPTED_GPU_MODEL_CTX_SIZE" SERAPH_GPU_MODEL_LAYERS="$ACCEPTED_GPU_MODEL_LAYERS" SERAPH_ALLOW_PREVIOUS_ACCEPTED_RECEIPT=true production_host_inventory_validate "$challenged_attestation" "$vlm" || return 1
+        SERAPH_GPU_MODEL_IMAGE="$ACCEPTED_GPU_MODEL_IMAGE" SERAPH_GPU_MODEL_ALIAS="$ACCEPTED_GPU_MODEL_ALIAS" SERAPH_GPU_MODEL_DIR="$ACCEPTED_GPU_MODEL_DIR" SERAPH_GPU_MODEL_FILE="$ACCEPTED_GPU_MODEL_FILE" SERAPH_GPU_MMPROJ_FILE="$ACCEPTED_GPU_MMPROJ_FILE" SERAPH_GPU_MODEL_CTX_SIZE="$ACCEPTED_GPU_MODEL_CTX_SIZE" SERAPH_GPU_MODEL_LAYERS="$ACCEPTED_GPU_MODEL_LAYERS" SERAPH_ALLOW_PREVIOUS_ACCEPTED_RECEIPT=true production_host_inventory_validate "$final_attestation" "$vlm" || return 1
     else
-        SERAPH_ALLOW_PREVIOUS_ACCEPTED_RECEIPT=true production_host_inventory_validate "$receipt" "$vlm" || return 1
+        SERAPH_GPU_MODEL_IMAGE="$ACCEPTED_GPU_MODEL_IMAGE" SERAPH_GPU_MODEL_ALIAS="$ACCEPTED_GPU_MODEL_ALIAS" SERAPH_GPU_MODEL_DIR="$ACCEPTED_GPU_MODEL_DIR" SERAPH_GPU_MODEL_FILE="$ACCEPTED_GPU_MODEL_FILE" SERAPH_GPU_MMPROJ_FILE="$ACCEPTED_GPU_MMPROJ_FILE" SERAPH_GPU_MODEL_CTX_SIZE="$ACCEPTED_GPU_MODEL_CTX_SIZE" SERAPH_GPU_MODEL_LAYERS="$ACCEPTED_GPU_MODEL_LAYERS" SERAPH_ALLOW_PREVIOUS_ACCEPTED_RECEIPT=true production_host_inventory_validate "$receipt" "$vlm" || return 1
     fi
     ACCEPTED_APP_TAG="$tag"
     ACCEPTED_VLM_IMAGE="$vlm"
@@ -1195,12 +1266,24 @@ function production_rollback() {
     production_any_staged_state && error_exit "rollback refused while another stage awaits LAN acceptance"
     [[ "$tag" =~ ^[0-9a-f]{40}$ ]] || error_exit "rollback application tag must be a full git SHA"
     [[ "$vlm_image" =~ ^([^[:space:]@]+@sha256:[0-9a-fA-F]{64}|sha256:[0-9a-fA-F]{64})$ ]] || error_exit "rollback VLM image must use a registry RepoDigest or exact local sha256 image ID"
+    local target_bundle active_tag_file="$PID_DIR/seraph-prod-active-release"
+    [ -r "$active_tag_file" ] || error_exit "rollback requires accepted release history"
+    target_bundle=$(python3 -c 'import hashlib,json,sys; lines=open(sys.argv[1]).read().splitlines(); entries=json.loads(lines[3]) if len(lines)==4 else []; matches=[e for e in entries if e.get("app_sha")==sys.argv[2] and e.get("vlm_image")==sys.argv[3] and e.get("sha256") and e.get("bundle")]; valid=[e["bundle"] for e in matches if hashlib.sha256(open(e["bundle"],"rb").read()).hexdigest()==e["sha256"]]; print(valid[0] if len(valid)==1 else "")' "$active_tag_file" "$tag" "$vlm_image") || return 1
+    [ -r "$target_bundle" ] || error_exit "rollback requires exactly one previously accepted complete GPU release bundle"
+    SERAPH_BUNDLE_APP_SHA="$tag" SERAPH_BUNDLE_VLM_IMAGE="$vlm_image" python3 "$SCRIPT_DIR/scripts/validate_acceptance_bundle.py" <"$target_bundle" || error_exit "rollback accepted-history bundle validation failed"
+    SERAPH_GPU_MODEL_IMAGE=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["gpu_release"]["image_ref"])' "$target_bundle") || return 1
+    SERAPH_GPU_MODEL_ALIAS=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["gpu_release"]["alias"])' "$target_bundle") || return 1
+    SERAPH_GPU_MODEL_DIR=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["gpu_release"]["artifact_root"])' "$target_bundle") || return 1
+    SERAPH_GPU_MODEL_FILE=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["gpu_release"]["model"]["filename"])' "$target_bundle") || return 1
+    SERAPH_GPU_MMPROJ_FILE=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["gpu_release"]["mmproj"]["filename"])' "$target_bundle") || return 1
+    SERAPH_GPU_MODEL_CTX_SIZE=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["gpu_release"]["ctx_size"])' "$target_bundle") || return 1
+    SERAPH_GPU_MODEL_LAYERS=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["gpu_release"]["layers"])' "$target_bundle") || return 1
+    export SERAPH_GPU_MODEL_IMAGE SERAPH_GPU_MODEL_ALIAS SERAPH_GPU_MODEL_DIR SERAPH_GPU_MODEL_FILE SERAPH_GPU_MMPROJ_FILE SERAPH_GPU_MODEL_CTX_SIZE SERAPH_GPU_MODEL_LAYERS
     docker image inspect "seraph/backend:$tag" >/dev/null 2>&1 || error_exit "missing seraph/backend:$tag"
     docker image inspect "seraph/frontend-ingress:$tag" >/dev/null 2>&1 || error_exit "missing seraph/frontend-ingress:$tag"
     docker image inspect "$vlm_image" >/dev/null 2>&1 || error_exit "missing $vlm_image"
     SERAPH_IMAGE_TAG="$tag" SERAPH_VLM_IMAGE="$vlm_image" SERAPH_VALIDATING_ROLLBACK=true production_config_validate
     ensure_runtime_dirs
-    local active_tag_file="$PID_DIR/seraph-prod-active-release"
     local original_tag=""
     local original_vlm=""
     local original_receipt=""
@@ -1209,10 +1292,10 @@ function production_rollback() {
     running_vlm_id=$(docker compose --env-file "$ENV_FILE" "${COMPOSE_FILES[@]}" ps -q vlm-wrapper 2>/dev/null || true)
     if { [ -n "$running_backend_id" ] || [ -n "$running_vlm_id" ]; } && [ ! -r "$active_tag_file" ]; then echo "running production containers require explicit adoption before rollback" >&2; return 1; fi
     if [ -r "$active_tag_file" ]; then
-        production_read_validate_accepted_state "$active_tag_file" || { echo "accepted release state is invalid; refusing rollback cutover" >&2; return 1; }
+        production_read_validate_accepted_state "$active_tag_file" active preserve || { echo "accepted release state is invalid; refusing rollback cutover" >&2; return 1; }
         original_tag="$ACCEPTED_APP_TAG"; original_vlm="$ACCEPTED_VLM_IMAGE"; original_receipt="$ACCEPTED_INVENTORY_RECEIPT"
     fi
-    if ! SERAPH_IMAGE_TAG="$tag" SERAPH_VLM_IMAGE="$vlm_image" docker compose --env-file "$ENV_FILE" "${COMPOSE_FILES[@]}" up -d --no-build --wait --wait-timeout 120 || ! SERAPH_IMAGE_TAG="$tag" SERAPH_VLM_IMAGE="$vlm_image" docker compose --env-file "$ENV_FILE" "${COMPOSE_FILES[@]}" exec -T backend uv run python production_preflight.py; then
+    if ! SERAPH_IMAGE_TAG="$tag" SERAPH_VLM_IMAGE="$vlm_image" docker compose --env-file "$ENV_FILE" "${COMPOSE_FILES[@]}" up -d --no-build --wait --wait-timeout 300 || ! SERAPH_IMAGE_TAG="$tag" SERAPH_VLM_IMAGE="$vlm_image" docker compose --env-file "$ENV_FILE" "${COMPOSE_FILES[@]}" exec -T backend uv run python production_preflight.py; then
         docker compose --env-file "$ENV_FILE" "${COMPOSE_FILES[@]}" logs --no-color --tail 500 >"$LOG_DIR/seraph-prod-failed-rollback.log" 2>&1 || true
         echo "requested rollback tuple failed; restoring original active tuple" >&2
         production_restore_after_failure "$original_tag" "$original_vlm" "$original_receipt"; return $?

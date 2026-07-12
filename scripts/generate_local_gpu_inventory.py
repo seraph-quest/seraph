@@ -9,19 +9,23 @@ from pathlib import Path
 def run(args: list[str]) -> subprocess.CompletedProcess[str]:
     return subprocess.run(args, text=True, capture_output=True, check=False)
 
-VLM_PROBE = """import sys,urllib.error,urllib.request
+VLM_PROBE = """import json,sys,urllib.error,urllib.request
 path=sys.argv[1]; key=sys.stdin.read().strip(); headers={'Authorization':'Bearer '+key} if key else {}
 try:
     with urllib.request.urlopen(urllib.request.Request('http://127.0.0.1:8001'+path,headers=headers),timeout=5) as response:
-        response.read(4096); print(response.status)
-except urllib.error.HTTPError as exc: print(exc.code)
+        raw=response.read(4096); body=json.loads(raw) if raw else {}; print(json.dumps({'http_status':response.status,'body':body}))
+except urllib.error.HTTPError as exc:
+    raw=exc.read(4096); body=json.loads(raw) if raw else {}; print(json.dumps({'http_status':exc.code,'body':body}))
 except Exception: raise SystemExit(1)
 """
 
-def vlm_status(container_id: str, path: str, key: str = "") -> int:
+def vlm_response(container_id: str, path: str, key: str = "") -> tuple[int, dict]:
     result=subprocess.run(['docker','exec','-i',container_id,'python','-c',VLM_PROBE,path],input=key,text=True,capture_output=True,check=False)
-    try: return int(result.stdout.strip()) if result.returncode == 0 else 0
-    except ValueError: return 0
+    try:
+        payload=json.loads(result.stdout) if result.returncode == 0 else {}
+        body=payload.get('body',{})
+        return int(payload.get('http_status',0)), body if isinstance(body,dict) else {}
+    except (ValueError,TypeError,json.JSONDecodeError): return 0, {}
 
 def gpu_healthy(container_id: str) -> bool:
     result=run(['docker','exec',container_id,'curl','--fail','--silent','--show-error','--max-time','5','http://127.0.0.1:8000/health'])
@@ -85,9 +89,12 @@ networks = container.get("NetworkSettings", {}).get("Networks", {})
 api_key = args.vlm_api_key_file.read_text().strip() if args.vlm_api_key_file else ""
 checks = {}
 for name, path in (("health", "/health"), ("backend", "/health/backend"), ("queue", "/queue/status")):
-    checks[name] = vlm_status(args.vlm_container,path) == 200
-checks['auth_closed'] = vlm_status(args.vlm_container,'/health/chat') in (401,403)
-checks['auth_interface'] = vlm_status(args.vlm_container,'/health/chat',api_key) == 200
+    checks[name] = vlm_response(args.vlm_container,path)[0] == 200
+closed_status,closed=vlm_response(args.vlm_container,'/health/chat')
+open_status,opened=vlm_response(args.vlm_container,'/health/chat',api_key)
+checks['auth_closed'] = closed_status == 200 and closed.get('enabled') is True and closed.get('auth_configured') is True and closed.get('status') == 'auth_failed' and closed.get('auth_ok') is False
+model_identity=opened.get('model',opened.get('model_alias'))
+checks['auth_interface'] = open_status == 200 and opened.get('enabled') is True and opened.get('auth_configured') is True and opened.get('status') == 'ok' and opened.get('auth_ok') is True and model_identity == args.expected_gpu_model_alias
 
 compose_containers={}
 for service, container_id, expected_ip in (("ingress",args.ingress_container,"172.30.0.10"),("backend",args.backend_container,"172.30.0.20"),("vlm-wrapper",args.vlm_container,"172.30.0.30"),("gpu-model",args.gpu_model_container,"172.30.0.40")):

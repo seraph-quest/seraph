@@ -149,6 +149,15 @@ def test_candidate_generator_observes_container_and_auth_without_firewall_claims
     assert "http://127.0.0.1:8000/health" in generator
     assert "http://172.30.0.40:8000/health" not in generator
     assert "base_url" not in generator
+    assert "closed_status == 200" in generator
+    assert "closed.get('status') == 'auth_failed'" in generator
+    assert "closed.get('auth_ok') is False" in generator
+    assert "opened.get('status') == 'ok'" in generator
+    assert "opened.get('auth_ok') is True" in generator
+    assert "model_identity == args.expected_gpu_model_alias" in generator
+    assert "model_identity is None or" not in generator
+    assert '"checks": checks' in generator
+    assert '"responses"' not in generator
 
 
 def test_restore_adoption_inventory_and_atomic_state_failure_contracts():

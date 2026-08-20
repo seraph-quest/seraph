@@ -4625,7 +4625,12 @@ def test_runtime_eval_scenarios_expose_expected_details():
         )
     )
 
-    assert summary.failed == 0
+    failed_results = [
+        f"{result.name}: {result.error or result.details}"
+        for result in summary.results
+        if not result.passed
+    ]
+    assert summary.failed == 0, failed_results
     details_by_name = {result.name: result.details for result in summary.results}
 
     assert details_by_name["provider_fallback_chain"]["attempted_models"] == [

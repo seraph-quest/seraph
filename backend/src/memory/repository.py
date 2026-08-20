@@ -330,6 +330,8 @@ class MemoryRepository:
                 row_source_type = str(source_row.get("source_type") or "session").strip() or "session"
                 row_session_id = source_row.get("source_session_id")
                 row_message_id = source_row.get("source_message_id")
+                if not row_session_id and not row_message_id:
+                    continue
                 source_key = (
                     "message",
                     row_message_id,

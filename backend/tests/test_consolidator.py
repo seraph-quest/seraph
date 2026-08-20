@@ -5,12 +5,13 @@ from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from sqlalchemy import select, text
 
 pytestmark = pytest.mark.usefixtures("mocked_canonical_inference_context")
 
 from config.settings import settings
 from src.audit.repository import audit_repository
-from src.db.models import MemoryKind, MemorySnapshotKind, MemorySource
+from src.db.models import Memory, MemoryKind, MemorySnapshotKind, MemorySource
 from src.agent.session import SessionManager
 from src.memory.consolidator import consolidate_session
 from src.memory.decay import DecayMaintenanceResult
@@ -981,7 +982,7 @@ class TestConsolidateSession:
             nonlocal source_construction_count
             source_construction_count += 1
             if source_construction_count == 2:
-                raise RuntimeError("forced provenance write failure")
+                kwargs["memory_id"] = "missing-memory"
             return real_memory_source(**kwargs)
 
         with (
@@ -993,11 +994,20 @@ class TestConsolidateSession:
 
         memories = await memory_repository.list_memories(limit=5)
         events = await audit_repository.list_events(limit=10)
+        from src.db.engine import get_session
+
+        async with get_session() as db:
+            foreign_keys_enabled = (await db.execute(text("PRAGMA foreign_keys"))).scalar_one()
+            memory_rows = (await db.execute(select(Memory))).scalars().all()
+            source_rows = (await db.execute(select(MemorySource))).scalars().all()
 
         assert result.outcome == "partially_succeeded"
         assert result.should_cache_fingerprint is False
         assert source_construction_count == 2
+        assert foreign_keys_enabled == 1
         assert memories == []
+        assert memory_rows == []
+        assert source_rows == []
         assert any(
             event["event_type"] == "background_task_partially_succeeded"
             and event["tool_name"] == "session_consolidation"

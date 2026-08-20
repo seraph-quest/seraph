@@ -56,7 +56,7 @@ async def test_create_memory_preserves_explicit_message_source_snippet(async_db)
 
 
 @pytest.mark.asyncio
-async def test_create_memory_persists_and_dedupes_additional_sources(async_db):
+async def test_create_memory_persists_dedupes_and_skips_malformed_sources(async_db):
     result = await memory_repository.create_memory(
         content="User prefers concise status updates.",
         kind=MemoryKind.communication_preference,
@@ -75,6 +75,10 @@ async def test_create_memory_persists_and_dedupes_additional_sources(async_db):
                 "source_session_id": "sess-1",
                 "source_message_id": "msg-2",
                 "snippet": "Duplicate source should be ignored.",
+            },
+            {
+                "source_type": "message",
+                "snippet": "Malformed source should be ignored.",
             },
         ],
     )

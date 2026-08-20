@@ -1015,7 +1015,12 @@ async def _browse_webpage_async(url: str, *, action: str = "extract") -> str:
     return await asyncio.to_thread(browse_webpage, url, action=action)
 
 
-async def _run_scheduler_eval_job(job_id: str, job: Callable[[], Awaitable[Any]]) -> Any:
+async def _run_scheduler_eval_job(
+    job_id: str,
+    job: Callable[[], Awaitable[Any]],
+    *,
+    mock_transport: bool = False,
+) -> Any:
     """Run a scheduler-backed eval through the production service authority seam."""
     wrapper = _async_job_wrapper(
         job,
@@ -1023,7 +1028,66 @@ async def _run_scheduler_eval_job(job_id: str, job: Callable[[], Awaitable[Any]]
         job_id=f"eval:{job_id}",
         allow_model_inference=True,
     )
-    return await wrapper()
+    if not mock_transport:
+        return await wrapper()
+    with ExitStack() as stack:
+        for module in (
+            "src.scheduler.jobs.daily_briefing",
+            "src.scheduler.jobs.evening_review",
+            "src.scheduler.jobs.activity_digest",
+            "src.scheduler.jobs.weekly_activity_review",
+        ):
+            stack.enter_context(
+                patch(f"{module}.completion_with_fallback", new=_eval_mock_completion)
+            )
+        return await wrapper()
+
+
+@asynccontextmanager
+async def _eval_model_authority(job_id: str, *, session_id: str = ""):
+    """Bind the same bounded model authority used by a real eval service job."""
+    principal = TrustPrincipal(
+        principal_id=f"service:eval:{job_id}",
+        principal_type=PrincipalType.SERVICE,
+        grants=(AuthorityGrant.MODEL_INFERENCE,),
+        session_id=session_id,
+        job_id=f"eval:{job_id}",
+    )
+    tokens = set_runtime_context(session_id or None, "high_risk", trust_principal=principal)
+    try:
+        yield
+    finally:
+        reset_runtime_context(tokens)
+
+
+async def _run_model_eval_job(
+    job_id: str,
+    job: Callable[[], Awaitable[Any]],
+    *,
+    session_id: str = "",
+) -> Any:
+    """Run a direct model-using eval with an explicit bounded service identity."""
+    async with _eval_model_authority(job_id, session_id=session_id):
+        return await job()
+
+
+async def _eval_mock_completion(**kwargs: Any) -> Any:
+    """Exercise profile/fallback/audit behavior while keeping transport deterministic."""
+    with patch(
+        "src.model_fabric.caller_context.is_canonical_inference_route",
+        return_value=False,
+    ):
+        return await asyncio.to_thread(
+            completion_with_fallback_sync,
+            messages=kwargs["messages"],
+            temperature=kwargs["temperature"],
+            max_tokens=kwargs["max_tokens"],
+            model_id=kwargs.get("model_id"),
+            runtime_path=kwargs.get("runtime_path", "completion"),
+            profile=kwargs.get("profile"),
+            local_runtime_only=kwargs.get("local_runtime_only", False),
+            request_context=None,
+        )
 
 
 EVAL_SYNC_CLIENT_DB_PATCH_TARGETS: tuple[str, ...] = (
@@ -4808,6 +4872,7 @@ def _eval_runtime_model_overrides() -> dict[str, Any]:
         ),
         patch.object(settings, "fallback_model", ""),
         patch.object(settings, "fallback_models", ""),
+        patch("src.model_fabric.caller_context.is_canonical_inference_route", return_value=False),
         patch("litellm.completion", return_value=completion_response) as mock_completion,
     ):
         response = completion_with_fallback_sync(
@@ -4856,6 +4921,7 @@ def _eval_runtime_fallback_overrides() -> dict[str, Any]:
             ),
             patch.object(settings, "fallback_llm_api_key", ""),
             patch.object(settings, "fallback_llm_api_base", ""),
+            patch("src.model_fabric.caller_context.is_canonical_inference_route", return_value=False),
             patch(
                 "litellm.completion",
                 side_effect=[
@@ -4914,6 +4980,7 @@ def _eval_runtime_profile_preferences() -> dict[str, Any]:
             patch.object(settings, "fallback_models", ""),
             patch.object(settings, "fallback_llm_api_key", ""),
             patch.object(settings, "fallback_llm_api_base", ""),
+            patch("src.model_fabric.caller_context.is_canonical_inference_route", return_value=False),
             patch(
                 "litellm.completion",
                 side_effect=[RuntimeError("local down"), completion_response],
@@ -5039,6 +5106,7 @@ def _eval_provider_policy_capabilities() -> dict[str, Any]:
                     "session_title_generation=fast|cheap"
                 ),
             ),
+            patch("src.model_fabric.caller_context.is_canonical_inference_route", return_value=False),
             patch(
                 "litellm.completion",
                 side_effect=[RuntimeError("primary down"), completion_response],
@@ -5123,6 +5191,7 @@ def _eval_provider_policy_scoring() -> dict[str, Any]:
                     "chat_agent=fast:6|reasoning:4|tool_use:4"
                 ),
             ),
+            patch("src.model_fabric.caller_context.is_canonical_inference_route", return_value=False),
             patch(
                 "litellm.completion",
                 side_effect=[RuntimeError("primary down"), completion_response],
@@ -5223,6 +5292,9 @@ async def _eval_provider_policy_safeguards() -> dict[str, Any]:
                 stack.enter_context(patch.object(settings, "runtime_max_latency_tier", "chat_agent=medium"))
                 stack.enter_context(patch.object(settings, "runtime_task_class", "chat_agent=chat"))
                 stack.enter_context(patch.object(settings, "runtime_max_budget_class", "chat_agent=medium"))
+                stack.enter_context(
+                    patch("src.model_fabric.caller_context.is_canonical_inference_route", return_value=False)
+                )
                 mock_completion = stack.enter_context(patch("litellm.completion", return_value=completion_response))
                 response = completion_with_fallback_sync(
                     messages=[{"role": "user", "content": "pick the guardrail-compliant provider"}],
@@ -5289,6 +5361,7 @@ async def _eval_provider_routing_decision_audit() -> dict[str, Any]:
             ),
             patch.object(settings, "runtime_policy_intents", "session_title_generation=fast|cheap"),
             patch.object(settings, "llm_target_cooldown_seconds", 300),
+            patch("src.model_fabric.caller_context.is_canonical_inference_route", return_value=False),
             patch.object(audit_repository, "log_event", AsyncMock()) as mock_log_event,
             patch(
                 "litellm.completion",
@@ -5395,6 +5468,14 @@ async def _eval_provider_routing_decision_audit() -> dict[str, Any]:
 
 
 async def _eval_session_bound_llm_trace() -> dict[str, Any]:
+    return await _run_model_eval_job(
+        "session_bound_llm_trace",
+        _eval_session_bound_llm_trace_body,
+        session_id="trace-session",
+    )
+
+
+async def _eval_session_bound_llm_trace_body() -> dict[str, Any]:
     async with _patched_async_db(
         "src.db.engine.get_session",
         "src.agent.session.get_session",
@@ -5423,6 +5504,8 @@ async def _eval_session_bound_llm_trace() -> dict[str, Any]:
 
         with (
             patch("litellm.completion", side_effect=[title_response, consolidation_response]),
+            patch("src.llm_runtime.completion_with_fallback", new=_eval_mock_completion),
+            patch("src.memory.consolidator.completion_with_fallback", new=_eval_mock_completion),
             patch(
                 "src.memory.consolidator.sync_soul_file_to_profile",
                 AsyncMock(return_value={"Identity": "Hero"}),
@@ -5824,10 +5907,10 @@ async def _eval_scheduled_local_runtime_profile() -> dict[str, Any]:
         patch("litellm.completion", side_effect=local_responses) as mock_completion,
         patch("src.observer.delivery.deliver_or_queue", mock_deliver),
     ):
-        await _run_scheduler_eval_job("daily_briefing", run_daily_briefing)
-        await _run_scheduler_eval_job("evening_review", run_evening_review)
-        await _run_scheduler_eval_job("activity_digest", run_activity_digest)
-        await _run_scheduler_eval_job("weekly_activity_review", run_weekly_activity_review)
+        await _run_scheduler_eval_job("daily_briefing", run_daily_briefing, mock_transport=True)
+        await _run_scheduler_eval_job("evening_review", run_evening_review, mock_transport=True)
+        await _run_scheduler_eval_job("activity_digest", run_activity_digest, mock_transport=True)
+        await _run_scheduler_eval_job("weekly_activity_review", run_weekly_activity_review, mock_transport=True)
 
     assert mock_completion.call_count == 4
     routed_models = {
@@ -6511,6 +6594,14 @@ async def _eval_strategist_tick_learning_continuity_behavior() -> dict[str, Any]
 
 
 async def _eval_session_consolidation_background_audit() -> dict[str, Any]:
+    return await _run_model_eval_job(
+        "session_consolidation_background_audit",
+        _eval_session_consolidation_background_audit_body,
+        session_id="eval-session",
+    )
+
+
+async def _eval_session_consolidation_background_audit_body() -> dict[str, Any]:
     mock_log_event = AsyncMock()
     llm_response = _make_litellm_response(json.dumps({
         "facts": ["User is prioritizing runtime reliability"],
@@ -6523,11 +6614,12 @@ async def _eval_session_consolidation_background_audit() -> dict[str, Any]:
     async with _patched_async_db():
         with (
             patch.object(session_manager, "get_history_text", AsyncMock(return_value="User: I need reliability.\nAssistant: Let's harden it.")),
+            patch("litellm.completion", return_value=llm_response),
             patch(
                 "src.memory.consolidator.sync_soul_file_to_profile",
                 AsyncMock(return_value={"Identity": "Hero"}),
             ),
-            patch("src.memory.consolidator.completion_with_fallback", AsyncMock(return_value=llm_response)),
+            patch("src.memory.consolidator.completion_with_fallback", new=_eval_mock_completion),
             patch("src.memory.consolidator.add_memory", return_value="vec-memory-1"),
             patch.object(audit_repository, "log_event", mock_log_event),
         ):
@@ -6546,6 +6638,14 @@ async def _eval_session_consolidation_background_audit() -> dict[str, Any]:
 
 
 async def _eval_session_consolidation_behavior() -> dict[str, Any]:
+    return await _run_model_eval_job(
+        "session_consolidation_behavior",
+        _eval_session_consolidation_behavior_body,
+        session_id="guardian-session",
+    )
+
+
+async def _eval_session_consolidation_behavior_body() -> dict[str, Any]:
     mock_log_event = AsyncMock()
     llm_response = _make_litellm_response(json.dumps({
         "facts": ["User is building a guardian workspace"],
@@ -6569,7 +6669,8 @@ async def _eval_session_consolidation_behavior() -> dict[str, Any]:
                 "src.memory.consolidator.sync_soul_file_to_profile",
                 AsyncMock(return_value={"Goals": "- Keep the system grounded"}),
             ),
-            patch("src.memory.consolidator.completion_with_fallback", AsyncMock(return_value=llm_response)),
+            patch("litellm.completion", return_value=llm_response),
+            patch("src.memory.consolidator.completion_with_fallback", new=_eval_mock_completion),
             patch("src.memory.consolidator.add_memory", return_value="vec-memory-1") as mock_add_memory,
             patch("src.memory.consolidator.update_profile_soul_section", AsyncMock()) as mock_update_soul,
             patch.object(audit_repository, "log_event", mock_log_event),
@@ -8783,6 +8884,14 @@ async def _eval_operator_m6_memory_superiority_benchmark_surface_behavior() -> d
 
 
 async def _eval_session_title_generation_background_audit() -> dict[str, Any]:
+    return await _run_model_eval_job(
+        "session_title_generation_background_audit",
+        _eval_session_title_generation_background_audit_body,
+        session_id="eval-session",
+    )
+
+
+async def _eval_session_title_generation_background_audit_body() -> dict[str, Any]:
     sm = SessionManager()
     mock_log_event = AsyncMock()
     llm_response = _make_litellm_response("Reliability planning")
@@ -8795,7 +8904,8 @@ async def _eval_session_title_generation_background_audit() -> dict[str, Any]:
         patch.object(sm, "get", AsyncMock(return_value=MagicMock(id="eval-session", title="New Conversation"))),
         patch.object(sm, "update_title", AsyncMock(return_value=True)),
         patch("src.agent.session.get_session", return_value=_FakeDbSessionContext(fake_messages)),
-        patch("src.llm_runtime.completion_with_fallback", AsyncMock(return_value=llm_response)),
+        patch("litellm.completion", return_value=llm_response),
+        patch("src.llm_runtime.completion_with_fallback", new=_eval_mock_completion),
         patch.object(audit_repository, "log_event", mock_log_event),
     ):
         title = await sm.generate_title("eval-session")

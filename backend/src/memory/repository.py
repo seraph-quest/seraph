@@ -270,6 +270,7 @@ class MemoryRepository:
         metadata: dict[str, Any] | None = None,
         status: MemoryStatus | str = MemoryStatus.active,
         last_confirmed_at: datetime | None = None,
+        additional_sources: list[dict[str, str | None]] | None = None,
     ) -> MemoryWriteResult:
         normalized_content = content.strip()
         if not normalized_content:
@@ -288,6 +289,17 @@ class MemoryRepository:
             if isinstance(source_snippet, str) and source_snippet.strip()
             else None
         )
+        source_rows: list[dict[str, str | None]] = []
+        if source_session_id or source_message_id:
+            source_rows.append(
+                {
+                    "source_type": normalized_source_type,
+                    "source_session_id": source_session_id,
+                    "source_message_id": source_message_id,
+                    "snippet": normalized_source_snippet,
+                }
+            )
+        source_rows.extend(additional_sources or [])
 
         async with get_session() as db:
             metadata_map = dict(metadata or {})
@@ -311,19 +323,42 @@ class MemoryRepository:
             db.add(memory)
             await db.flush()
 
-            if source_session_id or source_message_id:
+            message_source_count = 0
+            session_source_created = False
+            seen_source_keys: set[tuple[str, str | None, str | None]] = set()
+            for source_row in source_rows:
+                row_source_type = str(source_row.get("source_type") or "session").strip() or "session"
+                row_session_id = source_row.get("source_session_id")
+                row_message_id = source_row.get("source_message_id")
+                source_key = (
+                    "message",
+                    row_message_id,
+                    None,
+                ) if row_message_id is not None else (
+                    "session",
+                    row_session_id,
+                    row_source_type,
+                )
+                if source_key in seen_source_keys:
+                    continue
+                seen_source_keys.add(source_key)
                 db.add(
                     MemorySource(
                         memory_id=memory.id,
-                        source_type=normalized_source_type,
-                        source_session_id=source_session_id,
-                        source_message_id=source_message_id,
+                        source_type=row_source_type,
+                        source_session_id=row_session_id,
+                        source_message_id=row_message_id,
                         snippet=(
-                            normalized_source_snippet
+                            self._normalize_source_snippet(source_row.get("snippet"))
                             or (summary or normalized_content)[:240]
                         ),
                     )
                 )
+                if row_message_id is not None:
+                    message_source_count += 1
+                elif row_session_id is not None:
+                    session_source_created = True
+            if source_rows:
                 await db.flush()
 
             db.expunge(memory)
@@ -331,11 +366,8 @@ class MemoryRepository:
                 memory_id=memory.id,
                 subject_entity_id=subject_entity_id,
                 project_entity_id=project_entity_id,
-                message_source_count=1 if source_message_id is not None else 0,
-                session_source_created=(
-                    source_message_id is None
-                    and source_session_id is not None
-                ),
+                message_source_count=message_source_count,
+                session_source_created=session_source_created,
             )
 
     async def add_memory_source(

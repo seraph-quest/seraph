@@ -56,6 +56,36 @@ async def test_create_memory_preserves_explicit_message_source_snippet(async_db)
 
 
 @pytest.mark.asyncio
+async def test_create_memory_persists_and_dedupes_additional_sources(async_db):
+    result = await memory_repository.create_memory(
+        content="User prefers concise status updates.",
+        kind=MemoryKind.communication_preference,
+        source_session_id="sess-1",
+        source_message_id="msg-1",
+        source_type="message",
+        additional_sources=[
+            {
+                "source_type": "message",
+                "source_session_id": "sess-1",
+                "source_message_id": "msg-2",
+                "snippet": "Keep the status updates concise.",
+            },
+            {
+                "source_type": "message",
+                "source_session_id": "sess-1",
+                "source_message_id": "msg-2",
+                "snippet": "Duplicate source should be ignored.",
+            },
+        ],
+    )
+
+    sources = await memory_repository.list_sources(memory_id=result.memory_id)
+
+    assert result.message_source_count == 2
+    assert [source.source_message_id for source in sources] == ["msg-1", "msg-2"]
+
+
+@pytest.mark.asyncio
 async def test_get_or_create_entity_merges_aliases(async_db):
     first = await memory_repository.get_or_create_entity(
         canonical_name="Project Atlas",

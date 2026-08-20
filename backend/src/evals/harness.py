@@ -981,6 +981,7 @@ from src.scheduler.jobs.evening_review import run_evening_review
 from src.scheduler.jobs.strategist_tick import run_strategist_tick
 from src.scheduler.jobs.weekly_activity_review import run_weekly_activity_review
 from src.scheduler.connection_manager import BroadcastResult
+from src.scheduler.engine import _async_job_wrapper
 from src.tools.audit import wrap_tools_for_audit
 from src.tools.browser_tool import browse_webpage
 from src.tools.delegate_task_tool import delegate_task
@@ -1012,6 +1013,17 @@ _TIMING = Timing(start_time=0.0, end_time=1.0)
 
 async def _browse_webpage_async(url: str, *, action: str = "extract") -> str:
     return await asyncio.to_thread(browse_webpage, url, action=action)
+
+
+async def _run_scheduler_eval_job(job_id: str, job: Callable[[], Awaitable[Any]]) -> Any:
+    """Run a scheduler-backed eval through the production service authority seam."""
+    wrapper = _async_job_wrapper(
+        job,
+        asyncio.get_running_loop(),
+        job_id=f"eval:{job_id}",
+        allow_model_inference=True,
+    )
+    return await wrapper()
 
 
 EVAL_SYNC_CLIENT_DB_PATCH_TARGETS: tuple[str, ...] = (
@@ -5505,7 +5517,7 @@ async def _eval_daily_briefing_fallback() -> dict[str, Any]:
         patch("litellm.completion", side_effect=[primary_error, fallback_response]) as mock_completion,
         patch("src.observer.delivery.deliver_or_queue", mock_deliver),
     ):
-        await run_daily_briefing()
+        await _run_scheduler_eval_job("daily_briefing", run_daily_briefing)
 
     assert mock_completion.call_count == 2
     assert mock_completion.call_args_list[0].kwargs["model"] == "openrouter/anthropic/claude-sonnet-4"
@@ -5537,7 +5549,7 @@ async def _eval_daily_briefing_degraded_memories_audit() -> dict[str, Any]:
         patch("src.observer.delivery.deliver_or_queue", mock_deliver),
         patch.object(audit_repository, "log_event", mock_log_event),
     ):
-        await run_daily_briefing()
+        await _run_scheduler_eval_job("daily_briefing", run_daily_briefing)
 
     degraded = _find_audit_call(
         mock_log_event,
@@ -5586,7 +5598,7 @@ async def _eval_daily_briefing_delivery_behavior() -> dict[str, Any]:
         patch("src.observer.delivery.deliver_or_queue", mock_deliver),
         patch.object(audit_repository, "log_event", mock_log_event),
     ):
-        await run_daily_briefing()
+        await _run_scheduler_eval_job("daily_briefing", run_daily_briefing)
 
     delivered_message = mock_deliver.await_args.args[0]
     delivered_kwargs = mock_deliver.await_args.kwargs
@@ -5625,7 +5637,7 @@ async def _eval_activity_digest_degraded_summary_audit() -> dict[str, Any]:
         patch("src.observer.delivery.deliver_or_queue", mock_deliver),
         patch.object(audit_repository, "log_event", mock_log_event),
     ):
-        await run_activity_digest()
+        await _run_scheduler_eval_job("activity_digest", run_activity_digest)
 
     degraded = _find_audit_call(
         mock_log_event,
@@ -5666,7 +5678,7 @@ async def _eval_activity_digest_degraded_delivery_behavior() -> dict[str, Any]:
         patch("src.observer.delivery.deliver_or_queue", mock_deliver),
         patch.object(audit_repository, "log_event", mock_log_event),
     ):
-        await run_activity_digest()
+        await _run_scheduler_eval_job("activity_digest", run_activity_digest)
 
     delivered_message = mock_deliver.await_args.args[0]
     delivered_kwargs = mock_deliver.await_args.kwargs
@@ -5709,7 +5721,7 @@ async def _eval_evening_review_degraded_inputs_audit() -> dict[str, Any]:
         patch("src.observer.delivery.deliver_or_queue", mock_deliver),
         patch.object(audit_repository, "log_event", mock_log_event),
     ):
-        await run_evening_review()
+        await _run_scheduler_eval_job("evening_review", run_evening_review)
 
     succeeded = _find_audit_call(
         mock_log_event,
@@ -5744,7 +5756,7 @@ async def _eval_evening_review_degraded_delivery_behavior() -> dict[str, Any]:
         patch("src.observer.delivery.deliver_or_queue", mock_deliver),
         patch.object(audit_repository, "log_event", mock_log_event),
     ):
-        await run_evening_review()
+        await _run_scheduler_eval_job("evening_review", run_evening_review)
 
     delivered_message = mock_deliver.await_args.args[0]
     delivered_kwargs = mock_deliver.await_args.kwargs
@@ -5812,10 +5824,10 @@ async def _eval_scheduled_local_runtime_profile() -> dict[str, Any]:
         patch("litellm.completion", side_effect=local_responses) as mock_completion,
         patch("src.observer.delivery.deliver_or_queue", mock_deliver),
     ):
-        await run_daily_briefing()
-        await run_evening_review()
-        await run_activity_digest()
-        await run_weekly_activity_review()
+        await _run_scheduler_eval_job("daily_briefing", run_daily_briefing)
+        await _run_scheduler_eval_job("evening_review", run_evening_review)
+        await _run_scheduler_eval_job("activity_digest", run_activity_digest)
+        await _run_scheduler_eval_job("weekly_activity_review", run_weekly_activity_review)
 
     assert mock_completion.call_count == 4
     routed_models = {

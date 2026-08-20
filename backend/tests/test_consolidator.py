@@ -1,15 +1,17 @@
 """Tests for memory consolidator (src/memory/consolidator.py)."""
 
 import json
+from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from sqlalchemy import select, text
 
 pytestmark = pytest.mark.usefixtures("mocked_canonical_inference_context")
 
 from config.settings import settings
 from src.audit.repository import audit_repository
-from src.db.models import MemoryKind, MemorySnapshotKind
+from src.db.models import Memory, MemoryKind, MemorySnapshotKind, MemorySource
 from src.agent.session import SessionManager
 from src.memory.consolidator import consolidate_session
 from src.memory.decay import DecayMaintenanceResult
@@ -513,6 +515,9 @@ class TestConsolidateSession:
         ), patch(
             "src.memory.consolidator.add_memory",
             side_effect=["vec-1", "vec-2"],
+        ), patch(
+            "src.memory.decay._now",
+            return_value=datetime(2026, 3, 25, 12, tzinfo=timezone.utc),
         ):
             await consolidate_session("s1")
 
@@ -944,6 +949,73 @@ class TestConsolidateSession:
             and event["details"]["stored_memory_count"] == 0
             and event["details"]["vector_memory_count"] == 1
             and event["details"]["partial_write_count"] == 1
+            for event in events
+        )
+
+    async def test_provenance_failure_rolls_back_new_memory_and_audits_partial(self, async_db, sm):
+        await sm.get_or_create("s1")
+        await sm.add_message("s1", "user", "Atlas launch is active and needs concise check-ins.")
+        await sm.add_message("s1", "assistant", "Atlas launch context should be remembered.")
+
+        mock_resp = MagicMock()
+        mock_resp.choices = [MagicMock()]
+        mock_resp.choices[0].message.content = json.dumps({
+            "memories": [
+                {
+                    "text": "Atlas launch is active.",
+                    "kind": "fact",
+                    "summary": "Atlas launch",
+                    "confidence": 0.9,
+                    "importance": 0.8,
+                }
+            ],
+            "facts": [],
+            "patterns": [],
+            "goals": [],
+            "reflections": [],
+            "soul_updates": {},
+        })
+        real_memory_source = MemorySource
+        source_construction_count = 0
+
+        def fail_on_extra_source(**kwargs):
+            nonlocal source_construction_count
+            source_construction_count += 1
+            if source_construction_count == 2:
+                kwargs["memory_id"] = "missing-memory"
+            return real_memory_source(**kwargs)
+
+        with (
+            patch("src.memory.consolidator.completion_with_fallback", AsyncMock(return_value=mock_resp)),
+            patch("src.memory.consolidator.add_memory", return_value="vec-1"),
+            patch("src.memory.repository.MemorySource", side_effect=fail_on_extra_source),
+        ):
+            result = await consolidate_session("s1")
+
+        memories = await memory_repository.list_memories(limit=5)
+        events = await audit_repository.list_events(limit=10)
+        from src.db.engine import get_session
+
+        async with get_session() as db:
+            foreign_keys_enabled = (await db.execute(text("PRAGMA foreign_keys"))).scalar_one()
+            memory_rows = (await db.execute(select(Memory))).scalars().all()
+            source_rows = (await db.execute(select(MemorySource))).scalars().all()
+
+        assert result.outcome == "partially_succeeded"
+        assert result.should_cache_fingerprint is False
+        assert source_construction_count == 2
+        assert foreign_keys_enabled == 1
+        assert memories == []
+        assert memory_rows == []
+        assert source_rows == []
+        assert any(
+            event["event_type"] == "background_task_partially_succeeded"
+            and event["tool_name"] == "session_consolidation"
+            and event["session_id"] == "s1"
+            and event["details"]["stored_memory_count"] == 0
+            and event["details"]["source_link_count"] == 0
+            and event["details"]["partial_write_count"] == 1
+            and event["details"]["write_failure_count"] == 0
             for event in events
         )
 

@@ -190,6 +190,34 @@ proof scaffolding, broad docs reconciliation, or claim gates while the actual
 capability is still missing. Ship the capability with the focused receipts it
 needs, then track broader proof work separately when necessary.
 
+### Capability Completion Contract
+
+A capability is not **Shipped** merely because its registry entry, settings
+surface, deterministic scenario, or benchmark endpoint exists. Where the
+capability crosses the relevant boundaries, completion requires one observable
+vertical slice:
+
+1. a stable capability identity with typed inputs and outputs;
+2. declared permissions, limits, policy, approval, and runtime dependencies;
+3. an accepted bounded job with owner, priority, retry/cancel behavior, and
+   idempotency expectations;
+4. real execution through the governed runtime rather than a receipt fixture;
+5. durable artifact, checkpoint, audit, and effective-route receipts;
+6. verification or external readback of the intended outcome;
+7. an explicit canonical-memory update or an explicit no-learning result; and
+8. operator-visible success, degraded, blocked, and recovery states.
+
+Mark a non-applicable element explicitly instead of silently omitting it.
+Proof-only endpoints and deterministic fixtures may validate a capability, but
+they do not count as the capability. Prefer one complete operator journey over
+several disconnected surfaces.
+
+For proactive behavior, prove the bounded loop end to end: goal or standing
+intent -> candidate intervention -> admission and priority -> approval or
+reservation -> capability execution -> evidence/readback -> outcome evaluation
+-> governed memory update. Periodic model calls or delivered messages alone do
+not satisfy the proactive-agent contract.
+
 ## Runtime And Lifecycle Rules
 
 - Use `./manage.sh -e dev local run` for live observation in managed Codex

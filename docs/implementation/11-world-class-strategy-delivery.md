@@ -69,9 +69,46 @@ Priority is a milestone and leverage model, not a calendar model.
 
 The corrected priority is capability-first. Guardian intelligence remains a moat and operating mode, but implementation should not treat "guardian capabilities" as the only top priority. Tools, workflows, connectors, automation, browser/computer use, memory, delegation, and supervised execution must become one coherent capability workspace.
 
+## Capability Completion Gate
+
+Capability delivery is measured through an operator outcome, not by the number
+of registries, settings panels, fixtures, or proof endpoints added. A capability
+may be marked **Shipped** only when the applicable parts of this vertical slice
+are observable:
+
+```text
+operator intent
+  -> typed capability and declared boundaries
+  -> admitted bounded job
+  -> policy / approval / reservation
+  -> real execution
+  -> artifact / checkpoint / audit receipt
+  -> verification or external readback
+  -> outcome evaluation
+  -> canonical memory update or explicit no-learning result
+```
+
+The operator surface must show success, degraded, blocked, and recovery states,
+including the effective model or provider route when inference is involved.
+Non-applicable elements must be named explicitly. Deterministic scenarios and
+benchmark endpoints validate a real capability; they never substitute for it.
+
+For proactive work, a scheduled inference call or delivered message is only a
+candidate intervention. The proactive contract is complete only when a goal or
+standing intent can drive the full bounded loop above, stop when paused or
+revoked, and use verified outcomes to influence a later decision.
+
+Batch selection follows the missing-link rule: complete the smallest
+high-leverage operator journey that closes a real gap in this loop before adding
+another parallel surface. Cleanup should remove or consolidate superseded seams
+inside the changed scope, without expanding a capability batch into unrelated
+repository maintenance.
+
 ## Milestone Stack
 
-This is the delivery stack. It is intentionally not time-bounded.
+This is historical M0-M9 vocabulary retained because shipped receipts and the
+claim ledger still use it. It does not order current work. Epic #736 and the
+GitHub Project own current milestones and dependencies.
 
 - `M0. Competition truth and execution governance`: historical program language; current decisions belong to the constitution/ADRs and execution state belongs to GitHub.
 - `M1. Capability kernel and manifest contract`: one coherent map and contract for core tools, workflows, skills, MCP, connectors, automations, browser/computer-use surfaces, memory providers, runbooks, and extension-owned contributions.
@@ -84,57 +121,20 @@ This is the delivery stack. It is intentionally not time-bounded.
 - `M8. Guardian brain over the capability substrate`: memory, world model, goals, salience, timing, and feedback shape capability choice, sequencing, restraint, and follow-through.
 - `M9. Governed ecosystem`: external capability packs, managed connectors, versioning, compatibility, trust levels, and review flows can scale without turning Seraph into plugin soup.
 
-## Initial GitHub Project Spine
+Current Epic #736 mapping:
 
-These issues are the execution spine created for the milestone program. The Project remains the live source of truth for ownership, dependencies, status, and PR links.
-
-- [#424 M0: Agent competition truth table and capability benchmark](https://github.com/seraph-quest/seraph/issues/424)
-- [#425 M1: Capability kernel and manifest contract](https://github.com/seraph-quest/seraph/issues/425)
-- [#427 M2: Execution supremacy across terminal browser files and sandboxes](https://github.com/seraph-quest/seraph/issues/427)
-- [#428 M3: Secure capability host and trust-boundary enforcement](https://github.com/seraph-quest/seraph/issues/428)
-- [#426 M4: Channels presence and device pairing](https://github.com/seraph-quest/seraph/issues/426)
-- [#429 M5: Jobs routines workflows and delegation](https://github.com/seraph-quest/seraph/issues/429)
-- [#433 M6: Memory superiority and behavior-changing recall](https://github.com/seraph-quest/seraph/issues/433)
-- [#430 M7: Operator cockpit and activity control legibility](https://github.com/seraph-quest/seraph/issues/430)
-- [#431 M8: Guardian brain over the capability substrate](https://github.com/seraph-quest/seraph/issues/431)
-- [#432 M9: Ecosystem marketplace and verified capability packs](https://github.com/seraph-quest/seraph/issues/432)
-
-The first execution wave underneath that spine is:
-
-- [#436 P0: Strategy claim ledger and proof gate](https://github.com/seraph-quest/seraph/issues/436)
-- [#434 P0: Atomic capability contract freeze](https://github.com/seraph-quest/seraph/issues/434)
-- [#435 P0: IronClaw-class capability security parity gauntlet](https://github.com/seraph-quest/seraph/issues/435)
-- [#437 P0: Guardian intervention quality benchmark](https://github.com/seraph-quest/seraph/issues/437)
-- [#439 P1: Cockpit operator efficiency benchmark](https://github.com/seraph-quest/seraph/issues/439)
-- [#438 P1: One excellent reach channel canary](https://github.com/seraph-quest/seraph/issues/438)
-- [#441 P1: Memory provider quality gate](https://github.com/seraph-quest/seraph/issues/441)
-- [#440 P1: Live workflow endurance canary](https://github.com/seraph-quest/seraph/issues/440)
-
-## Current Next-Batch Order
-
-The following implementation ordering is a historical #475 record. It does not
-order Epic #736 work. The Project remains the execution source of truth.
-
-| Order | Batch | Primary milestone | Existing issue | Acceptance frame |
-|---:|---|---|---|---|
-| 1 | Board, proof, and P1 wave normalization | M0 | [#468](https://github.com/seraph-quest/seraph/issues/468) | active Project fields are complete, stale merged-item PR/review fields are corrected, #438-#441 remain tied to the parent execution wave, and proof/claim gates are explicit before implementation starts |
-| 2 | Secure execution host v1 | M3 | historical [#455](https://github.com/seraph-quest/seraph/issues/455) | privileged execution, browser credential/cookie, workspace, provider, and connector paths fail closed with adversarial receipts; claim boundary remains stronger isolation foundations, not production secure-by-default execution |
-| 3 | Live long-horizon eval replay v1 | M0 / cross-cutting proof | [#457](https://github.com/seraph-quest/seraph/issues/457) / [PR #458](https://github.com/seraph-quest/seraph/pull/458) | live-ish fake providers, replay fixtures, failure taxonomy, CI receipts, and operator-visible proof cover memory, workflow, reach, security, and cockpit flows before stronger quality claims |
-| 4 | Cockpit operator efficiency benchmark | M7 | [#439](https://github.com/seraph-quest/seraph/issues/439) | real operator tasks measure speed, clicks or keystrokes, error detectability, recovery, confidence, and receipts rather than only cockpit density |
-| 5 | Memory provider quality gate | M6 / M9 | [#441](https://github.com/seraph-quest/seraph/issues/441) | provider evidence declares provenance, confidence, privacy, freshness, conflict handling, and suppression; noisy or stale evidence is blocked before guardian context |
-| 6 | Workflow endurance canary | M5 | [#440](https://github.com/seraph-quest/seraph/issues/440) | multi-session interruption, checkpoint, branch, recovery, delegated ownership, artifact comparison, approval preservation, and audit trail are replayable without calling the workflow engine durable yet |
-| 7 | Durable workflow engine v1 | M5 | [#470](https://github.com/seraph-quest/seraph/issues/470) | workflow state moves from audit-projected receipts toward a minimal durable state kernel with crash-safe resume, heartbeat or reactive triggers, retry, repair, and delegated artifact review lifecycle |
-| 8 | One excellent reach channel canary | M4 | [#438](https://github.com/seraph-quest/seraph/issues/438) | one selected channel proves pairing, revocation, health, retry, thread continuity, memory/context continuity, approval handoff, degraded UI, and audit receipts with explicit anti-sprawl scope |
-| 9 | Guardian world-model learning quality v2 | M8 | [#471](https://github.com/seraph-quest/seraph/issues/471) | multi-signal learning, stale/conflicting evidence arbitration, salience/confidence calibration, and false-positive/false-negative accounting are proven with live-ish intervention replay |
-| 10 | Governed extension marketplace hardening foundations | M9 | [#472](https://github.com/seraph-quest/seraph/issues/472) | pack review/verification, compatibility semantics, supply-chain policy, provider trust downgrade handling, and authoring ergonomics improve production-oriented foundations without claiming production marketplace security |
-
-Critic/contrarian gate for this ordering:
-
-- accepted: trust and proof substrate must precede memory-provider breadth, reach expansion, and marketplace hardening
-- accepted: #439 should benchmark real workflow and memory scenarios rather than stand alone as synthetic UI proof
-- accepted: #440 can begin as an endurance canary, but durable-workflow claims wait for the durable state-machine batch
-- accepted: #438 remains later in the stack unless the single channel, rejection criteria, and anti-sprawl scope are explicit
-- accepted: capability/trust regression coverage should be folded into the M0/M3/proof batches so every capability class carries owner, permission, mutation, credential-egress, browser/session, audit, and operator-proof semantics
+| Durable contract | Current tracked milestone(s) |
+| --- | --- |
+| M0 evidence and release governance | #736 and #754 |
+| M1 capability contract | #743, #747, and #755 |
+| M2 execution depth | #743, #747, and #748 |
+| M3 trust boundaries | #747 |
+| M4 reach and identity | #749 through #752 |
+| M5 durable work and follow-through | #743 and #745 |
+| M6 memory quality | #753 |
+| M7 operator surface | #746 |
+| M8 guardian decision and action loop | #745 |
+| M9 governed capability packs | #755 |
 
 ## M0 Competition Truth And Execution Governance
 
@@ -144,10 +144,13 @@ Implementation meaning: strategy, delivery, competitive evidence, and active exe
 - missing strategic gaps: consistent milestone labels across Project items, clearer Project fields for proof and ownership, tighter update rules when PRs change strategic status, maintained primary-source competitor matrix, and claim-ledger review discipline
 - proof requirements: every active strategy item is represented in the GitHub Project with owner, milestone, acceptance criteria, linked PR or issue state, competitor gap where relevant, and allowed wording for strategic claims
 
-M0 batch ownership:
+Historical provenance; these closed issues do not own current execution:
 
-- [#424 Agent competition truth table and capability benchmark](https://github.com/seraph-quest/seraph/issues/424) owns the primary-source competitor matrix and capability benchmark axes.
-- [#436 Strategy claim ledger and proof gate](https://github.com/seraph-quest/seraph/issues/436) owns [19. Strategy Claim Ledger](/research/strategy-claim-ledger), the allowed wording/status model, and the review gate for unbacked superiority language.
+- [#424](https://github.com/seraph-quest/seraph/issues/424) created the
+  historical competition truth table and benchmark axes.
+- [#436](https://github.com/seraph-quest/seraph/issues/436) created
+  [19. Strategy Claim Ledger](/research/strategy-claim-ledger). The ledger
+  remains the durable wording gate; Epic #736 and the Project own current work.
 
 ## M1 Capability Kernel And Manifest Contract
 
@@ -166,7 +169,7 @@ M1 source-of-truth contract:
 - provenance contract: inventory and receipts should distinguish core-owned behavior, package-owned behavior, managed connector behavior, raw MCP exposure, external provider evidence, and transitional compatibility paths
 - operator proof: cockpit/API surfaces should let an operator inspect why a capability exists, where it came from, what it can do, what blocks it, what repair or install action is available, and which receipt proves the state
 
-Acceptance for #425/#434:
+Historical acceptance provenance from closed #425/#434:
 
 - historical M1 docs described a shared capability contract consumed by M2, M3, and M9; current contracts are governed by the constitution and tracked implementation work
 - the accepted contract covers identity, manifest shape, permissions, provenance, mutation rights, health, compatibility, lifecycle state, and trust level
@@ -189,15 +192,18 @@ Implementation meaning: Seraph should be excellent at real work across terminal,
 - missing strategic gaps: broader repair coverage across connectors, browser/computer-use providers, delegated workers, automation triggers, external credentials, local/remote sandboxes, and artifact handoffs; clearer failure grouping by capability family
 - proof requirements: repeatable execution and blocked-capability scenarios with inspectable diagnosis, safe repair action, audit receipt, and operator-visible recovery state
 
-M2 batch execution rules:
+Current Epic mapping: #743 owns the durable job/artifact/checkpoint runtime,
+#747 owns the secure capability host, and #748 owns the first representative
+Seraph-native software-engineering loop.
 
-- M2 is a milestone, not a time box or a series of small PR slices. The whole M2 completion claim must ship as one ready PR that closes #427 and #435 together.
 - execution depth must land as capability contract surface area, runnable tool behavior, operator-visible receipts, and deterministic tests together
 - file work needs first-class patch preview/apply behavior, not only raw file overwrite
 - terminal, process, browser, HTTP, sandbox, filesystem, patch, and background-session surfaces should expose operation modes, session model, persistence, artifact contract, health, controls, and recovery actions
-- M2 cannot claim parity or excellence if #435 trust-boundary checks are left as follow-up work; SSRF, DNS-resolution preflight for private addresses, redirect-to-internal, path traversal, secret egress, replay drift, delegation, and prompt/extension permission creep must stay in the acceptance frame
+- execution cannot claim parity or excellence if trust-boundary checks are left as follow-up work; SSRF, DNS-resolution preflight for private addresses, redirect-to-internal, path traversal, secret egress, replay drift, delegation, and prompt/extension permission creep must stay in the acceptance frame
 - previous failed PR tests are part of the batch acceptance burden when they affect the same milestone surfaces, especially deterministic benchmark and engineering-memory proof
-- The implementation gate for this batch is `m2_execution_supremacy` plus the dedicated `/api/operator/m2-execution-benchmark` surface. If that suite or any prior failed shard regresses, M2 stays blocked.
+- historical `m2_execution_supremacy` receipts remain regression evidence, but
+  current Epic milestones require the real capability completion gate above
+  and cannot close from those deterministic receipts alone
 
 ## M3 Trusted Execution Boundaries
 

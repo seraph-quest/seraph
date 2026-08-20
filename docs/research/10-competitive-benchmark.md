@@ -4,115 +4,183 @@ title: 10. Competitive Benchmark
 
 # 10. Competitive Benchmark
 
-## Purpose
+**State:** Research
 
-This file records the current evidence-backed comparison between Seraph on `develop` and the reference systems named in this program: OpenClaw, Hermes, and IronClaw.
+**Source review date:** 2026-08-19
 
-The current read in this file reflects sources reviewed through April 5, 2026, with the paired refresh memo preserving the benchmark-refresh context.
+## Purpose And Evidence Boundary
 
-The goal is not to win every category on paper. The goal is to identify exactly where Seraph is ahead, behind, or still unknown, then tie that to implementation work.
+This is a dated, source-inspected comparison of Seraph on `develop` with
+OpenClaw, Hermes Agent, and IronClaw. It identifies product pressure; it does
+not define Seraph's target, execution order, or shipped status. Those belong to
+the [Project Constitution](/), the GitHub Project, and
+[Development Status](/status).
 
-Implementation mirror:
+Competitor entries are based on official documentation, repositories, parity
+matrices, and releases. They prove what a project currently documents or ships
+in source; they are not independent reliability or quality benchmarks. No
+overall parity or superiority claim is allowed from this table.
 
-- `docs/implementation/09-benchmark-status.md` owns the shipped-on-`develop` translation of these axes
+Evidence labels used here:
 
-M0 proof gate:
+- `Documented`: described by the project's official material.
+- `Source-inspected`: an official implementation, release, or self-reported
+  parity boundary was inspected.
+- `Runtime-verified`: exercised against a running reference system by Seraph's
+  maintainers.
+- `Independently benchmarked`: compared under the same published task and
+  scoring protocol.
 
-- `docs/research/18-agent-competition-truth-table.md` owns the broader primary-source competitor truth table and capability benchmark axes
-- `docs/research/19-strategy-claim-ledger.md` owns allowed wording for world-class or superiority claims
-- `docs/research/18-agent-competition-truth-table.md` owns the broader primary-source competitor truth table and capability benchmark pressure
-- `docs/research/19-strategy-claim-ledger.md` owns allowed wording for world-class or superiority claims
-- `docs/research/15-reference-systems-refresh-2026-04.md` records the April 2026 benchmark refresh that motivated the latest corrections in this file
+This refresh is `Source-inspected`; it is not `Runtime-verified` or
+`Independently benchmarked`.
 
-## How To Read This
+## How To Read The Matrix
 
-- `Ahead` means Seraph’s currently shipped repo surface is stronger on the reviewed evidence.
-- `Behind` means the competitor’s currently documented product/runtime surface is stronger.
-- `At Par` means the shipped surfaces are comparable enough that Seraph does not have a clear advantage.
-- `Unknown` means the reviewed evidence was insufficient for a confident call.
+- `Ahead`: comparable evidence shows Seraph's shipped surface is stronger.
+- `Behind`: the competitor's documented/source-inspected surface is materially
+  more complete than Seraph's shipped surface.
+- `At Par`: comparable evidence shows no material difference.
+- `Unknown`: evidence or comparability is insufficient.
 
-## Axis Matrix
+`Unknown` is the default when one side has only a deterministic receipt,
+marketing claim, or differently scoped implementation.
 
-| Axis | OpenClaw | Hermes | IronClaw |
-|---|---|---|---|
-| Operator visibility | `Behind` | `Behind` | `Behind` |
-| Longitudinal memory | `At Par` | `At Par` | `At Par` |
-| Intervention quality | `Unknown` | `Ahead` | `Ahead` |
-| Safe real-world execution | `Behind` | `Behind` | `Behind` |
-| Runtime reliability / eval rigor | `Unknown` | `Ahead` | `Unknown` |
-| Workflow composition | `Behind` | `Behind` | `Behind` |
-| Dense interface efficiency | `Behind` | `Behind` | `Behind` |
-| Presence / reach | `Behind` | `Behind` | `Behind` |
+## Current Axis Matrix
 
-## OpenClaw
+| Axis | OpenClaw | Hermes | IronClaw | Seraph evidence boundary |
+| --- | --- | --- | --- | --- |
+| Persistent goals and bounded follow-through | `Behind` | `Behind` | `Unknown` | Seraph has goals, strategist ticks, proactive delivery, and feedback foundations, but no shipped goal -> capability job -> verified outcome -> changed-decision loop. |
+| Durable jobs, flows, and restart recovery | `Behind` | `Behind` | `Unknown` | Durable workflow foundations exist, but the universal capability job/checkpoint contract remains Partial. |
+| Scheduled and event-driven proactivity | `Behind` | `Behind` | `Unknown` | Scheduled work exists; production standing-intent admission, execution, and outcome closure remain incomplete. |
+| Typed execution and isolation | `Unknown` | `Unknown` | `Unknown` | All four projects document different boundaries and caveats; no shared escape/exfiltration benchmark establishes a ranking. |
+| Memory governance and outcome learning | `Unknown` | `Unknown` | `Unknown` | Canonical memory and guardian learning foundations exist, but comparative recall quality and behavior change are not independently benchmarked. |
+| Operator visibility and recovery | `Unknown` | `Unknown` | `Unknown` | Seraph has a dense cockpit, but task efficiency and recovery burden have no current cross-system benchmark. |
+| Browser and external-system execution | `Behind` | `Behind` | `Unknown` | Seraph's catalog and proof surfaces do not substitute for broad live task completion. |
+| Cross-surface reach | `Behind` | `Behind` | `Behind` | The authenticated paired Mac edge and canonical cross-surface identity are not shipped. |
+| Guardian restraint and intervention quality | `Unknown` | `Unknown` | `Unknown` | Seraph has differentiated scaffolding, but no comparable live outcome study proves an advantage. |
+| One-GPU priority and non-starvation | `Unknown` | `Unknown` | `Unknown` | Seraph's serial broker is an accepted target, not a shipped cross-consumer receipt. |
 
-### Current Read
+Every `Behind` cell is scoped only to documented surface completeness where
+Seraph's own status marks the corresponding end-to-end behavior Partial or
+missing. It does not score reliability, security quality, task success, or
+operator outcomes. Those dimensions remain `Unknown` until the systems are run
+under a shared protocol.
 
-Seraph is currently behind OpenClaw on operator console density, workflow leverage breadth, safe execution breadth, and cross-channel reach. It is roughly at par on longitudinal memory. Intervention quality and eval rigor remain unclear from the reviewed official OpenClaw materials.
+## Reference-System Pressure
 
-### Why
+### Hermes Agent: goal completion and operator velocity
 
-- OpenClaw’s official Control UI exposes chat, tool-event cards, sessions, cron, skills, health, logs, and config in one operator surface.
-- OpenClaw documents first-class multi-agent composition and explicit workflow primitives through sub-agents and OpenProse.
-- Seraph now ships first-class reusable workflows, but OpenClaw still appears ahead on composition breadth and operator control around those workflows.
-- OpenClaw documents broader safety controls around sandboxing, approvals, browser execution, and gateway security than Seraph has shipped on `develop`.
-- Seraph’s current strengths relative to OpenClaw remain its guardian-specific memory, observer loop, proactive scaffolding, and deterministic runtime eval harness, but the reviewed OpenClaw sources do not give enough evidence to score intervention quality or eval rigor decisively.
+Hermes documents direct pressure on Seraph's goal-directed execution gap.
+Persistent Goals continue work until completion, pause, or a budget
+boundary. Kanban adds durable tasks, dependencies, reclaim, human-unblock state,
+and structured handoffs. Cron, delegation, browser/file/terminal tools, skills,
+memory providers, and messaging make those loops immediately usable from a
+compact operator surface.
 
-### Sources
+Hermes also documents important limits. Delegated children are isolated but do
+not provide universal crash-resumable child execution, and its security guide
+warns that host terminal access is not an adversarial sandbox. Seraph should
+copy the clarity and completeness of the goal loop, not weaken its own trust
+boundary to match feature count.
 
-- [OpenClaw Control UI](https://docs.openclaw.ai/web/control-ui)
-- [OpenClaw architecture](https://docs.openclaw.ai/concepts/architecture)
-- [OpenClaw agent runtime](https://docs.openclaw.ai/concepts/agent)
-- [OpenClaw memory](https://docs.openclaw.ai/concepts/memory)
-- [OpenClaw browser](https://docs.openclaw.ai/tools/browser), [OpenClaw sandboxing](https://docs.openclaw.ai/gateway/sandboxing), and [OpenClaw security](https://docs.openclaw.ai/gateway/security)
-- [OpenClaw multi-agent composition](https://docs.openclaw.ai/concepts/multi-agent) and [OpenProse](https://docs.openclaw.ai/prose)
+Official sources reviewed:
 
-## Hermes
+- [Persistent Goals](https://hermes-agent.nousresearch.com/docs/user-guide/features/goals)
+- [Kanban](https://hermes-agent.nousresearch.com/docs/user-guide/features/kanban/)
+- [Scheduled Tasks](https://hermes-agent.nousresearch.com/docs/user-guide/features/cron)
+- [Subagent Delegation](https://hermes-agent.nousresearch.com/docs/user-guide/features/delegation)
+- [Tools and Toolsets](https://hermes-agent.nousresearch.com/docs/user-guide/features/tools/)
+- [Memory Providers](https://hermes-agent.nousresearch.com/docs/user-guide/features/memory-providers/)
+- [Security](https://hermes-agent.nousresearch.com/docs/user-guide/security/)
+- [Official releases](https://github.com/NousResearch/hermes-agent/releases)
 
-### Current Read
+### OpenClaw: durable automation, reach, and memory governance
 
-Seraph is currently at par with Hermes on longitudinal memory overall, while still ahead on guardian-style intervention scaffolding and runtime eval rigor. Hermes is ahead on workflow composition, automation breadth, dense terminal efficiency, cross-channel reach, and likely safer real-world execution surfaces.
+OpenClaw documents a broad operating surface: a gateway, Control UI,
+channels, paired nodes, browser execution, plugins, skills, multi-agent routing,
+heartbeats, durable automations, standing orders, and typed resumable flows.
+Lobster and Task Flow are particularly relevant because they combine bounded
+multi-step execution, approval checkpoints, resume state, timeouts, and operator
+inspection.
 
-### Why
+Its own security material also bounds the comparison: OpenClaw is designed
+around a trusted single-operator model, sandboxing is configurable rather than
+universal, and its public extension ecosystem creates supply-chain pressure.
+Seraph should learn from the control-plane coherence while retaining stricter
+canonical memory and execution authority.
 
-- Hermes ships a strong TUI with persistent status, slash-command grammar, interrupt-and-redirect, and strong terminal ergonomics.
-- Hermes ships broader workflow surfaces today through tools, skills, background sessions, messaging channels, cron, sub-agents, and code execution; Seraph now has first-class reusable workflows but not yet the same operator-facing workflow density.
-- Hermes still keeps bounded built-in memory, but it now also ships seven additive external memory providers. Seraph still has the stronger guardian-specific policy-time memory use and world-model integration, but the structural memory lead is no longer clear enough to score as `Ahead`.
-- Seraph now ships a governed self-evolution substrate for declarative skills, runbooks, starter packs, and prompt packs, with explicit anti-misevolution blocking, canary-only rollout posture, rollback-ready receipts, and operator-visible governed-improvement benchmark proof, but it remains deliberately human-reviewed and narrower than Hermes' broader self-evolution ambition.
-- Seraph documents a deterministic runtime eval harness and broader guardian-specific proactive scaffolding than the official Hermes materials show.
+Official sources reviewed:
 
-### Sources
+- [Features](https://docs.openclaw.ai/concepts/features)
+- [Standing orders](https://docs.openclaw.ai/automation/standing-orders)
+- [Heartbeat](https://docs.openclaw.ai/gateway/heartbeat)
+- [Automations](https://docs.openclaw.ai/automation/cron-jobs)
+- [Task Flow](https://docs.openclaw.ai/automation/taskflow)
+- [Lobster](https://docs.openclaw.ai/tools/lobster)
+- [Memory architecture](https://docs.openclaw.ai/concepts/memory-architecture)
+- [Nodes](https://docs.openclaw.ai/nodes)
+- [Sandboxing](https://docs.openclaw.ai/gateway/sandboxing)
+- [Security](https://docs.openclaw.ai/gateway/security)
+- [Official releases](https://github.com/openclaw/openclaw/releases/)
 
-- [Hermes CLI](https://hermes-agent.nousresearch.com/docs/user-guide/cli/)
-- [Hermes memory](https://hermes-agent.nousresearch.com/docs/user-guide/features/memory/)
-- [Hermes memory providers](https://hermes-agent.nousresearch.com/docs/user-guide/features/memory-providers/)
-- [Hermes tools](https://hermes-agent.nousresearch.com/docs/user-guide/features/tools/), [Hermes MCP](https://hermes-agent.nousresearch.com/docs/user-guide/features/mcp/), [Hermes browser](https://hermes-agent.nousresearch.com/docs/user-guide/features/browser/), and [Hermes security](https://hermes-agent.nousresearch.com/docs/user-guide/security/)
-- [Hermes homepage](https://hermes-agent.nousresearch.com/)
+### IronClaw: explicit execution boundaries
 
-## IronClaw
+IronClaw provides an explicit typed execution-boundary reference: capability
+permissions, WASM isolation, mediated credentials, endpoint allowlists, leak
+scanning, resource limits, durable database state, and distinct authorization,
+approval, reservation, dispatch, execution, and evidence phases.
 
-### Current Read
+Its current breadth should not be overstated. The project's own parity matrix,
+self-dated as last reviewed against OpenClaw on 2026-05-02, marks parts of
+browser automation, active memory, multi-agent operation, and other
+OpenClaw-compatible behavior incomplete. IronClaw is therefore a useful
+security-contract reference, not proof that every advertised agent loop is more
+mature than Seraph's.
 
-Seraph is currently ahead of IronClaw on guardian-style intervention scaffolding. IronClaw is ahead on safe execution, workflow composition, dense operator surfaces, and multi-channel reach. Longitudinal memory looks roughly at par. Runtime reliability/eval rigor remains unclear on the reviewed official materials, but IronClaw is now a more credible runtime competitor than the earlier “security-first fork” framing implied.
+Official sources reviewed:
 
-### Why
+- [Official README](https://github.com/nearai/ironclaw/blob/main/README.md)
+- [Contributor and architecture contract](https://github.com/nearai/ironclaw/blob/main/AGENTS.md)
+- [Feature parity matrix](https://github.com/nearai/ironclaw/blob/main/FEATURE_PARITY.md)
+- [Official releases](https://github.com/nearai/ironclaw/releases)
 
-- IronClaw documents a security-first execution model with capability permissions, isolation layers, and protected secret handling.
-- IronClaw documents both TUI and dashboard-style operator surfaces with logs, jobs, routines, skills, channels, and extensions.
-- IronClaw documents broader composition through MCP, WASM tools/channels, hooks, and routines; Seraph now has first-class reusable workflows but remains behind on breadth and operator control.
-- Seraph currently has stronger guardian-specific strategist, briefing, review, and proactive delivery scaffolding than the official IronClaw materials show.
+## Capability-First Implications For Seraph
 
-### Sources
+The highest-leverage gap is not another capability catalog or proof endpoint.
+It is one complete proactive operator journey:
 
-- [IronClaw official site](https://www.ironclaw.com/)
-- [IronClaw official README](https://github.com/nearai/ironclaw/blob/staging/README.md)
-- [IronClaw feature parity](https://github.com/nearai/ironclaw/blob/staging/FEATURE_PARITY.md)
+```text
+goal or standing intent
+  -> candidate intervention
+  -> deterministic admission and priority
+  -> approval / reservation
+  -> typed capability job
+  -> real bounded execution
+  -> evidence and external readback
+  -> outcome evaluation
+  -> governed canonical-memory update
+  -> changed later decision
+```
 
-## What This Means
+Research implications for tracked work:
 
-The benchmark is clear enough to set priorities:
+1. Make the universal goal-conditioned loop the first end-to-end capability
+   slice, while preserving durable jobs, global GPU arbitration, and secure
+   execution as hard dependencies.
+2. Measure restart recovery, cancellation, approval-to-readback correctness,
+   false triggers, no-invent-work behavior, and changed later decisions.
+3. Treat memory as a moat only when provenance, confidence, supersession,
+   expiry, contradiction handling, false promotion, and action boundaries are
+   measurable.
+4. Prefer one authenticated identity across cockpit, paired edge, voice, and
+   messaging over a race for raw channel count.
+5. Require extensions to support provenance, staged install, update, disable,
+   revoke, conformance checks, and rollback before ecosystem breadth counts as
+   product progress.
+6. Publish axis-specific comparable receipts before changing any claim from
+   `Unknown` or `Behind` to `At Par` or `Ahead`.
 
-- Seraph’s strongest relative moat is still guardian-specific memory plus intervention scaffolding.
-- Seraph’s biggest gaps are now operator cockpit quality, workflow control ergonomics, adapter-first external capability contracts, native reach, and execution hardening.
-- The implementation proof layer should keep getting denser: benchmark status should be readable through explicit suites and governed-improvement gates, not only through long flat scenario lists or one-off PR receipts. The new guardian-memory benchmark direction is the right shape because it turns Seraph’s memory moat into an auditable benchmark surface instead of a qualitative claim, the same principle now applies to guardian restraint through explicit user-model and clarify-before-action benchmark proof, trust posture through named trust-boundary and safety-receipt suites, long-running workflow quality through named endurance-and-repair benchmark suites rather than generic orchestration anecdotes, replayable browser/desktop execution proof through computer-use benchmark receipts instead of catalog-level transport claims, and self-improvement safety through explicit anti-misevolution, canary, rollback, and recent-receipt benchmark proof instead of optimistic proposal-generation claims.
-- The next product push should therefore combine guardian-state and intervention improvements with an interface, adapter, and execution program, not just more runtime seam work; the workflow side should bias toward anticipatory repair, backup branching, and long-horizon endurance proof instead of only denser post-failure controls.
+The [Strategy Claim Ledger](./19-strategy-claim-ledger.md) remains the wording
+gate. The [Agent Competition Truth Table](./18-agent-competition-truth-table.md)
+provides historical benchmark context and should not override this later dated
+source refresh.

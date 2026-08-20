@@ -122,6 +122,7 @@ async def test_artifact_storage_settings_exposes_safe_operator_posture(client, t
         patch.object(settings, "workspace_dir", str(tmp_path / "workspace")),
         patch.object(settings, "local_llm_api_base", ""),
         patch.object(settings, "local_vlm_base_url", ""),
+        patch.object(settings, "local_vlm_model", ""),
         patch.object(settings, "seraph_vlm_base_url", ""),
         patch.object(settings, "screen_analysis_provider", ""),
     ):
@@ -131,7 +132,7 @@ async def test_artifact_storage_settings_exposes_safe_operator_posture(client, t
     data = resp.json()
     assert data["screen"]["analysis_enabled"] is True
     assert data["screen"]["provider"] == ""
-    assert data["screen"]["model"]
+    assert data["screen"]["model"] == ""
     assert "capture_mode" not in data["screen"]
     assert "daemon_status" not in data["screen"]
     assert "archive_dir" not in data["screen"]
@@ -739,6 +740,7 @@ async def test_screen_analysis_settings_persist_and_drive_artifact_storage(clien
         storage = (await client.get("/api/settings/artifact-storage")).json()
         assert storage["screen"]["analysis_enabled"] is True
         assert storage["screen"]["provider"] == "local-vlm"
+        assert storage["screen"]["model"] == "unsloth/gemma-4-26B-A4B-it-GGUF:UD-Q4_K_M"
         assert "archive_dir" not in storage["screen"]
         assert "preservation_enabled" not in storage["screen"]
         assert storage["screenshot_folder"]["path"] == str(screenshot_root)

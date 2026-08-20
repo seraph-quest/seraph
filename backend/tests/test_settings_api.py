@@ -122,6 +122,7 @@ async def test_artifact_storage_settings_exposes_safe_operator_posture(client, t
         patch.object(settings, "workspace_dir", str(tmp_path / "workspace")),
         patch.object(settings, "local_llm_api_base", ""),
         patch.object(settings, "local_vlm_base_url", ""),
+        patch.object(settings, "local_vlm_model", ""),
         patch.object(settings, "seraph_vlm_base_url", ""),
         patch.object(settings, "screen_analysis_provider", ""),
     ):

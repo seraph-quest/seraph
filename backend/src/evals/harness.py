@@ -1072,22 +1072,177 @@ async def _run_model_eval_job(
 
 
 async def _eval_mock_completion(**kwargs: Any) -> Any:
-    """Exercise profile/fallback/audit behavior while keeping transport deterministic."""
-    with patch(
-        "src.model_fabric.caller_context.is_canonical_inference_route",
-        return_value=False,
-    ):
-        return await asyncio.to_thread(
-            completion_with_fallback_sync,
-            messages=kwargs["messages"],
-            temperature=kwargs["temperature"],
-            max_tokens=kwargs["max_tokens"],
-            model_id=kwargs.get("model_id"),
-            runtime_path=kwargs.get("runtime_path", "completion"),
-            profile=kwargs.get("profile"),
-            local_runtime_only=kwargs.get("local_runtime_only", False),
-            request_context=None,
+    """Exercise the canonical route with deterministic, transport-only mocks.
+
+    Runtime evals must not turn a canonical caller into an unauthenticated legacy
+    completion just because the provider is unavailable in CI.  Keep the caller's
+    immutable context (especially its request id), run the normal route selector,
+    and replace only the network transport plus the capability proof source with
+    a bounded local eval fixture.
+    """
+    request_context = kwargs.get("request_context")
+    request_id = getattr(request_context, "request_id", None)
+
+    def _eval_route_profile(target: dict[str, Any], context: Any) -> Any:
+        from dataclasses import replace
+
+        from src.llm_runtime import _provider_profile
+        from src.model_fabric.selector import classify_endpoint
+        from src.model_fabric.contracts import ProviderProfile
+
+        requested_profile = str(target.get("profile") or "").strip()
+        resolved_profile = "local-ollama" if requested_profile == "local" else requested_profile
+        base_profile = _provider_profile(resolved_profile) if resolved_profile else None
+        target_model = str(target.get("model_id") or "eval-model")
+        if base_profile is None:
+            base_profile = ProviderProfile(
+                id="eval-default",
+                provider_kind="openai_compatible",
+                model=target_model,
+                routing_model=target_model,
+                api_base="http://127.0.0.1:9/v1",
+                capabilities=("text", "structured_output", "local", "private"),
+                task_class=context.requirements.task_class,
+                task_classes=(context.requirements.task_class,),
+                budget_class="low",
+                keyless=True,
+                context_window_tokens=context.requirements.context_tokens,
+                max_output_tokens=context.requirements.output_tokens,
+                local_resource_ms=context.requirements.max_local_resource_ms,
+                max_latency_ms=context.requirements.max_latency_ms,
+            )
+
+        # Use a loopback-only fixture endpoint.  The transport is patched below,
+        # so no socket is opened and no real service is contacted by this eval.
+        capabilities = tuple(
+            sorted(
+                set(base_profile.capabilities)
+                | set(context.requirements.capabilities)
+                | {"text", "local", "private"}
+            )
         )
+        task_classes = tuple(
+            sorted(set(base_profile.task_classes) | {context.requirements.task_class})
+        )
+        target_api_base = str(target.get("api_base") or "").strip()
+        target_endpoint_class = classify_endpoint(target_api_base)
+        eval_api_base = (
+            target_api_base
+            if target_endpoint_class.value in {"local", "trusted_lan"}
+            else "http://127.0.0.1:9/v1"
+        )
+        return replace(
+            base_profile,
+            api_base=eval_api_base,
+            model=target_model,
+            routing_model=target_model,
+            secret_env="",
+            keyless=True,
+            capabilities=capabilities,
+            task_class=context.requirements.task_class,
+            task_classes=task_classes,
+            context_window_tokens=max(
+                int(base_profile.context_window_tokens or 0),
+                int(context.requirements.context_tokens),
+            ),
+            max_output_tokens=max(
+                int(base_profile.max_output_tokens or 0),
+                int(context.requirements.output_tokens),
+            ),
+            local_resource_ms=min(
+                int(base_profile.local_resource_ms or context.requirements.max_local_resource_ms),
+                int(context.requirements.max_local_resource_ms),
+            ),
+            max_latency_ms=min(
+                int(base_profile.max_latency_ms or context.requirements.max_latency_ms),
+                int(context.requirements.max_latency_ms),
+            ),
+        )
+
+    def _eval_preflight(target: dict[str, Any], context: Any | None) -> tuple[Any, tuple[str, ...]]:
+        if context is None:
+            return None, ()
+        from src.model_fabric import candidate_from_profile, select_route
+        from src.model_fabric.proofs import build_model_route_proof
+
+        profile = _eval_route_profile(target, context)
+        candidate = candidate_from_profile(
+            profile,
+            source=str(target.get("source") or "primary"),
+        )
+        checked_at = time.time()
+        proofs = tuple(
+            build_model_route_proof(
+                profile=profile,
+                endpoint_class=candidate.endpoint_class,
+                adapter=candidate.adapter,
+                capability=capability,
+                canary_version="eval-transport-v1",
+                outcome="passed",
+                checked_at=checked_at - 1.0,
+                expires_at=checked_at + 60.0,
+                probe_receipt_id="eval-transport-receipt",
+                probe_receipt_hash="0" * 64,
+                proven_value=(
+                    "healthy"
+                    if capability == "health"
+                    else context.requirements.max_latency_ms
+                    if capability == "latency_ms"
+                    else 1
+                ),
+            )
+            for capability in sorted(set(context.requirements.capabilities) | {"health", "latency_ms"})
+        )
+        decision = select_route(context, (candidate,), proofs, now=checked_at)
+        return decision, tuple(proof.proof_hash for proof in proofs)
+
+    def _eval_transport(*, decision: Any, context: Any, body: dict[str, Any], api_key: str | None) -> tuple[Any, dict[str, Any]]:
+        import litellm
+
+        response = litellm.completion(
+            model=decision.selected.profile.model,
+            messages=body.get("messages", []),
+            temperature=body.get("temperature"),
+            max_tokens=body.get("max_tokens"),
+            api_base=decision.selected.profile.api_base,
+        )
+        message = response.choices[0].message
+        raw_payload = {
+            "choices": [
+                {
+                    "message": {
+                        "role": getattr(message, "role", "assistant"),
+                        "content": getattr(message, "content", ""),
+                    }
+                }
+            ]
+        }
+        return response, raw_payload
+
+    if request_id:
+        from src.llm_runtime import _finish_request, _register_request
+
+        _register_request(request_id)
+    try:
+        with (
+            patch("src.llm_runtime._governed_preflight_target", side_effect=_eval_preflight),
+            patch("src.llm_runtime._governed_openai_chat_completion", side_effect=_eval_transport),
+        ):
+            return await asyncio.to_thread(
+                completion_with_fallback_sync,
+                messages=kwargs["messages"],
+                temperature=kwargs["temperature"],
+                max_tokens=kwargs["max_tokens"],
+                model_id=kwargs.get("model_id"),
+                request_id=request_id,
+                runtime_path=kwargs.get("runtime_path", "completion"),
+                profile=kwargs.get("profile"),
+                local_runtime_only=kwargs.get("local_runtime_only", False),
+                request_context=request_context,
+            )
+    finally:
+        if request_id:
+            _finish_request(request_id)
 
 
 EVAL_SYNC_CLIENT_DB_PATCH_TARGETS: tuple[str, ...] = (

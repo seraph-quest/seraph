@@ -351,9 +351,11 @@ describe("ArtifactStoragePanel", () => {
 
     render(<ArtifactStoragePanel />);
 
-    expect(await screen.findByText(/retained-local\/retained-gemma:routable/)).toBeInTheDocument();
+    expect(
+      await screen.findByText("Model-fabric metadata is temporarily unavailable; showing last-known settings."),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/retained-local\/retained-gemma:routable/)).toBeInTheDocument();
     expect(screen.getByText("stale")).toBeInTheDocument();
-    expect(screen.getByText("Model-fabric metadata is temporarily unavailable; showing last-known settings.")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Run canary" })).toBeDisabled();
   });
 
@@ -519,11 +521,11 @@ describe("ArtifactStoragePanel", () => {
 
     render(<ArtifactStoragePanel />);
 
-    await waitFor(() => expect(screen.getByText("Seraph analysis")).toBeInTheDocument());
+    expect(await screen.findByText("Seraph analysis")).toBeInTheDocument();
+    expect(await screen.findByText(/15 images/)).toBeInTheDocument();
     expect(screen.getByText("Screenshot Folder")).toBeInTheDocument();
     expect(screen.getByText("scans a local screenshot folder; reports stay in Seraph")).toBeInTheDocument();
     expect(screen.getByText("Local screenshot images")).toBeInTheDocument();
-    expect(screen.getByText(/15 images/)).toBeInTheDocument();
     expect(screen.getByText("every 5m · up to 100 images")).toBeInTheDocument();
     expect(screen.getByText("local image files only")).toBeInTheDocument();
     expect(screen.getByText("local-vlm · gemma-4-26b")).toBeInTheDocument();

@@ -1,7 +1,12 @@
 """Tests for profile/onboarding (src/api/profile.py)."""
 
-import pytest
+import asyncio
+from unittest.mock import AsyncMock, patch
 
+import pytest
+from sqlalchemy.exc import SQLAlchemyError
+
+from src.memory.soul import default_soul_sections, render_soul_text
 from src.api.profile import get_or_create_profile, mark_onboarding_complete, reset_onboarding
 
 
@@ -44,6 +49,44 @@ class TestProfileEndpoints:
         assert "soul_text" in data
         assert "Identity" in data["soul_sections"]
         assert "## Identity" in data["soul_text"]
+
+    async def test_get_profile_degrades_on_snapshot_timeout(self, client):
+        with patch(
+            "src.api.profile.get_profile_snapshot",
+            AsyncMock(side_effect=asyncio.TimeoutError("private timeout details")),
+        ):
+            res = await client.get("/api/user/profile")
+
+        assert res.status_code == 200
+        data = res.json()
+        assert data["name"] == "Unknown"
+        assert data["onboarding_completed"] is None
+        assert data["soul_sections"] == default_soul_sections()
+        assert data["soul_text"] == render_soul_text(default_soul_sections())
+        assert data["status"] == "degraded"
+        assert data["degraded"] is True
+        assert data["degradation_codes"] == ["profile_snapshot_timeout"]
+        assert data["claim_boundary"] == "default_profile_only"
+        assert "private timeout details" not in res.text
+
+    async def test_get_profile_degrades_on_database_failure(self, client):
+        with patch(
+            "src.api.profile.get_profile_snapshot",
+            AsyncMock(side_effect=SQLAlchemyError("private database details")),
+        ):
+            res = await client.get("/api/user/profile")
+
+        assert res.status_code == 200
+        data = res.json()
+        assert data["name"] == "Unknown"
+        assert data["onboarding_completed"] is None
+        assert data["soul_sections"] == default_soul_sections()
+        assert data["soul_text"] == render_soul_text(default_soul_sections())
+        assert data["status"] == "degraded"
+        assert data["degraded"] is True
+        assert data["degradation_codes"] == ["profile_database_unavailable"]
+        assert data["claim_boundary"] == "default_profile_only"
+        assert "private database details" not in res.text
 
     async def test_skip_onboarding(self, client):
         res = await client.post("/api/user/onboarding/skip")

@@ -4471,6 +4471,51 @@ def test_eval_browser_helper_does_not_block_event_loop():
     assert asyncio.run(_run()) == "slow browser result"
 
 
+@pytest.mark.asyncio
+async def test_scheduler_eval_wrapper_binds_authenticated_model_principal():
+    from src.approval.runtime import get_current_trust_principal
+    from src.model_fabric.caller_context import build_canonical_inference_context
+    from src.security.trust_contract import AuthorityGrant, PrincipalType
+
+    observed: dict[str, object] = {}
+
+    async def model_job() -> None:
+        principal = get_current_trust_principal()
+        assert principal is not None
+        context = build_canonical_inference_context(
+            "daily_briefing",
+            payload="scheduler eval",
+            output_tokens=32,
+            timeout_seconds=5,
+            job_id=principal.job_id,
+        )
+        observed["principal"] = principal
+        observed["context_principal"] = context.principal
+
+    await harness._run_scheduler_eval_job("principal-contract", model_job)
+
+    principal = observed["principal"]
+    assert principal is observed["context_principal"]
+    assert principal.principal_type is PrincipalType.SERVICE
+    assert principal.authenticated is True
+    assert principal.grants == (AuthorityGrant.MODEL_INFERENCE,)
+    assert principal.job_id.startswith("scheduler:eval:principal-contract:")
+
+
+def test_eval_inference_context_remains_fail_closed_without_principal():
+    from src.model_fabric.caller_context import build_canonical_inference_context
+
+    with patch("src.model_fabric.caller_context.get_current_trust_principal", return_value=None):
+        with pytest.raises(PermissionError, match="authenticated runtime principal"):
+            build_canonical_inference_context(
+                "daily_briefing",
+                payload="unauthenticated eval",
+                output_tokens=32,
+                timeout_seconds=5,
+                job_id="scheduler:eval:unauthenticated",
+            )
+
+
 def test_runtime_eval_scenarios_expose_expected_details():
     summary = asyncio.run(
         run_runtime_evals(

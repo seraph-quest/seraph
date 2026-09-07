@@ -168,6 +168,8 @@ def test_root_and_declared_path_safety(tmp_path):
         ExternalReferenceSpec("secret-key", ExternalReferencePolicy.CONSENTED_LOGICAL_ROOT)
     with pytest.raises(WorkspaceStateError):
         WorkspacePathSpec("external", WorkspaceStateClass.EXTERNAL_REFERENCE)
+    with pytest.raises(WorkspaceStateError, match="ordinary secret"):
+        WorkspacePathSpec(".vault-key", WorkspaceStateClass.SECRET_RECOVERY, required=False)
     with pytest.raises(WorkspaceStateError):
         WorkspaceIdentity("synthetic-secret-key", root)
 
@@ -265,6 +267,11 @@ def test_runtime_registry_binds_existing_persistence_roots_without_scanning(tmp_
     assert registry.classify_path(".vault-key") is WorkspaceStateClass.SECRET_RECOVERY
     with pytest.raises(UnknownWorkspacePathError):
         registry.classify_path("backup-archive.tar")
+    calendar_spec = next(
+        spec for spec in registry.config.declared_paths if spec.logical_path == "google_calendar_token.json"
+    )
+    assert calendar_spec.state_class is WorkspaceStateClass.SECRET
+    assert calendar_spec.required is False
 
 
 def test_artifact_persistence_consumes_runtime_registry(tmp_path, monkeypatch):
@@ -365,12 +372,33 @@ def test_production_inventory_reports_missing_declared_paths_as_degraded(tmp_pat
         "status": "degraded",
         "missing_declared_paths": ["optional"],
         "state_roles": manifest["inventory"]["state_roles"],
+        "required_secret_paths": ["secret.bin"],
+        "optional_secret_paths": [],
     }
     assert receipt["status"] == "degraded"
     assert receipt["operator_status"] == "workspace_inventory_degraded"
     assert receipt["missing_declared_paths"] == ["optional"]
     assert receipt["degraded_reasons"] == ["declared_paths_missing"]
     assert receipt["blocked_reasons"] == []
+
+
+def test_production_inventory_allows_missing_optional_secret_and_marks_degraded(tmp_path):
+    root, config = _make_production_workspace(tmp_path)
+    config = WorkspaceConfig(
+        identity=config.identity,
+        declared_paths=(*config.declared_paths, WorkspacePathSpec("optional-token.json", WorkspaceStateClass.SECRET, required=False)),
+    )
+
+    manifest = WorkspaceStateRegistry(config).build_manifest()
+    receipt = WorkspaceStateRegistry(config).build_inventory_receipt()
+
+    assert manifest["inventory"]["status"] == "degraded"
+    assert manifest["inventory"]["missing_declared_paths"] == ["optional-token.json"]
+    assert manifest["inventory"]["required_secret_paths"] == ["secret.bin"]
+    assert manifest["inventory"]["optional_secret_paths"] == ["optional-token.json"]
+    assert receipt["status"] == "degraded"
+    assert receipt["required_secret_paths"] == ["secret.bin"]
+    assert receipt["optional_secret_paths"] == ["optional-token.json"]
 
 
 def test_production_inventory_blocks_missing_secret_declarations(tmp_path):

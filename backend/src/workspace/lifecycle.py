@@ -271,6 +271,8 @@ def _manifest_entries(manifest: dict[str, Any]) -> dict[str, dict[str, Any]]:
         logical_path = _safe_logical_path(raw.get("logical_path"), field="manifest logical_path")
         if logical_path in entries:
             raise InvalidWorkspaceArchiveError(f"duplicate manifest path: {logical_path}")
+        if "required" in raw and not isinstance(raw["required"], bool):
+            raise InvalidWorkspaceArchiveError(f"manifest requiredness is invalid: {logical_path}")
         entries[logical_path] = raw
     return entries
 
@@ -305,6 +307,7 @@ def _archive_manifest(
                 "size_bytes": int(source_entry.get("size_bytes", 0)),
                 "sha256": str(source_entry.get("sha256", "")),
                 "digest_scope": str(source_entry.get("digest_scope", "")),
+                "required": bool(source_entry.get("required", True)),
                 # Registry SQLite digests intentionally cover only redacted
                 # metadata.  The archive needs an independent payload digest
                 # so its bytes can still be checked without exposing them in
@@ -519,7 +522,8 @@ def _load_archive(
                     raise InvalidWorkspaceArchiveError(f"archive entry flag is invalid: {logical_path}")
                 source_entry = source_entries[logical_path]
                 try:
-                    state_class = registry.classify_path(logical_path).value
+                    path_spec = registry.path_spec(logical_path)
+                    state_class = path_spec.state_class.value
                 except WorkspaceStateError as exc:
                     raise InvalidWorkspaceArchiveError(
                         f"archive path is not registry-owned: {logical_path}"
@@ -535,6 +539,18 @@ def _load_archive(
                 for field in ("file_type", "mode", "size_bytes", "sha256", "digest_scope"):
                     if raw.get(field) != source_entry.get(field):
                         raise InvalidWorkspaceArchiveError(f"archive metadata drift: {logical_path}")
+                source_has_required = "required" in source_entry
+                raw_has_required = "required" in raw
+                source_required = source_entry.get("required", path_spec.required)
+                raw_required = raw.get("required", path_spec.required)
+                if source_has_required and not isinstance(source_required, bool):
+                    raise InvalidWorkspaceArchiveError(f"source requiredness is invalid: {logical_path}")
+                if raw_has_required and not isinstance(raw_required, bool):
+                    raise InvalidWorkspaceArchiveError(f"archive requiredness is invalid: {logical_path}")
+                if source_has_required != raw_has_required:
+                    raise InvalidWorkspaceArchiveError(f"archive requiredness drift: {logical_path}")
+                if source_required != raw_required or source_required != path_spec.required:
+                    raise InvalidWorkspaceArchiveError(f"current requiredness drift: {logical_path}")
                 if raw.get("archived") and not isinstance(raw.get("payload_sha256"), str):
                     raise InvalidWorkspaceArchiveError(f"archive payload digest is missing: {logical_path}")
                 if not raw.get("archived") and raw.get("payload_sha256") is not None:
@@ -543,6 +559,17 @@ def _load_archive(
                     raise InvalidWorkspaceArchiveError("archive contains secret material")
             if set(indexed) != set(source_entries):
                 raise InvalidWorkspaceArchiveError("archive entry index does not cover the source manifest")
+            current_required_secrets = {
+                spec.logical_path
+                for spec in registry.config.declared_paths
+                if spec.required and spec.state_class in _SECRET_STATE_CLASSES
+            }
+            missing_required_secrets = sorted(current_required_secrets - set(source_entries))
+            if missing_required_secrets:
+                raise InvalidWorkspaceArchiveError(
+                    "archive is missing required secret material metadata: "
+                    + ", ".join(missing_required_secrets)
+                )
             payloads: dict[str, bytes] = {}
             expected_payload_members = {
                 f"{PAYLOAD_PREFIX}{logical_path}"
@@ -657,6 +684,8 @@ def _materialize_stage(
         if state_class in _SECRET_STATE_CLASSES:
             source = _safe_entry_path(root, logical_path, registry)
             if not source.is_file() or source.is_symlink():
+                if not registry.path_spec(logical_path).required:
+                    continue
                 raise MissingSecretMaterialError(
                     f"active secret material is missing: {logical_path}"
                 )
@@ -700,6 +729,16 @@ def _validate_stage(
         or entry.get("state_class") in _ARCHIVEABLE_STATE_CLASSES
         or entry.get("state_class") in _SECRET_STATE_CLASSES
     }
+    required_paths = {
+        logical_path
+        for logical_path, entry in entries.items()
+        if entry.get("file_type") == "directory"
+            or entry.get("state_class") in _ARCHIVEABLE_STATE_CLASSES
+            or (
+                entry.get("state_class") in _SECRET_STATE_CLASSES
+                and registry.path_spec(logical_path).required
+            )
+    }
     actual_paths: set[str] = set()
     for current, dirs, files in os.walk(stage, topdown=True, followlinks=False):
         current_path = Path(current)
@@ -715,7 +754,7 @@ def _validate_stage(
     if not actual_paths.issubset(expected_paths | allowed_extra):
         unknown = sorted(actual_paths - expected_paths - allowed_extra)
         raise WorkspaceLifecycleError("staged workspace contains unknown entries: " + ", ".join(unknown))
-    missing = sorted(expected_paths - actual_paths)
+    missing = sorted(required_paths - actual_paths)
     if missing:
         raise WorkspaceLifecycleError("staged workspace is missing required entries: " + ", ".join(missing))
     for logical_path in sorted(expected_paths):
@@ -729,6 +768,8 @@ def _validate_stage(
             continue
         if entry.get("state_class") in _SECRET_STATE_CLASSES:
             if not target.is_file() or target.is_symlink():
+                if not registry.path_spec(logical_path).required:
+                    continue
                 raise MissingSecretMaterialError(f"staged secret material is unavailable: {logical_path}")
             continue
         payload = _regular_file_bytes(target, label=f"staged workspace file {logical_path}")

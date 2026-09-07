@@ -198,6 +198,10 @@ class WorkspacePathSpec:
 
     logical_path: str
     state_class: WorkspaceStateClass
+    # Requiredness is currently used for secret/recovery material.  Production
+    # integrations may declare optional credentials without weakening the
+    # fail-closed rule for recovery keys and other required secrets.
+    required: bool = True
 
     def __post_init__(self) -> None:
         logical_path = _normalize_relative_path(self.logical_path, field_name="logical_path")
@@ -207,8 +211,15 @@ class WorkspacePathSpec:
             raise WorkspaceStateError(f"unknown workspace state class: {self.state_class!r}") from exc
         if state_class is WorkspaceStateClass.EXTERNAL_REFERENCE:
             raise WorkspaceStateError("external-reference state must use ExternalReferenceSpec, not a local path")
+        if not isinstance(self.required, bool):
+            raise WorkspaceStateError("workspace path requiredness must be boolean")
+        if not self.required and state_class is not WorkspaceStateClass.SECRET:
+            raise WorkspaceStateError(
+                "only ordinary secret credentials may be declared optional"
+            )
         object.__setattr__(self, "logical_path", logical_path)
         object.__setattr__(self, "state_class", state_class)
+        object.__setattr__(self, "required", self.required)
 
 
 @dataclass(frozen=True)
@@ -340,6 +351,7 @@ class _Entry:
     logical_path: str
     path: Path
     state_class: WorkspaceStateClass
+    required: bool
     file_type: str
     mode: int
     size_bytes: int
@@ -351,6 +363,7 @@ class _Entry:
             "logical_path": self.logical_path,
             "state_class": self.state_class.value,
             "state_role": _STATE_CLASS_ROLES[self.state_class.value],
+            "required": self.required,
             "file_type": self.file_type,
             "mode": self.mode,
             "size_bytes": self.size_bytes,
@@ -389,6 +402,20 @@ class WorkspaceStateRegistry:
                 "status": inventory_status,
                 "missing_declared_paths": missing_declared_paths,
                 "state_roles": dict(sorted(_STATE_CLASS_ROLES.items())),
+                "required_secret_paths": sorted(
+                    spec.logical_path
+                    for spec in self.config.declared_paths
+                    if spec.required
+                    and spec.state_class
+                    in {WorkspaceStateClass.SECRET, WorkspaceStateClass.SECRET_RECOVERY}
+                ),
+                "optional_secret_paths": sorted(
+                    spec.logical_path
+                    for spec in self.config.declared_paths
+                    if not spec.required
+                    and spec.state_class
+                    in {WorkspaceStateClass.SECRET, WorkspaceStateClass.SECRET_RECOVERY}
+                ),
             },
             "database": sqlite,
             "counts": {
@@ -431,6 +458,20 @@ class WorkspaceStateRegistry:
             "manifest": None,
             "manifest_sha256": None,
             "missing_declared_paths": [],
+            "required_secret_paths": sorted(
+                spec.logical_path
+                for spec in self.config.declared_paths
+                if spec.required
+                and spec.state_class
+                in {WorkspaceStateClass.SECRET, WorkspaceStateClass.SECRET_RECOVERY}
+            ),
+            "optional_secret_paths": sorted(
+                spec.logical_path
+                for spec in self.config.declared_paths
+                if not spec.required
+                and spec.state_class
+                in {WorkspaceStateClass.SECRET, WorkspaceStateClass.SECRET_RECOVERY}
+            ),
             "degraded_reasons": [],
             "blocked_reasons": [],
             "secret_values_included": False,
@@ -472,6 +513,8 @@ class WorkspaceStateRegistry:
             item for item in (missing if isinstance(missing, list) else []) if isinstance(item, str)
         )
         degraded_reasons = ["declared_paths_missing"] if missing_paths else []
+        required_secret_paths = inventory.get("required_secret_paths")
+        optional_secret_paths = inventory.get("optional_secret_paths")
         base.update(
             {
                 "status": status,
@@ -479,6 +522,16 @@ class WorkspaceStateRegistry:
                 "manifest": manifest,
                 "manifest_sha256": manifest.get("manifest_sha256"),
                 "missing_declared_paths": missing_paths,
+                "required_secret_paths": sorted(
+                    item
+                    for item in (required_secret_paths if isinstance(required_secret_paths, list) else [])
+                    if isinstance(item, str)
+                ),
+                "optional_secret_paths": sorted(
+                    item
+                    for item in (optional_secret_paths if isinstance(optional_secret_paths, list) else [])
+                    if isinstance(item, str)
+                ),
                 "degraded_reasons": degraded_reasons,
                 "blocked_reasons": [],
                 "reason_code": degraded_reasons[0] if degraded_reasons else None,
@@ -506,6 +559,16 @@ class WorkspaceStateRegistry:
         """
         normalized = _normalize_relative_path(logical_path, field_name="logical_path")
         return self._declared_state_class(normalized)
+
+    def path_spec(self, logical_path: str) -> WorkspacePathSpec:
+        """Return the explicit declaration that owns one logical path.
+
+        Lifecycle and persistence callers use this to consume the same
+        requiredness and state-class contract as inventory without duplicating
+        declaration matching rules.
+        """
+        normalized = _normalize_relative_path(logical_path, field_name="logical_path")
+        return self._declared_spec(normalized)
 
     def _validated_root(self) -> Path:
         root = self.config.identity.root
@@ -571,7 +634,7 @@ class WorkspaceStateRegistry:
                     if spec.state_class in {
                         WorkspaceStateClass.SECRET,
                         WorkspaceStateClass.SECRET_RECOVERY,
-                    }:
+                    } and spec.required:
                         raise WorkspaceStateError(
                             f"required secret workspace path is missing: {spec.logical_path}"
                         ) from exc
@@ -658,6 +721,9 @@ class WorkspaceStateRegistry:
         raise UnknownWorkspacePathError(f"{qualifier} workspace path: {logical_path}")
 
     def _declared_state_class(self, logical_path: str) -> WorkspaceStateClass:
+        return self._declared_spec(logical_path).state_class
+
+    def _declared_spec(self, logical_path: str) -> WorkspacePathSpec:
         direct = [
             spec
             for spec in self.config.declared_paths
@@ -667,7 +733,7 @@ class WorkspaceStateRegistry:
             classes = {spec.state_class for spec in direct}
             if len(classes) != 1:
                 raise AmbiguousWorkspaceRootsError(f"workspace path has multiple owners: {logical_path}")
-            return direct[0].state_class
+            return direct[0]
 
         descendants = [
             spec
@@ -678,7 +744,7 @@ class WorkspaceStateRegistry:
             classes = {spec.state_class for spec in descendants}
             if len(classes) != 1:
                 raise AmbiguousWorkspaceRootsError(f"workspace directory has multiple owners: {logical_path}")
-            return descendants[0].state_class
+            return descendants[0]
         raise UnknownWorkspacePathError(f"unknown workspace path: {logical_path}")
 
     def _make_entry(
@@ -712,6 +778,7 @@ class WorkspaceStateRegistry:
             logical_path=logical_path,
             path=path,
             state_class=state_class,
+            required=self._declared_spec(logical_path).required,
             file_type=file_type,
             mode=mode,
             size_bytes=size_bytes,
@@ -988,6 +1055,7 @@ _RUNTIME_PATH_SPECS = (
     (".vault-key", WorkspaceStateClass.SECRET_RECOVERY),
     ("google_calendar_token.json", WorkspaceStateClass.SECRET),
 )
+_OPTIONAL_RUNTIME_SECRET_PATHS = frozenset({"google_calendar_token.json"})
 
 
 def canonical_workspace_root(root: str | os.PathLike[str]) -> Path:
@@ -1018,7 +1086,11 @@ def canonical_workspace_config(root: str | os.PathLike[str]) -> WorkspaceConfig:
             root_kind=WorkspaceRootKind.PRODUCTION,
         ),
         declared_paths=tuple(
-            WorkspacePathSpec(path, state_class)
+            WorkspacePathSpec(
+                path,
+                state_class,
+                required=path not in _OPTIONAL_RUNTIME_SECRET_PATHS,
+            )
             for path, state_class in _RUNTIME_PATH_SPECS
         ),
         database_path="seraph.db",

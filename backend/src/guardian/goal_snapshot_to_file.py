@@ -59,6 +59,7 @@ MAX_PRIORITY = 100
 DEFAULT_DEADLINE_SECONDS = 300
 MAX_DEADLINE_SECONDS = 900
 MAX_OUTPUT_BYTES = 4 * 1024 * 1024
+_RECONCILIATION_ACTION = "reconcile the durable job and any workspace effect before retry or cancel"
 
 
 def _now() -> datetime:
@@ -193,6 +194,9 @@ class GoalSnapshotToFileResult(BaseModel):
     output_exists: bool = False
     workspace_contained: bool = False
     goal_id_read_back: bool = False
+    reconciliation_required: bool = False
+    recovery_action: str | None = None
+    durable_failure: dict[str, Any] | None = None
     evidence_refs: list[str] = Field(default_factory=list)
     reason: str = ""
 
@@ -345,11 +349,17 @@ class GoalSnapshotToFileAdapter:
         candidate: GoalCandidateDecision,
     ) -> GoalExecutionResult:
         self.last_receipt = None
-        path = _text(candidate.inputs.get("file_path")) if isinstance(candidate.inputs, dict) else ""
+        candidate_path = _text(candidate.inputs.get("file_path")) if isinstance(candidate.inputs, dict) else ""
         try:
-            path = normalize_workspace_relative_path(path)
+            request_path = normalize_workspace_relative_path(self.request.file_path)
         except ValueError as exc:
             return self._blocked(f"unsafe_output_path:{_text(exc)}")
+        try:
+            path = normalize_workspace_relative_path(candidate_path)
+        except ValueError:
+            return self._blocked("candidate_output_path_mismatch")
+        if path != request_path:
+            return self._blocked("candidate_output_path_mismatch")
         if candidate.capability_id != CAPABILITY_ID or candidate.capability_version != self.request.capability_version:
             return self._blocked("capability_contract_mismatch")
         if candidate.goal_id != self.request.goal_id or candidate.goal_revision != self.request.goal_revision:
@@ -454,7 +464,7 @@ class GoalSnapshotToFileAdapter:
             reason = "goal_not_found" if current_goal is None else (
                 "goal_not_active" if _text(current_goal.status) != "active" else "stale_goal_revision"
             )
-            await self._record_effect(
+            guard_effect = await self._record_effect(
                 job_id,
                 effect_type="goal_revision_guard",
                 status="blocked",
@@ -462,13 +472,21 @@ class GoalSnapshotToFileAdapter:
                 owner=runner_owner,
                 fencing_token=fencing_token,
             )
-            await self._transition(job_id, "blocked", owner=runner_owner, fencing_token=fencing_token, reason=reason)
-            return self._blocked(reason, job_id=job_id, durable_status="blocked")
+            return await self._block_job(
+                job_id,
+                reason=reason,
+                owner=runner_owner,
+                fencing_token=fencing_token,
+            )
         if self.request.deadline_at <= self.clock():
-            await self._transition(job_id, "failed", owner=runner_owner, fencing_token=fencing_token, reason="deadline_expired")
-            return self._failed("deadline_expired", job_id=job_id, durable_status="failed")
+            return await self._fail_job(
+                job_id,
+                reason="deadline_expired",
+                owner=runner_owner,
+                fencing_token=fencing_token,
+            )
         if workflow_tool is None:
-            await self._record_effect(
+            workflow_effect = await self._record_effect(
                 job_id,
                 effect_type="workflow_invocation",
                 status="blocked",
@@ -476,8 +494,12 @@ class GoalSnapshotToFileAdapter:
                 owner=runner_owner,
                 fencing_token=fencing_token,
             )
-            await self._transition(job_id, "blocked", owner=runner_owner, fencing_token=fencing_token, reason=workflow_reason or "workflow_unavailable")
-            return self._blocked(workflow_reason or "workflow_unavailable", job_id=job_id, durable_status="blocked")
+            return await self._block_job(
+                job_id,
+                reason=workflow_reason or "workflow_unavailable",
+                owner=runner_owner,
+                fencing_token=fencing_token,
+            )
 
         try:
             raw_result, workflow_audit = await self._invoke_workflow(
@@ -488,7 +510,7 @@ class GoalSnapshotToFileAdapter:
             )
         except Exception as exc:
             if type(exc).__name__ == "ApprovalRequired":
-                await self._record_effect(
+                approval_effect = await self._record_effect(
                     job_id,
                     effect_type="workflow_invocation",
                     status="blocked",
@@ -496,9 +518,29 @@ class GoalSnapshotToFileAdapter:
                     owner=runner_owner,
                     fencing_token=fencing_token,
                 )
-                await self._transition(job_id, "awaiting_approval", owner=runner_owner, fencing_token=fencing_token, reason="approval_required")
+                if approval_effect is None:
+                    return await self._block_job(
+                        job_id,
+                        reason="approval_required",
+                        owner=runner_owner,
+                        fencing_token=fencing_token,
+                    )
+                approval_transition = await self._transition(
+                    job_id,
+                    "awaiting_approval",
+                    owner=runner_owner,
+                    fencing_token=fencing_token,
+                    reason="approval_required",
+                )
+                if approval_transition is None or _status(approval_transition) != "awaiting_approval":
+                    return self._durable_blocked(
+                        job_id,
+                        fallback_reason="approval_transition_not_confirmed",
+                        durable_status=_status(approval_transition) or "running",
+                    )
                 return self._blocked("approval_required", job_id=job_id, durable_status="awaiting_approval")
-            await self._record_effect(
+            workflow_failure_reason = f"workflow_failed:{type(exc).__name__}"
+            failure_effect = await self._record_effect(
                 job_id,
                 effect_type="workflow_invocation",
                 status="failed",
@@ -506,8 +548,19 @@ class GoalSnapshotToFileAdapter:
                 owner=runner_owner,
                 fencing_token=fencing_token,
             )
-            await self._transition(job_id, "failed", owner=runner_owner, fencing_token=fencing_token, reason=f"workflow_failed:{type(exc).__name__}")
-            return self._failed(f"workflow_failed:{type(exc).__name__}", job_id=job_id, durable_status="failed")
+            if failure_effect is None:
+                return await self._block_job(
+                    job_id,
+                    reason=workflow_failure_reason,
+                    owner=runner_owner,
+                    fencing_token=fencing_token,
+                )
+            return await self._fail_job(
+                job_id,
+                reason=workflow_failure_reason,
+                owner=runner_owner,
+                fencing_token=fencing_token,
+            )
 
         invocation_effect = await self._record_effect(
             job_id,
@@ -523,26 +576,22 @@ class GoalSnapshotToFileAdapter:
             fencing_token=fencing_token,
         )
         if invocation_effect is None:
-            await self._transition(
+            return await self._block_job(
                 job_id,
-                "failed",
-                owner=runner_owner,
-                fencing_token=fencing_token,
                 reason="execution_receipt_failed",
-            )
-            return self._failed("execution_receipt_failed", job_id=job_id, durable_status="failed")
-        if _text(raw_result).startswith("Error:"):
-            await self._transition(
-                job_id,
-                "failed",
                 owner=runner_owner,
                 fencing_token=fencing_token,
-                reason="workflow_returned_error",
             )
-            return self._failed("workflow_returned_error", job_id=job_id, durable_status="failed")
+        if _text(raw_result).startswith("Error:"):
+            return await self._fail_job(
+                job_id,
+                reason="workflow_returned_error",
+                owner=runner_owner,
+                fencing_token=fencing_token,
+            )
         readback = self._readback(path, candidate.goal_id)
         if not readback.output_exists or not readback.workspace_contained or not readback.goal_id_read_back or readback.content is None:
-            await self._record_readback(
+            readback_receipt = await self._record_readback(
                 job_id,
                 path,
                 readback,
@@ -550,8 +599,20 @@ class GoalSnapshotToFileAdapter:
                 fencing_token=fencing_token,
             )
             reason = readback.reason or "output_readback_failed"
-            await self._transition(job_id, "failed", owner=runner_owner, fencing_token=fencing_token, reason=reason)
-            return self._failed(reason, job_id=job_id, durable_status="failed", readback=readback)
+            if readback_receipt is None:
+                return await self._block_job(
+                    job_id,
+                    reason=reason,
+                    owner=runner_owner,
+                    fencing_token=fencing_token,
+                )
+            return await self._fail_job(
+                job_id,
+                reason=reason,
+                owner=runner_owner,
+                fencing_token=fencing_token,
+                readback=readback,
+            )
 
         try:
             artifact = await self.jobs.record_artifact(
@@ -562,62 +623,89 @@ class GoalSnapshotToFileAdapter:
                 owner=runner_owner,
                 fencing_token=fencing_token,
             )
+            if not isinstance(artifact, dict):
+                raise TypeError("artifact_receipt_missing")
             artifact_record = artifact.get("receipt", artifact)
+            if not isinstance(artifact_record, dict):
+                raise TypeError("artifact_receipt_missing")
             artifact_id = _text(artifact_record.get("artifact_id")) or None
-            readback_receipt = await self._record_readback(
-                job_id,
-                path,
-                readback,
-                owner=runner_owner,
-                fencing_token=fencing_token,
-            )
-            write_effect = await self._record_effect(
-                job_id,
-                effect_type="workspace_write",
-                status="succeeded",
-                content_sha256=readback.content_sha256,
-                details={"artifact_id": artifact_id, "goal_id": candidate.goal_id, "file_path": path},
-                owner=runner_owner,
-                fencing_token=fencing_token,
-            )
-            if readback_receipt is None or write_effect is None:
-                raise RuntimeError("verification_receipt_failed")
-            evidence = list(normalized_evidence_refs(
-                *candidate.evidence_refs,
-                f"job:{job_id}",
-                f"readback:{readback.content_sha256}",
-            ))
-            transitioned = await self._transition(
-                job_id,
-                "succeeded",
-                owner=runner_owner,
-                fencing_token=fencing_token,
-                result={
-                    "goal_id": candidate.goal_id,
-                    "goal_revision": candidate.goal_revision,
-                    "file_path": path,
-                    "content_sha256": readback.content_sha256,
-                    "artifact_id": artifact_id,
-                    "verification": "passed",
-                },
-                result_summary="goal snapshot workflow executed and output read back",
-            )
-            if transitioned is None or _status(transitioned) != "succeeded":
-                return self._failed(
-                    "durable_success_transition_failed",
-                    job_id=job_id,
-                    durable_status=_status(transitioned) or "running",
-                    readback=readback,
-                )
         except Exception as exc:
-            await self._transition(
+            self._mark_durable_failure(job_id, operation="artifact", error=exc)
+            return await self._block_job(
                 job_id,
-                "failed",
+                reason="artifact_receipt_failed",
                 owner=runner_owner,
                 fencing_token=fencing_token,
-                reason=f"receipt_recording_failed:{type(exc).__name__}",
             )
-            return self._failed(f"receipt_recording_failed:{type(exc).__name__}", job_id=job_id, durable_status="failed", readback=readback)
+
+        if not artifact_id:
+            self._mark_durable_failure(
+                job_id,
+                operation="artifact",
+                error=ValueError("artifact_id_missing"),
+            )
+            return await self._block_job(
+                job_id,
+                reason="artifact_receipt_invalid",
+                owner=runner_owner,
+                fencing_token=fencing_token,
+            )
+        readback_receipt = await self._record_readback(
+            job_id,
+            path,
+            readback,
+            owner=runner_owner,
+            fencing_token=fencing_token,
+        )
+        if readback_receipt is None:
+            return await self._block_job(
+                job_id,
+                reason="verification_receipt_failed",
+                owner=runner_owner,
+                fencing_token=fencing_token,
+            )
+        write_effect = await self._record_effect(
+            job_id,
+            effect_type="workspace_write",
+            status="succeeded",
+            content_sha256=readback.content_sha256,
+            details={"artifact_id": artifact_id, "goal_id": candidate.goal_id, "file_path": path},
+            owner=runner_owner,
+            fencing_token=fencing_token,
+        )
+        if write_effect is None:
+            return await self._block_job(
+                job_id,
+                reason="workspace_write_receipt_failed",
+                owner=runner_owner,
+                fencing_token=fencing_token,
+            )
+        evidence = list(normalized_evidence_refs(
+            *candidate.evidence_refs,
+            f"job:{job_id}",
+            f"readback:{readback.content_sha256}",
+        ))
+        transitioned = await self._transition(
+            job_id,
+            "succeeded",
+            owner=runner_owner,
+            fencing_token=fencing_token,
+            result={
+                "goal_id": candidate.goal_id,
+                "goal_revision": candidate.goal_revision,
+                "file_path": path,
+                "content_sha256": readback.content_sha256,
+                "artifact_id": artifact_id,
+                "verification": "passed",
+            },
+            result_summary="goal snapshot workflow executed and output read back",
+        )
+        if transitioned is None or _status(transitioned) != "succeeded":
+            return self._durable_blocked(
+                job_id,
+                fallback_reason="succeeded_transition_not_confirmed",
+                durable_status=_status(transitioned) or "running",
+            )
 
         self.last_receipt = {
             "job_id": job_id,
@@ -783,7 +871,12 @@ class GoalSnapshotToFileAdapter:
             result = await self.jobs.record_effect(job_id, **kwargs)
             self._remember_projection(result, job_id=job_id)
             return result
-        except Exception:
+        except Exception as exc:
+            self._mark_durable_failure(
+                job_id,
+                operation=f"effect:{_text(kwargs.get('effect_type')) or 'unknown'}",
+                error=exc,
+            )
             return None
 
     async def _record_readback(self, job_id: str, path: str, readback: _Readback, **kwargs: Any) -> dict[str, Any] | None:
@@ -817,7 +910,8 @@ class GoalSnapshotToFileAdapter:
                 )
             self._remember_projection(result, job_id=job_id)
             return result
-        except Exception:
+        except Exception as exc:
+            self._mark_durable_failure(job_id, operation="readback", error=exc)
             return None
 
     async def _transition(self, job_id: str, status: str, **kwargs: Any) -> dict[str, Any] | None:
@@ -825,14 +919,128 @@ class GoalSnapshotToFileAdapter:
             result = await self.jobs.transition_job(job_id, status, **kwargs)
             self._remember_projection(result, job_id=job_id)
             return result
-        except Exception:
+        except Exception as exc:
+            self._mark_durable_failure(
+                job_id,
+                operation=f"transition:{status}",
+                error=exc,
+            )
             return None
 
     async def _cancel(self, job_id: str, *, reason: str, owner: str | None = None, fencing_token: int | None = None) -> GoalExecutionResult:
         result = await self._transition(job_id, "cancelled", owner=owner, fencing_token=fencing_token, reason=reason)
+        if result is None:
+            return self._durable_blocked(job_id, fallback_reason=f"cancel_transition_failed:{reason}")
         durable_status = _status(result) or "cancelled"
         self.last_receipt = {"job_id": job_id, "durable_status": durable_status}
         return self._blocked(reason, job_id=job_id, durable_status=durable_status)
+
+    def _mark_durable_failure(
+        self,
+        job_id: str,
+        *,
+        operation: str,
+        error: Exception,
+        durable_status: str | None = None,
+    ) -> str:
+        """Keep a safe recovery marker when durable persistence fails."""
+        reason = f"durable_reconciliation_required:{operation}:{type(error).__name__}"
+        previous = dict(self.last_receipt or {})
+        previous_failure = previous.get("durable_failure")
+        failures = list(previous.get("durable_failures") or [])
+        if isinstance(previous_failure, dict) and previous_failure not in failures:
+            failures.append(previous_failure)
+        failure = {
+            "reason": reason,
+            "operation": operation,
+            "error_type": type(error).__name__,
+            "reconciliation_required": True,
+        }
+        failures.append(failure)
+        self.last_receipt = {
+            **previous,
+            "job_id": job_id,
+            "durable_status": durable_status or previous.get("durable_status") or "unknown",
+            "durable_failure": failure,
+            "durable_failures": failures[-8:],
+            "reconciliation_required": True,
+            "recovery_action": _RECONCILIATION_ACTION,
+        }
+        return reason
+
+    def _durable_blocked(
+        self,
+        job_id: str,
+        *,
+        fallback_reason: str,
+        durable_status: str | None = None,
+    ) -> GoalExecutionResult:
+        failure = self.last_receipt.get("durable_failure") if isinstance(self.last_receipt, dict) else None
+        reason = _text(failure.get("reason")) if isinstance(failure, dict) else ""
+        if not reason:
+            reason = f"durable_reconciliation_required:transition:{fallback_reason}"
+            self.last_receipt = {
+                **(self.last_receipt or {}),
+                "job_id": job_id,
+                "durable_status": durable_status or (self.last_receipt or {}).get("durable_status") or "unknown",
+                "reconciliation_required": True,
+                "recovery_action": _RECONCILIATION_ACTION,
+            }
+        return self._blocked(
+            reason,
+            job_id=job_id,
+            durable_status=durable_status or (self.last_receipt or {}).get("durable_status"),
+        )
+
+    async def _block_job(
+        self,
+        job_id: str,
+        *,
+        reason: str,
+        owner: str | None = None,
+        fencing_token: int | None = None,
+    ) -> GoalExecutionResult:
+        failure = self.last_receipt.get("durable_failure") if isinstance(self.last_receipt, dict) else None
+        failure_reason = _text(failure.get("reason")) if isinstance(failure, dict) else ""
+        transitioned = await self._transition(
+            job_id,
+            "blocked",
+            owner=owner,
+            fencing_token=fencing_token,
+            reason=reason,
+        )
+        if transitioned is None:
+            return self._durable_blocked(job_id, fallback_reason=f"blocked_transition_failed:{reason}")
+        return self._blocked(
+            failure_reason or reason,
+            job_id=job_id,
+            durable_status=_status(transitioned) or "blocked",
+        )
+
+    async def _fail_job(
+        self,
+        job_id: str,
+        *,
+        reason: str,
+        owner: str | None = None,
+        fencing_token: int | None = None,
+        readback: _Readback | None = None,
+    ) -> GoalExecutionResult:
+        transitioned = await self._transition(
+            job_id,
+            "failed",
+            owner=owner,
+            fencing_token=fencing_token,
+            reason=reason,
+        )
+        if transitioned is None:
+            return self._durable_blocked(job_id, fallback_reason=f"failed_transition_failed:{reason}")
+        return self._failed(
+            reason,
+            job_id=job_id,
+            durable_status=_status(transitioned) or "failed",
+            readback=readback,
+        )
 
     async def _replay_admission(self, projection: dict[str, Any], candidate: GoalCandidateDecision, path: str) -> GoalExecutionResult:
         job_id = _text(projection.get("job_id")) or _job_id(candidate, self.request)
@@ -872,11 +1080,14 @@ class GoalSnapshotToFileAdapter:
         if not isinstance(projection, dict):
             return
         receipt = projection.get("receipt") if isinstance(projection.get("receipt"), dict) else {}
+        lease = projection.get("lease") if isinstance(projection.get("lease"), dict) else {}
         self.last_receipt = {
+            **(self.last_receipt or {}),
             "job_id": job_id,
             "durable_status": _status(projection),
             "receipt_kind": receipt.get("kind"),
             "receipt_status": receipt.get("status"),
+            "fencing_token": lease.get("fencing_token"),
         }
 
     def _blocked(
@@ -982,6 +1193,13 @@ class GoalSnapshotToFileService:
             output_exists=bool(receipt.get("output_exists", False)),
             workspace_contained=bool(receipt.get("workspace_contained", False)),
             goal_id_read_back=bool(receipt.get("goal_id_read_back", False)),
+            reconciliation_required=bool(receipt.get("reconciliation_required", False)),
+            recovery_action=_text(receipt.get("recovery_action")) or None,
+            durable_failure=(
+                dict(receipt["durable_failure"])
+                if isinstance(receipt.get("durable_failure"), dict)
+                else None
+            ),
             evidence_refs=list(outcome.evidence_refs),
             reason=outcome.reason,
         )

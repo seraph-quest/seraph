@@ -1026,6 +1026,42 @@ async def _run_scheduler_eval_job(job_id: str, job: Callable[[], Awaitable[Any]]
     return await wrapper()
 
 
+@asynccontextmanager
+async def _eval_model_authority(job_id: str, *, session_id: str = ""):
+    """Bind a scoped service identity for a direct model-using eval helper."""
+    normalized_job_id = str(job_id or "").strip()
+    if not normalized_job_id:
+        raise ValueError("model eval authority requires a job identity")
+    normalized_session_id = str(session_id or "").strip()
+    principal = TrustPrincipal(
+        principal_id=f"service:eval:{normalized_job_id}",
+        principal_type=PrincipalType.SERVICE,
+        grants=(AuthorityGrant.MODEL_INFERENCE,),
+        session_id=normalized_session_id,
+        job_id=f"eval:{normalized_job_id}",
+    )
+    tokens = set_runtime_context(
+        normalized_session_id or None,
+        "high_risk",
+        trust_principal=principal,
+    )
+    try:
+        yield principal
+    finally:
+        reset_runtime_context(tokens)
+
+
+async def _run_model_eval_job(
+    job_id: str,
+    job: Callable[[], Awaitable[Any]],
+    *,
+    session_id: str = "",
+) -> Any:
+    """Run one direct async model eval with explicit bounded service authority."""
+    async with _eval_model_authority(job_id, session_id=session_id):
+        return await job()
+
+
 EVAL_SYNC_CLIENT_DB_PATCH_TARGETS: tuple[str, ...] = (
     "src.db.engine.get_session",
     "src.agent.session.get_session",
@@ -5430,8 +5466,16 @@ async def _eval_session_bound_llm_trace() -> dict[str, Any]:
             patch("src.memory.consolidator.add_memory"),
             patch("src.memory.consolidator.update_profile_soul_section", AsyncMock()),
         ):
-            await session_manager.generate_title("trace-session")
-            await consolidate_session("trace-session")
+            await _run_model_eval_job(
+                "session_bound_llm_trace:title",
+                lambda: session_manager.generate_title("trace-session"),
+                session_id="trace-session",
+            )
+            await _run_model_eval_job(
+                "session_bound_llm_trace:consolidation",
+                lambda: consolidate_session("trace-session"),
+                session_id="trace-session",
+            )
 
         events = await audit_repository.list_events(limit=20, session_id="trace-session")
         title_event = next(
@@ -6344,7 +6388,7 @@ async def _eval_strategist_tick_tool_audit() -> dict[str, Any]:
         ),
         patch.object(audit_repository, "log_event", mock_log_event),
     ):
-        await run_strategist_tick()
+        await _run_model_eval_job("strategist_tick_tool_audit", run_strategist_tick)
 
     tool_call = _find_audit_call(mock_log_event, event_type="tool_call", tool_name="get_goals")
     return {
@@ -6373,7 +6417,7 @@ async def _eval_strategist_tick_behavior() -> dict[str, Any]:
         patch("src.observer.delivery.deliver_or_queue", mock_deliver),
         patch.object(audit_repository, "log_event", mock_log_event),
     ):
-        await run_strategist_tick()
+        await _run_model_eval_job("strategist_tick_behavior", run_strategist_tick)
 
     delivered_message = mock_deliver.await_args.args[0]
     succeeded = _find_audit_call(
@@ -6467,7 +6511,10 @@ async def _eval_strategist_tick_learning_continuity_behavior() -> dict[str, Any]
             patch("src.scheduler.connection_manager.ws_manager", mock_ws_manager),
             patch.object(audit_repository, "log_event", mock_log_event),
         ):
-            await run_strategist_tick()
+            await _run_model_eval_job(
+                "strategist_tick_learning_continuity_behavior",
+                run_strategist_tick,
+            )
             continuity = await get_observer_continuity()
 
         scheduler_event = _find_audit_call(
@@ -6531,7 +6578,11 @@ async def _eval_session_consolidation_background_audit() -> dict[str, Any]:
             patch("src.memory.consolidator.add_memory", return_value="vec-memory-1"),
             patch.object(audit_repository, "log_event", mock_log_event),
         ):
-            await consolidate_session("eval-session")
+            await _run_model_eval_job(
+                "session_consolidation_background_audit",
+                lambda: consolidate_session("eval-session"),
+                session_id="eval-session",
+            )
 
     success = _find_audit_call(
         mock_log_event,
@@ -6574,7 +6625,11 @@ async def _eval_session_consolidation_behavior() -> dict[str, Any]:
             patch("src.memory.consolidator.update_profile_soul_section", AsyncMock()) as mock_update_soul,
             patch.object(audit_repository, "log_event", mock_log_event),
         ):
-            await consolidate_session("guardian-session")
+            await _run_model_eval_job(
+                "session_consolidation_behavior",
+                lambda: consolidate_session("guardian-session"),
+                session_id="guardian-session",
+            )
 
     success = _find_audit_call(
         mock_log_event,
@@ -7731,7 +7786,11 @@ async def _eval_memory_provider_writeback_behavior() -> dict[str, Any]:
                     AsyncMock(),
                 ) as mock_log_background_task_event,
             ):
-                await consolidate_session("provider-writeback-session")
+                await _run_model_eval_job(
+                    "memory_provider_writeback_behavior",
+                    lambda: consolidate_session("provider-writeback-session"),
+                    session_id="provider-writeback-session",
+                )
                 inventory = await list_memory_providers()
         finally:
             reset_runtime_context(runtime_tokens)
@@ -8798,7 +8857,11 @@ async def _eval_session_title_generation_background_audit() -> dict[str, Any]:
         patch("src.llm_runtime.completion_with_fallback", AsyncMock(return_value=llm_response)),
         patch.object(audit_repository, "log_event", mock_log_event),
     ):
-        title = await sm.generate_title("eval-session")
+        title = await _run_model_eval_job(
+            "session_title_generation_background_audit",
+            lambda: sm.generate_title("eval-session"),
+            session_id="eval-session",
+        )
 
     success = _find_audit_call(
         mock_log_event,

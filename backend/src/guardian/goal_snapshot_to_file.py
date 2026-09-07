@@ -76,6 +76,21 @@ CAPABILITY_VERSION = "1"
 WORKFLOW_NAME = "goal-snapshot-to-file"
 WORKFLOW_TOOL_NAME = "workflow_goal_snapshot_to_file"
 _ALLOWED_WORKFLOW_STEP_SEQUENCE = ("get_goals", "write_file")
+_CANONICAL_WORKFLOW_STEP_DEFINITIONS = (
+    {
+        "id": "goals",
+        "tool": "get_goals",
+        "arguments": {},
+    },
+    {
+        "id": "save",
+        "tool": "write_file",
+        "arguments": {
+            "file_path": "{{ file_path }}",
+            "content": "Goal snapshot\n\n{{ steps.goals.result }}\n",
+        },
+    },
+)
 DEFAULT_PRIORITY = 60
 MAX_PRIORITY = 100
 DEFAULT_DEADLINE_SECONDS = 300
@@ -265,12 +280,16 @@ def _workflow_definition_digest(
     workflow_name: str,
     workflow_version: str,
     step_sequence: list[str],
+    workflow_tool_name: str = WORKFLOW_TOOL_NAME,
+    step_definitions: Any = _CANONICAL_WORKFLOW_STEP_DEFINITIONS,
 ) -> str:
     return _safe_digest(
         {
             "workflow_name": workflow_name,
             "workflow_version": workflow_version,
+            "workflow_tool_name": workflow_tool_name,
             "step_sequence": step_sequence,
+            "step_definitions": step_definitions,
         }
     )
 
@@ -535,6 +554,30 @@ class GoalSnapshotToFileAdapter:
             return workflow.get(key)
         return getattr(workflow, key, None)
 
+    @classmethod
+    def _step_definitions(cls, value: Any) -> list[dict[str, Any]] | None:
+        if not isinstance(value, (list, tuple)):
+            return None
+        definitions: list[dict[str, Any]] = []
+        for index, step in enumerate(value):
+            tool = cls._workflow_value(step, "tool")
+            if not isinstance(tool, str) or not tool.strip():
+                return None
+            raw_arguments = cls._workflow_value(step, "arguments")
+            if raw_arguments is None:
+                raw_arguments = {}
+            if not isinstance(raw_arguments, dict):
+                return None
+            step_id = _text(cls._workflow_value(step, "id")) or f"step_{index}"
+            definitions.append(
+                {
+                    "id": step_id,
+                    "tool": canonical_tool_name(tool.strip()),
+                    "arguments": raw_arguments,
+                }
+            )
+        return definitions
+
     @staticmethod
     def _sequence_mismatch_reason(sequence: list[str] | None) -> str | None:
         if sequence is None or not sequence:
@@ -669,6 +712,13 @@ class GoalSnapshotToFileAdapter:
                         observed_version=definition_version,
                         observed_sequence=definition_steps,
                     )
+                if not definition_tool_name:
+                    return self._rejected_workflow_binding(
+                        reason="workflow_tool_name_missing",
+                        observed_name=definition_name,
+                        observed_version=definition_version,
+                        observed_sequence=definition_steps,
+                    )
                 if definition_version_raw is not None and definition_version != self.request.capability_version:
                     return self._rejected_workflow_binding(
                         reason="workflow_version_mismatch",
@@ -680,6 +730,22 @@ class GoalSnapshotToFileAdapter:
                 if definition_reason:
                     return self._rejected_workflow_binding(
                         reason=definition_reason,
+                        observed_name=definition_name,
+                        observed_version=definition_version,
+                        observed_sequence=definition_steps,
+                    )
+                step_definitions = self._step_definitions(self._workflow_value(workflow, "steps"))
+                definition_digest = _workflow_definition_digest(
+                    workflow_name=definition_name,
+                    workflow_version=self.request.capability_version,
+                    workflow_tool_name=definition_tool_name,
+                    step_sequence=definition_steps,
+                    step_definitions=step_definitions,
+                )
+                expected_digest = self._workflow_binding()["workflow_definition_digest"]
+                if definition_digest != expected_digest:
+                    return self._rejected_workflow_binding(
+                        reason="workflow_definition_digest_mismatch",
                         observed_name=definition_name,
                         observed_version=definition_version,
                         observed_sequence=definition_steps,

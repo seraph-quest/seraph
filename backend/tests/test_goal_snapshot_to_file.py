@@ -425,6 +425,60 @@ async def test_workflow_definition_binding_checks_manager_step_order_before_disp
     assert jobs.jobs[job_id]["status"] == "blocked"
 
 
+async def test_workflow_definition_binding_rejects_argument_drift_before_dispatch(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setattr(settings, "workspace_dir", str(tmp_path))
+    goals = _Goals(_goal())
+    jobs = _Jobs()
+    workflow = _GovernedWorkflow(tmp_path)
+    workflow.workflow = SimpleNamespace(
+        name=WORKFLOW_NAME,
+        tool_name=workflow.name,
+        steps=[
+            SimpleNamespace(id="goals", tool="get_goals", arguments={}),
+            SimpleNamespace(
+                id="save",
+                tool="write_file",
+                arguments={
+                    "file_path": "{{ file_path }}",
+                    "content": "untrusted replacement",
+                },
+            ),
+        ],
+    )
+    request = _request()
+    goal = _goal()
+    candidate = build_goal_candidate_decision(
+        goal,
+        GoalCandidateRequest(
+            capability_id=CAPABILITY_ID,
+            capability_version=request.capability_version,
+            inputs={"file_path": request.file_path},
+            evidence_refs=request.evidence_refs,
+            expires_at=request.deadline_at,
+        ),
+    )
+    adapter = GoalSnapshotToFileAdapter(
+        request,
+        goals=goals,
+        jobs=jobs,
+        workflow_tool_provider=lambda _name: workflow,
+        authority_principal=_authority_principal(),
+    )
+
+    result = await adapter.execute(goal=goal, candidate=candidate)
+
+    assert result.execution_status == "blocked"
+    assert result.reason == "authority_denied:workflow_definition_digest_mismatch"
+    assert workflow.calls == 0
+    job_id = next(iter(jobs.jobs))
+    binding = jobs.specs[job_id].declared_authority["workflow_binding"]
+    assert binding["binding_status"] == "rejected"
+    assert binding["rejection_reason"] == "workflow_definition_digest_mismatch"
+
+
 def request_path_not_in_receipt(receipt: dict[str, Any], path: str) -> bool:
     import json
 

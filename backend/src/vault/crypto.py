@@ -7,6 +7,11 @@ import stat
 from cryptography.fernet import Fernet
 
 from config.settings import settings
+from src.workspace import (
+    WorkspaceStateClass,
+    canonical_workspace_registry,
+    canonical_workspace_root,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -27,7 +32,11 @@ def _get_fernet() -> Fernet:
     key = settings.vault_encryption_key
 
     if not key:
-        key_path = os.path.join(settings.workspace_dir, ".vault-key")
+        workspace_root = canonical_workspace_root(settings.workspace_dir)
+        registry = canonical_workspace_registry(workspace_root)
+        if registry.classify_path(".vault-key") is not WorkspaceStateClass.SECRET_RECOVERY:
+            raise RuntimeError("vault key path is not owned by the canonical secret/recovery state")
+        key_path = workspace_root / ".vault-key"
         if os.path.exists(key_path):
             with open(key_path, "r") as f:
                 key = f.read().strip()

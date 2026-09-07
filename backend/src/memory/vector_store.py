@@ -11,10 +11,10 @@ import pyarrow as pa
 from config.settings import settings
 from src.audit.runtime import log_integration_event_sync
 from src.memory.embedder import embed
+from src.workspace import WorkspaceStateClass, canonical_workspace_registry, canonical_workspace_root
 
 logger = logging.getLogger(__name__)
 
-_LANCE_DIR = os.path.join(settings.workspace_dir, "lance")
 _TABLE_NAME = "memories"
 
 # Schema: 384 dimensions for all-MiniLM-L6-v2
@@ -29,6 +29,15 @@ _SCHEMA = pa.schema([
 
 _db: Optional[lancedb.DBConnection] = None
 _db_lock = threading.Lock()
+
+
+def _lance_dir() -> str:
+    """Resolve the derived vector store below the canonical workspace root."""
+    workspace_root = canonical_workspace_root(settings.workspace_dir)
+    registry = canonical_workspace_registry(workspace_root)
+    if registry.classify_path("lance") is not WorkspaceStateClass.DERIVED:
+        raise RuntimeError("vector store path is not owned by derived workspace state")
+    return str(workspace_root / "lance")
 
 
 def _log_vector_store_event(outcome: str, details: dict | None = None) -> None:
@@ -53,9 +62,10 @@ def _get_db() -> lancedb.DBConnection:
     if _db is None:
         with _db_lock:
             if _db is None:
-                os.makedirs(_LANCE_DIR, exist_ok=True)
-                _db = lancedb.connect(_LANCE_DIR)
-                logger.info("LanceDB connected at %s", _LANCE_DIR)
+                lance_dir = _lance_dir()
+                os.makedirs(lance_dir, exist_ok=True)
+                _db = lancedb.connect(lance_dir)
+                logger.info("LanceDB connected at %s", lance_dir)
     return _db
 
 

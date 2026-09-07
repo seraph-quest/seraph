@@ -1,0 +1,834 @@
+"""Read-only, deterministic workspace inventory primitives.
+
+This module deliberately owns no lifecycle, scheduler, vault, archive, or
+database-engine behavior.  A caller supplies an explicit workspace identity
+and a relative path classification allow-list.  Synthetic fixtures can be
+inventoried, while production callers use the same registry for path
+classification without scanning or opening production state.  The backup and
+restore lifecycle remains a later #742 slice.
+
+Secret/recovery files are never opened.  Their manifest ``sha256`` is a
+deterministic digest of redacted metadata, marked by ``digest_scope``; this
+keeps the manifest useful for change detection without loading key material.
+"""
+
+from __future__ import annotations
+
+from collections import Counter
+from dataclasses import dataclass
+from enum import Enum
+import hashlib
+import json
+import os
+from pathlib import Path, PurePosixPath, PureWindowsPath
+import sqlite3
+import stat
+from typing import Any
+from urllib.parse import quote
+
+
+class WorkspaceStateError(ValueError):
+    """Base error for invalid or unsafe workspace state."""
+
+
+class AmbiguousWorkspaceRootsError(WorkspaceStateError):
+    """Raised when two classifications could own the same path."""
+
+
+class UnknownWorkspacePathError(WorkspaceStateError):
+    """Raised when an entry is not covered by the explicit registry."""
+
+
+class UnsupportedWorkspaceEntryError(WorkspaceStateError):
+    """Raised for links, devices, sockets, FIFOs, or other unsafe entries."""
+
+
+class WorkspaceRootKind(str, Enum):
+    """Root scopes supported by this pre-production inventory contract."""
+
+    SYNTHETIC_FIXTURE = "synthetic_fixture"
+    PRODUCTION = "production"
+
+
+class WorkspaceStateClass(str, Enum):
+    CANONICAL = "canonical"
+    SECRET_RECOVERY = "secret/recovery"
+    SECRET = "secret"
+    DERIVED = "derived"
+    CACHE = "cache"
+    EXTERNAL_REFERENCE = "external-reference"
+    DISPOSABLE = "disposable"
+
+
+class ExternalReferencePolicy(str, Enum):
+    """Non-secret policies for logical references that are not local paths."""
+
+    CONSENTED_LOGICAL_ROOT = "consented-logical-root"
+    PAIRED_EDGE_REFERENCE = "paired-edge-reference"
+
+
+def _canonical_json(value: object) -> str:
+    return json.dumps(value, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+
+
+def _sha256_bytes(value: bytes) -> str:
+    return hashlib.sha256(value).hexdigest()
+
+
+def _sha256_json(value: object) -> str:
+    return _sha256_bytes(_canonical_json(value).encode("utf-8"))
+
+
+def _normalize_relative_path(value: str, *, field_name: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise WorkspaceStateError(f"{field_name} must be a non-empty relative path")
+    raw = value.strip().replace("\\", "/")
+    if "\x00" in raw or raw.startswith("~") or raw.lower().startswith("file:"):
+        raise WorkspaceStateError(f"{field_name} contains an unsafe path form")
+    windows = PureWindowsPath(raw)
+    if raw.startswith("/") or windows.is_absolute() or windows.drive:
+        raise WorkspaceStateError(f"{field_name} must not be absolute: {value!r}")
+    parts = PurePosixPath(raw).parts
+    if not parts or any(part in {"", ".", ".."} for part in parts):
+        raise WorkspaceStateError(f"{field_name} must not contain '.', '..', or empty path parts")
+    normalized = "/".join(parts)
+    if normalized != raw:
+        raise WorkspaceStateError(f"{field_name} is not normalized: {value!r}")
+    return normalized
+
+
+@dataclass(frozen=True)
+class WorkspaceIdentity:
+    """Stable logical identity plus the one explicit local workspace root."""
+
+    workspace_id: str
+    root: Path
+    root_kind: WorkspaceRootKind = WorkspaceRootKind.SYNTHETIC_FIXTURE
+    synthetic_marker: str = ".seraph-synthetic-workspace"
+
+    def __post_init__(self) -> None:
+        workspace_id = str(self.workspace_id or "").strip()
+        if (
+            not workspace_id
+            or workspace_id in {".", ".."}
+            or "/" in workspace_id
+            or "\\" in workspace_id
+            or len(workspace_id) > 64
+            or not workspace_id.islower()
+            or not (workspace_id.startswith("synthetic-") or workspace_id.startswith("workspace-"))
+            or any(
+                part in {"secret", "key", "token", "password", "credential", "private"}
+                for part in workspace_id.split("-")
+            )
+        ):
+            raise WorkspaceStateError("workspace_id must be a non-secret workspace/synthetic slug")
+        root = Path(self.root)
+        if not root.is_absolute():
+            raise WorkspaceStateError("workspace root must be absolute")
+        try:
+            root_kind = WorkspaceRootKind(self.root_kind)
+        except (TypeError, ValueError) as exc:
+            raise WorkspaceStateError(f"unknown workspace root kind: {self.root_kind!r}") from exc
+        marker = _normalize_relative_path(self.synthetic_marker, field_name="synthetic_marker")
+        if "/" in marker:
+            raise WorkspaceStateError("synthetic_marker must be a single path component")
+        object.__setattr__(self, "workspace_id", workspace_id)
+        object.__setattr__(self, "root", root)
+        object.__setattr__(self, "root_kind", root_kind)
+        object.__setattr__(self, "synthetic_marker", marker)
+
+
+@dataclass(frozen=True)
+class WorkspacePathSpec:
+    """A relative path owned by one explicit workspace state class."""
+
+    logical_path: str
+    state_class: WorkspaceStateClass
+
+    def __post_init__(self) -> None:
+        logical_path = _normalize_relative_path(self.logical_path, field_name="logical_path")
+        try:
+            state_class = WorkspaceStateClass(self.state_class)
+        except (TypeError, ValueError) as exc:
+            raise WorkspaceStateError(f"unknown workspace state class: {self.state_class!r}") from exc
+        if state_class is WorkspaceStateClass.EXTERNAL_REFERENCE:
+            raise WorkspaceStateError("external-reference state must use ExternalReferenceSpec, not a local path")
+        object.__setattr__(self, "logical_path", logical_path)
+        object.__setattr__(self, "state_class", state_class)
+
+
+@dataclass(frozen=True)
+class ExternalReferenceSpec:
+    """A logical external root; the registry never resolves its host path."""
+
+    reference_id: str
+    policy: ExternalReferencePolicy | str
+
+    def __post_init__(self) -> None:
+        reference_id = str(self.reference_id or "").strip()
+        if (
+            not reference_id
+            or reference_id in {".", ".."}
+            or "\x00" in reference_id
+            or "/" in reference_id
+            or "\\" in reference_id
+            or len(reference_id) > 64
+            or not reference_id.islower()
+            or any(
+                part in {"secret", "key", "token", "password", "credential", "private"}
+                for part in reference_id.split("-")
+            )
+        ):
+            raise WorkspaceStateError("external reference id must be a non-secret logical slug")
+        try:
+            policy = ExternalReferencePolicy(self.policy)
+        except (TypeError, ValueError) as exc:
+            raise WorkspaceStateError("external reference policy must be a declared non-secret policy") from exc
+        object.__setattr__(self, "reference_id", reference_id)
+        object.__setattr__(self, "policy", policy)
+
+
+@dataclass(frozen=True)
+class WorkspaceDatabaseObjectSpec:
+    """Typed ownership and redaction contract for one SQLite schema object."""
+
+    name: str
+    object_type: str
+    state_class: WorkspaceStateClass
+    redaction_policy: str = "metadata-only"
+
+    def __post_init__(self) -> None:
+        name = str(self.name or "").strip()
+        object_type = str(self.object_type or "").strip().lower()
+        try:
+            state_class = WorkspaceStateClass(self.state_class)
+        except (TypeError, ValueError) as exc:
+            raise WorkspaceStateError(f"unknown database state class: {self.state_class!r}") from exc
+        if (
+            not name
+            or "\x00" in name
+            or "." in name
+            or "/" in name
+            or "\\" in name
+            or not name.isidentifier()
+        ):
+            raise WorkspaceStateError("database object names must be plain identifiers")
+        if object_type not in {"table", "index", "trigger", "view"}:
+            raise WorkspaceStateError(f"unsupported database object type: {object_type!r}")
+        if state_class is WorkspaceStateClass.EXTERNAL_REFERENCE:
+            raise WorkspaceStateError("database objects cannot own external-reference state")
+        if self.redaction_policy != "metadata-only":
+            raise WorkspaceStateError("database inventory only supports metadata-only redaction")
+        object.__setattr__(self, "name", name)
+        object.__setattr__(self, "object_type", object_type)
+        object.__setattr__(self, "state_class", state_class)
+        object.__setattr__(self, "redaction_policy", "metadata-only")
+
+
+@dataclass(frozen=True)
+class WorkspaceConfig:
+    """Explicit inventory configuration; no implicit workspace roots exist."""
+
+    identity: WorkspaceIdentity
+    declared_paths: tuple[WorkspacePathSpec, ...]
+    database_path: str = "seraph.db"
+    workspace_version: int = 1
+    external_references: tuple[ExternalReferenceSpec, ...] = ()
+    expected_database_objects: tuple[WorkspaceDatabaseObjectSpec, ...] = ()
+
+    def __post_init__(self) -> None:
+        declared_paths = tuple(self.declared_paths)
+        if not declared_paths:
+            raise WorkspaceStateError("workspace configuration must declare at least one path")
+        if any(not isinstance(item, WorkspacePathSpec) for item in declared_paths):
+            raise WorkspaceStateError("declared_paths must contain WorkspacePathSpec values")
+        database_path = _normalize_relative_path(self.database_path, field_name="database_path")
+        if not isinstance(self.workspace_version, int) or self.workspace_version < 1:
+            raise WorkspaceStateError("workspace_version must be a positive integer")
+        names = [item.logical_path for item in declared_paths]
+        if len(names) != len(set(names)):
+            raise AmbiguousWorkspaceRootsError("duplicate workspace path classifications")
+        for index, left in enumerate(declared_paths):
+            for right in declared_paths[index + 1 :]:
+                if left.logical_path.startswith(f"{right.logical_path}/") or right.logical_path.startswith(
+                    f"{left.logical_path}/"
+                ):
+                    raise AmbiguousWorkspaceRootsError(
+                        f"overlapping workspace roots are ambiguous: {left.logical_path!r} and {right.logical_path!r}"
+                    )
+        owners = [
+            item
+            for item in declared_paths
+            if database_path == item.logical_path or database_path.startswith(f"{item.logical_path}/")
+        ]
+        if len(owners) != 1 or owners[0].state_class is not WorkspaceStateClass.CANONICAL:
+            raise AmbiguousWorkspaceRootsError("database_path must be covered by exactly one canonical path")
+        external_references = tuple(self.external_references)
+        if any(not isinstance(item, ExternalReferenceSpec) for item in external_references):
+            raise WorkspaceStateError("external_references must contain ExternalReferenceSpec values")
+        reference_ids = [item.reference_id for item in external_references]
+        if len(reference_ids) != len(set(reference_ids)):
+            raise AmbiguousWorkspaceRootsError("duplicate external reference ids")
+        expected_objects = tuple(self.expected_database_objects)
+        if any(not isinstance(item, WorkspaceDatabaseObjectSpec) for item in expected_objects):
+            raise WorkspaceStateError("expected_database_objects must contain typed object specifications")
+        expected_names = [item.name for item in expected_objects]
+        if len(expected_names) != len(set(expected_names)):
+            raise AmbiguousWorkspaceRootsError("duplicate expected database object names")
+        object.__setattr__(self, "declared_paths", declared_paths)
+        object.__setattr__(self, "database_path", database_path)
+        object.__setattr__(self, "external_references", external_references)
+        object.__setattr__(self, "expected_database_objects", expected_objects)
+
+
+@dataclass(frozen=True)
+class _Entry:
+    logical_path: str
+    path: Path
+    state_class: WorkspaceStateClass
+    file_type: str
+    mode: int
+    size_bytes: int
+    sha256: str
+    digest_scope: str
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "logical_path": self.logical_path,
+            "state_class": self.state_class.value,
+            "file_type": self.file_type,
+            "mode": self.mode,
+            "size_bytes": self.size_bytes,
+            "sha256": self.sha256,
+            "digest_scope": self.digest_scope,
+        }
+
+
+class WorkspaceStateRegistry:
+    """Build a deterministic, redacted manifest from an explicit config."""
+
+    manifest_version = 1
+
+    def __init__(self, config: WorkspaceConfig):
+        if not isinstance(config, WorkspaceConfig):
+            raise WorkspaceStateError("registry requires a WorkspaceConfig")
+        self.config = config
+
+    def build_manifest(self) -> dict[str, Any]:
+        root = self._validated_root()
+        self._assert_within_root(root, root / self.config.database_path, self.config.database_path)
+        entries = self._inventory_entries(root)
+        sqlite = self._sqlite_inventory(root / self.config.database_path)
+        entry_dicts = [entry.as_dict() for entry in entries]
+        state_counts = Counter(entry.state_class.value for entry in entries)
+        file_type_counts = Counter(entry.file_type for entry in entries)
+        body: dict[str, Any] = {
+            "manifest_version": self.manifest_version,
+            "workspace_version": self.config.workspace_version,
+            "workspace_id": self.config.identity.workspace_id,
+            "database": sqlite,
+            "counts": {
+                "entries": len(entries),
+                "files": sum(entry.file_type in {"file", "sqlite"} for entry in entries),
+                "directories": sum(entry.file_type == "directory" for entry in entries),
+                "external_references": len(self.config.external_references),
+                "by_state_class": dict(sorted(state_counts.items())),
+                "by_file_type": dict(sorted(file_type_counts.items())),
+            },
+            "entries": entry_dicts,
+            "external_references": [
+                {
+                    "reference_id": item.reference_id,
+                    "state_class": WorkspaceStateClass.EXTERNAL_REFERENCE.value,
+                    "policy": item.policy.value,
+                }
+                for item in sorted(self.config.external_references, key=lambda value: value.reference_id)
+            ],
+        }
+        return {**body, "manifest_sha256": _sha256_json(body)}
+
+    def build_manifest_json(self) -> str:
+        """Return canonical JSON without host paths or file contents."""
+        return _canonical_json(self.build_manifest())
+
+    def classify_path(self, logical_path: str) -> WorkspaceStateClass:
+        """Classify one declared logical path without reading its contents.
+
+        Runtime persistence callers use this method to bind their path to the
+        same registry as inventory.  Unknown paths fail closed; callers that
+        need a full inventory should use :meth:`build_manifest`, which also
+        verifies the synthetic fixture marker and entry types.
+        """
+        normalized = _normalize_relative_path(logical_path, field_name="logical_path")
+        return self._declared_state_class(normalized)
+
+    def _validated_root(self) -> Path:
+        root = self.config.identity.root
+        if self.config.identity.root_kind is not WorkspaceRootKind.SYNTHETIC_FIXTURE:
+            raise WorkspaceStateError("production workspace roots are not supported by this fixture-only registry")
+        try:
+            root_stat = root.lstat()
+        except OSError as exc:
+            raise WorkspaceStateError("workspace root is not readable") from exc
+        if stat.S_ISLNK(root_stat.st_mode):
+            raise UnsupportedWorkspaceEntryError("workspace root must not be a symlink")
+        if not stat.S_ISDIR(root_stat.st_mode):
+            raise WorkspaceStateError("workspace root must be a directory")
+        self._assert_no_symlink_components(root)
+        try:
+            resolved_root = root.resolve(strict=True)
+        except OSError as exc:
+            raise WorkspaceStateError("workspace root cannot be resolved") from exc
+        marker = resolved_root / self.config.identity.synthetic_marker
+        try:
+            marker_stat = marker.lstat()
+        except OSError as exc:
+            raise WorkspaceStateError("synthetic workspace marker is missing") from exc
+        if stat.S_ISLNK(marker_stat.st_mode) or not stat.S_ISREG(marker_stat.st_mode):
+            raise UnsupportedWorkspaceEntryError("synthetic workspace marker must be a regular file")
+        try:
+            if marker.read_bytes() != b"seraph-synthetic-workspace-v1\n":
+                raise WorkspaceStateError("synthetic workspace marker is invalid")
+        except OSError as exc:
+            raise WorkspaceStateError("synthetic workspace marker is not readable") from exc
+        return resolved_root
+
+    @staticmethod
+    def _assert_no_symlink_components(path: Path) -> None:
+        current = Path(path.anchor)
+        for component in path.parts[1:]:
+            current /= component
+            try:
+                if stat.S_ISLNK(current.lstat().st_mode):
+                    raise UnsupportedWorkspaceEntryError("workspace root has a symlinked parent")
+            except FileNotFoundError as exc:
+                raise WorkspaceStateError("workspace root is not readable") from exc
+
+    def _inventory_entries(self, root: Path) -> list[_Entry]:
+        for spec in self.config.declared_paths:
+            candidate = root / spec.logical_path
+            self._assert_within_root(root, candidate, spec.logical_path)
+            try:
+                candidate_stat = candidate.lstat()
+            except OSError as exc:
+                raise WorkspaceStateError(f"declared workspace path is missing: {spec.logical_path}") from exc
+            if stat.S_ISLNK(candidate_stat.st_mode):
+                raise UnsupportedWorkspaceEntryError(f"declared path must not be a symlink: {spec.logical_path}")
+
+        entries: list[_Entry] = []
+        self._walk(root, root, entries)
+        entries.sort(key=lambda entry: entry.logical_path)
+        return entries
+
+    def _walk(self, root: Path, current: Path, entries: list[_Entry]) -> None:
+        try:
+            current_stat = current.lstat()
+        except OSError as exc:
+            raise WorkspaceStateError("workspace entry is not readable") from exc
+        if stat.S_ISLNK(current_stat.st_mode):
+            raise UnsupportedWorkspaceEntryError("symlink entries are not allowed")
+        relative = current.relative_to(root)
+        logical_path = "" if relative == Path(".") else relative.as_posix()
+        if "\\" in logical_path:
+            raise WorkspaceStateError("workspace paths containing backslashes are ambiguous")
+
+        if stat.S_ISDIR(current_stat.st_mode):
+            if logical_path:
+                state_class = self._classify(root, logical_path)
+                entries.append(
+                    self._make_entry(
+                        logical_path,
+                        current,
+                        state_class,
+                        file_type="directory",
+                        mode=stat.S_IMODE(current_stat.st_mode),
+                        size_bytes=0,
+                    )
+                )
+            try:
+                children = sorted(current.iterdir(), key=lambda child: child.name)
+            except OSError as exc:
+                raise WorkspaceStateError(f"workspace directory is not readable: {logical_path}") from exc
+            for child in children:
+                try:
+                    if stat.S_ISLNK(child.lstat().st_mode):
+                        raise UnsupportedWorkspaceEntryError("symlink entries are not allowed")
+                except OSError as exc:
+                    raise WorkspaceStateError("workspace entry is not readable") from exc
+                self._assert_within_root(root, child, child.name)
+                self._walk(root, child, entries)
+            return
+
+        if not stat.S_ISREG(current_stat.st_mode):
+            raise UnsupportedWorkspaceEntryError(f"unsupported workspace entry type: {logical_path}")
+        state_class = self._classify(root, logical_path)
+        entries.append(
+            self._make_entry(
+                logical_path,
+                current,
+                state_class,
+                file_type="sqlite" if logical_path == self.config.database_path else "file",
+                mode=stat.S_IMODE(current_stat.st_mode),
+                size_bytes=current_stat.st_size,
+            )
+        )
+
+    def _classify(self, root: Path, logical_path: str) -> WorkspaceStateClass:
+        try:
+            return self.classify_path(logical_path)
+        except UnknownWorkspacePathError:
+            pass
+
+        # Preserve the more useful writable-path detail for full fixture
+        # inventories while keeping the public classifier deterministic.
+        try:
+            mode = stat.S_IMODE((root / logical_path).lstat().st_mode)
+        except OSError as exc:
+            raise UnknownWorkspacePathError(f"unknown workspace path: {logical_path}") from exc
+        writable = bool(mode & 0o222)
+        qualifier = "unknown writable" if writable else "unknown"
+        raise UnknownWorkspacePathError(f"{qualifier} workspace path: {logical_path}")
+
+    def _declared_state_class(self, logical_path: str) -> WorkspaceStateClass:
+        direct = [
+            spec
+            for spec in self.config.declared_paths
+            if logical_path == spec.logical_path or logical_path.startswith(f"{spec.logical_path}/")
+        ]
+        if direct:
+            classes = {spec.state_class for spec in direct}
+            if len(classes) != 1:
+                raise AmbiguousWorkspaceRootsError(f"workspace path has multiple owners: {logical_path}")
+            return direct[0].state_class
+
+        descendants = [
+            spec
+            for spec in self.config.declared_paths
+            if spec.logical_path.startswith(f"{logical_path}/")
+        ]
+        if descendants:
+            classes = {spec.state_class for spec in descendants}
+            if len(classes) != 1:
+                raise AmbiguousWorkspaceRootsError(f"workspace directory has multiple owners: {logical_path}")
+            return descendants[0].state_class
+        raise UnknownWorkspacePathError(f"unknown workspace path: {logical_path}")
+
+    def _make_entry(
+        self,
+        logical_path: str,
+        path: Path,
+        state_class: WorkspaceStateClass,
+        *,
+        file_type: str,
+        mode: int,
+        size_bytes: int,
+    ) -> _Entry:
+        if (
+            file_type in {"directory", "sqlite"}
+            or state_class in {WorkspaceStateClass.SECRET_RECOVERY, WorkspaceStateClass.SECRET}
+        ):
+            digest_scope = "redacted_metadata"
+            sha256 = _sha256_json(
+                {
+                    "logical_path": logical_path,
+                    "state_class": state_class.value,
+                    "file_type": file_type,
+                    "mode": mode,
+                    "size_bytes": size_bytes,
+                }
+            )
+        else:
+            digest_scope = "content"
+            sha256 = self._hash_file(path)
+        return _Entry(
+            logical_path=logical_path,
+            path=path,
+            state_class=state_class,
+            file_type=file_type,
+            mode=mode,
+            size_bytes=size_bytes,
+            sha256=sha256,
+            digest_scope=digest_scope,
+        )
+
+    @staticmethod
+    def _hash_file(path: Path) -> str:
+        digest = hashlib.sha256()
+        try:
+            descriptor = os.open(
+                path,
+                os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0),
+            )
+            descriptor_stat = os.fstat(descriptor)
+            if not stat.S_ISREG(descriptor_stat.st_mode):
+                os.close(descriptor)
+                raise UnsupportedWorkspaceEntryError("workspace file changed to a non-regular entry")
+            with os.fdopen(descriptor, "rb") as handle:
+                for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                    digest.update(chunk)
+        except (OSError, ValueError) as exc:
+            raise WorkspaceStateError("workspace file is not readable") from exc
+        return digest.hexdigest()
+
+    @staticmethod
+    def _assert_within_root(root: Path, candidate: Path, logical_path: str) -> None:
+        try:
+            resolved = candidate.resolve(strict=False)
+            resolved.relative_to(root)
+        except (OSError, ValueError) as exc:
+            raise WorkspaceStateError(f"workspace path escapes root: {logical_path}") from exc
+
+    def _sqlite_inventory(self, database_path: Path) -> dict[str, Any]:
+        if not database_path.is_file() or database_path.is_symlink():
+            raise WorkspaceStateError("database_path must be a regular, non-symlink file")
+        uri = f"file:{quote(str(database_path), safe='/')}?mode=ro"
+        try:
+            connection = sqlite3.connect(uri, uri=True)
+        except sqlite3.Error as exc:
+            raise WorkspaceStateError("database_path is not a readable SQLite database") from exc
+        try:
+            objects = connection.execute(
+                "SELECT type, name, tbl_name, sql FROM sqlite_master "
+                "WHERE name NOT LIKE 'sqlite_%' "
+                "AND type IN ('table', 'index', 'trigger', 'view') "
+                "ORDER BY type, name"
+            ).fetchall()
+            actual_objects = {(str(row[0]), str(row[1])) for row in objects}
+            expected_by_name = {
+                spec.name: spec for spec in self.config.expected_database_objects
+            }
+            expected_names = set(expected_by_name)
+            actual_names = {name for _, name in actual_objects}
+            unknown_objects = sorted(actual_names - expected_names)
+            if unknown_objects:
+                raise UnknownWorkspacePathError(
+                    "unknown SQLite schema objects: " + ", ".join(unknown_objects)
+                )
+            missing_objects = sorted(expected_names - actual_names)
+            if missing_objects:
+                raise WorkspaceStateError(
+                    "expected SQLite schema objects are missing: " + ", ".join(missing_objects)
+                )
+            type_mismatches = sorted(
+                f"{name} (expected {expected_by_name[name].object_type}, found {object_type})"
+                for object_type, name in actual_objects
+                if expected_by_name[name].object_type != object_type
+            )
+            if type_mismatches:
+                raise WorkspaceStateError(
+                    "SQLite schema object type mismatch: " + ", ".join(type_mismatches)
+                )
+            schema_objects: list[dict[str, str]] = []
+            tables: list[dict[str, Any]] = []
+            for object_type, name, table_name, sql in objects:
+                object_spec = expected_by_name[str(name)]
+                object_payload = {
+                    "type": str(object_type),
+                    "name": str(name),
+                    "table_name": str(table_name or ""),
+                    "sql": str(sql or ""),
+                    "state_class": object_spec.state_class.value,
+                    "redaction_policy": object_spec.redaction_policy,
+                }
+                schema_objects.append(
+                    {
+                        "type": object_payload["type"],
+                        "name": object_payload["name"],
+                        "state_class": object_payload["state_class"],
+                        "redaction_policy": object_payload["redaction_policy"],
+                        "sha256": _sha256_json(object_payload),
+                    }
+                )
+                if object_type != "table":
+                    continue
+                columns = connection.execute(
+                    f'PRAGMA table_info({self._quote_identifier(str(name))})'
+                ).fetchall()
+                column_payload = [
+                    {
+                        "cid": int(row[0]),
+                        "name": str(row[1]),
+                        "type": str(row[2] or ""),
+                        "not_null": int(row[3]),
+                        "default": row[4],
+                        "primary_key_position": int(row[5]),
+                    }
+                    for row in columns
+                ]
+                index_payload = []
+                for index_row in connection.execute(
+                    f"PRAGMA index_list({self._quote_identifier(str(name))})"
+                ).fetchall():
+                    index_name = str(index_row[1])
+                    index_columns = [
+                        {
+                            "sequence": int(info[0]),
+                            "column_number": int(info[1]),
+                            "name": str(info[2] or ""),
+                        }
+                        for info in connection.execute(
+                            f"PRAGMA index_info({self._quote_identifier(index_name)})"
+                        ).fetchall()
+                    ]
+                    index_payload.append(
+                        {
+                            "name": index_name,
+                            "unique": int(index_row[2]),
+                            "origin": str(index_row[3] or ""),
+                            "partial": int(index_row[4]),
+                            "columns": index_columns,
+                        }
+                    )
+                index_payload.sort(key=lambda value: value["name"])
+                foreign_key_payload = [
+                    {
+                        "id": int(row[0]),
+                        "sequence": int(row[1]),
+                        "table": str(row[2]),
+                        "from": str(row[3]),
+                        "to": str(row[4] or ""),
+                        "on_update": str(row[5]),
+                        "on_delete": str(row[6]),
+                        "match": str(row[7]),
+                    }
+                    for row in connection.execute(
+                        f"PRAGMA foreign_key_list({self._quote_identifier(str(name))})"
+                    ).fetchall()
+                ]
+                row_count = int(
+                    connection.execute(
+                        f"SELECT COUNT(*) FROM {self._quote_identifier(str(name))}"
+                    ).fetchone()[0]
+                )
+                tables.append(
+                    {
+                        "name": str(name),
+                        "state_class": object_spec.state_class.value,
+                        "redaction_policy": object_spec.redaction_policy,
+                        "row_count": row_count,
+                        "schema_fingerprint": _sha256_json(
+                            {
+                                "definition": object_payload,
+                                "columns": column_payload,
+                                "indexes": index_payload,
+                                "foreign_keys": foreign_key_payload,
+                            }
+                        ),
+                    }
+                )
+        except sqlite3.Error as exc:
+            raise WorkspaceStateError("SQLite schema inventory failed") from exc
+        finally:
+            connection.close()
+
+        schema_objects.sort(key=lambda item: (item["type"], item["name"]))
+        tables.sort(key=lambda item: item["name"])
+        return {
+            "logical_path": self.config.database_path,
+            "schema_fingerprint": _sha256_json(schema_objects),
+            "schema_object_count": len(schema_objects),
+            "table_count": len(tables),
+            "row_count": sum(table["row_count"] for table in tables),
+            "tables": tables,
+        }
+
+    @staticmethod
+    def _quote_identifier(identifier: str) -> str:
+        return '"' + identifier.replace('"', '""') + '"'
+
+
+__all__ = [
+    "AmbiguousWorkspaceRootsError",
+    "ExternalReferencePolicy",
+    "ExternalReferenceSpec",
+    "UnknownWorkspacePathError",
+    "UnsupportedWorkspaceEntryError",
+    "WorkspaceConfig",
+    "WorkspaceDatabaseObjectSpec",
+    "WorkspaceIdentity",
+    "WorkspacePathSpec",
+    "WorkspaceRootKind",
+    "WorkspaceStateClass",
+    "WorkspaceStateError",
+    "WorkspaceStateRegistry",
+    "canonical_workspace_config",
+    "canonical_workspace_database_path",
+    "canonical_workspace_registry",
+    "canonical_workspace_root",
+]
+
+
+# These are the only runtime-owned workspace roots.  The paths are logical
+# and deliberately do not include backup or restore-staging siblings: those
+# are future lifecycle surfaces and must never become active workspace owners.
+_RUNTIME_PATH_SPECS = (
+    ("seraph.db", WorkspaceStateClass.CANONICAL),
+    ("soul.md", WorkspaceStateClass.CANONICAL),
+    ("artifacts", WorkspaceStateClass.CANONICAL),
+    ("extensions", WorkspaceStateClass.CANONICAL),
+    ("skills", WorkspaceStateClass.CANONICAL),
+    ("workflows", WorkspaceStateClass.CANONICAL),
+    ("runbooks", WorkspaceStateClass.CANONICAL),
+    ("plans", WorkspaceStateClass.CANONICAL),
+    ("reports", WorkspaceStateClass.CANONICAL),
+    ("notes", WorkspaceStateClass.CANONICAL),
+    ("mcp-servers.json", WorkspaceStateClass.CANONICAL),
+    ("stdio-proxies.json", WorkspaceStateClass.CANONICAL),
+    ("starter-packs.json", WorkspaceStateClass.CANONICAL),
+    ("model-fabric-settings.json", WorkspaceStateClass.CANONICAL),
+    ("screen-analysis-settings.json", WorkspaceStateClass.CANONICAL),
+    ("daemon-status.json", WorkspaceStateClass.DERIVED),
+    ("lance", WorkspaceStateClass.DERIVED),
+    ("cache", WorkspaceStateClass.CACHE),
+    ("tmp", WorkspaceStateClass.DISPOSABLE),
+    (".vault-key", WorkspaceStateClass.SECRET_RECOVERY),
+)
+
+
+def canonical_workspace_root(root: str | os.PathLike[str]) -> Path:
+    """Resolve the one workspace root used by runtime persistence paths."""
+    candidate = Path(root).expanduser()
+    if not candidate.is_absolute():
+        raise WorkspaceStateError("canonical workspace root must be absolute")
+    try:
+        metadata = candidate.lstat()
+    except FileNotFoundError:
+        return candidate.resolve(strict=False)
+    except OSError as exc:
+        raise WorkspaceStateError("canonical workspace root is not readable") from exc
+    if stat.S_ISLNK(metadata.st_mode):
+        raise UnsupportedWorkspaceEntryError("canonical workspace root must not be a symlink")
+    if not stat.S_ISDIR(metadata.st_mode):
+        raise WorkspaceStateError("canonical workspace root must be a directory")
+    return candidate.resolve(strict=True)
+
+
+def canonical_workspace_config(root: str | os.PathLike[str]) -> WorkspaceConfig:
+    """Build the shared runtime classification config for one root."""
+    resolved_root = canonical_workspace_root(root)
+    return WorkspaceConfig(
+        identity=WorkspaceIdentity(
+            workspace_id="workspace-runtime",
+            root=resolved_root,
+            root_kind=WorkspaceRootKind.PRODUCTION,
+        ),
+        declared_paths=tuple(
+            WorkspacePathSpec(path, state_class)
+            for path, state_class in _RUNTIME_PATH_SPECS
+        ),
+        database_path="seraph.db",
+    )
+
+
+def canonical_workspace_registry(root: str | os.PathLike[str]) -> WorkspaceStateRegistry:
+    """Return the registry shared by canonical persistence callers."""
+    return WorkspaceStateRegistry(canonical_workspace_config(root))
+
+
+def canonical_workspace_database_path(root: str | os.PathLike[str]) -> Path:
+    """Resolve ``seraph.db`` only after the registry proves canonical ownership."""
+    resolved_root = canonical_workspace_root(root)
+    registry = canonical_workspace_registry(resolved_root)
+    if registry.classify_path("seraph.db") is not WorkspaceStateClass.CANONICAL:
+        raise AmbiguousWorkspaceRootsError("seraph.db is not canonically owned")
+    return resolved_root / "seraph.db"

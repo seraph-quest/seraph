@@ -335,6 +335,15 @@ _CANONICAL_ADAPTERS = (
 
 _REVIEWED_EXCEPTIONS = (
     _review(
+        "evals/harness.py",
+        1202,
+        "_eval_mock_completion._eval_transport",
+        "litellm.completion",
+        "test_fixture_transport",
+        "Deterministic eval transport delegates to a patched LiteLLM fixture after canonical route selection; it is loopback-only and does not contact a provider.",
+        "Keep this transport confined to the eval fixture; if the harness changes, replace it with a canonical adapter stub rather than adding a production direct-dispatch caller.",
+    ),
+    _review(
         "llm_runtime.py",
         3441,
         "FallbackLiteLLMModel.generate.invoke_primary_transport",
@@ -372,7 +381,7 @@ _REVIEWED_EXCEPTIONS = (
     ),
     _review(
         "evals/harness.py",
-        5357,
+        5585,
         "_eval_provider_routing_decision_audit",
         "first_model.generate",
         "transitional_provider_call",
@@ -381,7 +390,7 @@ _REVIEWED_EXCEPTIONS = (
     ),
     _review(
         "evals/harness.py",
-        5366,
+        5594,
         "_eval_provider_routing_decision_audit",
         "rerouted_model.generate",
         "transitional_provider_call",

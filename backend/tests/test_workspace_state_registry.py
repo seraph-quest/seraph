@@ -373,6 +373,22 @@ def test_production_inventory_reports_missing_declared_paths_as_degraded(tmp_pat
     assert receipt["blocked_reasons"] == []
 
 
+def test_production_inventory_blocks_missing_secret_declarations(tmp_path):
+    root, config = _make_production_workspace(tmp_path)
+    (root / "secret.bin").unlink()
+    registry = WorkspaceStateRegistry(config)
+
+    with pytest.raises(WorkspaceStateError, match="required secret workspace path"):
+        registry.build_manifest()
+    receipt = registry.build_inventory_receipt()
+
+    assert receipt["status"] == "blocked"
+    assert receipt["operator_status"] == "workspace_inventory_blocked"
+    assert receipt["blocked_reasons"] == ["required_secret_missing"]
+    assert receipt["manifest"] is None
+    assert receipt["missing_declared_paths"] == []
+
+
 def test_production_inventory_blocks_unknown_entries_and_symlink_escape(tmp_path):
     root, config = _make_production_workspace(tmp_path)
     registry = WorkspaceStateRegistry(config)

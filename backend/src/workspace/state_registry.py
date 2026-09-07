@@ -107,6 +107,8 @@ def _inventory_failure_reason(exc: WorkspaceStateError) -> str:
         return "workspace_path_escape"
     if "database" in message or "sqlite" in message:
         return "database_inventory_failed"
+    if "required secret workspace path" in message:
+        return "required_secret_missing"
     if "declared workspace path" in message:
         return "declared_path_missing"
     if "root" in message:
@@ -566,6 +568,13 @@ class WorkspaceStateRegistry:
                     self.config.identity.root_kind is WorkspaceRootKind.PRODUCTION
                     and missing_declared_paths is not None
                 ):
+                    if spec.state_class in {
+                        WorkspaceStateClass.SECRET,
+                        WorkspaceStateClass.SECRET_RECOVERY,
+                    }:
+                        raise WorkspaceStateError(
+                            f"required secret workspace path is missing: {spec.logical_path}"
+                        ) from exc
                     missing_declared_paths.append(spec.logical_path)
                     continue
                 raise WorkspaceStateError(f"declared workspace path is missing: {spec.logical_path}") from exc

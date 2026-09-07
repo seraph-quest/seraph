@@ -21,6 +21,7 @@ from src.workspace import (
     WorkspaceDatabaseObjectSpec,
     WorkspaceIdentity,
     WorkspacePathSpec,
+    WorkspaceRootKind,
     WorkspaceStateClass,
     WorkspaceStateError,
     WorkspaceStateRegistry,
@@ -99,6 +100,29 @@ def _archive_with_extra_member(source: Path, destination: Path, name: str, paylo
         for info in reader.infolist():
             writer.writestr(info, reader.read(info))
         writer.writestr(name, payload)
+
+
+def test_production_backup_stops_when_required_secret_is_missing(tmp_path):
+    root, fixture_registry = _workspace(tmp_path)
+    fixture_config = fixture_registry.config
+    production_registry = WorkspaceStateRegistry(
+        WorkspaceConfig(
+            identity=WorkspaceIdentity("workspace-primary", root, WorkspaceRootKind.PRODUCTION),
+            declared_paths=fixture_config.declared_paths,
+            database_path=fixture_config.database_path,
+            workspace_version=fixture_config.workspace_version,
+            external_references=fixture_config.external_references,
+            expected_database_objects=fixture_config.expected_database_objects,
+        )
+    )
+    (root / ".vault-key").unlink()
+    archive_path = tmp_path / "production-backup.zip"
+
+    with pytest.raises(WorkspaceStateError, match="required secret workspace path"):
+        backup_workspace(root, registry=production_registry, archive_path=archive_path)
+
+    assert not archive_path.exists()
+    assert not workspace_backup_dir(root).exists()
 
 
 def test_backup_restore_round_trip_and_rollback_preserve_secret_boundary(tmp_path):

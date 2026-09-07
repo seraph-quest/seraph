@@ -292,6 +292,8 @@ def _archive_manifest(
         if source_entry.get("state_class") != state_class:
             raise WorkspaceLifecycleError(f"manifest state classification drift: {logical_path}")
         file_type = source_entry.get("file_type")
+        if state_class in _SECRET_STATE_CLASSES and file_type != "file":
+            raise WorkspaceLifecycleError(f"secret material must be a regular file: {logical_path}")
         archived = bool(
             file_type in {"file", "sqlite"}
             and state_class in _ARCHIVEABLE_STATE_CLASSES
@@ -530,6 +532,8 @@ def _load_archive(
                     ) from exc
                 if raw.get("state_class") != state_class or source_entry.get("state_class") != state_class:
                     raise InvalidWorkspaceArchiveError(f"archive state classification drift: {logical_path}")
+                if state_class in _SECRET_STATE_CLASSES and source_entry.get("file_type") != "file":
+                    raise InvalidWorkspaceArchiveError(f"secret material must be a regular file: {logical_path}")
                 expected_archived = bool(
                     source_entry.get("file_type") in {"file", "sqlite"}
                     and state_class in _ARCHIVEABLE_STATE_CLASSES
@@ -667,6 +671,8 @@ def _materialize_stage(
         entry = entries[logical_path]
         state_class = str(entry.get("state_class"))
         file_type = str(entry.get("file_type"))
+        if state_class in _SECRET_STATE_CLASSES and file_type != "file":
+            raise InvalidWorkspaceArchiveError(f"secret material must be a regular file: {logical_path}")
         target = _safe_entry_path(stage, logical_path, registry)
         if file_type == "directory":
             _ensure_directory(target, label=f"staged directory {logical_path}")

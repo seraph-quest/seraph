@@ -20,6 +20,7 @@ from src.workspace import (
     WorkspaceConfig,
     WorkspaceDatabaseObjectSpec,
     WorkspaceIdentity,
+    WorkspaceLifecycleError,
     WorkspacePathSpec,
     WorkspaceRootKind,
     WorkspaceStateClass,
@@ -149,6 +150,15 @@ def test_production_backup_stops_when_required_secret_is_missing(tmp_path):
 
     assert not archive_path.exists()
     assert not workspace_backup_dir(root).exists()
+
+
+def test_backup_rejects_secret_directory_shape(tmp_path):
+    root, registry = _workspace(tmp_path)
+    (root / ".vault-key").unlink()
+    (root / ".vault-key").mkdir()
+
+    with pytest.raises(WorkspaceLifecycleError, match="regular file"):
+        backup_workspace(root, registry=registry, archive_path=tmp_path / "secret-directory.zip")
 
 
 def test_backup_restore_round_trip_and_rollback_preserve_secret_boundary(tmp_path):

@@ -505,6 +505,16 @@ def _site_key(site: DispatchSite | DispatchReview) -> tuple[str, int, str, str]:
     return site.path, site.line, site.symbol, site.operation
 
 
+def _assert_unique_site_keys(sites: Iterable[DispatchSite]) -> None:
+    """Fail closed when two dispatches would collapse into one review key."""
+    materialized = tuple(sites)
+    keys = tuple(_site_key(item) for item in materialized)
+    assert len(keys) == len(set(keys)), (
+        "duplicate direct-dispatch review key; add an occurrence identity or split the calls:\n"
+        + render_inventory(materialized, ())
+    )
+
+
 def _unreviewed_sites(sites: Iterable[DispatchSite], reviews: Iterable[DispatchReview]) -> tuple[DispatchSite, ...]:
     reviewed = {_site_key(item) for item in reviews}
     return tuple(item for item in sites if _site_key(item) not in reviewed)
@@ -532,10 +542,25 @@ def render_inventory(sites: Iterable[DispatchSite], reviews: Iterable[DispatchRe
 
 def test_direct_dispatch_inventory_is_exact_and_reviewable():
     sites = scan_backend_source()
+    _assert_unique_site_keys(sites)
     assert _unreviewed_sites(sites, _ALL_REVIEWS) == (), render_inventory(sites, _ALL_REVIEWS)
     assert {_site_key(item) for item in sites} == {_site_key(item) for item in _ALL_REVIEWS}
     assert all(item.reason and item.expected_future_migration for item in _ALL_REVIEWS)
     assert render_inventory(sites, _ALL_REVIEWS) == render_inventory(tuple(reversed(sites)), tuple(reversed(_ALL_REVIEWS)))
+
+
+def test_duplicate_dispatch_keys_fail_closed():
+    source = (
+        "import httpx\n\n"
+        "def new_route(request):\n"
+        "    with httpx.Client() as client:\n"
+        "        client.post(request); client.post(request)\n"
+    )
+
+    sites = scan_source("synthetic/duplicate.py", source)
+    assert len(sites) == 2
+    with pytest.raises(AssertionError, match="duplicate direct-dispatch review key"):
+        _assert_unique_site_keys(sites)
 
 
 @pytest.mark.parametrize(

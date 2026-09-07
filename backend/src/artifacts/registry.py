@@ -15,10 +15,27 @@ from src.security.trust_contract import (
     canonical_digest,
     evaluate_trust,
 )
+from src.workspace import (
+    UnknownWorkspacePathError,
+    WorkspaceStateError,
+    canonical_workspace_registry,
+    canonical_workspace_root,
+)
 
 
 def _workspace_root() -> Path:
-    return Path(settings.workspace_dir).resolve()
+    return canonical_workspace_root(settings.workspace_dir)
+
+
+def _workspace_state(file_path: str) -> dict[str, str | None]:
+    """Return registry ownership without exposing the host workspace path."""
+    try:
+        state_class = canonical_workspace_registry(_workspace_root()).classify_path(file_path)
+    except UnknownWorkspacePathError:
+        return {"class": None, "status": "unclassified"}
+    except WorkspaceStateError:
+        return {"class": None, "status": "blocked"}
+    return {"class": state_class.value, "status": "classified"}
 
 
 def _safe_workspace_path(file_path: str) -> Path | None:
@@ -149,6 +166,7 @@ def build_artifact_record(
 
     content_sha256 = _hash_bytes(raw_bytes) if raw_bytes is not None else ""
     size_bytes = len(raw_bytes) if raw_bytes is not None else 0
+    workspace_state = _workspace_state(file_path)
     artifact_id = artifact_id_for(
         file_path=file_path,
         artifact_type=artifact_type,
@@ -180,6 +198,8 @@ def build_artifact_record(
         "trust": artifact_trust,
         "recovery_hint": recovery_hint or "Use the producer rollback receipt or regenerate from the recorded run inputs.",
         "exists": bool(resolved is not None and resolved.exists()),
+        "workspace_state_class": workspace_state["class"],
+        "workspace_state_status": workspace_state["status"],
     }
 
 

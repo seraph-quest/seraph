@@ -8,8 +8,9 @@ from sqlalchemy.orm import sessionmaker
 from sqlmodel import SQLModel
 
 from config.settings import settings
+from src.workspace import canonical_workspace_database_path, canonical_workspace_registry
 
-_db_path = os.path.join(settings.workspace_dir, "seraph.db")
+_db_path = str(canonical_workspace_database_path(settings.workspace_dir))
 _db_url = f"sqlite+aiosqlite:///{_db_path}"
 
 engine = create_async_engine(
@@ -404,6 +405,10 @@ async def _ensure_memory_indexes(conn) -> None:
 
 async def init_db() -> None:
     """Create all tables on startup."""
+    # Keep SQLite bound to the same canonical workspace registry used by
+    # artifact and vault persistence.  This is a path-ownership check only;
+    # migration and backup/restore lifecycle work remains a later #742 slice.
+    canonical_workspace_registry(settings.workspace_dir).classify_path("seraph.db")
     # Ensure every SQLModel table class is registered before create_all runs.
     from src.db import models as _models  # noqa: F401
 

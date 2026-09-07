@@ -1,0 +1,41 @@
+"""Pure workspace state inspection contracts."""
+
+from src.workspace.state_registry import (
+    AmbiguousWorkspaceRootsError,
+    ExternalReferencePolicy,
+    ExternalReferenceSpec,
+    UnknownWorkspacePathError,
+    UnsupportedWorkspaceEntryError,
+    WorkspaceConfig,
+    WorkspaceDatabaseObjectSpec,
+    WorkspaceIdentity,
+    WorkspacePathSpec,
+    WorkspaceRootKind,
+    WorkspaceStateClass,
+    WorkspaceStateError,
+    WorkspaceStateRegistry,
+    canonical_workspace_config,
+    canonical_workspace_database_path,
+    canonical_workspace_registry,
+    canonical_workspace_root,
+)
+
+__all__ = [
+    "AmbiguousWorkspaceRootsError",
+    "ExternalReferencePolicy",
+    "ExternalReferenceSpec",
+    "UnknownWorkspacePathError",
+    "UnsupportedWorkspaceEntryError",
+    "WorkspaceConfig",
+    "WorkspaceDatabaseObjectSpec",
+    "WorkspaceIdentity",
+    "WorkspacePathSpec",
+    "WorkspaceRootKind",
+    "WorkspaceStateClass",
+    "WorkspaceStateError",
+    "WorkspaceStateRegistry",
+    "canonical_workspace_config",
+    "canonical_workspace_database_path",
+    "canonical_workspace_registry",
+    "canonical_workspace_root",
+]

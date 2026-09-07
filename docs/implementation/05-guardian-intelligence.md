@@ -85,7 +85,10 @@ expired. Candidate identity now includes a canonical input digest.
 The branch-local `goal-snapshot-to-file` adapter re-reads the active goal and
 revision, admits one service-owned, bounded, idempotent job through the existing
 durable workflow state repository, and invokes only the governed
-`WorkflowManager` tool for that named workflow. It records fenced execution,
+`WorkflowManager` tool for that named workflow. Admission binds the canonical
+workflow name, capability version, and exact ordered `get_goals -> write_file`
+step sequence digest; unregistered, extra, missing, or reordered definitions
+are blocked before dispatch. It records fenced execution,
 artifact, effect, and readback receipts; verifies a workspace-contained output,
 its content digest, and the goal ID; then returns the result through the
 existing goal-conditioned loop with explicit `no_learning`. Stale, cancelled,

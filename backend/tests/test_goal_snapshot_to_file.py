@@ -6,6 +6,7 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 import hashlib
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -20,6 +21,7 @@ from src.guardian.goal_snapshot_to_file import (
     CAPABILITY_ID,
     CAPABILITY_VERSION,
     MAX_OUTPUT_BYTES,
+    WORKFLOW_NAME,
     GoalSnapshotToFileAdapter,
     GoalSnapshotToFileRequest,
     GoalSnapshotToFileService,
@@ -123,18 +125,28 @@ class _Jobs:
 class _GovernedWorkflow:
     name = "workflow_goal_snapshot_to_file"
 
-    def __init__(self, root: Path, *, write_output: bool = True, requires_approval: bool = False):
+    def __init__(
+        self,
+        root: Path,
+        *,
+        write_output: bool = True,
+        requires_approval: bool = False,
+        workflow_name: str | None = "goal-snapshot-to-file",
+        step_tools: list[str] | tuple[str, ...] = ("get_goals", "write_file"),
+    ):
         self.root = root
         self.write_output = write_output
         self.requires_approval = requires_approval
+        self.workflow_name = workflow_name
+        self.step_tools = list(step_tools)
         self.calls = 0
 
     def get_approval_context(self, _arguments: dict[str, Any]) -> dict[str, Any]:
         context = {
-            "workflow_name": "goal-snapshot-to-file",
+            "workflow_name": self.workflow_name,
             "risk_level": "medium",
             "execution_boundaries": ["workspace_write"],
-            "step_tools": ["get_goals", "write_file"],
+            "step_tools": list(self.step_tools),
         }
         if self.requires_approval:
             context["requires_approval"] = True
@@ -291,9 +303,126 @@ async def test_service_executes_governed_boundary_records_job_receipts_and_no_le
     assert any(item.get("receipt_kind") == "readback" for item in jobs.readbacks)
     assert result.authority_receipt
     assert result.authority_receipt["allowed"] is True
+    binding = result.authority_receipt["workflow_binding"]
+    assert binding["workflow_name"] == WORKFLOW_NAME
+    assert binding["workflow_version"] == CAPABILITY_VERSION
+    assert binding["step_sequence"] == ["get_goals", "write_file"]
+    assert len(binding["workflow_definition_digest"]) == 64
+    assert jobs.specs[result.job_id].declared_authority["workflow_binding"] == binding
+    assert jobs.specs[result.job_id].inputs["workflow_binding"] == binding
     assert request_path_not_in_receipt(result.authority_receipt, _request().file_path)
     assert {event_type for event_type, _details in persisted} == {"goal_loop_outcome", "goal_loop_no_learning"}
     assert persisted[0][1]["execution_status"] == "succeeded"
+
+
+@pytest.mark.parametrize(
+    ("workflow_name", "step_tools", "expected_reason"),
+    [
+        (None, ["get_goals", "write_file"], "workflow_name_missing"),
+        ("goal-snapshot-to-file", ["get_goals", "write_file", "update_goal"], "workflow_step_sequence_extra"),
+        ("goal-snapshot-to-file", ["write_file", "get_goals"], "workflow_step_sequence_reordered"),
+        ("unregistered-workflow", ["get_goals", "write_file"], "workflow_name_mismatch"),
+    ],
+)
+async def test_workflow_definition_binding_rejects_untrusted_shape_before_dispatch(
+    monkeypatch,
+    tmp_path,
+    workflow_name,
+    step_tools,
+    expected_reason,
+):
+    monkeypatch.setattr(settings, "workspace_dir", str(tmp_path))
+    goals = _Goals(_goal())
+    jobs = _Jobs()
+    workflow = _GovernedWorkflow(
+        tmp_path,
+        workflow_name=workflow_name,
+        step_tools=step_tools,
+    )
+    request = _request()
+    goal = _goal()
+    candidate = build_goal_candidate_decision(
+        goal,
+        GoalCandidateRequest(
+            capability_id=CAPABILITY_ID,
+            capability_version=request.capability_version,
+            inputs={"file_path": request.file_path},
+            evidence_refs=request.evidence_refs,
+            expires_at=request.deadline_at,
+        ),
+    )
+    adapter = GoalSnapshotToFileAdapter(
+        request,
+        goals=goals,
+        jobs=jobs,
+        workflow_tool_provider=lambda _name: workflow,
+        authority_principal=_authority_principal(),
+    )
+
+    result = await adapter.execute(goal=goal, candidate=candidate)
+
+    assert result.execution_status == "blocked"
+    assert result.reason == f"authority_denied:{expected_reason}"
+    assert workflow.calls == 0
+    job_id = next(iter(jobs.jobs))
+    assert jobs.jobs[job_id]["status"] == "blocked"
+    binding = jobs.specs[job_id].declared_authority["workflow_binding"]
+    assert binding["binding_status"] == "rejected"
+    assert binding["workflow_name"] == WORKFLOW_NAME
+    assert binding["step_sequence"] == ["get_goals", "write_file"]
+    assert binding["rejection_reason"] == expected_reason
+    assert adapter.last_receipt["workflow_binding"] == binding
+
+
+@pytest.mark.parametrize(
+    ("definition_steps", "expected_reason"),
+    [
+        (["get_goals", "write_file", "update_goal"], "workflow_step_sequence_extra"),
+        (["write_file", "get_goals"], "workflow_step_sequence_reordered"),
+    ],
+)
+async def test_workflow_definition_binding_checks_manager_step_order_before_dispatch(
+    monkeypatch,
+    tmp_path,
+    definition_steps,
+    expected_reason,
+):
+    monkeypatch.setattr(settings, "workspace_dir", str(tmp_path))
+    goals = _Goals(_goal())
+    jobs = _Jobs()
+    workflow = _GovernedWorkflow(tmp_path)
+    workflow.workflow = SimpleNamespace(
+        name=WORKFLOW_NAME,
+        tool_name=workflow.name,
+        steps=[SimpleNamespace(tool=tool_name) for tool_name in definition_steps],
+    )
+    request = _request()
+    goal = _goal()
+    candidate = build_goal_candidate_decision(
+        goal,
+        GoalCandidateRequest(
+            capability_id=CAPABILITY_ID,
+            capability_version=request.capability_version,
+            inputs={"file_path": request.file_path},
+            evidence_refs=request.evidence_refs,
+            expires_at=request.deadline_at,
+        ),
+    )
+    adapter = GoalSnapshotToFileAdapter(
+        request,
+        goals=goals,
+        jobs=jobs,
+        workflow_tool_provider=lambda _name: workflow,
+        authority_principal=_authority_principal(),
+    )
+
+    result = await adapter.execute(goal=goal, candidate=candidate)
+
+    assert result.execution_status == "blocked"
+    assert result.reason == f"authority_denied:{expected_reason}"
+    assert workflow.calls == 0
+    job_id = next(iter(jobs.jobs))
+    assert jobs.jobs[job_id]["status"] == "blocked"
 
 
 def request_path_not_in_receipt(receipt: dict[str, Any], path: str) -> bool:

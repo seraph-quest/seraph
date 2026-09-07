@@ -42,6 +42,7 @@ from src.guardian.goal_conditioned_loop import (
     build_goal_candidate_decision,
     dispatch_goal_candidate,
 )
+from src.native_tools.registry import canonical_tool_name
 from src.security.authority_envelope import (
     CAPABILITY_POLICY_SCHEMA_VERSION,
     CapabilityDecision,
@@ -73,6 +74,8 @@ from src.workspace import canonical_workspace_root
 CAPABILITY_ID = "workflow.goal-snapshot-to-file"
 CAPABILITY_VERSION = "1"
 WORKFLOW_NAME = "goal-snapshot-to-file"
+WORKFLOW_TOOL_NAME = "workflow_goal_snapshot_to_file"
+_ALLOWED_WORKFLOW_STEP_SEQUENCE = ("get_goals", "write_file")
 DEFAULT_PRIORITY = 60
 MAX_PRIORITY = 100
 DEFAULT_DEADLINE_SECONDS = 300
@@ -257,6 +260,21 @@ class _AuthorityRequest:
     approval_state: str
 
 
+def _workflow_definition_digest(
+    *,
+    workflow_name: str,
+    workflow_version: str,
+    step_sequence: list[str],
+) -> str:
+    return _safe_digest(
+        {
+            "workflow_name": workflow_name,
+            "workflow_version": workflow_version,
+            "step_sequence": step_sequence,
+        }
+    )
+
+
 def _job_id(candidate: GoalCandidateDecision, request: GoalSnapshotToFileRequest) -> str:
     return "job_goal_snapshot_" + _safe_digest(
         {
@@ -388,6 +406,7 @@ class GoalSnapshotToFileAdapter:
         self.authority_approval = authority_approval
         self.clock = clock
         self.last_receipt: dict[str, Any] | None = None
+        self._resolved_workflow_binding: dict[str, Any] | None = None
 
     @staticmethod
     def _approval_requirement(
@@ -466,6 +485,209 @@ class GoalSnapshotToFileAdapter:
             ),
         }
         return safe
+
+    def _workflow_binding(
+        self,
+        *,
+        status: str = "bound",
+        source: str | None = None,
+        observed: dict[str, Any] | None = None,
+        reason: str | None = None,
+    ) -> dict[str, Any]:
+        """Return the immutable workflow contract carried by this capability."""
+
+        step_sequence = list(_ALLOWED_WORKFLOW_STEP_SEQUENCE)
+        binding = {
+            "workflow_name": WORKFLOW_NAME,
+            "workflow_version": self.request.capability_version,
+            "step_sequence": step_sequence,
+            "step_sequence_digest": _safe_digest(step_sequence),
+            "workflow_definition_digest": _workflow_definition_digest(
+                workflow_name=WORKFLOW_NAME,
+                workflow_version=self.request.capability_version,
+                step_sequence=step_sequence,
+            ),
+            "binding_mode": "exact_step_sequence",
+            "binding_status": status,
+        }
+        if source:
+            binding["binding_source"] = source
+        if reason:
+            binding["rejection_reason"] = reason
+        if observed is not None:
+            binding["observed"] = observed
+        return binding
+
+    @staticmethod
+    def _step_sequence(value: Any) -> list[str] | None:
+        if not isinstance(value, (list, tuple)):
+            return None
+        sequence: list[str] = []
+        for item in value:
+            if not isinstance(item, str) or not item.strip():
+                return None
+            sequence.append(canonical_tool_name(item.strip()))
+        return sequence
+
+    @staticmethod
+    def _workflow_value(workflow: Any, key: str) -> Any:
+        if isinstance(workflow, dict):
+            return workflow.get(key)
+        return getattr(workflow, key, None)
+
+    @staticmethod
+    def _sequence_mismatch_reason(sequence: list[str] | None) -> str | None:
+        if sequence is None or not sequence:
+            return "workflow_step_sequence_missing"
+        if sequence == list(_ALLOWED_WORKFLOW_STEP_SEQUENCE):
+            return None
+        expected = set(_ALLOWED_WORKFLOW_STEP_SEQUENCE)
+        if any(tool_name not in expected for tool_name in sequence):
+            return "workflow_step_sequence_extra"
+        if len(sequence) < len(_ALLOWED_WORKFLOW_STEP_SEQUENCE) or not expected.issubset(sequence):
+            return "workflow_step_sequence_missing"
+        if len(sequence) == len(_ALLOWED_WORKFLOW_STEP_SEQUENCE) and set(sequence) == expected:
+            return "workflow_step_sequence_reordered"
+        return "workflow_step_sequence_mismatch"
+
+    def _rejected_workflow_binding(
+        self,
+        *,
+        reason: str,
+        observed_name: str | None,
+        observed_version: str | None,
+        observed_sequence: list[str] | None,
+    ) -> tuple[dict[str, Any], str]:
+        observed = {
+            "workflow_name": observed_name,
+            "workflow_version": observed_version,
+            "step_sequence": observed_sequence,
+        }
+        return (
+            self._workflow_binding(
+                status="rejected",
+                observed=observed,
+                reason=reason,
+            ),
+            reason,
+        )
+
+    def _validate_workflow_definition(
+        self,
+        tool: Any,
+        context: dict[str, Any],
+    ) -> tuple[dict[str, Any], str | None]:
+        """Require the exact registered workflow shape before admission.
+
+        The manager's approval context is intentionally normalized for policy
+        evaluation, so inspect an underlying Workflow definition when a
+        wrapper exposes one and always validate the raw context sequence too.
+        """
+
+        observed_name = _text(context.get("workflow_name")) or None
+        observed_version_raw = context.get("workflow_version", context.get("version"))
+        observed_version = _text(observed_version_raw) or None
+        observed_sequence = self._step_sequence(context.get("step_tools"))
+        if not observed_name:
+            return self._rejected_workflow_binding(
+                reason="workflow_name_missing",
+                observed_name=None,
+                observed_version=observed_version,
+                observed_sequence=observed_sequence,
+            )
+        if observed_name != WORKFLOW_NAME:
+            return self._rejected_workflow_binding(
+                reason="workflow_name_mismatch",
+                observed_name=observed_name,
+                observed_version=observed_version,
+                observed_sequence=observed_sequence,
+            )
+        if observed_version_raw is not None and observed_version != self.request.capability_version:
+            return self._rejected_workflow_binding(
+                reason="workflow_version_mismatch",
+                observed_name=observed_name,
+                observed_version=observed_version,
+                observed_sequence=observed_sequence,
+            )
+        sequence_reason = self._sequence_mismatch_reason(observed_sequence)
+        if sequence_reason:
+            return self._rejected_workflow_binding(
+                reason=sequence_reason,
+                observed_name=observed_name,
+                observed_version=observed_version,
+                observed_sequence=observed_sequence,
+            )
+
+        definition_source = "approval_context"
+        current = tool
+        visited: set[int] = set()
+        while current is not None and id(current) not in visited:
+            visited.add(id(current))
+            tool_name = _text(getattr(current, "name", None))
+            if tool_name and tool_name != WORKFLOW_TOOL_NAME:
+                return self._rejected_workflow_binding(
+                    reason="workflow_tool_name_mismatch",
+                    observed_name=observed_name,
+                    observed_version=observed_version,
+                    observed_sequence=observed_sequence,
+                )
+            workflow = getattr(current, "workflow", None)
+            if workflow is not None:
+                definition_source = "workflow_definition"
+                definition_name = _text(self._workflow_value(workflow, "name")) or None
+                definition_version_raw = self._workflow_value(workflow, "workflow_version")
+                if definition_version_raw is None:
+                    definition_version_raw = self._workflow_value(workflow, "version")
+                definition_version = _text(definition_version_raw) or None
+                definition_tool_name = _text(self._workflow_value(workflow, "tool_name")) or None
+                definition_steps = self._step_sequence(
+                    [
+                        self._workflow_value(step, "tool")
+                        for step in (self._workflow_value(workflow, "steps") or [])
+                    ]
+                    if isinstance(self._workflow_value(workflow, "steps"), (list, tuple))
+                    else None
+                )
+                if not definition_name:
+                    return self._rejected_workflow_binding(
+                        reason="workflow_name_missing",
+                        observed_name=None,
+                        observed_version=definition_version,
+                        observed_sequence=definition_steps,
+                    )
+                if definition_name != WORKFLOW_NAME:
+                    return self._rejected_workflow_binding(
+                        reason="workflow_name_mismatch",
+                        observed_name=definition_name,
+                        observed_version=definition_version,
+                        observed_sequence=definition_steps,
+                    )
+                if definition_tool_name and definition_tool_name != WORKFLOW_TOOL_NAME:
+                    return self._rejected_workflow_binding(
+                        reason="workflow_tool_name_mismatch",
+                        observed_name=definition_name,
+                        observed_version=definition_version,
+                        observed_sequence=definition_steps,
+                    )
+                if definition_version_raw is not None and definition_version != self.request.capability_version:
+                    return self._rejected_workflow_binding(
+                        reason="workflow_version_mismatch",
+                        observed_name=definition_name,
+                        observed_version=definition_version,
+                        observed_sequence=definition_steps,
+                    )
+                definition_reason = self._sequence_mismatch_reason(definition_steps)
+                if definition_reason:
+                    return self._rejected_workflow_binding(
+                        reason=definition_reason,
+                        observed_name=definition_name,
+                        observed_version=definition_version,
+                        observed_sequence=definition_steps,
+                    )
+                break
+            current = getattr(current, "wrapped_tool", None)
+
+        return self._workflow_binding(source=definition_source), None
 
     def _authority_limits(self) -> ResourceLimits:
         remaining = (self.request.deadline_at - self.clock()).total_seconds()
@@ -637,7 +859,19 @@ class GoalSnapshotToFileAdapter:
         job_id: str,
         approval_context: dict[str, Any] | None,
         workflow_tool: Any | None,
+        workflow_binding: dict[str, Any] | None = None,
+        workflow_binding_reason: str | None = None,
     ) -> tuple[_AuthorityRequest | None, CapabilityDecision | None, dict[str, Any], str]:
+        if workflow_binding_reason:
+            reason = workflow_binding_reason
+            receipt = self._authority_failure_receipt(
+                reason=reason,
+                job_id=job_id,
+                path=path,
+            )
+            if workflow_binding is not None:
+                receipt["workflow_binding"] = workflow_binding
+            return None, None, receipt, reason
         try:
             material = self._build_authority_request(
                 path=path,
@@ -684,6 +918,7 @@ class GoalSnapshotToFileAdapter:
             "resource_limits",
             "content",
             "recovery",
+            "workflow_binding",
         ):
             if key in receipt:
                 stable[key] = receipt[key]
@@ -738,6 +973,7 @@ class GoalSnapshotToFileAdapter:
         receipt: dict[str, Any],
         approval_context: dict[str, Any] | None,
         path: str,
+        workflow_binding: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         effect = _text(getattr(decision, "effect", None)) or _text(receipt.get("effect")) or "deny"
         stable_receipt = GoalSnapshotToFileAdapter._stable_authority_receipt(receipt)
@@ -792,6 +1028,7 @@ class GoalSnapshotToFileAdapter:
                 "workspace_relative_output_only": True,
                 "allowed_step_tools": ["get_goals", "write_file"],
             },
+            "workflow_binding": workflow_binding,
         }
 
     async def execute(
@@ -826,7 +1063,15 @@ class GoalSnapshotToFileAdapter:
         if current_revision != candidate.goal_revision:
             return self._blocked("stale_goal_revision")
 
+        self._resolved_workflow_binding = None
         workflow_tool, approval_context, workflow_reason = self._resolve_workflow_tool(path)
+        workflow_binding = self._resolved_workflow_binding
+        workflow_binding_reason = (
+            workflow_reason
+            if isinstance(workflow_binding, dict)
+            and workflow_binding.get("binding_status") == "rejected"
+            else None
+        )
         job_id = _job_id(candidate, self.request)
         runner_owner = f"{self.request.service_id}:{job_id}"
         if self.request.cancel_requested:
@@ -850,19 +1095,27 @@ class GoalSnapshotToFileAdapter:
                 job_id=job_id,
                 approval_context=approval_context,
                 workflow_tool=workflow_tool,
+                workflow_binding=workflow_binding,
+                workflow_binding_reason=workflow_binding_reason,
             )
+        if workflow_binding is not None:
+            authority_receipt = {
+                **authority_receipt,
+                "workflow_binding": workflow_binding,
+            }
         declared_authority = self._authority_declaration(
             material=authority_material,
             decision=authority_decision,
             receipt=authority_receipt,
             approval_context=approval_context,
             path=path,
+            workflow_binding=workflow_binding,
         )
         declared_authority.update(
             {
                 "goal_revision": candidate.goal_revision,
                 "workflow_name": WORKFLOW_NAME,
-                "workflow_tool_name": "workflow_goal_snapshot_to_file",
+                "workflow_tool_name": WORKFLOW_TOOL_NAME,
                 "workflow_available": workflow_tool is not None,
                 "workflow_blocked_reason": workflow_reason,
             }
@@ -871,6 +1124,7 @@ class GoalSnapshotToFileAdapter:
             "authority_receipt": authority_receipt,
             "authority_status": "allowed" if authority_decision and authority_decision.allowed else "denied",
             "authority_reason": authority_reason,
+            "workflow_binding": workflow_binding,
         }
         spec = DurableJobSpec(
             identity=DurableJobIdentity(
@@ -886,6 +1140,7 @@ class GoalSnapshotToFileAdapter:
                 "goal_id": candidate.goal_id,
                 "goal_revision": candidate.goal_revision,
                 "file_path": path,
+                "workflow_binding": workflow_binding,
             },
             session_id=self.request.session_id,
             goal_id=candidate.goal_id,
@@ -1016,7 +1271,11 @@ class GoalSnapshotToFileAdapter:
                 job_id,
                 effect_type="workflow_invocation",
                 status="blocked",
-                details={"workflow_name": WORKFLOW_NAME, "reason": workflow_reason or "workflow_unavailable"},
+                details={
+                    "workflow_name": WORKFLOW_NAME,
+                    "reason": workflow_reason or "workflow_unavailable",
+                    "workflow_binding": workflow_binding,
+                },
                 owner=runner_owner,
                 fencing_token=fencing_token,
             )
@@ -1045,6 +1304,11 @@ class GoalSnapshotToFileAdapter:
             authority_receipt,
             authority_reason,
         ) = self._recheck_authority(authority_material)
+        if workflow_binding is not None:
+            authority_receipt = {
+                **authority_receipt,
+                "workflow_binding": workflow_binding,
+            }
         self.last_receipt = {
             **(self.last_receipt or {}),
             "authority_receipt": authority_receipt,
@@ -1075,7 +1339,11 @@ class GoalSnapshotToFileAdapter:
                     job_id,
                     effect_type="workflow_invocation",
                     status="blocked",
-                    details={"workflow_name": WORKFLOW_NAME, "reason": "approval_required"},
+                    details={
+                        "workflow_name": WORKFLOW_NAME,
+                        "reason": "approval_required",
+                        "workflow_binding": workflow_binding,
+                    },
                     owner=runner_owner,
                     fencing_token=fencing_token,
                 )
@@ -1105,7 +1373,11 @@ class GoalSnapshotToFileAdapter:
                 job_id,
                 effect_type="workflow_invocation",
                 status="failed",
-                details={"workflow_name": WORKFLOW_NAME, "error_type": type(exc).__name__},
+                details={
+                    "workflow_name": WORKFLOW_NAME,
+                    "error_type": type(exc).__name__,
+                    "workflow_binding": workflow_binding,
+                },
                 owner=runner_owner,
                 fencing_token=fencing_token,
             )
@@ -1129,6 +1401,7 @@ class GoalSnapshotToFileAdapter:
             status="failed" if _text(raw_result).startswith("Error:") else "succeeded",
             details={
                 "workflow_name": WORKFLOW_NAME,
+                "workflow_binding": workflow_binding,
                 "result_error": _text(raw_result).startswith("Error:"),
                 "workflow_audit_digest": _safe_digest(workflow_audit or {}),
                 "durable_workflow_run_identity": _text((workflow_audit or {}).get("durable_run_identity")) or None,
@@ -1291,16 +1564,26 @@ class GoalSnapshotToFileAdapter:
 
     def _resolve_workflow_tool(self, path: str) -> tuple[Any | None, dict[str, Any] | None, str | None]:
         if self.workflow_tool_provider is not None:
-            tool = self.workflow_tool_provider(WORKFLOW_NAME)
+            try:
+                tool = self.workflow_tool_provider(WORKFLOW_NAME)
+            except Exception as exc:
+                return None, None, f"workflow_resolution_failed:{type(exc).__name__}"
             if tool is None:
                 return None, None, "governed_workflow_unavailable"
             context = self._approval_context(tool, path)
             if context is None:
                 return None, None, "workflow_approval_context_unavailable"
-            if context.get("workflow_name") not in {None, WORKFLOW_NAME}:
-                return None, None, "workflow_name_mismatch"
-            if not {"get_goals", "write_file"}.issubset(set(context.get("step_tools", []))):
-                return None, None, "workflow_step_tools_not_allowed"
+            try:
+                binding, binding_reason = self._validate_workflow_definition(tool, context)
+            except Exception as exc:
+                self._resolved_workflow_binding = self._workflow_binding(
+                    status="rejected",
+                    reason=type(exc).__name__,
+                )
+                return None, context, f"workflow_definition_validation_failed:{type(exc).__name__}"
+            self._resolved_workflow_binding = binding
+            if binding_reason:
+                return None, context, binding_reason
             return tool, context, None
         try:
             from src.agent.factory import get_tools
@@ -1316,10 +1599,10 @@ class GoalSnapshotToFileAdapter:
             context = self._approval_context(tool, path)
             if context is None:
                 return None, None, "workflow_approval_context_unavailable"
-            expected = {"get_goals", "write_file"}
-            actual = {str(item) for item in context.get("step_tools", [])} if isinstance(context, dict) else set()
-            if not expected.issubset(actual):
-                return None, None, "workflow_step_tools_not_allowed"
+            binding, binding_reason = self._validate_workflow_definition(tool, context)
+            self._resolved_workflow_binding = binding
+            if binding_reason:
+                return None, context, binding_reason
             return tool, context, None
         except Exception as exc:
             return None, None, f"workflow_resolution_failed:{type(exc).__name__}"
@@ -1880,6 +2163,7 @@ __all__ = [
     "CAPABILITY_ID",
     "CAPABILITY_VERSION",
     "WORKFLOW_NAME",
+    "WORKFLOW_TOOL_NAME",
     "GoalSnapshotToFileRequest",
     "GoalSnapshotToFileResult",
     "GoalSnapshotToFileAdapter",

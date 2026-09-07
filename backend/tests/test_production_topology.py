@@ -309,6 +309,7 @@ def test_mac_challenge_mismatch_and_unclassified_network_error_fail_closed(tmp_p
     assert "socket.create_connection((a.lan_ip,port)" in generator
     assert "server_hostname=expected_host" in generator
     assert "self.sock.getpeername()[0]!=a.lan_ip" in generator
+    assert "'Origin':origin" in generator
 
 
 def test_lifecycle_lock_and_server_challenge_ledger_reject_reuse(tmp_path):

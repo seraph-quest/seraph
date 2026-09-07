@@ -26,7 +26,7 @@ class PinnedHTTPSConnection(http.client.HTTPSConnection):
             self.sock.close(); raise OSError('TLS peer IP mismatch')
 def request(method,path,body=None,headers=None):
     connection=PinnedHTTPSConnection(expected_host,port=port,timeout=10,context=ctx)
-    request_headers={'Host':parsed.netloc,**(headers or {})}
+    request_headers={'Host':parsed.netloc,'Origin':origin,**(headers or {})}
     connection.request(method,path,body=body,headers=request_headers)
     response=connection.getresponse(); payload=response.read(); response_headers=response.getheaders(); connection.close()
     if response.status < 200 or response.status >= 300: raise SystemExit('authenticated HTTPS probe failed')

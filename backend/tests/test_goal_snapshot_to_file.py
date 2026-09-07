@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 import hashlib
 from pathlib import Path
@@ -17,11 +18,19 @@ from src.guardian import goal_conditioned_loop
 from src.guardian.goal_conditioned_loop import build_goal_candidate_decision
 from src.guardian.goal_snapshot_to_file import (
     CAPABILITY_ID,
+    CAPABILITY_VERSION,
+    MAX_OUTPUT_BYTES,
     GoalSnapshotToFileAdapter,
     GoalSnapshotToFileRequest,
     GoalSnapshotToFileService,
     normalize_workspace_relative_path,
 )
+from src.security.authority_envelope import (
+    CapabilityPolicy,
+    CapabilityScope,
+    ResourceLimits,
+)
+from src.security.trust_contract import AuthorityGrant, EgressClass, PrincipalType, TrustPrincipal
 
 
 class _Goals:
@@ -114,18 +123,22 @@ class _Jobs:
 class _GovernedWorkflow:
     name = "workflow_goal_snapshot_to_file"
 
-    def __init__(self, root: Path, *, write_output: bool = True):
+    def __init__(self, root: Path, *, write_output: bool = True, requires_approval: bool = False):
         self.root = root
         self.write_output = write_output
+        self.requires_approval = requires_approval
         self.calls = 0
 
     def get_approval_context(self, _arguments: dict[str, Any]) -> dict[str, Any]:
-        return {
+        context = {
             "workflow_name": "goal-snapshot-to-file",
             "risk_level": "medium",
             "execution_boundaries": ["workspace_write"],
             "step_tools": ["get_goals", "write_file"],
         }
+        if self.requires_approval:
+            context["requires_approval"] = True
+        return context
 
     def __call__(self, *, file_path: str, sanitize_inputs_outputs: bool = False) -> str:
         self.calls += 1
@@ -169,6 +182,41 @@ def _request(**updates: Any) -> GoalSnapshotToFileRequest:
     }
     values.update(updates)
     return GoalSnapshotToFileRequest.model_validate(values)
+
+
+def _authority_principal(*, authenticated: bool = True) -> TrustPrincipal:
+    return TrustPrincipal(
+        principal_id="service:guardian",
+        principal_type=PrincipalType.SERVICE,
+        authenticated=authenticated,
+        grants=(AuthorityGrant.CAPABILITY_EXECUTE,),
+        session_id="session-1",
+    )
+
+
+def _authority_policy(root: Path, request: GoalSnapshotToFileRequest, *, output_bytes: int = MAX_OUTPUT_BYTES) -> CapabilityPolicy:
+    limits = ResourceLimits(
+        cpu_seconds=60.0,
+        memory_bytes=256 * 1024 * 1024,
+        pid_count=4,
+        output_bytes=output_bytes,
+        deadline_seconds=300.0,
+    )
+    return CapabilityPolicy(
+        capability_id=CAPABILITY_ID,
+        capability_version=CAPABILITY_VERSION,
+        owner_id=request.owner_principal_id,
+        principal_type=PrincipalType.SERVICE,
+        scope=CapabilityScope(
+            operations=("write_file",),
+            paths=(str(root),),
+            sources=("source:goal-snapshot-to-file",),
+            egress_class=EgressClass.LOCAL_ONLY,
+        ),
+        resource_limits=limits,
+        goal_id=request.goal_id,
+        expires_at=request.deadline_at.timestamp(),
+    )
 
 
 def test_request_contract_binds_capability_owner_and_bounded_path():
@@ -227,6 +275,7 @@ async def test_service_executes_governed_boundary_records_job_receipts_and_no_le
         goals=goals,
         jobs=jobs,
         workflow_tool_provider=lambda _name: workflow,
+        authority_principal=_authority_principal(),
     ).run(_request())
 
     assert result.execution_status == "succeeded"
@@ -239,8 +288,175 @@ async def test_service_executes_governed_boundary_records_job_receipts_and_no_le
     assert jobs.transitions == [(result.job_id, "queued"), (result.job_id, "running"), (result.job_id, "succeeded")]
     assert jobs.artifacts and jobs.effects
     assert any(item.get("receipt_kind") == "readback" for item in jobs.readbacks)
+    assert result.authority_receipt
+    assert result.authority_receipt["allowed"] is True
+    assert request_path_not_in_receipt(result.authority_receipt, _request().file_path)
     assert {event_type for event_type, _details in persisted} == {"goal_loop_outcome", "goal_loop_no_learning"}
     assert persisted[0][1]["execution_status"] == "succeeded"
+
+
+def request_path_not_in_receipt(receipt: dict[str, Any], path: str) -> bool:
+    import json
+
+    return path not in json.dumps(receipt, sort_keys=True)
+
+
+async def test_missing_authenticated_owner_blocks_before_file_effect(monkeypatch, tmp_path):
+    monkeypatch.setattr(settings, "workspace_dir", str(tmp_path))
+    goals = _Goals(_goal())
+    jobs = _Jobs()
+    workflow = _GovernedWorkflow(tmp_path)
+    request = _request()
+    goal = _goal()
+    candidate = build_goal_candidate_decision(
+        goal,
+        GoalCandidateRequest(
+            capability_id=CAPABILITY_ID,
+            capability_version=request.capability_version,
+            inputs={"file_path": request.file_path},
+            evidence_refs=request.evidence_refs,
+            expires_at=request.deadline_at,
+        ),
+    )
+
+    result = await GoalSnapshotToFileAdapter(
+        request,
+        goals=goals,
+        jobs=jobs,
+        workflow_tool_provider=lambda _name: workflow,
+    ).execute(goal=goal, candidate=candidate)
+
+    assert result.execution_status == "blocked"
+    assert result.reason == "authority_denied:authority_request_invalid:ValueError"
+    assert workflow.calls == 0
+    assert not (tmp_path / request.file_path).exists()
+    assert jobs.transitions == [(result.job_id if hasattr(result, "job_id") else next(iter(jobs.jobs)), "blocked")]
+
+
+async def test_missing_approval_is_durable_and_has_redacted_authority_receipt(monkeypatch, tmp_path):
+    monkeypatch.setattr(settings, "workspace_dir", str(tmp_path))
+    goals = _Goals(_goal())
+    jobs = _Jobs()
+    workflow = _GovernedWorkflow(tmp_path, requires_approval=True)
+    request = _request()
+    goal = _goal()
+    candidate = build_goal_candidate_decision(
+        goal,
+        GoalCandidateRequest(
+            capability_id=CAPABILITY_ID,
+            capability_version=request.capability_version,
+            inputs={"file_path": request.file_path},
+            evidence_refs=request.evidence_refs,
+            expires_at=request.deadline_at,
+        ),
+    )
+    adapter = GoalSnapshotToFileAdapter(
+        request,
+        goals=goals,
+        jobs=jobs,
+        workflow_tool_provider=lambda _name: workflow,
+        authority_principal=_authority_principal(),
+    )
+    result = await adapter.execute(goal=goal, candidate=candidate)
+    job_id = next(iter(jobs.jobs))
+
+    assert result.execution_status == "blocked"
+    assert jobs.jobs[job_id]["status"] == "blocked"
+    assert result.reason == "authority_denied:approval_missing"
+    assert workflow.calls == 0
+    assert not (tmp_path / request.file_path).exists()
+    assert adapter.last_receipt and adapter.last_receipt["authority_receipt"]
+    assert adapter.last_receipt["authority_receipt"]["reason_code"] == "approval_missing"
+    assert adapter.last_receipt["authority_receipt"]["effect"] == "require_approval"
+    assert request_path_not_in_receipt(adapter.last_receipt["authority_receipt"], request.file_path)
+    assert jobs.transitions == [(job_id, "blocked")]
+    assert any(effect.get("effect_type") == "authority_gate" for effect in jobs.effects)
+
+
+async def test_authority_resource_limit_denies_before_workflow_effect(monkeypatch, tmp_path):
+    monkeypatch.setattr(settings, "workspace_dir", str(tmp_path))
+    goals = _Goals(_goal())
+    jobs = _Jobs()
+    workflow = _GovernedWorkflow(tmp_path)
+    request = _request()
+    goal = _goal()
+    candidate = build_goal_candidate_decision(
+        goal,
+        GoalCandidateRequest(
+            capability_id=CAPABILITY_ID,
+            capability_version=request.capability_version,
+            inputs={"file_path": request.file_path},
+            evidence_refs=request.evidence_refs,
+            expires_at=request.deadline_at,
+        ),
+    )
+    adapter = GoalSnapshotToFileAdapter(
+        request,
+        goals=goals,
+        jobs=jobs,
+        workflow_tool_provider=lambda _name: workflow,
+        authority_policy=_authority_policy(tmp_path, request, output_bytes=1),
+        authority_principal=_authority_principal(),
+    )
+    result = await adapter.execute(goal=goal, candidate=candidate)
+    job_id = next(iter(jobs.jobs))
+
+    assert result.execution_status == "blocked"
+    assert jobs.jobs[job_id]["status"] == "blocked"
+    assert result.reason == "authority_denied:resource_limit_exceeded"
+    assert workflow.calls == 0
+    assert not (tmp_path / request.file_path).exists()
+    assert adapter.last_receipt and adapter.last_receipt["authority_receipt"]
+    assert adapter.last_receipt["authority_receipt"]["reason_code"] == "resource_limit_exceeded"
+    assert request_path_not_in_receipt(adapter.last_receipt["authority_receipt"], request.file_path)
+    assert jobs.transitions == [(job_id, "blocked")]
+
+
+async def test_authority_recheck_after_claim_blocks_revoked_policy_before_workflow(monkeypatch, tmp_path):
+    monkeypatch.setattr(settings, "workspace_dir", str(tmp_path))
+    goals = _Goals(_goal())
+    request = _request()
+    policy = _authority_policy(tmp_path, request)
+    workflow = _GovernedWorkflow(tmp_path)
+    adapter: GoalSnapshotToFileAdapter | None = None
+
+    class RevokingJobs(_Jobs):
+        async def claim_job(self, job_id: str, *, owner: str, lease_seconds: int):
+            projection = await super().claim_job(job_id, owner=owner, lease_seconds=lease_seconds)
+            assert adapter is not None
+            adapter.authority_policy = replace(policy, revoked=True)
+            return projection
+
+    jobs = RevokingJobs()
+    goal = _goal()
+    candidate = build_goal_candidate_decision(
+        goal,
+        GoalCandidateRequest(
+            capability_id=CAPABILITY_ID,
+            capability_version=request.capability_version,
+            inputs={"file_path": request.file_path},
+            evidence_refs=request.evidence_refs,
+            expires_at=request.deadline_at,
+        ),
+    )
+    adapter = GoalSnapshotToFileAdapter(
+        request,
+        goals=goals,
+        jobs=jobs,
+        workflow_tool_provider=lambda _name: workflow,
+        authority_policy=policy,
+        authority_principal=_authority_principal(),
+    )
+
+    result = await adapter.execute(goal=goal, candidate=candidate)
+    job_id = next(iter(jobs.jobs))
+
+    assert result.execution_status == "blocked"
+    assert jobs.jobs[job_id]["status"] == "blocked"
+    assert jobs.transitions == [(job_id, "queued"), (job_id, "running"), (job_id, "blocked")]
+    assert workflow.calls == 0
+    assert not (tmp_path / request.file_path).exists()
+    assert adapter.last_receipt and adapter.last_receipt["authority_receipt"]["reason_code"] == "policy_revoked"
 
 
 async def test_stale_goal_after_claim_blocks_without_workflow_or_learning(monkeypatch, tmp_path):
@@ -266,6 +482,7 @@ async def test_stale_goal_after_claim_blocks_without_workflow_or_learning(monkey
         goals=goals,
         jobs=jobs,
         workflow_tool_provider=lambda _name: workflow,
+        authority_principal=_authority_principal(),
     ).execute(goal=active, candidate=candidate)
 
     assert result.execution_status == "blocked"
@@ -353,6 +570,7 @@ async def test_effect_receipt_failure_blocks_with_reconciliation_marker(monkeypa
         goals=goals,
         jobs=jobs,
         workflow_tool_provider=lambda _name: workflow,
+        authority_principal=_authority_principal(),
     )
     goal = _goal()
     candidate = build_goal_candidate_decision(
@@ -392,6 +610,7 @@ async def test_terminal_transition_failure_never_reports_success(monkeypatch, tm
         goals=goals,
         jobs=jobs,
         workflow_tool_provider=lambda _name: workflow,
+        authority_principal=_authority_principal(),
     )
     goal = _goal()
     candidate = build_goal_candidate_decision(

@@ -224,6 +224,7 @@ def build_goal_candidate_decision(
         capability_version=request.capability_version,
         evidence_refs=evidence_refs,
         expected_outcome=expected_outcome,
+        inputs=request.inputs,
     )
     candidate_id = "cand_" + hashlib.sha256(dedupe_key.encode("utf-8")).hexdigest()[:24]
     action = GoalCandidateAction.act

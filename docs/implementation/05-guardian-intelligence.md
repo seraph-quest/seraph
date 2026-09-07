@@ -80,14 +80,25 @@ creates a deterministic candidate decision with `act`, `clarify`, `defer`, or
 `silent` action, while `GET /api/goals/{goal_id}/loop` exposes the criterion and
 redacted candidate/outcome/no-learning receipts. Candidates retain the goal
 revision and cannot dispatch after a goal is paused, abandoned, edited, or
-expired. The receipt seam uses the existing audit repository and omits input
-values, retaining only input keys and a digest.
+expired. Candidate identity now includes a canonical input digest.
 
-The runtime adapter is dependency-injected for focused tests and is absent from
-the production path until the governed admission/execution contracts from
-#743/#744/#747 are available. Missing criteria, verifiers, or evidence therefore
-clarify/defer and record `no_learning`; this slice does not claim either real
-reference workflow journey or completed goal progress.
+The branch-local `goal-snapshot-to-file` adapter re-reads the active goal and
+revision, admits one service-owned, bounded, idempotent job through the existing
+durable workflow state repository, and invokes only the governed
+`WorkflowManager` tool for that named workflow. It records fenced execution,
+artifact, effect, and readback receipts; verifies a workspace-contained output,
+its content digest, and the goal ID; then returns the result through the
+existing goal-conditioned loop with explicit `no_learning`. Stale, cancelled,
+unavailable, failed, and unreadable paths remain blocked or failed with no
+learning.
+
+**Live/runtime limits:** This is a partial branch-local slice, not the full
+guardian brief journey. Its default provider requires the app-started workflow
+registry, governed tool wrappers, and a migrated durable-state database; the
+focused tests monkeypatch only that existing tool boundary and perform a real
+temporary-file readback. No live service, scheduler admission, operator
+approval, external readback, `web-brief-to-file`, or full #736 journey receipt
+was produced here, and no completion or learning claim is made.
 
 ## Memory Upgrade Program Record
 

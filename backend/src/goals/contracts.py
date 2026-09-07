@@ -202,8 +202,13 @@ def stable_candidate_key(
     capability_version: str | None,
     evidence_refs: list[str] | tuple[str, ...],
     expected_outcome: str,
+    inputs: dict[str, Any] | None = None,
 ) -> str:
-    """Build a deterministic key so unchanged evidence cannot re-admit work."""
+    """Build a deterministic key so unchanged inputs/evidence cannot re-admit work."""
+
+    input_digest = hashlib.sha256(
+        json.dumps(inputs or {}, sort_keys=True, separators=(",", ":"), ensure_ascii=True, default=str).encode("utf-8")
+    ).hexdigest()
 
     payload = {
         "goal_id": goal_id,
@@ -213,6 +218,7 @@ def stable_candidate_key(
         "capability_version": capability_version,
         "evidence_refs": sorted(set(evidence_refs)),
         "expected_outcome": expected_outcome.strip(),
+        "input_digest": input_digest,
     }
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
     return f"gcl:{hashlib.sha256(encoded.encode('utf-8')).hexdigest()[:32]}"

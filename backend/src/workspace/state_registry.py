@@ -4,8 +4,8 @@ This module deliberately owns no lifecycle, scheduler, vault, archive, or
 database-engine behavior.  A caller supplies an explicit workspace identity
 and a relative path classification allow-list.  Synthetic fixtures can be
 inventoried, while production callers use the same registry for path
-classification without scanning or opening production state.  The backup and
-restore lifecycle remains a later #742 slice.
+classification without scanning or opening production state.  The bounded
+backup and restore helpers in ``lifecycle.py`` consume this registry contract.
 
 Secret/recovery files are never opened.  Their manifest ``sha256`` is a
 deterministic digest of redacted metadata, marked by ``digest_scope``; this

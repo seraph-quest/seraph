@@ -1,4 +1,4 @@
-"""Pure workspace state inspection contracts."""
+"""Workspace state inspection and bounded lifecycle contracts."""
 
 from src.workspace.state_registry import (
     AmbiguousWorkspaceRootsError,
@@ -19,6 +19,22 @@ from src.workspace.state_registry import (
     canonical_workspace_registry,
     canonical_workspace_root,
 )
+from src.workspace.lifecycle import (
+    ARCHIVE_FORMAT,
+    ARCHIVE_VERSION,
+    DEFAULT_RETENTION,
+    InterruptedWorkspaceRestore,
+    InvalidWorkspaceArchiveError,
+    MissingSecretMaterialError,
+    WorkspaceLifecycleError,
+    backup_workspace,
+    cleanup_workspace_backups,
+    recover_interrupted_restore,
+    restore_workspace,
+    rollback_workspace,
+    workspace_backup_dir,
+    workspace_restore_staging_dir,
+)
 
 __all__ = [
     "AmbiguousWorkspaceRootsError",
@@ -38,4 +54,18 @@ __all__ = [
     "canonical_workspace_database_path",
     "canonical_workspace_registry",
     "canonical_workspace_root",
+    "ARCHIVE_FORMAT",
+    "ARCHIVE_VERSION",
+    "DEFAULT_RETENTION",
+    "InterruptedWorkspaceRestore",
+    "InvalidWorkspaceArchiveError",
+    "MissingSecretMaterialError",
+    "WorkspaceLifecycleError",
+    "backup_workspace",
+    "cleanup_workspace_backups",
+    "recover_interrupted_restore",
+    "restore_workspace",
+    "rollback_workspace",
+    "workspace_backup_dir",
+    "workspace_restore_staging_dir",
 ]

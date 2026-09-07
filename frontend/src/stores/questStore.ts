@@ -16,6 +16,24 @@ interface Dashboard {
   total_count: number;
 }
 
+export class GoalUpdateError extends Error {
+  readonly code: string | null;
+  readonly goalId: string;
+  readonly currentRevision: number | null;
+
+  constructor(
+    goalId: string,
+    message: string,
+    options: { code?: string | null; currentRevision?: number | null } = {},
+  ) {
+    super(message);
+    this.name = "GoalUpdateError";
+    this.goalId = goalId;
+    this.code = options.code ?? null;
+    this.currentRevision = options.currentRevision ?? null;
+  }
+}
+
 interface QuestStore {
   goals: GoalInfo[];
   goalTree: GoalInfo[];
@@ -29,6 +47,7 @@ interface QuestStore {
   updateGoal: (id: string, updates: {
     status?: string; title?: string; description?: string;
     level?: string; domain?: string; due_date?: string | null;
+    expected_revision?: number;
   }) => Promise<void>;
   deleteGoal: (id: string) => Promise<void>;
   refresh: () => Promise<void>;
@@ -79,13 +98,42 @@ export const useQuestStore = create<QuestStore>((set, get) => ({
 
   updateGoal: async (id, updates) => {
     try {
-      await fetch(`${API_URL}/api/goals/${id}`, {
+      const res = await fetch(`${API_URL}/api/goals/${id}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(updates),
       });
+      if (!res.ok) {
+        let detail: unknown = null;
+        try {
+          detail = await res.json();
+        } catch {
+          // Preserve the HTTP status in the user-facing error when the server
+          // cannot provide structured recovery metadata.
+        }
+        const detailRecord =
+          detail && typeof detail === "object" && !Array.isArray(detail)
+            ? (detail as Record<string, unknown>)
+            : null;
+        const nestedDetail =
+          detailRecord?.detail && typeof detailRecord.detail === "object" && !Array.isArray(detailRecord.detail)
+            ? (detailRecord.detail as Record<string, unknown>)
+            : detailRecord;
+        const code = typeof nestedDetail?.code === "string" ? nestedDetail.code : null;
+        const currentRevision =
+          typeof nestedDetail?.current_revision === "number" ? nestedDetail.current_revision : null;
+        const message =
+          typeof nestedDetail?.recovery === "string"
+            ? nestedDetail.recovery
+            : `Goal update failed (HTTP ${res.status}).`;
+        throw new GoalUpdateError(id, message, { code, currentRevision });
+      }
       await get().refresh();
-    } catch (err) { console.error("Failed to update goal:", err); }
+    } catch (err) {
+      if (err instanceof GoalUpdateError) throw err;
+      console.error("Failed to update goal:", err);
+      throw new GoalUpdateError(id, "Goal update could not be completed.");
+    }
   },
 
   deleteGoal: async (id) => {

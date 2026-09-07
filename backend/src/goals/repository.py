@@ -4,6 +4,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Optional
 
+from sqlalchemy import update
 from sqlmodel import select, col
 
 from src.db.engine import get_session
@@ -133,26 +134,39 @@ class GoalRepository:
             if expected_revision is not None and expected_revision != current_revision:
                 raise GoalRevisionConflict(goal_id, expected_revision, current_revision)
             changed = False
+            values: dict[str, object] = {}
             if title is not None:
-                goal.title = title
+                values["title"] = title
                 changed = True
             if description is not None:
-                goal.description = description
+                values["description"] = description
                 changed = True
             if status is not None:
-                goal.status = status
+                values["status"] = status
                 changed = True
             if due_date is not None:
-                goal.due_date = due_date
+                values["due_date"] = due_date
                 changed = True
             if success_criterion is not None:
-                goal.success_criterion_json = serialize_success_criterion(success_criterion)
+                values["success_criterion_json"] = serialize_success_criterion(success_criterion)
                 changed = True
+            values["updated_at"] = datetime.now(timezone.utc)
             if changed:
-                goal.revision = current_revision + 1
-            goal.updated_at = datetime.now(timezone.utc)
-            db.add(goal)
-            return goal
+                values["revision"] = Goal.revision + 1
+            guards = [Goal.id == goal_id]
+            if changed:
+                # The revision predicate makes the read/check/write sequence a
+                # compare-and-swap even when callers omit expected_revision.
+                guards.append(Goal.revision == current_revision)
+            result = await db.execute(update(Goal).where(*guards).values(**values))
+            if result.rowcount != 1:
+                latest_result = await db.execute(select(Goal).where(Goal.id == goal_id))
+                latest = latest_result.scalars().first()
+                latest_revision = max(int(latest.revision or 1), 1) if latest else current_revision
+                raise GoalRevisionConflict(goal_id, expected_revision or current_revision, latest_revision)
+            await db.flush()
+            refreshed_result = await db.execute(select(Goal).where(Goal.id == goal_id))
+            return refreshed_result.scalars().first()
 
     async def delete(self, goal_id: str) -> bool:
         """Delete a goal and all its descendants."""

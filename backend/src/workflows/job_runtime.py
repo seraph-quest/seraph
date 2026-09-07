@@ -337,6 +337,7 @@ def _serialize(run: WorkflowRunState, *, receipt: dict[str, Any] | None = None) 
         "priority": int(getattr(run, "priority", 50) or 0),
         "dependencies": _json_load(getattr(run, "dependencies_json", None), []),
         "resource_claims": _json_load(getattr(run, "resource_claims_json", None), []),
+        "input_digest": getattr(run, "input_digest", None),
         "authority_digest": getattr(run, "authority_digest", None),
         "idempotency": {
             "scope": getattr(run, "idempotency_scope", None),
@@ -789,6 +790,126 @@ class DurableJobRepository:
             refreshed = await self._fetch(db, job_id)
             db.expunge(refreshed)
             return _serialize(refreshed, receipt={"kind": "artifact", "status": "recorded", **receipt})
+
+    async def record_effect(
+        self,
+        job_id: str,
+        *,
+        effect_type: str,
+        target_path: str | None = None,
+        status: str = "succeeded",
+        content_sha256: str | None = None,
+        details: dict[str, Any] | None = None,
+        receipt_kind: str = "effect",
+        owner: str | None = None,
+        fencing_token: int | None = None,
+    ) -> dict[str, Any]:
+        """Persist a bounded effect or readback receipt on the job record.
+
+        The effect ledger is intentionally part of the canonical durable job
+        row.  A running job must use its current lease and fencing token, so a
+        stale runner cannot report an external write or verification after
+        restart recovery.  ``details`` is structural and redacted before it
+        is persisted; callers should pass digests rather than content.
+        """
+        effect_type = _text(effect_type)
+        receipt_kind = _text(receipt_kind, "effect")
+        status = _text(status, "unknown")
+        if not effect_type:
+            raise ValueError("effect_type is required")
+        if receipt_kind not in {"effect", "readback"}:
+            raise ValueError("receipt_kind must be effect or readback")
+        if status not in {"succeeded", "failed", "unknown", "blocked"}:
+            raise ValueError("effect status is not supported")
+        if content_sha256 is not None and not _text(content_sha256):
+            content_sha256 = None
+        safe_details = _safe_structure(details or {})
+        effect_id = "eff_" + _digest({
+            "job_id": job_id,
+            "receipt_kind": receipt_kind,
+            "effect_type": effect_type,
+            "target_path": target_path or "",
+            "status": status,
+            "content_sha256": content_sha256 or "",
+            "details": safe_details,
+        })[:24]
+        async with self._session() as db:
+            run = await self._fetch(db, job_id)
+            if run.status in DURABLE_JOB_TERMINAL_STATUSES:
+                raise DurableJobTransitionError(f"terminal job cannot record effects ({run.status})")
+            lease_present = bool(run.lease_owner or run.lease_expires_at)
+            if run.status == "running" and (owner is None or fencing_token is None):
+                raise DurableJobLeaseError("active jobs require owner and fencing token for effect writes")
+            if lease_present or run.status == "running":
+                if owner is None or fencing_token is None:
+                    raise DurableJobLeaseError("owner and fencing token are required for leased effect writes")
+                self._assert_lease(run, owner=owner, fencing_token=fencing_token)
+            elif owner is None and fencing_token is None:
+                if run.status != "accepted":
+                    raise DurableJobLeaseError("owner and fencing token are required to alter effect evidence")
+            else:
+                self._assert_lease(run, owner=owner, fencing_token=fencing_token)
+            receipt = {
+                "effect_id": effect_id,
+                "receipt_kind": receipt_kind,
+                "effect_type": effect_type,
+                "target_path": _text(target_path) or None,
+                "status": status,
+                "content_sha256": content_sha256,
+                "details": safe_details,
+                "recorded_at": _utc_now().isoformat(),
+                "fencing_token": fencing_token,
+            }
+            existing = _json_load(run.effect_receipts_json, [])
+            existing = [
+                item
+                for item in existing
+                if isinstance(item, dict) and item.get("effect_id") != effect_id
+            ]
+            existing.append(receipt)
+            now = _utc_now()
+            conditions = [
+                WorkflowRunState.run_identity == job_id,
+                WorkflowRunState.status == run.status,
+            ]
+            if owner is not None:
+                conditions.extend((WorkflowRunState.lease_owner == owner, WorkflowRunState.fencing_token == fencing_token))
+            else:
+                conditions.extend((WorkflowRunState.lease_owner.is_(None), WorkflowRunState.lease_expires_at.is_(None)))
+            result_update = await db.execute(
+                update(WorkflowRunState)
+                .where(*conditions)
+                .values(effect_receipts_json=_canonical(existing[-100:]), updated_at=now, heartbeat_at=now)
+            )
+            if result_update.rowcount != 1:
+                raise DurableJobLeaseError("stale job fencing token")
+            refreshed = await self._fetch(db, job_id)
+            db.expunge(refreshed)
+            return _serialize(refreshed, receipt={"kind": receipt_kind, "status": "recorded", **receipt})
+
+    async def record_readback(
+        self,
+        job_id: str,
+        *,
+        target_path: str,
+        status: str,
+        content_sha256: str | None = None,
+        details: dict[str, Any] | None = None,
+        owner: str | None = None,
+        fencing_token: int | None = None,
+    ) -> dict[str, Any]:
+        """Record an explicit readback receipt in the canonical effect ledger."""
+        return await self.record_effect(
+            job_id,
+            effect_type="readback",
+            receipt_kind="readback",
+            target_path=target_path,
+            status=status,
+            content_sha256=content_sha256,
+            details=details,
+            owner=owner,
+            fencing_token=fencing_token,
+        )
 
     async def retry_job(
         self,

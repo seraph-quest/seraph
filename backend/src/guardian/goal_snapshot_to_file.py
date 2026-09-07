@@ -441,7 +441,11 @@ class GoalSnapshotToFileAdapter:
             queued = await self.jobs.queue_job(job_id)
             self._remember_projection(queued, job_id=job_id)
         except Exception as exc:
-            return self._blocked(f"job_queue_failed:{type(exc).__name__}", job_id=job_id)
+            self._mark_durable_failure(job_id, operation="queue", error=exc)
+            return self._durable_blocked(
+                job_id,
+                fallback_reason=f"queue_failed:{type(exc).__name__}",
+            )
         if self.request.cancel_requested:
             return await self._cancel(job_id, reason="cancel_requested")
 
@@ -449,12 +453,26 @@ class GoalSnapshotToFileAdapter:
             claimed = await self.jobs.claim_job(job_id, owner=runner_owner, lease_seconds=MAX_DEADLINE_SECONDS)
             self._remember_projection(claimed, job_id=job_id)
         except Exception as exc:
-            return self._blocked(f"job_claim_failed:{type(exc).__name__}", job_id=job_id)
+            self._mark_durable_failure(job_id, operation="claim", error=exc)
+            return self._durable_blocked(
+                job_id,
+                fallback_reason=f"claim_failed:{type(exc).__name__}",
+            )
         if _status(claimed) in {"failed", "blocked", "cancelled"}:
             return self._result_for_durable_status(_status(claimed), _text(claimed.get("failure_reason")) or "job_not_runnable", job_id=job_id)
         lease_owner, fencing_token = _lease(claimed)
         if lease_owner != runner_owner or fencing_token is None:
-            return self._blocked("claim_missing_current_fence", job_id=job_id, durable_status=_status(claimed))
+            self._mark_durable_failure(
+                job_id,
+                operation="claim",
+                error=ValueError("claim_missing_current_fence"),
+                durable_status=_status(claimed) or "unknown",
+            )
+            return self._durable_blocked(
+                job_id,
+                fallback_reason="claim_missing_current_fence",
+                durable_status=_status(claimed) or "unknown",
+            )
         if self.request.cancel_requested:
             return await self._cancel(job_id, owner=runner_owner, fencing_token=fencing_token, reason="cancel_requested")
 

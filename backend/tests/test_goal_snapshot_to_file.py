@@ -304,3 +304,110 @@ async def test_cancel_request_is_durable_and_does_not_invoke_workflow(monkeypatc
     assert workflow.calls == 0
     assert jobs.transitions[-1][1] == "cancelled"
     assert any(event_type == "goal_loop_no_learning" for event_type, _details in persisted)
+
+
+async def test_candidate_path_mismatch_blocks_before_any_effect(monkeypatch, tmp_path):
+    monkeypatch.setattr(settings, "workspace_dir", str(tmp_path))
+    goal = _goal()
+    goals = _Goals(goal)
+    jobs = _Jobs()
+    workflow = _GovernedWorkflow(tmp_path)
+    request = _request(file_path="notes/request.md")
+    candidate = build_goal_candidate_decision(
+        goal,
+        GoalCandidateRequest(
+            capability_id=CAPABILITY_ID,
+            capability_version=request.capability_version,
+            inputs={"file_path": "notes/other.md"},
+            evidence_refs=request.evidence_refs,
+            expires_at=request.deadline_at,
+        ),
+    )
+
+    result = await GoalSnapshotToFileAdapter(
+        request,
+        goals=goals,
+        jobs=jobs,
+        workflow_tool_provider=lambda _name: workflow,
+    ).execute(goal=goal, candidate=candidate)
+
+    assert result.execution_status == "blocked"
+    assert result.reason == "candidate_output_path_mismatch"
+    assert workflow.calls == 0
+    assert jobs.jobs == {}
+
+
+async def test_effect_receipt_failure_blocks_with_reconciliation_marker(monkeypatch, tmp_path):
+    monkeypatch.setattr(settings, "workspace_dir", str(tmp_path))
+    goals = _Goals(_goal())
+    workflow = _GovernedWorkflow(tmp_path)
+
+    class FailingEffects(_Jobs):
+        async def record_effect(self, _job_id, **_kwargs):
+            raise RuntimeError("receipt store unavailable")
+
+    jobs = FailingEffects()
+    request = _request()
+    adapter = GoalSnapshotToFileAdapter(
+        request,
+        goals=goals,
+        jobs=jobs,
+        workflow_tool_provider=lambda _name: workflow,
+    )
+    goal = _goal()
+    candidate = build_goal_candidate_decision(
+        goal,
+        GoalCandidateRequest(
+            capability_id=CAPABILITY_ID,
+            capability_version=request.capability_version,
+            inputs={"file_path": request.file_path},
+            evidence_refs=request.evidence_refs,
+            expires_at=request.deadline_at,
+        ),
+    )
+
+    result = await adapter.execute(goal=goal, candidate=candidate)
+
+    assert result.execution_status == "blocked"
+    assert result.reason.startswith("durable_reconciliation_required:")
+    assert result.execution_status != "succeeded"
+    assert adapter.last_receipt["reconciliation_required"] is True
+    assert adapter.last_receipt["recovery_action"]
+    assert jobs.jobs[result.job_id if hasattr(result, "job_id") else next(iter(jobs.jobs))]["status"] == "blocked"
+
+
+async def test_terminal_transition_failure_never_reports_success(monkeypatch, tmp_path):
+    monkeypatch.setattr(settings, "workspace_dir", str(tmp_path))
+    goals = _Goals(_goal())
+    workflow = _GovernedWorkflow(tmp_path)
+
+    class FailingTransitions(_Jobs):
+        async def transition_job(self, _job_id, _status, **_kwargs):
+            raise RuntimeError("durable database unavailable")
+
+    jobs = FailingTransitions()
+    request = _request()
+    adapter = GoalSnapshotToFileAdapter(
+        request,
+        goals=goals,
+        jobs=jobs,
+        workflow_tool_provider=lambda _name: workflow,
+    )
+    goal = _goal()
+    candidate = build_goal_candidate_decision(
+        goal,
+        GoalCandidateRequest(
+            capability_id=CAPABILITY_ID,
+            capability_version=request.capability_version,
+            inputs={"file_path": request.file_path},
+            evidence_refs=request.evidence_refs,
+            expires_at=request.deadline_at,
+        ),
+    )
+
+    result = await adapter.execute(goal=goal, candidate=candidate)
+
+    assert result.execution_status == "blocked"
+    assert result.reason.startswith("durable_reconciliation_required:")
+    assert result.execution_status != "succeeded"
+    assert adapter.last_receipt["reconciliation_required"] is True

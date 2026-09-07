@@ -15,6 +15,7 @@ from .contracts import (
     finalized_openai_compatible_body,
 )
 from .hooks import persist_denied_route
+from .gpu_admission import GpuAdmissionError, GpuAdmissionRequest, gpu_admission_broker
 from .selector import select_route
 
 
@@ -90,31 +91,100 @@ async def execute_streaming(
             continue
         attempted = True
         proof_hashes = decision.proof_hashes
-        if aggregate is not None:
-            aggregate.attempt_started(decision, capability_proof_hashes=proof_hashes)
-        else:
-            await hooks.attempt_started(context=attempt_context, decision=decision)
         emitted = False
-        try:
-            async for delta in transport(decision.selected, transport_body, False):
-                emitted = True
-                yield delta
-        except Exception as error:
-            last_error = error
+        admission_request = GpuAdmissionRequest.from_inference_context(
+            attempt_context,
+            operation_id=decision.attempt_id or f"{attempt_context.request_id}:{candidate.profile.id}",
+        )
+        admission_callback_started = False
+
+        async def admitted_transport() -> AsyncIterator[str]:
+            nonlocal admission_callback_started, emitted
+            admission_callback_started = True
+            if aggregate is not None:
+                aggregate.attempt_started(decision, capability_proof_hashes=proof_hashes)
+            else:
+                await hooks.attempt_started(context=attempt_context, decision=decision)
+            try:
+                async for delta in transport(decision.selected, transport_body, False):
+                    emitted = True
+                    yield delta
+            except BaseException:
+                if aggregate is not None:
+                    aggregate.attempt_finished(
+                        outcome="failed",
+                        error_code="transport_failed",
+                        decision=decision,
+                        degradation_code="transport_failed",
+                    )
+                else:
+                    await hooks.attempt_finished(
+                        context=attempt_context,
+                        decision=decision,
+                        outcome="failed",
+                        error_code="transport_failed",
+                    )
+                raise
+            if not emitted:
+                if aggregate is not None:
+                    aggregate.attempt_finished(
+                        outcome="failed",
+                        error_code="stream_empty",
+                        decision=decision,
+                        degradation_code="stream_empty",
+                    )
+                else:
+                    await hooks.attempt_finished(
+                        context=attempt_context,
+                        decision=decision,
+                        outcome="failed",
+                        error_code="stream_empty",
+                    )
+                raise RuntimeError("stream_empty")
             if aggregate is not None:
                 aggregate.attempt_finished(
-                    outcome="failed",
-                    error_code="transport_failed",
+                    outcome="succeeded",
+                    error_code=None,
                     decision=decision,
-                    degradation_code="transport_failed",
+                    degradation_code=(
+                        f"fallback_{fallback_reason_code}" if fallback_reason_code else None
+                    ),
                 )
             else:
                 await hooks.attempt_finished(
                     context=attempt_context,
                     decision=decision,
-                    outcome="failed",
-                    error_code="transport_failed",
+                    outcome="succeeded",
+                    error_code=None,
                 )
+
+        try:
+            async for delta in gpu_admission_broker.stream(
+                admission_request,
+                admitted_transport,
+                now=now,
+            ):
+                yield delta
+        except Exception as error:
+            if isinstance(error, GpuAdmissionError) and not admission_callback_started:
+                # Admission is a bounded runtime decision.  A rejected,
+                # expired, cancelled, or fenced request did not start this
+                # provider attempt, so trying another candidate would
+                # multiply queue pressure and bypass its operator-visible
+                # receipt.  A provider that happens to raise the same base
+                # class after the callback starts still follows normal
+                # pre-output fallback semantics.
+                if aggregate is not None:
+                    await aggregate.finalize_denied(
+                        decision=decision,
+                        reason_codes=(
+                            "gpu_admission_rejected",
+                            f"gpu_admission_{error.code}",
+                        ),
+                        fallback_reason_code="gpu_admission_rejected",
+                    )
+                raise
+            last_error = error
             if emitted or not context.fallback_allowed or aggregate is None:
                 if aggregate is not None:
                     await aggregate.finalize(
@@ -123,55 +193,15 @@ async def execute_streaming(
                         degradation_codes=tuple(dict.fromkeys(degradation_codes)),
                     )
                 raise
-            fallback_reason_code = "transport_failed"
-            degradation_codes.extend(("fallback_used", "fallback_transport_failed"))
+            error_code = "stream_empty" if str(error) == "stream_empty" else "transport_failed"
+            fallback_reason_code = error_code
+            degradation_codes.extend(("fallback_used", f"fallback_{error_code}"))
             continue
-        if not emitted:
-            last_error = RuntimeError("stream_empty")
-            if aggregate is not None:
-                aggregate.attempt_finished(
-                    outcome="failed",
-                    error_code="stream_empty",
-                    decision=decision,
-                    degradation_code="stream_empty",
-                )
-                if context.fallback_allowed:
-                    fallback_reason_code = "stream_empty"
-                    degradation_codes.extend(("fallback_used", "fallback_stream_empty"))
-                    continue
-                await aggregate.finalize(
-                    outcome="failed",
-                    fallback_reason_code=fallback_reason_code,
-                    degradation_codes=tuple(dict.fromkeys(degradation_codes)),
-                )
-            else:
-                await hooks.attempt_finished(
-                    context=attempt_context,
-                    decision=decision,
-                    outcome="failed",
-                    error_code="stream_empty",
-                )
-            raise last_error
         if aggregate is not None:
-            aggregate.attempt_finished(
-                outcome="succeeded",
-                error_code=None,
-                decision=decision,
-                degradation_code=(
-                    f"fallback_{fallback_reason_code}" if fallback_reason_code else None
-                ),
-            )
             await aggregate.finalize(
                 outcome="succeeded",
                 fallback_reason_code=fallback_reason_code,
                 degradation_codes=tuple(dict.fromkeys(degradation_codes)),
-            )
-        else:
-            await hooks.attempt_finished(
-                context=attempt_context,
-                decision=decision,
-                outcome="succeeded",
-                error_code=None,
             )
         return
     if aggregate is not None and attempted:
@@ -215,21 +245,49 @@ async def run_preflighted_adapter(
             denied_kwargs["repository"] = repository
         await persist_denied_route(**denied_kwargs)
         raise NoCompliantModelRouteError()
-    await hooks.attempt_started(context=context, decision=decision)
-    try:
-        result = await adapter(decision.selected, False)
-    except Exception:
+    admission_request = GpuAdmissionRequest.from_inference_context(
+        context,
+        operation_id=decision.attempt_id or f"{context.request_id}:{decision.selected.profile.id}",
+    )
+    admission_callback_started = False
+
+    async def admitted_adapter() -> object:
+        nonlocal admission_callback_started
+        admission_callback_started = True
+        await hooks.attempt_started(context=context, decision=decision)
+        try:
+            result = await adapter(decision.selected, False)
+        except BaseException:
+            await hooks.attempt_finished(
+                context=context,
+                decision=decision,
+                outcome="failed",
+                error_code="transport_failed",
+            )
+            raise
         await hooks.attempt_finished(
             context=context,
             decision=decision,
-            outcome="failed",
-            error_code="transport_failed",
+            outcome="succeeded",
+            error_code=None,
         )
+        return result
+
+    try:
+        return await gpu_admission_broker.execute(admission_request, admitted_adapter)
+    except GpuAdmissionError as error:
+        if not admission_callback_started:
+            repository = getattr(hooks, "_repository", None)
+            denied_kwargs = {
+                "context": context,
+                "decision": decision,
+                "reason_codes": (
+                    "gpu_admission_rejected",
+                    f"gpu_admission_{error.code}",
+                ),
+                "fallback_reason_code": "gpu_admission_rejected",
+            }
+            if repository is not None:
+                denied_kwargs["repository"] = repository
+            await persist_denied_route(**denied_kwargs)
         raise
-    await hooks.attempt_finished(
-        context=context,
-        decision=decision,
-        outcome="succeeded",
-        error_code=None,
-    )
-    return result

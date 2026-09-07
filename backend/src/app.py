@@ -14,6 +14,7 @@ from src.extensions.registry import default_manifest_roots_for_workspace
 from src.llm_logger import init_llm_logging
 from src.llm_runtime import effective_runtime_model_id, provider_profile_statuses, provider_profiles, resolve_runtime_profile
 from src.memory.soul import ensure_soul_exists
+from src.model_fabric.gpu_admission import gpu_admission_broker
 from src.operators.local_codex import ExternalAgentRuntimeRemovedError, reject_legacy_external_agent_model
 from src.runbooks.manager import runbook_manager
 from src.scheduler.engine import init_scheduler, shutdown_scheduler, sync_scheduled_jobs
@@ -305,6 +306,7 @@ def create_app() -> FastAPI:
         from src.api.model_fabric_settings import model_fabric_runtime_status
 
         fabric_status = await model_fabric_runtime_status(str(runtime.get("active_profile") or ""))
+        gpu_admission = await gpu_admission_broker.status()
         return {
             "version": app.version,
             "build_id": f"SERAPH_PRIME_v{app.version}",
@@ -320,6 +322,7 @@ def create_app() -> FastAPI:
             "provider_profiles": _sanitize_runtime_endpoints(provider_profile_statuses()),
             "vlm_runtime": vlm_status,
             "model_fabric": fabric_status,
+            "gpu_admission": gpu_admission,
             "timezone": settings.user_timezone,
             "llm_logging_enabled": settings.llm_log_enabled,
         }

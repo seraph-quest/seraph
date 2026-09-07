@@ -426,6 +426,36 @@ class WorkflowStateRepository:
             "updated_at": run.updated_at.isoformat(),
             "finished_at": run.finished_at.isoformat() if run.finished_at else None,
             "metadata": _loads(run.metadata_json, {}),
+            "job_id": run.run_identity,
+            "record_schema_version": int(getattr(run, "record_schema_version", 1) or 1),
+            "parent_job_id": getattr(run, "parent_job_id", None),
+            "job_kind": getattr(run, "job_kind", "workflow"),
+            "owner_kind": getattr(run, "owner_kind", "legacy"),
+            "owner_principal_id": getattr(run, "owner_principal_id", None),
+            "service_id": getattr(run, "service_id", None),
+            "goal_id": getattr(run, "goal_id", None),
+            "goal_revision": getattr(run, "goal_revision", None),
+            "plan_revision": getattr(run, "plan_revision", None),
+            "candidate_id": getattr(run, "candidate_id", None),
+            "capability_version": getattr(run, "capability_version", "workflow-v1"),
+            "input_digest": getattr(run, "input_digest", None),
+            "authority_digest": getattr(run, "authority_digest", None),
+            "idempotency_scope": getattr(run, "idempotency_scope", None),
+            "idempotency_key": getattr(run, "idempotency_key", None),
+            "idempotency_binding": getattr(run, "idempotency_binding", None),
+            "priority": int(getattr(run, "priority", 50) or 0),
+            "dependencies": _loads(getattr(run, "dependencies_json", None), []),
+            "resource_claims": _loads(getattr(run, "resource_claims_json", None), []),
+            "deadline_at": run.deadline_at.isoformat() if getattr(run, "deadline_at", None) else None,
+            "lease_owner": getattr(run, "lease_owner", None),
+            "lease_expires_at": run.lease_expires_at.isoformat() if getattr(run, "lease_expires_at", None) else None,
+            "fencing_token": int(getattr(run, "fencing_token", 0) or 0),
+            "attempt_count": int(getattr(run, "attempt_count", 0) or 0),
+            "max_attempts": int(getattr(run, "max_attempts", 1) or 1),
+            "failure_reason": getattr(run, "failure_reason", None),
+            "checkpoint_receipts": _loads(getattr(run, "checkpoint_receipts_json", None), []),
+            "artifact_receipts": _loads(getattr(run, "artifact_receipts_json", None), []),
+            "effect_receipts": _loads(getattr(run, "effect_receipts_json", None), []),
             "step_records": step_records,
             "state_source": "durable_workflow_state",
             "claim_boundary": DURABLE_WORKFLOW_ENGINE_CLAIM_BOUNDARY,
@@ -1518,6 +1548,25 @@ class WorkflowStateRepository:
 
 
 workflow_state_repository = WorkflowStateRepository()
+
+# The typed #743 invocation contract uses this same WorkflowRunState table and
+# session factory.  Re-exporting keeps workflow callers on the existing kernel
+# module while avoiding a second durable state authority.
+from src.workflows.job_runtime import (  # noqa: E402
+    DURABLE_JOB_RECORD_SCHEMA_VERSION,
+    DURABLE_JOB_STATUSES,
+    DURABLE_JOB_TERMINAL_STATUSES,
+    DURABLE_JOB_TRANSITIONS,
+    DurableJobError,
+    DurableJobIdempotencyConflict,
+    DurableJobIdentity,
+    DurableJobLeaseError,
+    DurableJobNotFound,
+    DurableJobRepository,
+    DurableJobSpec,
+    DurableJobTransitionError,
+    durable_job_repository,
+)
 
 
 def _canonical_state_id(prefix: str, payload: Any) -> str:

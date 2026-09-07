@@ -1,0 +1,453 @@
+from __future__ import annotations
+
+import hashlib
+import json
+import shutil
+import sqlite3
+from pathlib import Path
+import zipfile
+
+import pytest
+import src.workspace.lifecycle as workspace_lifecycle
+
+from src.workspace import (
+    ExternalReferencePolicy,
+    ExternalReferenceSpec,
+    InterruptedWorkspaceRestore,
+    InvalidWorkspaceArchiveError,
+    MissingSecretMaterialError,
+    UnknownWorkspacePathError,
+    WorkspaceConfig,
+    WorkspaceDatabaseObjectSpec,
+    WorkspaceIdentity,
+    WorkspaceLifecycleError,
+    WorkspacePathSpec,
+    WorkspaceRootKind,
+    WorkspaceStateClass,
+    WorkspaceStateError,
+    WorkspaceStateRegistry,
+    backup_workspace,
+    cleanup_workspace_backups,
+    recover_interrupted_restore,
+    restore_workspace,
+    rollback_workspace,
+    workspace_backup_dir,
+    workspace_restore_staging_dir,
+)
+
+
+def _config(root: Path) -> WorkspaceConfig:
+    return WorkspaceConfig(
+        identity=WorkspaceIdentity("synthetic-lifecycle", root),
+        declared_paths=(
+            WorkspacePathSpec("seraph.db", WorkspaceStateClass.CANONICAL),
+            WorkspacePathSpec("soul.md", WorkspaceStateClass.CANONICAL),
+            WorkspacePathSpec("artifacts", WorkspaceStateClass.CANONICAL),
+            WorkspacePathSpec("extensions", WorkspaceStateClass.CANONICAL),
+            WorkspacePathSpec(".vault-key", WorkspaceStateClass.SECRET_RECOVERY),
+            WorkspacePathSpec("derived", WorkspaceStateClass.DERIVED),
+            WorkspacePathSpec("cache", WorkspaceStateClass.CACHE),
+            WorkspacePathSpec("tmp", WorkspaceStateClass.DISPOSABLE),
+            WorkspacePathSpec(".seraph-synthetic-workspace", WorkspaceStateClass.DISPOSABLE),
+        ),
+        external_references=(
+            ExternalReferenceSpec("screen-capture", ExternalReferencePolicy.CONSENTED_LOGICAL_ROOT),
+        ),
+        expected_database_objects=(
+            WorkspaceDatabaseObjectSpec("sessions", "table", WorkspaceStateClass.CANONICAL),
+            WorkspaceDatabaseObjectSpec("messages", "table", WorkspaceStateClass.CANONICAL),
+            WorkspaceDatabaseObjectSpec("ix_messages_session_id", "index", WorkspaceStateClass.DERIVED),
+        ),
+    )
+
+
+def _workspace(tmp_path: Path) -> tuple[Path, WorkspaceStateRegistry]:
+    root = tmp_path / "workspace"
+    root.mkdir()
+    (root / ".seraph-synthetic-workspace").write_bytes(b"seraph-synthetic-workspace-v1\n")
+    (root / "soul.md").write_text("original soul\n", encoding="utf-8")
+    (root / "artifacts").mkdir()
+    (root / "artifacts" / "report.md").write_text("canonical report\n", encoding="utf-8")
+    (root / "extensions").mkdir()
+    (root / ".vault-key").write_text("SECRET-SENTINEL-DO-NOT-ARCHIVE\n", encoding="utf-8")
+    (root / "derived").mkdir()
+    (root / "derived" / "vectors.idx").write_text("derived\n", encoding="utf-8")
+    (root / "cache").mkdir()
+    (root / "cache" / "cache.bin").write_text("cache\n", encoding="utf-8")
+    (root / "tmp").mkdir()
+    (root / "tmp" / "run.log").write_text("disposable\n", encoding="utf-8")
+    with sqlite3.connect(root / "seraph.db") as connection:
+        connection.executescript(
+            """
+            CREATE TABLE sessions (id TEXT PRIMARY KEY, title TEXT NOT NULL);
+            CREATE TABLE messages (
+                id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL REFERENCES sessions(id),
+                role TEXT NOT NULL,
+                content TEXT NOT NULL
+            );
+            CREATE INDEX ix_messages_session_id ON messages(session_id);
+            INSERT INTO sessions(id, title) VALUES ('s1', 'session');
+            INSERT INTO messages(id, session_id, role, content)
+                VALUES ('m1', 's1', 'user', 'SECRET-DB-CONTENT');
+            """
+        )
+    registry = WorkspaceStateRegistry(_config(root))
+    return root, registry
+
+
+def _archive_with_extra_member(source: Path, destination: Path, name: str, payload: bytes) -> None:
+    with zipfile.ZipFile(source, "r") as reader, zipfile.ZipFile(destination, "w") as writer:
+        for info in reader.infolist():
+            writer.writestr(info, reader.read(info))
+        writer.writestr(name, payload)
+
+
+def _rewrite_archive_manifest(source: Path, destination: Path, mutate) -> None:
+    with zipfile.ZipFile(source, "r") as reader:
+        members = {info.filename: reader.read(info) for info in reader.infolist()}
+    manifest = json.loads(members["manifest.json"])
+    mutate(manifest)
+    source_manifest = manifest.get("workspace_manifest")
+    if isinstance(source_manifest, dict) and "manifest_sha256" in source_manifest:
+        source_digest_body = dict(source_manifest)
+        source_digest_body.pop("manifest_sha256", None)
+        source_manifest["manifest_sha256"] = hashlib.sha256(
+            json.dumps(source_digest_body, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+        manifest["source_manifest_sha256"] = source_manifest["manifest_sha256"]
+    digest_body = dict(manifest)
+    digest_body.pop("manifest_sha256", None)
+    manifest["manifest_sha256"] = hashlib.sha256(
+        json.dumps(digest_body, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    with zipfile.ZipFile(destination, "w") as writer:
+        for name, payload in members.items():
+            if name == "manifest.json":
+                writer.writestr(name, json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode("utf-8"))
+            else:
+                writer.writestr(name, payload)
+
+
+def test_production_backup_stops_when_required_secret_is_missing(tmp_path):
+    root, fixture_registry = _workspace(tmp_path)
+    fixture_config = fixture_registry.config
+    production_registry = WorkspaceStateRegistry(
+        WorkspaceConfig(
+            identity=WorkspaceIdentity("workspace-primary", root, WorkspaceRootKind.PRODUCTION),
+            declared_paths=fixture_config.declared_paths,
+            database_path=fixture_config.database_path,
+            workspace_version=fixture_config.workspace_version,
+            external_references=fixture_config.external_references,
+            expected_database_objects=fixture_config.expected_database_objects,
+        )
+    )
+    (root / ".vault-key").unlink()
+    archive_path = tmp_path / "production-backup.zip"
+
+    with pytest.raises(WorkspaceStateError, match="required secret workspace path"):
+        backup_workspace(root, registry=production_registry, archive_path=archive_path)
+
+    assert not archive_path.exists()
+    assert not workspace_backup_dir(root).exists()
+
+
+def test_backup_rejects_secret_directory_shape(tmp_path):
+    root, registry = _workspace(tmp_path)
+    (root / ".vault-key").unlink()
+    (root / ".vault-key").mkdir()
+
+    with pytest.raises(WorkspaceLifecycleError, match="regular file"):
+        backup_workspace(root, registry=registry, archive_path=tmp_path / "secret-directory.zip")
+
+
+def test_backup_restore_round_trip_and_rollback_preserve_secret_boundary(tmp_path):
+    root, registry = _workspace(tmp_path)
+    backup = backup_workspace(root, registry=registry)
+    archive = Path(backup["archive_path"])
+
+    assert backup["secret_values_included"] is False
+    assert backup["derived_state_included"] is False
+    assert "SECRET-SENTINEL-DO-NOT-ARCHIVE" not in archive.read_bytes().decode("latin1")
+    with zipfile.ZipFile(archive, "r") as archive_reader:
+        archive_manifest = json.loads(archive_reader.read("manifest.json"))
+        database_entry = next(
+            entry
+            for entry in archive_manifest["archive_entries"]
+            if entry["logical_path"] == "seraph.db"
+        )
+        database_payload = archive_reader.read("payload/seraph.db")
+    assert database_entry["digest_scope"] == "redacted_metadata"
+    assert database_entry["sha256"] != database_entry["payload_sha256"]
+    assert database_entry["payload_sha256"] == hashlib.sha256(database_payload).hexdigest()
+
+    (root / "soul.md").write_text("changed soul\n", encoding="utf-8")
+    restore = restore_workspace(
+        root,
+        archive,
+        registry=registry,
+        confirm=True,
+        restore_id="restore-roundtrip-01",
+    )
+    assert restore["status"] == "restored"
+    assert restore["rollback_available"] is True
+    assert (root / "soul.md").read_text(encoding="utf-8") == "original soul\n"
+    assert (root / ".vault-key").read_text(encoding="utf-8") == "SECRET-SENTINEL-DO-NOT-ARCHIVE\n"
+    assert not (root / "derived" / "vectors.idx").exists()
+
+    rollback = rollback_workspace(root, "restore-roundtrip-01")
+    assert rollback["status"] == "rolled_back"
+    assert (root / "soul.md").read_text(encoding="utf-8") == "changed soul\n"
+
+
+@pytest.mark.parametrize("archive_kind", ["corrupt", "missing-manifest"])
+def test_restore_rejects_corrupt_or_incomplete_archive(tmp_path, archive_kind):
+    root, registry = _workspace(tmp_path)
+    archive = Path(backup_workspace(root, registry=registry)["archive_path"])
+    invalid = tmp_path / f"{archive_kind}.zip"
+    if archive_kind == "corrupt":
+        invalid.write_bytes(b"not a zip archive")
+    else:
+        with zipfile.ZipFile(invalid, "w") as output:
+            output.writestr("payload/seraph.db", b"incomplete")
+    with pytest.raises(InvalidWorkspaceArchiveError):
+        restore_workspace(root, invalid, registry=registry, confirm=True, restore_id="restore-invalid-01")
+
+
+def test_restore_rejects_payload_traversal_and_archive_symlink(tmp_path):
+    root, registry = _workspace(tmp_path)
+    archive = Path(backup_workspace(root, registry=registry)["archive_path"])
+    traversal = tmp_path / "traversal.zip"
+    _archive_with_extra_member(archive, traversal, "payload/../outside", b"escape")
+    with pytest.raises(InvalidWorkspaceArchiveError, match="unsafe|unexpected"):
+        restore_workspace(root, traversal, registry=registry, confirm=True, restore_id="restore-traversal-01")
+
+    linked = tmp_path / "linked.zip"
+    linked.symlink_to(archive)
+    with pytest.raises(InvalidWorkspaceArchiveError):
+        restore_workspace(root, linked, registry=registry, confirm=True, restore_id="restore-link-01")
+
+
+def test_restore_rejects_archive_requiredness_downgrade(tmp_path):
+    root, registry = _workspace(tmp_path)
+    archive = Path(backup_workspace(root, registry=registry)["archive_path"])
+    downgraded = tmp_path / "downgraded-requiredness.zip"
+
+    def downgrade(manifest):
+        source_entry = next(
+            entry
+            for entry in manifest["workspace_manifest"]["entries"]
+            if entry["logical_path"] == ".vault-key"
+        )
+        archive_entry = next(
+            entry for entry in manifest["archive_entries"] if entry["logical_path"] == ".vault-key"
+        )
+        source_entry["required"] = False
+        archive_entry["required"] = False
+
+    _rewrite_archive_manifest(archive, downgraded, downgrade)
+    with pytest.raises(InvalidWorkspaceArchiveError, match="requiredness"):
+        restore_workspace(root, downgraded, registry=registry, confirm=True, restore_id="restore-downgrade-01")
+
+
+def test_restore_rejects_archive_missing_required_secret_metadata(tmp_path):
+    root, registry = _workspace(tmp_path)
+    archive = Path(backup_workspace(root, registry=registry)["archive_path"])
+    missing = tmp_path / "missing-required-secret.zip"
+
+    def remove_required_secret(manifest):
+        manifest["workspace_manifest"]["entries"] = [
+            entry
+            for entry in manifest["workspace_manifest"]["entries"]
+            if entry["logical_path"] != ".vault-key"
+        ]
+        manifest["archive_entries"] = [
+            entry for entry in manifest["archive_entries"] if entry["logical_path"] != ".vault-key"
+        ]
+
+    _rewrite_archive_manifest(archive, missing, remove_required_secret)
+    with pytest.raises(InvalidWorkspaceArchiveError, match="required secret material metadata"):
+        restore_workspace(root, missing, registry=registry, confirm=True, restore_id="restore-missing-secret-01")
+
+
+def test_restore_accepts_legacy_archive_without_requiredness_metadata(tmp_path):
+    root, base_registry = _workspace(tmp_path)
+    base_config = base_registry.config
+    optional_path = "google_calendar_token.json"
+    (root / optional_path).write_text("legacy-calendar-token", encoding="utf-8")
+    registry = WorkspaceStateRegistry(
+        WorkspaceConfig(
+            identity=base_config.identity,
+            declared_paths=(
+                *base_config.declared_paths,
+                WorkspacePathSpec(optional_path, WorkspaceStateClass.SECRET, required=False),
+            ),
+            database_path=base_config.database_path,
+            workspace_version=base_config.workspace_version,
+            external_references=base_config.external_references,
+            expected_database_objects=base_config.expected_database_objects,
+        )
+    )
+    archive = Path(backup_workspace(root, registry=registry)["archive_path"])
+    legacy = tmp_path / "legacy-v1.zip"
+
+    def remove_requiredness_metadata(manifest):
+        for entry in manifest["workspace_manifest"]["entries"]:
+            entry.pop("required", None)
+        for entry in manifest["archive_entries"]:
+            entry.pop("required", None)
+
+    _rewrite_archive_manifest(archive, legacy, remove_requiredness_metadata)
+    (root / optional_path).unlink()
+    restore = restore_workspace(
+        root,
+        legacy,
+        registry=registry,
+        confirm=True,
+        restore_id="restore-legacy-v1-01",
+    )
+
+    assert restore["status"] == "restored"
+    assert not (root / optional_path).exists()
+
+
+def test_archive_member_bound_is_checked_before_payload_read(tmp_path, monkeypatch):
+    root, registry = _workspace(tmp_path)
+    archive = Path(backup_workspace(root, registry=registry)["archive_path"])
+    with zipfile.ZipFile(archive, "r") as archive_reader:
+        manifest_size = archive_reader.getinfo("manifest.json").file_size
+        database_size = archive_reader.getinfo("payload/seraph.db").file_size
+    assert database_size > manifest_size
+    monkeypatch.setattr(workspace_lifecycle, "MAX_ARCHIVE_MEMBER_BYTES", manifest_size + 1)
+    original_read = zipfile.ZipFile.read
+
+    def guarded_read(reader, member, *args, **kwargs):
+        info = member if isinstance(member, zipfile.ZipInfo) else reader.getinfo(member)
+        if info.filename == "payload/seraph.db":
+            raise AssertionError("oversized payload was read before validation")
+        return original_read(reader, member, *args, **kwargs)
+
+    monkeypatch.setattr(zipfile.ZipFile, "read", guarded_read)
+    with pytest.raises(InvalidWorkspaceArchiveError, match="bounded size"):
+        restore_workspace(root, archive, registry=registry, confirm=True, restore_id="restore-size-01")
+
+
+def test_interrupted_restore_is_recovered_from_journal(tmp_path):
+    root, registry = _workspace(tmp_path)
+    archive = Path(backup_workspace(root, registry=registry)["archive_path"])
+    (root / "soul.md").write_text("changed before interruption\n", encoding="utf-8")
+    with pytest.raises(InterruptedWorkspaceRestore):
+        restore_workspace(
+            root,
+            archive,
+            registry=registry,
+            confirm=True,
+            restore_id="restore-interrupted-01",
+            interrupt_after_active_move=True,
+        )
+    assert not root.exists()
+    recovery = recover_interrupted_restore(root)
+    assert recovery["status"] == "recovered"
+    assert recovery["recovered"] == [
+        {"restore_id": "restore-interrupted-01", "action": "promoted_staging"}
+    ]
+    assert (root / "soul.md").read_text(encoding="utf-8") == "original soul\n"
+
+
+def test_restore_requires_existing_secret_material_and_rejects_secret_symlink(tmp_path):
+    root, registry = _workspace(tmp_path)
+    archive = Path(backup_workspace(root, registry=registry)["archive_path"])
+    (root / ".vault-key").unlink()
+    with pytest.raises(MissingSecretMaterialError):
+        restore_workspace(root, archive, registry=registry, confirm=True, restore_id="restore-secret-01")
+
+    # Recreate the fixture and ensure a symlink cannot be copied into staging.
+    shutil.rmtree(root)
+    root, registry = _workspace(tmp_path)
+    archive = Path(backup_workspace(root, registry=registry)["archive_path"])
+    outside = tmp_path / "outside-secret"
+    outside.write_text("outside", encoding="utf-8")
+    (root / ".vault-key").unlink()
+    (root / ".vault-key").symlink_to(outside)
+    with pytest.raises(WorkspaceStateError):
+        restore_workspace(root, archive, registry=registry, confirm=True, restore_id="restore-secret-02")
+
+
+def test_restore_allows_missing_optional_secret_and_preserves_degraded_state(tmp_path):
+    root, base_registry = _workspace(tmp_path)
+    base_config = base_registry.config
+    optional_path = "optional-token.json"
+    (root / optional_path).write_text("optional-calendar-token", encoding="utf-8")
+    registry = WorkspaceStateRegistry(
+        WorkspaceConfig(
+            identity=base_config.identity,
+            declared_paths=(
+                *base_config.declared_paths,
+                WorkspacePathSpec(optional_path, WorkspaceStateClass.SECRET, required=False),
+            ),
+            database_path=base_config.database_path,
+            workspace_version=base_config.workspace_version,
+            external_references=base_config.external_references,
+            expected_database_objects=base_config.expected_database_objects,
+        )
+    )
+    backup = Path(backup_workspace(root, registry=registry)["archive_path"])
+    with zipfile.ZipFile(backup, "r") as archive_reader:
+        archive_manifest = json.loads(archive_reader.read("manifest.json"))
+    optional_entry = next(
+        entry
+        for entry in archive_manifest["archive_entries"]
+        if entry["logical_path"] == optional_path
+    )
+    assert optional_entry["required"] is False
+
+    (root / "soul.md").write_text("changed while token is present\n", encoding="utf-8")
+    restored_with_token = restore_workspace(
+        root,
+        backup,
+        registry=registry,
+        confirm=True,
+        restore_id="restore-optional-secret-present-01",
+    )
+    assert restored_with_token["status"] == "restored"
+    assert (root / optional_path).read_text(encoding="utf-8") == "optional-calendar-token"
+    assert (root / "soul.md").read_text(encoding="utf-8") == "original soul\n"
+
+    (root / optional_path).unlink()
+    (root / "soul.md").write_text("changed while token is unavailable\n", encoding="utf-8")
+    restore = restore_workspace(
+        root,
+        backup,
+        registry=registry,
+        confirm=True,
+        restore_id="restore-optional-secret-01",
+    )
+
+    assert restore["status"] == "restored"
+    assert not (root / optional_path).exists()
+    assert (root / "soul.md").read_text(encoding="utf-8") == "original soul\n"
+
+
+def test_cleanup_retention_is_bounded_to_derived_backup_sidecar(tmp_path):
+    root, registry = _workspace(tmp_path)
+    archives = [
+        Path(backup_workspace(root, registry=registry)["archive_path"])
+        for _ in range(4)
+    ]
+    receipt = cleanup_workspace_backups(root, keep=1)
+    assert receipt["retention"] == 1
+    assert len(receipt["retained"]) == 1
+    assert len(receipt["removed"]) == 3
+    assert root.exists()
+    assert all(path.exists() for path in archives if path.name in receipt["retained"])
+    assert workspace_backup_dir(root).name == "workspace.backups"
+    assert workspace_restore_staging_dir(root).name == "workspace.restore-staging"
+
+
+def test_restore_requires_explicit_confirmation_and_rejects_bad_id(tmp_path):
+    root, registry = _workspace(tmp_path)
+    archive = Path(backup_workspace(root, registry=registry)["archive_path"])
+    with pytest.raises(WorkspaceStateError, match="confirm"):
+        restore_workspace(root, archive, registry=registry)
+    with pytest.raises(WorkspaceStateError, match="restore_id"):
+        restore_workspace(root, archive, registry=registry, confirm=True, restore_id="../escape")

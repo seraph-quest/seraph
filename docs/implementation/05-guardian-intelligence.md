@@ -70,6 +70,39 @@
 - [ ] stronger linkage between guardian state, execution choices, and feedback-driven policy adaptation
 - [ ] deeper memory-provider use beyond the shipped additive retrieval, additive user/project modeling, stale/usefulness-ranked provider diagnostics, guarded post-canonical writeback, inventory/governance layer, the pre-context provider quality gate, the guardian-memory benchmark plus contradiction-aware selective-forgetting proof, Batch BZ provider usefulness/degradation/quarantine plus canonical reconciliation receipts, Batch CF live-regression monitors, Batch CM dimension-scoped provider parity matrix, Batch CV longitudinal provider-operation receipts, and Batch DD expanded provider-matrix receipts, especially broader ecosystem coverage, live-provider attestation, richer provider-specific quality tuning, stronger long-horizon usefulness diagnostics, and exact claim-ledger permission before any memory-superiority or full provider-parity wording
 
+## Branch-local #745 goal-conditioned slice
+
+**Status:** Partial on the milestone branch; not Shipped on `develop`.
+
+The first additive slice stores an inspectable success criterion and monotonic
+goal revision on the existing `Goal` record. `POST /api/goals/{goal_id}/candidates`
+creates a deterministic candidate decision with `act`, `clarify`, `defer`, or
+`silent` action, while `GET /api/goals/{goal_id}/loop` exposes the criterion and
+redacted candidate/outcome/no-learning receipts. Candidates retain the goal
+revision and cannot dispatch after a goal is paused, abandoned, edited, or
+expired. Candidate identity now includes a canonical input digest.
+
+The branch-local `goal-snapshot-to-file` adapter re-reads the active goal and
+revision, admits one service-owned, bounded, idempotent job through the existing
+durable workflow state repository, and invokes only the governed
+`WorkflowManager` tool for that named workflow. Admission binds the canonical
+workflow name, capability version, and exact ordered `get_goals -> write_file`
+step sequence digest; unregistered, extra, missing, or reordered definitions
+are blocked before dispatch. It records fenced execution,
+artifact, effect, and readback receipts; verifies a workspace-contained output,
+its content digest, and the goal ID; then returns the result through the
+existing goal-conditioned loop with explicit `no_learning`. Stale, cancelled,
+unavailable, failed, and unreadable paths remain blocked or failed with no
+learning.
+
+**Live/runtime limits:** This is a partial branch-local slice, not the full
+guardian brief journey. Its default provider requires the app-started workflow
+registry, governed tool wrappers, and a migrated durable-state database; the
+focused tests monkeypatch only that existing tool boundary and perform a real
+temporary-file readback. No live service, scheduler admission, operator
+approval, external readback, `web-brief-to-file`, or full #736 journey receipt
+was produced here, and no completion or learning claim is made.
+
 ## Memory Upgrade Program Record
 
 The upgraded memory system is now complete through Batches A, B, and C.

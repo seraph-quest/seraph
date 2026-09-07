@@ -19,8 +19,24 @@ from src.model_fabric.caller_context import build_canonical_inference_context
 from src.tools.audit import wrap_tools_for_audit
 from src.tools.soul_tool import view_soul
 from src.tools.goal_tools import get_goals, get_goal_progress
+from src.goals.contracts import GoalCandidateDecision, GoalCandidateRequest
+from src.guardian.goal_conditioned_loop import build_goal_candidate_decision
+from src.db.models import Goal
 
 logger = logging.getLogger(__name__)
+
+
+def build_goal_conditioned_candidate(
+    goal: Goal,
+    request: GoalCandidateRequest,
+) -> GoalCandidateDecision:
+    """Expose the bounded goal candidate seam to strategist callers.
+
+    Strategist reasoning remains proposal-only; admission and execution stay
+    behind the goal-loop adapter and current goal revision checks.
+    """
+
+    return build_goal_candidate_decision(goal, request)
 
 STRATEGIST_INSTRUCTIONS = """\
 You are Seraph's strategic reasoning module. You periodically review the user's context \

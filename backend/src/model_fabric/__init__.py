@@ -31,6 +31,23 @@ from .selector import (
     select_route,
 )
 from .execution import RouteReceiptHooks, execute_streaming, run_preflighted_adapter
+from .gpu_admission import (
+    GPU_ADMISSION_SCHEMA_VERSION,
+    GPU_ADMISSION_STATUSES,
+    GpuAdmissionBroker,
+    GpuAdmissionCapacityError,
+    GpuAdmissionCancelledError,
+    GpuAdmissionError,
+    GpuAdmissionExpiredError,
+    GpuAdmissionIdentityError,
+    GpuAdmissionLease,
+    GpuAdmissionLeaseError,
+    GpuAdmissionReceipt,
+    GpuAdmissionRequest,
+    GpuPriority,
+    gpu_admission_broker,
+    priority_for_inference_context,
+)
 from .proofs import build_model_route_proof, canonical_proof_hash, proof_is_fresh, validate_model_route_proof
 from .receipts import CostEstimate, ReceiptPersistenceResult, RouteAttemptReceipt, RouteReceipt, TokenUsage
 from .repository import ModelFabricRepository, ProofPersistenceResult, model_fabric_repository
@@ -67,6 +84,21 @@ __all__ = [
     "RouteReceiptHooks",
     "execute_streaming",
     "run_preflighted_adapter",
+    "GPU_ADMISSION_SCHEMA_VERSION",
+    "GPU_ADMISSION_STATUSES",
+    "GpuAdmissionBroker",
+    "GpuAdmissionCapacityError",
+    "GpuAdmissionCancelledError",
+    "GpuAdmissionError",
+    "GpuAdmissionExpiredError",
+    "GpuAdmissionIdentityError",
+    "GpuAdmissionLease",
+    "GpuAdmissionLeaseError",
+    "GpuAdmissionReceipt",
+    "GpuAdmissionRequest",
+    "GpuPriority",
+    "gpu_admission_broker",
+    "priority_for_inference_context",
     "build_model_route_proof",
     "canonical_proof_hash",
     "proof_is_fresh",

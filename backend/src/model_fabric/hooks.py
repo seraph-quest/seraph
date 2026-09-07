@@ -212,6 +212,26 @@ class RouteReceiptSession:
         self._finalized = True
         return result
 
+    async def finalize_denied(
+        self,
+        *,
+        decision: RouteDecision | None,
+        reason_codes: tuple[str, ...],
+        fallback_reason_code: str = "no_compliant_route",
+    ) -> ReceiptPersistenceResult:
+        """Persist a zero-attempt denial when admission never starts an attempt."""
+        if self._finalized or self._active is not None or self._completed:
+            raise ValueError("route receipt session is not ready to finalize as denied")
+        result = await persist_denied_route(
+            context=self._context,
+            decision=decision,
+            reason_codes=reason_codes,
+            fallback_reason_code=fallback_reason_code,
+            repository=self._repository,
+        )
+        self._finalized = True
+        return result
+
 
 class PersistedRouteReceiptHooks:
     """Single-attempt convenience implementing the execution RouteReceiptHooks protocol."""
@@ -313,6 +333,7 @@ async def persist_denied_route(
     context: InferenceRequestContext,
     decision: RouteDecision | None,
     reason_codes: tuple[str, ...],
+    fallback_reason_code: str = "no_compliant_route",
     repository: ModelFabricRepository = model_fabric_repository,
 ) -> ReceiptPersistenceResult:
     """Persist an operator-visible, zero-transport receipt for unroutable work."""
@@ -336,7 +357,7 @@ async def persist_denied_route(
         finished_at=now,
         latency_ms=0,
         attempts=(),
-        fallback_reason_code="no_compliant_route",
+        fallback_reason_code=fallback_reason_code,
         degradation_codes=safe_reasons,
         cost=CostEstimate(),
         usage=TokenUsage(),

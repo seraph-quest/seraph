@@ -16,8 +16,10 @@ from src.workspace.state_registry import (
     WorkspaceStateRegistry,
     canonical_workspace_config,
     canonical_workspace_database_path,
+    canonical_workspace_inventory,
     canonical_workspace_registry,
     canonical_workspace_root,
+    production_workspace_inventory,
 )
 from src.workspace.lifecycle import (
     ARCHIVE_FORMAT,
@@ -52,8 +54,10 @@ __all__ = [
     "WorkspaceStateRegistry",
     "canonical_workspace_config",
     "canonical_workspace_database_path",
+    "canonical_workspace_inventory",
     "canonical_workspace_registry",
     "canonical_workspace_root",
+    "production_workspace_inventory",
     "ARCHIVE_FORMAT",
     "ARCHIVE_VERSION",
     "DEFAULT_RETENTION",

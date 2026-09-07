@@ -12,6 +12,7 @@ import logging
 import math
 import os
 import time
+from collections.abc import Callable
 from fnmatch import fnmatchcase
 from threading import Lock
 from time import monotonic
@@ -29,11 +30,18 @@ from src.approval.runtime import get_current_session_id, get_current_trust_princ
 from src.audit.repository import audit_repository
 from src.local_runtime_profiles import local_runtime_profile
 from src.model_fabric.contracts import (
+    InferenceRequestContext,
     NoCompliantModelRouteError,
     ProviderProfile,
     SUPPORTED_SECRET_REFS,
     finalized_openai_compatible_body,
     transport_model_for_provider,
+)
+from src.model_fabric.gpu_admission import (
+    GpuAdmissionError,
+    GpuAdmissionIdentityError,
+    GpuAdmissionRequest,
+    gpu_admission_broker,
 )
 from src.operators.local_codex import reject_legacy_external_agent_model
 from src.security.trust_contract import (
@@ -2883,11 +2891,22 @@ def _finalize_route_receipt_sync(
         )
 
 
-def _persist_denied_route_sync(context: Any, decision: Any, reasons: tuple[str, ...]) -> None:
+def _persist_denied_route_sync(
+    context: Any,
+    decision: Any,
+    reasons: tuple[str, ...],
+    *,
+    fallback_reason_code: str = "no_compliant_route",
+) -> None:
     from src.model_fabric import persist_denied_route
 
     result = _run_receipt_hook_sync(
-        persist_denied_route(context=context, decision=decision, reason_codes=reasons)
+        persist_denied_route(
+            context=context,
+            decision=decision,
+            reason_codes=reasons,
+            fallback_reason_code=fallback_reason_code,
+        )
     )
     if result is not None and not bool(getattr(result, "persisted", False)):
         _log_llm_runtime_event_sync(
@@ -2896,6 +2915,92 @@ def _persist_denied_route_sync(context: Any, decision: Any, reasons: tuple[str, 
             details={"outcome": "denied", "error_code": getattr(result, "error_code", "receipt_persistence_failed")},
             request_id=getattr(context, "request_id", None),
         )
+
+
+def _requires_sync_gpu_admission(context: Any | None) -> bool:
+    """Return whether a sync completion carries the canonical broker contract."""
+    if context is None:
+        return False
+    if isinstance(context, InferenceRequestContext):
+        return True
+    # Test doubles and transitional callers may still provide a context-like
+    # object. Only a registered string route opts that object into admission;
+    # malformed canonical contexts fail closed below once identified.
+    runtime_path = getattr(context, "runtime_path", None)
+    if not isinstance(runtime_path, str):
+        return False
+    from src.model_fabric.caller_context import is_canonical_inference_route
+
+    return is_canonical_inference_route(runtime_path)
+
+
+def _persist_sync_gpu_admission_denial(
+    *,
+    context: Any,
+    decision: Any,
+    reason_codes: tuple[str, ...],
+) -> None:
+    """Best-effort route denial persistence while preserving the admission error."""
+    try:
+        _persist_denied_route_sync(
+            context,
+            decision,
+            reason_codes,
+            fallback_reason_code="gpu_admission_rejected",
+        )
+    except Exception:
+        # Admission remains fail-closed even when the optional persistence hook
+        # is unavailable during shutdown or an isolated test.
+        logger.warning("Failed to persist synchronous GPU admission denial", exc_info=True)
+
+
+def _execute_sync_with_gpu_admission(
+    *,
+    context: Any | None,
+    decision: Any,
+    operation_id: str,
+    operation: Callable[[], Any],
+) -> Any:
+    """Run one blocking route callback under the shared one-GPU broker."""
+    if not _requires_sync_gpu_admission(context):
+        return operation()
+    try:
+        request = GpuAdmissionRequest.from_inference_context(
+            context,
+            operation_id=operation_id,
+        )
+    except (TypeError, ValueError) as error:
+        reasons = ("gpu_admission_rejected", "gpu_admission_identity_conflict")
+        _persist_sync_gpu_admission_denial(
+            context=context,
+            decision=decision,
+            reason_codes=reasons,
+        )
+        raise GpuAdmissionIdentityError(
+            "canonical synchronous inference requires a valid GPU admission owner context"
+        ) from error
+    try:
+        return gpu_admission_broker.execute_sync(request, operation)
+    except GpuAdmissionError as error:
+        _persist_sync_gpu_admission_denial(
+            context=context,
+            decision=decision,
+            reason_codes=(
+                "gpu_admission_rejected",
+                f"gpu_admission_{error.code}",
+            ),
+        )
+        raise
+    except GpuAdmissionIdentityError:
+        _persist_sync_gpu_admission_denial(
+            context=context,
+            decision=decision,
+            reason_codes=(
+                "gpu_admission_rejected",
+                "gpu_admission_identity_conflict",
+            ),
+        )
+        raise
 
 
 def _reserved_output_tokens_from_kwargs(
@@ -3296,36 +3401,55 @@ class FallbackLiteLLMModel(BaseLiteLLMModel):
                         for rejection in getattr(route_decision, "rejections", ())
                     )
                     continue
-                if request_context is not None:
-                    governed_attempted = True
-                if receipt_session is not None:
-                    receipt_session.attempt_started(
-                        route_decision,
-                        capability_proof_hashes=proof_hashes,
-                    )
-                    route_attempt_started = True
+                admission_operation_id = (
+                    getattr(route_decision, "attempt_id", None)
+                    or f"{getattr(governed_context, 'request_id', request_id)}:{target.get('profile') or target['model_id']}"
+                )
                 if is_primary:
                     primary_attempted = True
-                    if governed_context is not None:
-                        governed_response, raw_payload = _governed_openai_chat_completion(
-                            decision=route_decision,
-                            context=governed_context,
-                            body=transport_body,
-                            api_key=target.get("api_key"),
+
+                    def invoke_primary_transport() -> tuple[Any, Any]:
+                        nonlocal governed_attempted, route_attempt_started
+                        if receipt_session is not None:
+                            receipt_session.attempt_started(
+                                route_decision,
+                                capability_proof_hashes=proof_hashes,
+                            )
+                            route_attempt_started = True
+                        governed_attempted = request_context is not None
+                        if governed_context is not None:
+                            governed_response, raw_payload = _governed_openai_chat_completion(
+                                decision=route_decision,
+                                context=governed_context,
+                                body=transport_body,
+                                api_key=target.get("api_key"),
+                            )
+                            return (
+                                _governed_agent_chat_message(
+                                    governed_response,
+                                    raw=raw_payload,
+                                    stop_sequences=stop_sequences,
+                                ),
+                                raw_payload,
+                            )
+                        return (
+                            BaseLiteLLMModel.generate(
+                                self,
+                                target_messages,
+                                stop_sequences=stop_sequences,
+                                response_format=response_format,
+                                tools_to_call_from=tools_to_call_from,
+                                **kwargs,
+                            ),
+                            None,
                         )
-                        response = _governed_agent_chat_message(
-                            governed_response,
-                            raw=raw_payload,
-                            stop_sequences=stop_sequences,
-                        )
-                    else:
-                        response = super().generate(
-                            target_messages,
-                            stop_sequences=stop_sequences,
-                            response_format=response_format,
-                            tools_to_call_from=tools_to_call_from,
-                            **kwargs,
-                        )
+
+                    response, raw_payload = _execute_sync_with_gpu_admission(
+                        context=governed_context,
+                        decision=route_decision,
+                        operation_id=str(admission_operation_id),
+                        operation=invoke_primary_transport,
+                    )
                     _mark_target_succeeded(
                         model_id=primary_model,
                         api_base=self.api_base,
@@ -3362,26 +3486,48 @@ class FallbackLiteLLMModel(BaseLiteLLMModel):
 
                 fallback_model = target["model"]
                 attempted_fallback_models.append(fallback_model.model_id)
-                if governed_context is not None:
-                    governed_response, raw_payload = _governed_openai_chat_completion(
-                        decision=route_decision,
-                        context=governed_context,
-                        body=transport_body,
-                        api_key=target.get("api_key"),
+
+                def invoke_fallback_transport() -> tuple[Any, Any]:
+                    nonlocal governed_attempted, route_attempt_started
+                    if receipt_session is not None:
+                        receipt_session.attempt_started(
+                            route_decision,
+                            capability_proof_hashes=proof_hashes,
+                        )
+                        route_attempt_started = True
+                    governed_attempted = request_context is not None
+                    if governed_context is not None:
+                        governed_response, raw_payload = _governed_openai_chat_completion(
+                            decision=route_decision,
+                            context=governed_context,
+                            body=transport_body,
+                            api_key=target.get("api_key"),
+                        )
+                        return (
+                            _governed_agent_chat_message(
+                                governed_response,
+                                raw=raw_payload,
+                                stop_sequences=stop_sequences,
+                            ),
+                            raw_payload,
+                        )
+                    return (
+                        fallback_model.generate(
+                            target_messages,
+                            stop_sequences=stop_sequences,
+                            response_format=response_format,
+                            tools_to_call_from=tools_to_call_from,
+                            **kwargs,
+                        ),
+                        None,
                     )
-                    response = _governed_agent_chat_message(
-                        governed_response,
-                        raw=raw_payload,
-                        stop_sequences=stop_sequences,
-                    )
-                else:
-                    response = fallback_model.generate(
-                        target_messages,
-                        stop_sequences=stop_sequences,
-                        response_format=response_format,
-                        tools_to_call_from=tools_to_call_from,
-                        **kwargs,
-                    )
+
+                response, raw_payload = _execute_sync_with_gpu_admission(
+                    context=governed_context,
+                    decision=route_decision,
+                    operation_id=str(admission_operation_id),
+                    operation=invoke_fallback_transport,
+                )
                 _mark_target_succeeded(
                     model_id=fallback_model.model_id,
                     api_base=fallback_model.api_base,
@@ -3433,6 +3579,30 @@ class FallbackLiteLLMModel(BaseLiteLLMModel):
                         ),
                     )
                 return response
+            except GpuAdmissionError as error:
+                if receipt_session is not None and route_attempt_started:
+                    receipt_session.attempt_finished(
+                        outcome="failed",
+                        error_code=f"gpu_admission_{error.code}",
+                        decision=route_decision,
+                        degradation_code="gpu_admission_rejected",
+                    )
+                    _finalize_route_receipt_sync(
+                        receipt_session,
+                        outcome="failed",
+                        request_id=request_id,
+                        fallback_reason_code="gpu_admission_rejected",
+                        degradation_codes=(
+                            "gpu_admission_rejected",
+                            f"gpu_admission_{error.code}",
+                        ),
+                    )
+                raise
+            except GpuAdmissionIdentityError:
+                # Identity validation and operation conflicts are admission
+                # denials; the helper has already attempted a zero-attempt
+                # receipt, and no fallback candidate may run.
+                raise
             except Exception as error:
                 if receipt_session is not None and route_attempt_started:
                     receipt_session.attempt_finished(
@@ -3734,26 +3904,42 @@ def completion_with_fallback_sync(
                         for rejection in getattr(route_decision, "rejections", ())
                     )
                     continue
-                if receipt_session is not None:
-                    receipt_session.attempt_started(
-                        route_decision,
-                        capability_proof_hashes=proof_hashes,
-                    )
-                    governed_attempted = True
-                    route_attempt_started = True
+                admission_operation_id = (
+                    getattr(route_decision, "attempt_id", None)
+                    or f"{getattr(governed_context, 'request_id', request_id)}:{target.get('profile') or target['model_id']}"
+                )
                 if is_primary:
                     primary_attempted = True
-                    if governed_context is not None:
-                        response, _raw_payload = _governed_openai_chat_completion(
-                            decision=route_decision,
-                            context=governed_context,
-                            body=transport_body,
-                            api_key=target.get("api_key"),
+
+                    def invoke_primary_transport() -> tuple[Any, Any]:
+                        nonlocal governed_attempted, route_attempt_started
+                        if receipt_session is not None:
+                            receipt_session.attempt_started(
+                                route_decision,
+                                capability_proof_hashes=proof_hashes,
+                            )
+                            route_attempt_started = True
+                        governed_attempted = request_context is not None
+                        if governed_context is not None:
+                            return _governed_openai_chat_completion(
+                                decision=route_decision,
+                                context=governed_context,
+                                body=transport_body,
+                                api_key=target.get("api_key"),
+                            )
+                        return (
+                            litellm.completion(
+                                **{**primary_kwargs, "messages": target_messages}
+                            ),
+                            None,
                         )
-                    else:
-                        response = litellm.completion(
-                            **{**primary_kwargs, "messages": target_messages}
-                        )
+
+                    response, _raw_payload = _execute_sync_with_gpu_admission(
+                        context=governed_context,
+                        decision=route_decision,
+                        operation_id=str(admission_operation_id),
+                        operation=invoke_primary_transport,
+                    )
                     _mark_target_succeeded(
                         model_id=primary_model,
                         api_base=primary_kwargs.get("api_base"),
@@ -3803,15 +3989,31 @@ def completion_with_fallback_sync(
                 )
                 fallback_model = _safe_model_name(fallback_kwargs)
                 attempted_fallback_models.append(fallback_model)
-                if governed_context is not None:
-                    response, _raw_payload = _governed_openai_chat_completion(
-                        decision=route_decision,
-                        context=governed_context,
-                        body=transport_body,
-                        api_key=target.get("api_key"),
-                    )
-                else:
-                    response = litellm.completion(**fallback_kwargs)
+
+                def invoke_fallback_transport() -> tuple[Any, Any]:
+                    nonlocal governed_attempted, route_attempt_started
+                    if receipt_session is not None:
+                        receipt_session.attempt_started(
+                            route_decision,
+                            capability_proof_hashes=proof_hashes,
+                        )
+                        route_attempt_started = True
+                    governed_attempted = request_context is not None
+                    if governed_context is not None:
+                        return _governed_openai_chat_completion(
+                            decision=route_decision,
+                            context=governed_context,
+                            body=transport_body,
+                            api_key=target.get("api_key"),
+                        )
+                    return litellm.completion(**fallback_kwargs), None
+
+                response, _raw_payload = _execute_sync_with_gpu_admission(
+                    context=governed_context,
+                    decision=route_decision,
+                    operation_id=str(admission_operation_id),
+                    operation=invoke_fallback_transport,
+                )
                 _mark_target_succeeded(
                     model_id=fallback_model,
                     api_base=target["api_base"],
@@ -3864,6 +4066,29 @@ def completion_with_fallback_sync(
                         ),
                     )
                 return response
+            except GpuAdmissionError as error:
+                if receipt_session is not None and route_attempt_started:
+                    receipt_session.attempt_finished(
+                        outcome="failed",
+                        error_code=f"gpu_admission_{error.code}",
+                        decision=route_decision,
+                        degradation_code="gpu_admission_rejected",
+                    )
+                    _finalize_route_receipt_sync(
+                        receipt_session,
+                        outcome="failed",
+                        request_id=request_id,
+                        fallback_reason_code="gpu_admission_rejected",
+                        degradation_codes=(
+                            "gpu_admission_rejected",
+                            f"gpu_admission_{error.code}",
+                        ),
+                    )
+                raise
+            except GpuAdmissionIdentityError:
+                # Admission identity and operation conflicts are terminal for
+                # this request; a fallback candidate must not run.
+                raise
             except Exception as error:
                 if receipt_session is not None and route_attempt_started:
                     receipt_session.attempt_finished(

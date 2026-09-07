@@ -15,6 +15,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 from enum import Enum
 import math
+import threading
 import time
 from typing import Any, Generic, TypeVar
 
@@ -286,7 +287,11 @@ class GpuAdmissionBroker(Generic[T]):
         self.max_queued = int(max_queued)
         self._clock = clock
         self._history_limit = int(history_limit)
-        self._condition = asyncio.Condition()
+        # Synchronous model callers may run in worker threads while async
+        # callers use other event loops. Keep one thread-safe state gate so
+        # both paths share the same serial admission lane.
+        self._condition = threading.Condition()
+        self._async_waiters: set[asyncio.Future[None]] = set()
         self._operations: dict[str, _QueuedOperation] = {}
         self._queue: list[str] = []
         self._active_operation_id: str | None = None
@@ -303,54 +308,61 @@ class GpuAdmissionBroker(Generic[T]):
     ) -> GpuAdmissionReceipt:
         """Accept one bounded operation without invoking its provider callback."""
         observed_at = self._clock() if now is None else float(now)
-        async with self._condition:
-            self._expire_locked(observed_at)
-            existing = self._operations.get(request.operation_id)
-            if existing is not None:
-                if existing.request != request:
-                    raise GpuAdmissionIdentityError(
-                        f"operation identity already belongs to a different request: {request.operation_id}"
-                    )
-                if existing.status in {"succeeded", "failed", "cancelled", "expired", "rejected"}:
-                    return self._receipt_locked(existing)
+        with self._condition:
+            return self._enqueue_locked(request, observed_at)
+
+    def _enqueue_locked(
+        self,
+        request: GpuAdmissionRequest,
+        observed_at: float,
+    ) -> GpuAdmissionReceipt:
+        self._expire_locked(observed_at)
+        existing = self._operations.get(request.operation_id)
+        if existing is not None:
+            if existing.request != request:
                 raise GpuAdmissionIdentityError(
-                    f"operation is already admitted and active: {request.operation_id}"
+                    f"operation identity already belongs to a different request: {request.operation_id}"
                 )
-            if request.deadline_at <= observed_at:
-                operation = self._record_terminal_locked(
-                    request, status="expired", reason_code="deadline_expired", observed_at=observed_at
-                )
-                self._last_degraded_reason = "deadline_expired"
-                raise GpuAdmissionExpiredError(
-                    "GPU operation deadline expired before admission",
-                    receipt=self._receipt_locked(operation),
-                )
-            if len(self._queue) >= self.max_queued:
-                operation = self._record_terminal_locked(
-                    request, status="rejected", reason_code="capacity_exhausted", observed_at=observed_at
-                )
-                self._last_degraded_reason = "capacity_exhausted"
-                raise GpuAdmissionCapacityError(
-                    "GPU admission queue is full",
-                    receipt=self._receipt_locked(operation),
-                )
-            self._sequence += 1
-            operation = _QueuedOperation(request=request, sequence=self._sequence, accepted_at=observed_at)
-            self._operations[request.operation_id] = operation
-            self._queue.append(request.operation_id)
-            # A newly accepted operation is a concrete recovery signal after
-            # a transient rejection, expiry, or provider failure.
-            self._last_degraded_reason = None
-            self._condition.notify_all()
-            return self._receipt_locked(operation)
+            if existing.status in {"succeeded", "failed", "cancelled", "expired", "rejected"}:
+                return self._receipt_locked(existing)
+            raise GpuAdmissionIdentityError(
+                f"operation is already admitted and active: {request.operation_id}"
+            )
+        if request.deadline_at <= observed_at:
+            operation = self._record_terminal_locked(
+                request, status="expired", reason_code="deadline_expired", observed_at=observed_at
+            )
+            self._last_degraded_reason = "deadline_expired"
+            raise GpuAdmissionExpiredError(
+                "GPU operation deadline expired before admission",
+                receipt=self._receipt_locked(operation),
+            )
+        if len(self._queue) >= self.max_queued:
+            operation = self._record_terminal_locked(
+                request, status="rejected", reason_code="capacity_exhausted", observed_at=observed_at
+            )
+            self._last_degraded_reason = "capacity_exhausted"
+            raise GpuAdmissionCapacityError(
+                "GPU admission queue is full",
+                receipt=self._receipt_locked(operation),
+            )
+        self._sequence += 1
+        operation = _QueuedOperation(request=request, sequence=self._sequence, accepted_at=observed_at)
+        self._operations[request.operation_id] = operation
+        self._queue.append(request.operation_id)
+        # A newly accepted operation is a concrete recovery signal after
+        # a transient rejection, expiry, or provider failure.
+        self._last_degraded_reason = None
+        self._notify_all_locked()
+        return self._receipt_locked(operation)
 
     async def acquire(self, operation_id: str, *, now: float | None = None) -> GpuAdmissionLease:
         """Claim the highest-priority ready operation, or wait until it is ready."""
         operation_id = str(operation_id or "").strip()
         initial_now = self._clock() if now is None else float(now)
         first_pass = True
-        async with self._condition:
-            while True:
+        while True:
+            with self._condition:
                 observed_at = initial_now if first_pass else self._clock()
                 first_pass = False
                 self._expire_locked(observed_at)
@@ -366,7 +378,7 @@ class GpuAdmissionBroker(Generic[T]):
                     operation.started_at = observed_at
                     operation.fencing_token = self._fencing_token
                     self._active_operation_id = operation_id
-                    self._condition.notify_all()
+                    self._notify_all_locked()
                     return GpuAdmissionLease(
                         operation_id=operation_id,
                         job_id=operation.request.job_id,
@@ -378,10 +390,17 @@ class GpuAdmissionBroker(Generic[T]):
                 if remaining <= 0:
                     self._expire_locked(self._clock())
                     continue
-                try:
-                    await asyncio.wait_for(self._condition.wait(), timeout=remaining)
-                except asyncio.TimeoutError:
-                    self._expire_locked(self._clock())
+                waiter = asyncio.get_running_loop().create_future()
+                self._async_waiters.add(waiter)
+            try:
+                await asyncio.wait_for(waiter, timeout=remaining)
+            except asyncio.TimeoutError:
+                # The deadline remains the hard upper bound if a condition
+                # notification races event-loop wake-up.
+                continue
+            finally:
+                with self._condition:
+                    self._async_waiters.discard(waiter)
 
     async def release(
         self,
@@ -393,7 +412,7 @@ class GpuAdmissionBroker(Generic[T]):
         """Release one lease, rejecting stale owners and fencing tokens."""
         if outcome not in {"succeeded", "failed", "cancelled"}:
             raise ValueError("GPU release outcome must be succeeded, failed, or cancelled")
-        async with self._condition:
+        with self._condition:
             operation = self._operations.get(lease.operation_id)
             if (
                 operation is None
@@ -419,7 +438,7 @@ class GpuAdmissionBroker(Generic[T]):
                 self._last_degraded_reason = reason_code or outcome
             else:
                 self._last_degraded_reason = None
-            self._condition.notify_all()
+            self._notify_all_locked()
             return self._receipt_locked(operation)
 
     async def cancel(
@@ -431,7 +450,7 @@ class GpuAdmissionBroker(Generic[T]):
         reason_code: str = "cancelled",
     ) -> GpuAdmissionReceipt:
         """Cancel queued work; active work is marked for cancellation after release."""
-        async with self._condition:
+        with self._condition:
             operation = self._operations.get(str(operation_id or "").strip())
             if operation is None:
                 raise KeyError(operation_id)
@@ -445,7 +464,7 @@ class GpuAdmissionBroker(Generic[T]):
                 operation.reason_code = reason_code
                 operation.finished_at = self._clock()
                 self._last_degraded_reason = reason_code
-                self._condition.notify_all()
+                self._notify_all_locked()
                 return self._receipt_locked(operation)
             if operation.status == "running":
                 if (
@@ -461,14 +480,14 @@ class GpuAdmissionBroker(Generic[T]):
                 operation.cancel_requested = True
                 operation.reason_code = reason_code
                 if self._active_task is not None:
-                    self._active_task.cancel()
-                self._condition.notify_all()
+                    self._cancel_active_task()
+                self._notify_all_locked()
                 return self._receipt_locked(operation)
             return self._receipt_locked(operation)
 
     async def status(self) -> dict[str, object]:
         """Return an operator-safe broker receipt with no queued payloads."""
-        async with self._condition:
+        with self._condition:
             self._expire_locked(self._clock())
             active = self._operations.get(self._active_operation_id or "")
             queued = [
@@ -511,7 +530,7 @@ class GpuAdmissionBroker(Generic[T]):
             await asyncio.shield(self._cancel_after_wait(request))
             raise
         active_task = asyncio.current_task()
-        self._active_task = active_task
+        self._bind_async_task(lease, active_task)
         cancellation_requests_at_start = (
             active_task.cancelling() if active_task is not None else 0
         )
@@ -547,6 +566,117 @@ class GpuAdmissionBroker(Generic[T]):
             )
         return result
 
+    def execute_sync(
+        self,
+        request: GpuAdmissionRequest,
+        operation: Callable[[], T],
+        *,
+        now: float | None = None,
+    ) -> T:
+        """Run one blocking provider callback under the shared GPU lease.
+
+        Synchronous model-fabric callers are expected to invoke this from a
+        worker thread (for example through ``asyncio.to_thread``). The blocking
+        path uses the same state and condition as async callers, without
+        binding the shared broker to one event loop.
+        """
+        observed_at = self._clock() if now is None else float(now)
+        with self._condition:
+            self._enqueue_locked(request, observed_at)
+        lease = self._acquire_sync(request.operation_id, now=now)
+        with self._condition:
+            self._active_task = None
+        try:
+            result = operation()
+        except BaseException:
+            self._release_sync(lease, outcome="failed", reason_code="provider_failed")
+            raise
+        receipt = self._release_sync(lease, outcome="succeeded")
+        if receipt.status == "cancelled":
+            raise GpuAdmissionCancelledError(
+                "GPU operation was cancelled before completion",
+                receipt=receipt,
+            )
+        return result
+
+    def _acquire_sync(
+        self,
+        operation_id: str,
+        *,
+        now: float | None = None,
+    ) -> GpuAdmissionLease:
+        operation_id = str(operation_id or "").strip()
+        initial_now = self._clock() if now is None else float(now)
+        first_pass = True
+        with self._condition:
+            while True:
+                observed_at = initial_now if first_pass else self._clock()
+                first_pass = False
+                self._expire_locked(observed_at)
+                operation = self._operations.get(operation_id)
+                if operation is None:
+                    raise KeyError(operation_id)
+                if operation.status != "queued":
+                    self._raise_terminal_locked(operation)
+                if self._active_operation_id is None and self._select_next_locked() == operation_id:
+                    self._queue.remove(operation_id)
+                    self._fencing_token += 1
+                    operation.status = "running"
+                    operation.started_at = observed_at
+                    operation.fencing_token = self._fencing_token
+                    self._active_operation_id = operation_id
+                    self._notify_all_locked()
+                    return GpuAdmissionLease(
+                        operation_id=operation_id,
+                        job_id=operation.request.job_id,
+                        owner_id=operation.request.owner_id,
+                        fencing_token=self._fencing_token,
+                        priority=operation.request.priority,
+                    )
+                remaining = operation.request.deadline_at - self._clock()
+                if remaining <= 0:
+                    self._expire_locked(self._clock())
+                    continue
+                self._condition.wait(timeout=remaining)
+
+    def _release_sync(
+        self,
+        lease: GpuAdmissionLease,
+        *,
+        outcome: str = "succeeded",
+        reason_code: str | None = None,
+    ) -> GpuAdmissionReceipt:
+        if outcome not in {"succeeded", "failed", "cancelled"}:
+            raise ValueError("GPU release outcome must be succeeded, failed, or cancelled")
+        with self._condition:
+            operation = self._operations.get(lease.operation_id)
+            if (
+                operation is None
+                or self._active_operation_id != lease.operation_id
+                or operation.status != "running"
+                or operation.request.owner_id != lease.owner_id
+                or operation.fencing_token != lease.fencing_token
+            ):
+                receipt = self._receipt_for_lease_locked(lease, reason_code="stale_owner_or_fencing_token")
+                raise GpuAdmissionLeaseError("GPU lease owner or fencing token is stale", receipt=receipt)
+            if operation.cancel_requested:
+                outcome = "cancelled"
+                reason_code = operation.reason_code or reason_code or "cancelled"
+            elif outcome == "cancelled" and reason_code is None:
+                reason_code = "cancelled"
+            observed_at = self._clock()
+            operation.status = outcome
+            operation.reason_code = reason_code
+            operation.finished_at = observed_at
+            self._active_operation_id = None
+            self._active_task = None
+            if outcome != "succeeded":
+                self._last_degraded_reason = reason_code or outcome
+            else:
+                self._last_degraded_reason = None
+            self._notify_all_locked()
+            return self._receipt_locked(operation)
+
     async def stream(
         self,
         request: GpuAdmissionRequest,
@@ -562,7 +692,7 @@ class GpuAdmissionBroker(Generic[T]):
             await asyncio.shield(self._cancel_after_wait(request))
             raise
         active_task = asyncio.current_task()
-        self._active_task = active_task
+        self._bind_async_task(lease, active_task)
         cancellation_requests_at_start = (
             active_task.cancelling() if active_task is not None else 0
         )
@@ -606,21 +736,21 @@ class GpuAdmissionBroker(Generic[T]):
 
     async def reset(self) -> None:
         """Clear process-local state for isolated tests or a controlled restart."""
-        async with self._condition:
+        with self._condition:
             if self._active_operation_id is not None:
                 raise RuntimeError("cannot reset an active GPU admission lease")
             self._operations.clear()
             self._queue.clear()
             self._active_task = None
             self._last_degraded_reason = None
-            self._condition.notify_all()
+            self._notify_all_locked()
 
     async def _cancel_after_wait(
         self,
         request: GpuAdmissionRequest,
     ) -> GpuAdmissionReceipt | None:
         """Clean up a request whose caller was cancelled while waiting."""
-        async with self._condition:
+        with self._condition:
             operation = self._operations.get(request.operation_id)
             if operation is None:
                 return None
@@ -630,7 +760,7 @@ class GpuAdmissionBroker(Generic[T]):
                 operation.reason_code = "caller_cancelled"
                 operation.finished_at = self._clock()
                 self._last_degraded_reason = "caller_cancelled"
-                self._condition.notify_all()
+                self._notify_all_locked()
                 return self._receipt_locked(operation)
             if operation.status == "running" and operation.request.owner_id == request.owner_id:
                 if self._active_task is None:
@@ -646,8 +776,8 @@ class GpuAdmissionBroker(Generic[T]):
                 else:
                     operation.cancel_requested = True
                     operation.reason_code = "caller_cancelled"
-                    self._active_task.cancel()
-                self._condition.notify_all()
+                    self._cancel_active_task()
+                self._notify_all_locked()
             return self._receipt_locked(operation)
 
     async def _close_stream_iterator(self, iterator: AsyncIterator[T] | None) -> None:
@@ -661,6 +791,80 @@ class GpuAdmissionBroker(Generic[T]):
             # Preserve the provider/consumer error.  Async task cancellation is
             # cooperative; a non-compliant iterator remains a documented risk.
             return
+
+    def _notify_all_locked(self) -> None:
+        self._condition.notify_all()
+        waiters = tuple(self._async_waiters)
+        self._async_waiters.clear()
+        for waiter in waiters:
+            if waiter.done():
+                continue
+            try:
+                loop = waiter.get_loop()
+                if loop.is_closed():
+                    continue
+                loop.call_soon_threadsafe(self._resolve_async_waiter, waiter)
+            except (RuntimeError, AttributeError):
+                # The owning event loop may be shutting down while a sync
+                # caller releases the shared lease. State remains authoritative
+                # under the condition; a future waiter will re-check it.
+                continue
+
+    @staticmethod
+    def _resolve_async_waiter(waiter: asyncio.Future[None]) -> None:
+        if not waiter.done():
+            waiter.set_result(None)
+
+    def _bind_async_task(
+        self,
+        lease: GpuAdmissionLease,
+        task: asyncio.Task[Any] | None,
+    ) -> None:
+        """Bind the callback task atomically, closing a cancelled hand-off."""
+        with self._condition:
+            operation = self._operations.get(lease.operation_id)
+            if (
+                operation is None
+                or self._active_operation_id != lease.operation_id
+                or operation.status != "running"
+                or operation.request.owner_id != lease.owner_id
+                or operation.fencing_token != lease.fencing_token
+            ):
+                receipt = self._receipt_for_lease_locked(
+                    lease,
+                    reason_code="stale_owner_or_fencing_token",
+                )
+                raise GpuAdmissionLeaseError(
+                    "GPU lease owner or fencing token is stale",
+                    receipt=receipt,
+                )
+            if operation.cancel_requested:
+                operation.status = "cancelled"
+                operation.reason_code = operation.reason_code or "cancelled"
+                operation.finished_at = self._clock()
+                self._active_operation_id = None
+                self._active_task = None
+                self._last_degraded_reason = operation.reason_code
+                self._notify_all_locked()
+                receipt = self._receipt_locked(operation)
+                raise GpuAdmissionCancelledError(
+                    "GPU operation was cancelled before provider invocation",
+                    receipt=receipt,
+                )
+            self._active_task = task
+
+    def _cancel_active_task(self) -> None:
+        task = self._active_task
+        if task is None:
+            return
+        try:
+            loop = task.get_loop()
+            if loop.is_running() and loop is not asyncio.get_running_loop():
+                loop.call_soon_threadsafe(task.cancel)
+            else:
+                task.cancel()
+        except (RuntimeError, AttributeError):
+            task.cancel()
 
     def _select_next_locked(self) -> str | None:
         if not self._queue:
@@ -685,7 +889,7 @@ class GpuAdmissionBroker(Generic[T]):
             operation.finished_at = observed_at
             self._last_degraded_reason = "deadline_expired"
         if expired:
-            self._condition.notify_all()
+            self._notify_all_locked()
 
     def _record_terminal_locked(
         self,

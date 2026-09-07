@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -207,3 +208,12 @@ async def test_conflicting_idempotency_binding_is_rejected(async_db):
     await durable_job_repository.admit_job(_spec(job_id="job-743-3", dedupe_key="candidate-3"))
     with pytest.raises(DurableJobIdempotencyConflict):
         await durable_job_repository.admit_job(_spec(job_id="job-743-other", dedupe_key="candidate-3"))
+
+
+@pytest.mark.asyncio
+async def test_replay_with_changed_execution_contract_is_rejected(async_db):
+    await durable_job_repository.admit_job(_spec(job_id="job-743-4", dedupe_key="candidate-4"))
+    with pytest.raises(DurableJobIdempotencyConflict, match="priority"):
+        await durable_job_repository.admit_job(
+            replace(_spec(job_id="job-743-4", dedupe_key="candidate-4"), priority=10)
+        )

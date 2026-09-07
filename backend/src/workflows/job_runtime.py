@@ -97,6 +97,12 @@ def _as_utc(value: datetime | str | None) -> datetime | None:
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
 
 
+def _normalized_datetime(value: datetime | str | None) -> str | None:
+    """Normalize a timestamp before comparing an idempotent job binding."""
+    parsed = _as_utc(value)
+    return parsed.isoformat() if parsed is not None else None
+
+
 def _canonical(value: Any) -> str:
     return json.dumps(value, ensure_ascii=True, separators=(",", ":"), sort_keys=True, default=str)
 
@@ -166,6 +172,66 @@ def _binding(
         "idempotency_scope": idempotency_scope,
         "candidate_dedupe_key": dedupe_key,
     })
+
+
+def _idempotency_conflicts(
+    existing: WorkflowRunState,
+    spec: DurableJobSpec,
+    *,
+    input_digest: str,
+    authority_digest: str,
+) -> tuple[str, ...]:
+    """Return immutable admission fields that differ from an existing job.
+
+    The binding digest prevents two goal candidates from sharing a record, but
+    it is deliberately small.  Every execution-defining field must also match
+    on a replay; otherwise a caller could silently change authority, capability
+    or resource claims while receiving a deduped receipt.
+    """
+    identity = spec.identity
+    expected = {
+        "job_id": identity.job_id,
+        "owner_kind": identity.owner_kind,
+        "owner_principal_id": identity.owner_principal_id,
+        "job_kind": identity.job_kind,
+        "capability_version": identity.capability_version,
+        "session_id": spec.session_id,
+        "parent_job_id": spec.parent_job_id,
+        "goal_id": spec.goal_id,
+        "goal_revision": spec.goal_revision,
+        "plan_revision": spec.plan_revision,
+        "candidate_id": spec.candidate_id,
+        "priority": int(spec.priority),
+        "dependencies_json": _canonical(_string_list(spec.dependencies)),
+        "resource_claims_json": _canonical(_string_list(spec.resource_claims)),
+        "deadline_at": _normalized_datetime(spec.deadline_at),
+        "max_attempts": int(spec.max_attempts),
+        "service_id": spec.service_id,
+        "input_digest": input_digest,
+        "authority_digest": authority_digest,
+    }
+    actual = {
+        "job_id": existing.run_identity,
+        "owner_kind": existing.owner_kind,
+        "owner_principal_id": existing.owner_principal_id,
+        "job_kind": existing.job_kind,
+        "capability_version": existing.capability_version,
+        "session_id": existing.session_id,
+        "parent_job_id": existing.parent_job_id,
+        "goal_id": existing.goal_id,
+        "goal_revision": existing.goal_revision,
+        "plan_revision": existing.plan_revision,
+        "candidate_id": existing.candidate_id,
+        "priority": int(existing.priority),
+        "dependencies_json": existing.dependencies_json or "[]",
+        "resource_claims_json": existing.resource_claims_json or "[]",
+        "deadline_at": _normalized_datetime(existing.deadline_at),
+        "max_attempts": int(existing.max_attempts),
+        "service_id": existing.service_id,
+        "input_digest": existing.input_digest,
+        "authority_digest": existing.authority_digest,
+    }
+    return tuple(name for name in expected if actual[name] != expected[name])
 
 
 def _serialize(run: WorkflowRunState, *, receipt: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -301,8 +367,17 @@ class DurableJobRepository:
                 )
             ).scalars().first()
             if existing is not None:
-                if existing.run_identity != identity.job_id or existing.input_digest != input_digest:
-                    raise DurableJobIdempotencyConflict("idempotency binding already belongs to a different invocation")
+                conflicts = _idempotency_conflicts(
+                    existing,
+                    spec,
+                    input_digest=input_digest,
+                    authority_digest=_digest(spec.declared_authority),
+                )
+                if conflicts:
+                    raise DurableJobIdempotencyConflict(
+                        "idempotency binding conflicts with immutable admission fields: "
+                        + ", ".join(conflicts)
+                    )
                 receipt = {
                     "kind": "job_admission",
                     "status": "deduped",

@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from functools import partial
 import hashlib
@@ -23,6 +23,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from config.settings import settings
 from src.approval.runtime import (
     get_current_approval_mode,
+    get_current_trust_principal,
     reset_runtime_context,
     set_runtime_context,
 )
@@ -41,7 +42,25 @@ from src.guardian.goal_conditioned_loop import (
     build_goal_candidate_decision,
     dispatch_goal_candidate,
 )
-from src.security.trust_contract import AuthorityGrant, PrincipalType, TrustPrincipal
+from src.security.authority_envelope import (
+    CAPABILITY_POLICY_SCHEMA_VERSION,
+    CapabilityDecision,
+    CapabilityEnvelope,
+    CapabilityPolicy,
+    CapabilityScope,
+    GlobalCapabilityPolicy,
+    ResourceLimits,
+    authorize_capability,
+    approval_binding_digest,
+    issue_capability_authority,
+)
+from src.security.trust_contract import (
+    ApprovalBinding,
+    AuthorityGrant,
+    EgressClass,
+    PrincipalType,
+    TrustPrincipal,
+)
 from src.workflows.job_runtime import (
     DurableJobIdempotencyConflict,
     DurableJobIdentity,
@@ -60,6 +79,11 @@ DEFAULT_DEADLINE_SECONDS = 300
 MAX_DEADLINE_SECONDS = 900
 MAX_OUTPUT_BYTES = 4 * 1024 * 1024
 _RECONCILIATION_ACTION = "reconcile the durable job and any workspace effect before retry or cancel"
+_AUTHORITY_SOURCE_ID = "source:goal-snapshot-to-file"
+_AUTHORITY_MEMORY_BYTES = 256 * 1024 * 1024
+_AUTHORITY_PID_COUNT = 4
+_AUTHORITY_CPU_SECONDS = 60.0
+_AUTHORITY_POLICY_DEADLINE_SECONDS = DEFAULT_DEADLINE_SECONDS
 
 
 def _now() -> datetime:
@@ -197,6 +221,7 @@ class GoalSnapshotToFileResult(BaseModel):
     reconciliation_required: bool = False
     recovery_action: str | None = None
     durable_failure: dict[str, Any] | None = None
+    authority_receipt: dict[str, Any] | None = None
     evidence_refs: list[str] = Field(default_factory=list)
     reason: str = ""
 
@@ -216,6 +241,20 @@ class _Readback:
     content_sha256: str | None
     content: bytes | None
     reason: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class _AuthorityRequest:
+    """Typed, model-independent authority material for one file effect."""
+
+    envelope: CapabilityEnvelope
+    policy: CapabilityPolicy
+    global_policy: GlobalCapabilityPolicy
+    principal: TrustPrincipal
+    resource_limits: ResourceLimits
+    workspace_path: Path
+    approval_required: bool
+    approval_state: str
 
 
 def _job_id(candidate: GoalCandidateDecision, request: GoalSnapshotToFileRequest) -> str:
@@ -333,14 +372,425 @@ class GoalSnapshotToFileAdapter:
         jobs: Any | None = None,
         goals: Any | None = None,
         workflow_tool_provider: WorkflowToolProvider | None = None,
+        authority_policy: CapabilityPolicy | None = None,
+        global_authority_policy: GlobalCapabilityPolicy | None = None,
+        authority_principal: TrustPrincipal | None = None,
+        authority_approval: ApprovalBinding | None = None,
         clock: Callable[[], datetime] = _now,
     ) -> None:
         self.request = request
         self.jobs = jobs or durable_job_repository
         self.goals = goals or goal_repository
         self.workflow_tool_provider = workflow_tool_provider
+        self.authority_policy = authority_policy
+        self.global_authority_policy = global_authority_policy
+        self.authority_principal = authority_principal
+        self.authority_approval = authority_approval
         self.clock = clock
         self.last_receipt: dict[str, Any] | None = None
+
+    @staticmethod
+    def _approval_requirement(
+        context: dict[str, Any] | None,
+        *,
+        tool: Any | None = None,
+    ) -> tuple[bool, str]:
+        """Extract only the approval state needed by the authority request.
+
+        The workflow's free-form approval context is data.  A caller-provided
+        ``ApprovalBinding`` remains the only value that can satisfy an
+        approval-required policy; a string such as ``"approved"`` is never
+        promoted into authority by this adapter.
+        """
+
+        context = context if isinstance(context, dict) else {}
+        raw_state = context.get("approval_state", context.get("approval_status"))
+        state = _text(raw_state).lower()
+        explicit_required = context.get("requires_approval", context.get("approval_required"))
+        required = explicit_required is True or state in {
+            "required",
+            "pending",
+            "missing",
+            "denied",
+            "rejected",
+        }
+        if _text(context.get("risk_level")).lower() == "high":
+            required = True
+        # ApprovalTool checks pending approval while the high-risk runtime mode
+        # is active.  Detect that existing wrapper boundary without requiring
+        # every injectable test tool to impersonate the wrapper.
+        current = tool
+        visited: set[int] = set()
+        while current is not None and id(current) not in visited:
+            visited.add(id(current))
+            if hasattr(current, "force_approval") and hasattr(current, "wrapped_tool"):
+                if bool(getattr(current, "force_approval", False)) or get_current_approval_mode() == "high_risk":
+                    required = True
+                break
+            current = getattr(current, "wrapped_tool", None)
+        if not required:
+            return False, "not_required"
+        if state in {"approved", "allow", "allowed"}:
+            return True, "approved"
+        return True, state or "missing"
+
+    @staticmethod
+    def _safe_approval_context(context: dict[str, Any] | None) -> dict[str, Any]:
+        """Persist a digest and bounded metadata, never workflow arguments."""
+
+        context = context if isinstance(context, dict) else {}
+        safe: dict[str, Any] = {
+            "context_digest": _safe_digest(context),
+            "workflow_name": _text(context.get("workflow_name")) or None,
+            "risk_level": _text(context.get("risk_level")).lower() or None,
+            "requires_approval": bool(
+                context.get("requires_approval") is True
+                or context.get("approval_required") is True
+            ),
+            "approval_state": _text(
+                context.get("approval_state", context.get("approval_status"))
+            ).lower() or None,
+            "step_tools": sorted(
+                {
+                    _text(item)
+                    for item in context.get("step_tools", [])
+                    if _text(item)
+                }
+            ),
+            "execution_boundaries": sorted(
+                {
+                    _text(item)
+                    for item in context.get("execution_boundaries", [])
+                    if _text(item)
+                }
+            ),
+        }
+        return safe
+
+    def _authority_limits(self) -> ResourceLimits:
+        remaining = (self.request.deadline_at - self.clock()).total_seconds()
+        return ResourceLimits(
+            cpu_seconds=min(_AUTHORITY_CPU_SECONDS, max(remaining, 0.001)),
+            memory_bytes=_AUTHORITY_MEMORY_BYTES,
+            pid_count=_AUTHORITY_PID_COUNT,
+            output_bytes=MAX_OUTPUT_BYTES,
+            deadline_seconds=min(_AUTHORITY_POLICY_DEADLINE_SECONDS, max(remaining, 0.001)),
+        )
+
+    def _authenticated_principal(self, *, job_id: str) -> TrustPrincipal:
+        principal = self.authority_principal or get_current_trust_principal()
+        if principal is None:
+            raise ValueError("authenticated_owner_missing")
+        if principal.principal_id != self.request.owner_principal_id:
+            raise ValueError("authenticated_owner_mismatch")
+        if principal.session_id and principal.session_id != self.request.session_id:
+            raise ValueError("authenticated_owner_session_mismatch")
+        # The durable child job is the execution identity for this effect.  A
+        # trusted service principal may delegate its authenticated grant to
+        # that exact child identity; the authority gate still checks auth,
+        # principal type, and capability grant below.
+        return replace(
+            principal,
+            session_id=self.request.session_id,
+            job_id=job_id,
+        )
+
+    def _build_authority_request(
+        self,
+        *,
+        path: str,
+        goal_id: str,
+        job_id: str,
+        approval_context: dict[str, Any] | None,
+        workflow_tool: Any | None,
+    ) -> _AuthorityRequest:
+        root = canonical_workspace_root(settings.workspace_dir)
+        workspace_path = root.joinpath(*PurePosixPath(path).parts)
+        resource_limits = self._authority_limits()
+        approval_required, approval_state = self._approval_requirement(
+            approval_context,
+            tool=workflow_tool,
+        )
+        if self.authority_policy is None:
+            policy_limits = ResourceLimits(
+                cpu_seconds=_AUTHORITY_CPU_SECONDS,
+                memory_bytes=_AUTHORITY_MEMORY_BYTES,
+                pid_count=_AUTHORITY_PID_COUNT,
+                output_bytes=MAX_OUTPUT_BYTES,
+                deadline_seconds=_AUTHORITY_POLICY_DEADLINE_SECONDS,
+            )
+            scope = CapabilityScope(
+                operations=("write_file",),
+                paths=(str(root),),
+                sources=(_AUTHORITY_SOURCE_ID,),
+                egress_class=EgressClass.LOCAL_ONLY,
+            )
+            policy = CapabilityPolicy(
+                capability_id=CAPABILITY_ID,
+                capability_version=self.request.capability_version,
+                owner_id=self.request.owner_principal_id,
+                principal_type=PrincipalType.SERVICE,
+                scope=scope,
+                resource_limits=policy_limits,
+                goal_id=goal_id,
+                requires_approval=approval_required,
+                requires_audit=False,
+                expires_at=self.request.deadline_at.timestamp(),
+            )
+        else:
+            policy = self.authority_policy
+            if approval_required and not policy.requires_approval:
+                policy = replace(policy, requires_approval=True)
+        if self.global_authority_policy is None:
+            global_policy = GlobalCapabilityPolicy(
+                scope=policy.scope,
+                resource_limits=policy.resource_limits,
+                allowed_capabilities=(CAPABILITY_ID,),
+                allowed_versions=(self.request.capability_version,),
+                expires_at=self.request.deadline_at.timestamp(),
+            )
+        else:
+            global_policy = self.global_authority_policy
+        approval_required = approval_required or bool(policy.requires_approval)
+        if approval_required and approval_state == "not_required":
+            approval_state = "approved" if self.authority_approval is not None else "missing"
+        principal = self._authenticated_principal(job_id=job_id)
+        now = self.clock().timestamp()
+        authority = issue_capability_authority(
+            policy,
+            principal,
+            session_id=self.request.session_id,
+            job_id=job_id,
+            goal_id=goal_id,
+            now=now,
+            expires_at=self.request.deadline_at.timestamp(),
+        )
+        if self.authority_approval is not None:
+            authority = replace(
+                authority,
+                approval=self.authority_approval,
+                approval_digest=approval_binding_digest(self.authority_approval),
+            )
+        envelope = CapabilityEnvelope.create(
+            authority=authority,
+            operation="write_file",
+            resource_limits=resource_limits,
+            deadline_at=self.request.deadline_at.timestamp(),
+            now=now,
+            path=str(workspace_path),
+            source_id=_AUTHORITY_SOURCE_ID,
+            egress_class=EgressClass.LOCAL_ONLY,
+            goal_id=goal_id,
+            resource_type="workspace_file",
+            resource_id="goal-snapshot:" + _safe_digest(
+                {"goal_id": goal_id, "job_id": job_id, "path": path}
+            )[:24],
+        )
+        return _AuthorityRequest(
+            envelope=envelope,
+            policy=policy,
+            global_policy=global_policy,
+            principal=principal,
+            resource_limits=resource_limits,
+            workspace_path=workspace_path,
+            approval_required=approval_required,
+            approval_state=approval_state,
+        )
+
+    def _authority_failure_receipt(self, *, reason: str, job_id: str, path: str) -> dict[str, Any]:
+        return {
+            "schema_version": CAPABILITY_POLICY_SCHEMA_VERSION,
+            "allowed": False,
+            "effect": "deny",
+            "reason_code": reason,
+            "request_digest": _safe_digest({"job_id": job_id, "path": path}),
+            "decision_id": "authority_failure_" + _safe_digest({"job_id": job_id, "reason": reason})[:24],
+            "degradation": "blocked_before_effect",
+            "capability_id": CAPABILITY_ID,
+            "capability_version": self.request.capability_version,
+            "identity": {
+                "owner_digest": _safe_digest({"owner_id": self.request.owner_principal_id}),
+                "goal_digest": _safe_digest({"goal_id": self.request.goal_id}),
+                "session_digest": _safe_digest({"session_id": self.request.session_id}),
+                "job_digest": _safe_digest({"job_id": job_id}),
+            },
+            "scope": {
+                "operation": "write_file",
+                "path_digest": _safe_digest({"path": path}),
+                "source_digest": _safe_digest({"source_id": _AUTHORITY_SOURCE_ID}),
+                "egress_class": EgressClass.LOCAL_ONLY.value,
+            },
+            "content": {
+                "raw_content_stored": False,
+                "secret_values_stored": False,
+            },
+            "recovery": "operator_review_or_fresh_authority",
+        }
+
+    def _evaluate_authority(
+        self,
+        *,
+        path: str,
+        goal_id: str,
+        job_id: str,
+        approval_context: dict[str, Any] | None,
+        workflow_tool: Any | None,
+    ) -> tuple[_AuthorityRequest | None, CapabilityDecision | None, dict[str, Any], str]:
+        try:
+            material = self._build_authority_request(
+                path=path,
+                goal_id=goal_id,
+                job_id=job_id,
+                approval_context=approval_context,
+                workflow_tool=workflow_tool,
+            )
+        except Exception as exc:
+            reason = f"authority_request_invalid:{type(exc).__name__}"
+            return None, None, self._authority_failure_receipt(reason=reason, job_id=job_id, path=path), reason
+        try:
+            decision = authorize_capability(
+                material.envelope,
+                material.policy,
+                material.global_policy,
+                now=self.clock().timestamp(),
+            )
+            if not isinstance(decision, CapabilityDecision):
+                raise TypeError("authority_decision_invalid")
+        except Exception as exc:
+            reason = f"authority_evaluation_failed:{type(exc).__name__}"
+            return material, None, self._authority_failure_receipt(reason=reason, job_id=job_id, path=path), reason
+        return material, decision, dict(decision.receipt), decision.reason_code
+
+    @staticmethod
+    def _stable_authority_receipt(receipt: dict[str, Any]) -> dict[str, Any]:
+        """Drop per-attempt references before binding authority to idempotency."""
+
+        stable: dict[str, Any] = {}
+        for key in (
+            "schema_version",
+            "allowed",
+            "effect",
+            "reason_code",
+            "degradation",
+            "capability_id",
+            "capability_version",
+            "destination_digest",
+            "resource_digest",
+            "principal",
+            "scope",
+            "audit",
+            "resource_limits",
+            "content",
+            "recovery",
+        ):
+            if key in receipt:
+                stable[key] = receipt[key]
+        identity = receipt.get("identity")
+        if isinstance(identity, dict):
+            stable["identity"] = {
+                key: identity[key]
+                for key in ("owner_digest", "goal_digest", "session_digest", "job_digest")
+                if key in identity
+            }
+        authority = receipt.get("authority")
+        if isinstance(authority, dict):
+            stable["authority"] = {
+                "grant_present": bool(authority.get("grant_digest")),
+                "approval_present": bool(authority.get("approval_digest")),
+            }
+        return stable
+
+    def _recheck_authority(
+        self,
+        material: _AuthorityRequest,
+    ) -> tuple[CapabilityDecision | None, dict[str, Any], str]:
+        """Re-evaluate the same envelope after the durable lease is held."""
+
+        policy = self.authority_policy or material.policy
+        if material.approval_required and not policy.requires_approval:
+            policy = replace(policy, requires_approval=True)
+        global_policy = self.global_authority_policy or material.global_policy
+        try:
+            decision = authorize_capability(
+                material.envelope,
+                policy,
+                global_policy,
+                now=self.clock().timestamp(),
+            )
+            if not isinstance(decision, CapabilityDecision):
+                raise TypeError("authority_decision_invalid")
+        except Exception as exc:
+            reason = f"authority_recheck_failed:{type(exc).__name__}"
+            return None, self._authority_failure_receipt(
+                reason=reason,
+                job_id=material.envelope.job_id,
+                path=self.request.file_path,
+            ), reason
+        return decision, dict(decision.receipt), decision.reason_code
+
+    def _authority_declaration(
+        self,
+        *,
+        material: _AuthorityRequest | None,
+        decision: CapabilityDecision | None,
+        receipt: dict[str, Any],
+        approval_context: dict[str, Any] | None,
+        path: str,
+    ) -> dict[str, Any]:
+        effect = _text(getattr(decision, "effect", None)) or _text(receipt.get("effect")) or "deny"
+        stable_receipt = GoalSnapshotToFileAdapter._stable_authority_receipt(receipt)
+        stable_request_digest = _safe_digest(
+            {
+                "capability_id": CAPABILITY_ID,
+                "capability_version": self.request.capability_version,
+                "receipt": stable_receipt,
+            }
+        )
+        stable_reason = _text(getattr(decision, "reason_code", None)) or _text(receipt.get("reason_code"))
+        stable_decision_id = "cap_" + _safe_digest(
+            {"request": stable_request_digest, "reason": stable_reason}
+        )[:24]
+        return {
+            "capability_id": CAPABILITY_ID,
+            "capability_version": self.request.capability_version,
+            "required_grant": AuthorityGrant.CAPABILITY_EXECUTE.value,
+            "principal": material.principal.principal_id if material else self.request.owner_principal_id,
+            "authenticated": bool(material and material.principal.authenticated),
+            "owner_kind": "service",
+            "owner_principal_id": material.principal.principal_id if material else self.request.owner_principal_id,
+            "service_id": self.request.service_id,
+            "session_id": self.request.session_id,
+            "goal_id": material.envelope.goal_id if material else self.request.goal_id,
+            "authority_envelope": {
+                "schema_version": _text(receipt.get("schema_version")) or CAPABILITY_POLICY_SCHEMA_VERSION,
+                "allowed": bool(decision and decision.allowed),
+                "effect": effect,
+                "reason_code": stable_reason,
+                "decision_id": stable_decision_id,
+                "request_digest": stable_request_digest,
+                "receipt": stable_receipt,
+            },
+            "approval": {
+                "required": bool(material and material.approval_required),
+                "state": material.approval_state if material else "missing",
+                "binding_present": bool(material and material.envelope.authority and material.envelope.authority.approval),
+                "binding_digest": (
+                    material.envelope.authority.approval_digest
+                    if material and material.envelope.authority
+                    else ""
+                ),
+            },
+            "scope": {
+                "operation": "write_file",
+                "path_digest": _safe_digest({"path": path}),
+                "resource_limits_digest": material.resource_limits.digest() if material else None,
+            },
+            "approval_context": self._safe_approval_context(approval_context),
+            "permissions": {
+                "workspace_relative_output_only": True,
+                "allowed_step_tools": ["get_goals", "write_file"],
+            },
+        }
 
     async def execute(
         self,
@@ -377,26 +827,48 @@ class GoalSnapshotToFileAdapter:
         workflow_tool, approval_context, workflow_reason = self._resolve_workflow_tool(path)
         job_id = _job_id(candidate, self.request)
         runner_owner = f"{self.request.service_id}:{job_id}"
-        declared_authority = {
-            "capability_id": CAPABILITY_ID,
-            "capability_version": self.request.capability_version,
-            "required_grant": AuthorityGrant.CAPABILITY_EXECUTE.value,
-            "principal": self.request.owner_principal_id,
-            "owner_kind": "service",
-            "owner_principal_id": self.request.owner_principal_id,
-            "service_id": self.request.service_id,
-            "session_id": self.request.session_id,
-            "goal_id": candidate.goal_id,
-            "goal_revision": candidate.goal_revision,
-            "workflow_name": WORKFLOW_NAME,
-            "workflow_tool_name": "workflow_goal_snapshot_to_file",
-            "workflow_available": workflow_tool is not None,
-            "workflow_blocked_reason": workflow_reason,
-            "approval_context": approval_context or {},
-            "permissions": {
-                "workspace_relative_output_only": True,
-                "allowed_step_tools": ["get_goals", "write_file"],
-            },
+        if self.request.cancel_requested:
+            authority_material = None
+            authority_decision = None
+            authority_receipt = self._authority_failure_receipt(
+                reason="authority_not_evaluated_cancel_requested",
+                job_id=job_id,
+                path=path,
+            )
+            authority_reason = "cancel_requested"
+        else:
+            (
+                authority_material,
+                authority_decision,
+                authority_receipt,
+                authority_reason,
+            ) = self._evaluate_authority(
+                path=path,
+                goal_id=candidate.goal_id,
+                job_id=job_id,
+                approval_context=approval_context,
+                workflow_tool=workflow_tool,
+            )
+        declared_authority = self._authority_declaration(
+            material=authority_material,
+            decision=authority_decision,
+            receipt=authority_receipt,
+            approval_context=approval_context,
+            path=path,
+        )
+        declared_authority.update(
+            {
+                "goal_revision": candidate.goal_revision,
+                "workflow_name": WORKFLOW_NAME,
+                "workflow_tool_name": "workflow_goal_snapshot_to_file",
+                "workflow_available": workflow_tool is not None,
+                "workflow_blocked_reason": workflow_reason,
+            }
+        )
+        self.last_receipt = {
+            "authority_receipt": authority_receipt,
+            "authority_status": "allowed" if authority_decision and authority_decision.allowed else "denied",
+            "authority_reason": authority_reason,
         }
         spec = DurableJobSpec(
             identity=DurableJobIdentity(
@@ -427,15 +899,49 @@ class GoalSnapshotToFileAdapter:
         try:
             admission = await self.jobs.admit_job(spec)
         except DurableJobIdempotencyConflict:
+            if authority_decision is None or not authority_decision.allowed:
+                self._mark_durable_failure(
+                    job_id,
+                    operation="authority_denial_admission",
+                    error=ValueError("idempotency_conflict"),
+                )
+                return self._durable_blocked(
+                    job_id,
+                    fallback_reason=f"authority_denied:{authority_reason}",
+                )
             return self._blocked("idempotency_conflict", job_id=job_id)
         except Exception as exc:
+            if authority_decision is None or not authority_decision.allowed:
+                self._mark_durable_failure(
+                    job_id,
+                    operation="authority_denial_admission",
+                    error=exc,
+                )
+                return self._durable_blocked(
+                    job_id,
+                    fallback_reason=f"authority_denied:{authority_reason}",
+                )
             return self._blocked(f"job_admission_failed:{type(exc).__name__}", job_id=job_id)
         self._remember_projection(admission, job_id=job_id)
         admission_receipt_status = _text(admission.get("receipt", {}).get("status"))
         if admission_receipt_status == "deduped":
+            if not self.request.cancel_requested and (authority_decision is None or not authority_decision.allowed):
+                return await self._record_authority_denial(
+                    admission,
+                    job_id=job_id,
+                    reason=authority_reason,
+                    receipt=authority_receipt,
+                )
             return await self._replay_admission(admission, candidate, path)
         if _status(admission) == "failed":
             return self._failed("deadline_expired", job_id=job_id, durable_status="failed")
+        if not self.request.cancel_requested and (authority_decision is None or not authority_decision.allowed):
+            return await self._record_authority_denial(
+                admission,
+                job_id=job_id,
+                reason=authority_reason,
+                receipt=authority_receipt,
+            )
 
         try:
             queued = await self.jobs.queue_job(job_id)
@@ -519,12 +1025,47 @@ class GoalSnapshotToFileAdapter:
                 fencing_token=fencing_token,
             )
 
+        if authority_material is None:
+            return await self._record_authority_denial(
+                claimed,
+                job_id=job_id,
+                reason="authority_material_missing",
+                receipt=self._authority_failure_receipt(
+                    reason="authority_material_missing",
+                    job_id=job_id,
+                    path=path,
+                ),
+                owner=runner_owner,
+                fencing_token=fencing_token,
+            )
+        (
+            authority_decision,
+            authority_receipt,
+            authority_reason,
+        ) = self._recheck_authority(authority_material)
+        self.last_receipt = {
+            **(self.last_receipt or {}),
+            "authority_receipt": authority_receipt,
+            "authority_status": "allowed" if authority_decision and authority_decision.allowed else "denied",
+            "authority_reason": authority_reason,
+        }
+        if authority_decision is None or not authority_decision.allowed:
+            return await self._record_authority_denial(
+                claimed,
+                job_id=job_id,
+                reason=authority_reason,
+                receipt=authority_receipt,
+                owner=runner_owner,
+                fencing_token=fencing_token,
+            )
+
         try:
             raw_result, workflow_audit = await self._invoke_workflow(
                 workflow_tool,
                 path,
                 session_id=self.request.session_id,
                 job_id=job_id,
+                principal=authority_material.principal if authority_material is not None else None,
             )
         except Exception as exc:
             if type(exc).__name__ == "ApprovalRequired":
@@ -726,6 +1267,7 @@ class GoalSnapshotToFileAdapter:
             )
 
         self.last_receipt = {
+            **(self.last_receipt or {}),
             "job_id": job_id,
             "durable_status": "succeeded",
             "artifact_id": artifact_id,
@@ -802,14 +1344,11 @@ class GoalSnapshotToFileAdapter:
         *,
         session_id: str,
         job_id: str,
+        principal: TrustPrincipal | None = None,
     ) -> tuple[Any, dict[str, Any] | None]:
-        principal = TrustPrincipal(
-            principal_id=self.request.owner_principal_id,
-            principal_type=PrincipalType.SERVICE,
-            grants=(AuthorityGrant.CAPABILITY_EXECUTE,),
-            session_id=session_id,
-            job_id=job_id,
-        )
+        if principal is None:
+            raise PermissionError("authenticated_owner_missing")
+        effective_principal = principal
         call = partial(tool, file_path=path, sanitize_inputs_outputs=True)
         if self.workflow_tool_provider is not None:
             # The injectable boundary is deliberately synchronous for tests;
@@ -817,7 +1356,7 @@ class GoalSnapshotToFileAdapter:
             tokens = set_runtime_context(
                 session_id,
                 get_current_approval_mode(),
-                trust_principal=principal,
+                trust_principal=effective_principal,
             )
             try:
                 result = call()
@@ -827,7 +1366,7 @@ class GoalSnapshotToFileAdapter:
             tokens = set_runtime_context(
                 session_id,
                 get_current_approval_mode(),
-                trust_principal=principal,
+                trust_principal=effective_principal,
             )
             try:
                 run_context = contextvars.copy_context()
@@ -883,6 +1422,92 @@ class GoalSnapshotToFileAdapter:
             return _Readback(True, True, True, digest, content)
         except (OSError, ValueError) as exc:
             return _Readback(False, False, False, None, None, f"output_readback_failed:{type(exc).__name__}")
+
+    async def _record_authority_denial(
+        self,
+        admission: dict[str, Any],
+        *,
+        job_id: str,
+        reason: str,
+        receipt: dict[str, Any],
+        owner: str | None = None,
+        fencing_token: int | None = None,
+    ) -> GoalExecutionResult:
+        """Persist a blocked authority decision before any workflow effect."""
+
+        denial_reason = f"authority_denied:{reason}"
+        status = _status(admission) or "accepted"
+        self.last_receipt = {
+            **(self.last_receipt or {}),
+            "authority_receipt": receipt,
+            "authority_status": "denied",
+            "authority_reason": reason,
+        }
+        # A fresh accepted record can be durably converted to blocked without
+        # taking a lease.  This records the denial and leaves the capability
+        # unqueued, so the governed workflow cannot be invoked accidentally.
+        lease_kwargs = {
+            "owner": owner,
+            "fencing_token": fencing_token,
+        }
+        can_block = status in {"accepted", "queued"} or (
+            status == "running" and owner is not None and fencing_token is not None
+        )
+        if can_block:
+            effect = await self._record_effect(
+                job_id,
+                effect_type="authority_gate",
+                receipt_kind="effect",
+                status="blocked",
+                details={
+                    "decision": "deny",
+                    "reason_code": reason,
+                    "redacted_receipt": receipt,
+                },
+                **lease_kwargs,
+            )
+            if effect is None:
+                return self._durable_blocked(
+                    job_id,
+                    fallback_reason=f"authority_denial_effect_failed:{reason}",
+                    durable_status=status,
+                )
+            transitioned = await self._transition(
+                job_id,
+                "blocked",
+                reason=denial_reason,
+                **lease_kwargs,
+            )
+            if transitioned is None:
+                return self._durable_blocked(
+                    job_id,
+                    fallback_reason=f"authority_denial_transition_failed:{reason}",
+                    durable_status=status,
+                )
+            transitioned_status = _status(transitioned) or "blocked"
+            if transitioned_status != "blocked":
+                return self._durable_blocked(
+                    job_id,
+                    fallback_reason=f"authority_denial_not_blocked:{reason}",
+                    durable_status=transitioned_status,
+                )
+            return self._blocked(denial_reason, job_id=job_id, durable_status="blocked")
+
+        # An already-running or queued idempotent projection must not be
+        # claimed by a denied retry.  Leave an operator-visible reconciliation
+        # marker rather than pretending the decision was applied to it.
+        if status not in {"blocked", "failed", "cancelled"}:
+            self.last_receipt = {
+                **(self.last_receipt or {}),
+                "reconciliation_required": True,
+                "recovery_action": _RECONCILIATION_ACTION,
+                "authority_denial_unapplied": True,
+            }
+        return self._result_for_durable_status(
+            status,
+            denial_reason,
+            job_id=job_id,
+        )
 
     async def _record_effect(self, job_id: str, **kwargs: Any) -> dict[str, Any] | None:
         try:
@@ -1173,11 +1798,19 @@ class GoalSnapshotToFileService:
         dispatcher: Callable[..., Any] | None = None,
         jobs: Any | None = None,
         workflow_tool_provider: WorkflowToolProvider | None = None,
+        authority_policy: CapabilityPolicy | None = None,
+        global_authority_policy: GlobalCapabilityPolicy | None = None,
+        authority_principal: TrustPrincipal | None = None,
+        authority_approval: ApprovalBinding | None = None,
     ) -> None:
         self.goals = goals or goal_repository
         self.dispatcher = dispatcher or dispatch_goal_candidate
         self.jobs = jobs
         self.workflow_tool_provider = workflow_tool_provider
+        self.authority_policy = authority_policy
+        self.global_authority_policy = global_authority_policy
+        self.authority_principal = authority_principal
+        self.authority_approval = authority_approval
 
     async def run(self, request: GoalSnapshotToFileRequest | dict[str, Any]) -> GoalSnapshotToFileResult:
         request = request if isinstance(request, GoalSnapshotToFileRequest) else GoalSnapshotToFileRequest.model_validate(request)
@@ -1192,6 +1825,10 @@ class GoalSnapshotToFileService:
             jobs=self.jobs,
             goals=self.goals,
             workflow_tool_provider=self.workflow_tool_provider,
+            authority_policy=self.authority_policy,
+            global_authority_policy=self.global_authority_policy,
+            authority_principal=self.authority_principal,
+            authority_approval=self.authority_approval,
         )
         outcome = await self.dispatcher(candidate, adapter=adapter)
         if not isinstance(outcome, GoalOutcomeReceipt):
@@ -1216,6 +1853,11 @@ class GoalSnapshotToFileService:
             durable_failure=(
                 dict(receipt["durable_failure"])
                 if isinstance(receipt.get("durable_failure"), dict)
+                else None
+            ),
+            authority_receipt=(
+                dict(receipt["authority_receipt"])
+                if isinstance(receipt.get("authority_receipt"), dict)
                 else None
             ),
             evidence_refs=list(outcome.evidence_refs),

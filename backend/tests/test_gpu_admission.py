@@ -246,6 +246,72 @@ async def test_late_callback_holds_gpu_until_provider_result_is_reconciled():
 
 
 @pytest.mark.asyncio
+async def test_active_deadline_watchdog_blocks_before_async_callback_returns():
+    clock = _Clock()
+    broker = GpuAdmissionBroker(clock=clock)
+    request = _request("watchdog-active", deadline_at=101.0)
+    follow_up_request = _request("watchdog-follow-up")
+    callback_started = asyncio.Event()
+    callback_cancelled = asyncio.Event()
+    release_callback = asyncio.Event()
+    follow_up_called = False
+
+    async def provider():
+        callback_started.set()
+        try:
+            await release_callback.wait()
+        except asyncio.CancelledError:
+            callback_cancelled.set()
+            await release_callback.wait()
+        return "late-result"
+
+    task = asyncio.create_task(broker.execute(request, provider, now=clock()))
+    await callback_started.wait()
+    clock.advance(1.0)
+    active = (await broker.status())["active"]
+    assert active["status"] == "blocked"
+    assert active["reason_code"] == "deadline_expired_active"
+    assert active["deadline_exceeded"] is True
+    assert active["callback_completed"] is False
+    assert active["cancel_requested"] is True
+    await callback_cancelled.wait()
+
+    with pytest.raises(GpuAdmissionLeaseError) as reconciliation_error:
+        await broker.reconcile(
+            request.operation_id,
+            owner_id=request.owner_id,
+            fencing_token=active["fencing_token"],
+        )
+    assert reconciliation_error.value.receipt.reason_code == "provider_callback_still_running"
+
+    async def follow_up_provider():
+        nonlocal follow_up_called
+        follow_up_called = True
+        return "follow-up-result"
+
+    follow_up = asyncio.create_task(broker.execute(follow_up_request, follow_up_provider))
+    await asyncio.sleep(0)
+    assert follow_up_called is False
+
+    release_callback.set()
+    with pytest.raises(GpuAdmissionUncertainError) as error:
+        await task
+    assert error.value.receipt.status == "blocked"
+    assert error.value.receipt.callback_completed is True
+
+    reconciled = await broker.reconcile(
+        request.operation_id,
+        owner_id=request.owner_id,
+        fencing_token=active["fencing_token"],
+        outcome="failed",
+        reason_code="provider_result_reconciled_failed",
+    )
+    assert reconciled.status == "failed"
+    assert await follow_up == "follow-up-result"
+    assert follow_up_called is True
+
+
+@pytest.mark.asyncio
 async def test_stale_owner_and_fencing_token_cannot_release_active_gpu():
     broker = GpuAdmissionBroker(clock=_Clock())
     request = _request("lease", owner_id="owner-a")

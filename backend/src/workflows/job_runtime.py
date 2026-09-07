@@ -631,7 +631,8 @@ class DurableJobRepository:
                 return _serialize(run, receipt={"kind": "claim", "status": "terminal_noop"})
             if run.status != "queued":
                 raise DurableJobTransitionError(f"only queued jobs may be claimed (current={run.status})")
-            if run.deadline_at and run.deadline_at <= now:
+            persisted_deadline = _as_utc(run.deadline_at)
+            if persisted_deadline and persisted_deadline <= now:
                 await db.execute(
                     update(WorkflowRunState)
                     .where(WorkflowRunState.run_identity == job_id, WorkflowRunState.status == "queued")
@@ -1032,7 +1033,8 @@ class DurableJobRepository:
             return
         if not owner or fencing_token is None or run.lease_owner != owner or run.fencing_token != fencing_token:
             raise DurableJobLeaseError("active owner lease and fencing token are required")
-        if run.lease_expires_at and run.lease_expires_at <= _utc_now():
+        persisted_expiry = _as_utc(run.lease_expires_at)
+        if persisted_expiry and persisted_expiry <= _utc_now():
             raise DurableJobLeaseError("job lease has expired")
 
     async def _fetch(self, db: Any, job_id: str) -> WorkflowRunState:

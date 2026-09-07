@@ -81,6 +81,8 @@ GPU_ADMISSION_STATUSES = frozenset(
 )
 GPU_ADMISSION_SCHEMA_VERSION = "seraph.gpu-admission.v1"
 GPU_RECONCILIATION_ACTION = "reconcile the provider result before releasing the GPU lease"
+GPU_ACTIVE_DEADLINE_REASON = "deadline_expired_active"
+GPU_CALLBACK_RUNNING_REASON = "provider_callback_still_running"
 
 
 class GpuAdmissionError(RuntimeError):
@@ -227,6 +229,8 @@ class GpuAdmissionReceipt:
     cancel_requested: bool = False
     reconciliation_required: bool = False
     recovery_action: str | None = None
+    deadline_exceeded: bool = False
+    callback_completed: bool = False
 
     def __post_init__(self) -> None:
         if self.status not in GPU_ADMISSION_STATUSES:
@@ -257,6 +261,8 @@ class GpuAdmissionReceipt:
             "cancel_requested": self.cancel_requested,
             "reconciliation_required": self.reconciliation_required,
             "recovery_action": self.recovery_action,
+            "deadline_exceeded": self.deadline_exceeded,
+            "callback_completed": self.callback_completed,
             "operator_visible": True,
         }
 
@@ -278,6 +284,7 @@ class _QueuedOperation:
     sequence: int
     accepted_at: float
     clock_offset: float = 0.0
+    watchdog: threading.Timer | None = None
     started_at: float | None = None
     finished_at: float | None = None
     status: str = "queued"
@@ -286,6 +293,8 @@ class _QueuedOperation:
     cancel_requested: bool = False
     reconciliation_required: bool = False
     recovery_action: str | None = None
+    deadline_exceeded: bool = False
+    callback_completed: bool = False
 
 
 T = TypeVar("T")
@@ -344,6 +353,7 @@ class GpuAdmissionBroker(Generic[T]):
         *,
         clock_offset: float = 0.0,
     ) -> GpuAdmissionReceipt:
+        self._mark_active_deadline_locked()
         self._expire_locked(observed_at)
         existing = self._operations.get(request.operation_id)
         if existing is not None:
@@ -407,6 +417,7 @@ class GpuAdmissionBroker(Generic[T]):
         first_pass = True
         while True:
             with self._condition:
+                self._mark_active_deadline_locked()
                 observed_at = initial_now if first_pass else self._clock()
                 first_pass = False
                 self._expire_locked(observed_at)
@@ -461,12 +472,15 @@ class GpuAdmissionBroker(Generic[T]):
             if (
                 operation is None
                 or self._active_operation_id != lease.operation_id
-                or operation.status != "running"
+                or operation.status not in {"running", "blocked"}
                 or operation.request.owner_id != lease.owner_id
                 or operation.fencing_token != lease.fencing_token
+                or (operation.status == "blocked" and not operation.callback_completed)
             ):
                 receipt = self._receipt_for_lease_locked(lease, reason_code="stale_owner_or_fencing_token")
                 raise GpuAdmissionLeaseError("GPU lease owner or fencing token is stale", receipt=receipt)
+            if operation.status == "blocked":
+                return self._finish_blocked_callback_locked(operation)
             observed_at = self._observed_at_locked(operation)
             if operation.request.deadline_at <= observed_at:
                 return self._hold_for_reconciliation_locked(
@@ -501,6 +515,7 @@ class GpuAdmissionBroker(Generic[T]):
     ) -> GpuAdmissionReceipt:
         """Cancel queued work; active work is marked for cancellation after release."""
         with self._condition:
+            self._mark_active_deadline_locked()
             operation = self._operations.get(str(operation_id or "").strip())
             if operation is None:
                 raise KeyError(operation_id)
@@ -544,6 +559,11 @@ class GpuAdmissionBroker(Generic[T]):
                         "GPU cancellation owner or fencing token is stale",
                         receipt=receipt,
                     )
+                if not operation.callback_completed:
+                    operation.cancel_requested = True
+                    self._cancel_active_task()
+                    self._notify_all_locked()
+                    return self._receipt_locked(operation)
                 return self._reconcile_locked(
                     operation,
                     outcome="cancelled",
@@ -554,6 +574,7 @@ class GpuAdmissionBroker(Generic[T]):
     async def status(self) -> dict[str, object]:
         """Return an operator-safe broker receipt with no queued payloads."""
         with self._condition:
+            self._mark_active_deadline_locked()
             self._expire_locked(self._clock())
             active = self._operations.get(self._active_operation_id or "")
             queued = [
@@ -597,12 +618,14 @@ class GpuAdmissionBroker(Generic[T]):
             raise
         active_task = asyncio.current_task()
         self._bind_async_task(lease, active_task)
+        self._start_deadline_watchdog(lease)
         cancellation_requests_at_start = (
             active_task.cancelling() if active_task is not None else 0
         )
         try:
             result = await operation()
         except asyncio.CancelledError:
+            self._mark_callback_completed(lease)
             receipt = await asyncio.shield(
                 self.release(lease, outcome="cancelled", reason_code="caller_cancelled")
             )
@@ -613,6 +636,7 @@ class GpuAdmissionBroker(Generic[T]):
                 )
             raise
         except BaseException as error:
+            self._mark_callback_completed(lease)
             receipt = await asyncio.shield(
                 self.release(lease, outcome="failed", reason_code="provider_failed")
             )
@@ -626,6 +650,7 @@ class GpuAdmissionBroker(Generic[T]):
             active_task is not None
             and active_task.cancelling() > cancellation_requests_at_start
         )
+        self._mark_callback_completed(lease)
         try:
             receipt = await self.release(
                 lease,
@@ -674,9 +699,11 @@ class GpuAdmissionBroker(Generic[T]):
         lease = self._acquire_sync(request.operation_id, now=now)
         with self._condition:
             self._active_task = None
+        self._start_deadline_watchdog(lease)
         try:
             result = operation()
         except BaseException as error:
+            self._mark_callback_completed(lease)
             receipt = self._release_sync(lease, outcome="failed", reason_code="provider_failed")
             if receipt.status == "blocked":
                 raise GpuAdmissionUncertainError(
@@ -684,6 +711,7 @@ class GpuAdmissionBroker(Generic[T]):
                     receipt=receipt,
                 ) from error
             raise
+        self._mark_callback_completed(lease)
         receipt = self._release_sync(lease, outcome="succeeded")
         if receipt.status == "blocked":
             raise GpuAdmissionUncertainError(
@@ -751,12 +779,15 @@ class GpuAdmissionBroker(Generic[T]):
             if (
                 operation is None
                 or self._active_operation_id != lease.operation_id
-                or operation.status != "running"
+                or operation.status not in {"running", "blocked"}
                 or operation.request.owner_id != lease.owner_id
                 or operation.fencing_token != lease.fencing_token
+                or (operation.status == "blocked" and not operation.callback_completed)
             ):
                 receipt = self._receipt_for_lease_locked(lease, reason_code="stale_owner_or_fencing_token")
                 raise GpuAdmissionLeaseError("GPU lease owner or fencing token is stale", receipt=receipt)
+            if operation.status == "blocked":
+                return self._finish_blocked_callback_locked(operation)
             observed_at = self._observed_at_locked(operation)
             if operation.request.deadline_at <= observed_at:
                 return self._hold_for_reconciliation_locked(
@@ -781,6 +812,140 @@ class GpuAdmissionBroker(Generic[T]):
             self._notify_all_locked()
             return self._receipt_locked(operation)
 
+    def _start_deadline_watchdog(self, lease: GpuAdmissionLease) -> None:
+        """Start one timer that marks the active callback uncertain at deadline."""
+        with self._condition:
+            operation = self._operations.get(lease.operation_id)
+            if (
+                operation is None
+                or self._active_operation_id != lease.operation_id
+                or operation.status != "running"
+                or operation.request.owner_id != lease.owner_id
+                or operation.fencing_token != lease.fencing_token
+            ):
+                receipt = self._receipt_for_lease_locked(
+                    lease,
+                    reason_code="stale_owner_or_fencing_token",
+                )
+                raise GpuAdmissionLeaseError(
+                    "GPU lease owner or fencing token is stale",
+                    receipt=receipt,
+                )
+            if operation.watchdog is not None:
+                return
+            delay = max(
+                operation.request.deadline_at - self._observed_at_locked(operation),
+                0.0,
+            )
+            timer = self._schedule_deadline_watchdog_locked(operation, delay)
+        timer.start()
+
+    def _schedule_deadline_watchdog_locked(
+        self,
+        operation: _QueuedOperation,
+        delay: float,
+    ) -> threading.Timer:
+        timer = threading.Timer(
+            max(float(delay), 0.0),
+            self._deadline_watchdog,
+            args=(operation.request.operation_id, operation.fencing_token),
+        )
+        timer.daemon = True
+        operation.watchdog = timer
+        return timer
+
+    def _deadline_watchdog(
+        self,
+        operation_id: str,
+        fencing_token: int | None,
+    ) -> None:
+        next_timer: threading.Timer | None = None
+        with self._condition:
+            operation = self._operations.get(operation_id)
+            if (
+                operation is None
+                or self._active_operation_id != operation_id
+                or operation.status != "running"
+                or operation.fencing_token != fencing_token
+                or operation.callback_completed
+            ):
+                return
+            operation.watchdog = None
+            remaining = operation.request.deadline_at - self._observed_at_locked(operation)
+            if remaining > 0:
+                next_timer = self._schedule_deadline_watchdog_locked(operation, remaining)
+            else:
+                self._mark_deadline_exceeded_locked(operation)
+        if next_timer is not None:
+            next_timer.start()
+
+    def _mark_active_deadline_locked(self) -> None:
+        """Mark an overdue active callback without releasing its GPU lease."""
+        operation = self._operations.get(self._active_operation_id or "")
+        if (
+            operation is None
+            or operation.status != "running"
+            or operation.callback_completed
+            or operation.watchdog is None
+            or operation.request.deadline_at > self._observed_at_locked(operation)
+        ):
+            return
+        self._mark_deadline_exceeded_locked(operation)
+
+    def _mark_deadline_exceeded_locked(self, operation: _QueuedOperation) -> None:
+        operation.status = "blocked"
+        operation.reason_code = GPU_ACTIVE_DEADLINE_REASON
+        operation.reconciliation_required = True
+        operation.recovery_action = GPU_RECONCILIATION_ACTION
+        operation.deadline_exceeded = True
+        # Async providers receive a cooperative cancellation request. Sync
+        # providers have no safe thread interrupt; their callback must return
+        # before the lease can be reconciled.
+        if self._active_task is not None:
+            operation.cancel_requested = True
+        self._last_degraded_reason = GPU_ACTIVE_DEADLINE_REASON
+        self._notify_all_locked()
+        if self._active_task is not None:
+            self._cancel_active_task()
+
+    def _mark_callback_completed(self, lease: GpuAdmissionLease) -> None:
+        """Close the callback boundary before attempting to release its lease."""
+        with self._condition:
+            operation = self._operations.get(lease.operation_id)
+            if (
+                operation is None
+                or self._active_operation_id != lease.operation_id
+                or operation.status not in {"running", "blocked"}
+                or operation.request.owner_id != lease.owner_id
+                or operation.fencing_token != lease.fencing_token
+            ):
+                receipt = self._receipt_for_lease_locked(
+                    lease,
+                    reason_code="stale_owner_or_fencing_token",
+                )
+                raise GpuAdmissionLeaseError(
+                    "GPU lease owner or fencing token is stale",
+                    receipt=receipt,
+                )
+            operation.callback_completed = True
+            self._cancel_watchdog_locked(operation)
+
+    def _cancel_watchdog_locked(self, operation: _QueuedOperation) -> None:
+        timer = operation.watchdog
+        operation.watchdog = None
+        if timer is not None:
+            timer.cancel()
+
+    def _finish_blocked_callback_locked(
+        self,
+        operation: _QueuedOperation,
+    ) -> GpuAdmissionReceipt:
+        operation.finished_at = self._observed_at_locked(operation)
+        self._cancel_watchdog_locked(operation)
+        self._active_task = None
+        self._notify_all_locked()
+        return self._receipt_locked(operation)
+
     def _observed_at_locked(self, operation: _QueuedOperation) -> float:
         """Read the current broker clock in the request's timestamp domain."""
         return self._clock() - operation.clock_offset
@@ -797,6 +962,9 @@ class GpuAdmissionBroker(Generic[T]):
         operation.reason_code = reason_code
         operation.reconciliation_required = True
         operation.recovery_action = GPU_RECONCILIATION_ACTION
+        operation.deadline_exceeded = True
+        operation.callback_completed = True
+        self._cancel_watchdog_locked(operation)
         operation.finished_at = observed_at
         # The callback has returned to this release boundary, but the provider
         # result remains uncertain. Keep _active_operation_id occupied so a
@@ -818,6 +986,7 @@ class GpuAdmissionBroker(Generic[T]):
         operation.reason_code = reason_code
         operation.reconciliation_required = False
         operation.recovery_action = None
+        self._cancel_watchdog_locked(operation)
         operation.finished_at = self._clock()
         self._active_operation_id = None
         self._active_task = None
@@ -866,6 +1035,15 @@ class GpuAdmissionBroker(Generic[T]):
                     "GPU reconciliation owner or fencing token is stale",
                     receipt=receipt,
                 )
+            if not operation.callback_completed:
+                receipt = self._receipt_locked(
+                    operation,
+                    reason_code=GPU_CALLBACK_RUNNING_REASON,
+                )
+                raise GpuAdmissionLeaseError(
+                    "GPU reconciliation is deferred until the provider callback completes",
+                    receipt=receipt,
+                )
             normalized_reason = str(reason_code or "").strip()
             if not normalized_reason:
                 raise ValueError("GPU reconciliation reason_code is required")
@@ -895,12 +1073,14 @@ class GpuAdmissionBroker(Generic[T]):
             active_task.cancelling() if active_task is not None else 0
         )
         stream_iterator: AsyncIterator[T] | None = None
+        self._start_deadline_watchdog(lease)
         try:
             stream_iterator = operation()
             async for item in stream_iterator:
                 yield item
         except BaseException as error:
             await self._close_stream_iterator(stream_iterator)
+            self._mark_callback_completed(lease)
             if isinstance(error, (asyncio.CancelledError, GeneratorExit)):
                 receipt = await asyncio.shield(
                     self.release(lease, outcome="cancelled", reason_code="caller_cancelled")
@@ -916,6 +1096,7 @@ class GpuAdmissionBroker(Generic[T]):
                 ) from error
             raise
         await self._close_stream_iterator(stream_iterator)
+        self._mark_callback_completed(lease)
         caller_cancelled = (
             active_task is not None
             and active_task.cancelling() > cancellation_requests_at_start
@@ -1067,7 +1248,11 @@ class GpuAdmissionBroker(Generic[T]):
             return
         try:
             loop = task.get_loop()
-            if loop.is_running() and loop is not asyncio.get_running_loop():
+            try:
+                current_loop = asyncio.get_running_loop()
+            except RuntimeError:
+                current_loop = None
+            if loop.is_running() and loop is not current_loop:
                 loop.call_soon_threadsafe(task.cancel)
             else:
                 task.cancel()
@@ -1187,6 +1372,8 @@ class GpuAdmissionBroker(Generic[T]):
             cancel_requested=operation.cancel_requested,
             reconciliation_required=operation.reconciliation_required,
             recovery_action=operation.recovery_action,
+            deadline_exceeded=operation.deadline_exceeded,
+            callback_completed=operation.callback_completed,
         )
 
     def _receipt_for_missing_lease(

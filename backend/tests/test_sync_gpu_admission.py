@@ -22,6 +22,7 @@ from src.model_fabric.gpu_admission import (
     GpuAdmissionCancelledError,
     GpuAdmissionExpiredError,
     GpuAdmissionIdentityError,
+    GpuAdmissionLeaseError,
     GpuAdmissionReceipt,
     GpuAdmissionRequest,
     GpuAdmissionUncertainError,
@@ -323,6 +324,76 @@ def test_late_sync_callback_holds_gpu_until_provider_result_is_reconciled():
         )
         assert reconciled.status == "failed"
         assert follow_up.result(timeout=1.0) == "follow-up-result"
+
+    assert follow_up_started.is_set() is True
+    assert asyncio.run(broker.status())["active"] is None
+
+
+def test_active_deadline_watchdog_blocks_before_sync_callback_returns():
+    clock = _Clock()
+    broker = GpuAdmissionBroker(clock=clock)
+    request = _request("watchdog-sync-active", deadline_at=101.0, clock=clock)
+    follow_up_request = _request("watchdog-sync-follow-up", clock=clock)
+    callback_started = threading.Event()
+    release_callback = threading.Event()
+    follow_up_started = threading.Event()
+
+    def provider() -> str:
+        callback_started.set()
+        assert release_callback.wait(timeout=5)
+        return "late-result"
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        task = pool.submit(broker.execute_sync, request, provider, now=clock())
+        assert callback_started.wait(timeout=5)
+        clock.advance(1.0)
+        active = asyncio.run(broker.status())["active"]
+        assert active["status"] == "blocked"
+        assert active["reason_code"] == "deadline_expired_active"
+        assert active["deadline_exceeded"] is True
+        assert active["callback_completed"] is False
+        assert active["cancel_requested"] is False
+
+        with pytest.raises(GpuAdmissionLeaseError) as reconciliation_error:
+            asyncio.run(
+                broker.reconcile(
+                    request.operation_id,
+                    owner_id=request.owner_id,
+                    fencing_token=active["fencing_token"],
+                )
+            )
+        assert reconciliation_error.value.receipt.reason_code == "provider_callback_still_running"
+
+        def follow_up_provider() -> str:
+            follow_up_started.set()
+            return "follow-up-result"
+
+        follow_up = pool.submit(
+            broker.execute_sync,
+            follow_up_request,
+            follow_up_provider,
+        )
+        for _ in range(50):
+            queued = asyncio.run(broker.status())["queued"]
+            if any(item["operation_id"] == follow_up_request.operation_id for item in queued):
+                break
+            time.sleep(0.01)
+        assert follow_up_started.is_set() is False
+
+        release_callback.set()
+        with pytest.raises(GpuAdmissionUncertainError):
+            task.result(timeout=5)
+        reconciled = asyncio.run(
+            broker.reconcile(
+                request.operation_id,
+                owner_id=request.owner_id,
+                fencing_token=active["fencing_token"],
+                outcome="failed",
+                reason_code="provider_result_reconciled_failed",
+            )
+        )
+        assert reconciled.status == "failed"
+        assert follow_up.result(timeout=5) == "follow-up-result"
 
     assert follow_up_started.is_set() is True
     assert asyncio.run(broker.status())["active"] is None

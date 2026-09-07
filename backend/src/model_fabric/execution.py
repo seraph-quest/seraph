@@ -249,8 +249,11 @@ async def run_preflighted_adapter(
         context,
         operation_id=decision.attempt_id or f"{context.request_id}:{decision.selected.profile.id}",
     )
+    admission_callback_started = False
 
     async def admitted_adapter() -> object:
+        nonlocal admission_callback_started
+        admission_callback_started = True
         await hooks.attempt_started(context=context, decision=decision)
         try:
             result = await adapter(decision.selected, False)
@@ -270,4 +273,21 @@ async def run_preflighted_adapter(
         )
         return result
 
-    return await gpu_admission_broker.execute(admission_request, admitted_adapter)
+    try:
+        return await gpu_admission_broker.execute(admission_request, admitted_adapter)
+    except GpuAdmissionError as error:
+        if not admission_callback_started:
+            repository = getattr(hooks, "_repository", None)
+            denied_kwargs = {
+                "context": context,
+                "decision": decision,
+                "reason_codes": (
+                    "gpu_admission_rejected",
+                    f"gpu_admission_{error.code}",
+                ),
+                "fallback_reason_code": "gpu_admission_rejected",
+            }
+            if repository is not None:
+                denied_kwargs["repository"] = repository
+            await persist_denied_route(**denied_kwargs)
+        raise

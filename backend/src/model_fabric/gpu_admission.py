@@ -290,6 +290,7 @@ class GpuAdmissionBroker(Generic[T]):
         self._operations: dict[str, _QueuedOperation] = {}
         self._queue: list[str] = []
         self._active_operation_id: str | None = None
+        self._active_task: asyncio.Task[Any] | None = None
         self._sequence = 0
         self._fencing_token = 0
         self._last_degraded_reason: str | None = None
@@ -403,11 +404,17 @@ class GpuAdmissionBroker(Generic[T]):
             ):
                 receipt = self._receipt_for_lease_locked(lease, reason_code="stale_owner_or_fencing_token")
                 raise GpuAdmissionLeaseError("GPU lease owner or fencing token is stale", receipt=receipt)
+            if operation.cancel_requested:
+                outcome = "cancelled"
+                reason_code = operation.reason_code or reason_code or "cancelled"
+            elif outcome == "cancelled" and reason_code is None:
+                reason_code = "cancelled"
             observed_at = self._clock()
             operation.status = outcome
             operation.reason_code = reason_code
             operation.finished_at = observed_at
             self._active_operation_id = None
+            self._active_task = None
             if outcome != "succeeded":
                 self._last_degraded_reason = reason_code or outcome
             else:
@@ -453,6 +460,8 @@ class GpuAdmissionBroker(Generic[T]):
                     )
                 operation.cancel_requested = True
                 operation.reason_code = reason_code
+                if self._active_task is not None:
+                    self._active_task.cancel()
                 self._condition.notify_all()
                 return self._receipt_locked(operation)
             return self._receipt_locked(operation)
@@ -496,13 +505,46 @@ class GpuAdmissionBroker(Generic[T]):
     ) -> T:
         """Run one awaited callback under the serial broker lease."""
         await self.enqueue(request, now=now)
-        lease = await self.acquire(request.operation_id, now=now)
+        try:
+            lease = await self.acquire(request.operation_id, now=now)
+        except asyncio.CancelledError:
+            await asyncio.shield(self._cancel_after_wait(request))
+            raise
+        active_task = asyncio.current_task()
+        self._active_task = active_task
+        cancellation_requests_at_start = (
+            active_task.cancelling() if active_task is not None else 0
+        )
         try:
             result = await operation()
+        except asyncio.CancelledError:
+            await asyncio.shield(
+                self.release(lease, outcome="cancelled", reason_code="caller_cancelled")
+            )
+            raise
         except BaseException:
             await asyncio.shield(self.release(lease, outcome="failed", reason_code="provider_failed"))
             raise
-        await self.release(lease, outcome="succeeded")
+        caller_cancelled = (
+            active_task is not None
+            and active_task.cancelling() > cancellation_requests_at_start
+        )
+        try:
+            receipt = await self.release(
+                lease,
+                outcome="cancelled" if caller_cancelled else "succeeded",
+                reason_code="caller_cancelled" if caller_cancelled else None,
+            )
+        except asyncio.CancelledError:
+            await asyncio.shield(
+                self.release(lease, outcome="cancelled", reason_code="caller_cancelled")
+            )
+            raise
+        if receipt.status == "cancelled":
+            raise GpuAdmissionCancelledError(
+                "GPU operation was cancelled before completion",
+                receipt=receipt,
+            )
         return result
 
     async def stream(
@@ -514,14 +556,53 @@ class GpuAdmissionBroker(Generic[T]):
     ) -> AsyncIterator[T]:
         """Yield a streaming callback while retaining the serial GPU lease."""
         await self.enqueue(request, now=now)
-        lease = await self.acquire(request.operation_id, now=now)
         try:
-            async for item in operation():
-                yield item
-        except BaseException:
-            await asyncio.shield(self.release(lease, outcome="failed", reason_code="provider_failed"))
+            lease = await self.acquire(request.operation_id, now=now)
+        except asyncio.CancelledError:
+            await asyncio.shield(self._cancel_after_wait(request))
             raise
-        await self.release(lease, outcome="succeeded")
+        active_task = asyncio.current_task()
+        self._active_task = active_task
+        cancellation_requests_at_start = (
+            active_task.cancelling() if active_task is not None else 0
+        )
+        stream_iterator: AsyncIterator[T] | None = None
+        try:
+            stream_iterator = operation()
+            async for item in stream_iterator:
+                yield item
+        except BaseException as error:
+            await self._close_stream_iterator(stream_iterator)
+            if isinstance(error, (asyncio.CancelledError, GeneratorExit)):
+                await asyncio.shield(
+                    self.release(lease, outcome="cancelled", reason_code="caller_cancelled")
+                )
+            else:
+                await asyncio.shield(
+                    self.release(lease, outcome="failed", reason_code="provider_failed")
+                )
+            raise
+        await self._close_stream_iterator(stream_iterator)
+        caller_cancelled = (
+            active_task is not None
+            and active_task.cancelling() > cancellation_requests_at_start
+        )
+        try:
+            receipt = await self.release(
+                lease,
+                outcome="cancelled" if caller_cancelled else "succeeded",
+                reason_code="caller_cancelled" if caller_cancelled else None,
+            )
+        except asyncio.CancelledError:
+            await asyncio.shield(
+                self.release(lease, outcome="cancelled", reason_code="caller_cancelled")
+            )
+            raise
+        if receipt.status == "cancelled":
+            raise GpuAdmissionCancelledError(
+                "GPU stream was cancelled before completion",
+                receipt=receipt,
+            )
 
     async def reset(self) -> None:
         """Clear process-local state for isolated tests or a controlled restart."""
@@ -530,8 +611,56 @@ class GpuAdmissionBroker(Generic[T]):
                 raise RuntimeError("cannot reset an active GPU admission lease")
             self._operations.clear()
             self._queue.clear()
+            self._active_task = None
             self._last_degraded_reason = None
             self._condition.notify_all()
+
+    async def _cancel_after_wait(
+        self,
+        request: GpuAdmissionRequest,
+    ) -> GpuAdmissionReceipt | None:
+        """Clean up a request whose caller was cancelled while waiting."""
+        async with self._condition:
+            operation = self._operations.get(request.operation_id)
+            if operation is None:
+                return None
+            if operation.status == "queued":
+                self._queue.remove(operation.request.operation_id)
+                operation.status = "cancelled"
+                operation.reason_code = "caller_cancelled"
+                operation.finished_at = self._clock()
+                self._last_degraded_reason = "caller_cancelled"
+                self._condition.notify_all()
+                return self._receipt_locked(operation)
+            if operation.status == "running" and operation.request.owner_id == request.owner_id:
+                if self._active_task is None:
+                    # Cancellation can race the hand-off immediately after
+                    # acquire() claims the slot.  No callback has started
+                    # before execute()/stream() binds its task, so close the
+                    # lease here instead of leaving an orphaned active slot.
+                    operation.status = "cancelled"
+                    operation.reason_code = "caller_cancelled"
+                    operation.finished_at = self._clock()
+                    self._active_operation_id = None
+                    self._last_degraded_reason = "caller_cancelled"
+                else:
+                    operation.cancel_requested = True
+                    operation.reason_code = "caller_cancelled"
+                    self._active_task.cancel()
+                self._condition.notify_all()
+            return self._receipt_locked(operation)
+
+    async def _close_stream_iterator(self, iterator: AsyncIterator[T] | None) -> None:
+        """Close an async provider iterator when its consumer is cancelled."""
+        close = getattr(iterator, "aclose", None)
+        if not callable(close):
+            return
+        try:
+            await asyncio.shield(close())
+        except BaseException:
+            # Preserve the provider/consumer error.  Async task cancellation is
+            # cooperative; a non-compliant iterator remains a documented risk.
+            return
 
     def _select_next_locked(self) -> str | None:
         if not self._queue:

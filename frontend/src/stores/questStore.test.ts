@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
-import { useQuestStore } from "./questStore";
+import { GoalUpdateError, useQuestStore } from "./questStore";
 
 const mockFetch = vi.fn();
 globalThis.fetch = mockFetch;
@@ -95,6 +95,38 @@ describe("questStore", () => {
     await useQuestStore.getState().updateGoal("g1", { due_date: null });
     const body = JSON.parse(mockFetch.mock.calls[0][1].body);
     expect(body.due_date).toBeNull();
+  });
+
+  it("updateGoal sends the server revision for stale-edit protection", async () => {
+    mockFetch.mockResolvedValueOnce({ ok: true });
+    mockFetch.mockResolvedValueOnce({ ok: true, json: async () => [] });
+    mockFetch.mockResolvedValueOnce({ ok: true, json: async () => ({ domains: {}, active_count: 0, completed_count: 0, total_count: 0 }) });
+    await useQuestStore.getState().updateGoal("g1", { title: "Draft", expected_revision: 4 });
+    const body = JSON.parse(mockFetch.mock.calls[0][1].body);
+    expect(body.expected_revision).toBe(4);
+  });
+
+  it("fails closed on a stale revision and preserves structured recovery metadata", async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: false,
+      status: 409,
+      json: async () => ({
+        detail: {
+          code: "stale_goal_revision",
+          current_revision: 7,
+          recovery: "Refresh the goal and resubmit against the current revision.",
+        },
+      }),
+    });
+
+    await expect(
+      useQuestStore.getState().updateGoal("g1", { title: "Draft", expected_revision: 4 }),
+    ).rejects.toMatchObject({
+      code: "stale_goal_revision",
+      goalId: "g1",
+      currentRevision: 7,
+    } satisfies Partial<GoalUpdateError>);
+    expect(mockFetch).toHaveBeenCalledTimes(1);
   });
 
   it("deleteGoal calls API and refreshes", async () => {

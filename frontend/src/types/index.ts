@@ -77,6 +77,19 @@ export interface SessionInfo {
 
 export type SessionContinuityState = "live" | "restored" | "new_activity";
 
+export type GoalCriterionVerifier =
+  | "artifact_readback"
+  | "external_readback"
+  | "operator_attestation";
+
+export interface GoalSuccessCriterion {
+  criterion_id: string;
+  description: string;
+  verifier_kind: GoalCriterionVerifier | null;
+  target: string | Record<string, unknown>;
+  evidence_refs: string[];
+}
+
 export interface GoalInfo {
   id: string;
   parent_id: string | null;
@@ -91,6 +104,10 @@ export interface GoalInfo {
   sort_order: number;
   children?: GoalInfo[];
   progress?: number;
+  /** Server revision for optimistic stale-edit protection. */
+  revision?: number;
+  /** Null when no bounded verification criterion is configured. */
+  success_criterion?: GoalSuccessCriterion | null;
 }
 
 export interface UserProfileInfo {

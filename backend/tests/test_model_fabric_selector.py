@@ -29,6 +29,7 @@ from src.model_fabric import (
     profile_exclusion_reason,
     finalized_openai_compatible_body,
     transport_model_for_provider,
+    run_preflighted_adapter,
     select_route,
 )
 from src.model_fabric.proofs import build_model_route_proof
@@ -358,6 +359,83 @@ async def test_streaming_admission_rejection_does_not_fallback_to_second_candida
     assert len(admission_requests) == 1
     assert admission_requests[0].priority is GpuPriority.INTERACTIVE_CHAT
     assert transported == []
+    assert repository.receipt is not None
+    assert repository.receipt.outcome == "denied"
+    assert repository.receipt.attempts == ()
+    assert repository.receipt.fallback_reason_code == "gpu_admission_rejected"
+    assert repository.receipt.degradation_codes == (
+        "gpu_admission_rejected",
+        "gpu_admission_capacity_exhausted",
+    )
+
+
+@pytest.mark.asyncio
+async def test_adapter_admission_rejection_persists_zero_attempt_denial_without_callback(monkeypatch):
+    from src.model_fabric import execution
+
+    profile = _profile()
+    context = _context(fallback_allowed=False)
+    decision = select_route(
+        context,
+        (candidate_from_profile(profile),),
+        _proofs(profile),
+        now=100.0,
+    )
+    assert decision.allowed is True
+    transported = False
+
+    class Repository:
+        receipt = None
+
+        async def persist_route_receipt(self, receipt):
+            self.receipt = receipt
+            return ReceiptPersistenceResult.success(receipt)
+
+    repository = Repository()
+
+    class Hooks:
+        _repository = repository
+
+        async def attempt_started(self, **_kwargs):
+            raise AssertionError("admission denial must not start a route attempt")
+
+        async def attempt_finished(self, **_kwargs):
+            raise AssertionError("admission denial must not finish a route attempt")
+
+    class SaturatedBroker:
+        async def execute(self, request, _operation, *, now=None):
+            receipt = GpuAdmissionReceipt(
+                operation_id=request.operation_id,
+                job_id=request.job_id,
+                owner_id=request.owner_id,
+                priority=request.priority,
+                status="rejected",
+                queue_position=None,
+                active_operation_id="already-running",
+                fencing_token=None,
+                reason_code="capacity_exhausted",
+                queued=32,
+                max_queued=32,
+            )
+            raise GpuAdmissionCapacityError("GPU admission queue is full", receipt=receipt)
+
+    monkeypatch.setattr(execution, "gpu_admission_broker", SaturatedBroker())
+
+    async def adapter(_candidate, _follow_redirects):
+        nonlocal transported
+        transported = True
+        return "unexpected"
+
+    with pytest.raises(GpuAdmissionCapacityError) as error:
+        await run_preflighted_adapter(
+            context=context,
+            decision=decision,
+            adapter=adapter,
+            hooks=Hooks(),
+        )
+
+    assert error.value.receipt.reason_code == "capacity_exhausted"
+    assert transported is False
     assert repository.receipt is not None
     assert repository.receipt.outcome == "denied"
     assert repository.receipt.attempts == ()

@@ -253,6 +253,196 @@ async def test_running_cancel_requires_owner_and_fencing_token():
     await broker.release(lease, outcome="cancelled", reason_code="cancelled")
 
 
+@pytest.mark.parametrize("streaming", [False, True])
+@pytest.mark.asyncio
+async def test_cancelled_waiter_is_removed_before_provider_invocation(streaming):
+    broker = GpuAdmissionBroker(clock=_Clock())
+    first_request = _request("waiter-first")
+    second_request = _request("waiter-second")
+    first_entered = asyncio.Event()
+    release_first = asyncio.Event()
+    provider_calls: list[str] = []
+
+    async def first_stream():
+        first_entered.set()
+        await release_first.wait()
+        yield "first"
+
+    async def first_execute():
+        first_entered.set()
+        await release_first.wait()
+
+    async def second_stream():
+        provider_calls.append("stream")
+        yield "unexpected"
+
+    async def second_execute():
+        provider_calls.append("execute")
+        return "unexpected"
+
+    async def run_first():
+        if streaming:
+            async for _item in broker.stream(first_request, first_stream):
+                pass
+        else:
+            await broker.execute(first_request, first_execute)
+
+    async def run_second():
+        if streaming:
+            async for _item in broker.stream(second_request, second_stream):
+                pass
+        else:
+            await broker.execute(second_request, second_execute)
+
+    first_task = asyncio.create_task(run_first())
+    await first_entered.wait()
+    second_task = asyncio.create_task(run_second())
+    for _ in range(10):
+        if [item["operation_id"] for item in (await broker.status())["queued"]] == ["waiter-second"]:
+            break
+        await asyncio.sleep(0)
+    assert [item["operation_id"] for item in (await broker.status())["queued"]] == ["waiter-second"]
+
+    second_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await second_task
+    assert (await broker.status())["queued"] == []
+    cancelled = await broker.enqueue(second_request)
+    assert cancelled.status == "cancelled"
+    assert cancelled.reason_code == "caller_cancelled"
+    assert provider_calls == []
+
+    release_first.set()
+    await first_task
+
+
+@pytest.mark.parametrize("streaming", [False, True])
+@pytest.mark.asyncio
+async def test_active_cancel_stops_callback_and_never_reports_success(streaming):
+    broker = GpuAdmissionBroker(clock=_Clock())
+    request = _request("active-cancel")
+    callback_started = asyncio.Event()
+    callback_cancelled = asyncio.Event()
+    stream_closed = asyncio.Event()
+    hold_callback = asyncio.Event()
+    received: list[str] = []
+
+    async def execute_provider():
+        callback_started.set()
+        try:
+            await hold_callback.wait()
+        except asyncio.CancelledError:
+            callback_cancelled.set()
+            return "ignored-cancellation"
+        return "unexpected-success"
+
+    async def stream_provider():
+        callback_started.set()
+        try:
+            yield "partial"
+            await hold_callback.wait()
+        except asyncio.CancelledError:
+            callback_cancelled.set()
+            return
+        finally:
+            stream_closed.set()
+
+    async def run():
+        if streaming:
+            async for item in broker.stream(request, stream_provider):
+                received.append(item)
+        else:
+            return await broker.execute(request, execute_provider)
+
+    task = asyncio.create_task(run())
+    await callback_started.wait()
+    active = (await broker.status())["active"]
+    cancelled = await broker.cancel(
+        request.operation_id,
+        owner_id=request.owner_id,
+        fencing_token=active["fencing_token"],
+    )
+    assert cancelled.cancel_requested is True
+
+    with pytest.raises(GpuAdmissionCancelledError) as error:
+        await task
+    assert error.value.receipt.status == "cancelled"
+    assert callback_cancelled.is_set()
+    assert stream_closed.is_set() is streaming
+    assert received == (["partial"] if streaming else [])
+    assert (await broker.status())["active"] is None
+    terminal = await broker.enqueue(request)
+    assert terminal.status == "cancelled"
+    assert terminal.reason_code == "cancelled"
+
+
+@pytest.mark.parametrize("streaming", [False, True])
+@pytest.mark.asyncio
+async def test_caller_cancellation_releases_active_operation_and_closes_provider(streaming):
+    broker = GpuAdmissionBroker(clock=_Clock())
+    request = _request("caller-cancel-active")
+    callback_waiting = asyncio.Event()
+    callback_cancelled = asyncio.Event()
+    stream_closed = asyncio.Event()
+    hold_callback = asyncio.Event()
+    received: list[str] = []
+
+    async def execute_provider():
+        callback_waiting.set()
+        try:
+            await hold_callback.wait()
+        except asyncio.CancelledError:
+            callback_cancelled.set()
+            return "ignored-cancellation"
+
+    class BlockingStream:
+        def __init__(self):
+            self._emitted = False
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            if not self._emitted:
+                self._emitted = True
+                return "partial"
+            callback_waiting.set()
+            try:
+                await hold_callback.wait()
+            except asyncio.CancelledError:
+                callback_cancelled.set()
+                raise StopAsyncIteration
+            raise StopAsyncIteration
+
+        async def aclose(self):
+            stream_closed.set()
+
+    def stream_provider():
+        return BlockingStream()
+
+    async def run():
+        if streaming:
+            async for item in broker.stream(request, stream_provider):
+                received.append(item)
+        else:
+            await broker.execute(request, execute_provider)
+
+    task = asyncio.create_task(run())
+    await callback_waiting.wait()
+    task.cancel()
+    with pytest.raises(GpuAdmissionCancelledError) as error:
+        await task
+
+    assert error.value.receipt.status == "cancelled"
+    assert callback_cancelled.is_set()
+    assert stream_closed.is_set() is streaming
+    assert received == (["partial"] if streaming else [])
+    assert (await broker.status())["active"] is None
+    terminal = await broker.enqueue(request)
+    assert terminal.status == "cancelled"
+    assert terminal.reason_code == "caller_cancelled"
+
+
 @pytest.mark.asyncio
 async def test_identity_conflict_and_operator_safe_status_receipt():
     broker = GpuAdmissionBroker(clock=_Clock())

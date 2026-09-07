@@ -485,6 +485,8 @@ class GoalSnapshotToFileAdapter:
             raise ValueError("authenticated_owner_mismatch")
         if principal.session_id and principal.session_id != self.request.session_id:
             raise ValueError("authenticated_owner_session_mismatch")
+        if principal.job_id and principal.job_id != job_id:
+            raise ValueError("authenticated_owner_job_mismatch")
         # The durable child job is the execution identity for this effect.  A
         # trusted service principal may delegate its authenticated grant to
         # that exact child identity; the authority gate still checks auth,

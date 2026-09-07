@@ -184,13 +184,14 @@ def _request(**updates: Any) -> GoalSnapshotToFileRequest:
     return GoalSnapshotToFileRequest.model_validate(values)
 
 
-def _authority_principal(*, authenticated: bool = True) -> TrustPrincipal:
+def _authority_principal(*, authenticated: bool = True, job_id: str = "") -> TrustPrincipal:
     return TrustPrincipal(
         principal_id="service:guardian",
         principal_type=PrincipalType.SERVICE,
         authenticated=authenticated,
         grants=(AuthorityGrant.CAPABILITY_EXECUTE,),
         session_id="session-1",
+        job_id=job_id,
     )
 
 
@@ -331,6 +332,38 @@ async def test_missing_authenticated_owner_blocks_before_file_effect(monkeypatch
     assert workflow.calls == 0
     assert not (tmp_path / request.file_path).exists()
     assert jobs.transitions == [(result.job_id if hasattr(result, "job_id") else next(iter(jobs.jobs)), "blocked")]
+
+
+async def test_authenticated_principal_bound_to_other_job_is_rejected(monkeypatch, tmp_path):
+    monkeypatch.setattr(settings, "workspace_dir", str(tmp_path))
+    goals = _Goals(_goal())
+    jobs = _Jobs()
+    workflow = _GovernedWorkflow(tmp_path)
+    request = _request()
+    goal = _goal()
+    candidate = build_goal_candidate_decision(
+        goal,
+        GoalCandidateRequest(
+            capability_id=CAPABILITY_ID,
+            capability_version=request.capability_version,
+            inputs={"file_path": request.file_path},
+            evidence_refs=request.evidence_refs,
+            expires_at=request.deadline_at,
+        ),
+    )
+
+    result = await GoalSnapshotToFileAdapter(
+        request,
+        goals=goals,
+        jobs=jobs,
+        workflow_tool_provider=lambda _name: workflow,
+        authority_principal=_authority_principal(job_id="job:other"),
+    ).execute(goal=goal, candidate=candidate)
+
+    assert result.execution_status == "blocked"
+    assert result.reason == "authority_denied:authority_request_invalid:ValueError"
+    assert workflow.calls == 0
+    assert jobs.jobs[next(iter(jobs.jobs))]["status"] == "blocked"
 
 
 async def test_missing_approval_is_durable_and_has_redacted_authority_receipt(monkeypatch, tmp_path):

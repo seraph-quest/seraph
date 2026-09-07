@@ -24,6 +24,7 @@ from src.model_fabric.gpu_admission import (
     GpuAdmissionIdentityError,
     GpuAdmissionReceipt,
     GpuAdmissionRequest,
+    GpuAdmissionUncertainError,
     GpuPriority,
 )
 
@@ -274,6 +275,59 @@ async def test_async_cancel_marks_running_sync_operation_and_blocks_success():
     assert (await broker.status())["active"] is None
 
 
+def test_late_sync_callback_holds_gpu_until_provider_result_is_reconciled():
+    clock = _Clock()
+    broker = GpuAdmissionBroker(clock=clock)
+    late_request = _request("late-sync-callback", deadline_at=101.0, clock=clock)
+    follow_up_request = _request("sync-follow-up", clock=clock)
+    follow_up_started = threading.Event()
+
+    def late_callback() -> str:
+        clock.advance(1.0)
+        return "late-result"
+
+    with pytest.raises(GpuAdmissionUncertainError) as error:
+        broker.execute_sync(late_request, late_callback, now=clock())
+
+    assert error.value.receipt.status == "blocked"
+    assert error.value.receipt.reason_code == "deadline_expired_after_callback"
+    active = asyncio.run(broker.status())["active"]
+    assert active["operation_id"] == late_request.operation_id
+    assert active["reconciliation_required"] is True
+
+    def follow_up_callback() -> str:
+        follow_up_started.set()
+        return "follow-up-result"
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        follow_up = pool.submit(
+            broker.execute_sync,
+            follow_up_request,
+            follow_up_callback,
+        )
+        for _ in range(50):
+            queued = asyncio.run(broker.status())["queued"]
+            if any(item["operation_id"] == follow_up_request.operation_id for item in queued):
+                break
+            time.sleep(0.01)
+        assert follow_up_started.is_set() is False
+
+        reconciled = asyncio.run(
+            broker.reconcile(
+                late_request.operation_id,
+                owner_id=late_request.owner_id,
+                fencing_token=active["fencing_token"],
+                outcome="failed",
+                reason_code="provider_result_reconciled_failed",
+            )
+        )
+        assert reconciled.status == "failed"
+        assert follow_up.result(timeout=1.0) == "follow-up-result"
+
+    assert follow_up_started.is_set() is True
+    assert asyncio.run(broker.status())["active"] is None
+
+
 def test_canonical_sync_completion_admits_provider_and_finishes_receipt():
     broker = GpuAdmissionBroker()
     context = _canonical_context(request_id="sync-success")
@@ -355,6 +409,39 @@ def test_canonical_sync_admission_denial_stops_fallback_and_persists_denial():
         "gpu_admission_capacity_exhausted",
     )
     assert denied.call_args.kwargs["fallback_reason_code"] == "gpu_admission_rejected"
+
+
+def test_canonical_sync_uncertain_completion_keeps_route_outcome_out_of_denial_receipt():
+    clock = _Clock()
+    broker = GpuAdmissionBroker(clock=clock)
+    context = _canonical_context(request_id="sync-uncertain")
+    context.deadline_at = 101.0
+    provider = Mock()
+
+    def late_provider() -> str:
+        clock.advance(1.0)
+        return "late-result"
+
+    provider.side_effect = late_provider
+    denied = Mock()
+
+    with (
+        patch("src.llm_runtime._persist_sync_gpu_admission_denial", denied),
+        patch("src.llm_runtime.gpu_admission_broker", broker),
+    ):
+        with pytest.raises(GpuAdmissionUncertainError) as error:
+            _execute_sync_with_gpu_admission(
+                context=context,
+                decision=MagicMock(allowed=True),
+                operation_id="attempt-sync-uncertain",
+                operation=provider,
+            )
+
+    provider.assert_called_once()
+    assert error.value.receipt.status == "blocked"
+    assert error.value.receipt.reconciliation_required is True
+    assert asyncio.run(broker.status())["active"]["operation_id"] == "attempt-sync-uncertain"
+    denied.assert_not_called()
 
 
 def test_canonical_sync_missing_owner_fails_closed_before_broker_or_provider():

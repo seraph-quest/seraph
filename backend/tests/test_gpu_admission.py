@@ -16,6 +16,7 @@ from src.model_fabric.gpu_admission import (
     GpuAdmissionIdentityError,
     GpuAdmissionLease,
     GpuAdmissionLeaseError,
+    GpuAdmissionUncertainError,
     GpuAdmissionRequest,
     GpuPriority,
     priority_for_inference_context,
@@ -196,6 +197,52 @@ async def test_expired_queued_operation_never_reaches_provider():
     assert error.value.receipt.status == "expired"
     assert error.value.receipt.reason_code == "deadline_expired"
     assert provider_called is False
+
+
+@pytest.mark.asyncio
+async def test_late_callback_holds_gpu_until_provider_result_is_reconciled():
+    clock = _Clock()
+    broker = GpuAdmissionBroker(clock=clock)
+    late_request = _request("late-callback", deadline_at=101.0)
+    follow_up_request = _request("follow-up")
+    follow_up_called = False
+
+    async def late_callback():
+        clock.advance(1.0)
+        return "late-result"
+
+    async def follow_up_callback():
+        nonlocal follow_up_called
+        follow_up_called = True
+        return "follow-up-result"
+
+    with pytest.raises(GpuAdmissionUncertainError) as error:
+        await broker.execute(late_request, late_callback, now=clock())
+
+    assert error.value.receipt.status == "blocked"
+    assert error.value.receipt.reason_code == "deadline_expired_after_callback"
+    assert error.value.receipt.reconciliation_required is True
+    active = (await broker.status())["active"]
+    assert active["operation_id"] == late_request.operation_id
+    assert active["recovery_action"]
+
+    follow_up = asyncio.create_task(broker.execute(follow_up_request, follow_up_callback))
+    await asyncio.sleep(0)
+    assert follow_up_called is False
+    blocked_status = await broker.status()
+    assert blocked_status["status"] == "degraded"
+    assert blocked_status["degradation_code"] == "deadline_expired_after_callback"
+
+    reconciled = await broker.reconcile(
+        late_request.operation_id,
+        owner_id=late_request.owner_id,
+        fencing_token=active["fencing_token"],
+        outcome="failed",
+        reason_code="provider_result_reconciled_failed",
+    )
+    assert reconciled.status == "failed"
+    assert await follow_up == "follow-up-result"
+    assert (await broker.status())["active"] is None
 
 
 @pytest.mark.asyncio

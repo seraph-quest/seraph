@@ -2982,14 +2982,19 @@ def _execute_sync_with_gpu_admission(
     try:
         return gpu_admission_broker.execute_sync(request, operation)
     except GpuAdmissionError as error:
-        _persist_sync_gpu_admission_denial(
-            context=context,
-            decision=decision,
-            reason_codes=(
-                "gpu_admission_rejected",
-                f"gpu_admission_{error.code}",
-            ),
-        )
+        # A post-callback deadline is an uncertain provider result, not a
+        # zero-attempt admission denial.  Its blocked receipt keeps the active
+        # lease held for reconciliation; the surrounding route receipt owns
+        # the failed/uncertain outcome and must not record a second denial.
+        if getattr(getattr(error, "receipt", None), "status", None) != "blocked":
+            _persist_sync_gpu_admission_denial(
+                context=context,
+                decision=decision,
+                reason_codes=(
+                    "gpu_admission_rejected",
+                    f"gpu_admission_{error.code}",
+                ),
+            )
         raise
     except GpuAdmissionIdentityError:
         _persist_sync_gpu_admission_denial(

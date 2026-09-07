@@ -31,6 +31,7 @@ _HTTP_METHODS = frozenset(
         "put",
         "request",
         "stream",
+        "send",
     }
 )
 _LITELLM_DISPATCH_METHODS = frozenset(
@@ -114,10 +115,12 @@ class _DispatchVisitor(ast.NodeVisitor):
         self.httpx_modules: set[str] = {"httpx"}
         self.httpx_client_types: set[str] = {"Client", "AsyncClient"}
         self.httpx_client_bindings: set[str] = set()
+        self.model_bindings: set[str] = set()
         self._collect_bindings(tree)
 
     def _collect_bindings(self, tree: ast.AST) -> None:
-        for node in ast.walk(tree):
+        nodes = tuple(ast.walk(tree))
+        for node in nodes:
             if isinstance(node, ast.Import):
                 for alias in node.names:
                     if alias.name == "litellm":
@@ -135,16 +138,38 @@ class _DispatchVisitor(ast.NodeVisitor):
                         if alias.name in self.httpx_client_types:
                             self.httpx_client_types.add(alias.asname or alias.name)
 
-            if isinstance(node, (ast.With, ast.AsyncWith)):
-                for item in node.items:
-                    if self._is_httpx_client_constructor(item.context_expr):
-                        self.httpx_client_bindings.update(_target_names(item.optional_vars))
-            elif isinstance(node, (ast.Assign, ast.AnnAssign)):
-                value = node.value
-                if self._is_httpx_client_constructor(value):
+        # Resolve only simple, syntactic names.  A fixed point handles an
+        # alias chain without pretending to understand dynamic attribute or
+        # container flow.
+        changed = True
+        while changed:
+            changed = False
+            for node in nodes:
+                if isinstance(node, (ast.With, ast.AsyncWith)):
+                    for item in node.items:
+                        if self._is_httpx_client_constructor(item.context_expr):
+                            changed |= self._add_names(
+                                self.httpx_client_bindings,
+                                _target_names(item.optional_vars),
+                            )
+                elif isinstance(node, (ast.Assign, ast.AnnAssign)):
+                    value = node.value
                     targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+                    target_names: set[str] = set()
                     for target in targets:
-                        self.httpx_client_bindings.update(_target_names(target))
+                        target_names.update(_target_names(target))
+                    if self._is_httpx_client_constructor(value):
+                        changed |= self._add_names(self.httpx_client_bindings, target_names)
+                    elif self._is_simple_httpx_client_alias(value):
+                        changed |= self._add_names(self.httpx_client_bindings, target_names)
+                    if self._is_model_constructor(value) or self._is_simple_model_alias(value):
+                        changed |= self._add_names(self.model_bindings, target_names)
+
+    @staticmethod
+    def _add_names(bindings: set[str], names: set[str]) -> bool:
+        before = len(bindings)
+        bindings.update(names)
+        return len(bindings) != before
 
     def _is_httpx_client_constructor(self, node: ast.AST | None) -> bool:
         if not isinstance(node, ast.Call):
@@ -161,6 +186,22 @@ class _DispatchVisitor(ast.NodeVisitor):
             return True
         return isinstance(node, ast.Name) and node.id in self.httpx_client_bindings
 
+    def _is_simple_httpx_client_alias(self, node: ast.AST | None) -> bool:
+        return isinstance(node, ast.Name) and node.id in self.httpx_client_bindings
+
+    @staticmethod
+    def _is_model_constructor(node: ast.AST | None) -> bool:
+        if not isinstance(node, ast.Call):
+            return False
+        chain = _attribute_chain(node.func)
+        return bool(chain and chain[-1].endswith("LiteLLMModel"))
+
+    def _is_simple_model_alias(self, node: ast.AST | None) -> bool:
+        if isinstance(node, ast.Name):
+            return node.id in self.model_bindings or "model" in node.id.lower()
+        chain = _attribute_chain(node) if node is not None else None
+        return bool(chain and chain[-1].lower() == "model")
+
     def _add(self, node: ast.Call, *, operation: str) -> None:
         self.sites.append(
             DispatchSite(
@@ -170,6 +211,18 @@ class _DispatchVisitor(ast.NodeVisitor):
                 operation=operation,
             )
         )
+
+    @staticmethod
+    def _receiver_label(node: ast.AST) -> str:
+        """Return a structural receiver name without exposing call arguments."""
+        chain = _attribute_chain(node)
+        if chain:
+            return ".".join(chain)
+        if isinstance(node, ast.Call):
+            constructor = _attribute_chain(node.func)
+            if constructor:
+                return ".".join(constructor)
+        return "<receiver>"
 
     def visit_ClassDef(self, node: ast.ClassDef) -> None:
         self.scope.append(node.name)
@@ -197,18 +250,19 @@ class _DispatchVisitor(ast.NodeVisitor):
         if isinstance(node.func, ast.Attribute):
             method = node.func.attr
             if method == "generate" and self._looks_like_model_receiver(node.func.value):
-                self._add(node, operation=f"{ast.unparse(node.func.value)}.generate")
+                self._add(node, operation=f"{self._receiver_label(node.func.value)}.generate")
             elif method in _HTTP_METHODS and self._is_httpx_client_receiver(node.func.value):
-                self._add(node, operation=f"{ast.unparse(node.func.value)}.{method}")
+                self._add(node, operation=f"{self._receiver_label(node.func.value)}.{method}")
         self.generic_visit(node)
 
-    @staticmethod
-    def _looks_like_model_receiver(node: ast.AST) -> bool:
+    def _looks_like_model_receiver(self, node: ast.AST) -> bool:
         chain = _attribute_chain(node)
         if chain and chain[-1].endswith("LiteLLMModel"):
             return True
+        if chain and chain[-1].lower() == "model":
+            return True
         if isinstance(node, ast.Name):
-            return "model" in node.id.lower()
+            return node.id in self.model_bindings or "model" in node.id.lower()
         return False
 
 
@@ -490,7 +544,12 @@ def test_direct_dispatch_inventory_is_exact_and_reviewable():
         "import litellm\n\ndef new_route(messages):\n    return litellm.completion(messages=messages)\n",
         "from litellm import completion as ask\n\ndef new_route(messages):\n    return ask(messages=messages)\n",
         "import httpx\n\ndef new_route(candidate):\n    with httpx.Client() as client:\n        return client.post(candidate.endpoint)\n",
+        "import httpx\n\ndef new_route(request):\n    with httpx.Client() as client:\n        return client.send(request)\n",
+        "import httpx\n\nasync def new_route(request):\n    async with httpx.AsyncClient() as client:\n        return await client.send(request)\n",
+        "import httpx\n\ndef new_route(candidate):\n    with httpx.Client() as client:\n        alias = client\n        return alias.send(candidate)\n",
         "def new_route(model):\n    return model.generate([])\n",
+        "def new_route(model):\n    alias = model\n    return alias.generate([])\n",
+        "def new_route(agent):\n    return agent.model.generate([])\n",
     ],
 )
 def test_synthetic_unregistered_direct_dispatch_is_rejected(source: str):
@@ -505,3 +564,18 @@ def test_inventory_is_redacted_and_contains_no_source_payloads():
     assert "Authorization" not in rendered
     assert "messages=" not in rendered
     assert "candidate.endpoint" not in rendered
+
+
+def test_inventory_receiver_labels_do_not_unparse_constructor_arguments():
+    source = """
+import httpx
+
+
+def new_route(request):
+    return httpx.Client(headers={"Authorization": "secret-token"}).send(request)
+"""
+
+    rendered = render_inventory(scan_source("synthetic/secret.py", source), ())
+    assert "secret-token" not in rendered
+    assert "Authorization" not in rendered
+    assert "httpx.Client.send" in rendered

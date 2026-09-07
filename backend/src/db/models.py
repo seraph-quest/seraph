@@ -188,6 +188,14 @@ class ScheduledJobRun(SQLModel, table=True):
 
 class WorkflowRunState(SQLModel, table=True):
     __tablename__ = "workflow_run_states"
+    __table_args__ = (
+        Index(
+            "ux_workflow_run_states_idempotency_binding",
+            "idempotency_binding",
+            unique=True,
+            sqlite_where=text("idempotency_binding IS NOT NULL"),
+        ),
+    )
 
     id: str = Field(default_factory=_uuid, primary_key=True)
     run_identity: str = Field(index=True, unique=True)
@@ -212,6 +220,39 @@ class WorkflowRunState(SQLModel, table=True):
     updated_at: datetime = Field(default_factory=_now, index=True)
     finished_at: Optional[datetime] = Field(default=None, index=True)
     metadata_json: Optional[str] = Field(default=None)
+    # Durable invocation contract (additive to the legacy workflow projection).
+    record_schema_version: int = Field(default=2, index=True)
+    parent_job_id: Optional[str] = Field(default=None, index=True)
+    job_kind: str = Field(default="workflow", index=True)
+    owner_kind: str = Field(default="legacy", index=True)
+    owner_principal_id: Optional[str] = Field(default=None, index=True)
+    service_id: Optional[str] = Field(default=None, index=True)
+    goal_id: Optional[str] = Field(default=None, index=True)
+    goal_revision: Optional[int] = Field(default=None, index=True)
+    plan_revision: Optional[int] = Field(default=None, index=True)
+    candidate_id: Optional[str] = Field(default=None, index=True)
+    capability_version: str = Field(default="workflow-v1", index=True)
+    input_digest: Optional[str] = Field(default=None, index=True)
+    authority_digest: Optional[str] = Field(default=None, index=True)
+    idempotency_scope: Optional[str] = Field(default=None, index=True)
+    idempotency_key: Optional[str] = Field(default=None, index=True)
+    idempotency_binding: Optional[str] = Field(default=None, index=True)
+    priority: int = Field(default=50, index=True)
+    dependencies_json: str = Field(default="[]")
+    resource_claims_json: str = Field(default="[]")
+    declared_authority_json: Optional[str] = Field(default=None)
+    deadline_at: Optional[datetime] = Field(default=None, index=True)
+    lease_owner: Optional[str] = Field(default=None, index=True)
+    lease_expires_at: Optional[datetime] = Field(default=None, index=True)
+    fencing_token: int = Field(default=0, index=True)
+    attempt_count: int = Field(default=0, index=True)
+    max_attempts: int = Field(default=1, index=True)
+    failure_reason: Optional[str] = Field(default=None, index=True)
+    checkpoint_receipts_json: str = Field(default="[]")
+    artifact_receipts_json: str = Field(default="[]")
+    effect_receipts_json: str = Field(default="[]")
+    result_digest: Optional[str] = Field(default=None)
+    result_summary: Optional[str] = Field(default=None)
 
 
 class WorkflowStepState(SQLModel, table=True):

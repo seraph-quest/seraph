@@ -318,7 +318,7 @@ _REVIEWED_EXCEPTIONS = (
     ),
     _review(
         "evals/harness.py",
-        5321,
+        5357,
         "_eval_provider_routing_decision_audit",
         "first_model.generate",
         "transitional_provider_call",
@@ -327,7 +327,7 @@ _REVIEWED_EXCEPTIONS = (
     ),
     _review(
         "evals/harness.py",
-        5330,
+        5366,
         "_eval_provider_routing_decision_audit",
         "rerouted_model.generate",
         "transitional_provider_call",

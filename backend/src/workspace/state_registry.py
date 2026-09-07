@@ -2,10 +2,10 @@
 
 This module deliberately owns no lifecycle, scheduler, vault, archive, or
 database-engine behavior.  A caller supplies an explicit workspace identity
-and a relative path classification allow-list.  Synthetic fixtures can be
-inventoried, while production callers use the same registry for path
-classification without scanning or opening production state.  The bounded
-backup and restore helpers in ``lifecycle.py`` consume this registry contract.
+and a relative path classification allow-list.  Synthetic fixtures and the
+configured production workspace use the same registry for path classification
+and inventory.  The bounded backup and restore helpers in ``lifecycle.py``
+consume this registry contract.
 
 Secret/recovery files are never opened.  Their manifest ``sha256`` is a
 deterministic digest of redacted metadata, marked by ``digest_scope``; this
@@ -44,7 +44,7 @@ class UnsupportedWorkspaceEntryError(WorkspaceStateError):
 
 
 class WorkspaceRootKind(str, Enum):
-    """Root scopes supported by this pre-production inventory contract."""
+    """Root scopes supported by the workspace inventory contract."""
 
     SYNTHETIC_FIXTURE = "synthetic_fixture"
     PRODUCTION = "production"
@@ -58,6 +58,21 @@ class WorkspaceStateClass(str, Enum):
     CACHE = "cache"
     EXTERNAL_REFERENCE = "external-reference"
     DISPOSABLE = "disposable"
+
+
+# This is intentionally a small, stable vocabulary for operator and migration
+# consumers.  The state class remains the authoritative classification; these
+# roles make the payload/rebuild/cache/secret boundary explicit in a manifest
+# without exposing host paths or file contents.
+_STATE_CLASS_ROLES: dict[str, str] = {
+    WorkspaceStateClass.CANONICAL.value: "canonical_payload",
+    WorkspaceStateClass.SECRET_RECOVERY.value: "secret_recovery",
+    WorkspaceStateClass.SECRET.value: "secret",
+    WorkspaceStateClass.DERIVED.value: "rebuildable",
+    WorkspaceStateClass.CACHE.value: "cache",
+    WorkspaceStateClass.EXTERNAL_REFERENCE.value: "external_reference",
+    WorkspaceStateClass.DISPOSABLE.value: "disposable",
+}
 
 
 class ExternalReferencePolicy(str, Enum):
@@ -77,6 +92,45 @@ def _sha256_bytes(value: bytes) -> str:
 
 def _sha256_json(value: object) -> str:
     return _sha256_bytes(_canonical_json(value).encode("utf-8"))
+
+
+def _inventory_failure_reason(exc: WorkspaceStateError) -> str:
+    """Map an internal inventory failure to a redacted operator code."""
+    if isinstance(exc, UnsupportedWorkspaceEntryError):
+        return "unsupported_or_symlink_entry"
+    if isinstance(exc, UnknownWorkspacePathError):
+        return "unknown_workspace_path"
+    if isinstance(exc, AmbiguousWorkspaceRootsError):
+        return "ambiguous_workspace_roots"
+    message = str(exc).lower()
+    if "escapes root" in message:
+        return "workspace_path_escape"
+    if "database" in message or "sqlite" in message:
+        return "database_inventory_failed"
+    if "required secret workspace path" in message:
+        return "required_secret_missing"
+    if "declared workspace path" in message:
+        return "declared_path_missing"
+    if "root" in message:
+        return "workspace_root_invalid"
+    return "workspace_inventory_failed"
+
+
+def _inventory_receipt_id(
+    workspace_id: str,
+    root_kind: str,
+    status: str,
+    reasons: list[str],
+) -> str:
+    digest = _sha256_json(
+        {
+            "workspace_id": workspace_id,
+            "root_kind": root_kind,
+            "status": status,
+            "reasons": sorted(reasons),
+        }
+    )
+    return f"workspace-inventory-{digest[:24]}"
 
 
 def _normalize_relative_path(value: str, *, field_name: str) -> str:
@@ -296,6 +350,7 @@ class _Entry:
         return {
             "logical_path": self.logical_path,
             "state_class": self.state_class.value,
+            "state_role": _STATE_CLASS_ROLES[self.state_class.value],
             "file_type": self.file_type,
             "mode": self.mode,
             "size_bytes": self.size_bytes,
@@ -317,21 +372,31 @@ class WorkspaceStateRegistry:
     def build_manifest(self) -> dict[str, Any]:
         root = self._validated_root()
         self._assert_within_root(root, root / self.config.database_path, self.config.database_path)
-        entries = self._inventory_entries(root)
+        missing_declared_paths: list[str] = []
+        entries = self._inventory_entries(root, missing_declared_paths=missing_declared_paths)
         sqlite = self._sqlite_inventory(root / self.config.database_path)
         entry_dicts = [entry.as_dict() for entry in entries]
         state_counts = Counter(entry.state_class.value for entry in entries)
         file_type_counts = Counter(entry.file_type for entry in entries)
+        missing_declared_paths.sort()
+        inventory_status = "degraded" if missing_declared_paths else "ready"
         body: dict[str, Any] = {
             "manifest_version": self.manifest_version,
             "workspace_version": self.config.workspace_version,
             "workspace_id": self.config.identity.workspace_id,
+            "root_kind": self.config.identity.root_kind.value,
+            "inventory": {
+                "status": inventory_status,
+                "missing_declared_paths": missing_declared_paths,
+                "state_roles": dict(sorted(_STATE_CLASS_ROLES.items())),
+            },
             "database": sqlite,
             "counts": {
                 "entries": len(entries),
                 "files": sum(entry.file_type in {"file", "sqlite"} for entry in entries),
                 "directories": sum(entry.file_type == "directory" for entry in entries),
                 "external_references": len(self.config.external_references),
+                "missing_declared_paths": len(missing_declared_paths),
                 "by_state_class": dict(sorted(state_counts.items())),
                 "by_file_type": dict(sorted(file_type_counts.items())),
             },
@@ -346,6 +411,86 @@ class WorkspaceStateRegistry:
             ],
         }
         return {**body, "manifest_sha256": _sha256_json(body)}
+
+    def build_inventory_receipt(self) -> dict[str, Any]:
+        """Return a redacted, operator-readable production inventory receipt.
+
+        ``build_manifest`` intentionally raises on an unsafe or incomplete
+        inventory so callers that need strict behavior can stop immediately.
+        Operator surfaces often need a bounded status instead.  This method
+        converts those failures into a stable blocked receipt without exposing
+        the host root, exception text, or any file contents.
+        """
+        identity = self.config.identity
+        base: dict[str, Any] = {
+            "schema_version": "seraph.workspace.inventory.v1",
+            "workspace_id": identity.workspace_id,
+            "root_kind": identity.root_kind.value,
+            "status": "blocked",
+            "operator_status": "workspace_inventory_blocked",
+            "manifest": None,
+            "manifest_sha256": None,
+            "missing_declared_paths": [],
+            "degraded_reasons": [],
+            "blocked_reasons": [],
+            "secret_values_included": False,
+        }
+        try:
+            manifest = self.build_manifest()
+        except WorkspaceStateError as exc:
+            reason = _inventory_failure_reason(exc)
+            base["blocked_reasons"] = [reason]
+            base["reason_code"] = reason
+            base["receipt_id"] = _inventory_receipt_id(
+                identity.workspace_id,
+                identity.root_kind.value,
+                "blocked",
+                [reason],
+            )
+            return base
+
+        inventory = manifest.get("inventory")
+        if not isinstance(inventory, dict):
+            # This branch is defensive; manifests produced by this class
+            # always include the inventory envelope.
+            reason = "inventory_envelope_missing"
+            base["blocked_reasons"] = [reason]
+            base["reason_code"] = reason
+            base["receipt_id"] = _inventory_receipt_id(
+                identity.workspace_id,
+                identity.root_kind.value,
+                "blocked",
+                [reason],
+            )
+            return base
+
+        status = str(inventory.get("status") or "blocked")
+        if status not in {"ready", "degraded"}:
+            status = "blocked"
+        missing = inventory.get("missing_declared_paths")
+        missing_paths = sorted(
+            item for item in (missing if isinstance(missing, list) else []) if isinstance(item, str)
+        )
+        degraded_reasons = ["declared_paths_missing"] if missing_paths else []
+        base.update(
+            {
+                "status": status,
+                "operator_status": f"workspace_inventory_{status}",
+                "manifest": manifest,
+                "manifest_sha256": manifest.get("manifest_sha256"),
+                "missing_declared_paths": missing_paths,
+                "degraded_reasons": degraded_reasons,
+                "blocked_reasons": [],
+                "reason_code": degraded_reasons[0] if degraded_reasons else None,
+                "receipt_id": _inventory_receipt_id(
+                    identity.workspace_id,
+                    identity.root_kind.value,
+                    status,
+                    missing_paths,
+                ),
+            }
+        )
+        return base
 
     def build_manifest_json(self) -> str:
         """Return canonical JSON without host paths or file contents."""
@@ -364,8 +509,6 @@ class WorkspaceStateRegistry:
 
     def _validated_root(self) -> Path:
         root = self.config.identity.root
-        if self.config.identity.root_kind is not WorkspaceRootKind.SYNTHETIC_FIXTURE:
-            raise WorkspaceStateError("production workspace roots are not supported by this fixture-only registry")
         try:
             root_stat = root.lstat()
         except OSError as exc:
@@ -379,18 +522,23 @@ class WorkspaceStateRegistry:
             resolved_root = root.resolve(strict=True)
         except OSError as exc:
             raise WorkspaceStateError("workspace root cannot be resolved") from exc
-        marker = resolved_root / self.config.identity.synthetic_marker
-        try:
-            marker_stat = marker.lstat()
-        except OSError as exc:
-            raise WorkspaceStateError("synthetic workspace marker is missing") from exc
-        if stat.S_ISLNK(marker_stat.st_mode) or not stat.S_ISREG(marker_stat.st_mode):
-            raise UnsupportedWorkspaceEntryError("synthetic workspace marker must be a regular file")
-        try:
-            if marker.read_bytes() != b"seraph-synthetic-workspace-v1\n":
-                raise WorkspaceStateError("synthetic workspace marker is invalid")
-        except OSError as exc:
-            raise WorkspaceStateError("synthetic workspace marker is not readable") from exc
+        if self.config.identity.root_kind is WorkspaceRootKind.SYNTHETIC_FIXTURE:
+            marker = resolved_root / self.config.identity.synthetic_marker
+            try:
+                marker_stat = marker.lstat()
+            except OSError as exc:
+                raise WorkspaceStateError("synthetic workspace marker is missing") from exc
+            if stat.S_ISLNK(marker_stat.st_mode) or not stat.S_ISREG(marker_stat.st_mode):
+                raise UnsupportedWorkspaceEntryError("synthetic workspace marker must be a regular file")
+            try:
+                if marker.read_bytes() != b"seraph-synthetic-workspace-v1\n":
+                    raise WorkspaceStateError("synthetic workspace marker is invalid")
+            except OSError as exc:
+                raise WorkspaceStateError("synthetic workspace marker is not readable") from exc
+        elif self.config.identity.root_kind is not WorkspaceRootKind.PRODUCTION:
+            # WorkspaceIdentity currently validates the enum, but keep this
+            # guard at the inventory boundary if another enum value is added.
+            raise WorkspaceStateError("workspace root kind is not supported")
         return resolved_root
 
     @staticmethod
@@ -404,12 +552,32 @@ class WorkspaceStateRegistry:
             except FileNotFoundError as exc:
                 raise WorkspaceStateError("workspace root is not readable") from exc
 
-    def _inventory_entries(self, root: Path) -> list[_Entry]:
+    def _inventory_entries(
+        self,
+        root: Path,
+        *,
+        missing_declared_paths: list[str] | None = None,
+    ) -> list[_Entry]:
         for spec in self.config.declared_paths:
             candidate = root / spec.logical_path
             self._assert_within_root(root, candidate, spec.logical_path)
             try:
                 candidate_stat = candidate.lstat()
+            except FileNotFoundError as exc:
+                if (
+                    self.config.identity.root_kind is WorkspaceRootKind.PRODUCTION
+                    and missing_declared_paths is not None
+                ):
+                    if spec.state_class in {
+                        WorkspaceStateClass.SECRET,
+                        WorkspaceStateClass.SECRET_RECOVERY,
+                    }:
+                        raise WorkspaceStateError(
+                            f"required secret workspace path is missing: {spec.logical_path}"
+                        ) from exc
+                    missing_declared_paths.append(spec.logical_path)
+                    continue
+                raise WorkspaceStateError(f"declared workspace path is missing: {spec.logical_path}") from exc
             except OSError as exc:
                 raise WorkspaceStateError(f"declared workspace path is missing: {spec.logical_path}") from exc
             if stat.S_ISLNK(candidate_stat.st_mode):
@@ -599,34 +767,62 @@ class WorkspaceStateRegistry:
             }
             expected_names = set(expected_by_name)
             actual_names = {name for _, name in actual_objects}
-            unknown_objects = sorted(actual_names - expected_names)
-            if unknown_objects:
-                raise UnknownWorkspacePathError(
-                    "unknown SQLite schema objects: " + ", ".join(unknown_objects)
+            if expected_by_name:
+                unknown_objects = sorted(actual_names - expected_names)
+                if unknown_objects:
+                    raise UnknownWorkspacePathError(
+                        "unknown SQLite schema objects: " + ", ".join(unknown_objects)
+                    )
+                missing_objects = sorted(expected_names - actual_names)
+                if missing_objects:
+                    raise WorkspaceStateError(
+                        "expected SQLite schema objects are missing: " + ", ".join(missing_objects)
+                    )
+                type_mismatches = sorted(
+                    f"{name} (expected {expected_by_name[name].object_type}, found {object_type})"
+                    for object_type, name in actual_objects
+                    if expected_by_name[name].object_type != object_type
                 )
-            missing_objects = sorted(expected_names - actual_names)
-            if missing_objects:
-                raise WorkspaceStateError(
-                    "expected SQLite schema objects are missing: " + ", ".join(missing_objects)
-                )
-            type_mismatches = sorted(
-                f"{name} (expected {expected_by_name[name].object_type}, found {object_type})"
-                for object_type, name in actual_objects
-                if expected_by_name[name].object_type != object_type
-            )
-            if type_mismatches:
-                raise WorkspaceStateError(
-                    "SQLite schema object type mismatch: " + ", ".join(type_mismatches)
-                )
+                if type_mismatches:
+                    raise WorkspaceStateError(
+                        "SQLite schema object type mismatch: " + ", ".join(type_mismatches)
+                    )
             schema_objects: list[dict[str, str]] = []
             tables: list[dict[str, Any]] = []
             for object_type, name, table_name, sql in objects:
-                object_spec = expected_by_name[str(name)]
+                object_name = str(name)
+                object_type = str(object_type)
+                object_spec = expected_by_name.get(object_name)
+                if object_spec is None:
+                    if self.config.identity.root_kind is not WorkspaceRootKind.PRODUCTION:
+                        raise UnknownWorkspacePathError(
+                            "unknown SQLite schema objects: " + object_name
+                        )
+                    # Production schemas evolve with the SQLModel metadata and
+                    # migrations.  When no explicit schema contract is
+                    # supplied, inventory the schema as metadata and use the
+                    # conservative table/trigger versus derived index/view
+                    # split.  No row values or SQL definitions are returned.
+                    inferred_state = (
+                        WorkspaceStateClass.DERIVED
+                        if object_type in {"index", "view"}
+                        else WorkspaceStateClass.CANONICAL
+                    )
+                    try:
+                        object_spec = WorkspaceDatabaseObjectSpec(
+                            object_name,
+                            object_type,
+                            inferred_state,
+                        )
+                    except WorkspaceStateError as exc:
+                        raise UnknownWorkspacePathError(
+                            "unknown SQLite schema objects: " + object_name
+                        ) from exc
                 object_payload = {
-                    "type": str(object_type),
-                    "name": str(name),
+                    "type": object_type,
+                    "name": object_name,
                     "table_name": str(table_name or ""),
-                    "sql": str(sql or ""),
+                    "sql_sha256": _sha256_bytes(str(sql or "").encode("utf-8")),
                     "state_class": object_spec.state_class.value,
                     "redaction_policy": object_spec.redaction_policy,
                 }
@@ -642,7 +838,7 @@ class WorkspaceStateRegistry:
                 if object_type != "table":
                     continue
                 columns = connection.execute(
-                    f'PRAGMA table_info({self._quote_identifier(str(name))})'
+                    f'PRAGMA table_info({self._quote_identifier(object_name)})'
                 ).fetchall()
                 column_payload = [
                     {
@@ -650,14 +846,14 @@ class WorkspaceStateRegistry:
                         "name": str(row[1]),
                         "type": str(row[2] or ""),
                         "not_null": int(row[3]),
-                        "default": row[4],
+                        "default_sha256": _sha256_json(row[4]) if row[4] is not None else None,
                         "primary_key_position": int(row[5]),
                     }
                     for row in columns
                 ]
                 index_payload = []
                 for index_row in connection.execute(
-                    f"PRAGMA index_list({self._quote_identifier(str(name))})"
+                    f"PRAGMA index_list({self._quote_identifier(object_name)})"
                 ).fetchall():
                     index_name = str(index_row[1])
                     index_columns = [
@@ -692,17 +888,17 @@ class WorkspaceStateRegistry:
                         "match": str(row[7]),
                     }
                     for row in connection.execute(
-                        f"PRAGMA foreign_key_list({self._quote_identifier(str(name))})"
+                        f"PRAGMA foreign_key_list({self._quote_identifier(object_name)})"
                     ).fetchall()
                 ]
                 row_count = int(
                     connection.execute(
-                        f"SELECT COUNT(*) FROM {self._quote_identifier(str(name))}"
+                        f"SELECT COUNT(*) FROM {self._quote_identifier(object_name)}"
                     ).fetchone()[0]
                 )
                 tables.append(
                     {
-                        "name": str(name),
+                        "name": object_name,
                         "state_class": object_spec.state_class.value,
                         "redaction_policy": object_spec.redaction_policy,
                         "row_count": row_count,
@@ -753,8 +949,10 @@ __all__ = [
     "WorkspaceStateRegistry",
     "canonical_workspace_config",
     "canonical_workspace_database_path",
+    "canonical_workspace_inventory",
     "canonical_workspace_registry",
     "canonical_workspace_root",
+    "production_workspace_inventory",
 ]
 
 
@@ -774,14 +972,21 @@ _RUNTIME_PATH_SPECS = (
     ("notes", WorkspaceStateClass.CANONICAL),
     ("mcp-servers.json", WorkspaceStateClass.CANONICAL),
     ("stdio-proxies.json", WorkspaceStateClass.CANONICAL),
+    ("extensions-state.json", WorkspaceStateClass.CANONICAL),
     ("starter-packs.json", WorkspaceStateClass.CANONICAL),
     ("model-fabric-settings.json", WorkspaceStateClass.CANONICAL),
     ("screen-analysis-settings.json", WorkspaceStateClass.CANONICAL),
     ("daemon-status.json", WorkspaceStateClass.DERIVED),
+    ("local-runtime-profile-receipts", WorkspaceStateClass.DERIVED),
     ("lance", WorkspaceStateClass.DERIVED),
+    (".seraph-extension-snapshots", WorkspaceStateClass.DERIVED),
+    ("seraph.db-wal", WorkspaceStateClass.DERIVED),
+    ("seraph.db-shm", WorkspaceStateClass.DERIVED),
+    ("seraph.db-journal", WorkspaceStateClass.DERIVED),
     ("cache", WorkspaceStateClass.CACHE),
     ("tmp", WorkspaceStateClass.DISPOSABLE),
     (".vault-key", WorkspaceStateClass.SECRET_RECOVERY),
+    ("google_calendar_token.json", WorkspaceStateClass.SECRET),
 )
 
 
@@ -823,6 +1028,40 @@ def canonical_workspace_config(root: str | os.PathLike[str]) -> WorkspaceConfig:
 def canonical_workspace_registry(root: str | os.PathLike[str]) -> WorkspaceStateRegistry:
     """Return the registry shared by canonical persistence callers."""
     return WorkspaceStateRegistry(canonical_workspace_config(root))
+
+
+def production_workspace_inventory(root: str | os.PathLike[str]) -> dict[str, Any]:
+    """Build an operator receipt for the explicitly configured production root."""
+    try:
+        registry = canonical_workspace_registry(root)
+    except WorkspaceStateError as exc:
+        reason = _inventory_failure_reason(exc)
+        return {
+            "schema_version": "seraph.workspace.inventory.v1",
+            "workspace_id": "workspace-runtime",
+            "root_kind": WorkspaceRootKind.PRODUCTION.value,
+            "status": "blocked",
+            "operator_status": "workspace_inventory_blocked",
+            "manifest": None,
+            "manifest_sha256": None,
+            "missing_declared_paths": [],
+            "degraded_reasons": [],
+            "blocked_reasons": [reason],
+            "reason_code": reason,
+            "secret_values_included": False,
+            "receipt_id": _inventory_receipt_id(
+                "workspace-runtime",
+                WorkspaceRootKind.PRODUCTION.value,
+                "blocked",
+                [reason],
+            ),
+        }
+    return registry.build_inventory_receipt()
+
+
+def canonical_workspace_inventory(root: str | os.PathLike[str]) -> dict[str, Any]:
+    """Compatibility name for the production inventory receipt boundary."""
+    return production_workspace_inventory(root)
 
 
 def canonical_workspace_database_path(root: str | os.PathLike[str]) -> Path:

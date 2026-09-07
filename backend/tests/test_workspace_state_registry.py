@@ -22,6 +22,7 @@ from src.workspace import (
     WorkspaceStateRegistry,
     canonical_workspace_database_path,
     canonical_workspace_registry,
+    production_workspace_inventory,
 )
 
 
@@ -234,7 +235,7 @@ def test_only_marked_synthetic_roots_are_read(tmp_path):
         identity=WorkspaceIdentity("workspace-primary", root, WorkspaceRootKind.PRODUCTION),
         declared_paths=(WorkspacePathSpec("seraph.db", WorkspaceStateClass.CANONICAL),),
     )
-    with pytest.raises(WorkspaceStateError, match="production workspace roots"):
+    with pytest.raises(UnknownWorkspacePathError, match="unknown"):
         WorkspaceStateRegistry(production_config).build_manifest()
 
 
@@ -277,3 +278,163 @@ def test_artifact_persistence_consumes_runtime_registry(tmp_path, monkeypatch):
 
     assert record["workspace_state_class"] == WorkspaceStateClass.CANONICAL.value
     assert record["workspace_state_status"] == "classified"
+
+
+def _production_config(root: Path) -> WorkspaceConfig:
+    return WorkspaceConfig(
+        identity=WorkspaceIdentity("workspace-primary", root, WorkspaceRootKind.PRODUCTION),
+        declared_paths=(
+            WorkspacePathSpec("seraph.db", WorkspaceStateClass.CANONICAL),
+            WorkspacePathSpec("artifacts", WorkspaceStateClass.CANONICAL),
+            WorkspacePathSpec("derived", WorkspaceStateClass.DERIVED),
+            WorkspacePathSpec("cache", WorkspaceStateClass.CACHE),
+            WorkspacePathSpec("secret.bin", WorkspaceStateClass.SECRET),
+            WorkspacePathSpec("tmp", WorkspaceStateClass.DISPOSABLE),
+        ),
+    )
+
+
+def _make_production_workspace(tmp_path: Path) -> tuple[Path, WorkspaceConfig]:
+    root = tmp_path / "production"
+    root.mkdir()
+    (root / "artifacts").mkdir()
+    (root / "artifacts" / "report.md").write_text("canonical report", encoding="utf-8")
+    (root / "derived").mkdir()
+    (root / "derived" / "vectors.idx").write_text("rebuildable", encoding="utf-8")
+    (root / "cache").mkdir()
+    (root / "cache" / "screen.cache").write_text("cache", encoding="utf-8")
+    (root / "secret.bin").write_text("PRODUCTION-SECRET-SENTINEL", encoding="utf-8")
+    (root / "tmp").mkdir()
+    with sqlite3.connect(root / "seraph.db") as connection:
+        connection.executescript(
+            """
+            CREATE TABLE records (
+                id TEXT PRIMARY KEY,
+                value TEXT NOT NULL DEFAULT 'DATABASE-DEFAULT-SECRET-SENTINEL'
+            );
+            CREATE INDEX ix_records_value ON records(value);
+            INSERT INTO records(id, value) VALUES ('r1', 'DATABASE-SECRET-SENTINEL');
+            """
+        )
+    return root, _production_config(root)
+
+
+def test_production_inventory_is_explicit_redacted_and_deterministic(tmp_path):
+    root, config = _make_production_workspace(tmp_path)
+    registry = WorkspaceStateRegistry(config)
+
+    first = registry.build_manifest()
+    second = registry.build_manifest()
+    receipt = registry.build_inventory_receipt()
+    encoded = registry.build_manifest_json()
+
+    assert first == second
+    assert encoded == json.dumps(first, sort_keys=True, separators=(",", ":"))
+    assert first["root_kind"] == WorkspaceRootKind.PRODUCTION.value
+    assert first["inventory"]["status"] == "ready"
+    assert first["inventory"]["missing_declared_paths"] == []
+    assert first["inventory"]["state_roles"][WorkspaceStateClass.CANONICAL.value] == "canonical_payload"
+    assert first["inventory"]["state_roles"][WorkspaceStateClass.DERIVED.value] == "rebuildable"
+    assert first["inventory"]["state_roles"][WorkspaceStateClass.CACHE.value] == "cache"
+    assert first["inventory"]["state_roles"][WorkspaceStateClass.SECRET.value] == "secret"
+    assert str(root) not in encoded
+    assert "PRODUCTION-SECRET-SENTINEL" not in encoded
+    assert "DATABASE-SECRET-SENTINEL" not in encoded
+    assert "DATABASE-DEFAULT-SECRET-SENTINEL" not in encoded
+    secret_entry = next(item for item in first["entries"] if item["logical_path"] == "secret.bin")
+    assert secret_entry["state_class"] == WorkspaceStateClass.SECRET.value
+    assert secret_entry["state_role"] == "secret"
+    assert secret_entry["digest_scope"] == "redacted_metadata"
+    assert receipt["status"] == "ready"
+    assert receipt["operator_status"] == "workspace_inventory_ready"
+    assert receipt["secret_values_included"] is False
+    assert receipt["manifest_sha256"] == first["manifest_sha256"]
+
+
+def test_production_inventory_reports_missing_declared_paths_as_degraded(tmp_path):
+    root, config = _make_production_workspace(tmp_path)
+    config = WorkspaceConfig(
+        identity=config.identity,
+        declared_paths=(*config.declared_paths, WorkspacePathSpec("optional", WorkspaceStateClass.DERIVED)),
+    )
+
+    manifest = WorkspaceStateRegistry(config).build_manifest()
+    receipt = WorkspaceStateRegistry(config).build_inventory_receipt()
+
+    assert manifest["inventory"] == {
+        "status": "degraded",
+        "missing_declared_paths": ["optional"],
+        "state_roles": manifest["inventory"]["state_roles"],
+    }
+    assert receipt["status"] == "degraded"
+    assert receipt["operator_status"] == "workspace_inventory_degraded"
+    assert receipt["missing_declared_paths"] == ["optional"]
+    assert receipt["degraded_reasons"] == ["declared_paths_missing"]
+    assert receipt["blocked_reasons"] == []
+
+
+def test_production_inventory_blocks_missing_secret_declarations(tmp_path):
+    root, config = _make_production_workspace(tmp_path)
+    (root / "secret.bin").unlink()
+    registry = WorkspaceStateRegistry(config)
+
+    with pytest.raises(WorkspaceStateError, match="required secret workspace path"):
+        registry.build_manifest()
+    receipt = registry.build_inventory_receipt()
+
+    assert receipt["status"] == "blocked"
+    assert receipt["operator_status"] == "workspace_inventory_blocked"
+    assert receipt["blocked_reasons"] == ["required_secret_missing"]
+    assert receipt["manifest"] is None
+    assert receipt["missing_declared_paths"] == []
+
+
+def test_production_inventory_blocks_unknown_entries_and_symlink_escape(tmp_path):
+    root, config = _make_production_workspace(tmp_path)
+    registry = WorkspaceStateRegistry(config)
+
+    (root / "unexpected.txt").write_text("outside approved roots", encoding="utf-8")
+    with pytest.raises(UnknownWorkspacePathError, match="unknown"):
+        registry.build_manifest()
+    blocked_unknown = registry.build_inventory_receipt()
+    assert blocked_unknown["status"] == "blocked"
+    assert blocked_unknown["operator_status"] == "workspace_inventory_blocked"
+    assert blocked_unknown["blocked_reasons"] == ["unknown_workspace_path"]
+    assert str(root) not in json.dumps(blocked_unknown, sort_keys=True)
+
+    (root / "unexpected.txt").unlink()
+    outside = tmp_path / "outside"
+    outside.write_text("SYMLINK-SECRET-SENTINEL", encoding="utf-8")
+    (root / "artifacts" / "escape").symlink_to(outside)
+    with pytest.raises(UnsupportedWorkspaceEntryError, match="symlink"):
+        registry.build_manifest()
+    blocked_symlink = registry.build_inventory_receipt()
+    assert blocked_symlink["status"] == "blocked"
+    assert blocked_symlink["blocked_reasons"] == ["unsupported_or_symlink_entry"]
+    assert "SYMLINK-SECRET-SENTINEL" not in json.dumps(blocked_symlink, sort_keys=True)
+
+
+def test_production_inventory_requires_a_real_explicit_root(tmp_path):
+    missing_root = tmp_path / "unknown-production-root"
+    config = WorkspaceConfig(
+        identity=WorkspaceIdentity("workspace-primary", missing_root, WorkspaceRootKind.PRODUCTION),
+        declared_paths=(WorkspacePathSpec("seraph.db", WorkspaceStateClass.CANONICAL),),
+    )
+    receipt = WorkspaceStateRegistry(config).build_inventory_receipt()
+
+    assert receipt["status"] == "blocked"
+    assert receipt["blocked_reasons"] == ["workspace_root_invalid"]
+    assert receipt["manifest"] is None
+    assert str(missing_root) not in json.dumps(receipt, sort_keys=True)
+    first_helper_receipt = production_workspace_inventory(missing_root)
+    second_helper_receipt = production_workspace_inventory(missing_root)
+    assert first_helper_receipt["status"] == "blocked"
+    assert first_helper_receipt["blocked_reasons"] == ["workspace_root_invalid"]
+    assert first_helper_receipt["receipt_id"] == second_helper_receipt["receipt_id"]
+
+    linked_root = tmp_path / "linked-production-root"
+    linked_root.symlink_to(tmp_path / "missing-target", target_is_directory=True)
+    linked_receipt = production_workspace_inventory(linked_root)
+    assert linked_receipt["status"] == "blocked"
+    assert linked_receipt["blocked_reasons"] == ["unsupported_or_symlink_entry"]
+    assert str(linked_root) not in json.dumps(linked_receipt, sort_keys=True)

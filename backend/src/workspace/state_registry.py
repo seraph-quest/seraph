@@ -10,6 +10,8 @@ consume this registry contract.
 Secret/recovery files are never opened.  Their manifest ``sha256`` is a
 deterministic digest of redacted metadata, marked by ``digest_scope``; this
 keeps the manifest useful for change detection without loading key material.
+Filesystem enumeration and regular-file hashing are bounded by the explicit
+limits on ``WorkspaceConfig``.
 """
 
 from __future__ import annotations
@@ -41,6 +43,52 @@ class UnknownWorkspacePathError(WorkspaceStateError):
 
 class UnsupportedWorkspaceEntryError(WorkspaceStateError):
     """Raised for links, devices, sockets, FIFOs, or other unsafe entries."""
+
+
+_INVENTORY_LIMIT_REASON_CODES: dict[str, str] = {
+    "max_entries": "workspace_inventory_entry_limit_exceeded",
+    "max_depth": "workspace_inventory_depth_limit_exceeded",
+    "max_total_bytes": "workspace_inventory_total_bytes_limit_exceeded",
+    "max_file_bytes": "workspace_inventory_file_bytes_limit_exceeded",
+}
+
+
+class WorkspaceInventoryLimitError(WorkspaceStateError):
+    """Raised when inventory work reaches a configured resource bound."""
+
+    def __init__(self, limit_name: str, configured_limit: int, observed: int) -> None:
+        if limit_name not in _INVENTORY_LIMIT_REASON_CODES:
+            raise ValueError(f"unknown workspace inventory limit: {limit_name}")
+        self.limit_name = limit_name
+        self.configured_limit = configured_limit
+        self.observed = observed
+        super().__init__(f"workspace inventory {limit_name} limit exceeded")
+
+    @property
+    def reason_code(self) -> str:
+        return _INVENTORY_LIMIT_REASON_CODES[self.limit_name]
+
+    def as_receipt(self) -> dict[str, int | str]:
+        """Return bounded, non-sensitive operator metadata for this breach."""
+        return {
+            "name": self.limit_name,
+            "configured": self.configured_limit,
+            "observed": self.observed,
+        }
+
+
+# These defaults bound ordinary production inventory while leaving room for
+# the current local workspace's reports, screenshots, and runtime metadata.
+DEFAULT_MAX_INVENTORY_ENTRIES = 4096
+DEFAULT_MAX_INVENTORY_DEPTH = 32
+DEFAULT_MAX_INVENTORY_TOTAL_BYTES = 512 * 1024 * 1024
+DEFAULT_MAX_INVENTORY_FILE_BYTES = 128 * 1024 * 1024
+
+
+def _positive_inventory_limit(value: object, *, field_name: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise WorkspaceStateError(f"{field_name} must be a positive integer")
+    return value
 
 
 class WorkspaceRootKind(str, Enum):
@@ -96,6 +144,8 @@ def _sha256_json(value: object) -> str:
 
 def _inventory_failure_reason(exc: WorkspaceStateError) -> str:
     """Map an internal inventory failure to a redacted operator code."""
+    if isinstance(exc, WorkspaceInventoryLimitError):
+        return exc.reason_code
     if isinstance(exc, UnsupportedWorkspaceEntryError):
         return "unsupported_or_symlink_entry"
     if isinstance(exc, UnknownWorkspacePathError):
@@ -292,7 +342,12 @@ class WorkspaceDatabaseObjectSpec:
 
 @dataclass(frozen=True)
 class WorkspaceConfig:
-    """Explicit inventory configuration; no implicit workspace roots exist."""
+    """Explicit inventory configuration; no implicit workspace roots exist.
+
+    The four inventory limits are part of the caller-supplied contract.  They
+    bound filesystem enumeration and regular-file hashing for both synthetic
+    and production roots; secret/recovery entries are still metadata-only.
+    """
 
     identity: WorkspaceIdentity
     declared_paths: tuple[WorkspacePathSpec, ...]
@@ -300,6 +355,10 @@ class WorkspaceConfig:
     workspace_version: int = 1
     external_references: tuple[ExternalReferenceSpec, ...] = ()
     expected_database_objects: tuple[WorkspaceDatabaseObjectSpec, ...] = ()
+    max_entries: int = DEFAULT_MAX_INVENTORY_ENTRIES
+    max_depth: int = DEFAULT_MAX_INVENTORY_DEPTH
+    max_total_bytes: int = DEFAULT_MAX_INVENTORY_TOTAL_BYTES
+    max_file_bytes: int = DEFAULT_MAX_INVENTORY_FILE_BYTES
 
     def __post_init__(self) -> None:
         declared_paths = tuple(self.declared_paths)
@@ -310,6 +369,16 @@ class WorkspaceConfig:
         database_path = _normalize_relative_path(self.database_path, field_name="database_path")
         if not isinstance(self.workspace_version, int) or self.workspace_version < 1:
             raise WorkspaceStateError("workspace_version must be a positive integer")
+        max_entries = _positive_inventory_limit(self.max_entries, field_name="max_entries")
+        max_depth = _positive_inventory_limit(self.max_depth, field_name="max_depth")
+        max_total_bytes = _positive_inventory_limit(
+            self.max_total_bytes,
+            field_name="max_total_bytes",
+        )
+        max_file_bytes = _positive_inventory_limit(
+            self.max_file_bytes,
+            field_name="max_file_bytes",
+        )
         names = [item.logical_path for item in declared_paths]
         if len(names) != len(set(names)):
             raise AmbiguousWorkspaceRootsError("duplicate workspace path classifications")
@@ -344,6 +413,10 @@ class WorkspaceConfig:
         object.__setattr__(self, "database_path", database_path)
         object.__setattr__(self, "external_references", external_references)
         object.__setattr__(self, "expected_database_objects", expected_objects)
+        object.__setattr__(self, "max_entries", max_entries)
+        object.__setattr__(self, "max_depth", max_depth)
+        object.__setattr__(self, "max_total_bytes", max_total_bytes)
+        object.__setattr__(self, "max_file_bytes", max_file_bytes)
 
 
 @dataclass(frozen=True)
@@ -382,6 +455,15 @@ class WorkspaceStateRegistry:
             raise WorkspaceStateError("registry requires a WorkspaceConfig")
         self.config = config
 
+    def _inventory_limits_payload(self) -> dict[str, int]:
+        """Return the explicit limits without exposing the workspace root."""
+        return {
+            "max_entries": self.config.max_entries,
+            "max_depth": self.config.max_depth,
+            "max_total_bytes": self.config.max_total_bytes,
+            "max_file_bytes": self.config.max_file_bytes,
+        }
+
     def build_manifest(self) -> dict[str, Any]:
         root = self._validated_root()
         self._assert_within_root(root, root / self.config.database_path, self.config.database_path)
@@ -398,6 +480,7 @@ class WorkspaceStateRegistry:
             "workspace_version": self.config.workspace_version,
             "workspace_id": self.config.identity.workspace_id,
             "root_kind": self.config.identity.root_kind.value,
+            "inventory_limits": self._inventory_limits_payload(),
             "inventory": {
                 "status": inventory_status,
                 "missing_declared_paths": missing_declared_paths,
@@ -458,6 +541,8 @@ class WorkspaceStateRegistry:
             "manifest": None,
             "manifest_sha256": None,
             "missing_declared_paths": [],
+            "inventory_limits": self._inventory_limits_payload(),
+            "limit_breach": None,
             "required_secret_paths": sorted(
                 spec.logical_path
                 for spec in self.config.declared_paths
@@ -480,6 +565,8 @@ class WorkspaceStateRegistry:
             manifest = self.build_manifest()
         except WorkspaceStateError as exc:
             reason = _inventory_failure_reason(exc)
+            if isinstance(exc, WorkspaceInventoryLimitError):
+                base["limit_breach"] = exc.as_receipt()
             base["blocked_reasons"] = [reason]
             base["reason_code"] = reason
             base["receipt_id"] = _inventory_receipt_id(
@@ -647,11 +734,19 @@ class WorkspaceStateRegistry:
                 raise UnsupportedWorkspaceEntryError(f"declared path must not be a symlink: {spec.logical_path}")
 
         entries: list[_Entry] = []
-        self._walk(root, root, entries)
+        total_bytes = [0]
+        self._walk(root, root, entries, total_bytes=total_bytes)
         entries.sort(key=lambda entry: entry.logical_path)
         return entries
 
-    def _walk(self, root: Path, current: Path, entries: list[_Entry]) -> None:
+    def _walk(
+        self,
+        root: Path,
+        current: Path,
+        entries: list[_Entry],
+        *,
+        total_bytes: list[int],
+    ) -> None:
         try:
             current_stat = current.lstat()
         except OSError as exc:
@@ -662,9 +757,12 @@ class WorkspaceStateRegistry:
         logical_path = "" if relative == Path(".") else relative.as_posix()
         if "\\" in logical_path:
             raise WorkspaceStateError("workspace paths containing backslashes are ambiguous")
+        if logical_path:
+            self._check_depth(logical_path)
 
         if stat.S_ISDIR(current_stat.st_mode):
             if logical_path:
+                self._reserve_entry(entries, logical_path)
                 state_class = self._classify(root, logical_path)
                 entries.append(
                     self._make_entry(
@@ -674,12 +772,10 @@ class WorkspaceStateRegistry:
                         file_type="directory",
                         mode=stat.S_IMODE(current_stat.st_mode),
                         size_bytes=0,
+                        total_bytes=total_bytes,
                     )
                 )
-            try:
-                children = sorted(current.iterdir(), key=lambda child: child.name)
-            except OSError as exc:
-                raise WorkspaceStateError(f"workspace directory is not readable: {logical_path}") from exc
+            children = self._bounded_children(current, logical_path, entries)
             for child in children:
                 try:
                     if stat.S_ISLNK(child.lstat().st_mode):
@@ -687,11 +783,13 @@ class WorkspaceStateRegistry:
                 except OSError as exc:
                     raise WorkspaceStateError("workspace entry is not readable") from exc
                 self._assert_within_root(root, child, child.name)
-                self._walk(root, child, entries)
+                self._walk(root, child, entries, total_bytes=total_bytes)
             return
 
         if not stat.S_ISREG(current_stat.st_mode):
             raise UnsupportedWorkspaceEntryError(f"unsupported workspace entry type: {logical_path}")
+        self._reserve_entry(entries, logical_path)
+        self._account_file_size(total_bytes, current_stat.st_size, logical_path)
         state_class = self._classify(root, logical_path)
         entries.append(
             self._make_entry(
@@ -701,8 +799,81 @@ class WorkspaceStateRegistry:
                 file_type="sqlite" if logical_path == self.config.database_path else "file",
                 mode=stat.S_IMODE(current_stat.st_mode),
                 size_bytes=current_stat.st_size,
+                total_bytes=total_bytes,
             )
         )
+
+    def _reserve_entry(self, entries: list[_Entry], logical_path: str) -> None:
+        observed = len(entries) + 1
+        if observed > self.config.max_entries:
+            raise WorkspaceInventoryLimitError(
+                "max_entries",
+                self.config.max_entries,
+                observed,
+            )
+
+    def _check_depth(self, logical_path: str) -> None:
+        observed = len(PurePosixPath(logical_path).parts)
+        if observed > self.config.max_depth:
+            raise WorkspaceInventoryLimitError(
+                "max_depth",
+                self.config.max_depth,
+                observed,
+            )
+
+    def _bounded_children(
+        self,
+        current: Path,
+        logical_path: str,
+        entries: list[_Entry],
+    ) -> list[Path]:
+        remaining = self.config.max_entries - len(entries)
+        if remaining < 0:
+            raise WorkspaceInventoryLimitError(
+                "max_entries",
+                self.config.max_entries,
+                len(entries),
+            )
+        children: list[Path] = []
+        try:
+            for child in current.iterdir():
+                children.append(child)
+                if len(children) > remaining:
+                    raise WorkspaceInventoryLimitError(
+                        "max_entries",
+                        self.config.max_entries,
+                        len(entries) + len(children),
+                    )
+        except WorkspaceInventoryLimitError:
+            raise
+        except OSError as exc:
+            raise WorkspaceStateError(
+                f"workspace directory is not readable: {logical_path}"
+            ) from exc
+        return sorted(children, key=lambda child: child.name)
+
+    def _account_file_size(
+        self,
+        total_bytes: list[int],
+        size_bytes: int,
+        logical_path: str,
+    ) -> None:
+        if size_bytes < 0:
+            raise WorkspaceStateError(f"workspace file size is invalid: {logical_path}")
+        if size_bytes > self.config.max_file_bytes:
+            raise WorkspaceInventoryLimitError(
+                "max_file_bytes",
+                self.config.max_file_bytes,
+                size_bytes,
+            )
+        observed_total = total_bytes[0] + size_bytes
+        if observed_total > self.config.max_total_bytes:
+            raise WorkspaceInventoryLimitError(
+                "max_total_bytes",
+                self.config.max_total_bytes,
+                observed_total,
+            )
+        total_bytes[0] = observed_total
 
     def _classify(self, root: Path, logical_path: str) -> WorkspaceStateClass:
         try:
@@ -756,6 +927,7 @@ class WorkspaceStateRegistry:
         file_type: str,
         mode: int,
         size_bytes: int,
+        total_bytes: list[int],
     ) -> _Entry:
         if (
             file_type in {"directory", "sqlite"}
@@ -773,7 +945,11 @@ class WorkspaceStateRegistry:
             )
         else:
             digest_scope = "content"
-            sha256 = self._hash_file(path)
+            sha256 = self._hash_file(
+                path,
+                expected_size=size_bytes,
+                total_bytes=total_bytes,
+            )
         return _Entry(
             logical_path=logical_path,
             path=path,
@@ -786,8 +962,13 @@ class WorkspaceStateRegistry:
             digest_scope=digest_scope,
         )
 
-    @staticmethod
-    def _hash_file(path: Path) -> str:
+    def _hash_file(
+        self,
+        path: Path,
+        *,
+        expected_size: int,
+        total_bytes: list[int],
+    ) -> str:
         digest = hashlib.sha256()
         try:
             descriptor = os.open(
@@ -798,9 +979,39 @@ class WorkspaceStateRegistry:
             if not stat.S_ISREG(descriptor_stat.st_mode):
                 os.close(descriptor)
                 raise UnsupportedWorkspaceEntryError("workspace file changed to a non-regular entry")
+            if descriptor_stat.st_size > self.config.max_file_bytes:
+                os.close(descriptor)
+                raise WorkspaceInventoryLimitError(
+                    "max_file_bytes",
+                    self.config.max_file_bytes,
+                    descriptor_stat.st_size,
+                )
+            bytes_read = 0
+            extra_bytes_accounted = 0
             with os.fdopen(descriptor, "rb") as handle:
                 for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                    bytes_read += len(chunk)
+                    if bytes_read > self.config.max_file_bytes:
+                        raise WorkspaceInventoryLimitError(
+                            "max_file_bytes",
+                            self.config.max_file_bytes,
+                            bytes_read,
+                        )
+                    extra_bytes = max(0, bytes_read - expected_size)
+                    if extra_bytes > extra_bytes_accounted:
+                        delta = extra_bytes - extra_bytes_accounted
+                        observed_total = total_bytes[0] + delta
+                        if observed_total > self.config.max_total_bytes:
+                            raise WorkspaceInventoryLimitError(
+                                "max_total_bytes",
+                                self.config.max_total_bytes,
+                                observed_total,
+                            )
+                        total_bytes[0] = observed_total
+                        extra_bytes_accounted = extra_bytes
                     digest.update(chunk)
+        except WorkspaceStateError:
+            raise
         except (OSError, ValueError) as exc:
             raise WorkspaceStateError("workspace file is not readable") from exc
         return digest.hexdigest()
@@ -826,8 +1037,15 @@ class WorkspaceStateRegistry:
                 "SELECT type, name, tbl_name, sql FROM sqlite_master "
                 "WHERE name NOT LIKE 'sqlite_%' "
                 "AND type IN ('table', 'index', 'trigger', 'view') "
-                "ORDER BY type, name"
+                "ORDER BY type, name LIMIT ?",
+                (self.config.max_entries + 1,),
             ).fetchall()
+            if len(objects) > self.config.max_entries:
+                raise WorkspaceInventoryLimitError(
+                    "max_entries",
+                    self.config.max_entries,
+                    len(objects),
+                )
             actual_objects = {(str(row[0]), str(row[1])) for row in objects}
             expected_by_name = {
                 spec.name: spec for spec in self.config.expected_database_objects
@@ -1009,11 +1227,16 @@ __all__ = [
     "WorkspaceConfig",
     "WorkspaceDatabaseObjectSpec",
     "WorkspaceIdentity",
+    "WorkspaceInventoryLimitError",
     "WorkspacePathSpec",
     "WorkspaceRootKind",
     "WorkspaceStateClass",
     "WorkspaceStateError",
     "WorkspaceStateRegistry",
+    "DEFAULT_MAX_INVENTORY_ENTRIES",
+    "DEFAULT_MAX_INVENTORY_DEPTH",
+    "DEFAULT_MAX_INVENTORY_TOTAL_BYTES",
+    "DEFAULT_MAX_INVENTORY_FILE_BYTES",
     "canonical_workspace_config",
     "canonical_workspace_database_path",
     "canonical_workspace_inventory",
@@ -1117,6 +1340,13 @@ def production_workspace_inventory(root: str | os.PathLike[str]) -> dict[str, An
             "manifest": None,
             "manifest_sha256": None,
             "missing_declared_paths": [],
+            "inventory_limits": {
+                "max_entries": DEFAULT_MAX_INVENTORY_ENTRIES,
+                "max_depth": DEFAULT_MAX_INVENTORY_DEPTH,
+                "max_total_bytes": DEFAULT_MAX_INVENTORY_TOTAL_BYTES,
+                "max_file_bytes": DEFAULT_MAX_INVENTORY_FILE_BYTES,
+            },
+            "limit_breach": None,
             "degraded_reasons": [],
             "blocked_reasons": [reason],
             "reason_code": reason,

@@ -15,6 +15,7 @@ from src.workspace import (
     WorkspaceConfig,
     WorkspaceDatabaseObjectSpec,
     WorkspaceIdentity,
+    WorkspaceInventoryLimitError,
     WorkspacePathSpec,
     WorkspaceRootKind,
     WorkspaceStateClass,
@@ -326,6 +327,18 @@ def _make_production_workspace(tmp_path: Path) -> tuple[Path, WorkspaceConfig]:
     return root, _production_config(root)
 
 
+def _with_inventory_limits(config: WorkspaceConfig, **limits: int) -> WorkspaceConfig:
+    return WorkspaceConfig(
+        identity=config.identity,
+        declared_paths=config.declared_paths,
+        database_path=config.database_path,
+        workspace_version=config.workspace_version,
+        external_references=config.external_references,
+        expected_database_objects=config.expected_database_objects,
+        **limits,
+    )
+
+
 def test_production_inventory_is_explicit_redacted_and_deterministic(tmp_path):
     root, config = _make_production_workspace(tmp_path)
     registry = WorkspaceStateRegistry(config)
@@ -338,6 +351,9 @@ def test_production_inventory_is_explicit_redacted_and_deterministic(tmp_path):
     assert first == second
     assert encoded == json.dumps(first, sort_keys=True, separators=(",", ":"))
     assert first["root_kind"] == WorkspaceRootKind.PRODUCTION.value
+    assert first["inventory_limits"]["max_entries"] == config.max_entries
+    assert first["inventory_limits"]["max_depth"] == config.max_depth
+    assert receipt["inventory_limits"]["max_total_bytes"] == config.max_total_bytes
     assert first["inventory"]["status"] == "ready"
     assert first["inventory"]["missing_declared_paths"] == []
     assert first["inventory"]["state_roles"][WorkspaceStateClass.CANONICAL.value] == "canonical_payload"
@@ -356,6 +372,81 @@ def test_production_inventory_is_explicit_redacted_and_deterministic(tmp_path):
     assert receipt["operator_status"] == "workspace_inventory_ready"
     assert receipt["secret_values_included"] is False
     assert receipt["manifest_sha256"] == first["manifest_sha256"]
+
+
+def _assert_inventory_limit_blocked(
+    root: Path,
+    config: WorkspaceConfig,
+    *,
+    limit_name: str,
+    reason_code: str,
+) -> None:
+    registry = WorkspaceStateRegistry(config)
+    with pytest.raises(WorkspaceInventoryLimitError) as raised:
+        registry.build_manifest()
+    assert raised.value.limit_name == limit_name
+    receipt = registry.build_inventory_receipt()
+    assert receipt["status"] == "blocked"
+    assert receipt["operator_status"] == "workspace_inventory_blocked"
+    assert receipt["blocked_reasons"] == [reason_code]
+    assert receipt["limit_breach"]["name"] == limit_name
+    assert receipt["limit_breach"]["configured"] == getattr(config, limit_name)
+    encoded = json.dumps(receipt, sort_keys=True)
+    assert str(root) not in encoded
+    assert "PRODUCTION-SECRET-SENTINEL" not in encoded
+
+
+def test_production_inventory_bounds_entry_count_without_unbounded_walk(tmp_path):
+    root, config = _make_production_workspace(tmp_path)
+    bounded = _with_inventory_limits(config, max_entries=3)
+
+    _assert_inventory_limit_blocked(
+        root,
+        bounded,
+        limit_name="max_entries",
+        reason_code="workspace_inventory_entry_limit_exceeded",
+    )
+
+
+def test_production_inventory_bounds_path_depth(tmp_path):
+    root, config = _make_production_workspace(tmp_path)
+    (root / "artifacts" / "deep" / "inside").mkdir(parents=True)
+    (root / "artifacts" / "deep" / "inside" / "payload.txt").write_text(
+        "bounded",
+        encoding="utf-8",
+    )
+    bounded = _with_inventory_limits(config, max_depth=2)
+
+    _assert_inventory_limit_blocked(
+        root,
+        bounded,
+        limit_name="max_depth",
+        reason_code="workspace_inventory_depth_limit_exceeded",
+    )
+
+
+def test_production_inventory_bounds_total_file_bytes(tmp_path):
+    root, config = _make_production_workspace(tmp_path)
+    bounded = _with_inventory_limits(config, max_total_bytes=1)
+
+    _assert_inventory_limit_blocked(
+        root,
+        bounded,
+        limit_name="max_total_bytes",
+        reason_code="workspace_inventory_total_bytes_limit_exceeded",
+    )
+
+
+def test_production_inventory_bounds_per_file_hashing(tmp_path):
+    root, config = _make_production_workspace(tmp_path)
+    bounded = _with_inventory_limits(config, max_file_bytes=1)
+
+    _assert_inventory_limit_blocked(
+        root,
+        bounded,
+        limit_name="max_file_bytes",
+        reason_code="workspace_inventory_file_bytes_limit_exceeded",
+    )
 
 
 def test_production_inventory_reports_missing_declared_paths_as_degraded(tmp_path):

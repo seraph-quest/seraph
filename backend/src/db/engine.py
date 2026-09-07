@@ -1,3 +1,4 @@
+import json
 import os
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator, Iterable
@@ -8,8 +9,9 @@ from sqlalchemy.orm import sessionmaker
 from sqlmodel import SQLModel
 
 from config.settings import settings
+from src.workspace import canonical_workspace_database_path, canonical_workspace_registry
 
-_db_path = os.path.join(settings.workspace_dir, "seraph.db")
+_db_path = str(canonical_workspace_database_path(settings.workspace_dir))
 _db_url = f"sqlite+aiosqlite:///{_db_path}"
 
 engine = create_async_engine(
@@ -47,12 +49,53 @@ OPERATOR_REQUIRED_TABLES = (
     "guardian_interventions",
 )
 
+_LEGACY_WORKFLOW_STATUS_MAP = {
+    "completed": "succeeded",
+    "succeeded": "succeeded",
+    "failed": "failed",
+    "cancelled": "cancelled",
+    "canceled": "cancelled",
+    "queued": "queued",
+    "awaiting_approval": "awaiting_approval",
+    "paused": "paused",
+    "blocked": "blocked",
+    "accepted": "accepted",
+    "pending": "accepted",
+}
+
+
+def _map_legacy_workflow_status(status: str | None) -> tuple[str, str | None]:
+    """Map a legacy workflow status into the bounded durable state machine."""
+    original_status = str(status or "unknown")
+    if original_status == "running":
+        return "blocked", "migration_requires_reconciliation"
+    if original_status not in _LEGACY_WORKFLOW_STATUS_MAP:
+        return "blocked", "legacy_status_unmapped"
+    return _LEGACY_WORKFLOW_STATUS_MAP[original_status], None
+
 
 async def _ensure_legacy_columns(conn) -> None:
     """Backfill columns for older local SQLite databases."""
     async def _table_columns(table_name: str) -> set[str]:
         result = await conn.exec_driver_sql(f"PRAGMA table_info({table_name})")
         return {row[1] for row in result.fetchall()}
+
+    goal_columns = await _table_columns("goals")
+    if goal_columns and "revision" not in goal_columns:
+        await conn.exec_driver_sql(
+            "ALTER TABLE goals ADD COLUMN revision INTEGER DEFAULT 1"
+        )
+    if goal_columns and "revision" in await _table_columns("goals"):
+        await conn.exec_driver_sql(
+            "UPDATE goals SET revision = 1 WHERE revision IS NULL OR revision < 1"
+        )
+        await conn.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_goals_revision ON goals (revision)"
+        )
+    if goal_columns and "success_criterion_json" not in goal_columns:
+        await conn.exec_driver_sql(
+            "ALTER TABLE goals ADD COLUMN success_criterion_json VARCHAR"
+        )
 
     user_profile_columns = await _table_columns("user_profiles")
     if user_profile_columns and "tool_policy_mode" not in user_profile_columns:
@@ -238,6 +281,96 @@ async def _ensure_legacy_columns(conn) -> None:
         },
     )
 
+    # #743 adds the durable invocation contract to the existing workflow state
+    # table.  The migration is additive: legacy workflow projections retain
+    # their original status/payload and are handled by the legacy serializer;
+    # only rows admitted through DurableJobRepository receive a binding and
+    # participate in the typed lifecycle.
+    workflow_job_columns = await _add_missing_columns(
+        "workflow_run_states",
+        {
+            "record_schema_version": "INTEGER DEFAULT 1",
+            "parent_job_id": "VARCHAR",
+            "job_kind": "VARCHAR DEFAULT 'workflow'",
+            "owner_kind": "VARCHAR DEFAULT 'legacy'",
+            "owner_principal_id": "VARCHAR",
+            "service_id": "VARCHAR",
+            "goal_id": "VARCHAR",
+            "goal_revision": "INTEGER",
+            "plan_revision": "INTEGER",
+            "candidate_id": "VARCHAR",
+            "capability_version": "VARCHAR DEFAULT 'workflow-v1'",
+            "input_digest": "VARCHAR",
+            "authority_digest": "VARCHAR",
+            "idempotency_scope": "VARCHAR",
+            "idempotency_key": "VARCHAR",
+            "idempotency_binding": "VARCHAR",
+            "priority": "INTEGER DEFAULT 50",
+            "dependencies_json": "VARCHAR DEFAULT '[]'",
+            "resource_claims_json": "VARCHAR DEFAULT '[]'",
+            "declared_authority_json": "VARCHAR",
+            "deadline_at": "DATETIME",
+            "lease_owner": "VARCHAR",
+            "lease_expires_at": "DATETIME",
+            "fencing_token": "INTEGER DEFAULT 0",
+            "attempt_count": "INTEGER DEFAULT 0",
+            "max_attempts": "INTEGER DEFAULT 1",
+            "failure_reason": "VARCHAR",
+            "checkpoint_receipts_json": "VARCHAR DEFAULT '[]'",
+            "artifact_receipts_json": "VARCHAR DEFAULT '[]'",
+            "effect_receipts_json": "VARCHAR DEFAULT '[]'",
+            "result_digest": "VARCHAR",
+            "result_summary": "VARCHAR",
+        },
+    )
+    # ``_add_missing_columns`` returns the existing set as well as newly added
+    # columns, so this index is recreated on every startup even when a prior
+    # migration already added the idempotency fields.
+    if workflow_job_columns and "idempotency_binding" in workflow_job_columns:
+        await conn.exec_driver_sql(
+            "CREATE UNIQUE INDEX IF NOT EXISTS "
+            "ux_workflow_run_states_idempotency_binding "
+            "ON workflow_run_states (idempotency_binding) "
+            "WHERE idempotency_binding IS NOT NULL"
+        )
+        legacy_result = await conn.exec_driver_sql(
+            "SELECT id, status, run_fingerprint, metadata_json "
+            "FROM workflow_run_states "
+            "WHERE record_schema_version = 1 AND idempotency_binding IS NULL"
+        )
+        legacy_rows = legacy_result.fetchall()
+        for row in legacy_rows:
+            metadata = {}
+            if row[3]:
+                try:
+                    parsed = json.loads(row[3])
+                    if isinstance(parsed, dict):
+                        metadata = parsed
+                except (TypeError, json.JSONDecodeError):
+                    metadata = {}
+            migration_marker = metadata.get("durable_job_migration")
+            if isinstance(migration_marker, dict) and migration_marker.get("version") == 1:
+                continue
+            original_status = str(row[1] or "unknown")
+            migrated_status, failure_reason = _map_legacy_workflow_status(original_status)
+            metadata["durable_job_migration"] = {
+                "version": 1,
+                "original_status": original_status,
+                "original_payload_digest": str(row[2] or ""),
+                "preserved": True,
+            }
+            await conn.exec_driver_sql(
+                "UPDATE workflow_run_states SET status = :status, "
+                "failure_reason = :failure_reason, metadata_json = :metadata "
+                "WHERE id = :id",
+                {
+                    "status": migrated_status,
+                    "failure_reason": failure_reason,
+                    "metadata": json.dumps(metadata, ensure_ascii=True, sort_keys=True),
+                    "id": row[0],
+                },
+            )
+
 
 async def _ensure_search_indexes(conn) -> None:
     await conn.exec_driver_sql(
@@ -404,6 +537,10 @@ async def _ensure_memory_indexes(conn) -> None:
 
 async def init_db() -> None:
     """Create all tables on startup."""
+    # Keep SQLite bound to the same canonical workspace registry used by
+    # artifact and vault persistence.  This is a path-ownership check only;
+    # migration and backup/restore lifecycle work remains a later #742 slice.
+    canonical_workspace_registry(settings.workspace_dir).classify_path("seraph.db")
     # Ensure every SQLModel table class is registered before create_all runs.
     from src.db import models as _models  # noqa: F401
 

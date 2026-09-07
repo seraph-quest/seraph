@@ -4479,7 +4479,7 @@ async def test_scheduler_eval_wrapper_binds_authenticated_model_principal():
 
     observed: dict[str, object] = {}
 
-    async def model_job() -> None:
+    async def model_job() -> str:
         principal = get_current_trust_principal()
         assert principal is not None
         context = build_canonical_inference_context(
@@ -4500,6 +4500,47 @@ async def test_scheduler_eval_wrapper_binds_authenticated_model_principal():
     assert principal.authenticated is True
     assert principal.grants == (AuthorityGrant.MODEL_INFERENCE,)
     assert principal.job_id.startswith("scheduler:eval:principal-contract:")
+
+
+@pytest.mark.asyncio
+async def test_model_eval_job_binds_scoped_service_principal_and_restores_context():
+    from src.approval.runtime import get_current_trust_principal
+    from src.model_fabric.caller_context import build_canonical_inference_context
+    from src.security.trust_contract import AuthorityGrant, PrincipalType
+
+    observed: dict[str, object] = {}
+
+    async def model_job() -> None:
+        principal = get_current_trust_principal()
+        assert principal is not None
+        context = build_canonical_inference_context(
+            "session_consolidation",
+            payload="direct model eval",
+            output_tokens=32,
+            timeout_seconds=5,
+            session_id="model-eval-session",
+            job_id=principal.job_id,
+        )
+        observed["principal"] = principal
+        observed["context_principal"] = context.principal
+        return "model-completed"
+
+    result = await harness._run_model_eval_job(
+        "principal-contract",
+        model_job,
+        session_id="model-eval-session",
+    )
+
+    assert result == "model-completed"
+    principal = observed["principal"]
+    assert principal is observed["context_principal"]
+    assert principal.principal_id == "service:eval:principal-contract"
+    assert principal.principal_type is PrincipalType.SERVICE
+    assert principal.authenticated is True
+    assert principal.grants == (AuthorityGrant.MODEL_INFERENCE,)
+    assert principal.session_id == "model-eval-session"
+    assert principal.job_id == "eval:principal-contract"
+    assert get_current_trust_principal() is None
 
 
 def test_eval_inference_context_remains_fail_closed_without_principal():

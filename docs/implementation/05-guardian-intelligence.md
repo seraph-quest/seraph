@@ -70,6 +70,25 @@
 - [ ] stronger linkage between guardian state, execution choices, and feedback-driven policy adaptation
 - [ ] deeper memory-provider use beyond the shipped additive retrieval, additive user/project modeling, stale/usefulness-ranked provider diagnostics, guarded post-canonical writeback, inventory/governance layer, the pre-context provider quality gate, the guardian-memory benchmark plus contradiction-aware selective-forgetting proof, Batch BZ provider usefulness/degradation/quarantine plus canonical reconciliation receipts, Batch CF live-regression monitors, Batch CM dimension-scoped provider parity matrix, Batch CV longitudinal provider-operation receipts, and Batch DD expanded provider-matrix receipts, especially broader ecosystem coverage, live-provider attestation, richer provider-specific quality tuning, stronger long-horizon usefulness diagnostics, and exact claim-ledger permission before any memory-superiority or full provider-parity wording
 
+## Branch-local #745 goal-conditioned slice
+
+**Status:** Partial on the milestone branch; not Shipped on `develop`.
+
+The first additive slice stores an inspectable success criterion and monotonic
+goal revision on the existing `Goal` record. `POST /api/goals/{goal_id}/candidates`
+creates a deterministic candidate decision with `act`, `clarify`, `defer`, or
+`silent` action, while `GET /api/goals/{goal_id}/loop` exposes the criterion and
+redacted candidate/outcome/no-learning receipts. Candidates retain the goal
+revision and cannot dispatch after a goal is paused, abandoned, edited, or
+expired. The receipt seam uses the existing audit repository and omits input
+values, retaining only input keys and a digest.
+
+The runtime adapter is dependency-injected for focused tests and is absent from
+the production path until the governed admission/execution contracts from
+#743/#744/#747 are available. Missing criteria, verifiers, or evidence therefore
+clarify/defer and record `no_learning`; this slice does not claim either real
+reference workflow journey or completed goal progress.
+
 ## Memory Upgrade Program Record
 
 The upgraded memory system is now complete through Batches A, B, and C.

@@ -437,6 +437,10 @@ class Goal(SQLModel, table=True):
     start_date: Optional[datetime] = Field(default=None)
     due_date: Optional[datetime] = Field(default=None)
     sort_order: int = Field(default=0)
+    # Additive v1 goal-conditioned planning fields.  Legacy goals remain
+    # readable and proposal-only until an operator supplies a criterion.
+    revision: int = Field(default=1, index=True)
+    success_criterion_json: Optional[str] = Field(default=None)
     created_at: datetime = Field(default_factory=_now)
     updated_at: datetime = Field(default_factory=_now)
 

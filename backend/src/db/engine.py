@@ -55,6 +55,23 @@ async def _ensure_legacy_columns(conn) -> None:
         result = await conn.exec_driver_sql(f"PRAGMA table_info({table_name})")
         return {row[1] for row in result.fetchall()}
 
+    goal_columns = await _table_columns("goals")
+    if goal_columns and "revision" not in goal_columns:
+        await conn.exec_driver_sql(
+            "ALTER TABLE goals ADD COLUMN revision INTEGER DEFAULT 1"
+        )
+    if goal_columns and "revision" in await _table_columns("goals"):
+        await conn.exec_driver_sql(
+            "UPDATE goals SET revision = 1 WHERE revision IS NULL OR revision < 1"
+        )
+        await conn.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_goals_revision ON goals (revision)"
+        )
+    if goal_columns and "success_criterion_json" not in goal_columns:
+        await conn.exec_driver_sql(
+            "ALTER TABLE goals ADD COLUMN success_criterion_json VARCHAR"
+        )
+
     user_profile_columns = await _table_columns("user_profiles")
     if user_profile_columns and "tool_policy_mode" not in user_profile_columns:
         await conn.exec_driver_sql(

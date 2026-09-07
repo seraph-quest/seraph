@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable
@@ -97,12 +98,6 @@ def _as_utc(value: datetime | str | None) -> datetime | None:
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
 
 
-def _normalized_datetime(value: datetime | str | None) -> str | None:
-    """Normalize a timestamp before comparing an idempotent job binding."""
-    parsed = _as_utc(value)
-    return parsed.isoformat() if parsed is not None else None
-
-
 def _canonical(value: Any) -> str:
     return json.dumps(value, ensure_ascii=True, separators=(",", ":"), sort_keys=True, default=str)
 
@@ -174,64 +169,147 @@ def _binding(
     })
 
 
-def _idempotency_conflicts(
+def _validate_owner_fields(
+    *, owner_kind: str, owner_principal_id: str, service_id: str | None
+) -> None:
+    """Validate the small owner identity shape this repository persists."""
+    if owner_kind not in {"user", "service"}:
+        raise ValueError("owner_kind must be user or service")
+    if not _text(owner_principal_id):
+        raise ValueError("owner_principal_id is required")
+    if owner_kind == "service" and not _text(service_id):
+        raise ValueError("service jobs require service_id")
+    if owner_kind == "user" and _text(service_id):
+        raise ValueError("user jobs cannot set service_id")
+
+
+def _validate_admission_authority(spec: "DurableJobSpec") -> None:
+    identity = spec.identity
+    _validate_owner_fields(
+        owner_kind=identity.owner_kind,
+        owner_principal_id=identity.owner_principal_id,
+        service_id=spec.service_id,
+    )
+    authority = spec.declared_authority
+    authority_principal = authority.get("principal")
+    if _text(authority_principal) != identity.owner_principal_id:
+        raise ValueError("declared authority principal must match owner_principal_id")
+    authority_kind = authority.get("owner_kind", authority.get("kind"))
+    if authority_kind is not None and _text(authority_kind) != identity.owner_kind:
+        raise ValueError("declared authority owner kind must match owner_kind")
+    authority_service_id = authority.get("service_id")
+    if authority_service_id is not None and _text(authority_service_id) != _text(spec.service_id):
+        raise ValueError("declared authority service_id must match service_id")
+    if identity.owner_kind == "service" and _text(authority_service_id) != _text(spec.service_id):
+        raise ValueError("service authority must declare the matching service_id")
+    if identity.owner_kind == "user" and _text(authority_service_id):
+        raise ValueError("user authority cannot declare service_id")
+
+
+def _deadline_identity(value: datetime | str | None) -> str | None:
+    parsed = _as_utc(value)
+    return parsed.isoformat() if parsed else None
+
+
+def _normalized_json_list(raw: str | None) -> str:
+    parsed = _json_load(raw, None)
+    if not isinstance(parsed, list):
+        return "<invalid>"
+    return _canonical(_string_list(parsed))
+
+
+def _admission_conflicts(
     existing: WorkflowRunState,
-    spec: DurableJobSpec,
     *,
+    spec: "DurableJobSpec",
     input_digest: str,
     authority_digest: str,
-) -> tuple[str, ...]:
-    """Return immutable admission fields that differ from an existing job.
-
-    The binding digest prevents two goal candidates from sharing a record, but
-    it is deliberately small.  Every execution-defining field must also match
-    on a replay; otherwise a caller could silently change authority, capability
-    or resource claims while receiving a deduped receipt.
-    """
+    deadline: datetime | None,
+) -> list[str]:
+    """Return immutable admission fields that differ without exposing values."""
     identity = spec.identity
     expected = {
         "job_id": identity.job_id,
-        "owner_kind": identity.owner_kind,
-        "owner_principal_id": identity.owner_principal_id,
+        "input_digest": input_digest,
         "job_kind": identity.job_kind,
         "capability_version": identity.capability_version,
+        "owner_kind": identity.owner_kind,
+        "owner_principal_id": identity.owner_principal_id,
+        "service_id": spec.service_id,
+        "authority_digest": authority_digest,
+        "dependencies": _canonical(_string_list(spec.dependencies)),
+        "resource_claims": _canonical(_string_list(spec.resource_claims)),
+        "deadline_at": _deadline_identity(deadline),
+        "priority": int(spec.priority),
+        "max_attempts": int(spec.max_attempts),
         "session_id": spec.session_id,
         "parent_job_id": spec.parent_job_id,
         "goal_id": spec.goal_id,
         "goal_revision": spec.goal_revision,
         "plan_revision": spec.plan_revision,
         "candidate_id": spec.candidate_id,
-        "priority": int(spec.priority),
-        "dependencies_json": _canonical(_string_list(spec.dependencies)),
-        "resource_claims_json": _canonical(_string_list(spec.resource_claims)),
-        "deadline_at": _normalized_datetime(spec.deadline_at),
-        "max_attempts": int(spec.max_attempts),
-        "service_id": spec.service_id,
-        "input_digest": input_digest,
-        "authority_digest": authority_digest,
     }
     actual = {
-        "job_id": existing.run_identity,
-        "owner_kind": existing.owner_kind,
-        "owner_principal_id": existing.owner_principal_id,
-        "job_kind": existing.job_kind,
-        "capability_version": existing.capability_version,
-        "session_id": existing.session_id,
-        "parent_job_id": existing.parent_job_id,
-        "goal_id": existing.goal_id,
-        "goal_revision": existing.goal_revision,
-        "plan_revision": existing.plan_revision,
-        "candidate_id": existing.candidate_id,
-        "priority": int(existing.priority),
-        "dependencies_json": existing.dependencies_json or "[]",
-        "resource_claims_json": existing.resource_claims_json or "[]",
-        "deadline_at": _normalized_datetime(existing.deadline_at),
-        "max_attempts": int(existing.max_attempts),
-        "service_id": existing.service_id,
-        "input_digest": existing.input_digest,
-        "authority_digest": existing.authority_digest,
+        "job_id": getattr(existing, "run_identity", None),
+        "input_digest": getattr(existing, "input_digest", None),
+        "job_kind": getattr(existing, "job_kind", None),
+        "capability_version": getattr(existing, "capability_version", None),
+        "owner_kind": getattr(existing, "owner_kind", None),
+        "owner_principal_id": getattr(existing, "owner_principal_id", None),
+        "service_id": getattr(existing, "service_id", None),
+        "authority_digest": getattr(existing, "authority_digest", None),
+        "dependencies": _normalized_json_list(getattr(existing, "dependencies_json", None)),
+        "resource_claims": _normalized_json_list(getattr(existing, "resource_claims_json", None)),
+        "deadline_at": _deadline_identity(getattr(existing, "deadline_at", None)),
+        "priority": int(getattr(existing, "priority", 0) or 0),
+        "max_attempts": int(getattr(existing, "max_attempts", 0) or 0),
+        "session_id": getattr(existing, "session_id", None),
+        "parent_job_id": getattr(existing, "parent_job_id", None),
+        "goal_id": getattr(existing, "goal_id", None),
+        "goal_revision": getattr(existing, "goal_revision", None),
+        "plan_revision": getattr(existing, "plan_revision", None),
+        "candidate_id": getattr(existing, "candidate_id", None),
     }
-    return tuple(name for name in expected if actual[name] != expected[name])
+    return [field_name for field_name, value in expected.items() if actual[field_name] != value]
+
+
+def _canonical_reconciliation_receipt(value: Any) -> tuple[str, str]:
+    """Return a redacted canonical receipt and digest, rejecting empty input."""
+    if isinstance(value, Mapping):
+        if not value:
+            raise ValueError("reconciliation_receipt must be nonempty")
+        safe = _safe_structure(dict(value))
+    elif isinstance(value, str) and value.strip():
+        # Opaque external receipt identifiers are represented by a digest so a
+        # secret-bearing token cannot be copied into the durable row.
+        safe = {"opaque_receipt_digest": _digest(value.strip())}
+    else:
+        raise ValueError("reconciliation_receipt must be a nonempty mapping or string")
+    canonical = _canonical(safe)
+    if canonical in {"{}", "null", "\"\""}:
+        raise ValueError("reconciliation_receipt must be nonempty")
+    return canonical, _digest(safe)
+
+
+def _validate_retry_actor(
+    run: WorkflowRunState,
+    *,
+    owner_kind: str,
+    owner_principal_id: str,
+    service_id: str | None,
+) -> None:
+    """Require the retry actor to be the persisted job owner identity."""
+    _validate_owner_fields(
+        owner_kind=owner_kind,
+        owner_principal_id=owner_principal_id,
+        service_id=service_id,
+    )
+    if (
+        getattr(run, "owner_kind", None) != owner_kind
+        or getattr(run, "owner_principal_id", None) != owner_principal_id
+        or getattr(run, "service_id", None) != service_id
+    ):
+        raise DurableJobLeaseError("retry actor is not the authenticated job owner")
 
 
 def _serialize(run: WorkflowRunState, *, receipt: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -345,6 +423,7 @@ class DurableJobRepository:
         identity = spec.identity
         if not spec.declared_authority:
             raise ValueError("declared_authority is required before admission")
+        _validate_admission_authority(spec)
         if not 0 <= int(spec.priority) <= 100:
             raise ValueError("priority must be between 0 and 100")
         if int(spec.max_attempts) < 1:
@@ -359,6 +438,7 @@ class DurableJobRepository:
             idempotency_scope=identity.idempotency_scope,
             dedupe_key=identity.idempotency_key,
         )
+        authority_digest = _digest(spec.declared_authority)
         async with self._session() as db:
             await ensure_sessions_exist(db, [spec.session_id])
             existing = (
@@ -367,15 +447,16 @@ class DurableJobRepository:
                 )
             ).scalars().first()
             if existing is not None:
-                conflicts = _idempotency_conflicts(
+                conflicts = _admission_conflicts(
                     existing,
-                    spec,
+                    spec=spec,
                     input_digest=input_digest,
-                    authority_digest=_digest(spec.declared_authority),
+                    authority_digest=authority_digest,
+                    deadline=deadline,
                 )
                 if conflicts:
                     raise DurableJobIdempotencyConflict(
-                        "idempotency binding conflicts with immutable admission fields: "
+                        "idempotency binding conflicts on immutable fields: "
                         + ", ".join(conflicts)
                     )
                 receipt = {
@@ -419,7 +500,7 @@ class DurableJobRepository:
                 candidate_id=spec.candidate_id,
                 capability_version=identity.capability_version,
                 input_digest=input_digest,
-                authority_digest=_digest(spec.declared_authority),
+                authority_digest=authority_digest,
                 idempotency_scope=identity.idempotency_scope,
                 idempotency_key=identity.idempotency_key,
                 idempotency_binding=binding,
@@ -648,15 +729,30 @@ class DurableJobRepository:
     ) -> dict[str, Any]:
         """Persist an operator-safe artifact receipt.
 
-        An ownerless receipt is allowed only before execution is claimed.  A
-        running job must supply the current lease owner and fencing token so a
-        stale runner cannot append an artifact after restart recovery.
+        An ownerless, content-free receipt is allowed only in ``accepted``
+        before execution is claimed. A leased/running job must supply the
+        current lease owner and fencing token so a stale runner cannot append
+        an artifact after restart recovery.
         """
         async with self._session() as db:
             run = await self._fetch(db, job_id)
-            if run.status == "running" and (owner is None or fencing_token is None):
-                raise DurableJobLeaseError("active jobs require owner and fencing token for artifact writes")
-            self._assert_lease(run, owner=owner, fencing_token=fencing_token)
+            if run.status in DURABLE_JOB_TERMINAL_STATUSES:
+                raise DurableJobTransitionError(f"terminal job cannot record artifacts ({run.status})")
+            lease_present = bool(run.lease_owner or run.lease_expires_at)
+            if lease_present or run.status == "running":
+                if owner is None or fencing_token is None:
+                    raise DurableJobLeaseError("owner and fencing token are required for leased artifact writes")
+                self._assert_lease(run, owner=owner, fencing_token=fencing_token)
+            elif owner is None and fencing_token is None:
+                # The only ownerless path is a pre-execution receipt with no
+                # content mutation.  Queued/failed/blocked rows need an
+                # explicit owner even when they currently have no lease.
+                if run.status != "accepted" or content is not None:
+                    raise DurableJobLeaseError(
+                        "owner and fencing token are required to alter artifact evidence"
+                    )
+            else:
+                self._assert_lease(run, owner=owner, fencing_token=fencing_token)
             record = build_artifact_record(
                 file_path=file_path,
                 artifact_type=artifact_type,
@@ -679,9 +775,14 @@ class DurableJobRepository:
             existing = [item for item in existing if isinstance(item, dict) and item.get("artifact_id") != receipt["artifact_id"]]
             existing.append(receipt)
             now = _utc_now()
-            conditions = [WorkflowRunState.run_identity == job_id]
+            conditions = [
+                WorkflowRunState.run_identity == job_id,
+                WorkflowRunState.status == run.status,
+            ]
             if owner is not None:
                 conditions.extend((WorkflowRunState.lease_owner == owner, WorkflowRunState.fencing_token == fencing_token))
+            else:
+                conditions.extend((WorkflowRunState.lease_owner.is_(None), WorkflowRunState.lease_expires_at.is_(None)))
             result_update = await db.execute(update(WorkflowRunState).where(*conditions).values(artifact_receipts_json=_canonical(existing[-100:]), updated_at=now, heartbeat_at=now))
             if result_update.rowcount != 1:
                 raise DurableJobLeaseError("stale job fencing token")
@@ -693,19 +794,74 @@ class DurableJobRepository:
         self,
         job_id: str,
         *,
-        owner: str,
-        reconciled: bool,
-        reconciliation_receipt: str | None = None,
+        owner_kind: str,
+        owner_principal_id: str,
+        service_id: str | None = None,
+        reconciliation_receipt: Any,
+        reconciled: bool | None = None,
     ) -> dict[str, Any]:
-        if not reconciled:
+        if reconciled is False:
             raise DurableJobTransitionError("failed jobs require external-effect reconciliation before retry")
-        if not _text(owner):
-            raise DurableJobLeaseError("owner is required to request a retry")
-        # A failed attempt releases its lease.  The retry owner is recorded in
-        # the receipt; the next queued claim obtains a fresh fencing token.
-        result = await self.transition_job(job_id, "queued", reason="explicit_retry_reconciled")
-        result["receipt"]["reconciliation_receipt"] = _digest(reconciliation_receipt or "operator_reconciled")
-        return result
+        canonical_receipt, receipt_digest = _canonical_reconciliation_receipt(reconciliation_receipt)
+        async with self._session() as db:
+            run = await self._fetch(db, job_id)
+            if run.status != "failed":
+                raise DurableJobTransitionError(f"only failed jobs may be retried (current={run.status})")
+            _validate_retry_actor(
+                run,
+                owner_kind=owner_kind,
+                owner_principal_id=owner_principal_id,
+                service_id=service_id,
+            )
+            existing_effects = _json_load(run.effect_receipts_json, [])
+            if not isinstance(existing_effects, list):
+                existing_effects = []
+            existing_effects.append(
+                {
+                    "kind": "reconciliation",
+                    "status": "reconciled",
+                    "receipt": _json_load(canonical_receipt, {}),
+                    "receipt_digest": receipt_digest,
+                    "owner_kind": owner_kind,
+                    "owner_principal_id": owner_principal_id,
+                    "service_id": service_id,
+                    "recorded_at": _utc_now().isoformat(),
+                }
+            )
+            now = _utc_now()
+            updated = await db.execute(
+                update(WorkflowRunState)
+                .where(
+                    WorkflowRunState.run_identity == job_id,
+                    WorkflowRunState.status == "failed",
+                    WorkflowRunState.owner_kind == owner_kind,
+                    WorkflowRunState.owner_principal_id == owner_principal_id,
+                    WorkflowRunState.service_id == service_id,
+                )
+                .values(
+                    status="queued",
+                    failure_reason=None,
+                    lease_owner=None,
+                    lease_expires_at=None,
+                    effect_receipts_json=_canonical(existing_effects[-100:]),
+                    updated_at=now,
+                    heartbeat_at=now,
+                )
+            )
+            if updated.rowcount != 1:
+                raise DurableJobLeaseError("retry actor is unauthorized or job changed")
+            refreshed = await self._fetch(db, job_id)
+            receipt = {
+                "kind": "retry",
+                "status": "recorded",
+                "owner_kind": owner_kind,
+                "owner_principal_id": owner_principal_id,
+                "service_id": service_id,
+                "reconciliation_receipt_digest": receipt_digest,
+                "operator_visible": True,
+            }
+            db.expunge(refreshed)
+            return _serialize(refreshed, receipt=receipt)
 
     async def recover_stale_jobs(self, *, now: datetime | None = None) -> list[dict[str, Any]]:
         observed_at = now or _utc_now()

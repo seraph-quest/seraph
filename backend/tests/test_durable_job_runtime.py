@@ -5,6 +5,7 @@ from __future__ import annotations
 import sqlite3
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 
 import pytest
 from src.db.engine import _ensure_legacy_columns, _map_legacy_workflow_status
@@ -18,6 +19,12 @@ from src.workflows.job_runtime import (
     DurableJobSpec,
     DurableJobLeaseError,
     DurableJobTransitionError,
+    _admission_conflicts,
+    _canonical_reconciliation_receipt,
+    _digest,
+    _safe_inputs_digest,
+    _validate_admission_authority,
+    _validate_retry_actor,
     durable_job_repository,
 )
 
@@ -46,6 +53,114 @@ def test_invalid_legacy_statuses_block_and_idempotency_index_is_unique():
     ]
     assert len(idempotency_indexes) == 1
     assert idempotency_indexes[0].unique is True
+
+
+def test_admission_binds_authority_and_all_immutable_identity_fields():
+    spec = _spec()
+    _validate_admission_authority(spec)
+
+    with pytest.raises(ValueError, match="principal"):
+        _validate_admission_authority(
+            replace(spec, declared_authority={"principal": "service:other", "service_id": "service:strategist"})
+        )
+    with pytest.raises(ValueError, match="service_id"):
+        _validate_admission_authority(replace(spec, service_id=None, declared_authority={"principal": "service:strategist"}))
+
+    input_digest, _ = _safe_inputs_digest(spec.inputs)
+    existing = SimpleNamespace(
+        run_identity=spec.identity.job_id,
+        input_digest=input_digest,
+        job_kind=spec.identity.job_kind,
+        capability_version=spec.identity.capability_version,
+        owner_kind=spec.identity.owner_kind,
+        owner_principal_id=spec.identity.owner_principal_id,
+        service_id=spec.service_id,
+        authority_digest=_digest(spec.declared_authority),
+        dependencies_json="[]",
+        resource_claims_json='["cpu"]',
+        deadline_at=None,
+        priority=spec.priority,
+        max_attempts=spec.max_attempts,
+        session_id=spec.session_id,
+        parent_job_id=spec.parent_job_id,
+        goal_id=spec.goal_id,
+        goal_revision=spec.goal_revision,
+        plan_revision=spec.plan_revision,
+        candidate_id=spec.candidate_id,
+    )
+    assert _admission_conflicts(
+        existing,
+        spec=spec,
+        input_digest=input_digest,
+        authority_digest=_digest(spec.declared_authority),
+        deadline=None,
+    ) == []
+    existing.priority = 1
+    assert _admission_conflicts(
+        existing,
+        spec=spec,
+        input_digest=input_digest,
+        authority_digest=_digest(spec.declared_authority),
+        deadline=None,
+    ) == ["priority"]
+    existing.priority = spec.priority
+
+    immutable_mutations = (
+        ("job_kind", "other_kind", "job_kind"),
+        ("capability_version", "2", "capability_version"),
+        ("authority_digest", "other-authority", "authority_digest"),
+        ("dependencies_json", '["other-dependency"]', "dependencies"),
+        ("resource_claims_json", '["gpu"]', "resource_claims"),
+        ("deadline_at", datetime.now(timezone.utc), "deadline_at"),
+        ("owner_kind", "user", "owner_kind"),
+        ("owner_principal_id", "user:other", "owner_principal_id"),
+        ("service_id", "service:other", "service_id"),
+    )
+    for field_name, changed_value, conflict_name in immutable_mutations:
+        setattr(existing, field_name, changed_value)
+        conflicts = _admission_conflicts(
+            existing,
+            spec=spec,
+            input_digest=input_digest,
+            authority_digest=_digest(spec.declared_authority),
+            deadline=None,
+        )
+        assert conflict_name in conflicts
+        setattr(existing, field_name, {
+            "job_kind": spec.identity.job_kind,
+            "capability_version": spec.identity.capability_version,
+            "authority_digest": _digest(spec.declared_authority),
+            "dependencies_json": "[]",
+            "resource_claims_json": '["cpu"]',
+            "deadline_at": None,
+            "owner_kind": spec.identity.owner_kind,
+            "owner_principal_id": spec.identity.owner_principal_id,
+            "service_id": spec.service_id,
+        }[field_name])
+
+
+def test_retry_requires_owner_identity_and_canonical_reconciliation_receipt():
+    run = SimpleNamespace(
+        owner_kind="service",
+        owner_principal_id="service:strategist",
+        service_id="service:strategist",
+    )
+    with pytest.raises(DurableJobLeaseError):
+        _validate_retry_actor(
+            run,
+            owner_kind="service",
+            owner_principal_id="service:other",
+            service_id="service:other",
+        )
+    with pytest.raises(ValueError):
+        _canonical_reconciliation_receipt({})
+    with pytest.raises(ValueError):
+        _canonical_reconciliation_receipt(None)
+    canonical, digest = _canonical_reconciliation_receipt(
+        {"status": "read_back", "secret_token": "must-not-persist"}
+    )
+    assert digest
+    assert "must-not-persist" not in canonical
 
 
 class _AsyncSQLiteConnection:
@@ -105,8 +220,13 @@ def _spec(*, job_id: str = "job-743-1", dedupe_key: str = "candidate-1") -> Dura
         candidate_id="candidate-1",
         priority=90,
         resource_claims=("cpu",),
-        declared_authority={"principal": "service:strategist", "approval_id": "approval-1"},
+        declared_authority={
+            "principal": "service:strategist",
+            "service_id": "service:strategist",
+            "approval_id": "approval-1",
+        },
         max_attempts=2,
+        service_id="service:strategist",
     )
 
 
@@ -158,14 +278,21 @@ async def test_admission_is_idempotent_and_lifecycle_records_safe_receipts(async
     )
     retried = await durable_job_repository.retry_job(
         admitted["job_id"],
-        owner="operator-1",
+        owner_kind="service",
+        owner_principal_id="service:strategist",
+        service_id="service:strategist",
         reconciled=True,
-        reconciliation_receipt="destination-readback-1",
+        reconciliation_receipt={
+            "effect_id": "destination-write-1",
+            "status": "read_back",
+            "readback_digest": "digest-1",
+        },
     )
 
     assert failed["status"] == "failed"
     assert retried["status"] == "queued"
-    assert retried["receipt"]["reconciliation_receipt"]
+    assert retried["receipt"]["reconciliation_receipt_digest"]
+    assert retried["effects"][0]["status"] == "reconciled"
 
 
 @pytest.mark.asyncio

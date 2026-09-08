@@ -166,7 +166,10 @@ async def analyze_pending_screenshot_folder_observations(
     worker_limit = max(concurrency, 1)
 
     if not screenshot_semantic_analysis_enabled():
-        return ScreenshotFolderAnalysisResult(scanned=0, analyzed=0, failed=0, skipped=0)
+        blocked = await _mark_pending_observations_blocked(
+            reason="remote_inference_blocked:configuration_required"
+        )
+        return ScreenshotFolderAnalysisResult(scanned=blocked, analyzed=0, failed=0, skipped=blocked)
 
     candidates = await _select_analysis_candidates_with_retry(limit=analysis_limit * 20)
     observations = [
@@ -258,19 +261,21 @@ def _is_blocked_analysis_error(error: BaseException) -> bool:
     )
 
 
-async def _select_analysis_candidates_with_retry(*, limit: int) -> list[ScreenObservation]:
+async def _select_analysis_candidates_with_retry(*, limit: int | None) -> list[ScreenObservation]:
     for attempt in range(_DB_LOCK_RETRY_ATTEMPTS):
         try:
             async with get_session() as db:
-                result = await db.execute(
+                statement = (
                     select(ScreenObservation)
                     .where(col(ScreenObservation.app_name) == "Screenshot Folder")
                     .where(col(ScreenObservation.details_json).contains("capture_artifacts:"))
                     .where(col(ScreenObservation.details_json).contains(SCREENSHOT_FOLDER_PROVIDER))
                     .where(_analysis_candidate_status_filter())
                     .order_by(col(ScreenObservation.timestamp).asc())
-                    .limit(limit)
                 )
+                if limit is not None:
+                    statement = statement.limit(limit)
+                result = await db.execute(statement)
                 return list(result.scalars().all())
         except OperationalError as exc:
             if not _is_database_locked(exc):
@@ -771,6 +776,25 @@ def _replace_analysis_details(
         next_details.append(screenshot_analysis_error_detail(reason))
         next_details.append(screenshot_analysis_status_detail(status, reason=reason, attempts=attempts))
     return next_details
+
+
+async def _mark_pending_observations_blocked(*, reason: str) -> int:
+    """Close every pending visual observation when the route is unavailable."""
+    candidates = await _select_analysis_candidates_with_retry(limit=None)
+    blocked = 0
+    for observation in candidates:
+        details = _observation_details(observation)
+        if not _analysis_candidate_ready(details):
+            continue
+        next_details = _replace_analysis_details(
+            details,
+            analysis=None,
+            error_reason=reason,
+            status="blocked",
+        )
+        await _persist_analysis_details_with_retry(observation.id, next_details)
+        blocked += 1
+    return blocked
 
 
 def _sha256_file(path: Path) -> str:

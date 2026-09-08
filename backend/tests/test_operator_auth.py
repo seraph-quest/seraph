@@ -11,7 +11,8 @@ from config.settings import settings
 from src.auth.middleware import validate_request_boundary
 from src.auth.middleware import OperatorAuthMiddleware
 from src.api.ws import _OperatorSessionRevoked, _await_authorized, watch_operator_session, websocket_chat
-from src.auth.service import AuthFailure, authenticate_token, bind_operator_principal, create_session
+from src.api.chat import _watch_rest_operator_session
+from src.auth.service import AuthFailure, authenticate_token, bind_operator_principal, create_session, revoke_session
 from src.auth.cancellation import RuntimeRevokedError, reset_revocation_guard, set_revocation_guard
 from src.llm_runtime import _governed_openai_chat_completion
 from src.api.auth import _reset_login_throttle_for_tests, _login_source
@@ -237,6 +238,51 @@ async def test_revocation_watch_fails_closed_when_auth_store_is_unavailable(monk
     assert revoked.is_set()
     assert guard.is_set()
     assert closed == {"code": 1011, "reason": "auth_state_unavailable"}
+
+
+@pytest.mark.asyncio
+async def test_rest_revocation_watch_sets_guard_when_session_is_revoked(monkeypatch):
+    monkeypatch.setattr(settings, "operator_auth_revocation_poll_seconds", 0.25)
+    guard = Event()
+    stop = asyncio.Event()
+
+    async def _revoked(_token, *, touch=False):
+        raise AuthFailure("session_revoked")
+
+    monkeypatch.setattr("src.api.chat.authenticate_token", _revoked)
+    await asyncio.wait_for(
+        _watch_rest_operator_session("token", guard, stop),
+        timeout=1,
+    )
+    assert guard.is_set()
+
+
+@pytest.mark.asyncio
+async def test_rest_chat_discards_result_when_session_is_revoked(client, monkeypatch):
+    _, token = await _login(client)
+    operator = await authenticate_token(token, touch=False)
+    monkeypatch.setattr(settings, "operator_auth_revocation_poll_seconds", 0.25)
+    monkeypatch.setattr("src.api.chat.should_use_direct_local_chat", lambda *args, **kwargs: True)
+
+    async def fake_route_error(**kwargs):
+        return None
+
+    monkeypatch.setattr("src.api.chat.direct_local_chat_route_error", fake_route_error)
+
+    async def slow_chat(*args, **kwargs):
+        await asyncio.sleep(0.3)
+        await revoke_session(operator.session_id)
+        await asyncio.sleep(0.4)
+        return "must be discarded"
+
+    monkeypatch.setattr("src.api.chat.run_direct_local_chat", slow_chat)
+    response = await client.post(
+        "/api/chat",
+        json={"session_id": "rest-revocation", "message": "hello"},
+        headers={"origin": ORIGIN},
+    )
+    assert response.status_code == 401
+    assert response.json()["detail"]["code"] == "session_revoked"
 
 
 def test_revocation_guard_blocks_new_governed_model_transport():

@@ -2,7 +2,9 @@ import asyncio
 import contextvars
 import json
 import logging
+from contextlib import suppress
 from dataclasses import replace
+from threading import Event
 from time import perf_counter
 
 from fastapi import APIRouter, HTTPException, Request as HttpRequest
@@ -24,6 +26,13 @@ from src.agent.session import session_manager
 from src.audit.runtime import log_agent_run_event
 from src.audit.repository import audit_repository
 from src.api.profile import get_or_create_profile, mark_onboarding_complete
+from src.auth.cancellation import (
+    RuntimeRevokedError,
+    assert_runtime_not_revoked,
+    reset_revocation_guard,
+    set_revocation_guard,
+)
+from src.auth.service import AuthFailure, auth_enabled, authenticate_token, bind_operator_principal
 from src.guardian.state import build_guardian_state
 from src.models.schemas import ChatRequest, ChatResponse
 from src.operators.local_codex import ExternalAgentRuntimeRemovedError
@@ -31,7 +40,6 @@ from src.tools.policy import get_current_tool_policy_mode
 from src.vault.redaction import redact_secrets_in_text
 from src.vlm_runtime import direct_local_chat_route_error
 from src.security.trust_contract import AuthorityGrant, PrincipalType, TrustPrincipal
-from src.auth.service import bind_operator_principal
 from src.llm_runtime import (
     _finish_request,
     _mark_request_timed_out,
@@ -43,6 +51,76 @@ from src.llm_runtime import (
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+
+async def _watch_rest_operator_session(
+    auth_cookie: str | None,
+    revocation_guard: Event,
+    stop_event: asyncio.Event,
+) -> None:
+    """Fail closed when an authenticated REST turn loses its session."""
+    if not auth_cookie or not auth_enabled():
+        return
+    poll_seconds = max(float(settings.operator_auth_revocation_poll_seconds), 0.25)
+    while not stop_event.is_set():
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=poll_seconds)
+            return
+        except asyncio.TimeoutError:
+            pass
+        try:
+            await authenticate_token(auth_cookie, touch=False)
+        except AuthFailure:
+            revocation_guard.set()
+            return
+        except Exception:
+            logger.exception("REST operator-session validation failed; failing closed")
+            revocation_guard.set()
+            return
+
+
+def _begin_rest_revocation_watch(http_request: HttpRequest):
+    """Install a context-propagated revocation guard for one REST inference."""
+    auth_cookie = http_request.cookies.get(settings.operator_auth_cookie_name)
+    if not auth_cookie or not auth_enabled():
+        return None
+    revocation_guard = Event()
+    stop_event = asyncio.Event()
+    watcher = asyncio.create_task(
+        _watch_rest_operator_session(auth_cookie, revocation_guard, stop_event),
+        name="rest-operator-revocation-watch",
+    )
+    token = set_revocation_guard(revocation_guard)
+    return revocation_guard, stop_event, watcher, token
+
+
+async def _end_rest_revocation_watch(scope) -> None:
+    if scope is None:
+        return
+    _revocation_guard, stop_event, watcher, token = scope
+    reset_revocation_guard(token)
+    stop_event.set()
+    if not watcher.done():
+        watcher.cancel()
+    with suppress(asyncio.CancelledError):
+        await watcher
+
+
+async def _ensure_rest_authorized(http_request: HttpRequest, scope) -> None:
+    """Recheck authority before REST transcript or outcome side effects."""
+    if scope is None:
+        return
+    try:
+        assert_runtime_not_revoked()
+        await authenticate_token(
+            http_request.cookies.get(settings.operator_auth_cookie_name),
+            touch=False,
+        )
+    except (AuthFailure, RuntimeRevokedError) as exc:
+        raise HTTPException(
+            status_code=401,
+            detail={"code": "session_revoked", "message": "Operator session was revoked."},
+        ) from exc
 
 
 class ChatAuthorityError(Exception):
@@ -201,6 +279,7 @@ async def chat(request: ChatRequest, http_request: HttpRequest):
             get_current_approval_mode(),
             trust_principal=chat_principal,
         )
+        revocation_scope = _begin_rest_revocation_watch(http_request)
         try:
             response_text = await asyncio.wait_for(
                 run_direct_local_chat(
@@ -213,6 +292,12 @@ async def chat(request: ChatRequest, http_request: HttpRequest):
                 timeout=min(settings.agent_chat_timeout, 60),
             )
             response_text = await redact_secrets_in_text(response_text)
+            assert_runtime_not_revoked()
+        except RuntimeRevokedError as exc:
+            raise HTTPException(
+                status_code=401,
+                detail={"code": "session_revoked", "message": "Operator session was revoked during inference."},
+            ) from exc
         except asyncio.TimeoutError:
             _mark_request_timed_out(llm_request_id)
             await log_agent_run_event(
@@ -251,7 +336,9 @@ async def chat(request: ChatRequest, http_request: HttpRequest):
         finally:
             reset_runtime_context(auth_tokens)
             _finish_request(llm_request_id)
+            await _end_rest_revocation_watch(revocation_scope)
 
+        await _ensure_rest_authorized(http_request, revocation_scope)
         await session_manager.add_message(session.id, "assistant", response_text)
         await log_agent_run_event(
             session_id=session.id,
@@ -288,11 +375,13 @@ async def chat(request: ChatRequest, http_request: HttpRequest):
             )
             agent = build_agent()
 
+    revocation_scope = None
     try:
         from src.observer.manager import context_manager as obs_manager
         started_at = perf_counter()
         llm_request_id = f"agent-rest:{session.id}:{started_at}"
         _register_request(llm_request_id)
+        revocation_scope = _begin_rest_revocation_watch(http_request)
         tokens = set_runtime_context(
             session.id,
             obs_manager.get_context().approval_mode,
@@ -308,6 +397,12 @@ async def chat(request: ChatRequest, http_request: HttpRequest):
         )
         response_text = str(result.output) if hasattr(result, "output") else str(result)
         response_text = await redact_secrets_in_text(response_text)
+        assert_runtime_not_revoked()
+    except RuntimeRevokedError as exc:
+        raise HTTPException(
+            status_code=401,
+            detail={"code": "session_revoked", "message": "Operator session was revoked during inference."},
+        ) from exc
     except ApprovalRequired as exc:
         await approval_repository.merge_details(
             exc.approval_id,
@@ -409,7 +504,9 @@ async def chat(request: ChatRequest, http_request: HttpRequest):
     finally:
         if "llm_request_id" in locals():
             _finish_request(llm_request_id)
+        await _end_rest_revocation_watch(revocation_scope)
 
+    await _ensure_rest_authorized(http_request, revocation_scope)
     await session_manager.add_message(session.id, "assistant", response_text)
     await log_agent_run_event(
         session_id=session.id,

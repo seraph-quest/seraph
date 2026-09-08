@@ -101,6 +101,38 @@ def test_missing_openrouter_configuration_is_a_blocked_receipt():
     assert status["reason"] == "remote_inference_blocked:configuration_required"
 
 
+@pytest.mark.asyncio
+async def test_disabled_analysis_closes_existing_pending_observations(monkeypatch):
+    from src.observer import screenshot_folder_source as source
+    from src.observer.screenshot_semantic_analysis import semantic_analysis_status_from_details
+
+    observation = ScreenObservation(
+        id="pending-observation",
+        app_name="Screenshot Folder",
+        details_json=json.dumps(["capture_artifacts:{}"]),
+    )
+    persisted: list[tuple[str, list[str]]] = []
+
+    async def select_candidates(*, limit):
+        assert limit is None
+        return [observation]
+
+    async def persist(observation_id, details):
+        persisted.append((observation_id, details))
+
+    monkeypatch.setattr(source, "screenshot_semantic_analysis_enabled", lambda: False)
+    monkeypatch.setattr(source, "_select_analysis_candidates_with_retry", select_candidates)
+    monkeypatch.setattr(source, "_persist_analysis_details_with_retry", persist)
+
+    result = await source.analyze_pending_screenshot_folder_observations(limit=1)
+
+    assert result == ScreenshotFolderAnalysisResult(scanned=1, analyzed=0, failed=0, skipped=1)
+    assert len(persisted) == 1
+    status = semantic_analysis_status_from_details(persisted[0][1]) or {}
+    assert status["status"] == "blocked"
+    assert status["reason"] == "remote_inference_blocked:configuration_required"
+
+
 def test_explicit_reanalysis_preserves_blocked_admission_status():
     from src.observer.screenshot_folder_source import _analysis_candidate_ready
     from src.observer.screenshot_semantic_analysis import (

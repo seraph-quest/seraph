@@ -101,6 +101,26 @@ def test_missing_openrouter_configuration_is_a_blocked_receipt():
     assert status["reason"] == "remote_inference_blocked:configuration_required"
 
 
+def test_explicit_reanalysis_preserves_blocked_admission_status():
+    from src.observer.screenshot_folder_source import _analysis_candidate_ready
+    from src.observer.screenshot_semantic_analysis import (
+        replace_semantic_analysis_details,
+        semantic_analysis_status_from_details,
+    )
+
+    details = replace_semantic_analysis_details(
+        ["capture_artifacts:{}"],
+        analysis=None,
+        error_reason="remote_inference_blocked:no_compliant_route",
+        reanalysis_reason="provider_failure_retry",
+    )
+
+    status = semantic_analysis_status_from_details(details) or {}
+    assert status["status"] == "blocked"
+    assert status["reason"] == "remote_inference_blocked:no_compliant_route"
+    assert _analysis_candidate_ready(details) is False
+
+
 @pytest.mark.asyncio
 async def test_screenshot_folder_analysis_selection_retries_database_lock(monkeypatch):
     from src.observer import screenshot_folder_source as source

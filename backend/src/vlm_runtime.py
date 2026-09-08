@@ -2,10 +2,7 @@
 
 from __future__ import annotations
 
-import asyncio
 from urllib.parse import urlparse
-
-import httpx
 
 from config.settings import settings
 
@@ -117,7 +114,12 @@ def deferred_vlm_live_probe(reason: str = "deferred_fast_metadata") -> dict[str,
 
 
 async def probe_effective_vlm_runtime(*, timeout_seconds: float = 0.75) -> dict[str, object]:
-    """Probe the effective VLM wrapper route from this Seraph process."""
+    """Return the retired local-runtime receipt without making a network call.
+
+    The function remains as a compatibility seam for status callers and older
+    integrations.  The OpenRouter-only phase must never probe or depend on a
+    local wrapper, GPU host, or VLM queue.
+    """
     return {
         "checked": False,
         "reachable": False,
@@ -126,40 +128,6 @@ async def probe_effective_vlm_runtime(*, timeout_seconds: float = 0.75) -> dict[
         "backend_health": _unprobed_endpoint(),
         "queue_status": _unprobed_endpoint(),
         "chat_proxy": _unprobed_endpoint(),
-    }
-    base_url = effective_vlm_base_url()
-    if not base_url:
-        return {
-            "checked": False,
-            "reachable": False,
-            "reason": "not_configured",
-            "health": _unprobed_endpoint(),
-            "backend_health": _unprobed_endpoint(),
-            "queue_status": _unprobed_endpoint(),
-            "chat_proxy": _unprobed_endpoint(),
-        }
-
-    timeout = max(min(timeout_seconds, 5.0), 0.1)
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        health, backend_health, queue_status, chat_proxy = await asyncio.gather(
-            _probe_json_endpoint(client, base_url + "/health"),
-            _probe_json_endpoint(client, base_url + "/health/backend"),
-            _probe_json_endpoint(client, base_url + "/queue/status"),
-            _probe_chat_health(client, base_url + "/health/chat"),
-        )
-    reachable = bool(
-        health.get("ok")
-        and backend_health.get("ok")
-        and queue_status.get("ok")
-        and chat_proxy.get("ok")
-    )
-    return {
-        "checked": True,
-        "reachable": reachable,
-        "health": health,
-        "backend_health": backend_health,
-        "queue_status": queue_status,
-        "chat_proxy": chat_proxy,
     }
 
 
@@ -195,142 +163,3 @@ def _trim_url(value: str | None) -> str:
 
 def _unprobed_endpoint() -> dict[str, object]:
     return {"checked": False, "ok": False, "status_code": None, "error": ""}
-
-
-def _probe_failure_detail(probe: dict[str, object]) -> str:
-    for key, label in (
-        ("chat_proxy", "chat proxy"),
-        ("backend_health", "backend health"),
-        ("health", "wrapper health"),
-        ("queue_status", "queue status"),
-    ):
-        endpoint = probe.get(key)
-        if not isinstance(endpoint, dict) or endpoint.get("ok") is True:
-            continue
-        error = str(endpoint.get("error") or "unreachable")
-        status_code = endpoint.get("status_code")
-        if status_code is not None:
-            return f"{label} {error} ({status_code})"
-        return f"{label} {error}"
-    reason = str(probe.get("reason") or "unreachable")
-    return _safe_probe_detail(reason)
-
-
-async def _probe_json_endpoint(client: httpx.AsyncClient, endpoint: str) -> dict[str, object]:
-    try:
-        response = await client.get(endpoint)
-    except httpx.TimeoutException:
-        return {"checked": True, "ok": False, "status_code": None, "error": "timeout"}
-    except httpx.ConnectError:
-        return {"checked": True, "ok": False, "status_code": None, "error": "connect_error"}
-    except httpx.HTTPError:
-        return {"checked": True, "ok": False, "status_code": None, "error": "http_error"}
-
-    payload: object
-    try:
-        payload = response.json()
-    except ValueError:
-        payload = {}
-    ok = 200 <= response.status_code < 400
-    result: dict[str, object] = {
-        "checked": True,
-        "ok": ok,
-        "status_code": response.status_code,
-        "error": "" if ok else "bad_status",
-    }
-    if isinstance(payload, dict):
-        queue = payload.get("queue")
-        if isinstance(queue, dict):
-            result["queue"] = {
-                "queued": queue.get("queued"),
-                "active": queue.get("active"),
-                "workers": queue.get("workers"),
-                "background_workers": queue.get("background_workers"),
-            }
-        elif any(key in payload for key in ("queued", "active", "workers", "background_workers")):
-            result["queue"] = {
-                "queued": payload.get("queued"),
-                "active": payload.get("active"),
-                "workers": payload.get("workers"),
-                "background_workers": payload.get("background_workers"),
-            }
-        for key in ("status", "backend_status", "model"):
-            if key in payload:
-                result[key] = payload[key]
-    return result
-
-
-async def _probe_chat_health(client: httpx.AsyncClient, endpoint: str) -> dict[str, object]:
-    headers = {}
-    api_key = effective_vlm_api_key()
-    if api_key:
-        headers["Authorization"] = f"Bearer {api_key}"
-    try:
-        response = await client.get(endpoint, headers=headers)
-    except httpx.TimeoutException:
-        return {"checked": True, "ok": False, "status_code": None, "error": "timeout"}
-    except httpx.ConnectError:
-        return {"checked": True, "ok": False, "status_code": None, "error": "connect_error"}
-    except httpx.HTTPError:
-        return {"checked": True, "ok": False, "status_code": None, "error": "http_error"}
-
-    try:
-        payload = response.json()
-    except ValueError:
-        payload = {}
-    status = ""
-    enabled = False
-    auth_configured = False
-    auth_ok = False
-    model = ""
-    if isinstance(payload, dict):
-        status = _safe_probe_detail(str(payload.get("status") or ""))
-        enabled = payload.get("enabled") is True
-        auth_configured = payload.get("auth_configured") is True
-        auth_ok = payload.get("auth_ok") is True
-        model_value = payload.get("model")
-        if isinstance(model_value, str):
-            model = _safe_probe_detail(model_value)
-    ok = 200 <= response.status_code < 400 and enabled and auth_configured and auth_ok
-    result: dict[str, object] = {
-        "checked": True,
-        "ok": ok,
-        "status_code": response.status_code,
-        "error": "" if ok else _chat_health_error(response, status, enabled, auth_configured, auth_ok),
-        "enabled": enabled,
-        "auth_configured": auth_configured,
-        "auth_ok": auth_ok,
-    }
-    if status:
-        result["status"] = status
-    if model:
-        result["model"] = model
-    return result
-
-
-def _chat_health_error(
-    response: httpx.Response,
-    status: str,
-    enabled: bool,
-    auth_configured: bool,
-    auth_ok: bool,
-) -> str:
-    if not 200 <= response.status_code < 400:
-        return "bad_status"
-    if status:
-        return _safe_probe_detail(status.strip().lower().replace(" ", "_"))
-    if not enabled:
-        return "disabled"
-    if not auth_configured:
-        return "auth_not_configured"
-    if not auth_ok:
-        return "auth_failed"
-    return "bad_status"
-
-
-def _safe_probe_detail(value: str) -> str:
-    safe = value.strip()
-    for secret in (settings.seraph_vlm_api_key, settings.local_vlm_api_key, settings.local_llm_api_key):
-        if secret:
-            safe = safe.replace(secret, "[redacted]")
-    return safe[:160]

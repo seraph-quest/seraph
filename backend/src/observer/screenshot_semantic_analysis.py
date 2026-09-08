@@ -373,6 +373,7 @@ def replace_semantic_analysis_details(
     analysis: ScreenshotAnalysis | None,
     error_reason: str | None,
     reanalysis_reason: str,
+    status: str | None = None,
 ) -> list[str]:
     """Replace existing semantic analysis details while preserving capture metadata."""
     next_details = [
@@ -394,10 +395,17 @@ def replace_semantic_analysis_details(
         )
     else:
         reason = error_reason or "unknown"
+        # Policy and admission denials are terminal until an operator changes
+        # the governing configuration.  Preserve that distinction for the
+        # explicit reanalysis endpoint as well as the scheduled worker; a
+        # generic ``failed`` receipt would make a blocked item look retryable.
+        resolved_status = status or (
+            "blocked" if reason.startswith("remote_inference_blocked:") else "failed"
+        )
         next_details.append(screenshot_analysis_error_detail(reason))
         next_details.append(
             screenshot_analysis_status_detail(
-                "failed",
+                resolved_status,
                 reason=reason,
                 reanalysis_reason=reanalysis_reason,
             )

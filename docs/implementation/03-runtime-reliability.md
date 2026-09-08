@@ -186,9 +186,13 @@ New runtime work should be activated through GitHub issues and the GitHub Projec
 - live-provider eval dependence for every reliability check
 - claiming remote OpenAI API profiles, Anthropic API models, OpenRouter, local models, or generic OpenAI-compatible endpoints are behaviorally equivalent just because they can be configured behind Seraph controls
 
-## Local Chat Streaming Contract
+## Historical Local Chat Streaming Receipt
 
-Direct local Gemma chat over `/ws/chat` streams assistant text with `delta` frames before the final answer. The expected lightweight chat frame order is:
+The following receipt describes the pre-migration `develop` baseline. It is kept
+for historical traceability; active inference on the #775 branch uses the
+governed OpenRouter route and must not require a local Gemma or VLM server.
+Direct local Gemma chat over `/ws/chat` streamed assistant text with `delta`
+frames before the final answer. The expected lightweight chat frame order was:
 
 ```text
 status -> status -> delta... -> final
@@ -196,16 +200,28 @@ status -> status -> delta... -> final
 
 The frontend reconciles those deltas into one in-progress assistant message and updates that same message when the `final` frame arrives, so the operator sees text appear progressively without duplicate final bubbles.
 
-The Docker VLM wrapper forwards authenticated OpenAI-compatible `stream: true` chat requests as `text/event-stream` responses while keeping the request inside the same priority queue worker until the stream completes. Wrapper repo `seraph-quest/vlm-screenshot-server` commit `48eb4e3` implemented that SSE forwarding. The 2026-07-02 receipt used the older local Docker wrapper path and proved the streaming contract itself: Seraph received `delta` frames before `final`, with 8 deltas, first delta at 2143 ms, and final at 2209 ms. That local-wrapper topology has since been superseded by the GPU-hosted wrapper at `http://192.168.1.26:8001`; current runtime validation must use the direct HTTP route described in `docs/implementation/18-screenshot-folder-source.md`. Seraph still keeps a defensive non-stream fallback if the wrapper or backend rejects streaming, but that fallback is no longer the expected healthy path.
+The Docker VLM wrapper forwarded authenticated OpenAI-compatible `stream: true`
+chat requests as `text/event-stream` responses while keeping the request inside
+the same priority queue worker until the stream completed. Wrapper repo
+`seraph-quest/vlm-screenshot-server` commit `48eb4e3` implemented that SSE
+forwarding. The 2026-07-02 receipt used the older local Docker wrapper path and
+proved the streaming contract itself: Seraph received `delta` frames before
+`final`, with 8 deltas, first delta at 2143 ms, and final at 2209 ms. This is
+historical evidence only; current branch validation uses the OpenRouter API and
+the governed remote-inference admission path documented in
+`docs/implementation/18-screenshot-folder-source.md`.
 
-This token streaming contract currently applies to the direct local chat path used for lightweight conversational turns. Tool-capable smolagents runs still stream operator-visible `step` frames plus `final`; they do not expose raw model token deltas yet because the agent runtime only yields structured steps at this boundary. That remaining deeper token-tap work is tracked separately from VLM queue scheduling and GPU utilization.
+Tool-capable smolagents runs still stream operator-visible `step` frames plus
+`final`; they do not expose raw model token deltas yet because the agent runtime
+only yields structured steps at this boundary. The active OpenRouter chat path
+retains bounded non-stream fallback behavior when streaming is unavailable.
 
 ## Acceptance Checklist
 
 - [x] provider failure with configured fallbacks does not collapse the entire chat path
 - [x] runtime paths can force distinct primary and fallback routing without changing the global baseline
 - [x] dynamic runtime paths can inherit wildcard routing rules without losing exact-path control
-- [x] a local or non-OpenRouter path is demonstrably possible across helper, all current scheduled completion jobs, core agent, delegation, and connected MCP-specialist flows
+- [x] **Historical develop baseline:** a local or non-OpenRouter path was demonstrably possible across helper, scheduled completion jobs, core agent, delegation, and connected MCP-specialist flows; the active #775 branch blocks those paths and admits only governed OpenRouter inference
 - [x] env examples describe local OpenAI-compatible models, OpenRouter, remote OpenAI API, Anthropic-oriented, and generic OpenAI-compatible setup with bounded claims; no active setup path configures an external coding-agent runtime
 
 The command-backed runtime direction previously tracked in

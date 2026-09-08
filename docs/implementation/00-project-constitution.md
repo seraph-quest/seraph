@@ -58,8 +58,8 @@ Public entry points: [docs](https://docs.seraph.quest),
 | Layer | Responsibility | Must not own |
 | --- | --- | --- |
 | **Guardian kernel** | Goals, policy, planning, prioritization, intervention, memory coordination, audit, and operator-visible state | Provider-specific behavior or unbounded side effects |
-| **Capability runtime** | Typed capabilities, durable jobs, checkpoints, artifacts, approvals, sandbox/policy enforcement, and one-GPU scheduling | Product goals or hidden provider fallback |
-| **Model fabric** | Local models, OpenRouter, and generic OpenAI-compatible inference with explicit routing and receipts | Agent identity, durable state, shell orchestration, or product policy |
+| **Capability runtime** | Typed capabilities, durable jobs, checkpoints, artifacts, approvals, sandbox/policy enforcement, and bounded remote-inference admission | Product goals or hidden provider fallback |
+| **Model fabric** | OpenRouter-only active inference for the Epic #736 phase, with explicit routing, consent, budgets, and receipts | Agent identity, durable state, shell orchestration, or product policy |
 | **Interfaces and edges** | Browser cockpit, API, paired Mac observation edge, voice, and paired messaging adapters | Canonical memory, authority, or an independent agent runtime |
 
 The guardian kernel decides **why and what**. The capability runtime controls
@@ -76,6 +76,7 @@ The following architecture decisions are normative:
 3. [ADR-003: Canonical memory boundary](./decisions/003-canonical-memory-boundary.md)
 4. [ADR-004: GPU core and paired Mac edge](./decisions/004-gpu-core-mac-edge-topology.md)
 5. [ADR-005: Epic integration branch workflow](./decisions/005-epic-integration-branch-workflow.md)
+6. [ADR-006: OpenRouter-only inference phase](./decisions/006-openrouter-only-inference-phase.md)
 
 Changing a locked decision requires a superseding ADR, a tracked issue, an
 independent Critic/Contrarian review, and updates to every affected active doc.
@@ -129,19 +130,25 @@ Open branches describe intended post-merge truth and must be identified as such.
 
 - Model providers are inference-only. Seraph does not depend on Codex CLI,
   Claude Code, or another coding-agent runtime to operate.
-- Supported inference families are local models, OpenRouter, and generic
-  OpenAI-compatible APIs. Provider-specific adapters must terminate at the model
-  fabric boundary.
-- One physical GPU executes one GPU job at a time. The running job may finish;
-  the next job is the highest-priority ready job. Background observation uses
-  idle capacity and cannot starve interactive work.
+- During Epic #736's active implementation phase, model inference uses only the
+  governed OpenRouter HTTPS route. Exact model/modalities and upstream policy
+  must be verified before dispatch; unsupported capabilities remain blocked or
+  degraded rather than falling back silently.
+- Remote inference uses one shared bounded admission contract with owner,
+  priority, deadline, cancellation, budget, idempotency, and reconciliation
+  receipts. The initial in-flight limit is one; this is an API admission bound,
+  not a claim about upstream hardware concurrency. The migration branch has
+  process-local admission and operator receipts; durable queue persistence and
+  provider cost reservation/reconciliation remain tracked follow-up work in
+  #743/#744.
 - Canonical goals, memory, jobs, artifacts, approvals, and audit records remain
   in Seraph-owned storage. Advisory memory providers may augment recall but do
   not become authoritative.
-- The target deployment places the authenticated Seraph core on the GPU server
-  for LAN access. A Mac is a paired, revocable observation/interface edge, not
-  the control plane. The currently shipped development topology remains listed
-  in [Current App Guide](./12-current-app-guide.md) until migration is proven.
+- The target deployment places the authenticated Seraph core and canonical state
+  on the selected host (currently `jupyter`). A Mac is a paired, revocable
+  observation/interface edge, not the control plane. GPU hardware, local model
+  weights, and a VLM wrapper are not active product prerequisites during the
+  OpenRouter-only phase.
 - Effective model, queue, edge, and degraded state must be operator-visible.
   Silent fallback that makes the UI lie is a contract violation.
 

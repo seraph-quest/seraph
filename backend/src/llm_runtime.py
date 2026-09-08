@@ -37,11 +37,11 @@ from src.model_fabric.contracts import (
     finalized_openai_compatible_body,
     transport_model_for_provider,
 )
-from src.model_fabric.gpu_admission import (
-    GpuAdmissionError,
-    GpuAdmissionIdentityError,
-    GpuAdmissionRequest,
-    gpu_admission_broker,
+from src.model_fabric.remote_inference_admission import (
+    RemoteInferenceAdmissionError as GpuAdmissionError,
+    RemoteInferenceAdmissionIdentityError as GpuAdmissionIdentityError,
+    RemoteInferenceAdmissionRequest as GpuAdmissionRequest,
+    remote_inference_admission_broker as gpu_admission_broker,
 )
 from src.operators.local_codex import reject_legacy_external_agent_model
 from src.security.trust_contract import (
@@ -54,7 +54,6 @@ from src.security.trust_contract import (
 from src.vlm_runtime import (
     SCREENSHOT_VLM_PROFILE_ID,
     effective_vlm_api_key,
-    effective_vlm_base_url,
     effective_vlm_chat_api_base,
 )
 
@@ -413,15 +412,40 @@ def _configured_provider_profiles() -> dict[str, ProviderProfile]:
     }
 
 
+def _openrouter_policy_options(*, vision: bool = False) -> dict[str, object]:
+    """Build the server-side OpenRouter policy attached to a profile.
+
+    The allow-list is intentionally empty until an operator selects approved
+    upstreams.  The model-fabric selector treats that as a configuration block
+    rather than silently accepting the gateway's default routing.
+    """
+    upstreams = tuple(
+        item.strip()
+        for item in str(getattr(settings, "openrouter_allowed_upstreams", "") or "").split(",")
+        if item.strip()
+    )
+    return {
+        "provider": {
+            "only": list(upstreams),
+            "allow_fallbacks": bool(getattr(settings, "openrouter_allow_fallbacks", False)),
+            "require_parameters": bool(getattr(settings, "openrouter_require_parameters", True)),
+            "data_collection": str(getattr(settings, "openrouter_data_collection", "deny") or "deny"),
+            "zdr": bool(getattr(settings, "openrouter_zero_data_retention", False)) if vision else True,
+        }
+    }
+
+
 def _builtin_provider_profiles() -> dict[str, ProviderProfile]:
+    configured_default_model = settings.default_model.strip() or "openrouter/anthropic/claude-sonnet-4"
     profiles = {
         "openrouter": ProviderProfile(
             id="openrouter",
             provider_kind="openrouter",
-            model=settings.default_model.strip() or "openrouter/anthropic/claude-sonnet-4",
+            model=transport_model_for_provider("openrouter", configured_default_model),
+            routing_model=configured_default_model,
             api_base="https://openrouter.ai/api/v1",
             secret_env="OPENROUTER_API_KEY",
-            capabilities=("reasoning", "tool_use"),
+            capabilities=("text", "reasoning", "tool_use", "streaming"),
             cost_tier="medium",
             latency_tier="medium",
             task_class="general",
@@ -432,6 +456,7 @@ def _builtin_provider_profiles() -> dict[str, ProviderProfile]:
                 "agent_reasoning",
             ),
             budget_class="medium",
+            options=_openrouter_policy_options(),
             safety_notes="OpenRouter-compatible cloud profile; credentials stay provider-scoped.",
         ),
         "openai-compatible": ProviderProfile(
@@ -489,31 +514,60 @@ def _builtin_provider_profiles() -> dict[str, ProviderProfile]:
             safety_notes="Anthropic-keyed Claude profile; operators may pin the exact provider model id in LLM_PROVIDER_PROFILES.",
         ),
     }
-    screenshot_vlm_base = effective_vlm_base_url()
+    # Embeddings are a separate capability and transport contract.  Do not
+    # synthesize a default model here: an operator must explicitly configure
+    # an OpenRouter-qualified embedding model before this profile exists.
+    configured_embedding_model = str(getattr(settings, "embedding_model", "") or "").strip()
+    if (
+        configured_embedding_model.startswith("openrouter/")
+        and "/" in configured_embedding_model.removeprefix("openrouter/")
+        and not any(character.isspace() for character in configured_embedding_model)
+    ):
+        profiles["memory_embedding"] = ProviderProfile(
+            id="memory_embedding",
+            provider_kind="openrouter",
+            model=transport_model_for_provider("openrouter", configured_embedding_model),
+            routing_model=configured_embedding_model,
+            api_base="https://openrouter.ai/api/v1",
+            secret_env="OPENROUTER_API_KEY",
+            capabilities=("embedding",),
+            task_class="memory_embedding",
+            task_classes=("memory_embedding",),
+            budget_class="medium",
+            options=_openrouter_policy_options(),
+            safety_notes=(
+                "Canonical memory embedding profile; requires explicit OpenRouter policy, "
+                "capability proofs, and cloud-egress consent."
+            ),
+            transport_adapter="openai_compatible_embeddings",
+            context_window_tokens=int(settings.local_runtime_context_window_tokens),
+            max_output_tokens=1,
+            max_latency_ms=max(int(settings.consolidation_llm_timeout * 1000), 1),
+        )
     from src.observer.screen_analysis_settings import effective_screen_analysis_model
 
     screenshot_vlm_model = effective_screen_analysis_model()
-    if screenshot_vlm_base and screenshot_vlm_model:
-        screenshot_runtime = local_runtime_profile("screenshot_fast")
+    if screenshot_vlm_model:
+        screenshot_routing_model = screenshot_vlm_model.strip()
         profiles[SCREENSHOT_VLM_PROFILE_ID] = ProviderProfile(
             id=SCREENSHOT_VLM_PROFILE_ID,
-            provider_kind="openai_compatible",
-            model=screenshot_vlm_model,
-            api_base=screenshot_vlm_base,
-            secret_env="SERAPH_VLM_API_KEY",
-            capabilities=("vision", "structured_output"),
-            cost_tier="low",
+            provider_kind="openrouter",
+            model=transport_model_for_provider("openrouter", screenshot_routing_model),
+            routing_model=screenshot_routing_model,
+            api_base="https://openrouter.ai/api/v1",
+            secret_env="OPENROUTER_API_KEY",
+            capabilities=("text", "vision", "structured_output"),
+            cost_tier="medium",
             latency_tier="medium",
             task_class="vision_analysis",
             task_classes=("vision_analysis",),
-            budget_class="low",
-            keyless=not bool(effective_vlm_api_key()),
-            safety_notes="Canonical screenshot VLM analyze-file route through the configured wrapper.",
-            transport_adapter="vlm_analyze_file",
+            budget_class="medium",
+            options=_openrouter_policy_options(vision=True),
+            safety_notes="Governed OpenRouter screenshot profile; requires explicit vision consent and ZDR policy.",
+            transport_adapter="openai_compatible_chat",
             context_window_tokens=int(settings.local_runtime_context_window_tokens),
-            max_output_tokens=int(screenshot_runtime.max_tokens),
-            local_resource_ms=max(int(settings.local_vlm_timeout_seconds * 1000), 1),
-            max_latency_ms=max(int(settings.local_vlm_timeout_seconds * 1000), 1),
+            max_output_tokens=int(settings.model_max_tokens),
+            max_latency_ms=max(int(settings.agent_chat_timeout * 1000), 1),
         )
     if has_local_model_profile():
         local_chat_api_base = effective_vlm_chat_api_base()
@@ -663,7 +717,8 @@ def provider_profiles() -> dict[str, ProviderProfile]:
 def _provider_profile(profile: str | None) -> ProviderProfile | None:
     if not profile:
         return None
-    return provider_profiles().get(_normal_profile_id(profile))
+    normalized = _normal_profile_id(profile)
+    return provider_profiles().get(normalized)
 
 
 def _is_local_profile(profile: str | None) -> bool:
@@ -732,9 +787,9 @@ def provider_profile_statuses() -> list[dict[str, Any]]:
             "schema_version": profile.schema_version,
             "contract_hash": profile.contract_hash,
         }
-        from src.model_fabric.selector import profile_exclusion_reason
+        from src.model_fabric.selector import active_provider_exclusion_reason
 
-        exclusion_reason = profile_exclusion_reason(profile)
+        exclusion_reason = active_provider_exclusion_reason(profile)
         status["model_fabric_eligible"] = exclusion_reason is None
         status["model_fabric_exclusion_reason"] = exclusion_reason
         profile_id = _local_gemma_runtime_profile_id(profile.id)
@@ -1081,7 +1136,22 @@ def runtime_profile_candidates(
     """Return the ordered runtime profiles to try for an implicit runtime path."""
     if profile:
         normalized_profile = _normalize_runtime_profile(profile)
+        from src.model_fabric.caller_context import is_canonical_inference_route
+
+        if runtime_path and is_canonical_inference_route(runtime_path) and normalized_profile == "default":
+            return ["openrouter"]
         return [normalized_profile] if normalized_profile else ["default"]
+
+    # Canonical production routes have a fixed provider boundary.  Persisted
+    # local preferences and model overrides are historical data for those
+    # routes and must never select a disabled local/GPU path.  Keep the broad
+    # resolver below available for readback and transitional helper callers;
+    # their actual transport still requires a canonical context and the active
+    # selector rejects non-OpenRouter candidates at that boundary.
+    from src.model_fabric.caller_context import is_canonical_inference_route
+
+    if runtime_path and is_canonical_inference_route(runtime_path):
+        return ["openrouter"]
 
     candidates: list[str] = []
     override = _runtime_model_override(runtime_path)
@@ -2782,7 +2852,12 @@ async def _governed_preflight_target_async(
 ) -> tuple[Any, Any]:
     """Preflight one exact concrete target immediately before its attempt."""
     from dataclasses import replace
-    from src.model_fabric import candidate_from_profile, profile_exclusion_reason, select_route
+    from src.model_fabric import (
+        active_provider_exclusion_reason,
+        candidate_from_profile,
+        profile_exclusion_reason,
+        select_route,
+    )
     from src.model_fabric.repository import model_fabric_repository
 
     profile_id = str(target.get("profile") or "")
@@ -2803,7 +2878,12 @@ async def _governed_preflight_target_async(
         api_base=str(target.get("api_base") or ""),
     )
     candidate = candidate_from_profile(profile, source=str(target.get("source") or "primary"))
-    if profile_exclusion_reason(profile) is not None:
+    exclusion = (
+        active_provider_exclusion_reason
+        if "openrouter" in getattr(request_context, "allowed_provider_kinds", ())
+        else profile_exclusion_reason
+    )
+    if exclusion(profile) is not None:
         decision = select_route(request_context, (candidate,), ())
         return decision, ()
     capabilities = set(request_context.requirements.capabilities)
@@ -3267,6 +3347,13 @@ class FallbackLiteLLMModel(BaseLiteLLMModel):
                     session_id=principal.session_id,
                     job_id=principal.job_id,
                     extra_capabilities=tuple(extra_capabilities),
+                )
+            else:
+                # An unregistered route has no caller-owned authority
+                # envelope and must not fall through to raw LiteLLM transport
+                # during the OpenRouter-only phase.
+                raise PermissionError(
+                    "active OpenRouter-only inference requires a registered canonical runtime path"
                 )
         request_id = _current_llm_request_id()
         primary_target = {
@@ -3739,6 +3826,10 @@ def completion_with_fallback_sync(
                 principal=principal,
                 session_id=principal.session_id,
                 job_id=principal.job_id,
+            )
+        else:
+            raise PermissionError(
+                "active OpenRouter-only inference requires a registered canonical runtime path"
             )
 
     try:

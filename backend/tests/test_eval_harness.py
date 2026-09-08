@@ -5388,10 +5388,10 @@ def test_runtime_eval_scenarios_expose_expected_details():
     assert details_by_name["mcp_specialist_local_runtime_profile"]["runtime_path"] == "mcp_github_actions"
     assert details_by_name["mcp_specialist_local_runtime_profile"]["routed_model"] == "ollama/llama3.2"
     assert details_by_name["embedding_runtime_audit"]["loaded_integration_type"] == "embedding_model"
-    assert details_by_name["embedding_runtime_audit"]["loaded_model"] == "all-MiniLM-L6-v2"
+    assert details_by_name["embedding_runtime_audit"]["loaded_model"] == "openrouter/openai/text-embedding-3-small"
     assert details_by_name["embedding_runtime_audit"]["vector_length"] == 2
-    assert details_by_name["embedding_runtime_audit"]["failure_stage"] == "encode"
-    assert details_by_name["embedding_runtime_audit"]["failure_error"] == "encode crashed"
+    assert details_by_name["embedding_runtime_audit"]["failure_stage"] == "request"
+    assert details_by_name["embedding_runtime_audit"]["failure_reason_code"] == "provider_transport_failed"
     assert details_by_name["vector_store_runtime_audit"]["memory_created"] is True
     assert details_by_name["vector_store_runtime_audit"]["success_operation"] == "add"
     assert details_by_name["vector_store_runtime_audit"]["empty_reason"] == "empty_table"

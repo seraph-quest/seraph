@@ -932,7 +932,7 @@ class SessionManager:
         runtime_tokens = None
 
         try:
-            from src.llm_runtime import completion_with_fallback, prefers_local_runtime_path
+            from src.llm_runtime import completion_with_fallback
 
             runtime_tokens = set_runtime_context(
                 session_id,
@@ -948,7 +948,9 @@ class SessionManager:
                 temperature=0.3,
                 max_tokens=20,
                 runtime_path="session_title_generation",
-                local_runtime_only=prefers_local_runtime_path("session_title_generation"),
+                # Active inference is OpenRouter-only; legacy local preference
+                # settings must not reintroduce a local model dependency.
+                local_runtime_only=False,
                 request_context=build_canonical_inference_context(
                     "session_title_generation",
                     payload=transport_messages,

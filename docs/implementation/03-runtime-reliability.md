@@ -4,6 +4,13 @@
 
 - [ ] Workstream 03 is only partially shipped on `develop`.
 
+> **OpenRouter-only migration branch:** Epic #736/#775 makes OpenRouter the
+> only active inference gateway. GPU, local-model, and VLM-wrapper references
+> below describe the pre-migration `develop` baseline or historical receipts
+> unless a line is explicitly marked branch-local. Active route status must use
+> the `remote_inference` admission and configuration-required/degraded
+> vocabulary; no local health check is a readiness requirement.
+
 ## Paired Research
 
 - primary design doc: [03. Runtime And Reliability](/research/runtime-and-reliability)
@@ -26,7 +33,7 @@
 - [x] `/api/runtime/status` retains the legacy `effective_runtime` route summary for compatibility, including wrapper/backend/queue metadata.
 - [ ] **Branch-local #740; intended until the epic integration PR lands:** the model-fabric operator surface separates configured candidates from selected/attempted routes and the last actual successful route. The intended `model_fabric` status also exposes runtime-path-specific text/VLM truth, fallback and degradation codes, receipt persistence, and fresh/stale/missing capability proof.
 - [ ] **Branch-local #740; intended until the epic integration PR lands:** `/api/settings/model-fabric` exposes sanitized configuration and policy truth, while the Settings canary is explicit, authenticated, exact-profile, bounded, and no-fallback. Metadata polling never launches inference.
-- [ ] **Partial, branch-local #744; intended until the epic integration PR lands:** governed model-fabric streaming, the preflighted VLM adapter, and canonical synchronous `llm_runtime.py` calls pass through `model_fabric.gpu_admission`, which admits typed priority classes with bounded FIFO queues, deadline/cancel handling, and one active serial GPU lease shared across async loops and worker threads. An active deadline watchdog marks a still-running callback `blocked`, requests cooperative async cancellation, and keeps synchronous leases held until callback completion and owner/fencing-validated reconciliation; a non-returning provider can therefore keep the lane blocked. `/api/runtime/status` exposes an operator-safe broker receipt. Transitional or unregistered provider calls still require migration and this process-local seam does not claim durable queue persistence.
+- [ ] **Partial, branch-local #775/#744; intended until the epic integration PR lands:** governed model-fabric streaming and synchronous calls use one bounded `remote_inference` admission contract with typed priorities, deadline/cancel handling, one active request, and owner/fencing-validated reconciliation shared across async loops and worker threads. An uncertain remote result remains blocked until reconciled and retains possible cost liability. `/api/runtime/status` exposes an operator-safe admission receipt; this process-local seam does not claim durable queue persistence until #743/#744 complete. GPU/VLM readiness is not an active requirement in this target.
 - [ ] **Partial, branch-local #742; intended until the epic integration PR lands:** the workspace registry now accepts an explicitly configured production root, classifies canonical/derived/cache/secret state, emits deterministic redacted ready/degraded/blocked inventory receipts, and blocks unknown entries, symlinks, invalid roots, and missing required secret/recovery material. Optional integration credentials such as `google_calendar_token.json` are explicitly marked optional and surface as degraded when absent. Restore is archive-snapshot based: an optional credential absent from the archive is not recreated and must be re-provisioned after restore. Production migration, operator lifecycle wiring, backup/restore drill, and live proof remain gated by #741 and #742 acceptance.
 - [ ] Interactive REST/WebSocket ingress intentionally remains zero-transport when no authenticated principal is bound. The model fabric does not synthesize identity; #741 owns authenticated LAN/operator identity binding before this path is functional.
 - [x] cockpit baseline refresh now stays bounded to cheap status, observer, audit, approval, capability, extension, browser, and settings calls; deep continuity, activity-ledger, workflow-run, control-plane, orchestration, background, M5/M6/M7/M8, guardian-memory, benchmark-proof, engineering-memory, and continuity-graph panes load through explicit operator controls with stale/unavailable states instead of rejoining the global heartbeat

@@ -160,6 +160,10 @@ def clear_ambient_runtime_profile_preferences():
         patch.object(settings, "local_runtime_paths", ""),
         patch.object(settings, "seraph_vlm_api_key", ""),
         patch.object(settings, "local_vlm_api_key", ""),
+        # These tests exercise the historical provider-matrix and routing
+        # compatibility contract.  Active OpenRouter-only behavior has
+        # dedicated focused coverage in test_model_fabric_openrouter_policy.
+        patch.object(settings, "openrouter_provider_only", False),
     ):
         yield
 
@@ -170,6 +174,7 @@ def transitional_legacy_completion_path(monkeypatch):
     from src.model_fabric import caller_context
 
     monkeypatch.setattr(caller_context, "is_canonical_inference_route", lambda _path: False)
+    monkeypatch.setattr(settings, "openrouter_provider_only", False)
 
 
 def test_build_model_kwargs_uses_provider_agnostic_settings():

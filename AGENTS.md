@@ -23,8 +23,21 @@ FastAPI backend, React cockpit/settings UI, scheduler jobs, screen observation
 storage, local model routing, VLM screenshot analysis, reports, skills,
 workflows, and external service adapters.
 
-The current development topology is part of the product contract, not incidental
-developer setup:
+### Active Epic #736/#775 inference phase
+
+On the OpenRouter-only migration branch, the GPU/VLM topology described below
+is historical `develop` baseline evidence. Active text, vision, and embedding
+inference must use the governed `https://openrouter.ai/api/v1` route with
+explicit upstream, consent, budget, and capability checks. The Seraph backend,
+canonical workspace, storage, tools, scheduler, and operator UI must remain
+usable on a CPU host with local model services and the VLM wrapper absent.
+Status and settings must show local inference as inactive or blocked rather than
+probing those services. The final reviewed migration PR is required before
+this branch-local target becomes shipped `develop` truth.
+
+The pre-#775 `develop` topology below is retained as historical evidence and
+GPU administration guidance, not as an active inference prerequisite on this
+branch:
 
 ```text
 Seraph frontend       http://127.0.0.1:3001
@@ -61,10 +74,12 @@ Two properties shape most Seraph decisions:
 - Runtime truth must be operator-visible. If chat, screenshots, reports, or
   settings use local Gemma/VLM/GPU paths, the UI and APIs must say that, not a
   stale default model or fallback provider.
-- Work should be queued, bounded, and priority-aware. One GPU means no fantasy
-  parallelism. Active GPU work is allowed to finish; the next accepted job must
-  be the highest-priority ready job, and background screenshot work should keep
-  the GPU busy when higher-priority work is absent.
+- Work should be queued, bounded, and priority-aware. On the active #775
+  branch, the serial resource is the governed remote-inference lane, not a
+  physical GPU. At most one remote inference may be admitted until durable
+  queue and cost ownership land; the next accepted job must be the highest-
+  priority ready job, and background screenshot work stays disabled unless its
+  explicit consent, budget, and capability gates are ready.
 
 ## Contribution Rubric
 
@@ -286,8 +301,8 @@ surfaces.
 | Chat/local model routing | API or WebSocket probe proving effective provider/model path, plus transcript persistence check when turn behavior changes. |
 | Streaming chat UI | Backend frame test, frontend reducer/rendering test, and live or mocked delta/final receipt. |
 | Settings/UI truth | Endpoint payload inspection plus frontend binding or component test. |
-| Scheduler/GPU queue | Priority/non-starvation test and proof that one-GPU serial semantics are preserved. |
-| Screenshot/VLM analysis | Wrapper `/health`, backend `/health/backend`, ingestion/analysis tests, and operator-visible status receipt. |
+| Scheduler/remote inference queue | Priority/non-starvation test and proof that one-remote-inference serial semantics are preserved; GPU receipts are historical on #775. |
+| Screenshot/OpenRouter vision analysis | OpenRouter policy/admission/ingestion tests and operator-visible status receipt; local wrapper health is historical and must not be a readiness prerequisite. |
 | Docs-only workflow change | Link to owning doc, contradiction scan for stale guidance, and no claims of runtime change. |
 | GitHub/project mutation | Duplicate issue search, issue/PR/project item IDs, and field verification after mutation. |
 | Security/privacy/trust boundary | Focused negative tests or proof of fail-closed behavior, plus explicit residual risk. |

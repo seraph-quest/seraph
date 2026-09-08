@@ -2,7 +2,12 @@ import pytest
 from unittest.mock import patch
 
 from config.settings import settings
-from src.app import _active_chat_runtime_status, _effective_runtime_route_status, _safe_runtime_endpoint
+from src.app import (
+    _active_chat_runtime_status,
+    _augment_inference_readiness,
+    _effective_runtime_route_status,
+    _safe_runtime_endpoint,
+)
 
 
 _DEFERRED_VLM_PROBE = {
@@ -34,19 +39,20 @@ def test_runtime_endpoint_sanitizer_preserves_safe_absolute_value():
     assert _safe_runtime_endpoint("HTTP://[::1]:8000/v1") == "http://[::1]:8000/v1"
 
 
-def test_active_runtime_validates_transport_model_but_displays_profile_model():
+def test_active_runtime_ignores_legacy_local_preference_and_uses_openrouter():
     with (
         patch.object(settings, "default_model", "openrouter/x-ai/grok-4.1-fast"),
         patch.object(settings, "local_model", "openai/unsloth/gemma-4-26B-A4B-it-qat-GGUF"),
         patch.object(settings, "local_llm_api_base", "http://127.0.0.1:8000/v1"),
         patch.object(settings, "local_llm_api_key", "not-needed"),
+        patch.object(settings, "openrouter_provider_only", False),
         patch.object(settings, "runtime_profile_preferences", "chat_agent=local-gemma-chat-thinking"),
         patch.object(settings, "runtime_model_overrides", ""),
     ):
         runtime = _active_chat_runtime_status()
 
-    assert runtime["model"] == "unsloth/gemma-4-26B-A4B-it-qat-GGUF"
-    assert runtime["active_profile"] == "local-gemma-chat-thinking"
+    assert runtime["model"] == "x-ai/grok-4.1-fast"
+    assert runtime["active_profile"] == "openrouter"
 
 
 def test_effective_runtime_distinguishes_direct_gpu_text_from_wrapper_chat():
@@ -89,6 +95,31 @@ def test_effective_runtime_distinguishes_direct_gpu_text_from_wrapper_chat():
     assert mac_local["provider_label"] == "local-gemma"
     assert unrelated_remote["route_label"] == "local Gemma"
     assert unrelated_remote["provider_label"] == "local-gemma"
+
+
+def test_openrouter_runtime_receipt_stays_blocked_until_profile_and_proofs_are_routable():
+    route = {
+        "provider": "openrouter",
+        "active_profile": "openrouter",
+        "inference_ready": True,
+        "inference_readiness": {"reasons": []},
+    }
+    fabric = {
+        "profiles": [{
+            "id": "openrouter",
+            "model_fabric_eligible": True,
+            "routable": False,
+            "non_routable_reasons": ["cost_bound_missing"],
+        }],
+        "proofs": [{"profile_id": "openrouter", "capability": "health", "status": "missing"}],
+    }
+
+    receipt = _augment_inference_readiness(route, fabric)
+
+    assert receipt["inference_ready"] is False
+    assert receipt["inference_readiness"]["status"] == "configuration_required"
+    assert "model_fabric_cost_bound_missing" in receipt["inference_readiness"]["reasons"]
+    assert "model_fabric_proof_missing:health" in receipt["inference_readiness"]["reasons"]
 
 
 @pytest.mark.asyncio
@@ -140,29 +171,30 @@ async def test_runtime_status_rejects_removed_local_codex_when_selected(client):
 
 
 @pytest.mark.asyncio
-async def test_runtime_status_reports_effective_local_gemma_chat_profile(client):
+async def test_runtime_status_reports_openrouter_when_local_preference_is_stale(client):
     with (
         patch.object(settings, "default_model", "openrouter/x-ai/grok-4.1-fast"),
         patch.object(settings, "local_model", "openai/unsloth/gemma-4-26B-A4B-it-qat-GGUF"),
         patch.object(settings, "local_llm_api_base", "http://127.0.0.1:8000/v1"),
         patch.object(settings, "local_llm_api_key", "not-needed"),
+        patch.object(settings, "openrouter_provider_only", False),
         patch.object(settings, "runtime_profile_preferences", "chat_agent=local-gemma-chat-thinking"),
     ):
         response = await client.get("/api/runtime/status")
 
     assert response.status_code == 200
     payload = response.json()
-    assert payload["provider"] == "local-gemma"
-    assert payload["model"] == "unsloth/gemma-4-26B-A4B-it-qat-GGUF"
-    assert payload["model_label"] == "gemma-4-26B-A4B-it-qat-GGUF"
-    assert payload["api_base"] == "http://127.0.0.1:8000/v1"
-    assert payload["active_profile"] == "local-gemma-chat-thinking"
+    assert payload["provider"] == "openrouter"
+    assert payload["model"] == "x-ai/grok-4.1-fast"
+    assert payload["model_label"] == "grok-4.1-fast"
+    assert payload["api_base"] == "https://openrouter.ai/api/v1"
+    assert payload["active_profile"] == "openrouter"
     assert payload["default_provider"] == "openrouter"
     assert payload["default_model"] == "openrouter/x-ai/grok-4.1-fast"
 
 
 @pytest.mark.asyncio
-async def test_runtime_status_distinguishes_gpu_wrapper_chat_from_screenshot_vlm(client):
+async def test_runtime_status_reports_openrouter_and_historical_vlm_metadata(client):
     with (
         patch.object(settings, "default_model", "openrouter/x-ai/grok-4.1-fast"),
         patch.object(settings, "local_model", "openai/unsloth/gemma-4-26B-A4B-it-qat-GGUF"),
@@ -171,53 +203,25 @@ async def test_runtime_status_distinguishes_gpu_wrapper_chat_from_screenshot_vlm
         patch.object(settings, "seraph_vlm_base_url", "http://192.168.1.26:8001"),
         patch.object(settings, "seraph_vlm_backend_url", "http://192.168.1.26:8000/v1"),
         patch.object(settings, "seraph_vlm_api_key", "secret-token"),
+        patch.object(settings, "openrouter_provider_only", False),
         patch.object(settings, "runtime_profile_preferences", "chat_agent=local-gemma-chat-thinking"),
     ):
         response = await client.get("/api/runtime/status")
 
     assert response.status_code == 200
     payload = response.json()
-    assert payload["provider"] == "local-gemma"
-    assert payload["api_base"] == "http://192.168.1.26:8001/v1"
-    assert payload["active_profile"] == "local-gemma-chat-thinking"
-    assert payload["effective_runtime"] == {
-        "runtime_path": "chat_agent",
-        "active_profile": "local-gemma-chat-thinking",
-        "provider": "local-gemma",
-        "provider_label": "local-gemma/gpu-wrapper-chat",
-            "model": "unsloth/gemma-4-26B-A4B-it-qat-GGUF",
-        "model_label": "gemma-4-26B-A4B-it-qat-GGUF",
-        "mode": "gpu-server",
-        "route_label": "GPU wrapper chat",
-        "summary_label": "GPU wrapper chat · gemma-4-26B-A4B-it-qat-GGUF",
-        "api_base": "http://192.168.1.26:8001/v1",
-        "vlm_base_url": "http://192.168.1.26:8001",
-        "vlm_backend_url": "http://192.168.1.26:8000/v1",
-        "vlm_configured": True,
-        "queue_status_endpoint": "http://192.168.1.26:8001/queue/status",
-        "health_endpoint": "http://192.168.1.26:8001/health",
-        "backend_health_endpoint": "http://192.168.1.26:8001/health/backend",
-    }
-    assert payload["vlm_runtime"] == {
-        "mode": "gpu-server",
-        "configured": True,
-        "base_url": "http://192.168.1.26:8001",
-        "backend_url": "http://192.168.1.26:8000/v1",
-        "chat_api_base": "http://192.168.1.26:8001/v1",
-        "chat_completion_endpoint": "http://192.168.1.26:8001/v1/chat/completions",
-        "chat_health_endpoint": "http://192.168.1.26:8001/health/chat",
-        "queue_status_endpoint": "http://192.168.1.26:8001/queue/status",
-        "health_endpoint": "http://192.168.1.26:8001/health",
-        "backend_health_endpoint": "http://192.168.1.26:8001/health/backend",
-        "api_key_configured": True,
-        "feeder_window": 2,
-        "live_probe": _DEFERRED_VLM_PROBE,
-    }
+    assert payload["provider"] == "openrouter"
+    assert payload["api_base"] == "https://openrouter.ai/api/v1"
+    assert payload["active_profile"] == "openrouter"
+    assert payload["effective_runtime"]["provider"] == "openrouter"
+    assert payload["effective_runtime"]["active_provider_policy"] == "openrouter_only"
+    assert payload["vlm_runtime"]["local_runtime_active"] is False
+    assert payload["vlm_runtime"]["live_probe"]["reason"] == "local_vlm_disabled_openrouter_only"
     assert "secret-token" not in str(payload)
 
 
 @pytest.mark.asyncio
-async def test_runtime_status_labels_direct_gpu_text_separately_from_screenshot_vlm(client):
+async def test_runtime_status_does_not_activate_direct_gpu_text(client):
     with (
         patch.object(settings, "default_model", "openrouter/x-ai/grok-4.1-fast"),
         patch.object(settings, "local_model", "openai/unsloth/gemma-4-26B-A4B-it-qat-GGUF"),
@@ -227,18 +231,18 @@ async def test_runtime_status_labels_direct_gpu_text_separately_from_screenshot_
         patch.object(settings, "seraph_vlm_base_url", "http://192.168.1.26:8001"),
         patch.object(settings, "seraph_vlm_backend_url", "http://192.168.1.26:8000/v1"),
         patch.object(settings, "runtime_profile_preferences", "chat_agent=local-gemma-chat-thinking"),
+        patch.object(settings, "openrouter_provider_only", False),
     ):
         response = await client.get("/api/runtime/status")
 
     assert response.status_code == 200
     payload = response.json()
-    assert payload["api_base"] == "http://192.168.1.26:8000/v1"
-    assert payload["effective_runtime"]["route_label"] == "GPU text"
-    assert payload["effective_runtime"]["provider_label"] == "local-gemma/gpu-text"
-    assert payload["effective_runtime"]["api_base"] == "http://192.168.1.26:8000/v1"
-    assert payload["effective_runtime"]["vlm_base_url"] == "http://192.168.1.26:8001"
-    assert payload["vlm_runtime"]["chat_api_base"] == "http://192.168.1.26:8001/v1"
-    assert payload["vlm_runtime"]["chat_completion_endpoint"].endswith("/v1/chat/completions")
+    assert payload["provider"] == "openrouter"
+    assert payload["api_base"] == "https://openrouter.ai/api/v1"
+    assert payload["effective_runtime"]["route_label"] == "openrouter"
+    assert payload["effective_runtime"]["provider_label"] == "openrouter"
+    assert payload["vlm_runtime"]["local_runtime_active"] is False
+    assert payload["vlm_runtime"]["live_probe"]["reason"] == "local_vlm_disabled_openrouter_only"
 
 
 @pytest.mark.asyncio

@@ -16,8 +16,21 @@ from src.agent.direct_chat import (
 )
 
 
-def test_direct_local_chat_handles_onboarding_when_local_gemma_configured():
+def test_direct_chat_handles_onboarding_when_openrouter_configured():
     with (
+        patch.object(settings, "openrouter_provider_only", True),
+        patch.object(settings, "runtime_profile_preferences", "onboarding_agent=openrouter"),
+    ):
+        assert should_use_direct_local_chat(
+            "Hello",
+            runtime_path="onboarding_agent",
+            is_onboarding=True,
+        )
+
+
+def test_direct_chat_ignores_legacy_local_profile():
+    with (
+        patch.object(settings, "openrouter_provider_only", False),
         patch.object(settings, "local_model", "openai/local-gemma"),
         patch.object(settings, "local_llm_api_base", "http://127.0.0.1:8000/v1"),
         patch.object(settings, "runtime_profile_preferences", "onboarding_agent=local-gemma-chat-thinking"),
@@ -29,12 +42,10 @@ def test_direct_local_chat_handles_onboarding_when_local_gemma_configured():
         )
 
 
-def test_direct_local_chat_handles_generic_local_profile():
+def test_direct_chat_ignores_stale_local_preference_in_openrouter_only_mode():
     with (
-        patch.object(settings, "local_model", "openai/local-gemma"),
-        patch.object(settings, "local_llm_api_base", "http://127.0.0.1:8000/v1"),
-        patch.object(settings, "local_runtime_paths", "onboarding_agent"),
-        patch.object(settings, "runtime_profile_preferences", ""),
+        patch.object(settings, "openrouter_provider_only", True),
+        patch.object(settings, "runtime_profile_preferences", "onboarding_agent=local-gemma-chat-thinking"),
     ):
         assert should_use_direct_local_chat(
             "Hello",
@@ -56,11 +67,9 @@ def test_direct_local_chat_leaves_non_lightweight_work_to_agent():
         )
 
 
-def test_direct_local_chat_accepts_lightweight_greeting_punctuation():
+def test_direct_chat_accepts_lightweight_greeting_punctuation_on_openrouter():
     with (
-        patch.object(settings, "local_model", "openai/local-gemma"),
-        patch.object(settings, "local_llm_api_base", "http://127.0.0.1:8000/v1"),
-        patch.object(settings, "runtime_profile_preferences", "chat_agent=local-gemma-chat-thinking"),
+        patch.object(settings, "runtime_profile_preferences", "chat_agent=openrouter"),
     ):
         assert should_use_direct_local_chat(
             "Hello?",
@@ -79,11 +88,9 @@ def test_direct_local_chat_accepts_lightweight_greeting_punctuation():
         )
 
 
-def test_direct_local_chat_does_not_intercept_onboarding_bare_domain():
+def test_direct_chat_does_not_intercept_onboarding_bare_domain():
     with (
-        patch.object(settings, "local_model", "openai/local-gemma"),
-        patch.object(settings, "local_llm_api_base", "http://127.0.0.1:8000/v1"),
-        patch.object(settings, "runtime_profile_preferences", "onboarding_agent=local-gemma-chat-thinking"),
+        patch.object(settings, "runtime_profile_preferences", "onboarding_agent=openrouter"),
     ):
         assert not should_use_direct_local_chat(
             "natgurlain.com",
@@ -92,11 +99,9 @@ def test_direct_local_chat_does_not_intercept_onboarding_bare_domain():
         )
 
 
-def test_direct_local_chat_does_not_intercept_website_requests():
+def test_direct_chat_does_not_intercept_website_requests():
     with (
-        patch.object(settings, "local_model", "openai/local-gemma"),
-        patch.object(settings, "local_llm_api_base", "http://127.0.0.1:8000/v1"),
-        patch.object(settings, "runtime_profile_preferences", "onboarding_agent=local-gemma-chat-thinking"),
+        patch.object(settings, "runtime_profile_preferences", "onboarding_agent=openrouter"),
     ):
         assert not should_use_direct_local_chat(
             "Check the website and get the goals from it",
@@ -113,7 +118,7 @@ def test_tool_or_web_request_classifier_uses_word_boundaries():
 
 
 @pytest.mark.asyncio
-async def test_run_direct_local_chat_uses_bounded_local_completion():
+async def test_run_direct_chat_uses_bounded_governed_completion():
     response = SimpleNamespace(
         choices=[
             SimpleNamespace(
@@ -137,7 +142,7 @@ async def test_run_direct_local_chat_uses_bounded_local_completion():
     call_kwargs = mock_completion.call_args.kwargs
     assert call_kwargs["runtime_path"] == "onboarding_agent"
     assert call_kwargs["max_tokens"] == 512
-    assert call_kwargs["local_runtime_only"] is True
+    assert call_kwargs["local_runtime_only"] is False
 
 
 def test_stream_chunk_delta_reads_openai_compatible_content():
@@ -162,9 +167,7 @@ async def test_stream_direct_local_chat_uses_governed_streaming_facade():
 
     with (
         patch.object(settings, "model_max_tokens", 4096),
-        patch.object(settings, "local_model", "openai/local-gemma"),
-        patch.object(settings, "local_llm_api_base", "http://127.0.0.1:8000/v1"),
-        patch.object(settings, "runtime_profile_preferences", "onboarding_agent=local"),
+        patch.object(settings, "runtime_profile_preferences", "onboarding_agent=openrouter"),
         patch(
             "src.agent.direct_chat.stream_completion_with_fallback",
             side_effect=governed_stream,

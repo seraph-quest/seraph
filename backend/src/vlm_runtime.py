@@ -9,7 +9,9 @@ import httpx
 
 from config.settings import settings
 
-SCREENSHOT_VLM_PROFILE_ID = "local-vlm-screenshot-fast"
+# Canonical active profile identity. The old local-vlm name is intentionally
+# not reused, so persisted local proofs/configuration cannot look current.
+SCREENSHOT_VLM_PROFILE_ID = "openrouter-screenshot-vision"
 
 
 def effective_vlm_base_url() -> str:
@@ -74,8 +76,14 @@ def effective_vlm_status(*, live_probe: dict[str, object] | None = None) -> dict
     base_url = effective_vlm_base_url()
     backend_url = effective_vlm_backend_url()
     mode = effective_vlm_mode()
+    # The OpenRouter migration removes the local wrapper from the active
+    # runtime.  Keep configured endpoint metadata for historical diagnostics,
+    # but never advertise it as active or make readiness depend on it.
+    local_runtime_active = False
     status = {
         "mode": mode,
+        "active": local_runtime_active,
+        "disabled_reason": None if local_runtime_active else "local_vlm_disabled_openrouter_only",
         "configured": bool(base_url),
         "base_url": base_url,
         "backend_url": backend_url,
@@ -110,6 +118,15 @@ def deferred_vlm_live_probe(reason: str = "deferred_fast_metadata") -> dict[str,
 
 async def probe_effective_vlm_runtime(*, timeout_seconds: float = 0.75) -> dict[str, object]:
     """Probe the effective VLM wrapper route from this Seraph process."""
+    return {
+        "checked": False,
+        "reachable": False,
+        "reason": "local_vlm_disabled_openrouter_only",
+        "health": _unprobed_endpoint(),
+        "backend_health": _unprobed_endpoint(),
+        "queue_status": _unprobed_endpoint(),
+        "chat_proxy": _unprobed_endpoint(),
+    }
     base_url = effective_vlm_base_url()
     if not base_url:
         return {
@@ -146,38 +163,19 @@ async def probe_effective_vlm_runtime(*, timeout_seconds: float = 0.75) -> dict[
     }
 
 
-async def direct_local_chat_route_error(*, timeout_seconds: float = 0.75) -> str | None:
-    """Return an operator-readable route error when local chat cannot run."""
-    status = effective_vlm_status()
-    base_url = str(status.get("base_url") or "")
-    chat_api_base = effective_vlm_chat_api_base()
-    chat_health_endpoint = str(status.get("chat_health_endpoint") or "")
-    if not chat_api_base:
-        return (
-            "Local chat runtime is not configured for the Seraph backend. "
-            "Set SERAPH_VLM_BASE_URL or LOCAL_VLM_BASE_URL before using direct local chat."
-        )
-    if not base_url:
-        return None
+async def direct_local_chat_route_error(
+    *,
+    timeout_seconds: float = 0.75,
+    runtime_path: str | None = None,
+) -> str | None:
+    """Return a route error for legacy local chat callers.
 
-    wrapper_chat_api_base = effective_vlm_wrapper_chat_api_base()
-    if _trim_url(chat_api_base) != _trim_url(wrapper_chat_api_base):
-        # An explicitly configured text endpoint is independent of the VLM
-        # wrapper. The completion transport reports its own reachability error.
-        return None
-
-    probe = await probe_effective_vlm_runtime(timeout_seconds=timeout_seconds)
-    if probe.get("reachable") is True:
-        return None
-
-    detail = _probe_failure_detail(probe)
-    endpoint = chat_health_endpoint or str(status.get("backend_health_endpoint") or status.get("health_endpoint") or base_url)
-    return (
-        "Local chat runtime is unreachable from the Seraph backend at "
-        f"{base_url}. Health endpoint {endpoint} reported {detail}. "
-        "Check the VLM wrapper route before retrying."
-    )
-
+    OpenRouter direct chat is governed by the model fabric and must not depend
+    on the retired local VLM health endpoints.  Keep the no-argument behavior
+    for historical diagnostics, while allowing active chat callers to bypass
+    those probes explicitly.
+    """
+    return "local_vlm_disabled_openrouter_only"
 
 def _trim_url(value: str | None) -> str:
     return str(value or "").strip().rstrip("/")

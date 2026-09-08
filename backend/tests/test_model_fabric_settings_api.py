@@ -25,6 +25,12 @@ from src.security.trust_contract import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _legacy_provider_compatibility_mode(monkeypatch):
+    """The broad settings API matrix covers retained historical profiles."""
+    monkeypatch.setattr(settings, "openrouter_provider_only", False)
+
+
 def _profile_payload(*, profile_id="persisted-local"):
     return {
         "id": profile_id,

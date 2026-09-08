@@ -30,6 +30,7 @@ from src.model_fabric.configuration import (
     credential_ref_allowed,
     effective_workload_policy,
     read_model_fabric_configuration,
+    validate_active_model_fabric_configuration,
     write_model_fabric_configuration,
 )
 from src.model_fabric.contracts import MODEL_FABRIC_SCHEMA_VERSION, InferenceRequestContext, InferenceRequirements, InferenceWorkload, transport_endpoint
@@ -38,7 +39,13 @@ from src.model_fabric.proofs import proof_is_fresh
 from src.model_fabric.receipts import sanitized_endpoint
 from src.model_fabric.repository import model_fabric_repository
 from src.model_fabric.runtime_status import latest_receipt_persistence, publish_receipt_persistence
-from src.model_fabric.selector import profile_exclusion_reason, provider_family_exclusion_reason
+from src.model_fabric.selector import (
+    active_provider_exclusion_reason,
+)
+from src.model_fabric.remote_inference_admission import (
+    RemoteInferenceAdmissionRequest,
+    remote_inference_admission_broker,
+)
 from src.security.trust_contract import (
     AuthorityGrant,
     ContentOrigin,
@@ -146,6 +153,7 @@ async def put_model_fabric_settings(body: ModelFabricConfigurationRequest, reque
         status="ready",
     )
     try:
+        validate_active_model_fabric_configuration(configuration)
         write_model_fabric_configuration(configuration)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -243,12 +251,19 @@ async def _run_model_fabric_canary_locked(body, profile, policy, candidate, prin
     )
 
     async def transport(candidate, _trust_request, requirements):
-        return await _execute_canary_transport(
-            candidate.profile,
-            capability=body.capability,
-            timeout_seconds=body.timeout_seconds,
-            requirements=requirements,
-            fixture=fixture,
+        admission_request = RemoteInferenceAdmissionRequest.from_inference_context(
+            context,
+            operation_id=f"{context.request_id}:canary",
+        )
+        return await remote_inference_admission_broker.execute(
+            admission_request,
+            lambda: _execute_canary_transport(
+                candidate.profile,
+                capability=body.capability,
+                timeout_seconds=body.timeout_seconds,
+                requirements=requirements,
+                fixture=fixture,
+            ),
         )
 
     result = await run_capability_probe(
@@ -338,7 +353,7 @@ def _static_profile_route_reasons(
     reasons: list[str] = []
     if profile.schema_version != MODEL_FABRIC_SCHEMA_VERSION:
         reasons.append("profile_schema_unknown")
-    if reason := profile_exclusion_reason(profile):
+    if reason := active_provider_exclusion_reason(profile):
         reasons.append(reason)
     if not credential_ref_allowed(profile):
         reasons.append("credential_ref_not_allowed")
@@ -736,12 +751,12 @@ def _operator_profile_statuses(proofs) -> list[dict[str, object]]:
     statuses: list[dict[str, object]] = []
     now = time.time()
     for profile in provider_profiles().values():
-        provider_reason = provider_family_exclusion_reason(profile.provider_kind)
+        provider_reason = active_provider_exclusion_reason(profile)
         schema_provider_eligible = (
             profile.schema_version == MODEL_FABRIC_SCHEMA_VERSION and provider_reason is None
         )
         non_routable: list[str] = []
-        if reason := profile_exclusion_reason(profile):
+        if reason := active_provider_exclusion_reason(profile):
             non_routable.append(reason)
         if not credential_ref_allowed(profile):
             non_routable.append("credential_ref_not_allowed")

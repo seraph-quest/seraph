@@ -14,7 +14,8 @@ from src.extensions.registry import default_manifest_roots_for_workspace
 from src.llm_logger import init_llm_logging
 from src.llm_runtime import effective_runtime_model_id, provider_profile_statuses, provider_profiles, resolve_runtime_profile
 from src.memory.soul import ensure_soul_exists
-from src.model_fabric.gpu_admission import gpu_admission_broker
+from src.model_fabric.configuration import effective_workload_policy
+from src.model_fabric.remote_inference_admission import remote_inference_admission_broker
 from src.operators.local_codex import ExternalAgentRuntimeRemovedError, reject_legacy_external_agent_model
 from src.runbooks.manager import runbook_manager
 from src.scheduler.engine import init_scheduler, shutdown_scheduler, sync_scheduled_jobs
@@ -24,6 +25,7 @@ from src.tools.mcp_manager import mcp_manager
 from src.utils.background import drain_tracked_tasks
 from src.vlm_runtime import deferred_vlm_live_probe, effective_vlm_status
 from src.workflows.manager import workflow_manager
+from src.security.trust_contract import EgressClass
 
 limiter = Limiter(key_func=get_remote_address, default_limits=["60/minute"])
 _LOCAL_DEV_ORIGIN_REGEX = r"https?://(localhost|127\.0\.0\.1)(:\d+)?$"
@@ -178,6 +180,33 @@ def _effective_runtime_route_status(runtime: dict[str, str], vlm_status: dict[st
         }
 
     provider_label = provider or "unknown"
+    policy = effective_workload_policy("chat_agent")
+    readiness_reasons: list[str] = []
+    if not bool(getattr(settings, "openrouter_provider_only", True)):
+        readiness_reasons.append("openrouter_only_mode_disabled")
+    if provider != "openrouter":
+        readiness_reasons.append("openrouter_profile_not_active")
+    if str(runtime.get("api_base") or "").rstrip("/") != "https://openrouter.ai/api/v1":
+        readiness_reasons.append("openrouter_api_base_not_canonical")
+    if not settings.openrouter_api_key.strip():
+        readiness_reasons.append("openrouter_api_key_missing")
+    if not settings.openrouter_allowed_upstreams.strip():
+        readiness_reasons.append("openrouter_upstream_allowlist_missing")
+    if settings.openrouter_allow_fallbacks:
+        readiness_reasons.append("openrouter_fallbacks_enabled")
+    if not settings.openrouter_require_parameters:
+        readiness_reasons.append("openrouter_parameter_requirement_disabled")
+    if settings.openrouter_data_collection != "deny":
+        readiness_reasons.append("openrouter_data_policy_not_deny")
+    if policy.egress_class is EgressClass.LOCAL_ONLY:
+        readiness_reasons.append("chat_cloud_egress_not_allowed")
+    if not policy.cloud_egress_acknowledged:
+        readiness_reasons.append("chat_cloud_consent_missing")
+    if policy.max_cost_microusd is None:
+        readiness_reasons.append("chat_cost_ceiling_missing")
+    if set(policy.allowed_provider_kinds) != {"openrouter"}:
+        readiness_reasons.append("chat_provider_policy_missing")
+    inference_ready = not readiness_reasons
     return {
         "runtime_path": "chat_agent",
         "active_profile": profile,
@@ -190,7 +219,72 @@ def _effective_runtime_route_status(runtime: dict[str, str], vlm_status: dict[st
         "summary_label": f"{provider_label} · {model_label or model or 'unknown'}",
         "api_base": runtime.get("api_base", ""),
         "vlm_configured": bool(vlm_status.get("configured")),
+        "active_provider_policy": "openrouter_only",
+        "inference_ready": inference_ready,
+        "inference_readiness": {
+            "status": "ready" if inference_ready else "configuration_required",
+            "reasons": readiness_reasons,
+            "provider": "openrouter",
+            "active_only": bool(getattr(settings, "openrouter_provider_only", True)),
+            "cloud_egress": policy.egress_class.value,
+            "cloud_consent": bool(policy.cloud_egress_acknowledged),
+            "cost_ceiling_microusd": policy.max_cost_microusd,
+        },
+        "legacy_local_route_blocked": provider not in {"openrouter"},
     }
+
+
+def _augment_inference_readiness(
+    route_status: dict[str, object],
+    fabric_status: dict[str, object],
+) -> dict[str, object]:
+    """Fold model-fabric profile/proof truth into the cheap runtime receipt."""
+    if route_status.get("provider") != "openrouter":
+        return route_status
+    readiness = dict(route_status.get("inference_readiness") or {})
+    reasons = list(readiness.get("reasons") or [])
+    active_profile = str(route_status.get("active_profile") or "")
+    profiles = fabric_status.get("profiles") if isinstance(fabric_status, dict) else None
+    profile = next(
+        (
+            item for item in profiles or ()
+            if isinstance(item, dict) and item.get("id") == active_profile
+        ),
+        None,
+    )
+    if profile is None:
+        reasons.append("model_fabric_profile_missing")
+    else:
+        if profile.get("model_fabric_eligible") is not True:
+            reasons.append(
+                f"model_fabric_profile_ineligible:{profile.get('model_fabric_exclusion_reason') or 'unknown'}"
+            )
+        if profile.get("routable") is not True:
+            non_routable = profile.get("non_routable_reasons")
+            if isinstance(non_routable, list) and non_routable:
+                reasons.extend(f"model_fabric_{item}" for item in non_routable if isinstance(item, str))
+            else:
+                reasons.append("model_fabric_profile_not_routable")
+    proofs = fabric_status.get("proofs") if isinstance(fabric_status, dict) else None
+    for proof in proofs or ():
+        if not isinstance(proof, dict) or proof.get("profile_id") != active_profile:
+            continue
+        if proof.get("status") != "fresh":
+            reasons.append(
+                f"model_fabric_proof_{proof.get('status') or 'unknown'}:{proof.get('capability') or 'unknown'}"
+            )
+    deduped_reasons = list(dict.fromkeys(reasons))
+    readiness.update(
+        {
+            "status": "ready" if not deduped_reasons else "configuration_required",
+            "reasons": deduped_reasons,
+            "profile_id": active_profile or None,
+        }
+    )
+    route_status = dict(route_status)
+    route_status["inference_ready"] = not deduped_reasons
+    route_status["inference_readiness"] = readiness
+    return route_status
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -306,12 +400,16 @@ def create_app() -> FastAPI:
         from src.api.model_fabric_settings import model_fabric_runtime_status
 
         fabric_status = await model_fabric_runtime_status(str(runtime.get("active_profile") or ""))
-        gpu_admission = await gpu_admission_broker.status()
+        remote_inference_admission = await remote_inference_admission_broker.status()
+        effective_runtime = _augment_inference_readiness(
+            _effective_runtime_route_status(runtime, vlm_status),
+            fabric_status,
+        )
         return {
             "version": app.version,
             "build_id": f"SERAPH_PRIME_v{app.version}",
             **runtime,
-            "effective_runtime": _effective_runtime_route_status(runtime, vlm_status),
+            "effective_runtime": effective_runtime,
             "default_provider": _runtime_provider_label(
                 default_model,
                 api_base=_safe_runtime_endpoint(settings.llm_api_base),
@@ -322,7 +420,10 @@ def create_app() -> FastAPI:
             "provider_profiles": _sanitize_runtime_endpoints(provider_profile_statuses()),
             "vlm_runtime": vlm_status,
             "model_fabric": fabric_status,
-            "gpu_admission": gpu_admission,
+            # Keep the historical key for API consumers while exposing the
+            # active resource class explicitly.  No GPU service is contacted.
+            "gpu_admission": remote_inference_admission,
+            "remote_inference_admission": remote_inference_admission,
             "timezone": settings.user_timezone,
             "llm_logging_enabled": settings.llm_log_enabled,
         }

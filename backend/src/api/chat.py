@@ -59,7 +59,7 @@ async def chat(request: ChatRequest):
         is_onboarding=is_onboarding,
     ):
         started_at = perf_counter()
-        route_error = await direct_local_chat_route_error()
+        route_error = await direct_local_chat_route_error(runtime_path=direct_runtime_path)
         if route_error:
             safe_detail = await redact_secrets_in_text(route_error)
             await log_agent_run_event(

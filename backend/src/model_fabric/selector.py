@@ -10,6 +10,7 @@ import time
 from urllib.parse import urlparse
 from uuid import uuid4
 
+from config.settings import settings
 from src.security.trust_contract import (
     AuthorityGrant,
     DestinationClass,
@@ -35,21 +36,104 @@ from .contracts import (
     has_inline_secret_options,
     SUPPORTED_TRANSPORT_ADAPTERS,
     credential_ref_allowed,
+    OPENROUTER_API_BASE,
+    OPENROUTER_PROVIDER_KIND,
 )
 
 
 SUPPORTED_PROVIDER_KINDS = frozenset({"local", "ollama", "openrouter", "openai", "openai_compatible"})
+ACTIVE_PROVIDER_KINDS = frozenset({OPENROUTER_PROVIDER_KIND})
 SYNTHETIC_PROBE_CAPABILITIES = frozenset({"health", "latency_ms"})
+
+OPENROUTER_POLICY_REASON = "provider_kind_not_allowed"
+OPENROUTER_ENDPOINT_REASON = "openrouter_endpoint_not_canonical"
+OPENROUTER_CREDENTIAL_REASON = "openrouter_credential_required"
+OPENROUTER_ADAPTER_REASON = "openrouter_transport_adapter_not_allowed"
+OPENROUTER_EMBEDDING_ADAPTER_REASON = "openrouter_embedding_adapter_requires_embedding_capability"
+OPENROUTER_EMBEDDING_CAPABILITY_REASON = "openrouter_embedding_capability_requires_embedding_adapter"
+OPENROUTER_FALLBACK_REASON = "openrouter_fallbacks_forbidden"
+OPENROUTER_PROVIDER_POLICY_REASON = "openrouter_provider_policy_missing"
+OPENROUTER_UPSTREAMS_REASON = "openrouter_upstream_allowlist_missing"
+OPENROUTER_PARAMETERS_REASON = "openrouter_parameters_required"
+OPENROUTER_DATA_POLICY_REASON = "openrouter_data_policy_missing"
+OPENROUTER_ZDR_REASON = "openrouter_zdr_required_for_vision"
 
 
 def provider_family_exclusion_reason(provider_kind: str) -> str | None:
     return None if provider_kind in SUPPORTED_PROVIDER_KINDS else "provider_family_excluded"
 
 
-def profile_exclusion_reason(profile: ProviderProfile) -> str | None:
+def _openrouter_provider_policy(options: dict[str, object] | None) -> dict[str, object] | None:
+    if not isinstance(options, dict):
+        return None
+    policy = options.get("provider")
+    return policy if isinstance(policy, dict) else None
+
+
+def active_provider_exclusion_reason(profile: ProviderProfile) -> str | None:
+    """Return the active-phase provider policy denial for a profile.
+
+    ``SUPPORTED_PROVIDER_KINDS`` remains intentionally broader for legacy
+    configuration/readback.  This function is the narrower active inference
+    policy used by route selection and operator status.
+    """
     family_reason = provider_family_exclusion_reason(profile.provider_kind)
     if family_reason is not None:
         return family_reason
+    if profile.provider_kind not in ACTIVE_PROVIDER_KINDS:
+        return OPENROUTER_POLICY_REASON
+    if profile.api_base != OPENROUTER_API_BASE:
+        return OPENROUTER_ENDPOINT_REASON
+    if profile.follow_redirects:
+        return "redirects_forbidden"
+    if profile.transport_adapter not in {
+        "openai_compatible_chat",
+        "openai_compatible_embeddings",
+    }:
+        return OPENROUTER_ADAPTER_REASON
+    if (
+        profile.transport_adapter == "openai_compatible_embeddings"
+        and "embedding" not in profile.capabilities
+    ):
+        return OPENROUTER_EMBEDDING_ADAPTER_REASON
+    if (
+        "embedding" in profile.capabilities
+        and profile.transport_adapter != "openai_compatible_embeddings"
+    ):
+        return OPENROUTER_EMBEDDING_CAPABILITY_REASON
+    if profile.secret_env != "OPENROUTER_API_KEY" or profile.keyless:
+        return OPENROUTER_CREDENTIAL_REASON
+    if profile.fallback_models:
+        return OPENROUTER_FALLBACK_REASON
+    provider_policy = _openrouter_provider_policy(profile.options)
+    if provider_policy is None:
+        return OPENROUTER_PROVIDER_POLICY_REASON
+    upstreams = provider_policy.get("only")
+    if not isinstance(upstreams, (list, tuple)) or not upstreams or any(
+        not isinstance(upstream, str) or not upstream.strip() for upstream in upstreams
+    ):
+        return OPENROUTER_UPSTREAMS_REASON
+    if provider_policy.get("allow_fallbacks") is not False:
+        return OPENROUTER_FALLBACK_REASON
+    if provider_policy.get("require_parameters") is not True:
+        return OPENROUTER_PARAMETERS_REASON
+    if provider_policy.get("data_collection") != "deny":
+        return OPENROUTER_DATA_POLICY_REASON
+    if "vision" in profile.capabilities and provider_policy.get("zdr") is not True:
+        return OPENROUTER_ZDR_REASON
+    return None
+
+
+def profile_exclusion_reason(profile: ProviderProfile) -> str | None:
+    # Keep the broad provider contract readable for historical compatibility
+    # tests and retained configuration.  The active phase narrows it only
+    # when the operator has enabled OpenRouter-only mode; callers that need an
+    # unconditional active check use ``active_provider_exclusion_reason``.
+    if family_reason := provider_family_exclusion_reason(profile.provider_kind):
+        return family_reason
+    if bool(getattr(settings, "openrouter_provider_only", True)):
+        if reason := active_provider_exclusion_reason(profile):
+            return reason
     if has_inline_secret_options(profile.options or {}):
         return "inline_secret_option_forbidden"
     if not credential_ref_allowed(profile):
@@ -139,7 +223,14 @@ def preflight_candidate(
 ) -> tuple[TrustRequest | None, str | None, str | None]:
     checked_at = time.time() if now is None else float(now)
     profile = candidate.profile
-    if reason := profile_exclusion_reason(profile):
+    # Canonical caller contexts carry an explicit OpenRouter provider allowlist.
+    # Apply the narrow active-phase contract at that boundary even when a
+    # stale compatibility flag is false.  Standalone selector compatibility
+    # tests/readback can still exercise the broad provider contract without
+    # creating an executable production route.
+    active_context = "openrouter" in context.allowed_provider_kinds
+    exclusion = active_provider_exclusion_reason if active_context else profile_exclusion_reason
+    if reason := exclusion(profile):
         return None, None, reason
     if context.deadline_at <= checked_at:
         return None, None, "request_deadline_expired"

@@ -19,6 +19,8 @@ from config.settings import settings
 from src.audit.runtime import log_integration_event
 from src.db.engine import get_session
 from src.db.models import ScreenObservation
+from src.model_fabric import NoCompliantModelRouteError
+from src.model_fabric.remote_inference_admission import RemoteInferenceAdmissionError
 from src.observer.image_metadata import image_metadata_label, local_image_metadata
 from src.observer.screen_repository import screen_observation_repo
 from src.observer.screenshot_semantic_analysis import (
@@ -204,9 +206,17 @@ async def analyze_pending_screenshot_folder_observations(
                 analysis=analysis,
                 error_reason=None if analysis is not None else "provider not configured",
             )
-        except (OSError, ScreenshotFolderImageError, ScreenshotSemanticAnalysisError) as exc:
+        except (
+            OSError,
+            ScreenshotFolderImageError,
+            ScreenshotSemanticAnalysisError,
+            NoCompliantModelRouteError,
+            RemoteInferenceAdmissionError,
+        ) as exc:
             failed_reason = str(exc)
             logger.warning("screenshot_folder_analysis: failed %s: %s", image_path.name, failed_reason)
+            if status_override is None and _is_blocked_analysis_error(exc):
+                status_override = "blocked"
             details = _replace_analysis_details(
                 details,
                 analysis=None,
@@ -235,6 +245,17 @@ async def analyze_pending_screenshot_folder_observations(
     skipped = sum(1 for item in results if item[2])
 
     return ScreenshotFolderAnalysisResult(scanned=len(observations), analyzed=analyzed, failed=failed, skipped=skipped)
+
+
+def _is_blocked_analysis_error(error: BaseException) -> bool:
+    """Classify policy/admission denials separately from provider failures."""
+    if isinstance(error, RemoteInferenceAdmissionError):
+        return True
+    if isinstance(error, NoCompliantModelRouteError):
+        return True
+    return isinstance(error, ScreenshotSemanticAnalysisError) and str(error).startswith(
+        "remote_inference_blocked:"
+    )
 
 
 async def _select_analysis_candidates_with_retry(*, limit: int) -> list[ScreenObservation]:

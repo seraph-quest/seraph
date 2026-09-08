@@ -60,6 +60,32 @@ def test_failed_screenshot_analysis_is_retried_after_cooldown():
     assert not _analysis_candidate_ready(exhausted, now=now + timedelta(minutes=10))
 
 
+def test_route_denial_is_persisted_as_blocked_and_not_auto_retried():
+    from src.model_fabric import NoCompliantModelRouteError
+    from src.observer.screenshot_folder_source import (
+        _analysis_candidate_ready,
+        _is_blocked_analysis_error,
+        _replace_analysis_details,
+    )
+    from src.observer.screenshot_semantic_analysis import (
+        ScreenshotSemanticAnalysisError,
+        semantic_analysis_status_from_details,
+    )
+
+    assert _is_blocked_analysis_error(NoCompliantModelRouteError()) is True
+    assert _is_blocked_analysis_error(ScreenshotSemanticAnalysisError("remote_inference_blocked:no_route")) is True
+    assert _is_blocked_analysis_error(ScreenshotSemanticAnalysisError("provider_timeout")) is False
+
+    details = _replace_analysis_details(
+        ["capture_artifacts:{}"],
+        analysis=None,
+        error_reason="remote_inference_blocked:no_route",
+        status="blocked",
+    )
+    assert (semantic_analysis_status_from_details(details) or {}).get("status") == "blocked"
+    assert _analysis_candidate_ready(details) is False
+
+
 @pytest.mark.asyncio
 async def test_screenshot_folder_analysis_selection_retries_database_lock(monkeypatch):
     from src.observer import screenshot_folder_source as source
@@ -223,7 +249,7 @@ async def test_screenshot_folder_analysis_job_drains_pending_backlog_with_bounde
     assert events[0]["details"]["concurrency"] == 2
     assert events[0]["details"]["batch_limit"] == 1
     assert events[0]["details"]["feeder_iterations"] == 2
-    assert events[0]["details"]["stopped_reason"] == "local_vlm_no_background_capacity"
+    assert events[0]["details"]["stopped_reason"] == "remote_inference_no_background_capacity"
 
 
 @pytest.mark.asyncio
@@ -317,7 +343,7 @@ async def test_screenshot_folder_analysis_job_skips_when_vlm_has_no_capacity(mon
                 "concurrency": 2,
                 "batch_limit": 0,
                 "feeder_iterations": 0,
-                "stopped_reason": "local_vlm_no_background_capacity",
+            "stopped_reason": "remote_inference_no_background_capacity",
             },
         }
     ]

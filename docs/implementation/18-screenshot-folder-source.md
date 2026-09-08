@@ -7,6 +7,38 @@ title: Screenshot Folder Source
 
 Seraph does not connect to a screenshot app or service. It can scan a local directory that contains ordinary screenshot image files.
 
+## Active inference phase (Epic #736/#775)
+
+Screenshot capture and local image ingestion do not require a model server. On
+the OpenRouter-only migration branch, semantic screenshot analysis uses the
+governed OpenRouter vision adapter only after all of these are true: the
+operator has enabled analysis and cloud upload, an exact vision model is
+configured, the OpenRouter key and upstream allow-list are present, fallback
+and data-collection controls are fail-closed, zero-data-retention is enabled
+for the vision request, and the workload has an explicit finite budget. If any
+condition is missing, the observation remains local metadata with a visible
+blocked/degraded reason; Seraph does not fall back to a local VLM or GPU host.
+
+The persisted screenshot model must be explicitly qualified as
+`openrouter/<provider>/<model>`. This qualification prevents a stale local or
+VLM model value from becoming an executable OpenRouter request.
+
+The active path is:
+
+```text
+local screenshot bytes -> Seraph privacy/schema gate
+  -> bounded remote_inference admission
+  -> https://openrouter.ai/api/v1/chat/completions
+  -> strict screenshot schema validation
+  -> local ScreenObservation and report artifacts
+```
+
+The OpenRouter route is remote inference, not a screenshot producer or a
+canonical-state owner. Raw image bytes stay local until the explicit cloud
+consent gate passes. The process-local admission receipt is observable, while
+durable queue and provider cost reservation/reconciliation remain follow-up
+work in #743/#744.
+
 The producing app is intentionally anonymous to Seraph. Seraph does not call a recorder, read recorder metadata, require manifests, or expect any service handshake. The contract is just `.png`, `.jpg`, and `.jpeg` files in a configured folder.
 
 ## Boundary
@@ -120,21 +152,28 @@ The Seraph settings UI describes this as a local screenshot folder, not as Serap
 - inspection endpoint
 - stored artifact type: `image`
 
-The settings panel saves `screenshot_folder` through `/api/settings/screen-analysis`. The manual scan action calls Seraph's local `/api/observer/screenshot-folder/scan` endpoint. Seraph can also run its own `screenshot_folder_ingest` scheduler job, controlled by `SCREENSHOT_FOLDER_INGEST_ENABLED`, `SCREENSHOT_FOLDER_INGEST_INTERVAL_MIN`, and `SCREENSHOT_FOLDER_INGEST_LIMIT`. The local default is enabled, every 1 minute, up to 100 images per tick so a newly mounted backlog is ingested quickly enough for the VLM lane to stay busy.
+The settings panel saves `screenshot_folder` through `/api/settings/screen-analysis`. The manual scan action calls Seraph's local `/api/observer/screenshot-folder/scan` endpoint. Seraph can also run its own `screenshot_folder_ingest` scheduler job, controlled by `SCREENSHOT_FOLDER_INGEST_ENABLED`, `SCREENSHOT_FOLDER_INGEST_INTERVAL_MIN`, and `SCREENSHOT_FOLDER_INGEST_LIMIT`. The local default is enabled, every 1 minute, up to 100 images per tick so a newly mounted backlog is ingested quickly enough for the remote analysis lane to stay supplied.
 
-Semantic analysis is a second scheduler lane, controlled by `SCREENSHOT_FOLDER_ANALYSIS_LIMIT`, `SCREENSHOT_FOLDER_ANALYSIS_CONCURRENCY`, and `SCREENSHOT_FOLDER_ANALYSIS_INTERVAL_SECONDS`. In the one-GPU local topology, Seraph feeds a tiny analysis window on each scheduler tick: one active GPU request plus one queued background request by default. The VLM wrapper still runs GPU inference serially and owns priority ordering for the next accepted job; Seraph does not cancel an already-running GPU request. The analysis job starts only when screenshot-folder ingestion is enabled and the local VLM service answers `/health` with free queue capacity, then records `succeeded`, `failed`, or `skipped` scheduler receipts. A transient failed analysis is retried after a short cooldown up to a bounded attempt count, so one bad VLM response does not strand the item while repeated bad rows remain visible as failed. Candidate selection and result persistence use short DB sessions with bounded retry/backoff for SQLite lock errors. If a lock is exhausted, Seraph records the batch as degraded or failed and leaves pending work available for a later scheduler pass instead of holding the scheduler lane forever. This keeps folder scanning cheap, avoids long scheduler-owned batches, and lets the VLM queue stay fed without blocking the producer or duplicating observations.
+Semantic analysis is a second scheduler lane, controlled by `SCREENSHOT_FOLDER_ANALYSIS_LIMIT`, `SCREENSHOT_FOLDER_ANALYSIS_CONCURRENCY`, and `SCREENSHOT_FOLDER_ANALYSIS_INTERVAL_SECONDS`. In the OpenRouter-only phase, Seraph feeds a bounded remote-inference window on each scheduler tick and admits work through the shared process-local remote lane. The active request finishes before the highest-priority ready request starts; Seraph does not silently retry an uncertain paid request. The analysis job records `succeeded`, `failed`, or `blocked` receipts. Missing or stale capability proofs consume one bounded worker attempt so the observation receives an operator-visible blocked reason instead of remaining pending forever. Candidate selection and result persistence use short DB sessions with bounded retry/backoff for SQLite lock errors. If a lock is exhausted, Seraph records the batch as degraded or failed and leaves pending work available for a later scheduler pass instead of holding the scheduler lane forever. This keeps folder scanning cheap, avoids long scheduler-owned batches, and prevents duplicate observations.
 
 Both paths only read local image files from the configured folder. They do not start, connect to, or query any screenshot producer.
 
-The artifact-storage settings API also exposes Seraph-owned screenshot analysis status for the configured folder: observation count, total historical observation count, analyzer status mix, active backlog, active failures, stale cleanup counts, visual run count, visual suppression count, DB lock retry/failure counters, latest observation/analyzed timestamps, digest count, and latest digest timestamp. These metadata summaries are bounded with short degraded fallbacks so the Settings modal stays usable even when filesystem, DB, proof, or receipt metadata is slow. Filesystem summary degradation is explicit through `screenshot_folder.summary_status=partial` plus `summary_failure`, and analysis metadata degradation is explicit through `screenshot_folder.analysis.metadata_status=partial` plus `metadata_failure`. The UI shows these fields beside the local folder path and scan controls so the operator can see whether screenshots are being analyzed, compressed before VLM, blocked by local persistence contention, and rolled into report-ready digest windows without blocking status endpoints while a screenshot or VLM backlog drains.
+The artifact-storage settings API also exposes Seraph-owned screenshot analysis status for the configured folder: observation count, total historical observation count, analyzer status mix, active backlog, active failures, stale cleanup counts, visual run count, visual suppression count, DB lock retry/failure counters, latest observation/analyzed timestamps, digest count, and latest digest timestamp. These metadata summaries are bounded with short degraded fallbacks so the Settings modal stays usable even when filesystem, DB, proof, or receipt metadata is slow. Filesystem summary degradation is explicit through `screenshot_folder.summary_status=partial` plus `summary_failure`, and analysis metadata degradation is explicit through `screenshot_folder.analysis.metadata_status=partial` plus `metadata_failure`. The UI shows these fields beside the local folder path and scan controls so the operator can see whether screenshots are being analyzed, compressed before remote vision, blocked by local persistence contention, and rolled into report-ready digest windows without blocking status endpoints while a screenshot backlog drains.
 
 Opening Settings defaults to the Screenshot/VLM section and mounts only that active section. Heavy sections such as workflows, skills, catalog, MCP, and audit are loaded only after the operator selects their tabs, and closing Settings resets the next open back to Screenshot/VLM so a previous heavy section cannot immediately refetch on reopen.
 
 If a screenshot image disappears before analysis, Seraph records the observation status as `source_missing` instead of retrying it as a generic provider failure. If an incomplete observation points at an older configured screenshot root, the active settings summary classifies it as `stale_root`. `source_missing` and `stale_root` rows are excluded from active backlog/failure counts and from screenshot digest or end-of-day report inputs. The Settings panel shows stale cleanup candidates and exposes a localhost-only Clear Stale action that archives only stale incomplete rows; succeeded rows remain historical evidence even if their original image file has since been deleted.
 
-The same surface exposes local Gemma runtime profile status: configured gateway state, active model, built-in profile contracts, latest profile-proof receipt, and whether single-backend profile routing is currently safe.
+The same surface exposes the active OpenRouter vision profile status: configured
+gateway state, selected model, upstream allow-list, cloud consent, budget,
+latest capability-proof receipt, and whether remote profile routing is safe.
 
-## Remote VLM Analysis Target
+## Historical GPU/VLM analysis target
+
+The sections below document the pre-#775 GPU wrapper topology for migration
+evidence and rollback diagnosis. They are not an active setup path on the
+OpenRouter-only branch. Do not configure `local-vlm`, `SERAPH_VLM_BASE_URL`, or
+the GPU model server to enable current screenshot analysis.
 
 Seraph can keep screenshot production separate from analysis while still using a GPU on another machine. The target shape is:
 
@@ -366,7 +405,7 @@ Seraph-side controls:
 - `SCREENSHOT_FOLDER_ANALYSIS_LIMIT` caps the number of pending or retryable failed observations eligible for background analysis policy. The scheduled feeder clamps each live tick to the configured concurrency window, so a large backlog drains over repeated short ticks instead of one long scheduler-owned batch.
 - `SCREENSHOT_FOLDER_ANALYSIS_CONCURRENCY` caps concurrent Seraph HTTP calls admitted into the wrapper feeder window, not concurrent GPU inference. In the one-GPU local topology the default is `2`, which means one active background request plus one queued background request. Priority is enforced at wrapper admission for the next job, never by interrupting the job already running on the GPU.
 - `SERAPH_VLM_FEEDER_WINDOW` bounds how much work Seraph may keep active or queued in the wrapper. The default is `2`: enough to avoid GPU idle time between short screenshot jobs, but small enough that newly arrived interactive chat becomes the next accepted high-priority job after the current GPU job finishes.
-- `SCREENSHOT_FOLDER_ANALYSIS_JOB_TIMEOUT_SECONDS` is the per-image base timeout. The scheduled job applies it to the small feeder batch selected for the current tick, preventing a locked SQLite write or hung wrapper call from leaving the scheduler permanently stuck.
+- `SCREENSHOT_FOLDER_ANALYSIS_JOB_TIMEOUT_SECONDS` is the per-image base timeout (the OpenRouter-only examples use 120 seconds to match the bounded remote vision request). The scheduled job applies it to the small feeder batch selected for the current tick, preventing a locked SQLite write or hung provider call from leaving the scheduler permanently stuck.
 - `GUARDIAN_STATE_TIMEOUT_SECONDS` bounds chat context assembly. If guardian/operator context is slow or degraded, chat falls back to a minimal agent context instead of leaving the operator stuck at "responding" before the model request is dispatched.
 - `LOCAL_RUNTIME_CONTEXT_WINDOW_TOKENS` is Seraph's configured prompt budget for local Gemma-compatible chat backends. It must match the GPU server `--ctx-size` operationally; the current local target is `32768`.
 - `LOCAL_RUNTIME_PROMPT_SAFETY_RATIO`, `LOCAL_RUNTIME_TOOL_RESERVE_TOKENS`, and `LOCAL_RUNTIME_MIN_SECTION_TOKENS` control deterministic prompt compaction for local runtime profiles. Seraph compacts guardian state, observer context, memories, active skills, and conversation history before creating the `ToolCallingAgent`, while preserving the fixed Seraph identity instructions. `FallbackLiteLLMModel.generate` and `completion_with_fallback_sync` also run a final profile-aware message compaction pass for local-profile targets, preserving the current user turn and reserving the effective output-token budget before LiteLLM sees the request. Local profile status exposes the configured context window, safety ratio, tool reserve, and prompt budget so operators can verify the runtime contract. This is the Seraph-side guardrail that prevents oversized local prompts from reaching the backend as raw `exceed_context_size_error`.

@@ -1,4 +1,4 @@
-"""Focused tests for the OpenRouter-only screenshot analysis gate."""
+"""Focused proof for the OpenRouter-only screenshot transport."""
 
 from __future__ import annotations
 
@@ -8,9 +8,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from config.settings import settings
 from src.model_fabric.configuration import WorkloadPolicy
-from src.model_fabric.contracts import OPENROUTER_API_BASE, ProviderProfile
+from src.model_fabric.contracts import ProviderProfile, OPENROUTER_API_BASE
 from src.security.trust_contract import EgressClass
 
 
@@ -51,7 +50,7 @@ def _analysis_payload() -> dict[str, object]:
         "activity_type": "reviewing",
         "project": "seraph",
         "applications": ["editor"],
-        "visible_artifacts": ["test_screenshot_semantic_analysis.py"],
+        "visible_artifacts": ["test_openrouter_screenshot.py"],
         "key_visible_text": [],
         "user_intent": "Verify remote screenshot analysis.",
         "goal_alignment": {
@@ -67,26 +66,15 @@ def _analysis_payload() -> dict[str, object]:
     }
 
 
-def _configure_openrouter(monkeypatch, profile: ProviderProfile) -> None:
-    monkeypatch.setattr(settings, "screen_analysis_provider", "openrouter")
-    monkeypatch.setattr(settings, "screen_analysis_model", f"openrouter/{profile.model}")
-    monkeypatch.setattr(settings, "openrouter_api_key", "test-openrouter-key")
-    monkeypatch.setattr(settings, "openrouter_provider_only", True)
-    monkeypatch.setattr(settings, "openrouter_allowed_upstreams", "anthropic")
-    monkeypatch.setattr(settings, "openrouter_allow_fallbacks", False)
-    monkeypatch.setattr(settings, "openrouter_require_parameters", True)
-    monkeypatch.setattr(settings, "openrouter_data_collection", "deny")
-    monkeypatch.setattr(settings, "openrouter_zero_data_retention", True)
-    monkeypatch.setattr(
-        "src.observer.screenshot_semantic_analysis.effective_workload_policy",
-        lambda _path: WorkloadPolicy(
-            "screenshot_image_analysis",
-            egress_class=EgressClass.CLOUD_ALLOWED_FULL,
-            cloud_egress_acknowledged=True,
-            allowed_provider_kinds=("openrouter",),
-            max_cost_microusd=1000,
-        ),
+def test_screenshot_model_identifier_requires_explicit_openrouter_qualification():
+    from src.observer.screen_analysis_settings import normalize_openrouter_model_identifier
+
+    assert normalize_openrouter_model_identifier("openrouter/anthropic/claude-sonnet-4") == (
+        "openrouter/anthropic/claude-sonnet-4"
     )
+    assert normalize_openrouter_model_identifier("anthropic/claude-sonnet-4") == ""
+    assert normalize_openrouter_model_identifier("local/gemma-vision") == ""
+    assert normalize_openrouter_model_identifier("openrouter/gemini") == ""
 
 
 @pytest.mark.asyncio
@@ -96,10 +84,11 @@ async def test_openrouter_screenshot_uses_inline_bytes_and_no_local_endpoint(tmp
     image = tmp_path / "capture.png"
     image.write_bytes(b"png bytes")
     profile = _profile()
-    _configure_openrouter(monkeypatch, profile)
     calls: list[dict[str, object]] = []
 
     class Response:
+        status_code = 200
+
         def raise_for_status(self):
             return None
 
@@ -124,6 +113,26 @@ async def test_openrouter_screenshot_uses_inline_bytes_and_no_local_endpoint(tmp
     async def governed(*, context, profile, transport):
         return await transport(module.candidate_from_profile(profile), False)
 
+    monkeypatch.setattr(module.settings, "screen_analysis_provider", "openrouter")
+    monkeypatch.setattr(module.settings, "screen_analysis_model", "openrouter/anthropic/claude-sonnet-4")
+    monkeypatch.setattr(module.settings, "openrouter_api_key", "test-openrouter-key")
+    monkeypatch.setattr(module.settings, "openrouter_provider_only", True)
+    monkeypatch.setattr(module.settings, "openrouter_allowed_upstreams", "anthropic")
+    monkeypatch.setattr(module.settings, "openrouter_allow_fallbacks", False)
+    monkeypatch.setattr(module.settings, "openrouter_require_parameters", True)
+    monkeypatch.setattr(module.settings, "openrouter_data_collection", "deny")
+    monkeypatch.setattr(module.settings, "openrouter_zero_data_retention", True)
+    monkeypatch.setattr(
+        module,
+        "effective_workload_policy",
+        lambda _path: WorkloadPolicy(
+            "screenshot_image_analysis",
+            egress_class=EgressClass.CLOUD_ALLOWED_FULL,
+            cloud_egress_acknowledged=True,
+            allowed_provider_kinds=("openrouter",),
+            max_cost_microusd=1000,
+        ),
+    )
     monkeypatch.setattr(module, "provider_profiles", lambda: {profile.id: profile})
     monkeypatch.setattr(module, "_run_governed_vlm_adapter", governed)
     monkeypatch.setattr(module.httpx, "AsyncClient", Client)
@@ -146,32 +155,39 @@ async def test_openrouter_screenshot_uses_inline_bytes_and_no_local_endpoint(tmp
     assert content[1]["image_url"]["url"].startswith("data:image/png;base64,")
     assert str(image) not in json.dumps(body)
     assert "127.0.0.1" not in str(calls[0]["endpoint"])
+    assert calls[0]["headers"] == {
+        "Authorization": "Bearer test-openrouter-key",
+        "Content-Type": "application/json",
+    }
 
 
 @pytest.mark.asyncio
-async def test_local_provider_is_hard_disabled_even_when_legacy_flag_is_false(tmp_path, monkeypatch):
-    from src.observer import screenshot_semantic_analysis as module
-
-    image = tmp_path / "capture.png"
-    image.write_bytes(b"png bytes")
-    monkeypatch.setattr(settings, "openrouter_provider_only", False)
-    monkeypatch.setattr(settings, "screen_analysis_provider", "local-vlm")
-    monkeypatch.setattr(settings, "local_vlm_base_url", "http://gpu:8088")
-
-    assert module.screenshot_semantic_analysis_enabled() is False
-    assert await module.analyze_screenshot_image(image, {}) is None
-    with pytest.raises(module.ScreenshotSemanticAnalysisError, match="local_vlm_disabled"):
-        await module._analyze_with_local_vlm(image, {})
-
-
-@pytest.mark.asyncio
-async def test_oversize_image_is_rejected_before_governed_dispatch(tmp_path, monkeypatch):
+async def test_openrouter_screenshot_rejects_oversize_before_governed_dispatch(tmp_path, monkeypatch):
     from src.observer import screenshot_semantic_analysis as module
 
     image = tmp_path / "large.png"
     image.write_bytes(b"x" * (module.MAX_IMAGE_BYTES + 1))
     profile = _profile()
-    _configure_openrouter(monkeypatch, profile)
+    monkeypatch.setattr(module.settings, "screen_analysis_provider", "openrouter")
+    monkeypatch.setattr(module.settings, "screen_analysis_model", f"openrouter/{profile.model}")
+    monkeypatch.setattr(module.settings, "openrouter_api_key", "key")
+    monkeypatch.setattr(module.settings, "openrouter_provider_only", True)
+    monkeypatch.setattr(module.settings, "openrouter_allowed_upstreams", "anthropic")
+    monkeypatch.setattr(module.settings, "openrouter_allow_fallbacks", False)
+    monkeypatch.setattr(module.settings, "openrouter_require_parameters", True)
+    monkeypatch.setattr(module.settings, "openrouter_data_collection", "deny")
+    monkeypatch.setattr(module.settings, "openrouter_zero_data_retention", True)
+    monkeypatch.setattr(
+        module,
+        "effective_workload_policy",
+        lambda _path: WorkloadPolicy(
+            "screenshot_image_analysis",
+            egress_class=EgressClass.CLOUD_ALLOWED_FULL,
+            cloud_egress_acknowledged=True,
+            allowed_provider_kinds=("openrouter",),
+            max_cost_microusd=1000,
+        ),
+    )
     monkeypatch.setattr(module, "provider_profiles", lambda: {profile.id: profile})
     dispatched = False
 
@@ -181,20 +197,32 @@ async def test_oversize_image_is_rejected_before_governed_dispatch(tmp_path, mon
         raise AssertionError("oversize image must be rejected before governed dispatch")
 
     monkeypatch.setattr(module, "_run_governed_vlm_adapter", governed)
+
     with pytest.raises(module.ScreenshotSemanticAnalysisError, match="8 MiB"):
         await module.analyze_screenshot_image(image, {})
     assert dispatched is False
 
 
 @pytest.mark.asyncio
-async def test_screenshot_requires_explicit_cloud_policy(tmp_path, monkeypatch):
+async def test_openrouter_screenshot_requires_explicit_cloud_policy(tmp_path, monkeypatch):
     from src.observer import screenshot_semantic_analysis as module
 
     image = tmp_path / "capture.png"
     image.write_bytes(b"png bytes")
-    profile = _profile()
-    _configure_openrouter(monkeypatch, profile)
-    monkeypatch.setattr(module, "effective_workload_policy", lambda _path: WorkloadPolicy("screenshot_image_analysis"))
+    monkeypatch.setattr(module.settings, "screen_analysis_provider", "openrouter")
+    monkeypatch.setattr(module.settings, "screen_analysis_model", "openrouter/anthropic/claude-sonnet-4")
+    monkeypatch.setattr(module.settings, "openrouter_api_key", "key")
+    monkeypatch.setattr(module.settings, "openrouter_provider_only", True)
+    monkeypatch.setattr(module.settings, "openrouter_allowed_upstreams", "anthropic")
+    monkeypatch.setattr(module.settings, "openrouter_allow_fallbacks", False)
+    monkeypatch.setattr(module.settings, "openrouter_require_parameters", True)
+    monkeypatch.setattr(module.settings, "openrouter_data_collection", "deny")
+    monkeypatch.setattr(module.settings, "openrouter_zero_data_retention", True)
+    monkeypatch.setattr(
+        module,
+        "effective_workload_policy",
+        lambda _path: WorkloadPolicy("screenshot_image_analysis"),
+    )
 
     assert module.screenshot_semantic_analysis_enabled() is False
     assert await module.analyze_screenshot_image(image, {}) is None

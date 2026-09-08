@@ -144,7 +144,7 @@ async def build_screenshot_observation_digest(
                     digest_key=digest_key,
                 )
 
-    decision = screen_derived_llm_decision("screenshot_observation_digest")
+    decision = await screen_derived_llm_decision("screenshot_observation_digest")
     if not decision.allowed:
         logger.warning(
             "screenshot observation digest blocked by screen LLM policy: %s",
@@ -324,7 +324,10 @@ async def _llm_digest_content(payload: dict[str, Any]) -> str:
         max_tokens=800,
         timeout=settings.agent_briefing_timeout,
         runtime_path="screenshot_observation_digest",
-        local_runtime_only=not settings.screen_derived_llm_allow_remote,
+        # The active phase has one governed OpenRouter inference route.  The
+        # workload policy, rather than a legacy local-only flag, controls
+        # whether this cloud request may dispatch.
+        local_runtime_only=False,
         request_context=build_canonical_inference_context(
             "screenshot_observation_digest",
             payload=transport_messages,

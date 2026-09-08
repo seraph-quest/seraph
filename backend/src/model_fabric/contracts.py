@@ -20,8 +20,14 @@ from src.security.trust_contract import (
 
 
 MODEL_FABRIC_SCHEMA_VERSION = "seraph.model-fabric.v1"
+OPENROUTER_PROVIDER_KIND = "openrouter"
+OPENROUTER_API_BASE = "https://openrouter.ai/api/v1"
 SUPPORTED_TRANSPORT_ADAPTERS = frozenset(
-    {"openai_compatible_chat", "vlm_analyze_file"}
+    {
+        "openai_compatible_chat",
+        "openai_compatible_embeddings",
+        "vlm_analyze_file",
+    }
 )
 SUPPORTED_SECRET_REFS = frozenset(
     {
@@ -68,6 +74,7 @@ class InferenceWorkload(str, Enum):
 
 class ModelCapability(str, Enum):
     TEXT = "text"
+    EMBEDDING = "embedding"
     VISION = "vision"
     TOOL_USE = "tool_use"
     STRUCTURED_OUTPUT = "structured_output"
@@ -307,6 +314,10 @@ _OPENAI_COMPATIBLE_RESERVED_FIELDS = frozenset(
     {"model", "messages", "temperature", "max_tokens", "stream", "api_key", "api_base"}
 )
 
+_OPENAI_COMPATIBLE_EMBEDDING_RESERVED_FIELDS = frozenset(
+    {"model", "input", "encoding_format", "api_key", "api_base"}
+)
+
 
 def finalized_openai_compatible_body(
     *,
@@ -342,6 +353,33 @@ def finalized_openai_compatible_body(
     return body
 
 
+def finalized_openai_compatible_embeddings_body(
+    *,
+    model_id: str,
+    inputs: str | list[str],
+    options: dict[str, object] | None = None,
+    encoding_format: str = "float",
+    additional_fields: dict[str, object] | None = None,
+) -> dict[str, object]:
+    """Build the exact OpenAI-compatible embeddings body for trust binding."""
+    body = {
+        key: value
+        for key, value in (options or {}).items()
+        if key not in _OPENAI_COMPATIBLE_EMBEDDING_RESERVED_FIELDS
+    }
+    body.update(
+        {
+            "model": str(model_id or "").strip(),
+            "input": inputs,
+            "encoding_format": str(encoding_format or "float").strip() or "float",
+        }
+    )
+    for key, value in (additional_fields or {}).items():
+        if key not in _OPENAI_COMPATIBLE_EMBEDDING_RESERVED_FIELDS:
+            body[key] = value
+    return body
+
+
 def transport_endpoint(profile: ProviderProfile) -> str:
     """Return the exact adapter destination authorized for transport."""
     parsed = urlsplit(str(profile.api_base or "").strip())
@@ -357,7 +395,13 @@ def transport_endpoint(profile: ProviderProfile) -> str:
     ):
         raise ValueError("model api_base must be an absolute HTTP(S) URL")
     base_path = parsed.path.rstrip("/")
-    expected = "/analyze-file" if profile.transport_adapter == "vlm_analyze_file" else "/chat/completions"
+    expected = (
+        "/analyze-file"
+        if profile.transport_adapter == "vlm_analyze_file"
+        else "/embeddings"
+        if profile.transport_adapter == "openai_compatible_embeddings"
+        else "/chat/completions"
+    )
     if base_path.endswith(expected):
         path = base_path
     elif base_path.endswith("/v1"):

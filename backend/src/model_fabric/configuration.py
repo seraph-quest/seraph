@@ -24,13 +24,17 @@ from .contracts import (
     transport_model_for_provider,
 )
 from .receipts import safe_code
-from .selector import classify_endpoint, profile_exclusion_reason
+from .selector import active_provider_exclusion_reason, classify_endpoint, profile_exclusion_reason
 
 
 CONFIG_SCHEMA_VERSION = "seraph.model-fabric.settings.v1"
 _SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 SUPPORTED_TRANSPORT_ADAPTERS = frozenset(
-    {"openai_compatible_chat", "vlm_analyze_file"}
+    {
+        "openai_compatible_chat",
+        "openai_compatible_embeddings",
+        "vlm_analyze_file",
+    }
 )
 
 
@@ -70,6 +74,13 @@ def read_model_fabric_configuration() -> ModelFabricConfiguration:
 
 
 def write_model_fabric_configuration(configuration: ModelFabricConfiguration) -> None:
+    """Persist a structurally valid configuration, including legacy profiles.
+
+    Active route eligibility is checked by the selector and by
+    ``validate_active_model_fabric_configuration``.  Keeping this write path
+    provider-agnostic lets an operator read and retain historical settings
+    while the active selector fails closed on them.
+    """
     validated = _configuration_from_payload(_configuration_payload(configuration))
     path = model_fabric_configuration_path()
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -81,6 +92,23 @@ def write_model_fabric_configuration(configuration: ModelFabricConfiguration) ->
     temporary.chmod(0o600)
     os.replace(temporary, path)
     path.chmod(0o600)
+
+
+def validate_active_model_fabric_configuration(
+    configuration: ModelFabricConfiguration,
+) -> None:
+    """Validate that a newly supplied configuration cannot activate legacy routes."""
+    validated = _configuration_from_payload(_configuration_payload(configuration))
+    for profile in validated.profiles:
+        if reason := active_provider_exclusion_reason(profile):
+            raise ValueError(f"model-fabric profile is ineligible: {reason}")
+        if reason := profile_exclusion_reason(profile):
+            raise ValueError(f"model-fabric profile is ineligible: {reason}")
+    for policy in validated.workload_policies:
+        if policy.fallback_allowed:
+            raise ValueError("active model-fabric policies must disable fallback")
+        if policy.allowed_provider_kinds and set(policy.allowed_provider_kinds) != {"openrouter"}:
+            raise ValueError("active model-fabric policies may allow only openrouter")
 
 
 def effective_provider_profiles(legacy_profiles: dict[str, ProviderProfile]) -> dict[str, ProviderProfile]:
@@ -161,6 +189,10 @@ def _profile_from_payload(payload: object) -> ProviderProfile:
         raise ValueError("remote model-fabric endpoints require HTTPS")
     if profile.transport_adapter == "vlm_analyze_file" and "vision" not in profile.capabilities:
         raise ValueError("VLM transport requires the vision capability")
+    if profile.transport_adapter == "openai_compatible_embeddings" and "embedding" not in profile.capabilities:
+        raise ValueError("embedding transport requires the embedding capability")
+    if "embedding" in profile.capabilities and profile.transport_adapter != "openai_compatible_embeddings":
+        raise ValueError("embedding capability requires the embeddings transport")
     if not credential_ref_allowed(profile):
         raise ValueError("model-fabric credential reference is not allowed for this provider")
     if has_inline_secret_options(profile.options or {}):
@@ -178,9 +210,6 @@ def _profile_from_payload(payload: object) -> ProviderProfile:
         not math.isfinite(profile.cost_source_updated_at) or profile.cost_source_updated_at < 0
     ):
         raise ValueError("model-fabric pricing timestamp must be finite and nonnegative")
-    exclusion = profile_exclusion_reason(profile)
-    if exclusion is not None:
-        raise ValueError(f"model-fabric profile is ineligible: {exclusion}")
     return profile
 
 

@@ -9,6 +9,15 @@ DEFAULT_ENV_FILE = REPO_ROOT / ".env.dev"
 
 class Settings(BaseSettings):
     openrouter_api_key: str = ""
+    # Active inference policy.  A blank upstream allow-list intentionally keeps
+    # paid dispatch blocked until the operator has selected approved upstreams
+    # in the model-fabric settings surface.
+    openrouter_provider_only: bool = True
+    openrouter_allow_fallbacks: bool = False
+    openrouter_require_parameters: bool = True
+    openrouter_data_collection: str = "deny"
+    openrouter_allowed_upstreams: str = ""
+    openrouter_zero_data_retention: bool = False
     openai_api_key: str = ""
     anthropic_api_key: str = ""
     default_model: str = "openrouter/anthropic/claude-sonnet-4"
@@ -48,7 +57,7 @@ class Settings(BaseSettings):
 
     # Phase 1 — Soul & Memory
     soul_file: str = "soul.md"
-    embedding_model: str = "all-MiniLM-L6-v2"
+    embedding_model: str = ""
     memory_search_top_k: int = 5
     context_window_token_budget: int = 12000  # max tokens for conversation history
     context_window_keep_first: int = 2        # always keep first N messages
@@ -108,14 +117,18 @@ class Settings(BaseSettings):
     screenshot_folder_analysis_interval_seconds: int = 1
     screenshot_folder_analysis_limit: int = 100
     screenshot_folder_analysis_concurrency: int = 2
-    screenshot_folder_analysis_job_timeout_seconds: int = 30
+    # Match the bounded OpenRouter vision request deadline.  A shorter job
+    # timeout would cancel a queued/active remote request while its provider
+    # outcome is still uncertain.
+    screenshot_folder_analysis_job_timeout_seconds: int = 120
     screenshot_observation_digest_enabled: bool = True
     screenshot_observation_digest_interval_min: int = 15
     screenshot_observation_digest_window_min: int = 30
     screenshot_observation_digest_max_chars: int = 6000
     screen_derived_llm_allow_remote: bool = False
     screen_derived_llm_require_profile_proof: bool = True
-    screen_analysis_provider: str = ""  # local-vlm enables semantic screenshot analysis
+    screen_analysis_provider: str = ""  # openrouter enables governed semantic screenshot analysis
+    screen_analysis_model: str = ""
     seraph_vlm_mode: str = ""  # gpu-server, mac-wrapper, or empty for legacy local VLM config
     seraph_vlm_base_url: str = ""  # wrapper base URL, e.g. http://192.168.1.26:8001
     seraph_vlm_backend_url: str = ""  # model backend behind the wrapper, e.g. http://192.168.1.26:8000/v1

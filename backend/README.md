@@ -3,6 +3,12 @@
 > The canonical product and provider boundary is defined by the
 > [Project Constitution](../docs/implementation/00-project-constitution.md).
 > Model profiles provide inference only; Seraph owns its capability runtime.
+>
+> **Active Epic #736/#775 phase:** OpenRouter is the only executable inference
+> gateway. Local, direct-vendor, generic OpenAI-compatible, and fallback
+> recipes below are retained as historical configuration examples and are not
+> active setup paths. Use `../env.dev.example` or `../env.prod.example` for
+> the current CPU-host deployment contract.
 
 AI assistant backend powered by FastAPI, smolagents, and LiteLLM-compatible provider routing.
 
@@ -81,8 +87,8 @@ Receive (streamed):
 | `DEBUG` | `false` | Enable debug mode |
 | `WORKSPACE_DIR` | `/app/data` | Agent file workspace |
 | `LOCAL_MODEL` | - | Model id for the local runtime profile |
-| `LOCAL_LLM_API_KEY` | - | Optional API key for the local runtime profile |
-| `LOCAL_LLM_API_BASE` | - | API base for the local runtime profile |
+| `LOCAL_LLM_API_KEY` | - | Historical local-runtime credential; inactive while OpenRouter-only mode is enabled |
+| `LOCAL_LLM_API_BASE` | - | Historical local-runtime endpoint; inactive while OpenRouter-only mode is enabled |
 | `SCREEN_CAPTURE_ARCHIVE_DIR` | `~/Library/Application Support/Seraph/artifacts/screen-captures` | Durable local archive root for preserved screen capture images, redacted provider output, and normalized JSON served by localhost-only observer artifact endpoints |
 | `SCREEN_ANALYSIS_MIN_SECONDS_BETWEEN_CAPTURES` | `0` | Minimum seconds between screen-analysis captures; `0` disables this throttle |
 | `SCREEN_ANALYSIS_MAX_DAILY_CAPTURES` | `0` | Daily screen-analysis capture cap; `0` means unlimited |
@@ -132,7 +138,11 @@ Receive (streamed):
 | `LLM_LOG_MAX_BYTES` | `52428800` | Max bytes per log file before rotation (50 MB) |
 | `LLM_LOG_BACKUP_COUNT` | `5` | Number of rotated log files to keep |
 
-Inference profile recipes:
+## Historical profile recipes
+
+The following recipes document the pre-#775 configurable provider surface for
+rollback and migration review. They must not be enabled for the active
+OpenRouter-only phase.
 
 ```bash
 # Built-in named profiles:

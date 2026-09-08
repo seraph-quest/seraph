@@ -796,7 +796,8 @@ from src.workflows.post_dx_live_durable_orchestration import (
 from src.evolution.engine import evolution_benchmark_gate_policy
 from src.approval.exceptions import ApprovalRequired
 from src.approval.runtime import reset_runtime_context, set_runtime_context
-from src.security.trust_contract import AuthorityGrant, PrincipalType, TrustPrincipal
+from src.security.trust_contract import AuthorityGrant, EgressClass, PrincipalType, TrustPrincipal
+from src.model_fabric.configuration import WorkloadPolicy
 from src.agent.session import SessionManager, session_manager
 from src.agent.context_window import _summarize_middle, _summary_cache
 from src.agent.factory import create_agent, create_orchestrator, get_model
@@ -832,7 +833,8 @@ from src.llm_runtime import (
     build_completion_kwargs,
     completion_with_fallback_sync,
 )
-from src.memory.embedder import _reset_embedder_state, embed
+from src.memory import embedder as embedder_module
+from src.memory.embedder import EmbeddingMetadata, EmbeddingUnavailableError, _reset_embedder_state, embed
 from src.memory.repository import memory_repository
 from src.memory.superiority_benchmark import (
     M6_MEMORY_SUPERIORITY_BENCHMARK_SCENARIO_NAMES,
@@ -4519,55 +4521,101 @@ def _eval_mcp_specialist_local_runtime_profile() -> dict[str, Any]:
 
 
 async def _eval_embedding_runtime_audit() -> dict[str, Any]:
-    class _Vector:
-        def __init__(self, payload: Any):
-            self._payload = payload
+    embedding_name = "openrouter/openai/text-embedding-3-small"
+    policy = WorkloadPolicy(
+        runtime_path="memory_embedding",
+        egress_class=EgressClass.CLOUD_ALLOWED_FULL,
+        cloud_egress_acknowledged=True,
+        allowed_provider_kinds=("openrouter",),
+        fallback_allowed=False,
+        max_cost_microusd=500,
+    )
 
-        def tolist(self) -> Any:
-            return self._payload
-
-    class _FakeSentenceTransformer:
-        def __init__(self, model_name: str):
-            self.model_name = model_name
-
-        def encode(self, value: Any, normalize_embeddings: bool = True) -> _Vector:
-            if value == "fail":
-                raise RuntimeError("encode crashed")
-            if isinstance(value, list):
-                return _Vector([[0.1, 0.2] for _ in value])
-            return _Vector([0.1, 0.2])
+    def _fake_request(*, model: str, texts: list[str], request_id: str) -> dict[str, Any]:
+        if texts == ["fail"]:
+            embedder_module._log_embedding_event(
+                "failed",
+                details=embedder_module._safe_details(
+                    stage="request",
+                    reason_code="provider_transport_failed",
+                    batch_size=len(texts),
+                    request_id=request_id,
+                    model=model,
+                ),
+            )
+            raise EmbeddingUnavailableError(
+                "provider_transport_failed",
+                stage="request",
+                request_id=request_id,
+                retryable=True,
+            )
+        return {
+            "model": model,
+            "data": [
+                {"index": index, "embedding": [0.1, 0.2]}
+                for index, _text in enumerate(texts)
+            ],
+        }
 
     _reset_embedder_state()
-    fake_module = types.SimpleNamespace(SentenceTransformer=_FakeSentenceTransformer)
+    principal = TrustPrincipal(
+        principal_id="eval:embedding",
+        principal_type=PrincipalType.SERVICE,
+        grants=(AuthorityGrant.MODEL_INFERENCE,),
+        session_id="eval-embedding-session",
+        job_id="eval-embedding-job",
+    )
+
+    def _execute_sync_adapter(*, context, candidates, proofs, adapter, **_kwargs):
+        # The eval owns the provider fixture; canonical context construction and
+        # the adapter seam are still exercised without a live provider or DB.
+        return adapter(candidates[0], False)
 
     try:
         with (
-            patch.dict(sys.modules, {"sentence_transformers": fake_module}),
+            patch.object(settings, "embedding_model", embedding_name),
+            patch.object(settings, "openrouter_api_key", "test-key"),
+            patch.object(settings, "llm_api_base", "https://openrouter.ai/api/v1"),
+            patch.object(settings, "openrouter_provider_only", True),
+            patch.object(settings, "openrouter_allowed_upstreams", "openai"),
+            patch.object(settings, "openrouter_allow_fallbacks", False),
+            patch.object(settings, "openrouter_require_parameters", True),
+            patch.object(settings, "openrouter_data_collection", "deny"),
+            patch.object(settings, "openrouter_zero_data_retention", True),
+            patch.object(embedder_module, "effective_workload_policy", return_value=policy),
+            patch.object(embedder_module, "get_current_trust_principal", return_value=principal),
+            patch.object(embedder_module, "_load_embedding_proofs", return_value=()),
+            patch.object(embedder_module, "execute_sync_adapter", side_effect=_execute_sync_adapter),
+            patch.object(embedder_module, "_request_embeddings", side_effect=_fake_request),
             patch.object(audit_repository, "log_event", AsyncMock()) as mock_log_event,
         ):
             vector = embed("hello")
             try:
                 embed("fail")
-            except RuntimeError:
+            except EmbeddingUnavailableError:
                 pass
+            # The sync audit wrapper schedules onto the active loop; yield
+            # twice so the task itself and the mocked repository call both
+            # get a turn before assertions inspect the receipt.
+            await asyncio.sleep(0)
             await asyncio.sleep(0)
 
         loaded = _find_audit_call(
             mock_log_event,
             event_type="integration_loaded",
-            tool_name=f"embedding_model:{settings.embedding_model}",
+            tool_name=f"embedding_model:{embedding_name}",
         )
         failed = _find_audit_call(
             mock_log_event,
             event_type="integration_failed",
-            tool_name=f"embedding_model:{settings.embedding_model}",
+            tool_name=f"embedding_model:{embedding_name}",
         )
         return {
             "loaded_model": loaded["details"]["name"],
             "loaded_integration_type": loaded["details"]["integration_type"],
             "vector_length": len(vector),
             "failure_stage": failed["details"]["stage"],
-            "failure_error": failed["details"]["error"],
+            "failure_reason_code": failed["details"]["reason_code"],
         }
     finally:
         _reset_embedder_state()
@@ -4581,21 +4629,38 @@ async def _eval_vector_store_runtime_audit() -> dict[str, Any]:
     empty_table = MagicMock()
     empty_table.count_rows.return_value = 0
 
+    metadata = EmbeddingMetadata(
+        schema_version="seraph.memory.embedding.v1",
+        provider="openrouter",
+        model="openai/text-embedding-3-small",
+        dimension=2,
+    )
+
     _reset_vector_store_state()
     try:
         with patch.object(audit_repository, "log_event", AsyncMock()) as mock_log_event:
             with (
                 patch("src.memory.vector_store._get_or_create_table", return_value=success_table),
                 patch("src.memory.vector_store.embed", return_value=[0.1, 0.2]),
+                patch("src.memory.vector_store.embedding_metadata", return_value=metadata),
             ):
                 memory_id = add_memory("remember this", category="fact", source_session_id="sess-1")
 
-            with patch("src.memory.vector_store._get_or_create_table", return_value=empty_table):
+            with (
+                patch("src.memory.vector_store._get_or_create_table", return_value=empty_table),
+                patch("src.memory.vector_store.embed", return_value=[0.1, 0.2]),
+                patch("src.memory.vector_store.embedding_metadata", return_value=metadata),
+            ):
                 results = search("missing memory", top_k=3)
 
-            with patch("src.memory.vector_store._get_or_create_table", side_effect=RuntimeError("db down")):
+            with (
+                patch("src.memory.vector_store._get_or_create_table", side_effect=RuntimeError("db down")),
+                patch("src.memory.vector_store.embed", return_value=[0.1, 0.2]),
+                patch("src.memory.vector_store.embedding_metadata", return_value=metadata),
+            ):
                 failed_id = add_memory("broken", category="fact", source_session_id="sess-2")
 
+            await asyncio.sleep(0)
             await asyncio.sleep(0)
 
         success = _find_audit_call(
@@ -27695,13 +27760,13 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
     EvalScenario(
         name="embedding_runtime_audit",
         category="observability",
-        description="The local embedding model boundary records load success and encode failures without live dependencies.",
+        description="The OpenRouter embedding boundary records governed load success and provider failures without live dependencies.",
         runner=_eval_embedding_runtime_audit,
     ),
     EvalScenario(
         name="vector_store_runtime_audit",
         category="observability",
-        description="The local vector-store boundary records add success, search empty-result, and storage failures without live dependencies.",
+        description="The local canonical vector-store boundary records namespaced add success, search empty-result, and storage failures without live dependencies.",
         runner=_eval_vector_store_runtime_audit,
     ),
     EvalScenario(

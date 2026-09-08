@@ -70,6 +70,7 @@ class Settings(BaseSettings):
     operator_auth_trusted_proxy_ips: str = ""
     operator_auth_allow_unauthenticated_tests: bool = False
     operator_auth_backend_workers: int = 1
+    operator_auth_revocation_poll_seconds: float = 2.0
 
     # Phase 1 — Soul & Memory
     soul_file: str = "soul.md"

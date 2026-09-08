@@ -79,6 +79,33 @@ curl -sS http://127.0.0.1:8004/api/runtime/status
 curl -sS http://127.0.0.1:8004/api/settings/artifact-storage
 ```
 
+Production API access is authenticated with a server-side, single-operator
+session. Generate a PBKDF2 password hash in the backend environment, store it
+in the deployment secret store as `OPERATOR_AUTH_SECRET_HASH`, and set
+`DEPLOYMENT_ENVIRONMENT=production`, `OPERATOR_AUTH_COOKIE_SECURE=true`, and
+the exact operator host/origin allow-lists. The raw password and session cookie
+must never be placed in browser configuration or logs. A manual provisioning
+and login receipt is:
+
+```bash
+cd backend
+uv run python -c 'from src.auth.service import encode_secret; print(encode_secret("REPLACE_ME"))'
+curl -c /tmp/seraph.cookies -H 'Origin: https://cockpit.example' \
+  -H 'Content-Type: application/json' \
+  --data '{"password":"REPLACE_ME"}' \
+  https://api.example/api/auth/login
+curl -b /tmp/seraph.cookies -H 'Origin: https://cockpit.example' \
+  https://api.example/api/auth/session
+```
+
+The login/session/refresh/logout endpoints are the canonical provisioning
+surface for the current single-operator deployment. Host headers with ports
+such as `127.0.0.1:8004` are normalized against the configured allow-list.
+Unauthenticated API requests fail closed; the explicit unauthenticated bypass
+is accepted only by test configuration. A WebSocket rechecks the session at a
+bounded interval and closes when the session is revoked or expires. A cockpit
+login form and multi-operator identity ownership remain #741 follow-up scope.
+
 `/api/runtime/status` and `/api/settings/artifact-storage` are the active
 operator receipts. They expose the effective OpenRouter route, consent,
 allow-list, budget, admission state, and disabled local-runtime reason. A

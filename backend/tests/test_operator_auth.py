@@ -1,5 +1,6 @@
 from datetime import datetime, timedelta, timezone
 import asyncio
+from threading import Event
 
 import pytest
 from fastapi import HTTPException, Response
@@ -9,7 +10,7 @@ from sqlalchemy import select
 from config.settings import settings
 from src.auth.middleware import validate_request_boundary
 from src.auth.middleware import OperatorAuthMiddleware
-from src.api.ws import websocket_chat
+from src.api.ws import _OperatorSessionRevoked, _await_authorized, watch_operator_session, websocket_chat
 from src.auth.service import AuthFailure, authenticate_token, bind_operator_principal, create_session
 from src.api.auth import _reset_login_throttle_for_tests, _login_source
 from src.api.auth import LoginRequest, login
@@ -154,8 +155,37 @@ async def test_concurrent_refresh_has_exactly_one_winner(client):
 
 def test_websocket_boundary_requires_exact_host_and_origin():
     assert validate_request_boundary(host="test", origin=ORIGIN, method="POST") is None
+    assert validate_request_boundary(host="test:8004", origin=ORIGIN, method="POST") is None
+    assert validate_request_boundary(host="127.0.0.1:8004", origin=ORIGIN, method="POST") is None
     assert validate_request_boundary(host="evil.example", origin=ORIGIN, method="POST") == "origin_forbidden"
     assert validate_request_boundary(host="test", origin=None, method="POST") == "mutation_origin_required"
+
+
+@pytest.mark.asyncio
+async def test_revocation_watch_closes_socket_and_cancels_active_turn(monkeypatch):
+    monkeypatch.setattr(settings, "operator_auth_revocation_poll_seconds", 0.25)
+    revoked = asyncio.Event()
+    guard = Event()
+    closed = {}
+
+    class FakeWebSocket:
+        async def close(self, *, code, reason):
+            closed.update(code=code, reason=reason)
+
+    async def _revoked(_token, *, touch=False):
+        raise AuthFailure("session_revoked")
+
+    monkeypatch.setattr("src.api.ws.authenticate_token", _revoked)
+    await asyncio.wait_for(
+        watch_operator_session(FakeWebSocket(), "token", revoked, guard),
+        timeout=1,
+    )
+    assert revoked.is_set()
+    assert guard.is_set()
+    assert closed == {"code": 4401, "reason": "session_revoked"}
+
+    with pytest.raises(_OperatorSessionRevoked):
+        await _await_authorized(asyncio.sleep(10), revoked)
 
 
 def test_login_source_only_honors_forwarding_from_trusted_proxy(monkeypatch):

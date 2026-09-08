@@ -134,7 +134,6 @@ def _bind_chat_principal(
 @router.post("/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest, http_request: HttpRequest):
     """Send a message and receive an AI response."""
-    session = await session_manager.get_or_create(request.session_id)
     try:
         operator = getattr(http_request.state, "operator", None)
         if operator is None:
@@ -143,6 +142,13 @@ async def chat(request: ChatRequest, http_request: HttpRequest):
                 status_code=401,
                 code="chat_authentication_required",
             )
+    except ChatAuthorityError as exc:
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail={"code": exc.code, "message": exc.message},
+        ) from exc
+    session = await session_manager.get_or_create(request.session_id)
+    try:
         chat_principal = _bind_chat_principal(
             session.id,
             operator=operator,

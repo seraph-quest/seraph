@@ -2,6 +2,7 @@ import asyncio
 import contextvars
 import json
 import logging
+from threading import Event
 from contextlib import suppress
 from time import perf_counter
 
@@ -12,6 +13,7 @@ from config.settings import settings
 from src.approval.exceptions import ApprovalRequired
 from src.approval.repository import approval_repository
 from src.approval.runtime import get_current_approval_mode, reset_runtime_context, set_runtime_context
+from src.auth.cancellation import reset_revocation_guard, set_revocation_guard
 from src.agent.exceptions import ClarificationRequired
 from src.agent.direct_chat import run_direct_local_chat, should_use_direct_local_chat, stream_direct_local_chat
 from src.agent.factory import build_agent
@@ -23,7 +25,7 @@ from src.audit.repository import audit_repository
 from src.api.profile import get_or_create_profile, mark_onboarding_complete, reset_onboarding
 from src.api.chat import ChatAuthorityError, _bind_chat_principal
 from src.auth.middleware import authenticate_websocket
-from src.auth.service import AuthFailure, bind_operator_principal
+from src.auth.service import AuthFailure, auth_enabled, authenticate_token, bind_operator_principal
 from src.guardian.state import build_guardian_state
 from src.models.schemas import WSMessage, WSResponse
 from src.operators.local_codex import ExternalAgentRuntimeRemovedError
@@ -53,6 +55,60 @@ _INTERRUPTED_TURN_MESSAGE = (
 
 class _DirectStreamOutcomeUncertain(Exception):
     """A remote stream failed without a confirmed complete response."""
+
+
+class _OperatorSessionRevoked(Exception):
+    """The authenticated operator lost authority during a live turn."""
+
+
+async def _await_authorized(awaitable, revoked_event: asyncio.Event, *, timeout: float | None = None):
+    """Await work while allowing session revocation to cancel the work."""
+    work_task = asyncio.ensure_future(awaitable)
+    revoked_task = asyncio.create_task(revoked_event.wait(), name="operator-revocation-wait")
+    try:
+        wait_kwargs = {"return_when": asyncio.FIRST_COMPLETED}
+        if timeout is None:
+            done, _ = await asyncio.wait({work_task, revoked_task}, **wait_kwargs)
+        else:
+            done, _ = await asyncio.wait({work_task, revoked_task}, timeout=timeout, **wait_kwargs)
+            if not done:
+                work_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await work_task
+                raise asyncio.TimeoutError
+        if revoked_task in done and revoked_event.is_set():
+            work_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await work_task
+            raise _OperatorSessionRevoked
+        return await work_task
+    finally:
+        if not revoked_task.done():
+            revoked_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await revoked_task
+
+
+async def watch_operator_session(
+    websocket,
+    auth_cookie: str | None,
+    revoked_event: asyncio.Event,
+    revocation_guard: Event,
+) -> None:
+    """Poll the authenticated session and close a socket after revocation/expiry."""
+    if not auth_cookie:
+        return
+    poll_seconds = max(float(settings.operator_auth_revocation_poll_seconds), 0.25)
+    while True:
+        await asyncio.sleep(poll_seconds)
+        try:
+            await authenticate_token(auth_cookie, touch=False)
+        except AuthFailure as exc:
+            revoked_event.set()
+            revocation_guard.set()
+            with suppress(Exception):
+                await websocket.close(code=4401, reason=exc.code)
+            return
 
 
 def _format_tool_step(step_name: str, arguments: dict, specialist_names: set[str]) -> str:
@@ -114,9 +170,18 @@ async def websocket_chat(websocket: WebSocket):
         return
     await websocket.accept()
     ws_manager.connect(websocket)
+    auth_revoked = asyncio.Event()
+    revocation_guard = Event()
+    auth_cookie = websocket.cookies.get(settings.operator_auth_cookie_name) if auth_enabled() else None
+
+    revocation_task = asyncio.create_task(
+        watch_operator_session(websocket, auth_cookie, auth_revoked, revocation_guard),
+        name=f"ws-auth-watch:{operator.session_id[:8]}",
+    )
     _seq = 0
     active_turn_session_id: str | None = None
     active_turn_completed = True
+    revocation_guard_token = None
 
     def _next_seq() -> int:
         nonlocal _seq
@@ -130,6 +195,10 @@ async def websocket_chat(websocket: WebSocket):
         active_turn_completed = True
         with suppress(Exception):
             await session_manager.add_message(active_turn_session_id, "assistant", _INTERRUPTED_TURN_MESSAGE)
+
+    async def _ensure_operator_active() -> None:
+        if auth_revoked.is_set():
+            raise _OperatorSessionRevoked
 
     # Send welcome message if user hasn't completed onboarding
     try:
@@ -154,6 +223,7 @@ async def websocket_chat(websocket: WebSocket):
 
     try:
         while True:
+            await _ensure_operator_active()
             raw = await websocket.receive_text()
             try:
                 data = json.loads(raw)
@@ -165,12 +235,14 @@ async def websocket_chat(websocket: WebSocket):
                 continue
 
             if ws_msg.type == "ping":
+                await _ensure_operator_active()
                 await websocket.send_text(
                     WSResponse(type="pong", content="pong").model_dump_json()
                 )
                 continue
 
             if ws_msg.type == "skip_onboarding":
+                await _ensure_operator_active()
                 await mark_onboarding_complete()
                 await websocket.send_text(
                     WSResponse(
@@ -279,6 +351,7 @@ async def websocket_chat(websocket: WebSocket):
                     get_current_approval_mode(),
                     trust_principal=chat_principal,
                 )
+                revocation_guard_token = set_revocation_guard(revocation_guard)
                 try:
                     await websocket.send_text(
                         WSResponse(
@@ -316,16 +389,22 @@ async def websocket_chat(websocket: WebSocket):
                         return "".join(streamed_parts).strip()
 
                     try:
-                        final_result = await asyncio.wait_for(
+                        final_result = await _await_authorized(
                             _stream_direct_reply(),
+                            auth_revoked,
                             timeout=min(settings.agent_chat_timeout, 60),
                         )
                     except asyncio.TimeoutError:
+                        raise
+                    except _OperatorSessionRevoked:
                         raise
                     except Exception as exc:
                         raise _DirectStreamOutcomeUncertain(str(exc)) from exc
 
                     final_result = await redact_secrets_in_text(final_result, fail_closed=True)
+                except _OperatorSessionRevoked:
+                    active_turn_completed = True
+                    raise
                 except asyncio.TimeoutError:
                     _mark_request_timed_out(llm_request_id)
                     await log_agent_run_event(
@@ -418,6 +497,9 @@ async def websocket_chat(websocket: WebSocket):
                     )
                     continue
                 finally:
+                    if revocation_guard_token is not None:
+                        reset_revocation_guard(revocation_guard_token)
+                        revocation_guard_token = None
                     reset_runtime_context(auth_tokens)
                     _finish_request(llm_request_id)
 
@@ -481,6 +563,7 @@ async def websocket_chat(websocket: WebSocket):
                     context_manager.get_context().approval_mode,
                     trust_principal=chat_principal,
                 )
+                revocation_guard_token = set_revocation_guard(revocation_guard)
                 llm_request_token = set_current_llm_request_id(llm_request_id)
                 run_ctx = contextvars.copy_context()
                 reset_runtime_context(tokens)
@@ -534,7 +617,11 @@ async def websocket_chat(websocket: WebSocket):
                     name=f"ws-drain:{session.id[:8]}",
                 )
                 try:
-                    await asyncio.wait_for(drain_task, timeout=settings.agent_chat_timeout)
+                    await _await_authorized(
+                        drain_task,
+                        auth_revoked,
+                        timeout=settings.agent_chat_timeout,
+                    )
                 except Exception:
                     if not drain_task.done():
                         drain_task.cancel()
@@ -542,6 +629,9 @@ async def websocket_chat(websocket: WebSocket):
                             await drain_task
                     raise
 
+            except _OperatorSessionRevoked:
+                active_turn_completed = True
+                raise
             except asyncio.TimeoutError:
                 logger.warning("Agent timed out after %ds for session %s", settings.agent_chat_timeout, session.id)
                 run_outcome = "timed_out"
@@ -662,6 +752,9 @@ async def websocket_chat(websocket: WebSocket):
                 )
                 continue
             finally:
+                if revocation_guard_token is not None:
+                    reset_revocation_guard(revocation_guard_token)
+                    revocation_guard_token = None
                 if "llm_request_id" in locals():
                     _finish_request(llm_request_id)
 
@@ -711,8 +804,12 @@ async def websocket_chat(websocket: WebSocket):
                 except Exception:
                     logger.debug("Failed to schedule memory consolidation", exc_info=True)
 
+    except _OperatorSessionRevoked:
+        ws_manager.disconnect(websocket)
+        logger.info("WebSocket closed because the operator session was revoked or expired")
     except WebSocketDisconnect:
-        await _record_interrupted_turn()
+        if not auth_revoked.is_set():
+            await _record_interrupted_turn()
         ws_manager.disconnect(websocket)
         logger.info("WebSocket client disconnected")
     except RuntimeError as exc:
@@ -722,3 +819,8 @@ async def websocket_chat(websocket: WebSocket):
             logger.info("WebSocket client disconnected before next receive")
             return
         raise
+    finally:
+        if not revocation_task.done():
+            revocation_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await revocation_task

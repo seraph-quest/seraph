@@ -57,6 +57,8 @@ def validate_auth_configuration() -> None:
         or settings.operator_auth_idle_seconds > settings.operator_auth_absolute_seconds
     ):
         raise RuntimeError("operator authentication expiry configuration is invalid")
+    if settings.operator_auth_revocation_poll_seconds <= 0:
+        raise RuntimeError("operator authentication revocation polling must be positive")
 
 
 def _pbkdf2(value: str, salt: bytes, iterations: int = 600_000) -> bytes:

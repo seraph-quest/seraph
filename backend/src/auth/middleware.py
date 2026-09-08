@@ -3,6 +3,7 @@ from __future__ import annotations
 from fastapi import Request
 from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
+from urllib.parse import urlsplit
 
 from config.settings import settings
 from src.auth.service import (
@@ -22,9 +23,27 @@ def _csv(value: str) -> set[str]:
     return {item.strip().rstrip("/") for item in value.split(",") if item.strip()}
 
 
+def _hostname(value: str) -> str:
+    """Normalize a Host header or configured host to its hostname.
+
+    Starlette exposes the port-bearing Host header verbatim (for example
+    ``127.0.0.1:8004``).  Comparing it directly with a hostname allow-list
+    rejects the managed dev/prod listeners.  Parsing the authority also keeps
+    IPv6 literals and optional ports well-defined without accepting a path or
+    userinfo component.
+    """
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    parsed = urlsplit(f"//{raw}")
+    if parsed.path not in {"", "/"} or parsed.query or parsed.fragment:
+        return ""
+    return (parsed.hostname or "").strip().rstrip(".").lower()
+
+
 def validate_request_boundary(*, host: str, origin: str | None, method: str) -> str | None:
-    allowed_hosts = {item.lower() for item in _csv(settings.operator_auth_allowed_hosts)}
-    if host.strip().lower() not in allowed_hosts:
+    allowed_hosts = {_hostname(item) for item in _csv(settings.operator_auth_allowed_hosts)}
+    if not _hostname(host) or _hostname(host) not in allowed_hosts:
         return "origin_forbidden"
     if method.upper() not in _SAFE_METHODS:
         if not origin:

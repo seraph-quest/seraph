@@ -67,6 +67,7 @@ class GoalRepository:
         description: Optional[str] = None,
         due_date: Optional[datetime] = None,
         success_criterion: GoalSuccessCriterion | dict | None = None,
+        proactive_enabled: bool = False,
     ) -> Goal:
         if level not in _VALID_LEVELS:
             raise ValueError(f"Invalid level '{level}'. Must be one of: {_VALID_LEVELS}")
@@ -103,6 +104,7 @@ class GoalRepository:
                 sort_order=sort_order,
                 revision=1,
                 success_criterion_json=serialize_success_criterion(success_criterion),
+                proactive_enabled=bool(proactive_enabled),
             )
             db.add(goal)
             await db.flush()
@@ -118,11 +120,18 @@ class GoalRepository:
         goal_id: str,
         title: Optional[str] = None,
         description: Optional[str] = None,
+        level: Optional[str] = None,
+        domain: Optional[str] = None,
         status: Optional[str] = None,
         due_date: Optional[datetime] = None,
         success_criterion: GoalSuccessCriterion | dict | None = None,
+        proactive_enabled: bool | None = None,
         expected_revision: int | None = None,
     ) -> Optional[Goal]:
+        if level is not None and level not in _VALID_LEVELS:
+            raise ValueError(f"Invalid level '{level}'. Must be one of: {_VALID_LEVELS}")
+        if domain is not None and domain not in _VALID_DOMAINS:
+            raise ValueError(f"Invalid domain '{domain}'. Must be one of: {_VALID_DOMAINS}")
         if status is not None and status not in _VALID_STATUSES:
             raise ValueError(f"Invalid status '{status}'. Must be one of: {_VALID_STATUSES}")
         async with get_session() as db:
@@ -141,6 +150,12 @@ class GoalRepository:
             if description is not None:
                 values["description"] = description
                 changed = True
+            if level is not None:
+                values["level"] = level
+                changed = True
+            if domain is not None:
+                values["domain"] = domain
+                changed = True
             if status is not None:
                 values["status"] = status
                 changed = True
@@ -149,6 +164,9 @@ class GoalRepository:
                 changed = True
             if success_criterion is not None:
                 values["success_criterion_json"] = serialize_success_criterion(success_criterion)
+                changed = True
+            if proactive_enabled is not None:
+                values["proactive_enabled"] = bool(proactive_enabled)
                 changed = True
             values["updated_at"] = datetime.now(timezone.utc)
             if changed:
@@ -239,6 +257,7 @@ class GoalRepository:
                 "status": g.status,
                 "revision": max(int(g.revision or 1), 1),
                 "success_criterion": criterion.model_dump(mode="json") if criterion else None,
+                "proactive_enabled": bool(getattr(g, "proactive_enabled", False)),
                 "due_date": g.due_date.isoformat() if g.due_date else None,
                 "created_at": g.created_at.isoformat(),
                 "children": [],

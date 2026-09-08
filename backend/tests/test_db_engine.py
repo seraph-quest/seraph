@@ -97,6 +97,46 @@ async def test_ensure_legacy_columns_adds_guardian_intervention_active_project(t
         await engine.dispose()
 
 
+async def test_ensure_legacy_columns_adds_goal_proactive_permission_disabled_by_default(tmp_path):
+    db_path = tmp_path / "legacy-goals-proactive.db"
+    engine = create_async_engine(f"sqlite+aiosqlite:///{db_path}")
+    event.listen(engine.sync_engine, "connect", _configure_sqlite_connection)
+
+    try:
+        async with engine.begin() as conn:
+            await conn.exec_driver_sql(
+                """
+                CREATE TABLE goals (
+                    id VARCHAR PRIMARY KEY,
+                    title VARCHAR,
+                    revision INTEGER,
+                    success_criterion_json VARCHAR
+                )
+                """
+            )
+            await conn.exec_driver_sql(
+                "INSERT INTO goals (id, title, revision) VALUES ('goal-1', 'Legacy', 1)"
+            )
+
+            await _ensure_legacy_columns(conn)
+
+            row = (
+                await conn.exec_driver_sql(
+                    "SELECT proactive_enabled FROM goals WHERE id = 'goal-1'"
+                )
+            ).one()
+            indexes = {
+                item[1]
+                for item in (
+                    await conn.exec_driver_sql("PRAGMA index_list(goals)")
+                ).fetchall()
+            }
+            assert row[0] == 0
+            assert "ix_goals_proactive_enabled" in indexes
+    finally:
+        await engine.dispose()
+
+
 async def test_ensure_legacy_columns_upgrades_early_model_fabric_tables_idempotently(
     tmp_path,
 ):

@@ -169,6 +169,8 @@ class GoalSnapshotToFileRequest(BaseModel):
     owner_principal_id: str = Field(min_length=1, max_length=160)
     service_id: str = Field(min_length=1, max_length=160)
     session_id: str = Field(min_length=1, max_length=160)
+    parent_job_id: str | None = Field(default=None, min_length=1, max_length=160)
+    parent_fencing_token: int | None = Field(default=None, ge=1)
     capability_version: Literal[CAPABILITY_VERSION] = CAPABILITY_VERSION
     evidence_refs: list[str] = Field(default_factory=list, max_length=32)
     reason: str = Field(default="goal_snapshot_requested", max_length=1_000)
@@ -300,6 +302,9 @@ def _job_id(candidate: GoalCandidateDecision, request: GoalSnapshotToFileRequest
             "candidate": candidate.dedupe_key,
             "owner": request.owner_principal_id,
             "service": request.service_id,
+            # Keep scheduler retries idempotent across parent occurrences while
+            # keeping an operator-triggered run in a distinct job namespace.
+            "origin": "scheduler" if request.parent_job_id else "operator",
         }
     )[:24]
 
@@ -1199,7 +1204,11 @@ class GoalSnapshotToFileAdapter:
                 owner_principal_id=self.request.owner_principal_id,
                 job_kind=CAPABILITY_ID,
                 capability_version=self.request.capability_version,
-                idempotency_scope="goal-snapshot-to-file",
+                idempotency_scope=(
+                    "goal-snapshot-to-file-scheduler"
+                    if self.request.parent_job_id
+                    else "goal-snapshot-to-file"
+                ),
                 idempotency_key=candidate.dedupe_key,
             ),
             inputs={
@@ -1209,6 +1218,8 @@ class GoalSnapshotToFileAdapter:
                 "workflow_binding": workflow_binding,
             },
             session_id=self.request.session_id,
+            parent_job_id=self.request.parent_job_id,
+            parent_fencing_token=self.request.parent_fencing_token,
             goal_id=candidate.goal_id,
             goal_revision=candidate.goal_revision,
             candidate_id=candidate.candidate_id,

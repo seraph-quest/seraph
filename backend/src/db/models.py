@@ -482,6 +482,10 @@ class Goal(SQLModel, table=True):
     # readable and proposal-only until an operator supplies a criterion.
     revision: int = Field(default=1, index=True)
     success_criterion_json: Optional[str] = Field(default=None)
+    # Autonomous goal work is opt-in and remains disabled for legacy goals.
+    # The authenticated goals API records the operator grant; the scheduler
+    # must never infer permission from an active status or criterion alone.
+    proactive_enabled: bool = Field(default=False, index=True)
     created_at: datetime = Field(default_factory=_now)
     updated_at: datetime = Field(default_factory=_now)
 

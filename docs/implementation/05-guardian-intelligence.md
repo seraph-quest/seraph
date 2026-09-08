@@ -102,16 +102,35 @@ least-privilege `service:goal-snapshot` identity, and returns separate
 execution, verification, artifact, learning, durable, operator, and audit
 receipts. It rejects stale revisions and body-supplied actor identities; an
 audit-store failure is returned as an explicit degraded response. This endpoint
-does not yet make the scheduler proactive or prove the live OpenRouter/web-brief
-journey.
+is operator-triggered; the separate scheduler opt-in below does not prove the
+live OpenRouter/web-brief journey.
+
+Autonomous scheduler admission is now explicitly opt-in per goal through the
+authenticated `proactive_enabled` field. Legacy goals and newly created goals
+default to disabled; enabling records the authenticated grant before work can
+be admitted, while disabling applies first and then records the revocation
+receipt so an audit outage cannot leave autonomous work enabled. The existing
+strategist tick considers at most one
+enabled active goal with an artifact-readback verifier and consent evidence,
+then reuses the same goal-snapshot adapter and parent durable effect receipt.
+Missing criteria, paused/retired goals, and disabled permissions produce an
+inspectable skip/no-learning state. This remains a bounded canary; it does not
+claim a live provider call or broad autonomous planning.
+
+Scheduled snapshot admission binds the child to the strategist occurrence's
+live durable fence before creating or replaying work. The child identity is
+stable within the scheduler idempotency scope, so a repeated tick replays the
+same goal/revision candidate instead of creating another workspace write;
+operator-triggered runs use a separate scope. A stale, expired, or non-running
+parent is rejected before child admission.
 
 **Live/runtime limits:** This is a partial branch-local slice, not the full
 guardian brief journey. Its default provider requires the app-started workflow
 registry, governed tool wrappers, and a migrated durable-state database; the
 focused tests monkeypatch only that existing tool boundary and perform a real
-temporary-file readback. No live service, scheduler admission, operator
-approval, external readback, `web-brief-to-file`, or full #736 journey receipt
-was produced here, and no completion or learning claim is made.
+temporary-file readback. No live service, scheduler run, operator approval,
+external readback, `web-brief-to-file`, or full #736 journey receipt was
+produced here, and no completion or learning claim is made.
 
 ## Memory Upgrade Program Record
 

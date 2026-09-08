@@ -155,12 +155,37 @@ async def test_concurrent_refresh_has_exactly_one_winner(client):
     assert loser.code == "session_revoked"
 
 
-def test_websocket_boundary_requires_exact_host_and_origin():
+def test_websocket_boundary_requires_exact_host_and_origin(monkeypatch):
+    monkeypatch.setattr(settings, "operator_auth_allowed_hosts", "test,localhost,127.0.0.1,[::1]")
     assert validate_request_boundary(host="test", origin=ORIGIN, method="POST") is None
     assert validate_request_boundary(host="test:8004", origin=ORIGIN, method="POST") is None
     assert validate_request_boundary(host="127.0.0.1:8004", origin=ORIGIN, method="POST") is None
+    assert validate_request_boundary(host="[::1]:8004", origin=ORIGIN, method="POST") is None
     assert validate_request_boundary(host="evil.example", origin=ORIGIN, method="POST") == "origin_forbidden"
     assert validate_request_boundary(host="test", origin=None, method="POST") == "mutation_origin_required"
+
+
+@pytest.mark.parametrize(
+    "host",
+    [
+        "user:pass@test",
+        "@test",
+        "test@",
+        "test:",
+        "test:not-a-port",
+        "test:65536",
+        "test:80:90",
+        "[::1]:",
+        "[::1]:not-a-port",
+        "[::1",
+        "::1",
+        "test/path",
+        "test?query=1",
+        "test#fragment",
+    ],
+)
+def test_websocket_boundary_rejects_malformed_host_authorities(host):
+    assert validate_request_boundary(host=host, origin=ORIGIN, method="POST") == "origin_forbidden"
 
 
 @pytest.mark.asyncio

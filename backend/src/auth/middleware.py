@@ -35,10 +35,32 @@ def _hostname(value: str) -> str:
     raw = str(value or "").strip()
     if not raw:
         return ""
-    parsed = urlsplit(f"//{raw}")
-    if parsed.path not in {"", "/"} or parsed.query or parsed.fragment:
+    if any(character.isspace() or ord(character) < 0x20 or ord(character) == 0x7F for character in raw):
         return ""
-    return (parsed.hostname or "").strip().rstrip(".").lower()
+    try:
+        parsed = urlsplit(f"//{raw}")
+        # A Host value is an authority, never a URL with userinfo, path, query,
+        # or fragment.  Comparing netloc also rejects control characters that
+        # urlsplit silently strips while parsing.
+        if parsed.netloc != raw or parsed.path or parsed.query or parsed.fragment:
+            return ""
+        if parsed.username is not None or parsed.password is not None:
+            return ""
+        hostname = parsed.hostname
+        if not hostname:
+            return ""
+        # Accessing .port validates both the numeric form and the 0..65535
+        # range.  An explicit trailing colon is an empty, invalid port.
+        parsed.port
+        if raw.endswith(":"):
+            return ""
+        # Unbracketed IPv6 authorities are ambiguous with host:port and must
+        # be rejected; valid IPv6 Host values use brackets.
+        if not raw.startswith("[") and raw.count(":") > 1:
+            return ""
+    except ValueError:
+        return ""
+    return hostname.strip().rstrip(".").lower()
 
 
 def validate_request_boundary(*, host: str, origin: str | None, method: str) -> str | None:

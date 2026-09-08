@@ -91,6 +91,7 @@ describe("GoalLoopPanel", () => {
       expected_revision: 4,
       evidence_refs: ["artifact:guardian"],
     })));
+    expect(screen.getByTestId("goal-loop-panel")).toHaveAttribute("data-state", "recovered");
   });
 
   it("binds pause, correction, and rollback to their existing bounded controls", async () => {
@@ -173,6 +174,7 @@ describe("GoalLoopPanel", () => {
   it.each([
     ["blocked", "blocked"],
     ["failed", "failed"],
+    ["awaiting_approval", "awaiting_approval"],
   ] as const)("renders %s from the latest receipt without claiming success", (state, executionStatus) => {
     setupStore({
       goalLoop: {
@@ -182,6 +184,22 @@ describe("GoalLoopPanel", () => {
     });
     render(<GoalLoopPanel goal={goal} />);
     expect(screen.getByTestId("goal-loop-panel")).toHaveAttribute("data-state", state);
+  });
+
+  it("renders degraded state while retaining last-known evidence", () => {
+    setupStore({
+      goalLoopError: {
+        status: 503,
+        code: "runtime_unavailable",
+        message: "The governed runtime is unavailable.",
+        payload: null,
+      },
+    });
+    render(<GoalLoopPanel goal={goal} />);
+
+    expect(screen.getByTestId("goal-loop-panel")).toHaveAttribute("data-state", "degraded");
+    expect(screen.getByText("The governed runtime is unavailable.")).toBeInTheDocument();
+    expect(screen.getByTestId("goal-axis-verification")).toHaveTextContent("passed");
   });
 
   it("renders empty and partial metadata states explicitly", () => {

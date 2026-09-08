@@ -14,6 +14,7 @@ type GoalLoopViewState =
   | "loading"
   | "empty"
   | "active"
+  | "awaiting_approval"
   | "stale"
   | "degraded"
   | "blocked"
@@ -78,6 +79,10 @@ function viewState({
   if (receipt?.goal_revision && receipt.goal_revision !== payload.goal.revision) return "stale";
   if (receipt?.execution_status === "failed") return "failed";
   if (receipt?.execution_status === "blocked") return "blocked";
+  const executionStatus = receipt?.execution_status?.toLowerCase();
+  if (executionStatus === "awaiting_approval" || executionStatus === "pending_approval" || executionStatus === "approval_required") {
+    return "awaiting_approval";
+  }
   if (!payload.criterion || !payload.criterion.verifier_kind) return "partial_metadata";
   if (recovered) return "recovered";
   return "active";
@@ -91,6 +96,7 @@ function stateMessage(state: GoalLoopViewState): string {
   switch (state) {
     case "empty": return "Select a priority to inspect its governed loop.";
     case "loading": return "Loading loop receipts…";
+    case "awaiting_approval": return "An action is awaiting operator approval. Do not retry it as a new execution.";
     case "stale": return "This loop is stale. Refresh and review the current revision before acting.";
     case "degraded": return "Loop metadata is degraded. Last-known evidence is retained; retry after recovery.";
     case "blocked": return "The latest attempt is blocked. No success is claimed without execution and readback.";
@@ -151,6 +157,7 @@ export function GoalLoopPanel({ goal, onEdit }: Props) {
     recovered,
   });
   const effectsDisabled = !goal || state === "stale" || state === "unauthorized";
+  const snapshotDisabled = effectsDisabled || state === "awaiting_approval";
   const actionBusy = activeAction !== null;
   const canSnapshot = Boolean(goal && criterion?.verifier_kind && criterion.evidence_refs.length > 0);
   const canCorrect = criterion?.verifier_kind === "artifact_readback" && Boolean(target?.query);
@@ -197,7 +204,7 @@ export function GoalLoopPanel({ goal, onEdit }: Props) {
   };
 
   const handleSnapshot = async () => {
-    if (!goal || effectsDisabled || !canSnapshot) return;
+    if (!goal || snapshotDisabled || !canSnapshot) return;
     setActionFailure(null);
     try {
       await runGoalSnapshot(goal.id, {
@@ -362,7 +369,7 @@ export function GoalLoopPanel({ goal, onEdit }: Props) {
             <button
               type="button"
               onClick={() => void handleSnapshot()}
-              disabled={effectsDisabled || actionBusy || !canSnapshot}
+              disabled={snapshotDisabled || actionBusy || !canSnapshot}
               title={!canSnapshot ? "Configure a verifier and evidence before requesting a snapshot." : undefined}
               className="text-[9px] border border-retro-highlight/30 px-1.5 py-1 text-retro-highlight hover:bg-retro-highlight/10 disabled:opacity-30"
             >

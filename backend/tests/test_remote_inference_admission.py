@@ -11,6 +11,8 @@ from src.model_fabric.remote_inference_admission import (
     REMOTE_INFERENCE_ADMISSION_SCHEMA_VERSION,
     REMOTE_INFERENCE_OWNER_COST_UNKNOWN_REASON,
     RemoteInferenceAdmissionBroker,
+    RemoteInferenceAdmissionCancelledError,
+    RemoteInferenceAdmissionExpiredError,
     RemoteInferenceAdmissionOwnerBudgetError,
     RemoteInferenceAdmissionOwnerCapacityError,
     RemoteInferenceAdmissionRequest,
@@ -237,6 +239,92 @@ async def test_remote_callback_failure_is_uncertain_until_actual_cost_reconcilia
         actual_cost_microusd=18,
     )
     assert settled.cost_settled_microusd == 18
+
+
+@pytest.mark.asyncio
+async def test_unknown_settlement_stays_held_until_owner_fenced_reconciliation():
+    clock = _Clock()
+    broker = RemoteInferenceAdmissionBroker(clock=clock, max_owner_cost_microusd=100)
+    request = _request("stale-settlement", estimated_cost_microusd=20)
+    await broker.enqueue(request)
+    lease = await broker.acquire(request.operation_id)
+
+    blocked = await broker.release(lease, uncertain=True)
+    assert blocked.status == "blocked"
+    assert blocked.reconciliation_required is True
+
+    with pytest.raises(GpuAdmissionLeaseError) as stale:
+        await broker.reconcile(
+            request.operation_id,
+            owner_id=request.owner_id,
+            fencing_token=lease.fencing_token + 1,
+            outcome="succeeded",
+            actual_cost_microusd=20,
+        )
+    assert stale.value.receipt.status == "blocked"
+    assert (await broker.status())["active"]["status"] == "blocked"
+    assert (await broker.status())["capacity"]["owners"][request.owner_id]["outstanding"] == 1
+
+    settled = await broker.reconcile(
+        request.operation_id,
+        owner_id=request.owner_id,
+        fencing_token=lease.fencing_token,
+        outcome="succeeded",
+        actual_cost_microusd=20,
+    )
+    assert settled.status == "succeeded"
+    assert (await broker.status())["active"] is None
+
+
+@pytest.mark.asyncio
+async def test_queued_cancellation_and_expiry_never_dispatch_a_remote_callback():
+    clock = _Clock()
+    broker = RemoteInferenceAdmissionBroker(clock=clock)
+
+    cancelled = await broker.enqueue(_request("cancel-before-dispatch"))
+    await broker.cancel(cancelled.operation_id, owner_id=cancelled.owner_id)
+    with pytest.raises(RemoteInferenceAdmissionCancelledError):
+        await broker.acquire(cancelled.operation_id)
+
+    expired = _request("expire-before-dispatch", deadline_at=110.0)
+    await broker.enqueue(expired)
+    clock.advance(10)
+    with pytest.raises(RemoteInferenceAdmissionExpiredError):
+        await broker.acquire(expired.operation_id)
+
+    status = await broker.status()
+    assert status["active"] is None
+    assert status["queued"] == []
+
+
+@pytest.mark.asyncio
+async def test_receipt_persistence_is_explicit_and_uses_the_typed_repository_seam():
+    broker = RemoteInferenceAdmissionBroker(clock=_Clock())
+    receipt = await broker.enqueue(_request("persisted-receipt"))
+    recorded: list[dict[str, object]] = []
+
+    class RecordingRepository:
+        async def record_remote_inference_receipt(self, payload, *, owner=None, fencing_token=None):
+            recorded.append(
+                {
+                    "payload": payload,
+                    "owner": owner,
+                    "fencing_token": fencing_token,
+                }
+            )
+            return {"persisted": True, "status": "recorded"}
+
+    result = await broker.persist_receipt(
+        receipt,
+        repository=RecordingRepository(),
+        owner="durable-runner",
+        fencing_token=7,
+    )
+
+    assert result["persisted"] is True
+    assert recorded[0]["payload"]["status"] == "queued"
+    assert recorded[0]["owner"] == "durable-runner"
+    assert "prompt" not in recorded[0]["payload"]
 
 
 @pytest.mark.asyncio

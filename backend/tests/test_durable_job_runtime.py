@@ -17,10 +17,14 @@ from src.workflows.job_runtime import (
     DurableJobIdentity,
     DurableJobIdempotencyConflict,
     DurableJobSpec,
+    DurableJobNotFound,
     DurableJobLeaseError,
+    DurableJobRepository,
     DurableJobTransitionError,
+    REMOTE_INFERENCE_EFFECT_STATUSES,
     _admission_conflicts,
     _canonical_reconciliation_receipt,
+    _canonical_remote_inference_receipt,
     _digest,
     _safe_inputs_digest,
     _validate_admission_authority,
@@ -161,6 +165,91 @@ def test_retry_requires_owner_identity_and_canonical_reconciliation_receipt():
     )
     assert digest
     assert "must-not-persist" not in canonical
+
+
+def test_remote_admission_receipts_are_allowlisted_and_redacted():
+    safe, digest = _canonical_remote_inference_receipt(
+        {
+            "schema_version": "seraph.remote-inference-admission.v1",
+            "operation_id": "operation-1",
+            "job_id": "job-1",
+            "owner_id": "service:strategist",
+            "status": "blocked",
+            "reason_code": "provider_result_uncertain",
+            "reconciliation_required": True,
+            "prompt": "must not be copied",
+            "api_key": "must not be copied",
+        }
+    )
+
+    assert safe["status"] == "blocked"
+    assert safe["reason_code"] == "provider_result_uncertain"
+    assert "prompt" not in safe
+    assert "api_key" not in safe
+    assert digest
+
+    with pytest.raises(ValueError, match="unsupported"):
+        _canonical_remote_inference_receipt(
+            {"operation_id": "operation-1", "job_id": "job-1", "owner_id": "service:strategist", "status": "unknown"}
+        )
+
+
+@pytest.mark.asyncio
+async def test_remote_receipt_adapter_maps_status_without_mutating_job_lifecycle():
+    class RecordingRepository(DurableJobRepository):
+        async def get_job(self, job_id):
+            return {"job_id": job_id, "owner": {"principal_id": "service:strategist"}}
+
+        async def record_effect(self, job_id, **kwargs):
+            self.calls.append((job_id, kwargs))
+            return {"persisted": True, "job_id": job_id, "effect": kwargs}
+
+        def __init__(self):
+            self.calls = []
+
+    repository = RecordingRepository()
+    for status, expected_effect_status in (
+        ("queued", "unknown"),
+        ("blocked", "blocked"),
+        ("settled", "succeeded"),
+        ("rejected", "failed"),
+    ):
+        result = await repository.record_remote_inference_receipt(
+            {
+                "operation_id": f"operation-{status}",
+                "job_id": "job-1",
+                "owner_id": "service:strategist",
+                "status": status,
+                "reconciliation_required": status == "blocked",
+                "secret_token": "must-not-persist",
+            }
+        )
+        assert result["persisted"] is True
+        _, kwargs = repository.calls[-1]
+        assert kwargs["status"] == expected_effect_status
+        assert kwargs["details"]["admission_status"] == status
+        assert "secret_token" not in str(kwargs["details"])
+
+    assert set(REMOTE_INFERENCE_EFFECT_STATUSES) >= {"queued", "blocked", "settled", "rejected"}
+
+
+@pytest.mark.asyncio
+async def test_remote_receipt_adapter_requires_an_existing_canonical_job():
+    class MissingJobRepository:
+        async def get_job(self, _job_id):
+            return None
+
+    adapter = DurableJobRepository()
+    adapter.get_job = MissingJobRepository().get_job
+    with pytest.raises(DurableJobNotFound):
+        await adapter.record_remote_inference_receipt(
+            {
+                "operation_id": "operation-missing",
+                "job_id": "job-missing",
+                "owner_id": "service:strategist",
+                "status": "queued",
+            }
+        )
 
 
 class _AsyncSQLiteConnection:

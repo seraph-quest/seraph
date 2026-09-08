@@ -12,8 +12,8 @@ and a stricter broker-wide limit always wins over a request-level limit.
 
 from __future__ import annotations
 
-from collections.abc import Callable
-from typing import Any, NoReturn
+from collections.abc import Callable, Mapping
+from typing import Any, NoReturn, Protocol
 
 from .gpu_admission import (
     GPU_ADMISSION_SCHEMA_VERSION,
@@ -43,6 +43,25 @@ REMOTE_INFERENCE_RESOURCE_CLASS = "remote_inference"
 REMOTE_INFERENCE_DEFAULT_QUEUE = 64
 REMOTE_INFERENCE_DEFAULT_OWNER_OUTSTANDING = 16
 REMOTE_INFERENCE_OWNER_COST_UNKNOWN_REASON = "owner_cost_unknown"
+
+
+class RemoteInferenceReceiptRepository(Protocol):
+    """Canonical-job extension point for an already admitted remote request.
+
+    The broker remains process-local.  A caller that already owns a durable
+    ``WorkflowRunState`` row may explicitly forward a broker receipt to the
+    canonical job repository through this narrow protocol.  The adapter must
+    persist the supplied operator-safe mapping without creating another queue
+    or changing the job's lifecycle on the broker's behalf.
+    """
+
+    async def record_remote_inference_receipt(
+        self,
+        receipt: Mapping[str, object],
+        *,
+        owner: str | None = None,
+        fencing_token: int | None = None,
+    ) -> Mapping[str, object]: ...
 
 
 class RemoteInferenceAdmissionBroker(GpuAdmissionBroker[Any]):
@@ -90,6 +109,33 @@ class RemoteInferenceAdmissionBroker(GpuAdmissionBroker[Any]):
             return None
         requested = request.owner_budget_microusd
         return configured if requested is None else min(configured, requested)
+
+    async def persist_receipt(
+        self,
+        receipt: RemoteInferenceAdmissionReceipt,
+        *,
+        repository: RemoteInferenceReceiptRepository,
+        owner: str | None = None,
+        fencing_token: int | None = None,
+    ) -> Mapping[str, object]:
+        """Forward one redacted broker receipt to the canonical job runtime.
+
+        Persistence is explicit because many inference requests are short
+        lived request jobs without a ``WorkflowRunState`` row.  This method
+        never creates one, never dispatches work, and never treats the remote
+        broker fencing token as the durable job lease token.  A caller running
+        under a durable job lease may pass that separate ``owner`` and
+        ``fencing_token`` pair to preserve the repository's existing fence.
+        """
+        if receipt.resource_class != REMOTE_INFERENCE_RESOURCE_CLASS:
+            raise ValueError("receipt does not belong to the remote inference resource class")
+        if receipt.schema_version != REMOTE_INFERENCE_ADMISSION_SCHEMA_VERSION:
+            raise ValueError("receipt schema version is not supported by the remote adapter")
+        return await repository.record_remote_inference_receipt(
+            receipt.as_dict(),
+            owner=owner,
+            fencing_token=fencing_token,
+        )
 
     def _reject_owner_policy(
         self,
@@ -182,6 +228,7 @@ __all__ = [
     "REMOTE_INFERENCE_DEFAULT_QUEUE",
     "REMOTE_INFERENCE_DEFAULT_OWNER_OUTSTANDING",
     "REMOTE_INFERENCE_OWNER_COST_UNKNOWN_REASON",
+    "RemoteInferenceReceiptRepository",
     "GPU_ADMISSION_SCHEMA_VERSION",
     "GPU_ADMISSION_STATUSES",
     "RemoteInferenceAdmissionBroker",

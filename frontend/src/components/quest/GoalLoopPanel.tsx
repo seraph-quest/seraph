@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   GoalLoopError,
+  normalizeGoalLoopReceipt,
   useQuestStore,
 } from "../../stores/questStore";
 import type {
@@ -41,9 +42,16 @@ function asRecord(value: unknown): Record<string, unknown> | null {
 }
 
 function latestReceipt(payload: GoalLoopPayload | null): GoalLoopReceipt | null {
-  return payload && Array.isArray(payload.receipts) && payload.receipts.length > 0
-    ? payload.receipts[0] ?? null
-    : null;
+  if (!payload || !Array.isArray(payload.receipts) || payload.receipts.length === 0) return null;
+  return normalizeGoalLoopReceipt(payload.receipts[0]);
+}
+
+function hasMalformedReceipt(payload: GoalLoopPayload | null): boolean {
+  return Boolean(
+    payload &&
+      Array.isArray(payload.receipts) &&
+      payload.receipts.some((receipt) => normalizeGoalLoopReceipt(receipt) === null),
+  );
 }
 
 function validCriterion(value: unknown): GoalSuccessCriterion | null {
@@ -67,7 +75,8 @@ function validCriterion(value: unknown): GoalSuccessCriterion | null {
 }
 
 function receiptAxis(receipt: GoalLoopReceipt | null, key: "execution_status" | "verification" | "usefulness" | "learning") {
-  return receipt?.[key] ? String(receipt[key]) : "unknown";
+  const value = receipt?.[key];
+  return typeof value === "string" && value.trim() ? value : "unknown";
 }
 
 function viewState({
@@ -88,7 +97,7 @@ function viewState({
   if (!goal) return "empty";
   if (loading) return "loading";
   const errorCode = actionFailure?.code ?? error?.code;
-  const errorStatus = error?.status ?? 0;
+  const errorStatus = typeof error?.status === "number" ? error.status : 0;
   if (errorCode === "stale_goal_revision") return "stale";
   if (errorCode === "authentication_required" || errorCode === "session_unavailable" || errorStatus === 401 || errorStatus === 403) {
     return "unauthorized";
@@ -96,14 +105,18 @@ function viewState({
   if (error && (errorStatus === 503 || errorStatus === 0)) return "degraded";
   if (errorStatus === 502) return "partial_metadata";
   if (errorStatus === 404) return "failed";
+  if (error && errorStatus >= 400) return "degraded";
   if (!payload) return "partial_metadata";
   if (!payload.goal || typeof payload.goal.revision !== "number") return "partial_metadata";
   if (payload.goal.revision !== (goal.revision ?? payload.goal.revision)) return "stale";
+  if (!Array.isArray(payload.receipts) || hasMalformedReceipt(payload)) return "partial_metadata";
   const receipt = latestReceipt(payload);
   if (receipt?.goal_revision && receipt.goal_revision !== payload.goal.revision) return "stale";
-  if (receipt?.execution_status === "failed") return "failed";
-  if (receipt?.execution_status === "blocked") return "blocked";
-  const executionStatus = receipt?.execution_status?.toLowerCase();
+  const executionStatus = typeof receipt?.execution_status === "string"
+    ? receipt.execution_status.toLowerCase()
+    : null;
+  if (executionStatus === "failed") return "failed";
+  if (executionStatus === "blocked") return "blocked";
   if (executionStatus === "awaiting_approval" || executionStatus === "pending_approval" || executionStatus === "approval_required") {
     return "awaiting_approval";
   }
@@ -185,14 +198,15 @@ export function GoalLoopPanel({ goal, onEdit }: Props) {
     actionFailure,
     recovered,
   });
-  const effectsDisabled = !goal || [
+  const receiptRetryableFailure = state === "failed" && !loopError && latest?.execution_status?.toLowerCase() === "failed";
+  const effectsDisabled = !goal || Boolean(loopError) || [
     "loading",
     "stale",
     "degraded",
     "partial_metadata",
     "awaiting_approval",
     "unauthorized",
-  ].includes(state);
+  ].includes(state) || (state === "failed" && !receiptRetryableFailure);
   const snapshotDisabled = effectsDisabled;
   const actionBusy = activeAction !== null;
   const canSnapshot = Boolean(goal && criterion?.verifier_kind && criterion.evidence_refs.length > 0);
@@ -348,6 +362,12 @@ export function GoalLoopPanel({ goal, onEdit }: Props) {
         </div>
       )}
 
+      {loopError && activePayload && (
+        <div className="text-[9px] text-amber-300/80 mt-1" role="note" data-testid="goal-loop-read-only">
+          Last-known evidence retained · read-only until loop metadata recovers.
+        </div>
+      )}
+
       {goal && (
         <>
           <div className="flex flex-wrap gap-x-2 gap-y-1 mt-2 text-[9px] text-retro-text/60">
@@ -380,8 +400,8 @@ export function GoalLoopPanel({ goal, onEdit }: Props) {
           {latest && (
             <div className="mt-2 border-t border-retro-text/10 pt-1 text-[9px] text-retro-text/50">
               latest receipt · {latest.receipt_type ?? latest.event_type ?? "unknown"} · {formatReceiptTime(latest.created_at)}
-              {latest.reason && <div className="text-retro-text/40">{latest.reason}</div>}
-              {latest.artifact_ref && <div className="text-retro-text/40">artifact: {latest.artifact_ref}</div>}
+              {typeof latest.reason === "string" && latest.reason && <div className="text-retro-text/40">{latest.reason}</div>}
+              {typeof latest.artifact_ref === "string" && latest.artifact_ref && <div className="text-retro-text/40">artifact: {latest.artifact_ref}</div>}
             </div>
           )}
 

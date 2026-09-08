@@ -237,6 +237,68 @@ describe("GoalLoopPanel", () => {
     expect(screen.getByRole("button", { name: "apply correction" })).toBeDisabled();
   });
 
+  it.each([
+    [500, "degraded"],
+    [422, "degraded"],
+    [404, "failed"],
+  ] as const)("fails closed for a retained payload after HTTP %s loop retrieval", (status, state) => {
+    setupStore({
+      goalLoopError: {
+        status,
+        code: status === 404 ? "goal_not_found" : "loop_unavailable",
+        message: `Loop request failed with HTTP ${status}.`,
+        payload: null,
+      },
+    });
+    const onEdit = vi.fn();
+    render(<GoalLoopPanel goal={goal} onEdit={onEdit} />);
+
+    expect(screen.getByTestId("goal-loop-panel")).toHaveAttribute("data-state", state);
+    expect(screen.getByTestId("goal-loop-read-only")).toHaveTextContent("Last-known evidence retained");
+    expect(screen.getByRole("button", { name: "edit" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "pause" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "run snapshot" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "apply correction" })).toBeDisabled();
+    expect(onEdit).not.toHaveBeenCalled();
+  });
+
+  it("keeps a receipt-level failed outcome retryable when retrieval succeeded", () => {
+    setupStore({
+      goalLoop: {
+        ...payload,
+        receipts: [{ ...payload.receipts[0], execution_status: "failed" }],
+      },
+    });
+    render(<GoalLoopPanel goal={goal} onEdit={vi.fn()} />);
+
+    expect(screen.getByTestId("goal-loop-panel")).toHaveAttribute("data-state", "failed");
+    expect(screen.getByRole("button", { name: "edit" })).not.toBeDisabled();
+    expect(screen.getByRole("button", { name: "pause" })).not.toBeDisabled();
+    expect(screen.getByRole("button", { name: "run snapshot" })).not.toBeDisabled();
+  });
+
+  it("renders malformed receipt metadata as partial and never renders object values", () => {
+    const malformedReceipt = {
+      ...payload.receipts[0],
+      execution_status: { value: "failed" },
+      reason: { detail: "unsafe" },
+      artifact_ref: { path: "unsafe" },
+      audit_event_id: { id: "unsafe" },
+      created_at: { timestamp: "unsafe" },
+    } as unknown as GoalLoopPayload["receipts"][number];
+    setupStore({
+      goalLoop: { ...payload, receipts: [malformedReceipt] },
+    });
+
+    render(<GoalLoopPanel goal={goal} onEdit={vi.fn()} />);
+
+    expect(screen.getByTestId("goal-loop-panel")).toHaveAttribute("data-state", "partial_metadata");
+    expect(screen.getByTestId("goal-axis-execution")).toHaveTextContent("unknown");
+    expect(screen.queryByText("[object Object]")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "edit" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "run snapshot" })).toBeDisabled();
+  });
+
   it("renders malformed criterion metadata as partial and disables effects", () => {
     setupStore({
       goalLoop: {

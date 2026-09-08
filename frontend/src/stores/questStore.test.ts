@@ -171,6 +171,64 @@ describe("questStore", () => {
     expect(useQuestStore.getState().goalLoop).toEqual(payload);
   });
 
+  it.each([500, 422, 404])("retains last-known loop evidence while HTTP %s retrieval fails", async (status) => {
+    const previous = {
+      goal: { id: "g1", title: "Ship", status: "active", revision: 4 },
+      criterion: null,
+      receipts: [{ receipt_type: "outcome", execution_status: "completed", verification: "passed", usefulness: "useful", learning: "applied" }],
+      strategy_deltas: [],
+    };
+    useQuestStore.setState({ goalLoop: previous, goalLoopGoalId: "g1" });
+    mockFetch.mockResolvedValueOnce({
+      ok: false,
+      status,
+      json: async () => ({ detail: { code: "loop_unavailable", reason: `HTTP ${status}` } }),
+    });
+
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      await useQuestStore.getState().loadGoalLoop("g1");
+    } finally {
+      errorSpy.mockRestore();
+    }
+
+    expect(useQuestStore.getState().goalLoop).toEqual(previous);
+    expect(useQuestStore.getState().goalLoopError).toMatchObject({ status });
+    expect(useQuestStore.getState().goalLoopLoading).toBe(false);
+  });
+
+  it("rejects receipt fields with unsafe runtime types", async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        goal: { id: "g1", title: "Malformed receipt", status: "active", revision: 1 },
+        criterion: null,
+        receipts: [{
+          receipt_type: "outcome",
+          execution_status: { status: "failed" },
+          verification: "unknown",
+          usefulness: "unknown",
+          learning: "no_learning",
+          reason: { detail: "unsafe" },
+          artifact_ref: { path: "unsafe" },
+          audit_event_id: { id: "unsafe" },
+          created_at: { timestamp: "unsafe" },
+        }],
+        strategy_deltas: [],
+      }),
+    });
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      await useQuestStore.getState().loadGoalLoop("g1");
+    } finally {
+      errorSpy.mockRestore();
+    }
+
+    expect(useQuestStore.getState().goalLoop).toBeNull();
+    expect(useQuestStore.getState().goalLoopError).toMatchObject({ status: 502 });
+  });
+
   it("reports unauthorized loop inspection while retaining last-known payload", async () => {
     const previous = {
       goal: { id: "g1", title: "Ship", status: "active", revision: 4 },

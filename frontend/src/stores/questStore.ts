@@ -4,6 +4,7 @@ import type {
   GoalInfo,
   GoalLoopActionResponse,
   GoalLoopPayload,
+  GoalLoopReceipt,
   GoalSnapshotInput,
   GoalStrategyCorrectionInput,
   GoalStrategyRollbackInput,
@@ -128,8 +129,98 @@ function isGoalCriterion(value: unknown): boolean {
   );
 }
 
-function isGoalLoopReceipt(value: unknown): boolean {
-  return isRecord(value);
+const RECEIPT_STRING_FIELDS = [
+  "event_type",
+  "receipt_version",
+  "receipt_type",
+  "candidate_id",
+  "outcome_id",
+  "goal_id",
+  "execution_status",
+  "verification",
+  "usefulness",
+  "learning",
+  "learning_record_id",
+  "artifact_ref",
+  "reason",
+  // These fields are emitted by the candidate receipt contract and are kept
+  // safe even though the cockpit currently renders only the outcome summary.
+  "dedupe_key",
+  "criterion_id",
+  "action",
+  "capability_id",
+  "capability_version",
+  "input_digest",
+  "expected_outcome",
+  "expires_at",
+] as const;
+
+/**
+ * Keep receipt metadata renderable even when a backend or proxy returns an
+ * unexpected shape.  Receipts are evidence, so silently stringifying an
+ * object here would make the operator UI claim a value that was never part of
+ * the typed contract.
+ */
+export function normalizeGoalLoopReceipt(value: unknown): GoalLoopReceipt | null {
+  const record = isRecord(value) ? value : null;
+  if (!record) return null;
+
+  for (const field of RECEIPT_STRING_FIELDS) {
+    const fieldValue = record[field];
+    if (fieldValue !== undefined && fieldValue !== null && typeof fieldValue !== "string") {
+      return null;
+    }
+  }
+
+  const auditEventId = record.audit_event_id;
+  if (
+    auditEventId !== undefined &&
+    auditEventId !== null &&
+    typeof auditEventId !== "string" &&
+    !(typeof auditEventId === "number" && Number.isFinite(auditEventId))
+  ) {
+    return null;
+  }
+
+  const goalRevision = record.goal_revision;
+  if (
+    goalRevision !== undefined &&
+    goalRevision !== null &&
+    (typeof goalRevision !== "number" || !Number.isInteger(goalRevision) || goalRevision < 1)
+  ) {
+    return null;
+  }
+
+  if (record.proposal_only !== undefined && typeof record.proposal_only !== "boolean") {
+    return null;
+  }
+
+  if (
+    record.evidence_refs !== undefined &&
+    (!Array.isArray(record.evidence_refs) || !record.evidence_refs.every((ref) => typeof ref === "string"))
+  ) {
+    return null;
+  }
+
+  if (
+    record.input_keys !== undefined &&
+    (!Array.isArray(record.input_keys) || !record.input_keys.every((key) => typeof key === "string"))
+  ) {
+    return null;
+  }
+
+  if (record.content_redacted !== undefined && typeof record.content_redacted !== "boolean") {
+    return null;
+  }
+
+  const createdAt = record.created_at;
+  if (createdAt !== undefined && createdAt !== null && typeof createdAt !== "string") {
+    return null;
+  }
+
+  // Preserve unknown safe receipt fields for forward compatibility, while
+  // ensuring all fields rendered by GoalLoopPanel have passed the checks above.
+  return { ...record } as GoalLoopReceipt;
 }
 
 function isStrategyDelta(value: unknown): boolean {
@@ -142,22 +233,31 @@ function isStrategyDelta(value: unknown): boolean {
   );
 }
 
-function isGoalLoopPayload(payload: unknown): payload is GoalLoopPayload {
-  if (!isRecord(payload) || !isRecord(payload.goal)) return false;
+function normalizeGoalLoopPayload(payload: unknown): GoalLoopPayload | null {
+  if (!isRecord(payload) || !isRecord(payload.goal)) return null;
   const goal = payload.goal;
-  return Boolean(
-    typeof goal.id === "string" &&
-      typeof goal.title === "string" &&
-      typeof goal.status === "string" &&
-      typeof goal.revision === "number" &&
-      Number.isInteger(goal.revision) &&
-      goal.revision >= 1 &&
-      (payload.criterion === null || isGoalCriterion(payload.criterion)) &&
-      Array.isArray(payload.receipts) &&
-      payload.receipts.every(isGoalLoopReceipt) &&
-      Array.isArray(payload.strategy_deltas) &&
-      payload.strategy_deltas.every(isStrategyDelta),
-  );
+  if (
+    typeof goal.id !== "string" ||
+    typeof goal.title !== "string" ||
+    typeof goal.status !== "string" ||
+    typeof goal.revision !== "number" ||
+    !Number.isInteger(goal.revision) ||
+    goal.revision < 1 ||
+    (payload.criterion !== null && !isGoalCriterion(payload.criterion)) ||
+    !Array.isArray(payload.receipts) ||
+    !Array.isArray(payload.strategy_deltas) ||
+    !payload.strategy_deltas.every(isStrategyDelta)
+  ) {
+    return null;
+  }
+
+  const receipts = payload.receipts.map(normalizeGoalLoopReceipt);
+  if (receipts.some((receipt) => receipt === null)) return null;
+
+  return {
+    ...payload,
+    receipts: receipts as GoalLoopReceipt[],
+  } as GoalLoopPayload;
 }
 
 let goalLoopRequestSequence = 0;
@@ -305,11 +405,12 @@ export const useQuestStore = create<QuestStore>((set, get) => ({
       const res = await fetch(`${API_URL}/api/goals/${id}/loop`);
       const payload = await readResponsePayload(res);
       if (!res.ok) throw goalLoopError(res, payload, "Goal loop could not be loaded");
-      if (!isGoalLoopPayload(payload) || payload.goal.id !== id) {
+      const normalizedPayload = normalizeGoalLoopPayload(payload);
+      if (!normalizedPayload || normalizedPayload.goal.id !== id) {
         throw new GoalLoopError(502, "Goal loop returned incomplete or mismatched metadata.", { payload });
       }
       if (requestSequence !== goalLoopRequestSequence || get().goalLoopGoalId !== id) return;
-      set({ goalLoop: payload, goalLoopError: null });
+      set({ goalLoop: normalizedPayload, goalLoopError: null });
     } catch (err) {
       if (requestSequence !== goalLoopRequestSequence || get().goalLoopGoalId !== id) return;
       const failure =

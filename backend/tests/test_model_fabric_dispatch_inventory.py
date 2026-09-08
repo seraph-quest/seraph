@@ -304,7 +304,7 @@ def _review(
 _CANONICAL_ADAPTERS = (
     _review(
         "llm_runtime.py",
-        1532,
+        1540,
         "_governed_openai_chat_completion",
         "client.post",
         "canonical_adapter",
@@ -313,7 +313,7 @@ _CANONICAL_ADAPTERS = (
     ),
     _review(
         "llm_runtime.py",
-        4408,
+        4416,
         "stream_completion_with_fallback.default_transport",
         "client.stream",
         "canonical_adapter",
@@ -344,7 +344,7 @@ _CANONICAL_ADAPTERS = (
 _REVIEWED_EXCEPTIONS = (
     _review(
         "llm_runtime.py",
-        3529,
+        3537,
         "FallbackLiteLLMModel.generate.invoke_primary_transport",
         "BaseLiteLLMModel.generate",
         "transitional_provider_call",
@@ -353,7 +353,7 @@ _REVIEWED_EXCEPTIONS = (
     ),
     _review(
         "llm_runtime.py",
-        3608,
+        3616,
         "FallbackLiteLLMModel.generate.invoke_fallback_transport",
         "fallback_model.generate",
         "transitional_provider_call",
@@ -362,7 +362,7 @@ _REVIEWED_EXCEPTIONS = (
     ),
     _review(
         "llm_runtime.py",
-        4029,
+        4037,
         "completion_with_fallback_sync.invoke_primary_transport",
         "litellm.completion",
         "transitional_provider_call",
@@ -371,30 +371,12 @@ _REVIEWED_EXCEPTIONS = (
     ),
     _review(
         "llm_runtime.py",
-        4107,
+        4115,
         "completion_with_fallback_sync.invoke_fallback_transport",
         "litellm.completion",
         "transitional_provider_call",
         "Delete after legacy fallback callers are removed; canonical OpenRouter execution never enters this branch.",
         "Migrate fallback completion attempts to governed model-fabric execution and delete the direct LiteLLM branch.",
-    ),
-    _review(
-        "evals/harness.py",
-        5390,
-        "_eval_provider_routing_decision_audit",
-        "first_model.generate",
-        "transitional_provider_call",
-        "Deterministic routing evaluation exercises the retained legacy wrapper path with a mocked provider.",
-        "Update the evaluation fixture to construct an authenticated canonical context once the legacy wrapper path is removed.",
-    ),
-    _review(
-        "evals/harness.py",
-        5399,
-        "_eval_provider_routing_decision_audit",
-        "rerouted_model.generate",
-        "transitional_provider_call",
-        "Deterministic routing evaluation exercises legacy reroute behavior with a mocked provider.",
-        "Update the evaluation fixture to assert governed reroute receipts after canonical model-fabric migration.",
     ),
     _review(
         "api/model_fabric_settings.py",

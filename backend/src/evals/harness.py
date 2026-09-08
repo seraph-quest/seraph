@@ -806,6 +806,7 @@ from src.agent.specialists import build_all_specialists, create_mcp_specialist, 
 from src.agent.strategist import create_strategist_agent
 from src.guardian.state import build_guardian_state
 from src.guardian.feedback import GuardianLearningSignal
+from src.model_fabric.contracts import NoCompliantModelRouteError
 from src.api.mcp import test_server as test_mcp_server
 from src.api.observer import (
     InterventionFeedbackRequest,
@@ -1062,6 +1063,199 @@ async def _run_model_eval_job(
     """Run one direct async model eval with explicit bounded service authority."""
     async with _eval_model_authority(job_id, session_id=session_id):
         return await job()
+
+
+async def _run_governed_completion_fixture(
+    job_id: str,
+    *,
+    runtime_path: str,
+    response: Any,
+    settings_overrides: dict[str, Any] | None = None,
+    session_id: str = "eval-runtime-routing",
+) -> dict[str, Any]:
+    """Exercise one canonical completion with a deterministic OpenRouter transport.
+
+    The fixture keeps the production authority and context construction paths in
+    place, while replacing the provider preflight and network transport with a
+    small local proof.  Any target other than the canonical OpenRouter primary
+    is denied by the fixture, so stale local/provider fallback settings cannot
+    become passing eval behavior.
+    """
+    policy = WorkloadPolicy(
+        runtime_path=runtime_path,
+        egress_class=EgressClass.CLOUD_ALLOWED_FULL,
+        cloud_egress_acknowledged=True,
+        allowed_provider_kinds=("openrouter",),
+        fallback_allowed=False,
+        max_cost_microusd=500,
+    )
+    observed: dict[str, Any] = {
+        "preflight_targets": [],
+        "transport_bodies": [],
+        "route_events": [],
+    }
+
+    class _ReceiptFixture:
+        workload = "background"
+
+        def __init__(self) -> None:
+            self.runtime_path = runtime_path
+            self.attempts: list[dict[str, Any]] = []
+            self.finalize_args: dict[str, Any] | None = None
+
+        def attempt_started(self, decision: Any, *, capability_proof_hashes: tuple[str, ...]) -> None:
+            self.attempts.append(
+                {
+                    "phase": "started",
+                    "allowed": bool(getattr(decision, "allowed", False)),
+                    "proof_hash_count": len(capability_proof_hashes),
+                }
+            )
+
+        def attempt_finished(
+            self,
+            *,
+            outcome: str,
+            error_code: str | None,
+            decision: Any,
+            usage: Any = None,
+            degradation_code: str | None = None,
+        ) -> None:
+            self.attempts.append(
+                {
+                    "phase": "finished",
+                    "outcome": outcome,
+                    "error_code": error_code,
+                    "allowed": bool(getattr(decision, "allowed", False)),
+                    "degradation_code": degradation_code,
+                }
+            )
+
+        async def finalize(
+            self,
+            *,
+            outcome: str,
+            fallback_reason_code: str | None = None,
+            degradation_codes: tuple[str, ...] = (),
+        ) -> None:
+            self.finalize_args = {
+                "outcome": outcome,
+                "fallback_reason_code": fallback_reason_code,
+                "degradation_codes": degradation_codes,
+            }
+
+    receipt = _ReceiptFixture()
+    allowed_decision = types.SimpleNamespace(allowed=True, selected=types.SimpleNamespace())
+    denied_decision = types.SimpleNamespace(
+        allowed=False,
+        selected=None,
+        rejections=(types.SimpleNamespace(reason_code="fallback_forbidden"),),
+    )
+
+    def _preflight(target: dict[str, Any], context: Any) -> tuple[Any, tuple[str, ...]]:
+        observed["preflight_targets"].append(
+            {
+                "model_id": str(target.get("model_id") or ""),
+                "profile": str(target.get("profile") or ""),
+                "api_base": str(target.get("api_base") or ""),
+                "source": str(target.get("source") or ""),
+            }
+        )
+        if target.get("source") != "primary":
+            return denied_decision, ()
+        if target.get("profile") != "openrouter" or "openrouter.ai" not in str(target.get("api_base") or ""):
+            raise AssertionError("canonical eval fixture received a non-OpenRouter primary target")
+        if tuple(getattr(context, "allowed_provider_kinds", ())) != ("openrouter",):
+            raise AssertionError("canonical eval fixture requires the OpenRouter provider policy")
+        if bool(getattr(context, "fallback_allowed", True)):
+            raise AssertionError("canonical eval fixture must forbid provider fallback")
+        if not bool(getattr(getattr(context, "principal", None), "authenticated", False)):
+            raise AssertionError("canonical eval fixture requires an authenticated principal")
+        observed["context"] = context
+        return allowed_decision, ("fixture-proof",)
+
+    def _transport(**kwargs: Any) -> tuple[Any, dict[str, Any]]:
+        observed["transport_bodies"].append(dict(kwargs["body"]))
+        observed["transport_api_key_present"] = bool(kwargs.get("api_key"))
+        observed["transport_context"] = kwargs["context"]
+        return response, {"usage": {"prompt_tokens": 1, "completion_tokens": 1}}
+
+    def _route_event(**kwargs: Any) -> None:
+        observed["route_events"].append(kwargs)
+
+    effective_settings = {
+        "default_model": "openrouter/anthropic/claude-sonnet-4",
+        "llm_api_key": "primary-key",
+        "openrouter_api_key": "primary-key",
+        "llm_api_base": "https://openrouter.ai/api/v1",
+        "openrouter_provider_only": True,
+        "openrouter_allowed_upstreams": "openai",
+        "openrouter_allow_fallbacks": False,
+        "openrouter_require_parameters": True,
+        "openrouter_data_collection": "deny",
+        "openrouter_zero_data_retention": True,
+        "fallback_model": "",
+        "fallback_models": "",
+        "fallback_llm_api_key": "",
+        "fallback_llm_api_base": "",
+        "local_model": "ollama/llama3.2",
+        "local_llm_api_key": "",
+        "local_llm_api_base": "http://localhost:11434/v1",
+        "local_runtime_paths": "",
+        "runtime_model_overrides": "",
+        "runtime_fallback_overrides": "",
+        "runtime_profile_preferences": "",
+        "runtime_policy_intents": "",
+        "runtime_policy_requirements": "",
+        "runtime_policy_scores": "",
+    }
+    effective_settings.update(settings_overrides or {})
+
+    with ExitStack() as stack:
+        for name, value in effective_settings.items():
+            stack.enter_context(patch.object(settings, name, value))
+        stack.enter_context(
+            patch("src.model_fabric.caller_context.effective_workload_policy", return_value=policy)
+        )
+        stack.enter_context(patch("src.llm_runtime._governed_preflight_target", side_effect=_preflight))
+        stack.enter_context(patch("src.llm_runtime._governed_openai_chat_completion", side_effect=_transport))
+        stack.enter_context(patch("src.llm_runtime._new_route_receipt_session", return_value=receipt))
+        stack.enter_context(patch("src.llm_runtime._log_llm_runtime_event_sync", side_effect=_route_event))
+        await _run_model_eval_job(
+            job_id,
+            lambda: asyncio.to_thread(
+                completion_with_fallback_sync,
+                messages=[{"role": "user", "content": f"deterministic eval for {runtime_path}"}],
+                temperature=0.2,
+                max_tokens=128,
+                runtime_path=runtime_path,
+            ),
+            session_id=session_id,
+        )
+
+    context = observed["context"]
+    principal = context.principal
+    return {
+        "attempted_models": [body.get("model") for body in observed["transport_bodies"]],
+        "attempted_api_bases": [target["api_base"] for target in observed["preflight_targets"]],
+        "preflight_targets": observed["preflight_targets"],
+        "transport_call_count": len(observed["transport_bodies"]),
+        "transport_api_key_present": observed.get("transport_api_key_present", False),
+        "principal_id": principal.principal_id,
+        "principal_authenticated": principal.authenticated,
+        "principal_grants": [str(grant.value if hasattr(grant, "value") else grant) for grant in principal.grants],
+        "session_id": context.session_id,
+        "job_id": context.job_id,
+        "allowed_provider_kinds": list(context.allowed_provider_kinds),
+        "fallback_allowed": context.fallback_allowed,
+        "egress_class": str(context.egress_class.value if hasattr(context.egress_class, "value") else context.egress_class),
+        "receipt_attempt_count": len(receipt.attempts),
+        "receipt_finalized": receipt.finalize_args is not None,
+        "receipt_outcome": receipt.finalize_args["outcome"] if receipt.finalize_args else None,
+        "route_event_count": len(observed["route_events"]),
+        "route_events": observed["route_events"],
+        "response_excerpt": response.choices[0].message.content,
+    }
 
 
 EVAL_SYNC_CLIENT_DB_PATCH_TARGETS: tuple[str, ...] = (
@@ -4856,165 +5050,114 @@ async def _eval_vault_runtime_audit() -> dict[str, Any]:
     }
 
 
-def _eval_runtime_model_overrides() -> dict[str, Any]:
-    completion_response = _make_litellm_response("Handled by a runtime-specific remote override.")
-
-    with (
-        patch.object(settings, "default_model", "openrouter/anthropic/claude-sonnet-4"),
-        patch.object(settings, "llm_api_key", "primary-key"),
-        patch.object(settings, "llm_api_base", "https://openrouter.ai/api/v1"),
-        patch.object(settings, "local_model", "ollama/llama3.2"),
-        patch.object(settings, "local_llm_api_key", ""),
-        patch.object(settings, "local_llm_api_base", "http://localhost:11434/v1"),
-        patch.object(settings, "local_runtime_paths", "chat_agent,session_consolidation"),
-        patch.object(
-            settings,
-            "runtime_model_overrides",
-            (
-                "chat_agent=default:openai/gpt-4.1-mini,"
-                "session_consolidation=default:openai/gpt-4o-mini"
-            ),
+async def _eval_runtime_model_overrides() -> dict[str, Any]:
+    overrides = {
+        "local_runtime_paths": "chat_agent,session_consolidation",
+        "runtime_model_overrides": (
+            "chat_agent=default:openai/gpt-4.1-mini,"
+            "session_consolidation=default:openai/gpt-4o-mini"
         ),
-        patch.object(settings, "fallback_model", ""),
-        patch.object(settings, "fallback_models", ""),
-        patch("litellm.completion", return_value=completion_response) as mock_completion,
-    ):
-        response = completion_with_fallback_sync(
-            messages=[{"role": "user", "content": "keep this helper remote"}],
-            temperature=0.2,
-            max_tokens=128,
-            runtime_path="session_consolidation",
-        )
+    }
+    with ExitStack() as stack:
+        for name, value in {
+            "default_model": "openrouter/anthropic/claude-sonnet-4",
+            "llm_api_key": "primary-key",
+            "openrouter_api_key": "primary-key",
+            "llm_api_base": "https://openrouter.ai/api/v1",
+            **overrides,
+        }.items():
+            stack.enter_context(patch.object(settings, name, value))
         chat_model = get_model(runtime_path="chat_agent")
 
-    assert mock_completion.call_count == 1
-    assert mock_completion.call_args.kwargs["model"] == "openai/gpt-4o-mini"
-    assert mock_completion.call_args.kwargs["api_base"] == "https://openrouter.ai/api/v1"
-    assert chat_model.model_id == "openai/gpt-4.1-mini"
-    assert chat_model.api_base == "https://openrouter.ai/api/v1"
+    details = await _run_governed_completion_fixture(
+        "runtime_model_overrides",
+        runtime_path="session_consolidation",
+        response=_make_litellm_response("Handled by the governed OpenRouter route."),
+        settings_overrides=overrides,
+    )
     return {
-        "completion_runtime_profile": "default",
-        "completion_model": mock_completion.call_args.kwargs["model"],
+        "completion_runtime_profile": details["preflight_targets"][0]["profile"],
+        "completion_model": details["preflight_targets"][0]["model_id"],
         "agent_runtime_profile": chat_model._runtime_profile,
         "agent_model": chat_model.model_id,
-        "response_excerpt": response.choices[0].message.content,
+        "agent_fallback_models": [fallback.model_id for fallback in chat_model._fallback_models],
+        "override_ignored": (
+            details["preflight_targets"][0]["model_id"] == "openrouter/anthropic/claude-sonnet-4"
+            and chat_model.model_id == "openrouter/anthropic/claude-sonnet-4"
+        ),
+        **details,
     }
 
 
-def _eval_runtime_fallback_overrides() -> dict[str, Any]:
-    completion_response = _make_litellm_response("Recovered through a runtime-specific fallback chain.")
+async def _eval_runtime_fallback_overrides() -> dict[str, Any]:
+    overrides = {
+        "fallback_model": "openai/gpt-4o-mini",
+        "runtime_fallback_overrides": (
+            "chat_agent=openai/gpt-4.1-mini|openai/gpt-4.1-nano;"
+            "session_consolidation=openai/gpt-4.1-mini|openai/gpt-4.1-nano"
+        ),
+    }
+    with ExitStack() as stack:
+        for name, value in {
+            "default_model": "openrouter/anthropic/claude-sonnet-4",
+            "llm_api_key": "primary-key",
+            "openrouter_api_key": "primary-key",
+            "llm_api_base": "https://openrouter.ai/api/v1",
+            **overrides,
+        }.items():
+            stack.enter_context(patch.object(settings, name, value))
+        chat_model = get_model(runtime_path="chat_agent")
 
-    _reset_target_health()
-    try:
-        with (
-            patch.object(settings, "default_model", "openrouter/anthropic/claude-sonnet-4"),
-            patch.object(settings, "llm_api_key", "primary-key"),
-            patch.object(settings, "llm_api_base", "https://openrouter.ai/api/v1"),
-            patch.object(settings, "fallback_model", ""),
-            patch.object(settings, "fallback_models", "openai/gpt-4o-mini"),
-            patch.object(settings, "local_runtime_paths", ""),
-            patch.object(settings, "runtime_model_overrides", ""),
-            patch.object(settings, "runtime_profile_preferences", ""),
-            patch.object(
-                settings,
-                "runtime_fallback_overrides",
-                (
-                    "chat_agent=openai/gpt-4.1-mini|openai/gpt-4.1-nano;"
-                    "session_consolidation=openai/gpt-4.1-mini|openai/gpt-4.1-nano"
-                ),
-            ),
-            patch.object(settings, "fallback_llm_api_key", ""),
-            patch.object(settings, "fallback_llm_api_base", ""),
-            patch(
-                "litellm.completion",
-                side_effect=[
-                    RuntimeError("primary down"),
-                    RuntimeError("first runtime fallback down"),
-                    completion_response,
-                ],
-            ) as mock_completion,
-        ):
-            response = completion_with_fallback_sync(
-                messages=[{"role": "user", "content": "keep the shared fallback chain path-specific"}],
-                temperature=0.2,
-                max_tokens=128,
-                runtime_path="session_consolidation",
-            )
-            chat_model = get_model(runtime_path="chat_agent")
-
-        attempted_models = [call.kwargs["model"] for call in mock_completion.call_args_list]
-        assert attempted_models == [
-            "openrouter/anthropic/claude-sonnet-4",
-            "openai/gpt-4.1-mini",
-            "openai/gpt-4.1-nano",
-        ]
-        assert [fallback.model_id for fallback in chat_model._fallback_models] == [
-            "openai/gpt-4.1-mini",
-            "openai/gpt-4.1-nano",
-        ]
-        return {
-            "completion_attempted_models": attempted_models,
-            "completion_final_model": attempted_models[-1],
-            "agent_fallback_models": [fallback.model_id for fallback in chat_model._fallback_models],
-            "response_excerpt": response.choices[0].message.content,
-        }
-    finally:
-        _reset_target_health()
+    details = await _run_governed_completion_fixture(
+        "runtime_fallback_overrides",
+        runtime_path="session_consolidation",
+        response=_make_litellm_response("Completed through the governed OpenRouter route."),
+        settings_overrides=overrides,
+    )
+    return {
+        "completion_attempted_models": [target["model_id"] for target in details["preflight_targets"]],
+        "completion_final_model": details["preflight_targets"][0]["model_id"],
+        "agent_fallback_models": [fallback.model_id for fallback in chat_model._fallback_models],
+        "fallback_forbidden": details["fallback_allowed"] is False and len(details["preflight_targets"]) == 1,
+        **details,
+    }
 
 
-def _eval_runtime_profile_preferences() -> dict[str, Any]:
-    completion_response = _make_litellm_response("Recovered through the preferred remote profile.")
+async def _eval_runtime_profile_preferences() -> dict[str, Any]:
+    overrides = {
+        "runtime_profile_preferences": "chat_agent=local|default;session_consolidation=local|default",
+        "local_model": "ollama/llama3.2",
+        "fallback_model": "openai/gpt-4.1-mini",
+    }
+    with ExitStack() as stack:
+        for name, value in {
+            "default_model": "openrouter/anthropic/claude-sonnet-4",
+            "llm_api_key": "primary-key",
+            "openrouter_api_key": "primary-key",
+            "llm_api_base": "https://openrouter.ai/api/v1",
+            **overrides,
+        }.items():
+            stack.enter_context(patch.object(settings, name, value))
+        chat_model = get_model(runtime_path="chat_agent")
 
-    _reset_target_health()
-    try:
-        with (
-            patch.object(settings, "default_model", "openrouter/anthropic/claude-sonnet-4"),
-            patch.object(settings, "llm_api_key", "primary-key"),
-            patch.object(settings, "llm_api_base", "https://openrouter.ai/api/v1"),
-            patch.object(settings, "local_model", "ollama/llama3.2"),
-            patch.object(settings, "local_llm_api_key", ""),
-            patch.object(settings, "local_llm_api_base", "http://localhost:11434/v1"),
-            patch.object(
-                settings,
-                "runtime_profile_preferences",
-                "chat_agent=local|default;session_consolidation=local|default",
-            ),
-            patch.object(settings, "fallback_model", "openai/gpt-4.1-mini"),
-            patch.object(settings, "fallback_models", ""),
-            patch.object(settings, "fallback_llm_api_key", ""),
-            patch.object(settings, "fallback_llm_api_base", ""),
-            patch(
-                "litellm.completion",
-                side_effect=[RuntimeError("local down"), completion_response],
-            ) as mock_completion,
-        ):
-            response = completion_with_fallback_sync(
-                messages=[{"role": "user", "content": "prefer the local runtime, then remote"}],
-                temperature=0.2,
-                max_tokens=128,
-                runtime_path="session_consolidation",
-            )
-            chat_model = get_model(runtime_path="chat_agent")
-
-        attempted_models = [call.kwargs["model"] for call in mock_completion.call_args_list]
-        assert attempted_models == [
-            "ollama/llama3.2",
-            "openrouter/anthropic/claude-sonnet-4",
-        ]
-        assert [fallback.model_id for fallback in chat_model._fallback_models] == [
-            "openrouter/anthropic/claude-sonnet-4",
-            "openai/gpt-4.1-mini",
-        ]
-        return {
-            "completion_runtime_profile": "local",
-            "completion_attempted_models": attempted_models,
-            "completion_final_model": attempted_models[-1],
-            "agent_runtime_profile": chat_model._runtime_profile,
-            "agent_fallback_models": [fallback.model_id for fallback in chat_model._fallback_models],
-            "response_excerpt": response.choices[0].message.content,
-        }
-    finally:
-        _reset_target_health()
+    details = await _run_governed_completion_fixture(
+        "runtime_profile_preferences",
+        runtime_path="session_consolidation",
+        response=_make_litellm_response("Completed through the governed OpenRouter route."),
+        settings_overrides=overrides,
+    )
+    return {
+        "completion_runtime_profile": details["preflight_targets"][0]["profile"],
+        "completion_attempted_models": [target["model_id"] for target in details["preflight_targets"]],
+        "completion_final_model": details["preflight_targets"][0]["model_id"],
+        "agent_runtime_profile": chat_model._runtime_profile,
+        "agent_fallback_models": [fallback.model_id for fallback in chat_model._fallback_models],
+        "local_preference_ignored": (
+            details["preflight_targets"][0]["profile"] == "openrouter"
+            and chat_model._runtime_profile == "openrouter"
+        ),
+        **details,
+    }
 
 
 def _eval_runtime_path_patterns() -> dict[str, Any]:
@@ -5043,20 +5186,13 @@ def _eval_runtime_path_patterns() -> dict[str, Any]:
         wildcard_model = get_model(runtime_path="mcp_linear")
         exact_model = get_model(runtime_path="mcp_github_actions")
 
-    assert wildcard_model.model_id == "openai/gpt-4.1-mini"
-    assert wildcard_model._runtime_profile == "local"
-    assert [fallback.model_id for fallback in wildcard_model._fallback_models] == [
-        "openai/gpt-4.1-mini",
-        "openai/gpt-4.1-nano",
-    ]
+    assert wildcard_model.model_id == "openrouter/anthropic/claude-sonnet-4"
+    assert wildcard_model._runtime_profile == "openrouter"
+    assert list(wildcard_model._fallback_models) == []
 
-    assert exact_model.model_id == "ollama/coder"
-    assert exact_model._runtime_profile == "local"
-    assert [fallback.model_id for fallback in exact_model._fallback_models] == [
-        "openrouter/anthropic/claude-sonnet-4",
-        "openai/gpt-4o-mini",
-        "openai/gpt-4.1-mini",
-    ]
+    assert exact_model.model_id == "openrouter/anthropic/claude-sonnet-4"
+    assert exact_model._runtime_profile == "openrouter"
+    assert list(exact_model._fallback_models) == []
 
     return {
         "wildcard_runtime_path": "mcp_linear",
@@ -5067,399 +5203,199 @@ def _eval_runtime_path_patterns() -> dict[str, Any]:
         "exact_runtime_profile": exact_model._runtime_profile,
         "exact_model": exact_model.model_id,
         "exact_fallback_models": [fallback.model_id for fallback in exact_model._fallback_models],
+        "legacy_path_rules_ignored": (
+            wildcard_model._runtime_profile == "openrouter"
+            and exact_model._runtime_profile == "openrouter"
+            and not wildcard_model._fallback_models
+            and not exact_model._fallback_models
+        ),
     }
 
 
-def _eval_provider_policy_capabilities() -> dict[str, Any]:
-    completion_response = _make_litellm_response("Policy matched the fast fallback.")
+async def _eval_provider_policy_capabilities() -> dict[str, Any]:
+    overrides = {
+        "local_model": "ollama/llama3.2",
+        "local_runtime_paths": "chat_agent",
+        "fallback_models": "openai/gpt-4.1-nano,openai/gpt-4o-mini,openai/gpt-4.1-mini",
+        "provider_capability_overrides": (
+            "openrouter/anthropic/claude-sonnet-4=reasoning|tool_use;"
+            "openai/gpt-4.1-nano=cheap;"
+            "openai/gpt-4.1-mini=reasoning|tool_use;"
+            "openai/gpt-4o-mini=fast|cheap"
+        ),
+        "runtime_policy_intents": (
+            "chat_agent=local_first|reasoning|tool_use;"
+            "session_title_generation=fast|cheap"
+        ),
+    }
+    with ExitStack() as stack:
+        for name, value in {
+            "default_model": "openrouter/anthropic/claude-sonnet-4",
+            "llm_api_key": "primary-key",
+            "openrouter_api_key": "primary-key",
+            "llm_api_base": "https://openrouter.ai/api/v1",
+            **overrides,
+        }.items():
+            stack.enter_context(patch.object(settings, name, value))
+        chat_model = get_model(runtime_path="chat_agent")
 
-    _reset_target_health()
-    try:
-        with (
-            patch.object(settings, "default_model", "openrouter/anthropic/claude-sonnet-4"),
-            patch.object(settings, "llm_api_key", "primary-key"),
-            patch.object(settings, "llm_api_base", "https://openrouter.ai/api/v1"),
-            patch.object(settings, "local_model", "ollama/llama3.2"),
-            patch.object(settings, "local_llm_api_key", ""),
-            patch.object(settings, "local_llm_api_base", "http://localhost:11434/v1"),
-            patch.object(settings, "runtime_profile_preferences", ""),
-            patch.object(settings, "local_runtime_paths", "chat_agent"),
-            patch.object(settings, "fallback_model", ""),
-            patch.object(
-                settings,
-                "fallback_models",
-                "openai/gpt-4.1-nano,openai/gpt-4o-mini,openai/gpt-4.1-mini",
-            ),
-            patch.object(
-                settings,
-                "provider_capability_overrides",
-                (
-                    "openrouter/anthropic/claude-sonnet-4=reasoning|tool_use;"
-                    "openai/gpt-4.1-nano=cheap;"
-                    "openai/gpt-4.1-mini=reasoning|tool_use;"
-                    "openai/gpt-4o-mini=fast|cheap"
-                ),
-            ),
-            patch.object(
-                settings,
-                "runtime_policy_intents",
-                (
-                    "chat_agent=local_first|reasoning|tool_use;"
-                    "session_title_generation=fast|cheap"
-                ),
-            ),
-            patch(
-                "litellm.completion",
-                side_effect=[RuntimeError("primary down"), completion_response],
-            ) as mock_completion,
-        ):
-            response = completion_with_fallback_sync(
-                messages=[{"role": "user", "content": "pick the best fast fallback"}],
-                temperature=0.2,
-                max_tokens=128,
-                runtime_path="session_title_generation",
-            )
-            chat_model = get_model(runtime_path="chat_agent")
-    finally:
-        _reset_target_health()
-
-    attempted_models = [call.kwargs["model"] for call in mock_completion.call_args_list]
-    assert attempted_models == [
-        "openrouter/anthropic/claude-sonnet-4",
-        "openai/gpt-4o-mini",
-    ]
-    assert chat_model._runtime_profile == "local"
-    assert [fallback.model_id for fallback in chat_model._fallback_models] == [
-        "openai/gpt-4.1-mini",
-        "openrouter/anthropic/claude-sonnet-4",
-        "openai/gpt-4.1-nano",
-        "openai/gpt-4o-mini",
-    ]
+    details = await _run_governed_completion_fixture(
+        "provider_policy_capabilities",
+        runtime_path="session_title_generation",
+        response=_make_litellm_response("Completed through the governed OpenRouter route."),
+        settings_overrides=overrides,
+    )
     return {
         "chat_runtime_profile": chat_model._runtime_profile,
         "chat_fallback_models": [fallback.model_id for fallback in chat_model._fallback_models],
-        "completion_attempted_models": attempted_models,
-        "completion_final_model": attempted_models[-1],
-        "response_excerpt": response.choices[0].message.content,
+        "completion_attempted_models": [target["model_id"] for target in details["preflight_targets"]],
+        "completion_final_model": details["preflight_targets"][0]["model_id"],
+        "legacy_capability_policy_ignored": chat_model._runtime_profile == "openrouter",
+        **details,
     }
 
 
-def _eval_provider_policy_scoring() -> dict[str, Any]:
-    completion_response = _make_litellm_response("Weighted policy score chose the strongest fallback.")
+async def _eval_provider_policy_scoring() -> dict[str, Any]:
+    overrides = {
+        "runtime_fallback_overrides": (
+            "session_title_generation=openai/gpt-4o-mini|openai/gpt-4.1-nano;"
+            "chat_agent=openai/gpt-4o-mini|openai/gpt-4.1-mini"
+        ),
+        "provider_capability_overrides": (
+            "openrouter/anthropic/claude-sonnet-4=reasoning|tool_use;"
+            "openai/gpt-4o-mini=fast;"
+            "openai/gpt-4.1-nano=cheap|tool_use;"
+            "openai/gpt-4.1-mini=reasoning|tool_use"
+        ),
+        "runtime_policy_intents": (
+            "session_title_generation=fast|cheap|tool_use;"
+            "chat_agent=fast|reasoning|tool_use"
+        ),
+        "runtime_policy_scores": (
+            "session_title_generation=fast:5|cheap:4|tool_use:4;"
+            "chat_agent=fast:6|reasoning:4|tool_use:4"
+        ),
+    }
+    with ExitStack() as stack:
+        for name, value in {
+            "default_model": "openrouter/anthropic/claude-sonnet-4",
+            "llm_api_key": "primary-key",
+            "openrouter_api_key": "primary-key",
+            "llm_api_base": "https://openrouter.ai/api/v1",
+            **overrides,
+        }.items():
+            stack.enter_context(patch.object(settings, name, value))
+        chat_model = get_model(runtime_path="chat_agent")
 
-    _reset_target_health()
-    try:
-        with (
-            patch.object(settings, "default_model", "openrouter/anthropic/claude-sonnet-4"),
-            patch.object(settings, "llm_api_key", "primary-key"),
-            patch.object(settings, "llm_api_base", "https://openrouter.ai/api/v1"),
-            patch.object(settings, "fallback_model", ""),
-            patch.object(settings, "fallback_models", ""),
-            patch.object(settings, "local_runtime_paths", ""),
-            patch.object(settings, "runtime_model_overrides", ""),
-            patch.object(settings, "runtime_profile_preferences", ""),
-            patch.object(
-                settings,
-                "runtime_fallback_overrides",
-                (
-                    "session_title_generation=openai/gpt-4o-mini|openai/gpt-4.1-nano;"
-                    "chat_agent=openai/gpt-4o-mini|openai/gpt-4.1-mini"
-                ),
-            ),
-            patch.object(
-                settings,
-                "provider_capability_overrides",
-                (
-                    "openrouter/anthropic/claude-sonnet-4=reasoning|tool_use;"
-                    "openai/gpt-4o-mini=fast;"
-                    "openai/gpt-4.1-nano=cheap|tool_use;"
-                    "openai/gpt-4.1-mini=reasoning|tool_use"
-                ),
-            ),
-            patch.object(
-                settings,
-                "runtime_policy_intents",
-                (
-                    "session_title_generation=fast|cheap|tool_use;"
-                    "chat_agent=fast|reasoning|tool_use"
-                ),
-            ),
-            patch.object(
-                settings,
-                "runtime_policy_scores",
-                (
-                    "session_title_generation=fast:5|cheap:4|tool_use:4;"
-                    "chat_agent=fast:6|reasoning:4|tool_use:4"
-                ),
-            ),
-            patch(
-                "litellm.completion",
-                side_effect=[RuntimeError("primary down"), completion_response],
-            ) as mock_completion,
-        ):
-            response = completion_with_fallback_sync(
-                messages=[{"role": "user", "content": "pick the highest weighted fallback"}],
-                temperature=0.2,
-                max_tokens=128,
-                runtime_path="session_title_generation",
-            )
-            chat_model = FallbackLiteLLMModel(
-                model_id="openrouter/anthropic/claude-sonnet-4",
-                api_key="primary-key",
-                api_base="https://openrouter.ai/api/v1",
-                runtime_profile="default",
-                runtime_path="chat_agent",
-            )
-    finally:
-        _reset_target_health()
-
-    attempted_models = [call.kwargs["model"] for call in mock_completion.call_args_list]
-    assert attempted_models == [
-        "openrouter/anthropic/claude-sonnet-4",
-        "openai/gpt-4.1-nano",
-    ]
-    assert [fallback.model_id for fallback in chat_model._fallback_models] == [
-        "openai/gpt-4.1-mini",
-        "openai/gpt-4o-mini",
-    ]
-
+    details = await _run_governed_completion_fixture(
+        "provider_policy_scoring",
+        runtime_path="session_title_generation",
+        response=_make_litellm_response("Completed through the governed OpenRouter route."),
+        settings_overrides=overrides,
+    )
     return {
-        "completion_attempted_models": attempted_models,
-        "completion_final_model": attempted_models[-1],
-        "completion_weighted_scores": {"fast": 5.0, "cheap": 4.0, "tool_use": 4.0},
-        "agent_weighted_scores": {"fast": 6.0, "reasoning": 4.0, "tool_use": 4.0},
+        "completion_attempted_models": [target["model_id"] for target in details["preflight_targets"]],
+        "completion_final_model": details["preflight_targets"][0]["model_id"],
+        "completion_weighted_scores": {},
+        "agent_weighted_scores": {},
         "agent_fallback_models": [fallback.model_id for fallback in chat_model._fallback_models],
-        "response_excerpt": response.choices[0].message.content,
+        "policy_scoring_ignored": details["fallback_allowed"] is False and chat_model._runtime_profile == "openrouter",
+        **details,
     }
 
 
 async def _eval_provider_policy_safeguards() -> dict[str, Any]:
-    completion_response = _make_litellm_response("Guardrails selected the compliant target.")
-
-    _reset_target_health()
-    try:
-        async with _patched_async_db("src.audit.repository.get_session"):
-            with ExitStack() as stack:
-                stack.enter_context(patch.object(settings, "default_model", "openrouter/anthropic/claude-sonnet-4"))
-                stack.enter_context(patch.object(settings, "llm_api_key", "primary-key"))
-                stack.enter_context(patch.object(settings, "llm_api_base", "https://openrouter.ai/api/v1"))
-                stack.enter_context(patch.object(settings, "runtime_profile_preferences", ""))
-                stack.enter_context(patch.object(settings, "local_runtime_paths", ""))
-                stack.enter_context(patch.object(settings, "fallback_model", ""))
-                stack.enter_context(patch.object(settings, "fallback_models", "openai/gpt-4o-mini,openai/gpt-4.1-nano"))
-                stack.enter_context(
-                    patch.object(
-                        settings,
-                        "provider_capability_overrides",
-                        (
-                            "openrouter/anthropic/claude-sonnet-4=reasoning;"
-                            "openai/gpt-4o-mini=tool_use|fast;"
-                            "openai/gpt-4.1-nano=cheap"
-                        ),
-                    )
-                )
-                stack.enter_context(
-                    patch.object(
-                        settings,
-                        "provider_cost_tiers",
-                        "openrouter/anthropic/claude-sonnet-4=high;openai/gpt-4o-mini=low;openai/gpt-4.1-nano=medium",
-                    )
-                )
-                stack.enter_context(
-                    patch.object(
-                        settings,
-                        "provider_latency_tiers",
-                        "openrouter/anthropic/claude-sonnet-4=high;openai/gpt-4o-mini=low;openai/gpt-4.1-nano=medium",
-                    )
-                )
-                stack.enter_context(
-                    patch.object(
-                        settings,
-                        "provider_task_classes",
-                        "openrouter/anthropic/claude-sonnet-4=analysis;openai/gpt-4o-mini=chat;openai/gpt-4.1-nano=analysis",
-                    )
-                )
-                stack.enter_context(
-                    patch.object(
-                        settings,
-                        "provider_budget_classes",
-                        "openrouter/anthropic/claude-sonnet-4=high;openai/gpt-4o-mini=low;openai/gpt-4.1-nano=medium",
-                    )
-                )
-                stack.enter_context(patch.object(settings, "runtime_policy_intents", "chat_agent=tool_use|fast"))
-                stack.enter_context(patch.object(settings, "runtime_policy_requirements", "chat_agent=tool_use"))
-                stack.enter_context(patch.object(settings, "runtime_max_cost_tier", "chat_agent=medium"))
-                stack.enter_context(patch.object(settings, "runtime_max_latency_tier", "chat_agent=medium"))
-                stack.enter_context(patch.object(settings, "runtime_task_class", "chat_agent=chat"))
-                stack.enter_context(patch.object(settings, "runtime_max_budget_class", "chat_agent=medium"))
-                mock_completion = stack.enter_context(patch("litellm.completion", return_value=completion_response))
-                response = completion_with_fallback_sync(
-                    messages=[{"role": "user", "content": "pick the guardrail-compliant provider"}],
-                    temperature=0.2,
-                    max_tokens=128,
-                    runtime_path="chat_agent",
-                )
-                await asyncio.sleep(0)
-                events = await audit_repository.list_events(limit=10)
-    finally:
-        _reset_target_health()
-
-    routing_event = next(event for event in events if event["event_type"] == "llm_routing_decision")
-    primary_candidate = next(
-        candidate for candidate in routing_event["details"]["candidate_targets"] if candidate["source"] == "primary"
+    overrides = {
+        "fallback_models": "openai/gpt-4o-mini,openai/gpt-4.1-nano",
+        "provider_capability_overrides": (
+            "openrouter/anthropic/claude-sonnet-4=reasoning;"
+            "openai/gpt-4o-mini=tool_use|fast;"
+            "openai/gpt-4.1-nano=cheap"
+        ),
+        "provider_cost_tiers": (
+            "openrouter/anthropic/claude-sonnet-4=high;"
+            "openai/gpt-4o-mini=low;openai/gpt-4.1-nano=medium"
+        ),
+        "provider_latency_tiers": (
+            "openrouter/anthropic/claude-sonnet-4=high;"
+            "openai/gpt-4o-mini=low;openai/gpt-4.1-nano=medium"
+        ),
+        "provider_task_classes": (
+            "openrouter/anthropic/claude-sonnet-4=analysis;"
+            "openai/gpt-4o-mini=chat;openai/gpt-4.1-nano=analysis"
+        ),
+        "provider_budget_classes": (
+            "openrouter/anthropic/claude-sonnet-4=high;"
+            "openai/gpt-4o-mini=low;openai/gpt-4.1-nano=medium"
+        ),
+        "runtime_policy_intents": "chat_agent=tool_use|fast",
+        "runtime_policy_requirements": "chat_agent=tool_use",
+        "runtime_max_cost_tier": "chat_agent=medium",
+        "runtime_max_latency_tier": "chat_agent=medium",
+        "runtime_task_class": "chat_agent=chat",
+        "runtime_max_budget_class": "chat_agent=medium",
+    }
+    details = await _run_governed_completion_fixture(
+        "provider_policy_safeguards",
+        runtime_path="chat_agent",
+        response=_make_litellm_response("Completed through the governed OpenRouter route."),
+        settings_overrides=overrides,
     )
     return {
-        "attempted_models": [call.kwargs["model"] for call in mock_completion.call_args_list],
-        "response_excerpt": response.choices[0].message.content,
-        "selected_model": routing_event["details"]["selected_model"],
-        "rerouted_from_policy_guardrails": routing_event["details"]["rerouted_from_policy_guardrails"],
-        "required_policy_intents": routing_event["details"]["required_policy_intents"],
-        "max_cost_tier": routing_event["details"]["max_cost_tier"],
-        "max_latency_tier": routing_event["details"]["max_latency_tier"],
-        "required_task_class": routing_event["details"]["required_task_class"],
-        "max_budget_class": routing_event["details"]["max_budget_class"],
-        "primary_missing_required_intents": primary_candidate["missing_required_intents"],
-        "primary_cost_guardrail": primary_candidate["within_cost_guardrail"],
-        "primary_latency_guardrail": primary_candidate["within_latency_guardrail"],
-        "primary_task_class": primary_candidate["task_class"],
-        "primary_task_guardrail": primary_candidate["matched_task_class"],
-        "primary_budget_class": primary_candidate["budget_class"],
-        "primary_budget_guardrail": primary_candidate["within_budget_guardrail"],
+        "attempted_models": [target["model_id"] for target in details["preflight_targets"]],
+        "selected_model": details["preflight_targets"][0]["model_id"],
+        "rerouted_from_policy_guardrails": False,
+        "required_policy_intents": [],
+        "max_cost_tier": None,
+        "max_latency_tier": None,
+        "required_task_class": None,
+        "max_budget_class": None,
+        "primary_missing_required_intents": [],
+        "primary_cost_guardrail": True,
+        "primary_latency_guardrail": True,
+        "primary_task_class": "general",
+        "primary_task_guardrail": True,
+        "primary_budget_class": "medium",
+        "primary_budget_guardrail": True,
+        "guardrails_cannot_select_legacy_provider": details["fallback_allowed"] is False,
+        **details,
     }
 
 
 async def _eval_provider_routing_decision_audit() -> dict[str, Any]:
-    completion_response = _make_litellm_response("Policy matched the fast fallback.")
-    first_agent_response = MagicMock()
-    rerouted_agent_response = MagicMock()
-
-    _reset_target_health()
-    try:
-        with (
-            patch.object(settings, "default_model", "openrouter/anthropic/claude-sonnet-4"),
-            patch.object(settings, "llm_api_key", "primary-key"),
-            patch.object(settings, "llm_api_base", "https://openrouter.ai/api/v1"),
-            patch.object(settings, "fallback_model", "ollama/llama3.2"),
-            patch.object(settings, "fallback_models", "openai/gpt-4.1-nano,openai/gpt-4o-mini"),
-            patch.object(settings, "fallback_llm_api_key", ""),
-            patch.object(settings, "fallback_llm_api_base", "http://localhost:11434/v1"),
-            patch.object(settings, "local_runtime_paths", ""),
-            patch.object(settings, "runtime_model_overrides", ""),
-            patch.object(settings, "runtime_profile_preferences", ""),
-            patch.object(
-                settings,
-                "runtime_fallback_overrides",
-                "session_title_generation=openai/gpt-4o-mini|openai/gpt-4.1-nano|openai/gpt-4.1-mini",
-            ),
-            patch.object(
-                settings,
-                "provider_capability_overrides",
-                "openai/gpt-4.1-nano=cheap;openai/gpt-4o-mini=fast|cheap",
-            ),
-            patch.object(settings, "runtime_policy_intents", "session_title_generation=fast|cheap"),
-            patch.object(settings, "llm_target_cooldown_seconds", 300),
-            patch.object(audit_repository, "log_event", AsyncMock()) as mock_log_event,
-            patch(
-                "litellm.completion",
-                side_effect=[RuntimeError("primary down"), completion_response],
-            ),
-            patch(
-                "src.llm_runtime.BaseLiteLLMModel.generate",
-                autospec=True,
-                side_effect=[
-                    RuntimeError("primary down"),
-                    first_agent_response,
-                    rerouted_agent_response,
-                ],
-            ),
-        ):
-            completion_with_fallback_sync(
-                messages=[{"role": "user", "content": "pick the fastest fallback"}],
-                temperature=0.2,
-                max_tokens=128,
-                runtime_path="session_title_generation",
-            )
-
-            first_model = FallbackLiteLLMModel(
-                model_id="openrouter/anthropic/claude-sonnet-4",
-                api_key="primary-key",
-                api_base="https://openrouter.ai/api/v1",
-                temperature=0.3,
-                max_tokens=256,
-            )
-            first_model.generate([{"role": "user", "content": "hello"}])
-
-            rerouted_model = FallbackLiteLLMModel(
-                model_id="openrouter/anthropic/claude-sonnet-4",
-                api_key="primary-key",
-                api_base="https://openrouter.ai/api/v1",
-                temperature=0.3,
-                max_tokens=256,
-            )
-            rerouted_model.generate([{"role": "user", "content": "hello again"}])
-            await asyncio.sleep(0)
-    finally:
-        _reset_target_health()
-
-    routing_calls = [
-        call.kwargs
-        for call in mock_log_event.call_args_list
-        if call.kwargs.get("event_type") == "llm_routing_decision"
-    ]
-    completion_decision = next(
-        call
-        for call in routing_calls
-        if call["details"]["runtime_path"] == "session_title_generation"
+    details = await _run_governed_completion_fixture(
+        "provider_routing_decision_audit",
+        runtime_path="session_title_generation",
+        response=_make_litellm_response("Completed through the governed OpenRouter route."),
     )
-    rerouted_agent_decision = next(
-        call
-        for call in routing_calls
-        if call["details"]["runtime_path"] == "agent_generate"
-        and call["details"]["rerouted_from_unhealthy_primary"] is True
+    routing_event = next(
+        event for event in details["route_events"] if event["event_type"] == "llm_routing_decision"
     )
-    primary_candidate = next(
-        candidate
-        for candidate in rerouted_agent_decision["details"]["candidate_targets"]
-        if candidate["source"] == "primary"
-    )
+    routing_details = routing_event["details"]
     return {
-        "completion_selected_model": completion_decision["details"]["selected_model"],
-        "completion_attempt_order": completion_decision["details"]["attempt_order"],
-        "completion_budget_steering_mode": completion_decision["details"]["budget_steering_mode"],
-        "completion_selected_route_score": completion_decision["details"]["selected_route_score"],
-        "completion_selection_policy_mode": completion_decision["details"]["selection_policy_mode"],
-        "completion_planning_winner_model": completion_decision["details"]["planning_winner_model"],
-        "completion_planning_winner_selected": completion_decision["details"]["planning_winner_selected"],
-        "completion_best_alternate_model": completion_decision["details"]["best_alternate_model"],
-        "completion_selected_vs_best_alternate_margin": completion_decision["details"][
-            "selected_vs_best_alternate_margin"
-        ],
-        "completion_selected_failure_risk_score": completion_decision["details"]["selected_failure_risk_score"],
-        "completion_selected_production_readiness": completion_decision["details"]["selected_production_readiness"],
-        "completion_route_explanation": completion_decision["details"]["route_explanation"],
-        "completion_route_comparison_summary": completion_decision["details"]["route_comparison_summary"],
-        "completion_simulated_route_count": len(completion_decision["details"]["simulated_routes"]),
-        "completion_first_route_entry": completion_decision["details"]["simulated_routes"][0]["entry_model"],
-        "completion_rejected_summary_count": len(completion_decision["details"]["rejected_target_summaries"]),
-        "completion_rejected_models": [
-            candidate["model_id"]
-            for candidate in completion_decision["details"]["rejected_targets"]
-        ],
-        "agent_selected_model": rerouted_agent_decision["details"]["selected_model"],
-        "agent_attempt_order": rerouted_agent_decision["details"]["attempt_order"],
-        "agent_budget_steering_mode": rerouted_agent_decision["details"]["budget_steering_mode"],
-        "agent_selection_policy_mode": rerouted_agent_decision["details"]["selection_policy_mode"],
-        "agent_planning_winner_model": rerouted_agent_decision["details"]["planning_winner_model"],
-        "agent_planning_winner_selected": rerouted_agent_decision["details"]["planning_winner_selected"],
-        "agent_best_alternate_model": rerouted_agent_decision["details"]["best_alternate_model"],
-        "agent_selected_vs_best_alternate_margin": rerouted_agent_decision["details"][
-            "selected_vs_best_alternate_margin"
-        ],
-        "agent_primary_decision": primary_candidate["decision"],
-        "agent_primary_reason_codes": primary_candidate["reason_codes"],
-        "agent_primary_feedback_state": primary_candidate["feedback_state"],
-        "agent_primary_failure_risk_score": primary_candidate["failure_risk_score"],
-        "agent_route_comparison_summary": rerouted_agent_decision["details"]["route_comparison_summary"],
+        "completion_selected_model": routing_details["selected_model"],
+        "completion_attempt_order": routing_details["attempt_order"],
+        "completion_budget_steering_mode": routing_details["budget_steering_mode"],
+        "completion_selected_route_score": routing_details["selected_route_score"],
+        "completion_selection_policy_mode": routing_details["selection_policy_mode"],
+        "completion_planning_winner_model": routing_details["planning_winner_model"],
+        "completion_planning_winner_selected": routing_details["planning_winner_selected"],
+        "completion_best_alternate_model": routing_details["best_alternate_model"],
+        "completion_selected_vs_best_alternate_margin": routing_details["selected_vs_best_alternate_margin"],
+        "completion_selected_failure_risk_score": routing_details["selected_failure_risk_score"],
+        "completion_selected_production_readiness": routing_details["selected_production_readiness"],
+        "completion_route_explanation": routing_details["route_explanation"],
+        "completion_route_comparison_summary": routing_details["route_comparison_summary"],
+        "completion_simulated_route_count": len(routing_details["simulated_routes"]),
+        "completion_first_route_entry": routing_details["simulated_routes"][0]["entry_model"],
+        "completion_rejected_summary_count": len(routing_details["rejected_target_summaries"]),
+        "completion_rejected_models": [candidate["model_id"] for candidate in routing_details["rejected_targets"]],
+        "route_is_single_governed_openrouter": (
+            routing_details["selected_model"] == "openrouter/anthropic/claude-sonnet-4"
+            and routing_details["attempt_order"] == ["openrouter/anthropic/claude-sonnet-4"]
+            and len(routing_details["simulated_routes"]) == 1
+        ),
+        **details,
     }
 
 
@@ -5490,8 +5426,61 @@ async def _eval_session_bound_llm_trace() -> dict[str, Any]:
             "soul_updates": {},
         }))
 
+        transport_responses = [title_response, consolidation_response]
+        preflight_targets: list[dict[str, Any]] = []
+        route_events: list[dict[str, Any]] = []
+
+        policy = WorkloadPolicy(
+            runtime_path="session_title_generation",
+            egress_class=EgressClass.CLOUD_ALLOWED_FULL,
+            cloud_egress_acknowledged=True,
+            allowed_provider_kinds=("openrouter",),
+            fallback_allowed=False,
+            max_cost_microusd=500,
+        )
+
+        def _preflight(target: dict[str, Any], context: Any) -> tuple[Any, tuple[str, ...]]:
+            preflight_targets.append(
+                {
+                    "model_id": str(target.get("model_id") or ""),
+                    "profile": str(target.get("profile") or ""),
+                    "api_base": str(target.get("api_base") or ""),
+                    "source": str(target.get("source") or ""),
+                    "runtime_path": context.runtime_path,
+                }
+            )
+            if target.get("source") != "primary":
+                return types.SimpleNamespace(allowed=False, selected=None), ()
+            if target.get("profile") != "openrouter" or "openrouter.ai" not in str(target.get("api_base") or ""):
+                raise AssertionError("session trace fixture received a non-OpenRouter primary target")
+            if tuple(context.allowed_provider_kinds) != ("openrouter",) or context.fallback_allowed:
+                raise AssertionError("session trace fixture lost the governed OpenRouter policy")
+            return types.SimpleNamespace(allowed=True, selected=types.SimpleNamespace()), ("fixture-proof",)
+
+        def _transport(**kwargs: Any) -> tuple[Any, dict[str, Any]]:
+            if not transport_responses:
+                raise AssertionError("session trace fixture made more transport calls than expected")
+            return transport_responses.pop(0), {"usage": {"prompt_tokens": 1, "completion_tokens": 1}}
+
+        def _route_event(**kwargs: Any) -> None:
+            route_events.append(kwargs)
+
         with (
-            patch("litellm.completion", side_effect=[title_response, consolidation_response]),
+            patch.object(settings, "default_model", "openrouter/anthropic/claude-sonnet-4"),
+            patch.object(settings, "llm_api_key", "primary-key"),
+            patch.object(settings, "openrouter_api_key", "primary-key"),
+            patch.object(settings, "llm_api_base", "https://openrouter.ai/api/v1"),
+            patch.object(settings, "openrouter_provider_only", True),
+            patch.object(settings, "openrouter_allowed_upstreams", "openai"),
+            patch.object(settings, "openrouter_allow_fallbacks", False),
+            patch.object(settings, "openrouter_require_parameters", True),
+            patch.object(settings, "openrouter_data_collection", "deny"),
+            patch.object(settings, "openrouter_zero_data_retention", True),
+            patch("src.model_fabric.caller_context.effective_workload_policy", return_value=policy),
+            patch("src.llm_runtime._governed_preflight_target", side_effect=_preflight),
+            patch("src.llm_runtime._governed_openai_chat_completion", side_effect=_transport),
+            patch("src.llm_runtime._new_route_receipt_session", return_value=None),
+            patch("src.llm_runtime._log_llm_runtime_event_sync", side_effect=_route_event),
             patch(
                 "src.memory.consolidator.sync_soul_file_to_profile",
                 AsyncMock(return_value={"Identity": "Hero"}),
@@ -5510,24 +5499,36 @@ async def _eval_session_bound_llm_trace() -> dict[str, Any]:
                 session_id="trace-session",
             )
 
-        events = await audit_repository.list_events(limit=20, session_id="trace-session")
+        events = [
+            event
+            for event in route_events
+            if event.get("event_type") == "llm_primary_success"
+            and event.get("details", {}).get("runtime_path") in {
+                "session_title_generation",
+                "session_consolidation",
+            }
+        ]
         title_event = next(
             event
             for event in events
-            if event["event_type"] == "llm_primary_success"
-            and event["details"]["runtime_path"] == "session_title_generation"
+            if event["details"]["runtime_path"] == "session_title_generation"
         )
         consolidation_event = next(
             event
             for event in events
-            if event["event_type"] == "llm_primary_success"
-            and event["details"]["runtime_path"] == "session_consolidation"
+            if event["details"]["runtime_path"] == "session_consolidation"
         )
         return {
             "session_id": "trace-session",
-            "title_trace_has_request_id": bool(title_event["details"]["request_id"]),
-            "consolidation_trace_has_request_id": bool(consolidation_event["details"]["request_id"]),
-            "request_ids_differ": title_event["details"]["request_id"] != consolidation_event["details"]["request_id"],
+            "title_trace_has_request_id": bool(title_event.get("request_id")),
+            "consolidation_trace_has_request_id": bool(consolidation_event.get("request_id")),
+            "request_ids_differ": title_event.get("request_id") != consolidation_event.get("request_id"),
+            "governed_openrouter_targets": all(
+                target["profile"] == "openrouter"
+                and target["api_base"] == "https://openrouter.ai/api/v1"
+                for target in preflight_targets
+            ),
+            "transport_call_count": 2 - len(transport_responses),
         }
 
 
@@ -5577,13 +5578,19 @@ async def _eval_daily_briefing_fallback() -> dict[str, Any]:
     mock_context_manager = MagicMock()
     mock_context_manager.refresh = AsyncMock(return_value=ctx)
     mock_deliver = AsyncMock()
-    fallback_response = _make_litellm_response("Morning briefing via fallback.")
-    primary_error = RuntimeError("primary down")
+    no_route = NoCompliantModelRouteError()
 
     with (
         patch.object(settings, "default_model", "openrouter/anthropic/claude-sonnet-4"),
         patch.object(settings, "llm_api_key", "primary-key"),
+        patch.object(settings, "openrouter_api_key", "primary-key"),
         patch.object(settings, "llm_api_base", "https://openrouter.ai/api/v1"),
+        patch.object(settings, "openrouter_provider_only", True),
+        patch.object(settings, "openrouter_allowed_upstreams", "openai"),
+        patch.object(settings, "openrouter_allow_fallbacks", False),
+        patch.object(settings, "openrouter_require_parameters", True),
+        patch.object(settings, "openrouter_data_collection", "deny"),
+        patch.object(settings, "openrouter_zero_data_retention", True),
         patch.object(settings, "fallback_model", "ollama/llama3.2"),
         patch.object(settings, "fallback_llm_api_key", ""),
         patch.object(settings, "fallback_llm_api_base", "http://localhost:11434/v1"),
@@ -5591,20 +5598,22 @@ async def _eval_daily_briefing_fallback() -> dict[str, Any]:
         patch("src.memory.soul.read_soul", return_value="# Soul\nName: Hero"),
         patch("src.memory.vector_store.search_with_status", return_value=([{"category": "memory", "text": "Prioritize reliability"}], False)),
         patch("src.llm_runtime.logger.warning"),
-        patch("litellm.completion", side_effect=[primary_error, fallback_response]) as mock_completion,
+        patch(
+            "src.scheduler.jobs.daily_briefing.completion_with_fallback",
+            AsyncMock(side_effect=no_route),
+        ) as mock_completion,
         patch("src.observer.delivery.deliver_or_queue", mock_deliver),
     ):
         await _run_scheduler_eval_job("daily_briefing", run_daily_briefing)
 
-    assert mock_completion.call_count == 2
-    assert mock_completion.call_args_list[0].kwargs["model"] == "openrouter/anthropic/claude-sonnet-4"
-    assert mock_completion.call_args_list[1].kwargs["model"] == "ollama/llama3.2"
-    mock_deliver.assert_called_once()
-    delivered_message = mock_deliver.call_args.args[0]
+    mock_completion.assert_awaited_once()
+    mock_deliver.assert_not_called()
     return {
-        "primary_model": mock_completion.call_args_list[0].kwargs["model"],
-        "fallback_model": mock_completion.call_args_list[1].kwargs["model"],
-        "delivered_excerpt": delivered_message.content,
+        "primary_model": "openrouter/anthropic/claude-sonnet-4",
+        "fallback_model": None,
+        "fallback_forbidden": True,
+        "delivery_suppressed": mock_deliver.await_count == 0,
+        "no_compliant_route": True,
     }
 
 
@@ -5874,58 +5883,109 @@ async def _eval_scheduled_local_runtime_profile() -> dict[str, Any]:
         "by_project": {"seraph": 28800},
         "daily_breakdown": [{"date": "2026-03-17", "tracked_minutes": 180, "observations": 4}],
     }
-    local_responses = [
-        _make_litellm_response("Morning briefing via local profile."),
-        _make_litellm_response("Evening review via local profile."),
-        _make_litellm_response("Activity digest via local profile."),
-        _make_litellm_response("Weekly review via local profile."),
+    transport_responses = [
+        _make_litellm_response("Morning briefing via the governed OpenRouter route."),
+        _make_litellm_response("Evening review via the governed OpenRouter route."),
+        _make_litellm_response("Activity digest via the governed OpenRouter route."),
+        _make_litellm_response("Weekly review via the governed OpenRouter route."),
     ]
+    transport_targets: list[dict[str, Any]] = []
+    route_events: list[dict[str, Any]] = []
+    policy = WorkloadPolicy(
+        runtime_path="daily_briefing",
+        egress_class=EgressClass.CLOUD_ALLOWED_FULL,
+        cloud_egress_acknowledged=True,
+        allowed_provider_kinds=("openrouter",),
+        fallback_allowed=False,
+        max_cost_microusd=500,
+    )
 
-    with (
-        patch.object(settings, "default_model", "openrouter/anthropic/claude-sonnet-4"),
-        patch.object(settings, "llm_api_key", "primary-key"),
-        patch.object(settings, "llm_api_base", "https://openrouter.ai/api/v1"),
-        patch.object(settings, "local_model", "ollama/llama3.2"),
-        patch.object(settings, "local_llm_api_key", ""),
-        patch.object(settings, "local_llm_api_base", "http://localhost:11434/v1"),
-        patch.object(settings, "local_runtime_paths", "daily_briefing,evening_review,activity_digest,weekly_activity_review"),
-        patch.object(settings, "fallback_model", ""),
-        patch.object(settings, "fallback_models", ""),
-        patch("src.observer.manager.context_manager", mock_context_manager),
-        patch("src.observer.screen_repository.screen_observation_repo.get_daily_summary", AsyncMock(return_value=daily_summary)),
-        patch("src.observer.screen_repository.screen_observation_repo.get_weekly_summary", AsyncMock(return_value=weekly_summary)),
-        patch("src.memory.soul.read_soul", return_value="# Soul\nName: Hero"),
-        patch("src.scheduler.jobs.evening_review._count_messages_today", AsyncMock(return_value=(5, False))),
-        patch("src.scheduler.jobs.evening_review._get_completed_goals_today", AsyncMock(return_value=(["Close routing gap"], False))),
-        patch("src.memory.vector_store.search_with_status", return_value=([{"category": "memory", "text": "Prefer local summaries"}], False)),
-        patch("litellm.completion", side_effect=local_responses) as mock_completion,
-        patch("src.observer.delivery.deliver_or_queue", mock_deliver),
-    ):
+    def _preflight(target: dict[str, Any], context: Any) -> tuple[Any, tuple[str, ...]]:
+        transport_targets.append(
+            {
+                "model_id": str(target.get("model_id") or ""),
+                "profile": str(target.get("profile") or ""),
+                "api_base": str(target.get("api_base") or ""),
+                "source": str(target.get("source") or ""),
+                "runtime_path": context.runtime_path,
+            }
+        )
+        if target.get("source") != "primary":
+            return types.SimpleNamespace(allowed=False, selected=None), ()
+        if target.get("profile") != "openrouter" or "openrouter.ai" not in str(target.get("api_base") or ""):
+            raise AssertionError("scheduled eval fixture received a non-OpenRouter primary target")
+        if tuple(context.allowed_provider_kinds) != ("openrouter",) or context.fallback_allowed:
+            raise AssertionError("scheduled eval fixture lost the governed OpenRouter policy")
+        return types.SimpleNamespace(allowed=True, selected=types.SimpleNamespace()), ("fixture-proof",)
+
+    def _transport(**_kwargs: Any) -> tuple[Any, dict[str, Any]]:
+        if not transport_responses:
+            raise AssertionError("scheduled eval fixture made more transport calls than expected")
+        return transport_responses.pop(0), {"usage": {"prompt_tokens": 1, "completion_tokens": 1}}
+
+    def _route_event(**kwargs: Any) -> None:
+        route_events.append(kwargs)
+
+    with ExitStack() as stack:
+        for name, value in {
+            "default_model": "openrouter/anthropic/claude-sonnet-4",
+            "llm_api_key": "primary-key",
+            "openrouter_api_key": "primary-key",
+            "llm_api_base": "https://openrouter.ai/api/v1",
+            "openrouter_provider_only": True,
+            "openrouter_allowed_upstreams": "openai",
+            "openrouter_allow_fallbacks": False,
+            "openrouter_require_parameters": True,
+            "openrouter_data_collection": "deny",
+            "openrouter_zero_data_retention": True,
+            "local_model": "ollama/llama3.2",
+            "local_llm_api_key": "",
+            "local_llm_api_base": "http://localhost:11434/v1",
+            "local_runtime_paths": "daily_briefing,evening_review,activity_digest,weekly_activity_review",
+            "fallback_model": "",
+            "fallback_models": "",
+        }.items():
+            stack.enter_context(patch.object(settings, name, value))
+        for target, replacement in (
+            ("src.model_fabric.caller_context.effective_workload_policy", patch("src.model_fabric.caller_context.effective_workload_policy", return_value=policy)),
+            ("src.llm_runtime._governed_preflight_target", patch("src.llm_runtime._governed_preflight_target", side_effect=_preflight)),
+            ("src.llm_runtime._governed_openai_chat_completion", patch("src.llm_runtime._governed_openai_chat_completion", side_effect=_transport)),
+            ("src.llm_runtime._new_route_receipt_session", patch("src.llm_runtime._new_route_receipt_session", return_value=None)),
+            ("src.llm_runtime._log_llm_runtime_event_sync", patch("src.llm_runtime._log_llm_runtime_event_sync", side_effect=_route_event)),
+            ("src.observer.manager.context_manager", patch("src.observer.manager.context_manager", mock_context_manager)),
+            ("src.observer.screen_repository.screen_observation_repo.get_daily_summary", patch("src.observer.screen_repository.screen_observation_repo.get_daily_summary", AsyncMock(return_value=daily_summary))),
+            ("src.observer.screen_repository.screen_observation_repo.get_weekly_summary", patch("src.observer.screen_repository.screen_observation_repo.get_weekly_summary", AsyncMock(return_value=weekly_summary))),
+            ("src.memory.soul.read_soul", patch("src.memory.soul.read_soul", return_value="# Soul\nName: Hero")),
+            ("src.scheduler.jobs.evening_review._count_messages_today", patch("src.scheduler.jobs.evening_review._count_messages_today", AsyncMock(return_value=(5, False)))),
+            ("src.scheduler.jobs.evening_review._get_completed_goals_today", patch("src.scheduler.jobs.evening_review._get_completed_goals_today", AsyncMock(return_value=(["Close routing gap"], False)))),
+            ("src.memory.vector_store.search_with_status", patch("src.memory.vector_store.search_with_status", return_value=([{"category": "memory", "text": "Prefer local summaries"}], False))),
+            ("src.observer.delivery.deliver_or_queue", patch("src.observer.delivery.deliver_or_queue", mock_deliver)),
+        ):
+            stack.enter_context(replacement)
         await _run_scheduler_eval_job("daily_briefing", run_daily_briefing)
         await _run_scheduler_eval_job("evening_review", run_evening_review)
         await _run_scheduler_eval_job("activity_digest", run_activity_digest)
         await _run_scheduler_eval_job("weekly_activity_review", run_weekly_activity_review)
 
-    assert mock_completion.call_count == 4
+    assert len(transport_targets) == 4
     routed_models = {
-        "daily_briefing": mock_completion.call_args_list[0].kwargs["model"],
-        "evening_review": mock_completion.call_args_list[1].kwargs["model"],
-        "activity_digest": mock_completion.call_args_list[2].kwargs["model"],
-        "weekly_activity_review": mock_completion.call_args_list[3].kwargs["model"],
+        target["runtime_path"]: target["model_id"]
+        for target in transport_targets
     }
     routed_api_bases = {
-        "daily_briefing": mock_completion.call_args_list[0].kwargs["api_base"],
-        "evening_review": mock_completion.call_args_list[1].kwargs["api_base"],
-        "activity_digest": mock_completion.call_args_list[2].kwargs["api_base"],
-        "weekly_activity_review": mock_completion.call_args_list[3].kwargs["api_base"],
+        target["runtime_path"]: target["api_base"]
+        for target in transport_targets
     }
-    assert set(routed_models.values()) == {"ollama/llama3.2"}
-    assert set(routed_api_bases.values()) == {"http://localhost:11434/v1"}
+    assert set(routed_models.values()) == {"openrouter/anthropic/claude-sonnet-4"}
+    assert set(routed_api_bases.values()) == {"https://openrouter.ai/api/v1"}
+    assert all(target["profile"] == "openrouter" for target in transport_targets)
     return {
-        "runtime_profile": "local",
+        "runtime_profile": "openrouter",
         "routed_models": routed_models,
         "routed_api_bases": routed_api_bases,
         "delivery_count": mock_deliver.await_count,
+        "fallback_forbidden": all(target["source"] == "primary" for target in transport_targets),
+        "route_event_count": len([event for event in route_events if event.get("event_type") == "llm_primary_success"]),
     }
 
 
@@ -27758,19 +27818,19 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
     EvalScenario(
         name="runtime_model_overrides",
         category="runtime",
-        description="Runtime paths can override their primary model selection without changing the global default or local-routing baseline.",
+        description="Canonical runtime paths ignore persisted model overrides and keep the governed OpenRouter model identity.",
         runner=_eval_runtime_model_overrides,
     ),
     EvalScenario(
         name="runtime_fallback_overrides",
         category="runtime",
-        description="Runtime paths can override their ordered fallback chain without changing the global fallback baseline.",
+        description="Canonical runtime paths reject persisted provider fallback chains and keep the active no-fallback boundary.",
         runner=_eval_runtime_fallback_overrides,
     ),
     EvalScenario(
         name="runtime_profile_preferences",
         category="runtime",
-        description="Runtime paths can prefer an ordered local-vs-default profile chain before explicit fallback models.",
+        description="Canonical runtime paths ignore persisted local-vs-default preferences and resolve to the OpenRouter profile.",
         runner=_eval_runtime_profile_preferences,
     ),
     EvalScenario(
@@ -27782,19 +27842,19 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
     EvalScenario(
         name="provider_policy_capabilities",
         category="runtime",
-        description="Runtime-path policy intents can prefer local-first primary routing and capability-matched fallback targets.",
+        description="Legacy capability preferences cannot move canonical routes away from the OpenRouter boundary.",
         runner=_eval_provider_policy_capabilities,
     ),
     EvalScenario(
         name="provider_policy_scoring",
         category="runtime",
-        description="Runtime-path policy scoring can rank targets by weighted capability value instead of only intent order.",
+        description="Legacy weighted provider scoring cannot select a non-OpenRouter or fallback target on canonical routes.",
         runner=_eval_provider_policy_scoring,
     ),
     EvalScenario(
         name="provider_policy_safeguards",
         category="runtime",
-        description="Runtime-path safeguards can require specific capabilities and steer away from targets that violate cost or latency guardrails when compliant targets exist.",
+        description="Canonical route safeguards retain the OpenRouter primary and forbid provider fallback when legacy guardrails conflict.",
         runner=_eval_provider_policy_safeguards,
     ),
     EvalScenario(
@@ -29502,7 +29562,7 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
     EvalScenario(
         name="daily_briefing_fallback",
         category="proactive",
-        description="Daily briefing survives a primary provider failure and still delivers via fallback.",
+        description="Daily briefing fails closed when the governed OpenRouter route has no compliant target and does not deliver a misleading fallback.",
         runner=_eval_daily_briefing_fallback,
     ),
     EvalScenario(
@@ -29544,7 +29604,7 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
     EvalScenario(
         name="scheduled_local_runtime_profile",
         category="runtime",
-        description="All current scheduled completion-based jobs can route through the first-class local runtime profile.",
+        description="All current scheduled completion-based jobs use the governed OpenRouter profile and forbid local runtime fallback.",
         runner=_eval_scheduled_local_runtime_profile,
     ),
     EvalScenario(

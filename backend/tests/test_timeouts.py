@@ -40,7 +40,12 @@ class TestRestChatTimeout:
     @patch("src.api.chat.build_agent")
     @patch("src.api.chat.create_onboarding_agent")
     async def test_returns_504_on_timeout(
-        self, mock_onboarding, mock_create_agent, mock_search, client
+        self,
+        mock_onboarding,
+        mock_create_agent,
+        mock_search,
+        client,
+        mocked_canonical_inference_context,
     ):
         mock_agent = MagicMock()
         mock_agent.run.side_effect = _slow_run

@@ -8,7 +8,7 @@ from config.settings import settings
 from src.approval.runtime import reset_runtime_context, set_runtime_context
 from src.llm_runtime import provider_profiles
 from src.model_fabric.caller_context import build_canonical_inference_context
-from src.model_fabric.contracts import ProviderProfile
+from src.model_fabric.contracts import OPENROUTER_API_BASE, ProviderProfile
 from src.model_fabric.configuration import (
     CONFIG_SCHEMA_VERSION,
     _configuration_from_payload,
@@ -25,26 +25,48 @@ from src.security.trust_contract import (
 )
 
 
-@pytest.fixture(autouse=True)
-def _legacy_provider_compatibility_mode(monkeypatch):
-    """The broad settings API matrix covers retained historical profiles."""
-    monkeypatch.setattr(settings, "openrouter_provider_only", False)
+PERSISTED_PROFILE_ID = "persisted-openrouter"
+PERSISTED_MODEL = "anthropic/claude-sonnet-4"
+_OPENROUTER_OPTIONS = {
+    "provider": {
+        "only": ["anthropic"],
+        "allow_fallbacks": False,
+        "require_parameters": True,
+        "data_collection": "deny",
+        "zdr": True,
+    }
+}
 
 
-def _profile_payload(*, profile_id="persisted-local"):
+def _capability_probe_policy(*, profile_id: str = PERSISTED_PROFILE_ID):
+    return {
+        "runtime_path": "capability_probe",
+        "egress_class": "cloud_allowed_full",
+        "cloud_egress_acknowledged": True,
+        "allowed_profile_ids": [profile_id],
+        "allowed_provider_kinds": ["openrouter"],
+        "max_cost_microusd": 5000,
+    }
+
+
+def _profile_payload(*, profile_id=PERSISTED_PROFILE_ID):
     return {
         "id": profile_id,
-        "provider_kind": "openai_compatible",
-        "model": "gemma-canary",
-        "api_base": "http://192.168.1.26:8001/v1",
+        "provider_kind": "openrouter",
+        "model": PERSISTED_MODEL,
+        "api_base": OPENROUTER_API_BASE,
+        "secret_env": "OPENROUTER_API_KEY",
+        "options": _OPENROUTER_OPTIONS,
         "capabilities": ["text", "structured_output"],
         "enabled": True,
-        "keyless": True,
+        "keyless": False,
         "transport_adapter": "openai_compatible_chat",
         "context_window_tokens": 8192,
         "max_output_tokens": 1024,
-        "local_resource_ms": 2000,
         "max_latency_ms": 2000,
+        "cost_microusd": 500,
+        "cost_source": "test-pricing",
+        "cost_source_updated_at": time.time() - 10,
         "task_class": "interactive_chat",
         "task_classes": ["interactive_chat"],
     }
@@ -60,7 +82,6 @@ def _remote_profile_payload(*, cost_source: str = "provider_pricing_v1"):
             "cost_source_updated_at": time.time() - 10,
         }
     )
-    profile.pop("local_resource_ms")
     return profile
 
 
@@ -70,6 +91,14 @@ def model_fabric_workspace(tmp_path, monkeypatch):
 
     clear_receipt_persistence_observations()
     monkeypatch.setattr(settings, "workspace_dir", str(tmp_path))
+    monkeypatch.setattr(settings, "openrouter_provider_only", True)
+    monkeypatch.setattr(settings, "openrouter_api_key", "test-openrouter-key")
+    monkeypatch.setattr(settings, "openrouter_allowed_upstreams", "anthropic")
+    monkeypatch.setattr(settings, "openrouter_allow_fallbacks", False)
+    monkeypatch.setattr(settings, "openrouter_require_parameters", True)
+    monkeypatch.setattr(settings, "openrouter_data_collection", "deny")
+    monkeypatch.setattr(settings, "openrouter_zero_data_retention", True)
+    monkeypatch.setattr(settings, "screen_analysis_model", "")
     principal = TrustPrincipal(
         principal_id="operator-test",
         principal_type=PrincipalType.OPERATOR,
@@ -94,8 +123,9 @@ async def test_put_get_configuration_becomes_canonical_profile_and_policy(client
                     "runtime_path": "chat_agent",
                     "egress_class": "cloud_allowed_full",
                     "cloud_egress_acknowledged": True,
-                    "allowed_profile_ids": ["persisted-local"],
-                    "fallback_allowed": True,
+                    "allowed_profile_ids": [PERSISTED_PROFILE_ID],
+                    "allowed_provider_kinds": ["openrouter"],
+                    "fallback_allowed": False,
                     "max_cost_microusd": 5000,
                 }
             ],
@@ -104,9 +134,9 @@ async def test_put_get_configuration_becomes_canonical_profile_and_policy(client
     assert response.status_code == 200
     payload = response.json()
     assert payload["status"] == "ready"
-    assert payload["persisted_profile_ids"] == ["persisted-local"]
+    assert payload["persisted_profile_ids"] == [PERSISTED_PROFILE_ID]
     assert payload["defaults"] == {"egress_class": "local_only", "fallback_allowed": False}
-    assert "persisted-local" in provider_profiles()
+    assert PERSISTED_PROFILE_ID in provider_profiles()
 
     principal = TrustPrincipal(
         principal_id="operator-test",
@@ -123,8 +153,9 @@ async def test_put_get_configuration_becomes_canonical_profile_and_policy(client
         session_id="session-test",
     )
     assert context.egress_class is EgressClass.CLOUD_ALLOWED_FULL
-    assert context.allowed_profile_ids == ("persisted-local",)
-    assert context.fallback_allowed is True
+    assert context.allowed_profile_ids == (PERSISTED_PROFILE_ID,)
+    assert context.allowed_provider_kinds == ("openrouter",)
+    assert context.fallback_allowed is False
     assert context.requirements.max_cost_microusd == 5000
 
 
@@ -239,10 +270,7 @@ async def test_manual_canary_is_exact_bounded_sanitized_and_visible_in_runtime_s
         json={
             "profiles": [_profile_payload()],
             "workload_policies": [
-                {
-                    "runtime_path": "capability_probe",
-                    "allowed_profile_ids": ["persisted-local"],
-                }
+                _capability_probe_policy(),
             ],
         },
     )
@@ -265,7 +293,7 @@ async def test_manual_canary_is_exact_bounded_sanitized_and_visible_in_runtime_s
         response = await client.post(
             "/api/settings/model-fabric/canary",
             json={
-                "profile_id": "persisted-local",
+                "profile_id": PERSISTED_PROFILE_ID,
                 "capability": "text",
                 "timeout_seconds": 2,
                 "proof_ttl_seconds": 120,
@@ -276,18 +304,18 @@ async def test_manual_canary_is_exact_bounded_sanitized_and_visible_in_runtime_s
     assert payload["outcome"] == "passed"
     assert payload["receipt_persistence"] == "persisted"
     assert payload["proof_persistence"] == "persisted"
-    assert payload["proof"]["profile_id"] == "persisted-local"
+    assert payload["proof"]["profile_id"] == PERSISTED_PROFILE_ID
     assert isinstance(payload["proof"]["checked_at"], str)
     assert isinstance(payload["proof"]["expires_at"], str)
     assert "output" not in payload
     assert transport.await_count == 1
     candidate = transport.await_args.args[0]
-    assert candidate.id == "persisted-local"
+    assert candidate.id == PERSISTED_PROFILE_ID
     assert transport.await_args.kwargs["timeout_seconds"] == 2
-    fixture = _canary_fixture(provider_profiles()["persisted-local"], "text")
+    fixture = _canary_fixture(provider_profiles()[PERSISTED_PROFILE_ID], "text")
     assert captured_contexts[0].data_digest == canonical_digest(fixture["digest_payload"])
     assert fixture["json"] == {
-        "model": "gemma-canary",
+        "model": PERSISTED_MODEL,
         "messages": [{"role": "user", "content": "Reply with CANARY_OK only."}],
         "max_tokens": 64,
     }
@@ -299,14 +327,14 @@ async def test_manual_canary_is_exact_bounded_sanitized_and_visible_in_runtime_s
     assert "orchestrator_agent" in fabric["topology"]["text"]
     assert fabric["topology"]["vlm"] == ["screenshot_image_analysis"]
     probe = fabric["workloads"]["capability_probe"]
-    assert probe["selected"]["profile_id"] == "persisted-local"
+    assert probe["selected"]["profile_id"] == PERSISTED_PROFILE_ID
     assert probe["attempted"]["outcome"] == "succeeded"
-    assert probe["succeeded"]["profile_id"] == "persisted-local"
+    assert probe["succeeded"]["profile_id"] == PERSISTED_PROFILE_ID
     assert probe["fallback_used"] is False
     assert probe["degradation_codes"] == []
     proof_status = next(
         item for item in fabric["proofs"]
-        if item["profile_id"] == "persisted-local" and item["capability"] == "text"
+        if item["profile_id"] == PERSISTED_PROFILE_ID and item["capability"] == "text"
     )
     assert proof_status["status"] == "fresh"
 
@@ -318,7 +346,10 @@ async def test_failed_canary_is_visible_as_failed_but_never_routable(
 ):
     configured = await client.put(
         "/api/settings/model-fabric",
-        json={"profiles": [_profile_payload()]},
+        json={
+            "profiles": [_profile_payload()],
+            "workload_policies": [_capability_probe_policy()],
+        },
     )
     assert configured.status_code == 200
 
@@ -328,7 +359,7 @@ async def test_failed_canary_is_visible_as_failed_but_never_routable(
     with patch("src.api.model_fabric_settings._execute_canary_transport", transport):
         canary = await client.post(
             "/api/settings/model-fabric/canary",
-            json={"profile_id": "persisted-local", "capability": "text"},
+            json={"profile_id": PERSISTED_PROFILE_ID, "capability": "text"},
         )
     assert canary.status_code == 200
     assert canary.json()["outcome"] == "failed"
@@ -336,7 +367,7 @@ async def test_failed_canary_is_visible_as_failed_but_never_routable(
 
     response = await client.get("/api/settings/model-fabric")
     profile = next(
-        item for item in response.json()["profiles"] if item["id"] == "persisted-local"
+        item for item in response.json()["profiles"] if item["id"] == PERSISTED_PROFILE_ID
     )
     assert profile["routable"] is False
     assert "proof_failed:text" in profile["non_routable_reasons"]
@@ -344,7 +375,7 @@ async def test_failed_canary_is_visible_as_failed_but_never_routable(
     runtime = await client.get("/api/runtime/status")
     proof_status = next(
         item for item in runtime.json()["model_fabric"]["proofs"]
-        if item["profile_id"] == "persisted-local" and item["capability"] == "text"
+        if item["profile_id"] == PERSISTED_PROFILE_ID and item["capability"] == "text"
     )
     assert proof_status["status"] == "failed"
     assert proof_status["outcome"] == "failed"
@@ -355,19 +386,14 @@ def test_chat_canary_digest_payload_is_exact_transport_json_for_tool_and_vision(
     from src.api.model_fabric_settings import _canary_fixture
     from src.model_fabric import ProviderProfile
 
-    profile = ProviderProfile(
-        id="chat-test",
-        provider_kind="openai_compatible",
-        model="openai/chat-model",
-        api_base="http://127.0.0.1:8000/v1",
-    )
+    profile = ProviderProfile(**_profile_payload(profile_id="chat-test"))
     fixture = _canary_fixture(profile, capability)
 
     assert fixture["digest_payload"] is fixture["json"]
     assert canonical_digest(fixture["digest_payload"]) == canonical_digest(fixture["json"])
     assert "canary_version" not in fixture["digest_payload"]
     assert "transport" not in fixture["digest_payload"]
-    assert fixture["json"]["model"] == "openai/chat-model"
+    assert fixture["json"]["model"] == PERSISTED_MODEL
     if capability == "tool_use":
         assert fixture["json"]["tools"]
         assert fixture["json"]["tool_choice"]
@@ -376,28 +402,28 @@ def test_chat_canary_digest_payload_is_exact_transport_json_for_tool_and_vision(
         assert content[1]["type"] == "image_url"
 
 
-def test_vlm_canary_digest_payload_is_exact_logical_multipart_body():
+def test_openrouter_vision_canary_digest_payload_is_exact_transport_json():
     from src.api.model_fabric_settings import _canary_fixture
     from src.model_fabric import ProviderProfile
 
-    profile = ProviderProfile(
-        id="vlm-test",
-        provider_kind="openai_compatible",
-        model="vlm-model",
-        api_base="http://192.168.1.26:8001",
-        transport_adapter="vlm_analyze_file",
+    payload = _profile_payload(profile_id="openrouter-screenshot-vision")
+    payload.update(
+        {
+            "capabilities": ["text", "vision", "structured_output"],
+            "task_class": "vision_analysis",
+            "task_classes": ["vision_analysis"],
+        }
     )
+    profile = ProviderProfile(**payload)
     fixture = _canary_fixture(profile, "vision")
 
-    assert fixture["digest_payload"] == {
-        "fields": fixture["form"],
-        "file": {
-            "filename": "canary.png",
-            "content_type": "image/png",
-            "sha256": fixture["digest_payload"]["file"]["sha256"],
-        },
-    }
-    assert set(fixture["digest_payload"]) == {"fields", "file"}
+    assert fixture["digest_payload"] is fixture["json"]
+    assert canonical_digest(fixture["digest_payload"]) == canonical_digest(fixture["json"])
+    assert fixture["json"]["model"] == PERSISTED_MODEL
+    content = fixture["json"]["messages"][0]["content"]
+    assert content[1]["type"] == "image_url"
+    assert "canary_version" not in fixture["digest_payload"]
+    assert "transport" not in fixture["digest_payload"]
 
 
 @pytest.mark.asyncio
@@ -432,7 +458,11 @@ async def test_health_and_latency_canary_api_use_real_transport_and_persist_proo
             workload_policies=(
                 WorkloadPolicy(
                     runtime_path="capability_probe",
+                    egress_class=EgressClass.CLOUD_ALLOWED_FULL,
+                    cloud_egress_acknowledged=True,
                     allowed_profile_ids=(profile.id,),
+                    allowed_provider_kinds=("openrouter",),
+                    max_cost_microusd=5000,
                 ),
             ),
             status="ready",
@@ -492,7 +522,7 @@ async def test_health_and_latency_canary_api_use_real_transport_and_persist_proo
     )
     payload = await run_model_fabric_canary(
         CapabilityCanaryRequest(
-            profile_id="persisted-local",
+            profile_id=PERSISTED_PROFILE_ID,
             capability=capability,
             timeout_seconds=2,
             proof_ttl_seconds=120,
@@ -520,10 +550,13 @@ async def test_health_and_latency_canary_api_use_real_transport_and_persist_proo
         assert payload["proof"]["proven_value"] == expected_value
     assert calls == [
         (
-            "http://192.168.1.26:8001/v1/chat/completions",
-            {"Content-Type": "application/json"},
+            f"{OPENROUTER_API_BASE}/chat/completions",
             {
-                "model": "gemma-canary",
+                "Authorization": "Bearer test-openrouter-key",
+                "Content-Type": "application/json",
+            },
+            {
+                "model": PERSISTED_MODEL,
                 "messages": [{"role": "user", "content": "Reply with CANARY_OK only."}],
                 "max_tokens": 64,
             },
@@ -532,71 +565,85 @@ async def test_health_and_latency_canary_api_use_real_transport_and_persist_proo
 
 
 @pytest.mark.asyncio
-async def test_canonical_screenshot_vlm_profile_is_configurable_probeable_and_status_visible(
+async def test_canonical_openrouter_screenshot_profile_is_configurable_probeable_and_status_visible(
     client,
     model_fabric_workspace,
 ):
     from src.vlm_runtime import SCREENSHOT_VLM_PROFILE_ID
 
-    with (
-        patch.object(settings, "seraph_vlm_base_url", "http://192.168.1.26:8001"),
-        patch.object(settings, "local_vlm_model", "gemma-vlm-test"),
-        patch.object(settings, "local_vlm_timeout_seconds", 2),
-    ):
-        configured = provider_profiles()[SCREENSHOT_VLM_PROFILE_ID]
-        assert configured.transport_adapter == "vlm_analyze_file"
-        assert configured.api_base == "http://192.168.1.26:8001"
-        assert configured.capabilities == ("vision", "structured_output")
-        assert configured.max_latency_ms == 2000
-        assert configured.local_resource_ms == 2000
+    vision_profile = _profile_payload(profile_id=SCREENSHOT_VLM_PROFILE_ID)
+    vision_profile.update(
+        {
+            "capabilities": ["text", "vision", "structured_output"],
+            "task_class": "vision_analysis",
+            "task_classes": ["vision_analysis"],
+            "max_output_tokens": 1400,
+        }
+    )
+    configured_response = await client.put(
+        "/api/settings/model-fabric",
+        json={
+            "profiles": [vision_profile],
+            "workload_policies": [_capability_probe_policy(profile_id=SCREENSHOT_VLM_PROFILE_ID)],
+        },
+    )
+    assert configured_response.status_code == 200, configured_response.text
 
-        settings_response = await client.get("/api/settings/model-fabric")
-        assert settings_response.status_code == 200
-        status_profile = next(
-            item for item in settings_response.json()["profiles"]
-            if item["id"] == SCREENSHOT_VLM_PROFILE_ID
-        )
-        assert status_profile["transport_adapter"] == "vlm_analyze_file"
-        assert status_profile["model_fabric_eligible"] is True
-        assert status_profile["canary_timeout_seconds"] == 2
+    configured = provider_profiles()[SCREENSHOT_VLM_PROFILE_ID]
+    assert configured.provider_kind == "openrouter"
+    assert configured.transport_adapter == "openai_compatible_chat"
+    assert configured.api_base == OPENROUTER_API_BASE
+    assert configured.capabilities == ("text", "vision", "structured_output")
+    assert configured.max_latency_ms == 2000
+    assert configured.local_resource_ms is None
 
-        transport = AsyncMock(
-            return_value=CapabilityProbeObservation(True, proven_value="verified")
-        )
-        with patch("src.api.model_fabric_settings._execute_canary_transport", transport):
-            canary = await client.post(
-                "/api/settings/model-fabric/canary",
-                json={
-                    "profile_id": SCREENSHOT_VLM_PROFILE_ID,
-                    "capability": "vision",
-                    "timeout_seconds": 2,
-                    "proof_ttl_seconds": 120,
-                },
-            )
-        assert canary.status_code == 200, canary.text
-        assert canary.json()["outcome"] == "passed"
-        assert transport.await_args.args[0].id == SCREENSHOT_VLM_PROFILE_ID
+    settings_response = await client.get("/api/settings/model-fabric")
+    assert settings_response.status_code == 200
+    status_profile = next(
+        item for item in settings_response.json()["profiles"]
+        if item["id"] == SCREENSHOT_VLM_PROFILE_ID
+    )
+    assert status_profile["provider_kind"] == "openrouter"
+    assert status_profile["transport_adapter"] == "openai_compatible_chat"
+    assert status_profile["model_fabric_eligible"] is True
+    assert status_profile["canary_timeout_seconds"] == 2
 
-        runtime = await client.get("/api/runtime/status")
-        proof_status = next(
-            item for item in runtime.json()["model_fabric"]["proofs"]
-            if item["profile_id"] == SCREENSHOT_VLM_PROFILE_ID
-            and item["capability"] == "vision"
+    transport = AsyncMock(
+        return_value=CapabilityProbeObservation(True, proven_value="verified")
+    )
+    with patch("src.api.model_fabric_settings._execute_canary_transport", transport):
+        canary = await client.post(
+            "/api/settings/model-fabric/canary",
+            json={
+                "profile_id": SCREENSHOT_VLM_PROFILE_ID,
+                "capability": "vision",
+                "timeout_seconds": 2,
+                "proof_ttl_seconds": 120,
+            },
         )
-        assert proof_status["status"] == "fresh"
+    assert canary.status_code == 200, canary.text
+    assert canary.json()["outcome"] == "passed"
+    assert transport.await_args.args[0].id == SCREENSHOT_VLM_PROFILE_ID
+
+    runtime = await client.get("/api/runtime/status")
+    proof_status = next(
+        item for item in runtime.json()["model_fabric"]["proofs"]
+        if item["profile_id"] == SCREENSHOT_VLM_PROFILE_ID
+        and item["capability"] == "vision"
+    )
+    assert proof_status["status"] == "fresh"
 
 
 @pytest.mark.asyncio
-async def test_canonical_vlm_canary_timeout_matches_declared_default_bound(
+async def test_canonical_openrouter_canary_timeout_matches_declared_default_bound(
     client,
     model_fabric_workspace,
 ):
     from src.vlm_runtime import SCREENSHOT_VLM_PROFILE_ID
 
     with (
-        patch.object(settings, "seraph_vlm_base_url", "http://192.168.1.26:8001"),
-        patch.object(settings, "local_vlm_model", "gemma-vlm-test"),
-        patch.object(settings, "local_vlm_timeout_seconds", 120),
+        patch.object(settings, "screen_analysis_model", "openrouter/anthropic/claude-sonnet-4"),
+        patch.object(settings, "agent_chat_timeout", 120),
     ):
         response = await client.get("/api/settings/model-fabric")
 
@@ -614,14 +661,17 @@ async def test_manual_canary_is_process_serialized(client, model_fabric_workspac
 
     configured = await client.put(
         "/api/settings/model-fabric",
-        json={"profiles": [_profile_payload()]},
+        json={
+            "profiles": [_profile_payload()],
+            "workload_policies": [_capability_probe_policy()],
+        },
     )
     assert configured.status_code == 200
     assert _MANUAL_CANARY_LOCK.acquire(blocking=False)
     try:
         response = await client.post(
             "/api/settings/model-fabric/canary",
-            json={"profile_id": "persisted-local", "capability": "text"},
+            json={"profile_id": PERSISTED_PROFILE_ID, "capability": "text"},
         )
     finally:
         _MANUAL_CANARY_LOCK.release()
@@ -636,12 +686,15 @@ async def test_static_guardrails_are_not_exposed_as_fake_canaries(
 ):
     configured = await client.put(
         "/api/settings/model-fabric",
-        json={"profiles": [_profile_payload()]},
+        json={
+            "profiles": [_profile_payload()],
+            "workload_policies": [_capability_probe_policy()],
+        },
     )
     assert configured.status_code == 200
     response = await client.post(
         "/api/settings/model-fabric/canary",
-        json={"profile_id": "persisted-local", "capability": "context_tokens"},
+        json={"profile_id": PERSISTED_PROFILE_ID, "capability": "context_tokens"},
     )
     assert response.status_code == 422
     assert response.json()["detail"] == "Unsupported model capability"
@@ -651,7 +704,10 @@ async def test_static_guardrails_are_not_exposed_as_fake_canaries(
 async def test_unauthenticated_canary_is_zero_transport(client, model_fabric_workspace):
     configured = await client.put(
         "/api/settings/model-fabric",
-        json={"profiles": [_profile_payload()]},
+        json={
+            "profiles": [_profile_payload()],
+            "workload_policies": [_capability_probe_policy()],
+        },
     )
     assert configured.status_code == 200
     transport = AsyncMock(return_value=CapabilityProbeObservation(True, proven_value="verified"))
@@ -660,7 +716,7 @@ async def test_unauthenticated_canary_is_zero_transport(client, model_fabric_wor
         with patch("src.api.model_fabric_settings._execute_canary_transport", transport):
             response = await client.post(
                 "/api/settings/model-fabric/canary",
-                json={"profile_id": "persisted-local", "capability": "text"},
+                json={"profile_id": PERSISTED_PROFILE_ID, "capability": "text"},
             )
     finally:
         reset_runtime_context(tokens)
@@ -716,7 +772,10 @@ async def test_receipt_persistence_degradation_remains_operator_visible(
 ):
     configured = await client.put(
         "/api/settings/model-fabric",
-        json={"profiles": [_profile_payload()]},
+        json={
+            "profiles": [_profile_payload()],
+            "workload_policies": [_capability_probe_policy()],
+        },
     )
     assert configured.status_code == 200
     transport = AsyncMock(return_value=CapabilityProbeObservation(True, proven_value="verified"))
@@ -730,7 +789,7 @@ async def test_receipt_persistence_degradation_remains_operator_visible(
     ):
         response = await client.post(
             "/api/settings/model-fabric/canary",
-            json={"profile_id": "persisted-local", "capability": "text"},
+            json={"profile_id": PERSISTED_PROFILE_ID, "capability": "text"},
         )
     assert response.status_code == 200
     assert response.json()["receipt_persistence"] == "degraded"
@@ -813,7 +872,7 @@ def test_vlm_canary_rejects_health_only_shape_and_requires_analysis_content():
     ) is False
 
 
-def test_advisory_profile_tags_do_not_create_fake_proof_requirements():
+def test_legacy_advisory_profile_tags_remain_excluded_without_fake_proof_requirements():
     from src.api.model_fabric_settings import _operator_profile_statuses
 
     profile = ProviderProfile(
@@ -837,6 +896,9 @@ def test_advisory_profile_tags_do_not_create_fake_proof_requirements():
     with patch("src.api.model_fabric_settings.provider_profiles", return_value={profile.id: profile}):
         status = _operator_profile_statuses(proofs)[0]
 
-    assert status["routable"] is True
+    assert status["routable"] is False
+    assert status["model_fabric_eligible"] is False
+    assert status["model_fabric_exclusion_reason"] == "provider_kind_not_allowed"
     assert status["capabilities"] == ["text", "local", "private", "reasoning_profile", "coding"]
+    assert status["non_routable_reasons"] == ["provider_kind_not_allowed"]
     assert not any("local" in reason or "coding" in reason for reason in status["non_routable_reasons"])

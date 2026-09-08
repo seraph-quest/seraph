@@ -65,6 +65,10 @@ _EGRESS_RANK = {
     EgressClass.CLOUD_ALLOWED_REDACTED: 1,
     EgressClass.CLOUD_ALLOWED_FULL: 2,
 }
+_DEFAULT_PORT_BY_SCHEME = {
+    "http": 80,
+    "https": 443,
+}
 
 
 def _value(value: object) -> str:
@@ -751,6 +755,16 @@ def network_target_allowed(
         for rule in path_rules
     ):
         return BoundaryCheck(False, "network_path_not_allowlisted", normalized_host)
+    if port is not None:
+        if not (1 <= port <= 65535):
+            return BoundaryCheck(False, "network_port_invalid", normalized_host)
+        # CapabilityScope currently declares hosts and paths, but has no port
+        # field. Treat an explicit non-default port as an undeclared
+        # destination instead of silently widening a host-only grant to another
+        # service on the same host. Reject it before DNS/site-policy work so a
+        # denied destination causes no resolver side effect.
+        if port != _DEFAULT_PORT_BY_SCHEME.get(scheme):
+            return BoundaryCheck(False, "network_port_not_allowlisted", normalized_host)
     site = evaluate_site_access(url, resolve_dns=resolve_dns)
     if not site.allowed:
         return BoundaryCheck(False, f"network_site_policy_{site.reason or 'blocked'}", normalized_host)
@@ -759,8 +773,6 @@ def network_target_allowed(
         # Literal public addresses are accepted when the local resolver returns
         # their address through site_policy.
         return BoundaryCheck(False, "network_destination_unresolved", normalized_host)
-    if port is not None and not (1 <= port <= 65535):
-        return BoundaryCheck(False, "network_port_invalid", normalized_host)
     return BoundaryCheck(True, "network_target_allowed", f"{scheme}://{normalized_host}{normalized_path}", matched_rule)
 
 

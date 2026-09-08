@@ -177,6 +177,10 @@ a failed egress decision sends zero request bytes. Route receipts record the act
 provider/model, destination class, transformation, fallback, latency, cost estimate
 when available, and degradation without including prompt contents.
 
+Capability network scopes currently bind a host and path, not an arbitrary service
+port. An explicit non-default HTTP(S) port is therefore denied before transport
+until the capability contract declares and enforces a port-specific grant.
+
 Provider credentials configure a route but do not approve data disclosure. The
 strict-local synchronous path now accepts only an explicit local runtime profile
 using HTTP(S) `localhost` or a literal RFC1918, IPv6 ULA, loopback, or link-local

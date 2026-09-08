@@ -159,7 +159,7 @@ async def test_artifact_storage_settings_exposes_safe_operator_posture(client, t
 
 
 @pytest.mark.asyncio
-async def test_screen_analysis_settings_exposes_env_screenshot_folder_and_local_vlm(client, tmp_path, monkeypatch):
+async def test_screen_analysis_settings_rejects_retired_local_vlm_and_exposes_folder(client, tmp_path, monkeypatch):
     screenshot_root = tmp_path / "captures"
     screenshot_root.mkdir()
     monkeypatch.setenv("SERAPH_SCREENSHOT_FOLDER", str(screenshot_root))
@@ -172,14 +172,14 @@ async def test_screen_analysis_settings_exposes_env_screenshot_folder_and_local_
 
     assert resp.status_code == 200
     data = resp.json()
-    assert data["provider"] == "local-vlm"
-    assert data["model"] == "gemma-local"
+    assert data["provider"] == ""
+    assert data["model"] == ""
     assert data["screenshot_folder"] == str(screenshot_root.resolve())
     assert data["screenshot_folder_source"] == "SERAPH_SCREENSHOT_FOLDER"
 
 
 @pytest.mark.asyncio
-async def test_artifact_storage_exposes_gpu_vlm_runtime_without_secret(client, tmp_path, monkeypatch):
+async def test_artifact_storage_marks_legacy_gpu_vlm_runtime_inactive(client, tmp_path, monkeypatch):
     screenshot_root = tmp_path / "captures"
     screenshot_root.mkdir()
     monkeypatch.setenv("SERAPH_SCREENSHOT_FOLDER", str(screenshot_root))
@@ -199,6 +199,8 @@ async def test_artifact_storage_exposes_gpu_vlm_runtime_without_secret(client, t
     data = resp.json()
     runtime = data["local_runtime"]["vlm_runtime"]
     assert runtime["mode"] == "gpu-server"
+    assert runtime["active"] is False
+    assert runtime["disabled_reason"] == "local_vlm_disabled_openrouter_only"
     assert runtime["base_url"] == "http://192.168.1.26:8001"
     assert runtime["backend_url"] == "http://192.168.1.26:8000/v1"
     assert runtime["chat_api_base"] == "http://192.168.1.26:8001/v1"

@@ -27,6 +27,7 @@ from smolagents.models import ChatMessage, MessageRole
 from config.settings import settings
 from src.agent.prompt_compaction import compact_messages_for_local_runtime
 from src.approval.runtime import get_current_session_id, get_current_trust_principal
+from src.auth.cancellation import RuntimeRevokedError, assert_runtime_not_revoked
 from src.audit.repository import audit_repository
 from src.local_runtime_profiles import local_runtime_profile
 from src.model_fabric.contracts import (
@@ -1525,6 +1526,7 @@ def _governed_openai_chat_completion(
     """
     import httpx
 
+    assert_runtime_not_revoked()
     if decision is None or not decision.allowed or decision.selected is None:
         raise NoCompliantModelRouteError()
     candidate = decision.selected
@@ -1538,6 +1540,9 @@ def _governed_openai_chat_completion(
         headers["authorization"] = f"Bearer {api_key}"
     with httpx.Client(follow_redirects=False, timeout=httpx.Timeout(remaining)) as client:
         response = client.post(candidate.endpoint, headers=headers, json=body)
+    # A synchronous provider call cannot be force-killed from the event loop;
+    # discard its result if the operator was revoked while it was in flight.
+    assert_runtime_not_revoked()
     if 300 <= response.status_code < 400:
         raise RuntimeError("model_fabric_redirect_denied")
     response.raise_for_status()
@@ -3317,6 +3322,7 @@ class FallbackLiteLLMModel(BaseLiteLLMModel):
         tools_to_call_from=None,
         **kwargs,
     ):
+        assert_runtime_not_revoked()
         request_context = kwargs.pop("request_context", None)
         primary_model = self.model_id
         reject_legacy_external_agent_model(primary_model)
@@ -3456,6 +3462,7 @@ class FallbackLiteLLMModel(BaseLiteLLMModel):
         primary_preflight_rejected = False
 
         for index, target in enumerate(attempt_targets):
+            assert_runtime_not_revoked()
             reject_legacy_external_agent_model(target.get("model_id"))
             is_primary = target["source"] == "primary"
             route_attempt_started = False
@@ -3680,6 +3687,10 @@ class FallbackLiteLLMModel(BaseLiteLLMModel):
                         ),
                     )
                 return response
+            except RuntimeRevokedError:
+                # Revocation is a terminal authority decision; never route a
+                # revoked request through a fallback target.
+                raise
             except GpuAdmissionError as error:
                 if receipt_session is not None and route_attempt_started:
                     receipt_session.attempt_finished(
@@ -3811,6 +3822,7 @@ def completion_with_fallback_sync(
     """Execute a completion with governed canonical or transitional legacy routing."""
     import litellm
 
+    assert_runtime_not_revoked()
     if request_context is None:
         from src.model_fabric.caller_context import (
             build_canonical_inference_context,
@@ -3976,6 +3988,7 @@ def completion_with_fallback_sync(
         primary_preflight_rejected = False
 
         for index, target in enumerate(attempt_targets):
+            assert_runtime_not_revoked()
             reject_legacy_external_agent_model(target.get("model_id"))
             is_primary = target["source"] == "primary"
             route_attempt_started = False
@@ -4172,6 +4185,8 @@ def completion_with_fallback_sync(
                         ),
                     )
                 return response
+            except RuntimeRevokedError:
+                raise
             except GpuAdmissionError as error:
                 if receipt_session is not None and route_attempt_started:
                     receipt_session.attempt_finished(

@@ -12,6 +12,8 @@ from src.auth.middleware import validate_request_boundary
 from src.auth.middleware import OperatorAuthMiddleware
 from src.api.ws import _OperatorSessionRevoked, _await_authorized, watch_operator_session, websocket_chat
 from src.auth.service import AuthFailure, authenticate_token, bind_operator_principal, create_session
+from src.auth.cancellation import RuntimeRevokedError, reset_revocation_guard, set_revocation_guard
+from src.llm_runtime import _governed_openai_chat_completion
 from src.api.auth import _reset_login_throttle_for_tests, _login_source
 from src.api.auth import LoginRequest, login
 
@@ -186,6 +188,46 @@ async def test_revocation_watch_closes_socket_and_cancels_active_turn(monkeypatc
 
     with pytest.raises(_OperatorSessionRevoked):
         await _await_authorized(asyncio.sleep(10), revoked)
+
+
+@pytest.mark.asyncio
+async def test_revocation_watch_fails_closed_when_auth_store_is_unavailable(monkeypatch):
+    monkeypatch.setattr(settings, "operator_auth_revocation_poll_seconds", 0.25)
+    revoked = asyncio.Event()
+    guard = Event()
+    closed = {}
+
+    class FakeWebSocket:
+        async def close(self, *, code, reason):
+            closed.update(code=code, reason=reason)
+
+    async def _unavailable(_token, *, touch=False):
+        raise RuntimeError("database unavailable")
+
+    monkeypatch.setattr("src.api.ws.authenticate_token", _unavailable)
+    await asyncio.wait_for(
+        watch_operator_session(FakeWebSocket(), "token", revoked, guard),
+        timeout=1,
+    )
+    assert revoked.is_set()
+    assert guard.is_set()
+    assert closed == {"code": 1011, "reason": "auth_state_unavailable"}
+
+
+def test_revocation_guard_blocks_new_governed_model_transport():
+    guard = Event()
+    guard.set()
+    token = set_revocation_guard(guard)
+    try:
+        with pytest.raises(RuntimeRevokedError):
+            _governed_openai_chat_completion(
+                decision=None,
+                context=None,
+                body={},
+                api_key=None,
+            )
+    finally:
+        reset_revocation_guard(token)
 
 
 def test_login_source_only_honors_forwarding_from_trusted_proxy(monkeypatch):

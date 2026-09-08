@@ -83,6 +83,10 @@ async def _await_authorized(awaitable, revoked_event: asyncio.Event, *, timeout:
             raise _OperatorSessionRevoked
         return await work_task
     finally:
+        if not work_task.done():
+            work_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await work_task
         if not revoked_task.done():
             revoked_task.cancel()
             with suppress(asyncio.CancelledError):
@@ -109,6 +113,37 @@ async def watch_operator_session(
             with suppress(Exception):
                 await websocket.close(code=4401, reason=exc.code)
             return
+        except Exception:
+            # Losing the auth-store connection is an authorization failure. Do
+            # not leave an already accepted socket usable while revocation
+            # state is unavailable.
+            logger.exception("WebSocket operator-session validation failed; closing fail-closed")
+            revoked_event.set()
+            revocation_guard.set()
+            with suppress(Exception):
+                await websocket.close(code=1011, reason="auth_state_unavailable")
+            return
+
+
+async def _authorized_with_timeout(
+    awaitable,
+    revoked_event: asyncio.Event,
+    *,
+    timeout: float,
+):
+    """Keep a concrete timeout boundary while cleaning up on patched/cancelled waits."""
+    authorized_task = asyncio.create_task(
+        _await_authorized(awaitable, revoked_event),
+        name="operator-authorized-work",
+    )
+    try:
+        return await asyncio.wait_for(authorized_task, timeout=timeout)
+    except BaseException:
+        if not authorized_task.done():
+            authorized_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await authorized_task
+        raise
 
 
 def _format_tool_step(step_name: str, arguments: dict, specialist_names: set[str]) -> str:
@@ -225,6 +260,18 @@ async def websocket_chat(websocket: WebSocket):
         while True:
             await _ensure_operator_active()
             raw = await websocket.receive_text()
+            if auth_cookie:
+                try:
+                    operator = await authenticate_token(auth_cookie, touch=True)
+                except AuthFailure:
+                    auth_revoked.set()
+                    revocation_guard.set()
+                    raise _OperatorSessionRevoked
+                except Exception:
+                    logger.exception("WebSocket operator-session refresh failed; closing fail-closed")
+                    auth_revoked.set()
+                    revocation_guard.set()
+                    raise _OperatorSessionRevoked
             try:
                 data = json.loads(raw)
                 ws_msg = WSMessage(**data)
@@ -389,7 +436,7 @@ async def websocket_chat(websocket: WebSocket):
                         return "".join(streamed_parts).strip()
 
                     try:
-                        final_result = await _await_authorized(
+                        final_result = await _authorized_with_timeout(
                             _stream_direct_reply(),
                             auth_revoked,
                             timeout=min(settings.agent_chat_timeout, 60),
@@ -617,7 +664,7 @@ async def websocket_chat(websocket: WebSocket):
                     name=f"ws-drain:{session.id[:8]}",
                 )
                 try:
-                    await _await_authorized(
+                    await _authorized_with_timeout(
                         drain_task,
                         auth_revoked,
                         timeout=settings.agent_chat_timeout,

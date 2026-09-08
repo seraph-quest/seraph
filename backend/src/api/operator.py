@@ -8,7 +8,7 @@ import logging
 import re
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
 from config.settings import settings
@@ -116,6 +116,7 @@ from src.memory.control import (
     apply_memory_operator_control,
     get_memory_live_controls_snapshot,
 )
+from src.api.memory import authenticated_memory_actor
 from src.memory.provider_quality_gate import build_memory_provider_quality_gate_report
 from src.memory.superiority import build_m6_memory_superiority_payload
 from src.memory.superiority_benchmark import build_m6_memory_superiority_benchmark_report
@@ -4331,12 +4332,15 @@ async def get_operator_guardian_memory_live_control(
 
 
 @router.post("/operator/memory-live-controls/actions")
-async def post_operator_memory_live_control_action(request: MemoryLiveControlActionRequest):
+async def post_operator_memory_live_control_action(
+    http_request: Request,
+    request: MemoryLiveControlActionRequest,
+):
     try:
         return await apply_memory_live_control_action(
             action=request.action,
             acknowledged=_memory_live_control_acknowledgement(request),
-            actor=request.actor,
+            actor=authenticated_memory_actor(http_request),
             reason=request.reason,
             owner_session_id=request.owner_session_id,
             memory_id=request.memory_id,
@@ -4349,8 +4353,11 @@ async def post_operator_memory_live_control_action(request: MemoryLiveControlAct
 
 
 @router.post("/operator/guardian-memory-live-control/actions")
-async def post_operator_guardian_memory_live_control_action(request: MemoryLiveControlActionRequest):
-    return await post_operator_memory_live_control_action(request)
+async def post_operator_guardian_memory_live_control_action(
+    http_request: Request,
+    request: MemoryLiveControlActionRequest,
+):
+    return await post_operator_memory_live_control_action(http_request, request)
 
 
 @router.get("/operator/post-dp-guardian-learning-memory-gap-closure")
@@ -4387,7 +4394,11 @@ async def get_operator_m6_memory_superiority(
 
 
 @router.post("/operator/memory-control/{memory_id}")
-async def post_operator_memory_control(memory_id: str, request: MemoryOperatorControlRequest):
+async def post_operator_memory_control(
+    memory_id: str,
+    http_request: Request,
+    request: MemoryOperatorControlRequest,
+):
     try:
         return await apply_memory_operator_control(
             memory_id=memory_id,
@@ -4397,6 +4408,7 @@ async def post_operator_memory_control(memory_id: str, request: MemoryOperatorCo
             summary=request.summary,
             privacy_boundary=request.privacy_boundary,
             session_id=request.session_id,
+            actor=authenticated_memory_actor(http_request),
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

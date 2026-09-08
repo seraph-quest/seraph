@@ -154,6 +154,34 @@ live service, scheduler run, operator approval, external public-source
 readback, or full #736 journey receipt was produced here, and no completion or
 learning claim is made.
 
+## Branch-local #753 canonical memory actor boundary
+
+**Status:** Partial on the milestone branch; not Shipped on `develop`.
+
+Canonical memory correction, pin, forget, audit, and live-control mutations now
+bind their service and audit actor to the authenticated operator principal from
+`request.state.operator`. The test-only unauthenticated middleware bypass uses
+the same `operator:test-bypass` principal contract. Request-body `actor` fields
+remain accepted for wire compatibility, but are ignored for authority and
+receipt identity; forged values such as `attacker` cannot be persisted or
+audited. The `/api/memory/guardian-memory-live-control/actions` alias and the
+legacy `/api/operator/memory-live-controls/actions`,
+`/api/operator/guardian-memory-live-control/actions`, and
+`/api/operator/memory-control/{memory_id}` routes use the same binding. Existing
+middleware rejection remains the first boundary for unauthenticated or invalid
+sessions, and read-only memory routes are unchanged. Caller-supplied source or
+session metadata such as `source_session_id`, `owner_session_id`, and legacy
+`session_id` retains its existing scoped metadata behavior; this slice does not
+promote those fields to authority or add ownership validation.
+
+Focused route tests cover the canonical mutations, all live-control aliases,
+legacy operator control, audit actor persistence, and disabled test-bypass
+rejection. Static compilation and route registration checks pass. The focused
+pytest run was attempted with the requested 45-second bound; the sandbox could
+not download the isolated worktree dependency set, and the pre-existing backend
+virtualenv stalled during async SQLite fixture setup, so no passing pytest
+receipt is claimed here.
+
 ## Memory Upgrade Program Record
 
 The upgraded memory system is now complete through Batches A, B, and C.

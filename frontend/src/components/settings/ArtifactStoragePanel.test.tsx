@@ -535,7 +535,7 @@ describe("ArtifactStoragePanel", () => {
     expect(screen.getByText("screenshot_fast emitted visible reasoning markers")).toBeInTheDocument();
     expect(screen.getByText("12 / 15 · remaining 3")).toBeInTheDocument();
     expect(screen.getByText("9 analyzed · 3 queued")).toBeInTheDocument();
-    expect(screen.getByText("12 observations · 2 backlog · 1 failed")).toBeInTheDocument();
+    expect(screen.getByText("12 observations · 2 backlog · 1 failed · 0 blocked")).toBeInTheDocument();
     expect(screen.getByText("4 retries · 1 failed · 3 writes")).toBeInTheDocument();
     expect(screen.getByText("3 windows · latest 2026-06-20T18:30:00Z")).toBeInTheDocument();
     expect(screen.getByText("provider unavailable")).toBeInTheDocument();

@@ -725,7 +725,7 @@ class TestConsolidateSession:
         call = mock_completion.await_args.kwargs
         assert call["request_context"].data_digest == canonical_digest(call["messages"])
 
-    async def test_extracts_facts_requires_local_runtime_when_configured(self, async_db, sm):
+    async def test_extracts_facts_uses_openrouter_when_local_runtime_is_configured(self, async_db, sm):
         await sm.get_or_create("s1")
         await sm.add_message("s1", "user", "My name is Alice and I work at ACME Corp as a software engineer.")
         await sm.add_message("s1", "assistant", "Nice to meet you, Alice! That sounds like a great position at ACME Corp.")
@@ -747,7 +747,7 @@ class TestConsolidateSession:
             await consolidate_session("s1")
 
         assert mock_completion.await_args.kwargs["runtime_path"] == "session_consolidation"
-        assert mock_completion.await_args.kwargs["local_runtime_only"] is True
+        assert mock_completion.await_args.kwargs["local_runtime_only"] is False
 
     async def test_applies_soul_updates(self, async_db, sm):
         await sm.get_or_create("s1")

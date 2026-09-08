@@ -53,7 +53,7 @@ class TestAgentFactory:
         assert model is not None
 
     @patch("src.agent.factory.LiteLLMModel")
-    def test_get_model_uses_local_profile_for_chat_runtime_path(self, mock_litellm_cls):
+    def test_get_model_uses_openrouter_for_chat_runtime_path_when_local_profile_is_configured(self, mock_litellm_cls):
         mock_litellm_cls.return_value = MagicMock()
 
         from config.settings import settings
@@ -69,8 +69,10 @@ class TestAgentFactory:
             get_model()
 
         call_kwargs = mock_litellm_cls.call_args[1]
-        assert call_kwargs["model_id"] == "ollama/llama3.2"
-        assert call_kwargs["api_base"] == "http://localhost:11434/v1"
+        assert call_kwargs["model_id"] == "openrouter/anthropic/claude-sonnet-4"
+        assert call_kwargs["api_base"] == "https://openrouter.ai/api/v1"
+        assert call_kwargs["runtime_profile"] == "openrouter"
+        assert call_kwargs["runtime_path"] == "chat_agent"
 
     @patch("src.agent.factory.mcp_manager")
     @patch("src.tools.policy.context_manager.get_context", return_value=CurrentContext(tool_policy_mode="full", mcp_policy_mode="full"))

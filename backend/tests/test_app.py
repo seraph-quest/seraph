@@ -149,9 +149,9 @@ async def test_runtime_status_exposes_release_and_model(client):
     assert payload["version"] == "2026.4.11"
     assert payload["build_id"] == "SERAPH_PRIME_v2026.4.11"
     assert payload["provider"] == "openrouter"
-    assert payload["model"] == settings.default_model
+    assert payload["model"] == settings.default_model.removeprefix("openrouter/")
     assert payload["model_label"] == settings.default_model.split("/")[-1]
-    assert payload["active_profile"] == "default"
+    assert payload["active_profile"] == "openrouter"
     assert payload["default_provider"] == "openrouter"
     assert payload["default_model"] == settings.default_model
     assert isinstance(payload["provider_profiles"], list)
@@ -215,8 +215,10 @@ async def test_runtime_status_reports_openrouter_and_historical_vlm_metadata(cli
     assert payload["active_profile"] == "openrouter"
     assert payload["effective_runtime"]["provider"] == "openrouter"
     assert payload["effective_runtime"]["active_provider_policy"] == "openrouter_only"
-    assert payload["vlm_runtime"]["local_runtime_active"] is False
-    assert payload["vlm_runtime"]["live_probe"]["reason"] == "local_vlm_disabled_openrouter_only"
+    assert payload["vlm_runtime"]["active"] is False
+    assert payload["vlm_runtime"]["disabled_reason"] == "local_vlm_disabled_openrouter_only"
+    assert payload["vlm_runtime"]["live_probe"]["checked"] is False
+    assert payload["vlm_runtime"]["live_probe"]["reason"] == "deferred_fast_metadata"
     assert "secret-token" not in str(payload)
 
 
@@ -241,8 +243,10 @@ async def test_runtime_status_does_not_activate_direct_gpu_text(client):
     assert payload["api_base"] == "https://openrouter.ai/api/v1"
     assert payload["effective_runtime"]["route_label"] == "openrouter"
     assert payload["effective_runtime"]["provider_label"] == "openrouter"
-    assert payload["vlm_runtime"]["local_runtime_active"] is False
-    assert payload["vlm_runtime"]["live_probe"]["reason"] == "local_vlm_disabled_openrouter_only"
+    assert payload["vlm_runtime"]["active"] is False
+    assert payload["vlm_runtime"]["disabled_reason"] == "local_vlm_disabled_openrouter_only"
+    assert payload["vlm_runtime"]["live_probe"]["checked"] is False
+    assert payload["vlm_runtime"]["live_probe"]["reason"] == "deferred_fast_metadata"
 
 
 @pytest.mark.asyncio
@@ -271,7 +275,7 @@ async def test_runtime_status_does_not_wait_for_live_vlm_probe(client):
         "http://[malformed/v1",
     ],
 )
-async def test_runtime_status_blanks_unsafe_legacy_endpoints(client, unsafe_endpoint):
+async def test_runtime_status_uses_openrouter_and_blanks_unsafe_legacy_endpoints(client, unsafe_endpoint):
     with (
         patch.object(settings, "default_model", "openai-compatible/model"),
         patch.object(settings, "llm_api_base", unsafe_endpoint),
@@ -282,9 +286,9 @@ async def test_runtime_status_blanks_unsafe_legacy_endpoints(client, unsafe_endp
 
     assert response.status_code == 200
     payload = response.json()
-    assert payload["api_base"] == ""
+    assert payload["api_base"] == "https://openrouter.ai/api/v1"
     assert payload["default_api_base"] == ""
-    assert payload["effective_runtime"]["api_base"] == ""
+    assert payload["effective_runtime"]["api_base"] == "https://openrouter.ai/api/v1"
     assert all(profile.get("api_base") != unsafe_endpoint for profile in payload["provider_profiles"])
     serialized = str(payload)
     assert "password" not in serialized

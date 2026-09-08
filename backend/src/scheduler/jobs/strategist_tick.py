@@ -1,10 +1,13 @@
 """Strategist tick — periodic strategic reasoning via restricted agent."""
 
 import asyncio
+import hashlib
 import logging
+from datetime import datetime, timedelta, timezone
 from time import perf_counter
 
 from config.settings import settings
+from src.approval.runtime import get_current_trust_principal
 from src.agent.strategist import parse_strategist_response, run_strategist_decision_completion
 from src.audit.runtime import log_scheduler_job_event
 from src.guardian.state import build_guardian_state
@@ -16,8 +19,180 @@ from src.llm_runtime import (
     set_current_llm_request_id,
 )
 from src.models.schemas import WSResponse
+from src.workflows.job_runtime import (
+    DurableJobIdentity,
+    DurableJobLeaseError,
+    DurableJobSpec,
+    DurableJobTransitionError,
+    durable_job_repository,
+)
 
 logger = logging.getLogger(__name__)
+
+_STRATEGIST_SERVICE_ID = "service:strategist"
+_STRATEGIST_RUNNER_ID = "scheduler:strategist_tick"
+_STRATEGIST_CAPABILITY_VERSION = "strategist-tick-v1"
+
+
+def _reasoning_digest(reasoning: object) -> str:
+    """Keep free-form model reasoning out of durable receipts."""
+    return hashlib.sha256(str(reasoning or "").encode("utf-8")).hexdigest()
+
+
+def _service_principal_id() -> str:
+    runtime_principal = get_current_trust_principal()
+    if runtime_principal is not None and (
+        not runtime_principal.authenticated or runtime_principal.revoked
+    ):
+        raise DurableJobTransitionError("strategist scheduler authority is not active")
+    if runtime_principal is not None and runtime_principal.principal_id.strip():
+        return runtime_principal.principal_id
+    return _STRATEGIST_SERVICE_ID
+
+
+def _occurrence_identity(now: datetime | None = None) -> str:
+    """Return a stable idempotency identity for one scheduler interval."""
+    observed_at = now or datetime.now(timezone.utc)
+    interval_minutes = max(int(settings.strategist_interval_min or 1), 1)
+    interval_seconds = interval_minutes * 60
+    bucket = int(observed_at.timestamp()) // interval_seconds
+    return f"strategist_tick:{bucket}"
+
+
+async def _admit_and_claim_tick(*, observed_at: datetime) -> tuple[str, int] | None:
+    """Admit one scheduled tick and claim it with a fenced durable lease.
+
+    A duplicate scheduler fire never re-runs a terminal occurrence. An active
+    occurrence owned by another scheduler is left visible for recovery rather
+    than being executed twice.
+    """
+    occurrence = _occurrence_identity(observed_at)
+    owner_principal_id = _service_principal_id()
+    spec = DurableJobSpec(
+        identity=DurableJobIdentity(
+            job_id=occurrence,
+            owner_kind="service",
+            owner_principal_id=owner_principal_id,
+            job_kind="strategist_tick",
+            capability_version=_STRATEGIST_CAPABILITY_VERSION,
+            idempotency_scope="scheduler-occurrence",
+            idempotency_key=occurrence,
+        ),
+        inputs={"trigger": "interval", "occurrence": occurrence},
+        priority=60,
+        resource_claims=("cpu",),
+        declared_authority={
+            "principal": owner_principal_id,
+            "owner_kind": "service",
+            "service_id": _STRATEGIST_SERVICE_ID,
+            "allowed_operations": ["guardian_state_read", "strategist_decision", "proactive_delivery"],
+        },
+        deadline_at=observed_at + timedelta(seconds=max(int(settings.agent_strategist_timeout), 1) + 30),
+        max_attempts=1,
+        service_id=_STRATEGIST_SERVICE_ID,
+    )
+    admission = await durable_job_repository.admit_job(spec)
+    status = str(admission.get("status") or "")
+    receipt_status = str(admission.get("receipt", {}).get("status") or "")
+
+    # A terminal duplicate is an idempotent no-op. This also covers a
+    # duplicate scheduler invocation after a process restart.
+    if receipt_status == "deduped" and status in {"succeeded", "cancelled"}:
+        logger.info("strategist_tick: occurrence already terminal (%s)", occurrence)
+        return None
+    if status in {"running", "awaiting_approval", "paused"}:
+        logger.info("strategist_tick: occurrence already active (%s, status=%s)", occurrence, status)
+        return None
+    if status in {"blocked", "failed", "cancelled", "succeeded"}:
+        logger.warning("strategist_tick: occurrence is not runnable (%s, status=%s)", occurrence, status)
+        return None
+
+    if status == "accepted":
+        queued = await durable_job_repository.queue_job(occurrence)
+        status = str(queued.get("status") or "")
+    if status != "queued":
+        logger.warning("strategist_tick: admission did not queue (%s, status=%s)", occurrence, status)
+        return None
+
+    try:
+        claimed = await durable_job_repository.claim_job(
+            occurrence,
+            owner=_STRATEGIST_RUNNER_ID,
+            lease_seconds=max(int(settings.agent_strategist_timeout), 1) + 30,
+        )
+    except DurableJobLeaseError as exc:
+        # A concurrent scheduler instance may already own this occurrence;
+        # infrastructure failures must propagate to the durable failure path.
+        current = await durable_job_repository.get_job(occurrence)
+        if current is not None and current.get("status") == "running":
+            logger.info("strategist_tick: occurrence claim deferred (%s): %s", occurrence, exc)
+            return None
+        raise
+    lease = claimed.get("lease") or {}
+    token = lease.get("fencing_token")
+    if str(claimed.get("status")) != "running" or lease.get("owner") != _STRATEGIST_RUNNER_ID or token is None:
+        logger.warning("strategist_tick: claim missing active fence (%s)", occurrence)
+        return None
+    return occurrence, int(token)
+
+
+async def _transition_tick(
+    job_id: str,
+    *,
+    status: str,
+    fencing_token: int,
+    reason: str | None = None,
+    result: object | None = None,
+    result_summary: str | None = None,
+) -> None:
+    """Record terminal state; a failed durable write must remain observable."""
+    await durable_job_repository.transition_job(
+        job_id,
+        status,
+        owner=_STRATEGIST_RUNNER_ID,
+        fencing_token=fencing_token,
+        reason=reason,
+        result=result,
+        result_summary=result_summary,
+    )
+
+
+async def _record_failure_state(
+    job_id: str,
+    *,
+    fencing_token: int,
+    reason: str,
+    result_summary: str,
+) -> bool:
+    """Attempt failure persistence and expose a stale lease if the DB is down."""
+    try:
+        await _transition_tick(
+            job_id,
+            status="failed",
+            fencing_token=fencing_token,
+            reason=reason,
+            result_summary=result_summary,
+        )
+    except Exception:
+        logger.exception("strategist_tick: failed to persist durable failure (%s)", job_id)
+        return False
+    return True
+
+
+async def _record_unclaimed_failure(job_id: str, *, reason: str) -> bool:
+    """Fail an admitted job that never obtained a runner lease."""
+    try:
+        await durable_job_repository.fail_unclaimed_job(
+            job_id,
+            owner_principal_id=_service_principal_id(),
+            service_id=_STRATEGIST_SERVICE_ID,
+            reason=reason,
+            result_summary="strategist tick failed before a runner lease was claimed",
+        )
+    except Exception:
+        logger.exception("strategist_tick: failed to persist unclaimed failure (%s)", job_id)
+        return False
+    return True
 
 
 def _delivery_value(result) -> str | None:
@@ -37,11 +212,30 @@ def _policy_action_value(result) -> str | None:
 async def run_strategist_tick() -> None:
     """Review context and decide if proactive intervention is warranted."""
     started_at = perf_counter()
+    observed_at = datetime.now(timezone.utc)
+    durable_job_id: str | None = None
+    durable_fencing_token: int | None = None
+    durable_failure_persisted: bool | None = None
     llm_request_id: str | None = None
     try:
+        durable_job_id = _occurrence_identity(observed_at)
+        claimed = await _admit_and_claim_tick(observed_at=observed_at)
+        if claimed is None:
+            return
+        durable_job_id, durable_fencing_token = claimed
         guardian_state = await build_guardian_state(
             refresh_observer=True,
             memory_query="current priorities, commitments, and recent intervention patterns",
+        )
+        await durable_job_repository.record_checkpoint(
+            durable_job_id,
+            checkpoint_id="guardian_state_loaded",
+            state={
+                "confidence": guardian_state.confidence.overall,
+                "memory_query": "current priorities, commitments, and recent intervention patterns",
+            },
+            owner=_STRATEGIST_RUNNER_ID,
+            fencing_token=durable_fencing_token,
         )
         llm_request_id = f"strategist_tick:{started_at}"
         _register_request(llm_request_id)
@@ -54,6 +248,27 @@ async def run_strategist_tick() -> None:
         decision = parse_strategist_response(str(raw))
 
         if not decision.should_intervene:
+            await durable_job_repository.record_effect(
+                durable_job_id,
+                effect_type="strategist_decision",
+                status="succeeded",
+                details={
+                    "should_intervene": False,
+                    "reasoning_digest": _reasoning_digest(decision.reasoning),
+                },
+                owner=_STRATEGIST_RUNNER_ID,
+                fencing_token=durable_fencing_token,
+            )
+            await _transition_tick(
+                durable_job_id,
+                status="succeeded",
+                fencing_token=durable_fencing_token,
+                result={
+                    "should_intervene": False,
+                    "reasoning_digest": _reasoning_digest(decision.reasoning),
+                },
+                result_summary="no intervention required",
+            )
             await log_scheduler_job_event(
                 job_name="strategist_tick",
                 outcome="skipped",
@@ -61,6 +276,7 @@ async def run_strategist_tick() -> None:
                     "duration_ms": int((perf_counter() - started_at) * 1000),
                     "reason": decision.reasoning,
                     "request_id": llm_request_id,
+                    "durable_job_id": durable_job_id,
                 },
             )
             logger.info("strategist_tick: no intervention needed — %s", decision.reasoning)
@@ -79,6 +295,36 @@ async def run_strategist_tick() -> None:
             message,
             guardian_confidence=guardian_state.confidence.overall,
         )
+        delivery_value = _delivery_value(result)
+        policy_action_value = _policy_action_value(result)
+        await durable_job_repository.record_effect(
+            durable_job_id,
+            effect_type="proactive_delivery",
+            # ``deliver_or_queue`` returns the policy decision, while the
+            # transport receipt is persisted by the delivery coordinator. Do
+            # not turn a policy value into a false claim that a user received
+            # the message.
+            status="unknown",
+            details={
+                "delivery_policy": delivery_value,
+                "policy_action": policy_action_value,
+                "intervention_type": decision.intervention_type,
+                "verification": "delivery_coordinator_receipt",
+            },
+            owner=_STRATEGIST_RUNNER_ID,
+            fencing_token=durable_fencing_token,
+        )
+        await _transition_tick(
+            durable_job_id,
+            status="succeeded",
+            fencing_token=durable_fencing_token,
+            result={
+                "should_intervene": True,
+                "delivery": delivery_value,
+                "policy_action": policy_action_value,
+            },
+            result_summary="proactive decision completed; delivery has a separate transport receipt",
+        )
         await log_scheduler_job_event(
             job_name="strategist_tick",
             outcome="succeeded",
@@ -89,6 +335,7 @@ async def run_strategist_tick() -> None:
                 "delivery": _delivery_value(result),
                 "policy_action": _policy_action_value(result),
                 "request_id": llm_request_id,
+                "durable_job_id": durable_job_id,
             },
         )
         logger.info(
@@ -102,6 +349,18 @@ async def run_strategist_tick() -> None:
     except asyncio.TimeoutError:
         if llm_request_id is not None:
             _mark_request_timed_out(llm_request_id)
+        if durable_job_id is not None and durable_fencing_token is not None:
+            durable_failure_persisted = await _record_failure_state(
+                durable_job_id,
+                fencing_token=durable_fencing_token,
+                reason="strategist_timeout",
+                result_summary="strategist decision timed out",
+            )
+        elif durable_job_id is not None:
+            durable_failure_persisted = await _record_unclaimed_failure(
+                durable_job_id,
+                reason="strategist_timeout_before_claim",
+            )
         await log_scheduler_job_event(
             job_name="strategist_tick",
             outcome="timed_out",
@@ -109,10 +368,24 @@ async def run_strategist_tick() -> None:
                 "duration_ms": int((perf_counter() - started_at) * 1000),
                 "timeout_seconds": settings.agent_strategist_timeout,
                 "request_id": llm_request_id,
+                "durable_job_id": durable_job_id,
+                "durable_failure_persisted": durable_failure_persisted,
             },
         )
         logger.warning("strategist_tick: agent timed out after %ds", settings.agent_strategist_timeout)
     except Exception as exc:
+        if durable_job_id is not None and durable_fencing_token is not None:
+            durable_failure_persisted = await _record_failure_state(
+                durable_job_id,
+                fencing_token=durable_fencing_token,
+                reason=type(exc).__name__,
+                result_summary="strategist tick failed before verified completion",
+            )
+        elif durable_job_id is not None:
+            durable_failure_persisted = await _record_unclaimed_failure(
+                durable_job_id,
+                reason=type(exc).__name__,
+            )
         await log_scheduler_job_event(
             job_name="strategist_tick",
             outcome="failed",
@@ -120,6 +393,8 @@ async def run_strategist_tick() -> None:
                 "duration_ms": int((perf_counter() - started_at) * 1000),
                 "error": str(exc),
                 "request_id": llm_request_id,
+                "durable_job_id": durable_job_id,
+                "durable_failure_persisted": durable_failure_persisted,
             },
         )
         logger.exception("strategist_tick failed")

@@ -119,6 +119,25 @@ Missing criteria, malformed targets, paused/retired goals, and disabled
 permissions produce an inspectable skip/no-learning state. This remains a
 bounded canary; it does not claim broad autonomous planning.
 
+The branch-local correction slice adds an authenticated
+`POST /api/goals/{goal_id}/strategy-corrections` boundary for the explicit
+web-brief target. An operator can revise only the bounded query, workspace
+relative output path, or scheduler priority while supplying the current goal
+revision; the change is stored as a durable `StrategyDelta`, included as a
+strategy evidence reference on the next scheduled child, and applied with
+the existing goal compare-and-swap revision. The matching rollback endpoint
+restores the prior target only when the goal still contains the exact corrected
+target. Both operations require middleware-authenticated capability-execute
+authority, preserve the existing proactive permission and public-source scope,
+emit audit receipts, and fail closed on stale revisions, target drift, malformed
+paths, unsupported fields, or unavailable strategy-delta storage. An audit-store
+outage returns an explicit degraded response after the bounded delta mutation;
+the durable delta remains the operator-visible recovery record and does not
+grant new authority or source scope. `GET /api/goals/{id}/loop` exposes bounded
+correction history for operator inspection. This is governed strategy
+adaptation with explicit no-learning execution receipts; it is not silent
+prompt, tool, authority, or harness self-modification.
+
 Scheduled child admission binds the work to the strategist occurrence's live
 durable fence before creating or replaying work. The child identity is stable
 within its capability-specific scheduler idempotency scope, so a repeated tick

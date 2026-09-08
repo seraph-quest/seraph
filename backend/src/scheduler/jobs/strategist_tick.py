@@ -223,10 +223,11 @@ def _policy_action_value(result) -> str | None:
     return None
 
 
-def _proactive_goal_sort_key(goal: Goal) -> tuple[int, float, int, str]:
+def _proactive_goal_sort_key(goal: Goal, priority: int = 0) -> tuple[int, int, float, int, str]:
     due = getattr(goal, "due_date", None)
     due_timestamp = due.timestamp() if due is not None else float("inf")
     return (
+        -max(min(int(priority), 100), 0),
         0 if due is not None else 1,
         due_timestamp,
         int(getattr(goal, "sort_order", 0) or 0),
@@ -240,15 +241,56 @@ def _web_brief_target(goal: Goal, criterion: object) -> tuple[str, str] | None:
     target = getattr(criterion, "target", None)
     if not isinstance(target, dict):
         return None
-    query = str(target.get("query") or "").strip()
-    raw_file_path = str(target.get("file_path") or f"web-briefs/{goal.id}.md").strip()
+    allowed_keys = {"query", "file_path", "priority", "strategy_delta_id"}
+    if set(target) - allowed_keys:
+        return None
+    raw_query = target.get("query")
+    if not isinstance(raw_query, str):
+        return None
+    query = raw_query.strip()
+    raw_file_path = target.get("file_path", f"web-briefs/{goal.id}.md")
+    if not isinstance(raw_file_path, str):
+        return None
+    raw_file_path = raw_file_path.strip()
     if not query or len(query) > 500 or not raw_file_path:
         return None
+    priority = target.get("priority", 0)
+    if isinstance(priority, bool) or not isinstance(priority, int) or not 0 <= priority <= 100:
+        return None
+    if "strategy_delta_id" in target:
+        strategy_delta_id = target["strategy_delta_id"]
+        if (
+            not isinstance(strategy_delta_id, str)
+            or not strategy_delta_id.strip()
+            or len(strategy_delta_id.strip()) > 128
+        ):
+            return None
     try:
         file_path = normalize_workspace_relative_path(raw_file_path)
     except ValueError:
         return None
     return query, file_path
+
+
+def _web_brief_priority(criterion: object) -> int:
+    target = getattr(criterion, "target", None)
+    if not isinstance(target, dict):
+        return 0
+    priority = target.get("priority", 0)
+    if isinstance(priority, bool) or not isinstance(priority, int) or not 0 <= priority <= 100:
+        return 0
+    return priority
+
+
+def _web_brief_strategy_delta_id(criterion: object) -> str | None:
+    target = getattr(criterion, "target", None)
+    if not isinstance(target, dict):
+        return None
+    value = target.get("strategy_delta_id")
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip()
+    return normalized if normalized and len(normalized) <= 128 else None
 
 
 def _has_explicit_web_brief_target(criterion: object) -> bool:
@@ -264,7 +306,7 @@ async def _run_opted_in_goal_web_brief(
     """Run one explicitly configured public-source research goal."""
 
     goals = await goal_repository.list_goals(status="active")
-    eligible: list[tuple[Goal, object, str, str]] = []
+    eligible: list[tuple[Goal, object, str, str, int, str | None]] = []
     for goal in goals:
         if not bool(getattr(goal, "proactive_enabled", False)):
             continue
@@ -276,7 +318,16 @@ async def _run_opted_in_goal_web_brief(
         target = _web_brief_target(goal, criterion)
         if target is None:
             continue
-        eligible.append((goal, criterion, target[0], target[1]))
+        eligible.append(
+            (
+                goal,
+                criterion,
+                target[0],
+                target[1],
+                _web_brief_priority(criterion),
+                _web_brief_strategy_delta_id(criterion),
+            )
+        )
     if not eligible:
         details = {"status": "skipped", "reason": "no_eligible_web_brief_goal"}
         await durable_job_repository.record_effect(
@@ -289,7 +340,10 @@ async def _run_opted_in_goal_web_brief(
         )
         return details
 
-    goal, criterion, query, file_path = sorted(eligible, key=lambda item: _proactive_goal_sort_key(item[0]))[0]
+    goal, criterion, query, file_path, priority, strategy_delta_id = sorted(
+        eligible,
+        key=lambda item: _proactive_goal_sort_key(item[0], item[4]),
+    )[0]
     revision = max(int(goal.revision or 1), 1)
     session_id = f"web-brief:scheduler:{goal.id}:{revision}"
     principal = TrustPrincipal(
@@ -299,6 +353,9 @@ async def _run_opted_in_goal_web_brief(
         grants=(AuthorityGrant.CAPABILITY_EXECUTE,),
         session_id=session_id,
     )
+    evidence_refs = list(criterion.evidence_refs)
+    if strategy_delta_id:
+        evidence_refs.append(f"strategy-delta:{strategy_delta_id}")
     request = WebBriefToFileRequest(
         goal_id=goal.id,
         goal_revision=revision,
@@ -309,9 +366,10 @@ async def _run_opted_in_goal_web_brief(
         session_id=session_id,
         parent_job_id=parent_job_id,
         parent_fencing_token=parent_fencing_token,
-        evidence_refs=list(criterion.evidence_refs),
+        evidence_refs=evidence_refs,
         reason="scheduled_proactive_web_brief",
         expected_outcome=criterion.description,
+        priority=priority,
     )
     result = await WebBriefToFileService(authority_principal=principal).run(request)
     if not isinstance(result, WebBriefToFileResult):
@@ -332,6 +390,9 @@ async def _run_opted_in_goal_web_brief(
         "job_id": result.job_id,
         "artifact_ref": result.artifact_ref,
         "query_digest": hashlib.sha256(query.encode("utf-8")).hexdigest(),
+        "priority": priority,
+        "strategy_delta_id": strategy_delta_id,
+        "strategy_delta_evidence_ref": f"strategy-delta:{strategy_delta_id}" if strategy_delta_id else None,
         "source_read": result.source_read,
         "reason": result.reason,
         "operator_visible": True,

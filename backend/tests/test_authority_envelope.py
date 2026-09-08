@@ -330,8 +330,18 @@ def test_network_and_credential_allowlists_fail_closed_without_effect():
             ("api.example.com",),
             allowed_paths=("/v1",),
         )
+        explicit_default_port = network_target_allowed(
+            "https://api.example.com:443/v1/read",
+            ("api.example.com",),
+            allowed_paths=("/v1",),
+        )
         wrong_host = network_target_allowed(
             "https://evil.example/v1/read",
+            ("api.example.com",),
+            allowed_paths=("/v1",),
+        )
+        undeclared_port = network_target_allowed(
+            "https://api.example.com:8443/v1/read",
             ("api.example.com",),
             allowed_paths=("/v1",),
         )
@@ -351,9 +361,33 @@ def test_network_and_credential_allowlists_fail_closed_without_effect():
         )
 
     assert allowed.allowed is True
+    assert explicit_default_port.allowed is True
     assert wrong_host.reason_code == "network_host_not_allowlisted"
+    assert undeclared_port.reason_code == "network_port_not_allowlisted"
     assert private.reason_code == "network_private_destination_blocked"
     assert wrong_credential.reason_code == "credential_field_not_allowlisted"
+
+
+def test_capability_with_undeclared_port_is_blocked_before_effect(tmp_path):
+    envelope, policy, global_policy = _envelope(tmp_path, network=True)
+    undeclared_port = envelope.__class__(
+        **{
+            **envelope.__dict__,
+            "network_url": "https://api.example.com:8443/v1/read",
+        }
+    )
+    allowed_site = SiteAccessDecision(
+        allowed=True,
+        hostname="api.example.com",
+        resolved_addresses=("93.184.216.34",),
+    )
+
+    with patch("src.security.authority_envelope.evaluate_site_access", return_value=allowed_site) as site_access:
+        decision = _allow(undeclared_port, policy, global_policy)
+
+    assert decision.allowed is False
+    assert decision.reason_code == "network_port_not_allowlisted"
+    site_access.assert_not_called()
 
 
 def test_untrusted_observation_and_memory_poisoning_remain_data(tmp_path):

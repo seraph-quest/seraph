@@ -182,6 +182,24 @@ not download the isolated worktree dependency set, and the pre-existing backend
 virtualenv stalled during async SQLite fixture setup, so no passing pytest
 receipt is claimed here.
 
+## Branch-local #753 Gate A canonical-first provider conflict boundary
+
+**Status:** Partial on the milestone branch; not Shipped on `develop`.
+
+The retrieval planner now treats canonical context as the active authority when
+assembling additive provider evidence. A provider claim that has the same
+memory scope and contradicts an active canonical claim is suppressed before it
+reaches guardian context; unrelated provider evidence remains advisory and can
+still augment the canonical context. The planner emits a content-free
+`canonical_first_provider_conflict_suppression` diagnostic and decision-receipt
+count, filters the suppressed claim from memory buckets, and remains stateless
+so retries produce the same result. Provider failure and recovery continue to
+fall back to or rejoin canonical retrieval without granting provider authority.
+
+This deterministic boundary does not implement the remaining #753 Gate A
+corpus/metrics artifact, canonical delete/export/rebuild ledger, remote
+provider deletion, or later #745 behavioral usefulness proof.
+
 ## Memory Upgrade Program Record
 
 The upgraded memory system is now complete through Batches A, B, and C.

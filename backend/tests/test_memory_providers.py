@@ -19,6 +19,7 @@ from src.extensions.lifecycle import (
 from src.extensions.registry import _current_seraph_version
 from src.memory.hybrid_retrieval import HybridMemoryRetrievalResult
 from src.memory.providers import (
+    MemoryProviderAggregateResult,
     MemoryProviderHit,
     MemoryProviderRetrievalResult,
     MemoryProviderWritebackResult,
@@ -446,6 +447,70 @@ async def test_plan_memory_retrieval_merges_provider_hits_without_overriding_can
     assert retrieval.provider_diagnostics[0]["sync_policy"] == "read_augment_only"
     assert retrieval.provider_diagnostics[0]["capability_contracts_used"]["retrieval"]["operation_mode"] == "augment_recall"
     assert retrieval.provider_diagnostics[0]["runtime_state"] == "ready"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("query", ["Atlas launch status", ""])
+async def test_plan_memory_retrieval_keeps_canonical_memory_ahead_of_conflicting_provider_context(query):
+    provider_result = MemoryProviderAggregateResult(
+        context=(
+            "- [project] graph-memory: Atlas launch is on track.\n"
+            "- [collaborator] graph-memory: Alice owns Atlas launch communications."
+        ),
+        buckets={
+            "project": ("Atlas launch is on track.",),
+            "collaborator": ("Alice owns Atlas launch communications.",),
+        },
+        degraded=False,
+        diagnostics=(
+            {
+                "name": "graph-memory",
+                "capabilities_used": ["retrieval"],
+                "failed_capabilities": [],
+            },
+        ),
+    )
+
+    with (
+        patch(
+            "src.memory.retrieval_planner.build_structured_memory_context_bundle",
+            return_value=(
+                "- [project] Atlas launch is delayed.",
+                {"project": ("Atlas launch is delayed.",)},
+            ),
+        ),
+        patch(
+            "src.memory.retrieval_planner.retrieve_hybrid_memory",
+            return_value=HybridMemoryRetrievalResult(
+                context="",
+                buckets={},
+                degraded=False,
+                hits=(),
+            ),
+        ),
+        patch(
+            "src.memory.retrieval_planner.retrieve_additive_memory_provider_context",
+            return_value=provider_result,
+        ),
+    ):
+        first = await plan_memory_retrieval(query=query, active_projects=())
+        second = await plan_memory_retrieval(query=query, active_projects=())
+
+    assert first == second
+    assert "Atlas launch is delayed." in first.semantic_context
+    assert "Atlas launch is on track." not in first.semantic_context
+    assert "Alice owns Atlas launch communications." in first.semantic_context
+    assert first.memory_buckets["project"] == ("Atlas launch is delayed.",)
+    assert first.memory_buckets["collaborator"] == ("Alice owns Atlas launch communications.",)
+    conflict_diagnostic = next(
+        item
+        for item in first.retrieval_diagnostics
+        if item.get("ranking_policy") == "canonical_first_provider_conflict_suppression"
+    )
+    assert conflict_diagnostic["canonical_provider_conflict_suppressed_count"] == 1
+    assert "Atlas launch is on track." not in json.dumps(first.retrieval_diagnostics)
+    assert first.decision_receipt["suppression"]["canonical_memory_conflict_count"] == 1
+    assert "canonical_memory_conflict" in first.decision_receipt["suppression"]["reasons"]
 
 
 @pytest.mark.asyncio

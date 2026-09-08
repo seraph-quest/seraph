@@ -9,6 +9,7 @@ from src.llm_runtime import FallbackLiteLLMModel as LiteLLMModel, build_model_kw
 from src.tools.browser_tool import browse_webpage as base_browse_webpage
 from src.tools.soul_tool import view_soul, update_soul
 from src.tools.goal_tools import create_goal, get_goals
+from src.tools.approval import wrap_tools_for_approval
 from src.tools.audit import wrap_tools_for_audit
 
 
@@ -145,7 +146,7 @@ def create_onboarding_agent(user_message: str | None = None) -> ToolCallingAgent
         tools.append(_build_onboarding_browse_tool(explicit_urls))
 
     return ToolCallingAgent(
-        tools=wrap_tools_for_audit(tools),
+        tools=wrap_tools_for_approval(wrap_tools_for_audit(tools)),
         model=model,
         max_steps=settings.agent_max_steps,
         instructions=_build_onboarding_instructions(explicit_urls),

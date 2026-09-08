@@ -132,7 +132,7 @@ The semantic analysis schema captures:
 
 The VLM prompt requires the model to treat screenshot content as untrusted and return only the JSON shape defined by the contract. The parser rejects non-JSON output, unknown fields, invalid enum values, and out-of-range confidence values. Seraph orchestration must not author semantic screenshot summaries or daily report conclusions with deterministic Python parsing; those reasoning steps belong to the configured LLM runtime.
 
-This contract is the boundary between local image ingestion and screenshot understanding. The folder scan stores the local image metadata observation and marks semantic work as pending. The separate `screenshot_folder_analysis` scheduler job calls the configured Seraph-side analyzer, validates the output with this contract, and replaces the pending status on the existing observation without requiring any direct connection to the screenshot producer.
+This contract is the boundary between local image ingestion and screenshot understanding. The folder scan stores the local image metadata observation. When the governed OpenRouter vision route is fully configured, it marks semantic work as pending for the separate `screenshot_folder_analysis` scheduler job. When that route is unavailable or policy is incomplete, it records a visible `blocked` status with the reason instead of creating an unbounded pending backlog. The scheduler validates analyzer output with this contract and replaces pending status on the existing observation without requiring any direct connection to the screenshot producer.
 
 End-of-day reports consume screenshot-folder `ScreenObservation` rows through the same report builder as other screen observations. Seraph records the observation source as `screenshot_folder` from its own stored capture-artifact details and includes report-safe screenshot samples using filenames, format, dimensions, and size. Reports do not rely on recorder manifests, sidecars, or service metadata.
 
@@ -456,7 +456,8 @@ Seraph blocks screen-derived digest/report LLM calls unless the resolved runtime
 
 Each screenshot observation carries Seraph-owned analysis status details:
 
-- `pending` when the screenshot was ingested but no semantic provider was configured
+- `pending` only when a governed semantic provider is configured and the screenshot is queued for analysis
+- `blocked` when OpenRouter configuration, consent, budget, capability proof, or admission is unavailable; the detail carries the recoverable reason
 - `succeeded` when a validated semantic analysis payload was stored
 - `failed` when the provider call or schema validation failed
 - `needs_reanalysis` when a stored semantic payload was produced by an older prompt, schema, or configured model
@@ -464,7 +465,7 @@ Each screenshot observation carries Seraph-owned analysis status details:
 Duplicate screenshot files are still suppressed by image SHA-256, so the same image cannot accidentally create a second semantic observation.
 
 Before VLM enqueue, Seraph also applies a conservative local visual-run dedupe gate against the current screenshot-folder representative. This gate computes a small grayscale fingerprint locally, compares only the new image against the current representative, and suppresses only extremely similar byte-different screenshots with matching dimensions and format. Suppression updates a `screenshot_visual_run` detail on the representative with `representative_path`, `first_seen`, `last_seen`, `suppressed_count`, `latest_suppressed_path`, and reason counts. The representative observation keeps the elapsed duration, so reports treat the interval as time spent in the same visual state rather than deleting it. A long unchanged run refreshes after the bounded dedupe window instead of suppressing forever, and manual reanalysis still targets the representative observation.
-Reanalysis is explicit and local-only through `POST /api/observer/screen-artifacts/{observation_id}/reanalyze`; callers must provide one of `prompt_version_changed`, `model_version_changed`, `provider_failure_retry`, or `manual_operator_request`.
+Reanalysis is explicit through the localhost `POST /api/observer/screen-artifacts/{observation_id}/reanalyze` endpoint; any semantic request still passes the same governed OpenRouter cloud-egress and admission gates. Callers must provide one of `prompt_version_changed`, `model_version_changed`, `provider_failure_retry`, or `manual_operator_request`.
 Reanalysis replaces the semantic analysis/status details on the existing observation and preserves the original screenshot hash and file mtime-derived capture timestamp.
 
 ## Rolling Observation Digests

@@ -327,7 +327,7 @@ _REVIEWED_EXCEPTIONS = (
     ),
     _review(
         "evals/harness.py",
-        5422,
+        5390,
         "_eval_provider_routing_decision_audit",
         "first_model.generate",
         "transitional_provider_call",
@@ -336,7 +336,7 @@ _REVIEWED_EXCEPTIONS = (
     ),
     _review(
         "evals/harness.py",
-        5431,
+        5399,
         "_eval_provider_routing_decision_audit",
         "rerouted_model.generate",
         "transitional_provider_call",
@@ -390,7 +390,7 @@ _REVIEWED_EXCEPTIONS = (
     ),
     _review(
         "vlm_runtime.py",
-        209,
+        221,
         "_probe_json_endpoint",
         "client.get",
         "health_or_metadata_probe",
@@ -399,7 +399,7 @@ _REVIEWED_EXCEPTIONS = (
     ),
     _review(
         "vlm_runtime.py",
-        257,
+        269,
         "_probe_chat_health",
         "client.get",
         "health_or_metadata_probe",

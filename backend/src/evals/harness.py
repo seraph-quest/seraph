@@ -2150,97 +2150,65 @@ def _eval_workflow_composition_behavior() -> dict[str, Any]:
 
 
 def _eval_provider_fallback_chain() -> dict[str, Any]:
-    completion_response = _make_litellm_response("Resolved after ordered fallback chain.")
+    """Retain the historical scenario name while proving fallback is blocked."""
+    with (
+        patch.object(settings, "default_model", "openrouter/anthropic/claude-sonnet-4"),
+        patch.object(settings, "fallback_model", ""),
+        patch.object(settings, "fallback_models", "openai/gpt-4o-mini,openai/gpt-4.1-mini"),
+        patch.object(settings, "llm_api_key", "primary-key"),
+        patch.object(settings, "llm_api_base", "https://openrouter.ai/api/v1"),
+        patch("litellm.completion") as mock_completion,
+    ):
+        try:
+            completion_with_fallback_sync(
+                messages=[{"role": "user", "content": "route around provider issues"}],
+                temperature=0.2,
+                max_tokens=128,
+            )
+        except PermissionError as exc:
+            blocked_reason = str(exc)
+        else:
+            raise AssertionError("unregistered fallback chain was not blocked")
 
-    with patch.object(settings, "default_model", "openrouter/anthropic/claude-sonnet-4"), \
-         patch.object(settings, "fallback_model", ""), \
-         patch.object(
-             settings,
-             "fallback_models",
-             "openai/gpt-4o-mini,openai/gpt-4.1-mini",
-         ), \
-         patch.object(settings, "llm_api_key", "primary-key"), \
-         patch.object(settings, "llm_api_base", "https://openrouter.ai/api/v1"), \
-         patch(
-             "litellm.completion",
-             side_effect=[
-                 RuntimeError("primary down"),
-                 RuntimeError("first fallback down"),
-                 completion_response,
-             ],
-         ) as mock_completion:
-        response = completion_with_fallback_sync(
-            messages=[{"role": "user", "content": "route around provider issues"}],
-            temperature=0.2,
-            max_tokens=128,
-        )
-
-    attempted_models = [call.kwargs["model"] for call in mock_completion.call_args_list]
-    assert attempted_models == [
-        "openrouter/anthropic/claude-sonnet-4",
-        "openai/gpt-4o-mini",
-        "openai/gpt-4.1-mini",
-    ]
+    attempted_models: list[str] = [call.kwargs["model"] for call in mock_completion.call_args_list]
+    assert attempted_models == []
     return {
         "attempted_models": attempted_models,
-        "final_model": attempted_models[-1],
-        "response_excerpt": response.choices[0].message.content,
+        "final_model": None,
+        "blocked_reason": blocked_reason,
+        "response_excerpt": None,
     }
 
 
 def _eval_provider_health_reroute() -> dict[str, Any]:
-    first_fallback_response = _make_litellm_response("Recovered through the fallback chain.")
-    rerouted_response = _make_litellm_response("Rerouted straight to the healthy fallback.")
-
-    _reset_target_health()
-    try:
-        with ExitStack() as stack:
-            stack.enter_context(
-                patch.object(settings, "default_model", "openrouter/anthropic/claude-sonnet-4")
-            )
-            stack.enter_context(patch.object(settings, "fallback_model", ""))
-            stack.enter_context(patch.object(settings, "fallback_models", "openai/gpt-4o-mini"))
-            stack.enter_context(patch.object(settings, "llm_api_key", "primary-key"))
-            stack.enter_context(
-                patch.object(settings, "llm_api_base", "https://openrouter.ai/api/v1")
-            )
-            stack.enter_context(
-                patch.object(settings, "llm_target_cooldown_seconds", 300)
-            )
-            mock_completion = stack.enter_context(
-                patch(
-                    "litellm.completion",
-                    side_effect=[
-                        RuntimeError("primary down"),
-                        first_fallback_response,
-                        rerouted_response,
-                    ],
-                )
-            )
+    """Health-based vendor rerouting is retired with the active provider boundary."""
+    with (
+        patch.object(settings, "default_model", "openrouter/anthropic/claude-sonnet-4"),
+        patch.object(settings, "fallback_model", ""),
+        patch.object(settings, "fallback_models", "openai/gpt-4o-mini"),
+        patch.object(settings, "llm_api_key", "primary-key"),
+        patch.object(settings, "llm_api_base", "https://openrouter.ai/api/v1"),
+        patch("litellm.completion") as mock_completion,
+    ):
+        try:
             completion_with_fallback_sync(
                 messages=[{"role": "user", "content": "recover once"}],
                 temperature=0.2,
                 max_tokens=128,
             )
-            response = completion_with_fallback_sync(
-                messages=[{"role": "user", "content": "recover again"}],
-                temperature=0.2,
-                max_tokens=128,
-            )
-    finally:
-        _reset_target_health()
+        except PermissionError as exc:
+            blocked_reason = str(exc)
+        else:
+            raise AssertionError("unregistered health reroute was not blocked")
 
-    attempted_models = [call.kwargs["model"] for call in mock_completion.call_args_list]
-    assert attempted_models == [
-        "openrouter/anthropic/claude-sonnet-4",
-        "openai/gpt-4o-mini",
-        "openai/gpt-4o-mini",
-    ]
+    attempted_models: list[str] = [call.kwargs["model"] for call in mock_completion.call_args_list]
+    assert attempted_models == []
     return {
-        "cooldown_seconds": 300,
-        "rerouted_model": attempted_models[-1],
+        "cooldown_seconds": None,
+        "rerouted_model": None,
         "attempted_models": attempted_models,
-        "response_excerpt": response.choices[0].message.content,
+        "blocked_reason": blocked_reason,
+        "response_excerpt": None,
     }
 
 
@@ -2267,11 +2235,11 @@ def _eval_local_runtime_profile() -> dict[str, Any]:
             runtime_path="session_consolidation",
         )
 
-    assert completion_kwargs["model"] == "ollama/llama3.2"
-    assert completion_kwargs["api_base"] == "http://localhost:11434/v1"
+    assert completion_kwargs["model"] == "openrouter/anthropic/claude-sonnet-4"
+    assert completion_kwargs["api_base"] == "https://openrouter.ai/api/v1"
     return {
         "runtime_path": "session_consolidation",
-        "runtime_profile": "local",
+        "runtime_profile": "openrouter",
         "routed_model": completion_kwargs["model"],
         "response_excerpt": "route configuration verified without transport",
     }
@@ -2307,9 +2275,9 @@ def _eval_helper_local_runtime_paths() -> dict[str, Any]:
             )
             routed_models[runtime_path] = completion_kwargs["model"]
 
-    assert set(routed_models.values()) == {"ollama/llama3.2"}
+    assert set(routed_models.values()) == {"openrouter/anthropic/claude-sonnet-4"}
     return {
-        "runtime_profile": "local",
+        "runtime_profile": "openrouter",
         "routed_models": routed_models,
     }
 
@@ -2406,9 +2374,9 @@ def _eval_agent_local_runtime_profile() -> dict[str, Any]:
         "strategist_agent": strategist_agent.model.model_id,
         "memory_keeper": specialist.model.model_id,
     }
-    assert set(routed_models.values()) == {"ollama/llama3.2"}
+    assert set(routed_models.values()) == {"openrouter/anthropic/claude-sonnet-4"}
     return {
-        "runtime_profile": "local",
+        "runtime_profile": "openrouter",
         "routed_models": routed_models,
     }
 
@@ -2466,9 +2434,9 @@ def _eval_delegation_local_runtime_profile() -> dict[str, Any]:
         "web_researcher": web_researcher.model.model_id,
         "file_worker": file_worker.model.model_id,
     }
-    assert set(routed_models.values()) == {"ollama/llama3.2"}
+    assert set(routed_models.values()) == {"openrouter/anthropic/claude-sonnet-4"}
     return {
-        "runtime_profile": "local",
+        "runtime_profile": "openrouter",
         "routed_models": routed_models,
     }
 
@@ -4512,9 +4480,9 @@ def _eval_mcp_specialist_local_runtime_profile() -> dict[str, Any]:
         specialist = create_mcp_specialist("github-actions", [tool], description="GitHub workflows MCP")
 
     assert specialist.name == runtime_path
-    assert specialist.model.model_id == "ollama/llama3.2"
+    assert specialist.model.model_id == "openrouter/anthropic/claude-sonnet-4"
     return {
-        "runtime_profile": "local",
+        "runtime_profile": "openrouter",
         "runtime_path": runtime_path,
         "routed_model": specialist.model.model_id,
     }

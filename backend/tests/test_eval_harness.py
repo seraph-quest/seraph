@@ -4669,23 +4669,19 @@ def test_runtime_eval_scenarios_expose_expected_details():
     assert summary.failed == 0
     details_by_name = {result.name: result.details for result in summary.results}
 
-    assert details_by_name["provider_fallback_chain"]["attempted_models"] == [
-        "openrouter/anthropic/claude-sonnet-4",
-        "openai/gpt-4o-mini",
-        "openai/gpt-4.1-mini",
-    ]
-    assert details_by_name["provider_fallback_chain"]["final_model"] == "openai/gpt-4.1-mini"
-    assert details_by_name["provider_health_reroute"]["attempted_models"] == [
-        "openrouter/anthropic/claude-sonnet-4",
-        "openai/gpt-4o-mini",
-        "openai/gpt-4o-mini",
-    ]
-    assert details_by_name["provider_health_reroute"]["rerouted_model"] == "openai/gpt-4o-mini"
-    assert details_by_name["local_runtime_profile"]["runtime_profile"] == "local"
-    assert details_by_name["local_runtime_profile"]["routed_model"] == "ollama/llama3.2"
-    assert details_by_name["helper_local_runtime_paths"]["routed_models"]["context_window_summary"] == "ollama/llama3.2"
-    assert details_by_name["helper_local_runtime_paths"]["routed_models"]["session_title_generation"] == "ollama/llama3.2"
-    assert details_by_name["helper_local_runtime_paths"]["routed_models"]["session_consolidation"] == "ollama/llama3.2"
+    assert details_by_name["provider_fallback_chain"]["attempted_models"] == []
+    assert details_by_name["provider_fallback_chain"]["final_model"] is None
+    assert "registered canonical runtime path" in details_by_name["provider_fallback_chain"]["blocked_reason"]
+    assert details_by_name["provider_health_reroute"]["attempted_models"] == []
+    assert details_by_name["provider_health_reroute"]["rerouted_model"] is None
+    assert "registered canonical runtime path" in details_by_name["provider_health_reroute"]["blocked_reason"]
+    assert details_by_name["local_runtime_profile"]["runtime_profile"] == "openrouter"
+    assert details_by_name["local_runtime_profile"]["routed_model"] == "openrouter/anthropic/claude-sonnet-4"
+    assert details_by_name["helper_local_runtime_paths"]["routed_models"] == {
+        "context_window_summary": "openrouter/anthropic/claude-sonnet-4",
+        "session_title_generation": "openrouter/anthropic/claude-sonnet-4",
+        "session_consolidation": "openrouter/anthropic/claude-sonnet-4",
+    }
     assert details_by_name["context_window_summary_audit"]["routing_verification"] == (
         "not_in_scope_transport_mocked_above_model_route"
     )
@@ -5063,15 +5059,12 @@ def test_runtime_eval_scenarios_expose_expected_details():
     assert details_by_name["guardian_learning_policy_v2_behavior"]["blocked_reason"] == "learned_blocked_state_avoidance"
     assert details_by_name["guardian_learning_policy_v2_behavior"]["available_action"] == "act"
     assert details_by_name["guardian_learning_policy_v2_behavior"]["available_reason"] == "learned_available_window"
-    assert details_by_name["agent_local_runtime_profile"]["routed_models"]["chat_agent"] == "ollama/llama3.2"
-    assert details_by_name["agent_local_runtime_profile"]["routed_models"]["onboarding_agent"] == "ollama/llama3.2"
-    assert details_by_name["agent_local_runtime_profile"]["routed_models"]["strategist_agent"] == "ollama/llama3.2"
-    assert details_by_name["agent_local_runtime_profile"]["routed_models"]["memory_keeper"] == "ollama/llama3.2"
-    assert details_by_name["delegation_local_runtime_profile"]["routed_models"]["orchestrator_agent"] == "ollama/llama3.2"
-    assert details_by_name["delegation_local_runtime_profile"]["routed_models"]["vault_keeper"] == "ollama/llama3.2"
-    assert details_by_name["delegation_local_runtime_profile"]["routed_models"]["goal_planner"] == "ollama/llama3.2"
-    assert details_by_name["delegation_local_runtime_profile"]["routed_models"]["web_researcher"] == "ollama/llama3.2"
-    assert details_by_name["delegation_local_runtime_profile"]["routed_models"]["file_worker"] == "ollama/llama3.2"
+    assert set(details_by_name["agent_local_runtime_profile"]["routed_models"].values()) == {
+        "openrouter/anthropic/claude-sonnet-4"
+    }
+    assert set(details_by_name["delegation_local_runtime_profile"]["routed_models"].values()) == {
+        "openrouter/anthropic/claude-sonnet-4"
+    }
     assert details_by_name["delegation_secret_boundary_behavior"]["memory_excludes_secret_tools"] is True
     assert details_by_name["delegation_secret_boundary_behavior"]["vault_only_secret_tools"] is True
     assert details_by_name["delegation_secret_boundary_behavior"]["secret_task_routed_to_vault_keeper"] is True
@@ -5386,7 +5379,7 @@ def test_runtime_eval_scenarios_expose_expected_details():
         "installed_extension_contribution_types"
     ]
     assert details_by_name["mcp_specialist_local_runtime_profile"]["runtime_path"] == "mcp_github_actions"
-    assert details_by_name["mcp_specialist_local_runtime_profile"]["routed_model"] == "ollama/llama3.2"
+    assert details_by_name["mcp_specialist_local_runtime_profile"]["routed_model"] == "openrouter/anthropic/claude-sonnet-4"
     assert details_by_name["embedding_runtime_audit"]["loaded_integration_type"] == "embedding_model"
     assert details_by_name["embedding_runtime_audit"]["loaded_model"] == "openrouter/openai/text-embedding-3-small"
     assert details_by_name["embedding_runtime_audit"]["vector_length"] == 2

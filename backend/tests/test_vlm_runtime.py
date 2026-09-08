@@ -295,3 +295,11 @@ async def test_direct_local_chat_route_error_does_not_gate_direct_text_on_wrappe
         error = await direct_local_chat_route_error()
 
     assert error is None
+
+
+@pytest.mark.asyncio
+async def test_direct_local_chat_route_error_allows_canonical_openrouter_path_without_vlm():
+    with patch("src.vlm_runtime.probe_effective_vlm_runtime", side_effect=AssertionError("must not probe VLM")):
+        error = await direct_local_chat_route_error(runtime_path="chat_agent")
+
+    assert error is None

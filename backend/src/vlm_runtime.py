@@ -175,6 +175,18 @@ async def direct_local_chat_route_error(
     for historical diagnostics, while allowing active chat callers to bypass
     those probes explicitly.
     """
+    # REST/WebSocket lightweight turns still use this compatibility seam, but
+    # canonical chat/onboarding paths now dispatch through the governed
+    # OpenRouter model fabric. Only callers without a canonical route remain
+    # legacy local-runtime diagnostics.
+    if runtime_path:
+        try:
+            from src.model_fabric.caller_context import is_canonical_inference_route
+
+            if is_canonical_inference_route(runtime_path):
+                return None
+        except (ImportError, ValueError):
+            pass
     return "local_vlm_disabled_openrouter_only"
 
 def _trim_url(value: str | None) -> str:

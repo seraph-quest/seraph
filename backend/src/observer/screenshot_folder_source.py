@@ -445,7 +445,9 @@ async def _image_to_observation(image_path: Path, root: Path) -> dict[str, objec
     if screenshot_semantic_analysis_enabled():
         details.append(screenshot_analysis_status_detail("pending", reason="queued_for_analysis"))
     else:
-        details.append(screenshot_analysis_status_detail("pending", reason="provider not configured"))
+        blocked_reason = "remote_inference_blocked:configuration_required"
+        details.append(screenshot_analysis_error_detail(blocked_reason))
+        details.append(screenshot_analysis_status_detail("blocked", reason=blocked_reason))
     metadata_label = image_metadata_label(metadata)
     summary_suffix = f" ({metadata_label})" if metadata_label else ""
     return {

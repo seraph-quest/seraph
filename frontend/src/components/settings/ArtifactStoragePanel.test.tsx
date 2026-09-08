@@ -364,8 +364,8 @@ describe("ArtifactStoragePanel", () => {
       mockResponse({
         screen: {
           analysis_enabled: true,
-          provider: "local-vlm",
-          model: "gemma-4-26b",
+          provider: "openrouter",
+          model: "openrouter/google/gemini-2.5-flash",
           capture_mode: "detailed",
           cadence_seconds: 60,
           daemon_connected: false,
@@ -406,8 +406,8 @@ describe("ArtifactStoragePanel", () => {
           readable: true,
           stored_artifacts: ["image"],
           analysis: {
-            provider: "local-vlm",
-            model: "gemma-4-26b",
+            provider: "openrouter",
+            model: "openrouter/google/gemini-2.5-flash",
             base_url_configured: true,
             observation_count: 12,
             analysis_status: {
@@ -528,7 +528,7 @@ describe("ArtifactStoragePanel", () => {
     expect(screen.getByText("Local screenshot images")).toBeInTheDocument();
     expect(screen.getByText("every 5m · up to 100 images")).toBeInTheDocument();
     expect(screen.getByText("local image files only")).toBeInTheDocument();
-    expect(screen.getByText("local-vlm · gemma-4-26b")).toBeInTheDocument();
+    expect(screen.getByText("openrouter · openrouter/google/gemini-2.5-flash")).toBeInTheDocument();
     expect(screen.getByText("Local Gemma runtime")).toBeInTheDocument();
     expect(screen.getByText("openai/unsloth/gemma-4-26B-A4B-it-qat-GGUF")).toBeInTheDocument();
     expect(screen.getByText("single backend profile routing not safe")).toBeInTheDocument();
@@ -541,7 +541,7 @@ describe("ArtifactStoragePanel", () => {
     expect(screen.getByText("provider unavailable")).toBeInTheDocument();
     expect(screen.queryByText("/api/observer/screenshot-folder/scan")).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Scan folder" })).toBeInTheDocument();
-    expect(screen.getByDisplayValue("local-vlm")).toBeInTheDocument();
+    expect(screen.getByDisplayValue("openrouter")).toBeInTheDocument();
     expect(screen.queryByDisplayValue("detailed / 60s")).not.toBeInTheDocument();
     expect(screen.queryByText("offline - no new captures")).not.toBeInTheDocument();
     expect(screen.queryByText("Grant Screen Recording permission to the terminal/app running Seraph.")).not.toBeInTheDocument();
@@ -1029,8 +1029,8 @@ describe("ArtifactStoragePanel", () => {
       if (url.includes("/api/settings/screen-analysis")) {
         return Promise.resolve(mockResponse({
           enabled: true,
-          provider: "local-vlm",
-          model: "gemma-4-26b",
+          provider: "openrouter",
+          model: "openrouter/google/gemini-2.5-flash",
           preserve_captures: true,
           archive_dir: "/tmp/seraph-dev-data/artifacts/screen-captures",
           capture_mode: "on_switch",
@@ -1047,7 +1047,7 @@ describe("ArtifactStoragePanel", () => {
 
     expect(await screen.findByText("Seraph analysis", undefined, { timeout: 1_000 })).toBeInTheDocument();
     expect(await screen.findByText("Folder metadata is still loading; analysis controls are live.")).toBeInTheDocument();
-    expect(await screen.findByDisplayValue("local-vlm")).toBeInTheDocument();
+    expect(await screen.findByDisplayValue("openrouter")).toBeInTheDocument();
     expect(screen.queryByDisplayValue("on_switch")).not.toBeInTheDocument();
     expect(screen.queryByText("Artifact storage settings unavailable.")).not.toBeInTheDocument();
     expect(screen.queryByText("Screenshot folder settings unavailable.")).not.toBeInTheDocument();
@@ -1062,8 +1062,8 @@ describe("ArtifactStoragePanel", () => {
       if (url.includes("/api/settings/screen-analysis")) {
         return Promise.resolve(mockResponse({
           enabled: true,
-          provider: "local-vlm",
-          model: "gemma-4-26b",
+          provider: "openrouter",
+          model: "openrouter/google/gemini-2.5-flash",
           preserve_captures: true,
           archive_dir: "/tmp/seraph-dev-data/artifacts/screen-captures",
           capture_mode: "on_switch",
@@ -1098,8 +1098,8 @@ describe("ArtifactStoragePanel", () => {
       if (url.includes("/api/settings/screen-analysis")) {
         return Promise.resolve(mockResponse({
           enabled: true,
-          provider: "local-vlm",
-          model: "gemma-4-26b",
+          provider: "openrouter",
+          model: "openrouter/google/gemini-2.5-flash",
           preserve_captures: true,
           archive_dir: "/tmp/seraph-dev-data/artifacts/screen-captures",
           capture_mode: "on_switch",
@@ -1121,7 +1121,7 @@ describe("ArtifactStoragePanel", () => {
         { timeout: 5_000 },
       ),
     ).toBeInTheDocument();
-    expect(screen.getByDisplayValue("local-vlm")).toBeInTheDocument();
+    expect(screen.getByDisplayValue("openrouter")).toBeInTheDocument();
     expect(artifactSignal?.aborted).toBe(true);
     expect(screen.queryByText("Artifact storage settings unavailable.")).not.toBeInTheDocument();
     expect(screen.queryByText("Screenshot folder settings unavailable.")).not.toBeInTheDocument();

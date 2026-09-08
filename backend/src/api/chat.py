@@ -72,7 +72,7 @@ async def chat(request: ChatRequest):
                     "duration_ms": int((perf_counter() - started_at) * 1000),
                     "message_length": len(request.message),
                     "error": safe_detail,
-                    "runtime": "direct-local-chat",
+                    "runtime": "direct-openrouter-chat",
                     "failure_stage": "route_preflight",
                 },
             )
@@ -104,12 +104,12 @@ async def chat(request: ChatRequest):
                     "message_length": len(request.message),
                     "timeout_seconds": min(settings.agent_chat_timeout, 60),
                     "request_id": llm_request_id,
-                    "runtime": "direct-local-chat",
+                    "runtime": "direct-openrouter-chat",
                 },
             )
-            raise HTTPException(status_code=504, detail="Local chat timed out — try again")
+            raise HTTPException(status_code=504, detail="OpenRouter chat timed out — try again")
         except Exception as e:
-            logger.exception("Direct local chat failed")
+            logger.exception("Direct OpenRouter chat failed")
             safe_detail = await redact_secrets_in_text(f"Agent error: {e}")
             await log_agent_run_event(
                 session_id=session.id,
@@ -122,7 +122,7 @@ async def chat(request: ChatRequest):
                     "message_length": len(request.message),
                     "error": safe_detail,
                     "request_id": llm_request_id,
-                    "runtime": "direct-local-chat",
+                    "runtime": "direct-openrouter-chat",
                 },
             )
             raise HTTPException(status_code=500, detail=safe_detail)
@@ -141,7 +141,7 @@ async def chat(request: ChatRequest):
                 "message_length": len(request.message),
                 "response_length": len(response_text),
                 "request_id": llm_request_id,
-                "runtime": "direct-local-chat",
+                "runtime": "direct-openrouter-chat",
             },
         )
         return ChatResponse(response=response_text, session_id=session.id)

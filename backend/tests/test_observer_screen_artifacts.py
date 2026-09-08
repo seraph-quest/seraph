@@ -277,8 +277,11 @@ async def test_screenshot_folder_scan_persists_observation_and_serves_image(asyn
     assert analysis["provider"] == "screenshot_folder"
     assert analysis["analysis"]["analysis_owner"] == "seraph"
     assert analysis["analysis"]["source"] == "local_screenshot_folder"
-    assert analysis["analysis"]["semantic_status"] == "pending"
-    assert analysis["analysis"]["semantic_status_detail"]["status"] == "pending"
+    assert analysis["analysis"]["semantic_status"] == "blocked"
+    assert analysis["analysis"]["semantic_status_detail"]["status"] == "blocked"
+    assert analysis["analysis"]["semantic_status_detail"]["reason"] == (
+        "remote_inference_blocked:configuration_required"
+    )
     assert analysis["analysis"]["image_sha256"] == image_sha256
     assert analysis["analysis"]["image_bytes"] == len(image.read_bytes())
     assert analysis["analysis"]["file_format"] == "png"

@@ -229,7 +229,7 @@ async def websocket_chat(websocket: WebSocket):
                             "duration_ms": int((perf_counter() - started_at) * 1000),
                             "message_length": len(ws_msg.message),
                             "error": safe_error,
-                            "runtime": "direct-local-chat",
+                            "runtime": "direct-openrouter-chat",
                             "failure_stage": "route_preflight",
                         },
                     )
@@ -249,7 +249,7 @@ async def websocket_chat(websocket: WebSocket):
                     await websocket.send_text(
                         WSResponse(
                             type="status",
-                            content="Seraph is using the local chat runtime.",
+                            content="Seraph is using the governed OpenRouter chat runtime.",
                             session_id=session.id,
                             seq=_next_seq(),
                         ).model_dump_json()
@@ -289,11 +289,11 @@ async def websocket_chat(websocket: WebSocket):
                     except Exception:
                         if streamed_parts:
                             raise
-                        logger.warning("Direct local websocket streaming unavailable; falling back to non-streaming chat")
+                        logger.warning("Direct OpenRouter websocket streaming unavailable; falling back to non-streaming chat")
                         await websocket.send_text(
                             WSResponse(
                                 type="status",
-                                content="Local streaming is unavailable; Seraph is falling back to the local chat runtime.",
+                                content="OpenRouter streaming is unavailable; Seraph is using the bounded non-streaming OpenRouter route.",
                                 session_id=session.id,
                                 seq=_next_seq(),
                             ).model_dump_json()
@@ -322,21 +322,21 @@ async def websocket_chat(websocket: WebSocket):
                             "message_length": len(ws_msg.message),
                             "timeout_seconds": min(settings.agent_chat_timeout, 60),
                             "request_id": llm_request_id,
-                            "runtime": "direct-local-chat",
+                            "runtime": "direct-openrouter-chat",
                         },
                     )
                     active_turn_completed = True
                     await websocket.send_text(
                         WSResponse(
                             type="error",
-                            content="Local chat timed out — try again",
+                            content="OpenRouter chat timed out — try again",
                             session_id=session.id,
                             seq=_next_seq(),
                         ).model_dump_json()
                     )
                     continue
                 except Exception as e:
-                    logger.exception("Direct local websocket chat failed")
+                    logger.exception("Direct OpenRouter websocket chat failed")
                     safe_error = await redact_secrets_in_text(f"Agent error: {e}")
                     await log_agent_run_event(
                         session_id=session.id,
@@ -349,7 +349,7 @@ async def websocket_chat(websocket: WebSocket):
                             "message_length": len(ws_msg.message),
                             "error": safe_error,
                             "request_id": llm_request_id,
-                            "runtime": "direct-local-chat",
+                            "runtime": "direct-openrouter-chat",
                         },
                     )
                     active_turn_completed = True
@@ -378,7 +378,7 @@ async def websocket_chat(websocket: WebSocket):
                         "message_length": len(ws_msg.message),
                         "response_length": len(final_result),
                         "request_id": llm_request_id,
-                        "runtime": "direct-local-chat",
+                        "runtime": "direct-openrouter-chat",
                     },
                 )
                 await websocket.send_text(

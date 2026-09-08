@@ -86,6 +86,21 @@ def test_route_denial_is_persisted_as_blocked_and_not_auto_retried():
     assert _analysis_candidate_ready(details) is False
 
 
+def test_missing_openrouter_configuration_is_a_blocked_receipt():
+    from src.observer.screenshot_folder_source import _replace_analysis_details
+    from src.observer.screenshot_semantic_analysis import semantic_analysis_status_from_details
+
+    details = _replace_analysis_details(
+        ["capture_artifacts:{}"],
+        analysis=None,
+        error_reason="remote_inference_blocked:configuration_required",
+        status="blocked",
+    )
+    status = semantic_analysis_status_from_details(details) or {}
+    assert status["status"] == "blocked"
+    assert status["reason"] == "remote_inference_blocked:configuration_required"
+
+
 @pytest.mark.asyncio
 async def test_screenshot_folder_analysis_selection_retries_database_lock(monkeypatch):
     from src.observer import screenshot_folder_source as source
@@ -524,6 +539,7 @@ async def test_screenshot_folder_analysis_drains_older_pending_rows_behind_newer
 
     monkeypatch.setattr("src.observer.screenshot_folder_source.settings.screen_analysis_provider", "local-vlm")
     monkeypatch.setattr("src.observer.screenshot_folder_source.settings.local_vlm_base_url", "http://gpu:8088")
+    monkeypatch.setattr("src.observer.screenshot_folder_source.screenshot_semantic_analysis_enabled", lambda: True)
     monkeypatch.setattr("src.observer.screenshot_folder_source.analyze_screenshot_image", fake_analyze)
 
     result = await analyze_pending_screenshot_folder_observations(limit=1)
@@ -596,6 +612,7 @@ async def test_screenshot_folder_analysis_counts_persistence_lock_as_failed(
 
     monkeypatch.setattr("src.observer.screenshot_folder_source.settings.screen_analysis_provider", "local-vlm")
     monkeypatch.setattr("src.observer.screenshot_folder_source.settings.local_vlm_base_url", "http://gpu:8088")
+    monkeypatch.setattr("src.observer.screenshot_folder_source.screenshot_semantic_analysis_enabled", lambda: True)
     monkeypatch.setattr("src.observer.screenshot_folder_source.analyze_screenshot_image", fake_analyze)
     monkeypatch.setattr("src.observer.screenshot_folder_source._persist_analysis_details_with_retry", locked_persist)
 

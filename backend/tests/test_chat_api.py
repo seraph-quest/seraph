@@ -105,7 +105,7 @@ class TestChatAPI:
     @patch("src.api.chat.should_use_direct_local_chat", return_value=True)
     @patch("src.api.chat.run_direct_local_chat", return_value="Hello. What should I call you?")
     @patch("src.api.chat.create_onboarding_agent")
-    async def test_chat_onboarding_hello_can_use_direct_local_path(
+    async def test_chat_onboarding_hello_can_use_direct_openrouter_path(
         self,
         mock_onboarding,
         mock_direct_chat,
@@ -127,7 +127,7 @@ class TestChatAPI:
         assert any(
             event["event_type"] == "agent_run_succeeded"
             and event["tool_name"] == "onboarding_agent"
-            and event["details"]["runtime"] == "direct-local-chat"
+            and event["details"]["runtime"] == "direct-openrouter-chat"
             for event in events
         )
 
@@ -135,7 +135,7 @@ class TestChatAPI:
     @patch("src.api.chat.should_use_direct_local_chat", return_value=True)
     @patch("src.api.chat.run_direct_local_chat")
     @patch("src.api.chat.create_onboarding_agent")
-    async def test_chat_direct_local_preflight_failure_returns_operator_error(
+    async def test_chat_direct_openrouter_preflight_failure_returns_operator_error(
         self,
         mock_onboarding,
         mock_direct_chat,
@@ -164,7 +164,7 @@ class TestChatAPI:
         assert any(
             event["event_type"] == "agent_run_failed"
             and event["tool_name"] == "onboarding_agent"
-            and event["details"]["runtime"] == "direct-local-chat"
+            and event["details"]["runtime"] == "direct-openrouter-chat"
             and event["details"]["failure_stage"] == "route_preflight"
             for event in events
         )

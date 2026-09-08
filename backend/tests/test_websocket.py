@@ -204,7 +204,7 @@ class TestWebSocket:
             assert received[0]["type"] == "status"
             assert received[0]["content"] == "Seraph received the message."
             assert received[1]["type"] == "status"
-            assert "local chat runtime" in received[1]["content"]
+            assert "governed OpenRouter chat runtime" in received[1]["content"]
             assert received[2]["type"] == "delta"
             assert received[2]["content"] == "Re"
             assert received[3]["type"] == "delta"
@@ -248,7 +248,7 @@ class TestWebSocket:
             assert received[0]["type"] == "status"
             assert received[0]["content"] == "Seraph received the message."
             assert received[1]["type"] == "status"
-            assert "local chat runtime" in received[1]["content"]
+            assert "governed OpenRouter chat runtime" in received[1]["content"]
             assert received[2]["type"] == "delta"
             assert received[2]["content"] == "Hello."
             assert received[3]["type"] == "final"
@@ -281,7 +281,7 @@ class TestWebSocket:
             assert received[0]["type"] == "status"
             assert received[0]["content"] == "Seraph received the message."
             assert received[1]["type"] == "status"
-            assert "local chat runtime" in received[1]["content"]
+            assert "governed OpenRouter chat runtime" in received[1]["content"]
             assert received[2]["type"] == "status"
             assert "falling back" in received[2]["content"]
             assert received[3]["type"] == "final"

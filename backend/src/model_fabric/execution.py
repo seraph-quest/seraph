@@ -141,6 +141,7 @@ async def execute_streaming(
         admission_request = GpuAdmissionRequest.from_inference_context(
             attempt_context,
             operation_id=decision.attempt_id or f"{attempt_context.request_id}:{candidate.profile.id}",
+            uncertain_on_error=(candidate.profile.provider_kind == "openrouter"),
         )
         admission_callback_started = False
 
@@ -294,6 +295,7 @@ async def run_preflighted_adapter(
     admission_request = GpuAdmissionRequest.from_inference_context(
         context,
         operation_id=decision.attempt_id or f"{context.request_id}:{decision.selected.profile.id}",
+        uncertain_on_error=(decision.selected.profile.provider_kind == "openrouter"),
     )
     admission_callback_started = False
 
@@ -385,6 +387,7 @@ def execute_sync_adapter(
         context,
         operation_id=decision.attempt_id
         or f"{context.request_id}:{decision.selected.profile.id}",
+        uncertain_on_error=(decision.selected.profile.provider_kind == "openrouter"),
     )
     callback_started = False
     attempt_completed = False

@@ -110,6 +110,106 @@ export interface GoalInfo {
   success_criterion?: GoalSuccessCriterion | null;
 }
 
+/** The smaller goal shape returned by the loop inspection endpoint. */
+export interface GoalLoopGoal {
+  id: string;
+  title: string;
+  status: string;
+  revision: number;
+  parent_id?: string | null;
+  description?: string | null;
+  level?: string;
+  domain?: string;
+  due_date?: string | null;
+  success_criterion?: GoalSuccessCriterion | null;
+  proactive_enabled?: boolean;
+}
+
+/** Redacted candidate/outcome/no-learning receipt from the governed loop. */
+export interface GoalLoopReceipt {
+  audit_event_id?: string | number | null;
+  event_type?: string;
+  created_at?: string | null;
+  receipt_version?: string;
+  receipt_type?: string;
+  proposal_only?: boolean;
+  candidate_id?: string | null;
+  outcome_id?: string | null;
+  goal_id?: string;
+  goal_revision?: number | null;
+  execution_status?: string | null;
+  verification?: string | null;
+  usefulness?: string | null;
+  learning?: string | null;
+  learning_record_id?: string | null;
+  artifact_ref?: string | null;
+  evidence_refs?: string[];
+  reason?: string | null;
+  [key: string]: unknown;
+}
+
+export interface GoalStrategyDelta {
+  delta_id: string;
+  goal_id: string;
+  scope: string;
+  field_name: string;
+  before: Record<string, unknown>;
+  after: Record<string, unknown>;
+  source_event_id: string;
+  author_id: string;
+  evaluator_id?: string | null;
+  goal_revision_before: number;
+  goal_revision_after?: number | null;
+  status: string;
+  rollback_target_id?: string | null;
+  reason: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface GoalLoopPayload {
+  goal: GoalLoopGoal;
+  criterion: GoalSuccessCriterion | null;
+  receipts: GoalLoopReceipt[];
+  strategy_deltas: GoalStrategyDelta[];
+}
+
+export interface GoalSnapshotInput {
+  expected_revision: number;
+  file_path?: string;
+  evidence_refs?: string[];
+  reason?: string;
+  expected_outcome?: string;
+  cancel_requested?: boolean;
+}
+
+export interface GoalStrategyCorrectionInput {
+  correction_id: string;
+  expected_revision: number;
+  query?: string;
+  file_path?: string;
+  priority?: number;
+  reason: string;
+}
+
+export interface GoalStrategyRollbackInput {
+  expected_revision: number;
+  reason: string;
+}
+
+export interface GoalLoopActionResponse {
+  status?: string;
+  goal?: GoalLoopGoal;
+  delta?: GoalStrategyDelta;
+  audit_receipt?: { status?: string; reason?: string; [key: string]: unknown };
+  execution_status?: string;
+  verification?: string;
+  usefulness?: string;
+  learning?: string;
+  artifact_ref?: string | null;
+  [key: string]: unknown;
+}
+
 export interface UserProfileInfo {
   id: string;
   name: string;

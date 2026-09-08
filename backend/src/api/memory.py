@@ -1,7 +1,9 @@
 from fastapi import APIRouter
 from fastapi import HTTPException
+from fastapi import Request
 from pydantic import BaseModel, Field
 
+from src.auth.service import AuthenticatedOperator
 from src.memory.benchmark import build_guardian_memory_benchmark_report
 from src.memory.control import (
     apply_memory_live_control_action,
@@ -15,6 +17,7 @@ from src.memory.control import (
 )
 from src.memory.decay import summarize_memory_reconciliation_state
 from src.memory.providers import list_memory_provider_inventory
+from src.security.trust_contract import AuthorityGrant
 
 router = APIRouter()
 
@@ -64,6 +67,33 @@ class MemoryLiveControlActionRequest(BaseModel):
     privacy_boundary: str | None = None
 
 
+def authenticated_memory_actor(request: Request) -> str:
+    """Return the middleware-bound operator identity for memory mutations.
+
+    The actor fields remain accepted in request models for wire compatibility,
+    but caller input never supplies canonical memory authority or audit
+    identity. The test-only middleware bypass supplies the same principal
+    contract as a real authenticated session.
+    """
+
+    operator = getattr(request.state, "operator", None)
+    principal = getattr(operator, "principal", None)
+    principal_id = str(getattr(principal, "principal_id", "") or "").strip()
+    session_id = str(getattr(operator, "session_id", "") or "").strip()
+    grants = {str(getattr(grant, "value", grant)) for grant in getattr(principal, "grants", ())}
+    if (
+        not isinstance(operator, AuthenticatedOperator)
+        or principal is None
+        or not bool(getattr(principal, "authenticated", False))
+        or bool(getattr(principal, "revoked", False))
+        or not principal_id
+        or not session_id
+        or AuthorityGrant.CAPABILITY_EXECUTE.value not in grants
+    ):
+        raise HTTPException(status_code=401, detail={"code": "authentication_required"})
+    return principal_id
+
+
 def _live_control_acknowledgement(request: MemoryLiveControlActionRequest) -> bool:
     if str(request.action or "").strip().lower() == "rollback_memory":
         return request.acknowledge_rollback_boundary
@@ -98,12 +128,15 @@ async def get_guardian_memory_live_control(limit: int = 8, owner_session_id: str
 
 
 @router.post("/memory/live-controls/actions")
-async def post_memory_live_control_action(request: MemoryLiveControlActionRequest):
+async def post_memory_live_control_action(
+    http_request: Request,
+    request: MemoryLiveControlActionRequest,
+):
     try:
         return await apply_memory_live_control_action(
             action=request.action,
             acknowledged=_live_control_acknowledgement(request),
-            actor=request.actor,
+            actor=authenticated_memory_actor(http_request),
             reason=request.reason,
             owner_session_id=request.owner_session_id,
             memory_id=request.memory_id,
@@ -116,12 +149,15 @@ async def post_memory_live_control_action(request: MemoryLiveControlActionReques
 
 
 @router.post("/memory/guardian-memory-live-control/actions")
-async def post_guardian_memory_live_control_action(request: MemoryLiveControlActionRequest):
-    return await post_memory_live_control_action(request)
+async def post_guardian_memory_live_control_action(
+    http_request: Request,
+    request: MemoryLiveControlActionRequest,
+):
+    return await post_memory_live_control_action(http_request, request)
 
 
 @router.post("/memory/corrections")
-async def create_memory_correction(request: MemoryCorrectionRequest):
+async def create_memory_correction(http_request: Request, request: MemoryCorrectionRequest):
     try:
         return await correct_memory(
             content=request.content,
@@ -129,7 +165,7 @@ async def create_memory_correction(request: MemoryCorrectionRequest):
             summary=request.summary,
             corrects_memory_id=request.corrects_memory_id,
             source_session_id=request.source_session_id,
-            actor=request.actor,
+            actor=authenticated_memory_actor(http_request),
             reason=request.reason,
             confidence=request.confidence,
             importance=request.importance,
@@ -141,11 +177,11 @@ async def create_memory_correction(request: MemoryCorrectionRequest):
 
 
 @router.post("/memory/{memory_id}/pin")
-async def pin_memory_item(memory_id: str, request: MemoryPinRequest):
+async def pin_memory_item(memory_id: str, http_request: Request, request: MemoryPinRequest):
     try:
         return await pin_memory(
             memory_id=memory_id,
-            actor=request.actor,
+            actor=authenticated_memory_actor(http_request),
             reason=request.reason,
             privacy_boundary=request.privacy_boundary,
         )
@@ -154,11 +190,11 @@ async def pin_memory_item(memory_id: str, request: MemoryPinRequest):
 
 
 @router.post("/memory/{memory_id}/forget")
-async def forget_memory_item(memory_id: str, request: MemoryForgetRequest):
+async def forget_memory_item(memory_id: str, http_request: Request, request: MemoryForgetRequest):
     try:
         return await forget_memory(
             memory_id=memory_id,
-            actor=request.actor,
+            actor=authenticated_memory_actor(http_request),
             reason=request.reason,
             mode=request.mode,
             privacy_boundary=request.privacy_boundary,
@@ -168,11 +204,11 @@ async def forget_memory_item(memory_id: str, request: MemoryForgetRequest):
 
 
 @router.post("/memory/{memory_id}/audit")
-async def audit_memory_item(memory_id: str, request: MemoryAuditRequest):
+async def audit_memory_item(memory_id: str, http_request: Request, request: MemoryAuditRequest):
     try:
         return await audit_memory(
             memory_id=memory_id,
-            actor=request.actor,
+            actor=authenticated_memory_actor(http_request),
             reason=request.reason,
         )
     except ValueError as exc:

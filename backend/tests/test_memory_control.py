@@ -2,6 +2,7 @@ from unittest.mock import patch
 
 import pytest
 
+from config.settings import settings
 from src.db.models import MemoryEdgeType, MemoryKind
 from src.memory.hybrid_retrieval import retrieve_hybrid_memory
 from src.memory.repository import memory_repository
@@ -433,3 +434,102 @@ async def test_memory_live_controls_quarantine_and_reinstate_provider_runtime_st
         assert reinstated.status_code == 200
         providers = reinstated.json()["snapshot"]["provider_states"]["providers"]
         assert providers[0]["runtime_state"] == "ready"
+
+
+@pytest.mark.asyncio
+async def test_memory_mutation_routes_bind_authenticated_principal_and_ignore_body_actor(client):
+    """Every canonical memory mutation and compatibility alias uses middleware identity."""
+
+    principal_id = "operator:test-bypass"
+    created = await memory_repository.create_memory(
+        content="Principal-bound memory control candidate.",
+        kind=MemoryKind.fact,
+        summary="Principal-bound candidate",
+        confidence=0.6,
+        importance=0.6,
+    )
+
+    correction = await client.post(
+        "/api/memory/corrections",
+        json={
+            "content": "Principal-bound corrected memory.",
+            "kind": "fact",
+            "corrects_memory_id": created.memory_id,
+            "actor": "attacker",
+            "reason": "Correction actor must come from the authenticated operator.",
+        },
+    )
+    assert correction.status_code == 200
+    corrected_id = correction.json()["memory"]["id"]
+    assert correction.json()["receipt"]["actor"] == principal_id
+    assert correction.json()["memory"]["provenance"]["actor"] == principal_id
+    assert correction.json()["memory"]["operator_control"]["last_actor"] == principal_id
+
+    pinned = await client.post(
+        f"/api/memory/{corrected_id}/pin",
+        json={"actor": "attacker", "reason": "Pin through the canonical route."},
+    )
+    forgotten = await client.post(
+        f"/api/memory/{corrected_id}/forget",
+        json={"actor": "attacker", "reason": "Forget through the canonical route."},
+    )
+    audited = await client.post(
+        f"/api/memory/{corrected_id}/audit",
+        json={"actor": "attacker", "reason": "Audit through the canonical route."},
+    )
+    assert pinned.status_code == 200
+    assert forgotten.status_code == 200
+    assert audited.status_code == 200
+    assert all(response.json()["receipt"]["actor"] == principal_id for response in (pinned, forgotten, audited))
+
+    live_control_routes = (
+        "/api/memory/live-controls/actions",
+        "/api/memory/guardian-memory-live-control/actions",
+        "/api/operator/memory-live-controls/actions",
+        "/api/operator/guardian-memory-live-control/actions",
+    )
+    for route in live_control_routes:
+        response = await client.post(
+            route,
+            json={
+                "action": "decay_stale_evidence",
+                "acknowledged": True,
+                "memory_id": corrected_id,
+                "actor": "attacker",
+                "reason": f"Live-control alias identity check for {route}.",
+            },
+        )
+        assert response.status_code == 200
+        assert response.json()["receipt"]["actor"] == principal_id
+
+    legacy_control = await client.post(
+        f"/api/operator/memory-control/{corrected_id}",
+        json={
+            "action": "audit",
+            "note": "Legacy operator alias identity check.",
+            "actor": "attacker",
+        },
+    )
+    assert legacy_control.status_code == 200
+    assert legacy_control.json()["receipt"]["actor"] == principal_id
+
+    audit = await client.get("/api/memory/audit", params={"memory_id": corrected_id, "limit": 50})
+    assert audit.status_code == 200
+    assert "attacker" not in audit.text
+    assert {event["actor"] for event in audit.json()["events"]} == {principal_id}
+
+
+@pytest.mark.asyncio
+async def test_memory_mutations_remain_blocked_when_test_auth_bypass_is_disabled(client, monkeypatch):
+    monkeypatch.setattr(settings, "operator_auth_allow_unauthenticated_tests", False)
+
+    response = await client.post(
+        "/api/memory/corrections",
+        json={
+            "content": "Unauthenticated correction must not be persisted.",
+            "actor": "attacker",
+        },
+    )
+
+    assert response.status_code == 503
+    assert response.json()["detail"]["code"] == "auth_not_configured"

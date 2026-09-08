@@ -22,9 +22,10 @@ interface Props {
   goals: GoalInfo[];
   depth: number;
   onEdit?: (goal: GoalInfo) => void;
+  onInspect?: (goal: GoalInfo) => void;
 }
 
-export function GoalTree({ goals, depth, onEdit }: Props) {
+export function GoalTree({ goals, depth, onEdit, onInspect }: Props) {
   const updateGoal = useQuestStore((s) => s.updateGoal);
   const deleteGoal = useQuestStore((s) => s.deleteGoal);
   const [error, setError] = useState<string | null>(null);
@@ -100,7 +101,17 @@ export function GoalTree({ goals, depth, onEdit }: Props) {
                   {goal.level}
                 </span>
               </div>
-              <div className="hidden group-hover:flex items-center gap-0.5 shrink-0">
+              <div className="flex items-center gap-0.5 shrink-0 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100">
+                {onInspect && (
+                  <button
+                    onClick={() => onInspect(goal)}
+                    className="text-[9px] text-retro-text/30 hover:text-retro-highlight px-0.5"
+                    title="Inspect goal loop"
+                    aria-label={`Inspect ${goal.title}`}
+                  >
+                    ?
+                  </button>
+                )}
                 {onEdit && (
                   <button
                     onClick={() => onEdit(goal)}
@@ -124,7 +135,7 @@ export function GoalTree({ goals, depth, onEdit }: Props) {
               </div>
             </div>
             {goal.children && goal.children.length > 0 && (
-              <GoalTree goals={goal.children} depth={depth + 1} onEdit={onEdit} />
+              <GoalTree goals={goal.children} depth={depth + 1} onEdit={onEdit} onInspect={onInspect} />
             )}
           </div>
         );

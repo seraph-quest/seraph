@@ -143,4 +143,83 @@ describe("questStore", () => {
     await useQuestStore.getState().refresh();
     expect(useQuestStore.getState().loading).toBe(false);
   });
+
+  it("loads a typed goal loop without proposing or executing a candidate", async () => {
+    const payload = {
+      goal: { id: "g1", title: "Ship", status: "active", revision: 4 },
+      criterion: {
+        criterion_id: "artifact",
+        description: "A verified artifact exists",
+        verifier_kind: "artifact_readback",
+        target: { file_path: "artifacts/ship.md" },
+        evidence_refs: ["artifact:ship"],
+      },
+      receipts: [{ receipt_type: "outcome", execution_status: "blocked", verification: "unknown", usefulness: "unknown", learning: "no_learning" }],
+      strategy_deltas: [],
+    };
+    mockFetch.mockResolvedValueOnce({ ok: true, status: 200, json: async () => payload });
+
+    await useQuestStore.getState().loadGoalLoop("g1");
+
+    expect(mockFetch).toHaveBeenCalledWith(expect.stringContaining("/api/goals/g1/loop"));
+    expect(mockFetch.mock.calls.some(([url]) => String(url).includes("/candidates"))).toBe(false);
+    expect(useQuestStore.getState().goalLoop).toEqual(payload);
+  });
+
+  it("reports unauthorized loop inspection while retaining last-known payload", async () => {
+    const previous = {
+      goal: { id: "g1", title: "Ship", status: "active", revision: 4 },
+      criterion: null,
+      receipts: [],
+      strategy_deltas: [],
+    };
+    useQuestStore.setState({ goalLoop: previous, goalLoopGoalId: "g1" });
+    mockFetch.mockResolvedValueOnce({
+      ok: false,
+      status: 401,
+      json: async () => ({ detail: { code: "authentication_required" } }),
+    });
+
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      await useQuestStore.getState().loadGoalLoop("g1");
+    } finally {
+      errorSpy.mockRestore();
+    }
+
+    expect(useQuestStore.getState().goalLoop).toEqual(previous);
+    expect(useQuestStore.getState().goalLoopError).toMatchObject({
+      status: 401,
+      code: "authentication_required",
+    });
+  });
+
+  it("runs the bounded snapshot endpoint and reloads loop evidence", async () => {
+    const response = {
+      status: "blocked",
+      execution_status: "blocked",
+      verification: "unknown",
+      learning: "no_learning",
+    };
+    const payload = {
+      goal: { id: "g1", title: "Ship", status: "active", revision: 4 },
+      criterion: null,
+      receipts: [],
+      strategy_deltas: [],
+    };
+    mockFetch.mockResolvedValueOnce({ ok: true, status: 200, json: async () => response });
+    mockFetch.mockResolvedValueOnce({ ok: true, status: 200, json: async () => payload });
+
+    await useQuestStore.getState().runGoalSnapshot("g1", {
+      expected_revision: 4,
+      evidence_refs: ["artifact:ship"],
+    });
+
+    const [url, options] = mockFetch.mock.calls[0];
+    expect(url).toContain("/api/goals/g1/snapshot");
+    expect(options.method).toBe("POST");
+    expect(JSON.parse(options.body)).toMatchObject({ expected_revision: 4 });
+    expect(mockFetch.mock.calls.some(([candidateUrl]) => String(candidateUrl).includes("/candidates"))).toBe(false);
+    expect(useQuestStore.getState().goalLoop).toEqual(payload);
+  });
 });

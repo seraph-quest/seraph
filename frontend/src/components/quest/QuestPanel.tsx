@@ -4,6 +4,7 @@ import { useChatStore } from "../../stores/chatStore";
 import { DomainStats } from "./DomainStats";
 import { GoalTree } from "./GoalTree";
 import { GoalForm } from "./GoalForm";
+import { GoalLoopPanel } from "./GoalLoopPanel";
 import type { GoalInfo } from "../../types";
 
 const LEVELS = ["daily", "weekly", "monthly", "quarterly", "annual", "vision"] as const;
@@ -35,11 +36,22 @@ function filterGoals(
   }, []);
 }
 
+function findGoal(goals: GoalInfo[], id: string | null): GoalInfo | null {
+  if (!id) return null;
+  for (const goal of goals) {
+    if (goal.id === id) return goal;
+    const nested = findGoal(goal.children ?? [], id);
+    if (nested) return nested;
+  }
+  return null;
+}
+
 export function QuestPanel() {
   const questPanelOpen = useChatStore((s) => s.questPanelOpen);
   const setQuestPanelOpen = useChatStore((s) => s.setQuestPanelOpen);
   const { goalTree, dashboard, refresh, loading } = useQuestStore();
   const [editingGoal, setEditingGoal] = useState<GoalInfo | "new" | null>(null);
+  const [selectedGoalId, setSelectedGoalId] = useState<string | null>(null);
 
   const [search, setSearch] = useState("");
   const [filterLevel, setFilterLevel] = useState("");
@@ -58,6 +70,10 @@ export function QuestPanel() {
   );
 
   const hasFilters = !!(search || filterLevel || filterDomain);
+  const selectedGoal = useMemo(
+    () => findGoal(filteredTree, selectedGoalId),
+    [filteredTree, selectedGoalId],
+  );
 
   if (!questPanelOpen) return null;
 
@@ -126,8 +142,14 @@ export function QuestPanel() {
             goals={filteredTree}
             depth={0}
             onEdit={(goal) => setEditingGoal(goal)}
+            onInspect={(goal) => setSelectedGoalId(goal.id)}
           />
         )}
+
+        <GoalLoopPanel
+          goal={selectedGoal}
+          onEdit={(goal) => setEditingGoal(goal)}
+        />
       </div>
     </div>
   );

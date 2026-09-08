@@ -91,7 +91,7 @@ async def run_screenshot_folder_analysis() -> None:
             while remaining > 0:
                 available_slots = await screenshot_semantic_analysis_background_slots()
                 if available_slots <= 0:
-                    stopped_reason = "local_vlm_no_background_capacity"
+                    stopped_reason = "remote_inference_no_background_capacity"
                     break
                 batch_limit = _scheduled_batch_limit(
                     limit=remaining,

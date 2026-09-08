@@ -154,12 +154,24 @@ def test_provider_profile_status_does_not_expose_unsafe_legacy_api_base():
 
 
 @pytest.fixture(autouse=True)
-def clear_ambient_runtime_profile_preferences():
+def clear_ambient_runtime_profile_preferences(monkeypatch):
+    # This module exercises the historical provider-matrix and LiteLLM
+    # compatibility helpers.  Canonical production-route enforcement is
+    # covered by the dedicated model-fabric and chat suites; keep these
+    # synthetic helper tests off that boundary so their explicit local,
+    # fallback, and provider-profile assertions remain meaningful.
+    from src.model_fabric import caller_context
+
+    monkeypatch.setattr(caller_context, "is_canonical_inference_route", lambda _path: False)
     with (
         patch.object(settings, "runtime_profile_preferences", ""),
         patch.object(settings, "local_runtime_paths", ""),
         patch.object(settings, "seraph_vlm_api_key", ""),
         patch.object(settings, "local_vlm_api_key", ""),
+        # These tests exercise the historical provider-matrix and routing
+        # compatibility contract.  Active OpenRouter-only behavior has
+        # dedicated focused coverage in test_model_fabric_openrouter_policy.
+        patch.object(settings, "openrouter_provider_only", False),
     ):
         yield
 
@@ -170,6 +182,20 @@ def transitional_legacy_completion_path(monkeypatch):
     from src.model_fabric import caller_context
 
     monkeypatch.setattr(caller_context, "is_canonical_inference_route", lambda _path: False)
+    monkeypatch.setattr(settings, "openrouter_provider_only", False)
+
+
+@pytest.fixture
+def canonical_openrouter_route(monkeypatch):
+    """Opt one test into the active canonical boundary despite the legacy fixture."""
+    from src.model_fabric import caller_context
+
+    monkeypatch.setattr(
+        caller_context,
+        "is_canonical_inference_route",
+        lambda path: path in {"chat_agent", "mcp_specialist_calendar"},
+    )
+    monkeypatch.setattr(settings, "openrouter_provider_only", True)
 
 
 def test_build_model_kwargs_uses_provider_agnostic_settings():
@@ -949,9 +975,8 @@ def _formatted_message_tokens(messages: list[dict[str, str]]) -> int:
     )
 
 
-def test_fallback_litellm_model_compacts_local_runtime_messages_before_generate():
-    success_response = MagicMock()
-    success_response.choices = [MagicMock(message=MagicMock(content="compacted response"))]
+def test_fallback_litellm_model_compacts_legacy_local_messages_before_generate():
+    success_response = ChatMessage.from_dict({"role": "assistant", "content": "compacted response"})
     with (
         patch.object(settings, "local_model", "openai/unsloth/gemma-local"),
         patch.object(settings, "local_llm_api_key", "local-secret"),
@@ -962,6 +987,7 @@ def test_fallback_litellm_model_compacts_local_runtime_messages_before_generate(
         patch.object(settings, "local_runtime_tool_reserve_tokens", 512),
         patch.object(settings, "local_runtime_min_section_tokens", 64),
         patch("src.agent.prompt_compaction.log_background_task_event_sync") as mock_receipt,
+        patch("src.llm_runtime._can_log_request", return_value=False),
         patch(
             "src.llm_runtime.get_current_trust_principal",
             return_value=TrustPrincipal(
@@ -976,10 +1002,7 @@ def test_fallback_litellm_model_compacts_local_runtime_messages_before_generate(
             return_value=(MagicMock(allowed=True), ()),
         ),
         patch("src.llm_runtime._new_route_receipt_session", return_value=None),
-        patch(
-            "src.llm_runtime._governed_openai_chat_completion",
-            return_value=(success_response, {}),
-        ) as mock_transport,
+        patch("src.llm_runtime.BaseLiteLLMModel.generate", return_value=success_response) as mock_transport,
     ):
         model = FallbackLiteLLMModel(**build_model_kwargs(
             temperature=0.2,
@@ -988,7 +1011,7 @@ def test_fallback_litellm_model_compacts_local_runtime_messages_before_generate(
         ))
         result = model.generate(_oversized_messages())
 
-    sent_messages = mock_transport.call_args.kwargs["body"]["messages"]
+    sent_messages = mock_transport.call_args.args[1]
     assert result.content == "compacted response"
     assert _formatted_message_tokens(sent_messages) <= local_runtime_prompt_budget(
         reserved_output_tokens=512
@@ -2253,7 +2276,9 @@ def test_governed_all_denied_returns_stable_error_and_zero_transport():
 
 
 @pytest.mark.parametrize("runtime_path", ["chat_agent", "mcp_specialist_calendar"])
-def test_canonical_completion_without_principal_is_zero_legacy_transport(runtime_path):
+def test_canonical_completion_without_principal_is_zero_legacy_transport(
+    runtime_path, canonical_openrouter_route
+):
     with (
         patch("src.llm_runtime.get_current_trust_principal", return_value=None),
         patch("litellm.completion") as legacy_transport,
@@ -2269,7 +2294,7 @@ def test_canonical_completion_without_principal_is_zero_legacy_transport(runtime
     legacy_transport.assert_not_called()
 
 
-def test_canonical_completion_builds_context_before_route_selection():
+def test_canonical_completion_builds_context_before_route_selection(canonical_openrouter_route):
     principal = TrustPrincipal(
         principal_id="operator-1",
         principal_type=PrincipalType.OPERATOR,

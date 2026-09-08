@@ -9,6 +9,7 @@ from typing import Any
 from smolagents import Tool
 
 from src.approval.runtime import get_current_session_id
+from src.auth.cancellation import assert_runtime_not_revoked
 from src.audit.formatting import format_tool_call_summary, redact_for_audit, summarize_tool_result
 from src.audit.repository import audit_repository
 from src.llm_runtime import get_current_llm_request_id
@@ -129,6 +130,7 @@ class AuditedTool(Tool):
         return None
 
     def __call__(self, *args, sanitize_inputs_outputs: bool = False, **kwargs):
+        assert_runtime_not_revoked()
         session_id = get_current_session_id()
         arguments = self._normalize_invocation(args, kwargs)
         audit_arguments = _custom_audit_arguments(self.wrapped_tool, arguments)
@@ -159,6 +161,7 @@ class AuditedTool(Tool):
         )
 
         try:
+            assert_runtime_not_revoked()
             result = self.wrapped_tool(*args, sanitize_inputs_outputs=sanitize_inputs_outputs, **kwargs)
         except Exception as exc:
             custom_failure_payload = _custom_failure_payload(self.wrapped_tool, arguments, exc)

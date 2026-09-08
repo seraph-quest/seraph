@@ -1,4 +1,4 @@
-"""Tests for local-screen end-of-day goal reports."""
+"""Tests for governed end-of-day goal reports."""
 
 from __future__ import annotations
 
@@ -24,8 +24,34 @@ def _llm_response(content: str) -> MagicMock:
 
 
 @pytest.fixture(autouse=True)
-def allow_remote_screen_llm_for_existing_report_tests():
-    with patch("src.scheduler.screen_llm_policy.settings.screen_derived_llm_allow_remote", True):
+def allow_openrouter_screen_llm_for_existing_report_tests():
+    """Keep report mechanics tests independent from live OpenRouter credentials.
+
+    The OpenRouter policy and proof contract has dedicated tests.  These tests
+    exercise report aggregation and prompt construction, so they inject the
+    already-admitted canonical route and still honor the feature-off setting.
+    """
+    from src.scheduler.screen_llm_policy import ScreenDerivedLlmDecision
+
+    async def admitted_decision(runtime_path: str) -> ScreenDerivedLlmDecision:
+        if not settings.end_of_day_report_llm_enabled:
+            return ScreenDerivedLlmDecision(
+                allowed=False,
+                reason="llm_disabled",
+                runtime_path=runtime_path,
+                runtime_profile="",
+            )
+        return ScreenDerivedLlmDecision(
+            allowed=True,
+            reason="test_openrouter_profile_ready",
+            runtime_path=runtime_path,
+            runtime_profile="openrouter",
+        )
+
+    with patch(
+        "src.scheduler.jobs.end_of_day_goal_report.screen_derived_llm_decision",
+        side_effect=admitted_decision,
+    ):
         yield
 
 
@@ -96,7 +122,7 @@ async def test_build_report_blocks_llm_when_disabled(async_db):
 
 
 @pytest.mark.asyncio
-async def test_build_report_blocks_default_remote_screen_data_routing(async_db):
+async def test_build_report_ignores_retired_local_routing_preferences(async_db):
     from src.db.models import ScreenObservation
     from src.scheduler.jobs.end_of_day_goal_report import build_end_of_day_goal_report
 
@@ -130,18 +156,20 @@ async def test_build_report_blocks_default_remote_screen_data_routing(async_db):
         "",
     ), patch(
         "src.scheduler.jobs.end_of_day_goal_report.completion_with_fallback",
-        new=AsyncMock(),
+        new=AsyncMock(return_value=_llm_response("OpenRouter report")),
     ) as completion:
         report = await build_end_of_day_goal_report(date(2026, 6, 20))
 
-    completion.assert_not_awaited()
-    assert report["analysis_provider"] == "blocked:local_profile_required"
-    assert "Configure a verified local runtime profile" in report["body"]
+    completion.assert_awaited_once()
+    assert completion.await_args.kwargs["local_runtime_only"] is False
+    assert report["body"] == "OpenRouter report"
+    assert report["analysis_provider"].startswith("llm:openrouter:")
 
 
 @pytest.mark.asyncio
 async def test_build_report_blocks_generic_local_profile_even_with_safe_proof(async_db):
     from src.scheduler.jobs.end_of_day_goal_report import build_end_of_day_goal_report
+    from src.scheduler.screen_llm_policy import ScreenDerivedLlmDecision
 
     with patch.object(settings, "user_timezone", "UTC"), patch(
         "src.scheduler.screen_llm_policy.settings.screen_derived_llm_allow_remote",
@@ -156,8 +184,15 @@ async def test_build_report_blocks_generic_local_profile_even_with_safe_proof(as
         "src.scheduler.screen_llm_policy.settings.local_llm_api_base",
         "http://127.0.0.1:8000/v1",
     ), patch(
-        "src.scheduler.screen_llm_policy.latest_local_runtime_profile_proof",
-        return_value={"safe_for_single_backend_profile_routing": True},
+        "src.scheduler.jobs.end_of_day_goal_report.screen_derived_llm_decision",
+        new=AsyncMock(
+            return_value=ScreenDerivedLlmDecision(
+                allowed=False,
+                reason="openrouter_cloud_policy_missing",
+                runtime_path="end_of_day_goal_report",
+                runtime_profile="openrouter",
+            )
+        ),
     ), patch(
         "src.scheduler.jobs.end_of_day_goal_report.completion_with_fallback",
         new=AsyncMock(),
@@ -165,41 +200,24 @@ async def test_build_report_blocks_generic_local_profile_even_with_safe_proof(as
         report = await build_end_of_day_goal_report(date(2026, 6, 20))
 
     completion.assert_not_awaited()
-    assert report["analysis_provider"] == "blocked:verified_profile_required"
+    assert report["analysis_provider"] == "blocked:openrouter_cloud_policy_missing"
 
 
 @pytest.mark.asyncio
-async def test_build_report_labels_verified_local_gemma_profile(async_db):
+async def test_build_report_labels_governed_openrouter_profile(async_db):
     from src.scheduler.jobs.end_of_day_goal_report import build_end_of_day_goal_report
 
-    response = _llm_response("Verified local Gemma report")
+    response = _llm_response("Verified OpenRouter report")
 
     with patch.object(settings, "user_timezone", "UTC"), patch(
-        "src.scheduler.screen_llm_policy.settings.screen_derived_llm_allow_remote",
-        False,
-    ), patch(
-        "src.scheduler.screen_llm_policy.settings.runtime_profile_preferences",
-        "end_of_day_goal_report=local-gemma-report-thinking",
-    ), patch(
-        "src.scheduler.screen_llm_policy.settings.local_model",
-        "openai/unsloth/gemma-4-26B-A4B-it-qat-GGUF",
-    ), patch(
-        "src.scheduler.screen_llm_policy.settings.local_llm_api_base",
-        "http://127.0.0.1:8000/v1",
-    ), patch(
-        "src.scheduler.screen_llm_policy.latest_local_runtime_profile_proof",
-        return_value={"safe_for_single_backend_profile_routing": True},
-    ), patch(
         "src.scheduler.jobs.end_of_day_goal_report.completion_with_fallback",
         new=AsyncMock(return_value=response),
     ) as completion:
         report = await build_end_of_day_goal_report(date(2026, 6, 20))
 
     completion.assert_awaited_once()
-    assert completion.await_args.kwargs["local_runtime_only"] is True
-    assert report["analysis_provider"] == (
-        "llm:local-gemma-report-thinking:openai/unsloth/gemma-4-26B-A4B-it-qat-GGUF"
-    )
+    assert completion.await_args.kwargs["local_runtime_only"] is False
+    assert report["analysis_provider"].startswith("llm:openrouter:")
 
 
 @pytest.mark.asyncio

@@ -2,6 +2,8 @@
 
 from .contracts import (
     MODEL_FABRIC_SCHEMA_VERSION,
+    OPENROUTER_API_BASE,
+    OPENROUTER_PROVIDER_KIND,
     EndpointClass,
     InferenceRequestContext,
     InferenceRequirements,
@@ -16,6 +18,7 @@ from .contracts import (
     default_egress_for_workload,
     bind_final_inference_payload,
     finalized_openai_compatible_body,
+    finalized_openai_compatible_embeddings_body,
     transport_model_for_provider,
     credential_ref_allowed,
     has_inline_secret_options,
@@ -23,14 +26,22 @@ from .contracts import (
 )
 from .selector import (
     SUPPORTED_PROVIDER_KINDS,
+    ACTIVE_PROVIDER_KINDS,
     candidate_from_profile,
     classify_endpoint,
     preflight_candidate,
     provider_family_exclusion_reason,
+    active_provider_exclusion_reason,
     profile_exclusion_reason,
     select_route,
 )
-from .execution import RouteReceiptHooks, execute_streaming, run_preflighted_adapter
+from .execution import (
+    RouteReceiptHooks,
+    SyncAdapterReceiptError,
+    execute_streaming,
+    execute_sync_adapter,
+    run_preflighted_adapter,
+)
 from .gpu_admission import (
     GPU_ADMISSION_SCHEMA_VERSION,
     GPU_ADMISSION_STATUSES,
@@ -49,6 +60,23 @@ from .gpu_admission import (
     gpu_admission_broker,
     priority_for_inference_context,
 )
+from .remote_inference_admission import (
+    REMOTE_INFERENCE_ADMISSION_SCHEMA_VERSION,
+    REMOTE_INFERENCE_RESOURCE_CLASS,
+    RemoteInferenceAdmissionBroker,
+    RemoteInferenceAdmissionCapacityError,
+    RemoteInferenceAdmissionCancelledError,
+    RemoteInferenceAdmissionError,
+    RemoteInferenceAdmissionExpiredError,
+    RemoteInferenceAdmissionIdentityError,
+    RemoteInferenceAdmissionLease,
+    RemoteInferenceAdmissionLeaseError,
+    RemoteInferenceAdmissionReceipt,
+    RemoteInferenceAdmissionRequest,
+    RemoteInferenceAdmissionUncertainError,
+    RemoteInferencePriority,
+    remote_inference_admission_broker,
+)
 from .proofs import build_model_route_proof, canonical_proof_hash, proof_is_fresh, validate_model_route_proof
 from .receipts import CostEstimate, ReceiptPersistenceResult, RouteAttemptReceipt, RouteReceipt, TokenUsage
 from .repository import ModelFabricRepository, ProofPersistenceResult, model_fabric_repository
@@ -57,6 +85,8 @@ from .hooks import PersistedRouteReceiptHooks, RouteReceiptSession, persist_deni
 
 __all__ = [
     "MODEL_FABRIC_SCHEMA_VERSION",
+    "OPENROUTER_API_BASE",
+    "OPENROUTER_PROVIDER_KIND",
     "EndpointClass",
     "InferenceRequestContext",
     "InferenceRequirements",
@@ -71,6 +101,7 @@ __all__ = [
     "default_egress_for_workload",
     "bind_final_inference_payload",
     "finalized_openai_compatible_body",
+    "finalized_openai_compatible_embeddings_body",
     "transport_model_for_provider",
     "credential_ref_allowed",
     "has_inline_secret_options",
@@ -80,10 +111,14 @@ __all__ = [
     "preflight_candidate",
     "select_route",
     "SUPPORTED_PROVIDER_KINDS",
+    "ACTIVE_PROVIDER_KINDS",
     "provider_family_exclusion_reason",
+    "active_provider_exclusion_reason",
     "profile_exclusion_reason",
     "RouteReceiptHooks",
+    "SyncAdapterReceiptError",
     "execute_streaming",
+    "execute_sync_adapter",
     "run_preflighted_adapter",
     "GPU_ADMISSION_SCHEMA_VERSION",
     "GPU_ADMISSION_STATUSES",
@@ -101,6 +136,21 @@ __all__ = [
     "GpuPriority",
     "gpu_admission_broker",
     "priority_for_inference_context",
+    "REMOTE_INFERENCE_ADMISSION_SCHEMA_VERSION",
+    "REMOTE_INFERENCE_RESOURCE_CLASS",
+    "RemoteInferenceAdmissionBroker",
+    "RemoteInferenceAdmissionCapacityError",
+    "RemoteInferenceAdmissionCancelledError",
+    "RemoteInferenceAdmissionError",
+    "RemoteInferenceAdmissionExpiredError",
+    "RemoteInferenceAdmissionIdentityError",
+    "RemoteInferenceAdmissionLease",
+    "RemoteInferenceAdmissionLeaseError",
+    "RemoteInferenceAdmissionReceipt",
+    "RemoteInferenceAdmissionRequest",
+    "RemoteInferenceAdmissionUncertainError",
+    "RemoteInferencePriority",
+    "remote_inference_admission_broker",
     "build_model_route_proof",
     "canonical_proof_hash",
     "proof_is_fresh",

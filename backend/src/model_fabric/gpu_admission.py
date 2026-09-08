@@ -231,6 +231,11 @@ class GpuAdmissionReceipt:
     recovery_action: str | None = None
     deadline_exceeded: bool = False
     callback_completed: bool = False
+    # Compatibility field retained for historical GPU-era receipts.  Active
+    # OpenRouter execution reports the governed resource class explicitly so
+    # operators do not mistake this process-local lane for a GPU dependency.
+    resource_class: str = "remote_inference"
+    serial_remote_inference: bool = True
 
     def __post_init__(self) -> None:
         if self.status not in GPU_ADMISSION_STATUSES:
@@ -258,6 +263,8 @@ class GpuAdmissionReceipt:
             "queued": self.queued,
             "max_queued": self.max_queued,
             "serial_gpu": self.serial_gpu,
+            "resource_class": self.resource_class,
+            "serial_remote_inference": self.serial_remote_inference,
             "cancel_requested": self.cancel_requested,
             "reconciliation_required": self.reconciliation_required,
             "recovery_action": self.recovery_action,
@@ -586,10 +593,12 @@ class GpuAdmissionBroker(Generic[T]):
             ]
             return {
                 "schema_version": GPU_ADMISSION_SCHEMA_VERSION,
+                "resource_class": "remote_inference",
                 "status": "degraded" if self._last_degraded_reason else "ready",
                 "degraded": bool(self._last_degraded_reason),
                 "degradation_code": self._last_degraded_reason,
                 "serial_gpu": True,
+                "serial_remote_inference": True,
                 "max_active": 1,
                 "active": self._receipt_locked(active).as_dict() if active is not None else None,
                 "queued": queued,

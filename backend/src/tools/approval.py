@@ -15,6 +15,7 @@ from src.approval.runtime import (
     get_current_session_id,
     get_current_trust_principal,
 )
+from src.auth.cancellation import assert_runtime_not_revoked
 from src.audit.formatting import format_tool_call_summary, redact_for_audit
 from src.security.trust_contract import (
     AuthorityGrant,
@@ -173,6 +174,7 @@ class ApprovalTool(Tool):
         return self.wrapped_tool(*args, **kwargs)
 
     def __call__(self, *args, sanitize_inputs_outputs: bool = False, **kwargs):
+        assert_runtime_not_revoked()
         approval_mode = get_current_approval_mode()
         session_id = get_current_session_id()
         arguments = self._normalize_invocation(args, kwargs)
@@ -213,6 +215,7 @@ class ApprovalTool(Tool):
                 fingerprint=fingerprint,
             )
         ):
+            assert_runtime_not_revoked()
             return self.wrapped_tool(*args, sanitize_inputs_outputs=sanitize_inputs_outputs, **kwargs)
 
         summary = format_tool_call_summary(self.name, arguments, set())

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
+import base64
 import json
 import logging
 from pathlib import Path
@@ -14,12 +14,9 @@ from datetime import datetime, timezone
 import httpx
 
 from config.settings import settings
-from src.local_runtime_profiles import (
-    local_runtime_profile_form_fields,
-    local_runtime_profile_headers,
-)
 from src.llm_runtime import provider_profiles
 from src.model_fabric import (
+    NoCompliantModelRouteError,
     PersistedRouteReceiptHooks,
     ProviderProfile,
     bind_final_inference_payload,
@@ -27,8 +24,16 @@ from src.model_fabric import (
     model_fabric_repository,
     run_preflighted_adapter,
     select_route,
+    finalized_openai_compatible_body,
 )
 from src.model_fabric.caller_context import build_canonical_inference_context
+from src.model_fabric.configuration import effective_workload_policy
+from src.model_fabric.proofs import proof_is_fresh
+from src.model_fabric.remote_inference_admission import (
+    RemoteInferenceAdmissionError,
+    remote_inference_admission_broker,
+)
+from src.security.trust_contract import EgressClass
 from src.observer.screen_analysis_settings import (
     effective_screen_analysis_enabled,
     effective_screen_analysis_model,
@@ -44,8 +49,6 @@ from src.observer.screenshot_analysis_contract import (
 )
 from src.vlm_runtime import (
     SCREENSHOT_VLM_PROFILE_ID,
-    effective_vlm_base_url,
-    effective_vlm_feeder_window,
 )
 
 logger = logging.getLogger(__name__)
@@ -59,6 +62,8 @@ REANALYSIS_REASONS = {
     "provider_failure_retry",
     "manual_operator_request",
 }
+MAX_IMAGE_BYTES = 8 * 1024 * 1024
+REMOTE_SCREENSHOT_TIMEOUT_SECONDS = 120
 
 
 class ScreenshotSemanticAnalysisError(RuntimeError):
@@ -66,18 +71,68 @@ class ScreenshotSemanticAnalysisError(RuntimeError):
 
 
 def screenshot_semantic_analysis_enabled() -> bool:
-    """Return true when Seraph should call the configured VLM screenshot analyzer."""
-    return (
-        effective_screen_analysis_enabled()
-        and effective_screen_analysis_provider().lower() == "local-vlm"
-        and bool(effective_vlm_base_url())
-    )
+    """Return true only when remote vision is explicitly configured and allowed.
+    """
+    if not effective_screen_analysis_enabled():
+        return False
+    provider = effective_screen_analysis_provider().lower()
+    if provider != "openrouter":
+        return False
+    if not effective_screen_analysis_model() or not settings.openrouter_api_key.strip():
+        return False
+    if not bool(getattr(settings, "openrouter_provider_only", True)):
+        return False
+    if not str(getattr(settings, "openrouter_allowed_upstreams", "") or "").strip():
+        return False
+    if bool(getattr(settings, "openrouter_allow_fallbacks", False)):
+        return False
+    if bool(getattr(settings, "openrouter_require_parameters", True)) is not True:
+        return False
+    if str(getattr(settings, "openrouter_data_collection", "deny") or "deny") != "deny":
+        return False
+    if not bool(getattr(settings, "openrouter_zero_data_retention", False)):
+        return False
+    try:
+        policy = effective_workload_policy("screenshot_image_analysis")
+    except Exception:
+        return False
+    now = time.time()
+    if (
+        policy.egress_class is not EgressClass.CLOUD_ALLOWED_FULL
+        or not bool(policy.cloud_egress_acknowledged)
+        or policy.fallback_allowed
+        or policy.max_cost_microusd is None
+        or set(policy.allowed_provider_kinds) != {"openrouter"}
+    ):
+        return False
+    profile = provider_profiles().get(SCREENSHOT_VLM_PROFILE_ID)
+    if profile is None or profile.provider_kind != "openrouter":
+        return False
+    if (
+        "vision" not in profile.capabilities
+        or "structured_output" not in profile.capabilities
+        or profile.context_window_tokens is None
+        or profile.max_output_tokens is None
+        or profile.max_latency_ms is None
+        or profile.cost_microusd is None
+        or not profile.cost_source
+        or profile.cost_source_updated_at is None
+        or profile.cost_source_updated_at < now - 2_592_000
+        or profile.cost_source_updated_at > now
+        or profile.cost_microusd > policy.max_cost_microusd
+        or profile.max_output_tokens < 64
+        or profile.max_latency_ms <= 0
+    ):
+        return False
+    provider_options = profile.options.get("provider") if isinstance(profile.options, dict) else None
+    return isinstance(provider_options, dict) and bool(provider_options.get("only"))
 
 
 async def screenshot_semantic_analysis_ready(*, timeout_seconds: float = 2.0) -> bool:
-    """Return true when the configured VLM screenshot analyzer is reachable."""
-    status = await _screenshot_semantic_analysis_health(timeout_seconds=timeout_seconds)
-    return status is not None
+    """Return true when remote vision is configured without paid probing."""
+    if not screenshot_semantic_analysis_enabled():
+        return False
+    return await _openrouter_profile_proofs_ready(timeout_seconds=timeout_seconds)
 
 
 async def screenshot_semantic_analysis_accepting_background_work(*, timeout_seconds: float = 2.0) -> bool:
@@ -86,83 +141,125 @@ async def screenshot_semantic_analysis_accepting_background_work(*, timeout_seco
 
 
 async def screenshot_semantic_analysis_background_slots(*, timeout_seconds: float = 2.0) -> int:
-    """Return the number of Seraph background image jobs the VLM wrapper can accept now."""
-    status = await _screenshot_semantic_analysis_queue_status(timeout_seconds=timeout_seconds)
-    if status is None:
+    """Return one bounded remote-inference feeder slot when queue capacity exists."""
+    if not screenshot_semantic_analysis_enabled():
         return 0
-    if not await _screenshot_semantic_analysis_backend_ready(timeout_seconds=timeout_seconds):
-        return 0
-    queue = _normalized_queue_status(status)
-    if queue is None:
-        return 0
-    active, queued, workers = queue
-    capacity_window = max(min(effective_vlm_feeder_window(), workers + 1), 1)
-    return max(capacity_window - active - queued, 0)
-
-
-def _normalized_queue_status(status: dict[str, Any]) -> tuple[int, int, int] | None:
-    queue_status = status.get("queue")
-    if isinstance(queue_status, dict):
-        status = queue_status
+    proofs_ready = await _openrouter_profile_proofs_ready(timeout_seconds=timeout_seconds)
     try:
-        active = int(status.get("active", 0))
-        queued = int(status.get("queued", 0))
-        workers = int(status.get("workers", 1))
+        status = await remote_inference_admission_broker.status()
+    except Exception:
+        return 0
+    capacity = status.get("capacity") if isinstance(status, dict) else None
+    if not isinstance(capacity, dict):
+        return 0
+    try:
+        available = int(capacity.get("available", 0))
     except (TypeError, ValueError):
-        return None
-    return max(active, 0), max(queued, 0), max(workers, 1)
+        return 0
+    if available <= 0:
+        return 0
+    # A configured profile without a fresh proof gets one bounded worker slot
+    # solely to persist a blocked/degraded observation receipt.  It never
+    # reaches the provider: _run_governed_vlm_adapter still fails closed at
+    # selector preflight.  Returning zero here would strand rows forever in
+    # ``pending`` with no operator-visible reason.
+    if not proofs_ready:
+        logger.info("screenshot semantic analysis has no fresh capability proof; admitting one blocked-receipt attempt")
+    return 1
 
 
 async def _screenshot_semantic_analysis_health(*, timeout_seconds: float = 2.0) -> dict[str, Any] | None:
-    """Return the VLM wrapper health payload when reachable."""
+    """Return operator-safe configuration health without contacting a provider."""
     if not screenshot_semantic_analysis_enabled():
         return None
-    endpoint = effective_vlm_base_url() + "/health"
-    try:
-        async with httpx.AsyncClient(timeout=max(timeout_seconds, 0.25)) as client:
-            response = await client.get(endpoint)
-        if not (200 <= response.status_code < 500):
-            return None
-        payload = response.json()
-        return payload if isinstance(payload, dict) else {}
-    except (httpx.HTTPError, ValueError):
-        return None
+    return {"provider": "openrouter", "configured": True, "paid_probe": False}
 
 
 async def _screenshot_semantic_analysis_queue_status(*, timeout_seconds: float = 2.0) -> dict[str, Any] | None:
-    """Return the VLM wrapper queue status payload when reachable."""
+    """Return the process-local remote admission state."""
     if not screenshot_semantic_analysis_enabled():
         return None
-    endpoint = effective_vlm_base_url() + "/queue/status"
-    try:
-        async with httpx.AsyncClient(timeout=max(timeout_seconds, 0.25)) as client:
-            response = await client.get(endpoint)
-        if not (200 <= response.status_code < 500):
-            return None
-        payload = response.json()
-        return payload if isinstance(payload, dict) else {}
-    except (httpx.HTTPError, ValueError):
-        return None
+    return await remote_inference_admission_broker.status()
 
 
 async def _screenshot_semantic_analysis_backend_ready(*, timeout_seconds: float = 2.0) -> bool:
-    """Return true when the wrapper's configured GPU backend is reachable."""
+    """Return whether remote vision is configured; dispatch proves reachability."""
     if not screenshot_semantic_analysis_enabled():
         return False
-    endpoint = effective_vlm_base_url() + "/health/backend"
-    try:
-        async with httpx.AsyncClient(timeout=max(timeout_seconds, 0.25)) as client:
-            response = await client.get(endpoint)
-        return 200 <= response.status_code < 300
-    except httpx.HTTPError:
+    return True
+
+
+async def _openrouter_profile_proofs_ready(*, timeout_seconds: float = 2.0) -> bool:
+    """Check persisted vision/response proofs before admitting background work."""
+    profile = provider_profiles().get(SCREENSHOT_VLM_PROFILE_ID)
+    if profile is None:
         return False
+    candidate = candidate_from_profile(profile)
+    required = {"vision", "structured_output", "latency_ms", "health"}
+    deadline = time.monotonic() + max(float(timeout_seconds), 0.1)
+    for capability in sorted(required):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        try:
+            proof = await asyncio.wait_for(
+                model_fabric_repository.latest_capability_proof(
+                    profile_schema_version=profile.schema_version,
+                    profile_contract_hash=profile.contract_hash,
+                    profile_id=profile.id,
+                    model=profile.model,
+                    endpoint=candidate.endpoint,
+                    endpoint_class=candidate.endpoint_class,
+                    adapter=candidate.adapter,
+                    capability=capability,
+                ),
+                timeout=remaining,
+            )
+        except asyncio.TimeoutError:
+            return False
+        except Exception:
+            return False
+        if proof is None or not proof_is_fresh(proof):
+            return False
+        if (
+            proof.profile_schema_version != profile.schema_version
+            or proof.profile_contract_hash != profile.contract_hash
+            or proof.profile_id != profile.id
+            or proof.model != profile.model
+            or proof.endpoint != candidate.endpoint
+            or proof.endpoint_class != candidate.endpoint_class
+            or proof.adapter != candidate.adapter
+        ):
+            return False
+        if capability == "health" and proof.proven_value != "healthy":
+            return False
+        if capability == "latency_ms":
+            try:
+                if int(proof.proven_value) > int(profile.max_latency_ms or 0):
+                    return False
+            except (TypeError, ValueError):
+                return False
+    return True
 
 
 async def analyze_screenshot_image(image_path: Path, artifacts: dict[str, Any]) -> ScreenshotAnalysis | None:
-    """Analyze one screenshot image through the configured Seraph VLM provider."""
+    """Analyze one screenshot image through the governed OpenRouter vision route."""
     if not screenshot_semantic_analysis_enabled():
         return None
-    return await _analyze_with_local_vlm(image_path, artifacts)
+    try:
+        return await _analyze_with_openrouter(image_path, artifacts)
+    except NoCompliantModelRouteError as exc:
+        raise ScreenshotSemanticAnalysisError("remote_inference_blocked:no_compliant_route") from exc
+    except RemoteInferenceAdmissionError as exc:
+        code = str(getattr(exc, "code", "admission_failed") or "admission_failed")
+        raise ScreenshotSemanticAnalysisError(f"remote_inference_blocked:{_bounded_reason(code)}") from exc
+    except (PermissionError, ValueError) as exc:
+        # Canonical context construction and route binding fail closed before
+        # any provider call. Translate those denials into the same bounded
+        # observation-level status that the folder worker persists.
+        raise ScreenshotSemanticAnalysisError(
+            f"remote_inference_blocked:{_bounded_reason(str(exc))}"
+        ) from exc
 
 
 def screenshot_analysis_detail(analysis: ScreenshotAnalysis) -> str:
@@ -276,6 +373,7 @@ def replace_semantic_analysis_details(
     analysis: ScreenshotAnalysis | None,
     error_reason: str | None,
     reanalysis_reason: str,
+    status: str | None = None,
 ) -> list[str]:
     """Replace existing semantic analysis details while preserving capture metadata."""
     next_details = [
@@ -297,10 +395,17 @@ def replace_semantic_analysis_details(
         )
     else:
         reason = error_reason or "unknown"
+        # Policy and admission denials are terminal until an operator changes
+        # the governing configuration.  Preserve that distinction for the
+        # explicit reanalysis endpoint as well as the scheduled worker; a
+        # generic ``failed`` receipt would make a blocked item look retryable.
+        resolved_status = status or (
+            "blocked" if reason.startswith("remote_inference_blocked:") else "failed"
+        )
         next_details.append(screenshot_analysis_error_detail(reason))
         next_details.append(
             screenshot_analysis_status_detail(
-                "failed",
+                resolved_status,
                 reason=reason,
                 reanalysis_reason=reanalysis_reason,
             )
@@ -308,7 +413,13 @@ def replace_semantic_analysis_details(
     return [str(item) for item in next_details if isinstance(item, str)]
 
 
-async def _analyze_with_local_vlm(image_path: Path, artifacts: dict[str, Any]) -> ScreenshotAnalysis:
+async def _analyze_with_openrouter(image_path: Path, artifacts: dict[str, Any]) -> ScreenshotAnalysis:
+    """Send one bounded, authorized image request to OpenRouter.
+
+    The local path is intentionally represented as inline bytes in the
+    governed request body.  Provider responses are treated as untrusted data
+    and validated by the Seraph-owned screenshot contract before persistence.
+    """
     metadata = {
         "captured_at": artifacts.get("created_at"),
         "source": "screenshot_folder",
@@ -321,55 +432,80 @@ async def _analyze_with_local_vlm(image_path: Path, artifacts: dict[str, Any]) -
     prompt = screenshot_analysis_prompt(metadata)
     profile = provider_profiles().get(SCREENSHOT_VLM_PROFILE_ID)
     if profile is None:
-        raise ScreenshotSemanticAnalysisError("canonical screenshot VLM profile is not configured")
-    data = {
-        "prompt": prompt,
-        **local_runtime_profile_form_fields("screenshot_fast"),
-        "model": profile.model,
-    }
-    headers = local_runtime_profile_headers("screenshot_fast")
-    api_key = profile.api_key
-    if api_key:
-        headers["Authorization"] = f"Bearer {api_key}"
+        raise ScreenshotSemanticAnalysisError("openrouter screenshot profile is not configured")
+    if profile.provider_kind != "openrouter" or profile.api_base != "https://openrouter.ai/api/v1":
+        raise ScreenshotSemanticAnalysisError("local screenshot inference is disabled in the active phase")
 
-    image_bytes = await asyncio.to_thread(image_path.read_bytes)
+    # Read a bounded artifact synchronously.  The folder analyser already
+    # limits one image to ``MAX_IMAGE_BYTES`` and performs this work in its
+    # bounded scheduler lane; using the default executor here would make
+    # cancellation/restart recovery depend on an unbounded process-wide
+    # thread pool.
+    image_bytes = image_path.read_bytes()
+    if len(image_bytes) > MAX_IMAGE_BYTES:
+        raise ScreenshotSemanticAnalysisError("screenshot exceeds the 8 MiB remote-analysis limit")
+    api_key = profile.api_key
+    if not api_key:
+        raise ScreenshotSemanticAnalysisError("OpenRouter credential is not configured")
     media_type = _image_media_type(image_path)
-    transport_body = {
-        "fields": data,
-        "file": {
-            "filename": image_path.name,
-            "content_type": media_type,
-            "sha256": hashlib.sha256(image_bytes).hexdigest(),
-        },
-    }
+    image_data_url = f"data:{media_type};base64,{base64.b64encode(image_bytes).decode('ascii')}"
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": prompt},
+                {"type": "image_url", "image_url": {"url": image_data_url}},
+            ],
+        }
+    ]
+    transport_body = finalized_openai_compatible_body(
+        model_id=profile.model,
+        messages=messages,
+        options=profile.options,
+        temperature=0.0,
+        max_tokens=1400,
+    )
     context = build_canonical_inference_context(
         "screenshot_image_analysis",
         payload=transport_body,
         output_tokens=1400,
-        timeout_seconds=settings.local_vlm_timeout_seconds,
+        timeout_seconds=min(max(int(settings.agent_chat_timeout), 1), REMOTE_SCREENSHOT_TIMEOUT_SECONDS),
     )
     context = bind_final_inference_payload(context, transport_body)
 
     async def _transport(candidate, follow_redirects: bool) -> ScreenshotAnalysis:
         if follow_redirects:
-            raise ScreenshotSemanticAnalysisError("VLM redirects are forbidden")
+            raise ScreenshotSemanticAnalysisError("OpenRouter redirects are forbidden")
         endpoint = candidate.endpoint
         remaining_seconds = context.deadline_at - time.time()
         if remaining_seconds <= 0:
-            raise ScreenshotSemanticAnalysisError("VLM inference deadline expired")
+            raise ScreenshotSemanticAnalysisError("OpenRouter vision deadline expired")
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        }
         async with httpx.AsyncClient(
             timeout=httpx.Timeout(remaining_seconds),
             follow_redirects=False,
         ) as client:
             response = await client.post(
                 endpoint,
-                data=data,
-                files={"file": (image_path.name, image_bytes, media_type)},
+                json=transport_body,
                 headers=headers,
             )
-        response.raise_for_status()
-        payload = response.json()
-        return parse_screenshot_analysis_output(_provider_analysis_payload(payload))
+        try:
+            response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            # Never copy provider bodies into operator receipts; status is
+            # enough to classify the bounded failure.
+            raise ScreenshotSemanticAnalysisError(
+                f"OpenRouter vision request failed with HTTP {exc.response.status_code}"
+            ) from exc
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise ScreenshotSemanticAnalysisError("OpenRouter vision response was not JSON") from exc
+        return parse_screenshot_analysis_output(_openrouter_analysis_payload(payload))
 
     try:
         result = await _run_governed_vlm_adapter(
@@ -378,19 +514,29 @@ async def _analyze_with_local_vlm(image_path: Path, artifacts: dict[str, Any]) -
             transport=_transport,
         )
         if not isinstance(result, ScreenshotAnalysis):
-            raise ScreenshotSemanticAnalysisError("VLM adapter returned an invalid analysis result")
+            raise ScreenshotSemanticAnalysisError("OpenRouter adapter returned an invalid analysis result")
         return result
     except (OSError, httpx.HTTPError, ValueError, ScreenshotAnalysisContractError) as exc:
         logger.warning("screenshot semantic analysis failed for %s: %s", image_path, exc)
         raise ScreenshotSemanticAnalysisError(str(exc)) from exc
 
 
+async def _analyze_with_local_vlm(image_path: Path, artifacts: dict[str, Any]) -> ScreenshotAnalysis:
+    """Retain the old symbol as a hard-failing migration diagnostic.
+
+    Keeping this name avoids an import-time break for archived tooling while
+    making the former local wrapper route impossible to execute.  Active
+    screenshot analysis has one provider path: the governed OpenRouter route.
+    """
+    raise ScreenshotSemanticAnalysisError("local_vlm_disabled_openrouter_only")
+
+
 async def _run_governed_vlm_adapter(*, context, profile: ProviderProfile, transport):
-    """Preflight and receipt-wrap the retained VLM analyze-file transport."""
+    """Preflight and receipt-wrap a governed OpenRouter chat vision transport."""
     candidate = candidate_from_profile(profile)
-    if candidate.adapter != "vlm_analyze_file":
+    if candidate.adapter != "openai_compatible_chat":
         raise ScreenshotSemanticAnalysisError(
-            "screenshot VLM profile requires the vlm_analyze_file adapter"
+            "screenshot profile requires the OpenRouter chat adapter"
         )
     capabilities = {*context.requirements.capabilities, "latency_ms", "health"}
     proofs = []
@@ -423,16 +569,24 @@ async def _run_governed_vlm_adapter(*, context, profile: ProviderProfile, transp
     return result
 
 
-def _provider_analysis_payload(payload: Any) -> str | dict[str, Any]:
-    if isinstance(payload, dict):
-        for key in ("analysis", "output", "result", "content", "text"):
-            value = payload.get(key)
-            if isinstance(value, (str, dict)):
-                return value
-        return payload
-    if isinstance(payload, str):
-        return payload
-    raise ScreenshotAnalysisContractError("local VLM response must be JSON text or object")
+def _openrouter_analysis_payload(payload: Any) -> str | dict[str, Any]:
+    """Extract untrusted chat content without accepting tool authority."""
+    if not isinstance(payload, dict):
+        raise ScreenshotAnalysisContractError("OpenRouter vision response must be an object")
+    try:
+        message = payload["choices"][0]["message"]
+    except (KeyError, IndexError, TypeError) as exc:
+        raise ScreenshotAnalysisContractError("OpenRouter vision response has no assistant message") from exc
+    if not isinstance(message, dict):
+        raise ScreenshotAnalysisContractError("OpenRouter vision assistant message is invalid")
+    content = message.get("content")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        text_parts = [item.get("text") for item in content if isinstance(item, dict) and isinstance(item.get("text"), str)]
+        if text_parts:
+            return "".join(text_parts)
+    raise ScreenshotAnalysisContractError("OpenRouter vision response contains no text content")
 
 
 def _image_media_type(path: Path) -> str:

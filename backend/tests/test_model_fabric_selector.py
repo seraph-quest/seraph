@@ -45,6 +45,12 @@ from src.security.trust_contract import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _legacy_provider_compatibility_mode(monkeypatch):
+    """Keep the pre-#775 selector matrix explicit while active-policy tests stay separate."""
+    monkeypatch.setattr("config.settings.settings.openrouter_provider_only", False)
+
+
 def _profile(*, remote: bool = False, **changes) -> ProviderProfile:
     values = {
         "id": "remote" if remote else "local",

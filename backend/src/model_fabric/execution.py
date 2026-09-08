@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator, Awaitable, Callable
-from typing import Protocol
+from threading import Thread
+from typing import Any, Protocol, TypeVar
 
 from .contracts import (
     InferenceRequestContext,
@@ -15,8 +17,52 @@ from .contracts import (
     finalized_openai_compatible_body,
 )
 from .hooks import persist_denied_route
-from .gpu_admission import GpuAdmissionError, GpuAdmissionRequest, gpu_admission_broker
+from .remote_inference_admission import (
+    RemoteInferenceAdmissionError as GpuAdmissionError,
+    RemoteInferenceAdmissionRequest as GpuAdmissionRequest,
+    remote_inference_admission_broker as gpu_admission_broker,
+)
 from .selector import select_route
+
+
+_SyncResult = TypeVar("_SyncResult")
+
+
+class SyncAdapterReceiptError(RuntimeError):
+    """Raised when a governed sync adapter cannot persist its route receipt."""
+
+    code = "route_receipt_persistence_failed"
+
+
+def _run_awaitable_sync(awaitable: Awaitable[_SyncResult]) -> _SyncResult:
+    """Resolve repository coroutines from sync callers, including active loops."""
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(awaitable)
+
+    result: list[_SyncResult] = []
+    error: list[BaseException] = []
+
+    def runner() -> None:
+        try:
+            result.append(asyncio.run(awaitable))
+        except BaseException as exc:  # pragma: no cover - defensive thread bridge
+            error.append(exc)
+
+    thread = Thread(target=runner, name="seraph-model-fabric-sync", daemon=True)
+    thread.start()
+    thread.join()
+    if error:
+        raise error[0]
+    if not result:
+        raise RuntimeError("sync awaitable completed without a result")
+    return result[0]
+
+
+def _require_persisted_receipt(result: Any) -> None:
+    if result is None or not bool(getattr(result, "persisted", False)):
+        raise SyncAdapterReceiptError()
 
 
 class RouteReceiptHooks(Protocol):
@@ -291,3 +337,122 @@ async def run_preflighted_adapter(
                 denied_kwargs["repository"] = repository
             await persist_denied_route(**denied_kwargs)
         raise
+
+
+def execute_sync_adapter(
+    *,
+    context: InferenceRequestContext,
+    candidates: tuple[ModelRouteCandidate, ...],
+    proofs: tuple[ModelRouteProof, ...],
+    adapter: Callable[[ModelRouteCandidate, bool], _SyncResult],
+    repository: Any | None = None,
+    now: float | None = None,
+) -> _SyncResult:
+    """Select, admit, execute, and persist one bounded synchronous route.
+
+    This is the governed seam for blocking adapters such as embeddings.  It
+    performs no implicit fallback: a provider call whose outcome may be
+    uncertain must be reconciled by its caller before another paid call is
+    attempted.  A denied route and every started attempt receive a durable
+    model-fabric receipt before the result is returned to the caller.
+    """
+    from .hooks import RouteReceiptSession, persist_denied_route
+    from .repository import model_fabric_repository
+
+    receipt_repository = repository or model_fabric_repository
+    candidate_set = candidates[:1] if not context.fallback_allowed else candidates
+    decision = select_route(context, candidate_set, proofs, now=now)
+    if not decision.allowed or decision.selected is None:
+        persistence = _run_awaitable_sync(
+            persist_denied_route(
+                context=context,
+                decision=decision,
+                reason_codes=tuple(
+                    rejection.reason_code for rejection in decision.rejections
+                ) or ("no_compliant_route",),
+                repository=receipt_repository,
+            )
+        )
+        _require_persisted_receipt(persistence)
+        raise NoCompliantModelRouteError()
+
+    session = RouteReceiptSession(
+        context=context,
+        repository=receipt_repository,
+        capability_proof_hashes=decision.proof_hashes,
+    )
+    admission_request = GpuAdmissionRequest.from_inference_context(
+        context,
+        operation_id=decision.attempt_id
+        or f"{context.request_id}:{decision.selected.profile.id}",
+    )
+    callback_started = False
+    attempt_completed = False
+
+    def admitted_adapter() -> _SyncResult:
+        nonlocal callback_started, attempt_completed
+        session.attempt_started(
+            decision,
+            capability_proof_hashes=decision.proof_hashes,
+        )
+        callback_started = True
+        try:
+            result = adapter(decision.selected, False)
+        except BaseException:
+            session.attempt_finished(
+                outcome="failed",
+                error_code="transport_failed",
+                decision=decision,
+            )
+            attempt_completed = True
+            raise
+        session.attempt_finished(
+            outcome="succeeded",
+            error_code=None,
+            decision=decision,
+        )
+        attempt_completed = True
+        return result
+
+    try:
+        result = gpu_admission_broker.execute_sync(admission_request, admitted_adapter, now=now)
+    except GpuAdmissionError as error:
+        if not callback_started:
+            persistence = _run_awaitable_sync(
+                session.finalize_denied(
+                    decision=decision,
+                    reason_codes=(
+                        "remote_inference_admission_rejected",
+                        f"remote_inference_admission_{error.code}",
+                    ),
+                    fallback_reason_code="remote_inference_admission_rejected",
+                )
+            )
+            _require_persisted_receipt(persistence)
+        elif attempt_completed:
+            persistence = _run_awaitable_sync(
+                session.finalize(
+                    outcome="failed",
+                    fallback_reason_code="remote_inference_admission_failed",
+                    degradation_codes=(f"remote_inference_admission_{error.code}",),
+                )
+            )
+            _require_persisted_receipt(persistence)
+        raise
+    except BaseException:
+        if callback_started and attempt_completed:
+            persistence = _run_awaitable_sync(session.finalize(outcome="failed"))
+            _require_persisted_receipt(persistence)
+        elif not callback_started:
+            persistence = _run_awaitable_sync(
+                session.finalize_denied(
+                    decision=decision,
+                    reason_codes=("adapter_admission_failed",),
+                )
+            )
+            _require_persisted_receipt(persistence)
+        raise
+
+    persistence = _run_awaitable_sync(session.finalize(outcome="succeeded"))
+    _require_persisted_receipt(persistence)
+    return result

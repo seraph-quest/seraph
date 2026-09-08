@@ -15,6 +15,8 @@ import {
 
 interface VlmRuntimeStatus {
   mode: string;
+  active?: boolean;
+  disabled_reason?: string;
   configured: boolean;
   base_url: string;
   backend_url: string;
@@ -45,6 +47,20 @@ interface VlmProbeEndpoint {
 }
 
 interface ArtifactStorageSettings {
+  inference?: {
+    provider: string;
+    active_only: boolean;
+    api_base: string;
+    credential_configured: boolean;
+    allowed_upstreams: string[];
+    data_collection: string;
+    zero_data_retention: boolean;
+    fallbacks_allowed: boolean;
+    chat_cloud_egress: string;
+    chat_cloud_consent: boolean;
+    chat_budget_microusd: number | null;
+    status: string;
+  };
   screen: {
     analysis_enabled: boolean;
     provider: string;
@@ -70,6 +86,7 @@ interface ArtifactStorageSettings {
       analysis_status: Record<string, number>;
       analysis_backlog: number;
       analysis_failures: number;
+      analysis_blocked?: number;
       stale_count?: number;
       source_missing_count?: number;
       stale_root_count?: number;
@@ -102,6 +119,8 @@ interface ArtifactStorageSettings {
     control_env: Record<string, string>;
   };
   local_runtime?: {
+    active?: boolean;
+    disabled_reason?: string;
     gateway_configured: boolean;
     llm_base_url_configured: boolean;
     vlm_base_url_configured: boolean;
@@ -240,7 +259,7 @@ function screenshotAnalysisTone(
   analysis: NonNullable<ArtifactStorageSettings["screenshot_folder"]>["analysis"],
 ): "normal" | "good" | "warn" {
   if (!analysis) return "normal";
-  if (analysis.analysis_failures > 0) return "warn";
+  if (analysis.analysis_failures > 0 || (analysis.analysis_blocked ?? 0) > 0) return "warn";
   if (analysis.analysis_backlog > 0) return "normal";
   return analysis.observation_count > 0 ? "good" : "normal";
 }
@@ -469,6 +488,9 @@ function screenshotFolderDisplayPath(path: string | null): string {
 }
 
 function vlmReachabilityLabel(runtime?: VlmRuntimeStatus): string {
+  if (runtime?.active === false) {
+    return "inactive · OpenRouter-only";
+  }
   const probe = runtime?.live_probe;
   if (!runtime?.configured) {
     return "not configured";
@@ -496,6 +518,9 @@ function vlmReachabilityLabel(runtime?: VlmRuntimeStatus): string {
 }
 
 function vlmReachabilityTone(runtime?: VlmRuntimeStatus): "normal" | "good" | "warn" {
+  if (runtime?.active === false) {
+    return "normal";
+  }
   const probe = runtime?.live_probe;
   if (!runtime?.configured || !probe?.checked) {
     return "normal";
@@ -1021,7 +1046,8 @@ export function ArtifactStoragePanel() {
                       value={
                         `${screenshotFolderSource.analysis.observation_count} observations · ` +
                         `${screenshotFolderSource.analysis.analysis_backlog} backlog · ` +
-                        `${screenshotFolderSource.analysis.analysis_failures} failed`
+                        `${screenshotFolderSource.analysis.analysis_failures} failed · ` +
+                        `${screenshotFolderSource.analysis.analysis_blocked ?? 0} blocked`
                       }
                       tone={screenshotAnalysisTone(screenshotFolderSource.analysis)}
                     />
@@ -1111,11 +1137,47 @@ export function ArtifactStoragePanel() {
                 className="min-w-0 border border-retro-text/20 bg-retro-bg px-1 py-0.5 text-retro-text"
               >
                 <option value="">not set</option>
-                <option value="apple-vision">apple-vision</option>
-                <option value="local-vlm">local-vlm</option>
                 <option value="openrouter">openrouter</option>
               </select>
             </div>
+
+            {settings.inference && (
+              <div className="border-t border-retro-text/10 pt-2 mt-1">
+                <div className="flex items-center justify-between gap-2 mb-1">
+                  <div className="text-[10px] text-retro-text">Inference gateway</div>
+                  <div className={`text-[9px] uppercase tracking-wider ${
+                    settings.inference.status === "ready" ? "text-green-400" : "text-yellow-400"
+                  }`}>
+                    {settings.inference.status.replace(/_/g, " ")}
+                  </div>
+                </div>
+                <ArtifactRow
+                  label="Provider"
+                  value={`${settings.inference.provider} · ${settings.inference.active_only ? "only active" : "phase disabled"}`}
+                  tone={settings.inference.active_only ? "good" : "warn"}
+                />
+                <ArtifactRow
+                  label="Route"
+                  value={`${settings.inference.api_base} · ${settings.inference.credential_configured ? "key configured" : "key missing"}`}
+                  tone={settings.inference.credential_configured ? "good" : "warn"}
+                />
+                <ArtifactRow
+                  label="Upstreams"
+                  value={settings.inference.allowed_upstreams.length > 0 ? settings.inference.allowed_upstreams.join(", ") : "allow-list required"}
+                  tone={settings.inference.allowed_upstreams.length > 0 ? "good" : "warn"}
+                />
+                <ArtifactRow
+                  label="Data policy"
+                  value={`${settings.inference.data_collection} · ZDR ${settings.inference.zero_data_retention ? "on" : "off"} · fallbacks ${settings.inference.fallbacks_allowed ? "on" : "off"}`}
+                  tone={settings.inference.data_collection === "deny" && !settings.inference.fallbacks_allowed ? "good" : "warn"}
+                />
+                <ArtifactRow
+                  label="Consent"
+                  value={`${settings.inference.chat_cloud_egress} · ${settings.inference.chat_cloud_consent ? "acknowledged" : "acknowledgement required"}`}
+                  tone={settings.inference.chat_cloud_consent ? "good" : "warn"}
+                />
+              </div>
+            )}
 
             <div className="border-t border-retro-text/10 pt-2 mt-1">
               <div className="flex items-center justify-between gap-2 mb-1">
@@ -1257,7 +1319,9 @@ export function ArtifactStoragePanel() {
             {settings.local_runtime && (
               <div className="border-t border-retro-text/10 pt-2 mt-1">
                 <div className="flex items-center justify-between gap-2 mb-1">
-                  <div className="text-[10px] text-retro-text">Local Gemma runtime</div>
+                  <div className="text-[10px] text-retro-text">
+                    {settings.local_runtime.active === false ? "Local runtime (inactive)" : "Local Gemma runtime"}
+                  </div>
                   <div
                     className={`text-[9px] uppercase tracking-wider ${
                       localRuntimeProofTone(settings.local_runtime.profile_proof) === "good"
@@ -1267,7 +1331,9 @@ export function ArtifactStoragePanel() {
                           : "text-retro-text/40"
                     }`}
                   >
-                    {settings.local_runtime.profile_proof.status.replace(/_/g, " ")}
+                    {settings.local_runtime.active === false
+                      ? "disabled · OpenRouter-only"
+                      : settings.local_runtime.profile_proof.status.replace(/_/g, " ")}
                   </div>
                 </div>
                 <ArtifactRow

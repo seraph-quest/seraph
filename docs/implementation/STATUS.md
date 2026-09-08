@@ -19,6 +19,18 @@ For a shorter reader-facing overview of the current app, start with
 [Current App Guide](./12-current-app-guide.md). This status page remains the
 dense shipped-state record.
 
+## Active Epic #736/#775 migration branch
+
+This branch implements the accepted OpenRouter-only inference phase. The
+active route is the governed OpenRouter gateway; CPU-local canonical state,
+storage, tools, and operator UI remain usable without a local model server,
+CUDA, downloaded weights, or the VLM wrapper. Missing key, consent, approved
+upstream, model-fabric bounds/proofs, or budget is reported as blocked or
+configuration-required. The migration is not shipped `develop` truth until its
+reviewed PR merges and its required live text, vision, and embedding receipts
+are recorded. GPU/VLM entries below remain historical baseline evidence unless
+they are explicitly marked as branch-local migration behavior.
+
 ## Legend
 
 - `[x]` shipped on `develop`
@@ -197,9 +209,9 @@ High-risk strategic wording in this status page remains governed by [19. Strateg
 - [x] The cockpit desktop shell, presence pane, and active triage now also surface explicit presence-surface ready/attention summaries plus direct repair/follow-up drafts for messaging, adapter, and observer surfaces, so broader non-browser reach no longer hides behind route-only health or catalog inventory views.
 - [x] Runtime Reliability now has deterministic proof for activity-ledger attribution, imported capability surfaces, and simulation-grade route-planning visibility in addition to the earlier guardian/runtime contracts.
 - [x] Runtime Reliability now rate-limits repeated browser and sandbox timeout audit receipts, preserving a grouped degraded provider signal without flooding operator/status surfaces during local chat or VLM backlog work.
-- [x] Runtime Reliability now keeps cockpit and settings metadata refreshes fast by separating configured/effective VLM runtime metadata from live GPU route probes; runtime status and artifact-storage return `deferred_fast_metadata` live-probe placeholders, and the cockpit resolves runtime labels from live runtime status, fresh operator posture, or explicitly `STALE` retained metadata through transient refresh failures.
-- [x] Settings now opens and reopens on the Screenshot/VLM section without eager-loading workflows, skills, catalog, MCP, or audit panels, so checking screenshot/VLM state does not flood the local backend with unrelated settings fetches.
-- [x] Runtime Reliability now also keeps health, session, and artifact-storage status responsive while screenshot/VLM backlog metadata is slow: artifact-storage returns bounded partial filesystem and analysis metadata with explicit `summary_status`, `summary_failure`, `metadata_status`, and `metadata_failure` fields instead of blocking the operator surface.
+- [x] **Historical develop baseline:** Runtime Reliability kept cockpit and settings metadata refreshes fast by separating configured/effective VLM runtime metadata from live GPU route probes; the active #775 branch replaces that readiness contract with governed OpenRouter status and explicit blocked/degraded receipts.
+- [x] **Historical develop baseline:** Settings opened and reopened on the Screenshot/VLM section without eager-loading unrelated panels; the active #775 branch retains the bounded operator surface while removing local VLM inference as an active dependency.
+- [x] **Historical develop baseline:** Runtime Reliability kept health, session, and artifact-storage status responsive while screenshot/VLM backlog metadata was slow; the active #775 branch preserves bounded metadata and reports OpenRouter policy/admission state instead of requiring GPU/VLM readiness.
 - [x] The Project Constitution owns accepted direction; active execution is tracked in the GitHub Project, issues, and PRs, while the historical roadmap points to Git history.
 - [x] The cross-cutting world-class strategy translation is tracked in `docs/implementation/11-world-class-strategy-delivery.md`.
 - [x] The board-backed full-completion train has completed bounded CJ-CQ implementation and audit receipts, and PR #521 permits only the exact bounded proof-train wording. This does not ship broad parity/exceedance permission; it records exact bounded proof-train wording and continued blocked claims.
@@ -230,7 +242,7 @@ High-risk strategic wording in this status page remains governed by [19. Strateg
 - [x] browser-based guardian workspace as the only supported browser shell
 - [x] FastAPI backend with chat, WebSocket, goals, tools, observer, settings, audit, approvals, vault, skills, and MCP APIs
 - [x] native macOS observer daemon for screen/window ingest
-- [x] screen analysis supports configured local or remote inference routes, with optional durable local image/provider-output/analysis artifacts available through localhost-only observer inspection endpoints; legacy stored `codex_output_path` metadata and the deprecated `/codex-output` route remain read-compatible while new links use `/provider-output`
+- [x] **Historical develop baseline:** screen analysis supported configured local or remote inference routes, with optional durable local image/provider-output/analysis artifacts through localhost-only observer inspection endpoints; on the active #775 branch, screenshot understanding uses the governed OpenRouter route and records blocked status when policy or proof is missing. Legacy stored `codex_output_path` metadata and the deprecated `/codex-output` route remain read-compatible while new links use `/provider-output`.
 - [x] persistent guardian record, vector memory, sessions, and goal storage
 
 ### Trust and control

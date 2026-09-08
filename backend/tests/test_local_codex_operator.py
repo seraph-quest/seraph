@@ -1,6 +1,6 @@
 import json
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -131,20 +131,20 @@ def test_agent_model_rejects_legacy_primary_without_transport():
     completion.assert_not_called()
 
 
-def test_agent_model_prevalidates_global_legacy_fallback_before_primary_transport():
+def test_agent_model_blocks_unregistered_route_before_any_transport():
     with (
         patch.object(settings, "fallback_model", "CoDeX-LoCaL"),
         patch.object(settings, "fallback_models", ""),
         patch("litellm.completion") as completion,
     ):
         model = FallbackLiteLLMModel(model_id="openrouter/openai/gpt-4.1-mini")
-        with pytest.raises(ExternalAgentRuntimeRemovedError):
+        with pytest.raises(PermissionError, match="registered canonical runtime path"):
             model.generate([{"role": "user", "content": "hello"}])
 
     completion.assert_not_called()
 
 
-def test_completion_prevalidates_runtime_override_legacy_fallback_before_primary_transport():
+def test_completion_blocks_unregistered_legacy_override_before_any_transport():
     with (
         patch.object(settings, "default_model", "openrouter/openai/gpt-4.1-mini"),
         patch.object(settings, "runtime_profile_preferences", ""),
@@ -154,7 +154,7 @@ def test_completion_prevalidates_runtime_override_legacy_fallback_before_primary
         patch.object(settings, "fallback_models", ""),
         patch("litellm.completion") as completion,
     ):
-        with pytest.raises(ExternalAgentRuntimeRemovedError):
+        with pytest.raises(PermissionError, match="registered canonical runtime path"):
             completion_with_fallback_sync(
                 messages=[{"role": "user", "content": "hello"}],
                 temperature=0.2,
@@ -212,17 +212,19 @@ async def test_runtime_status_has_no_external_operator_inventory(client):
 
 
 @pytest.mark.asyncio
-async def test_runtime_status_rejects_legacy_runtime_override():
+async def test_runtime_status_ignores_legacy_runtime_override_on_canonical_route():
     with patch.object(settings, "runtime_model_overrides", "chat_agent=CoDeX-LoCaL"):
         async with AsyncClient(transport=ASGITransport(app=create_app()), base_url="http://test") as client:
             response = await client.get("/api/runtime/status")
 
-    assert response.status_code == 410
-    assert response.json()["detail"]["code"] == EXTERNAL_AGENT_RUNTIME_REMOVED
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["provider"] == "openrouter"
+    assert payload["active_profile"] == "openrouter"
 
 
 @pytest.mark.asyncio
-async def test_runtime_status_rejects_legacy_custom_profile():
+async def test_runtime_status_ignores_legacy_custom_profile_on_canonical_route():
     with (
         patch.object(settings, "llm_provider_profiles", _REMOVED_PROFILE_CONFIG),
         patch.object(settings, "runtime_profile_preferences", "chat_agent=removed-agent"),
@@ -231,8 +233,10 @@ async def test_runtime_status_rejects_legacy_custom_profile():
         async with AsyncClient(transport=ASGITransport(app=create_app()), base_url="http://test") as client:
             response = await client.get("/api/runtime/status")
 
-    assert response.status_code == 410
-    assert response.json()["detail"]["code"] == EXTERNAL_AGENT_RUNTIME_REMOVED
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["provider"] == "openrouter"
+    assert payload["active_profile"] == "openrouter"
 
 
 @pytest.mark.asyncio
@@ -243,40 +247,45 @@ async def test_runtime_status_rejects_legacy_custom_profile():
         ("", "chat_agent=removed-agent", _REMOVED_PROFILE_CONFIG),
     ],
 )
-async def test_rest_chat_rejects_effective_removed_route(
+async def test_rest_chat_ignores_legacy_route_selection_and_uses_governed_path(
     runtime_override,
     profile_preference,
     profile_config,
 ):
     session = SimpleNamespace(id="legacy-session")
-    profile = SimpleNamespace(onboarding_completed=True)
+    profile = SimpleNamespace(onboarding_completed=False)
+    mock_agent = MagicMock()
+    mock_agent.run.return_value = ""
     with (
         patch.object(settings, "runtime_model_overrides", runtime_override),
         patch.object(settings, "runtime_profile_preferences", profile_preference),
         patch.object(settings, "llm_provider_profiles", profile_config),
         patch("src.api.chat.session_manager.get_or_create", new=AsyncMock(return_value=session)),
         patch("src.api.chat.session_manager.add_message", new=AsyncMock()),
+        patch("src.api.chat.session_manager.count_messages", new=AsyncMock(return_value=0)),
         patch("src.api.chat.get_or_create_profile", new=AsyncMock(return_value=profile)),
+        patch("src.api.chat.should_use_direct_local_chat", return_value=False),
+        patch("src.api.chat.create_onboarding_agent", return_value=mock_agent),
+        patch("src.api.chat.log_agent_run_event", new=AsyncMock()),
         patch("litellm.completion") as completion,
     ):
         async with AsyncClient(transport=ASGITransport(app=create_app()), base_url="http://test") as client:
             response = await client.post("/api/chat", json={"message": "hello"})
 
-    assert response.status_code == 410
-    assert response.json()["detail"]["code"] == EXTERNAL_AGENT_RUNTIME_REMOVED
+    assert response.status_code == 200
+    assert response.json()["response"] == ""
+    mock_agent.run.assert_called_once_with("hello")
     completion.assert_not_called()
 
 
-def test_operator_runtime_payload_rejects_effective_legacy_override():
-    from fastapi import HTTPException
+def test_operator_runtime_payload_ignores_effective_legacy_override():
     from src.api.operator import _runtime_status_payload
 
     with patch.object(settings, "runtime_model_overrides", "chat_agent=codex"):
-        with pytest.raises(HTTPException) as exc_info:
-            _runtime_status_payload()
+        payload = _runtime_status_payload()
 
-    assert exc_info.value.status_code == 410
-    assert exc_info.value.detail["code"] == EXTERNAL_AGENT_RUNTIME_REMOVED
+    assert payload["provider"] == "openrouter"
+    assert payload["active_profile"] == "openrouter"
 
 
 @pytest.mark.asyncio
@@ -287,12 +296,15 @@ def test_operator_runtime_payload_rejects_effective_legacy_override():
         ("", "chat_agent=removed-agent", _REMOVED_PROFILE_CONFIG),
     ],
 )
-async def test_websocket_handler_rejects_effective_removed_route_without_transport(
+async def test_websocket_handler_ignores_legacy_route_selection_without_transport(
     runtime_override,
     profile_preference,
     profile_config,
 ):
     from src.api.ws import websocket_chat
+
+    async def _fake_stream(*args, **kwargs):
+        yield "OpenRouter ready."
 
     class FakeWebSocket:
         def __init__(self):
@@ -323,10 +335,18 @@ async def test_websocket_handler_rejects_effective_removed_route_without_transpo
         patch("src.api.ws.session_manager.add_message", new=AsyncMock()),
         patch("src.api.ws.ws_manager.connect"),
         patch("src.api.ws.ws_manager.disconnect"),
+        patch("src.api.ws.should_use_direct_local_chat", return_value=True),
+        patch("src.api.ws.direct_local_chat_route_error", new=AsyncMock(return_value=None)),
+        patch("src.api.ws.stream_direct_local_chat", _fake_stream),
+        patch(
+            "src.api.ws.redact_secrets_for_streaming_snapshot",
+            new=AsyncMock(side_effect=lambda text, emitted: (text, len(text))),
+        ),
+        patch("src.api.ws.redact_secrets_in_text", new=AsyncMock(side_effect=lambda text, **kwargs: text)),
         patch("litellm.completion") as completion,
     ):
         await websocket_chat(websocket)  # type: ignore[arg-type]
 
-    error = next(item for item in websocket.sent if item["type"] == "error")
-    assert json.loads(str(error["content"]))["code"] == EXTERNAL_AGENT_RUNTIME_REMOVED
+    final = next(item for item in websocket.sent if item["type"] == "final")
+    assert final["content"] == "OpenRouter ready."
     completion.assert_not_called()

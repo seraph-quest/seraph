@@ -44,6 +44,7 @@ EXPECTED_CANONICAL_ROUTES = {
     "end_of_day_goal_report",
     "screenshot_observation_digest",
     "screenshot_image_analysis",
+    "memory_embedding",
     "memory_keeper",
     "vault_keeper",
     "goal_planner",
@@ -311,7 +312,7 @@ def test_canonical_context_requires_exact_caller_supplied_identity_and_defaults_
 def test_canonical_context_preserves_bound_operator_and_scheduled_service_identity():
     from src.approval.runtime import reset_runtime_context, set_runtime_context
     from src.model_fabric.caller_context import build_canonical_inference_context
-    from src.security.trust_contract import AuthorityGrant, PrincipalType, TrustPrincipal
+    from src.security.trust_contract import AuthorityGrant, EgressClass, PrincipalType, TrustPrincipal
 
     principals = (
         TrustPrincipal(
@@ -380,13 +381,13 @@ async def test_screenshot_vlm_adapter_preflights_and_requires_persisted_receipt(
     profile = SimpleNamespace(
         schema_version="seraph.model-fabric.v1",
         contract_hash="a" * 64,
-        id="local-vlm-screenshot-fast",
-        model="gemma-test",
+        id="openrouter-screenshot",
+        model="anthropic/claude-sonnet-4",
     )
     candidate = SimpleNamespace(
-        endpoint="http://192.168.1.26:8001/v1/analyze-file",
-        endpoint_class=SimpleNamespace(value="trusted_lan"),
-        adapter="vlm_analyze_file",
+        endpoint="https://openrouter.ai/api/v1/chat/completions",
+        endpoint_class=SimpleNamespace(value="remote"),
+        adapter="openai_compatible_chat",
     )
     proof = SimpleNamespace(proof_hash="b" * 64)
     latest = AsyncMock(return_value=proof)
@@ -432,7 +433,7 @@ async def test_screenshot_vlm_adapter_preflights_and_requires_persisted_receipt(
 
 
 @pytest.mark.asyncio
-async def test_screenshot_vlm_rejects_chat_adapter_before_proof_or_transport(monkeypatch):
+async def test_screenshot_vlm_rejects_legacy_file_adapter_before_proof_or_transport(monkeypatch):
     from types import SimpleNamespace
     from unittest.mock import AsyncMock
 
@@ -443,17 +444,16 @@ async def test_screenshot_vlm_rejects_chat_adapter_before_proof_or_transport(mon
     )
 
     profile = ProviderProfile(
-        id="local-vlm-screenshot-fast",
-        provider_kind="openai_compatible",
+        id="legacy-vlm-screenshot",
+        provider_kind="openrouter",
         model="gemma-vlm-test",
-        api_base="http://192.168.1.26:8001",
+        api_base="https://openrouter.ai/api/v1",
         capabilities=("vision", "structured_output"),
         task_classes=("vision_analysis",),
-        transport_adapter="openai_compatible_chat",
-        keyless=True,
+        transport_adapter="vlm_analyze_file",
+        secret_env="OPENROUTER_API_KEY",
         context_window_tokens=8192,
         max_output_tokens=1024,
-        local_resource_ms=5000,
         max_latency_ms=5000,
     )
     context = SimpleNamespace(
@@ -469,7 +469,7 @@ async def test_screenshot_vlm_rejects_chat_adapter_before_proof_or_transport(mon
 
     with pytest.raises(
         ScreenshotSemanticAnalysisError,
-        match="requires the vlm_analyze_file adapter",
+        match="requires the OpenRouter chat adapter",
     ):
         await _run_governed_vlm_adapter(
             context=context,
@@ -539,18 +539,29 @@ async def test_screenshot_vlm_no_compliant_route_persists_zero_attempt_denial(mo
         deadline_at=time.time() + 5,
     )
     profile = ProviderProfile(
-        id="local-vlm-screenshot-fast",
-        provider_kind="openai_compatible",
-        model="gemma-vlm-test",
-        api_base="http://192.168.1.26:8001",
+        id="openrouter-screenshot",
+        provider_kind="openrouter",
+        model="anthropic/claude-sonnet-4",
+        api_base="https://openrouter.ai/api/v1",
         capabilities=("vision", "structured_output"),
         task_classes=("vision_analysis",),
-        transport_adapter="vlm_analyze_file",
-        keyless=True,
+        transport_adapter="openai_compatible_chat",
+        secret_env="OPENROUTER_API_KEY",
         context_window_tokens=8192,
         max_output_tokens=1024,
-        local_resource_ms=5000,
         max_latency_ms=5000,
+        cost_microusd=100,
+        cost_source="test",
+        cost_source_updated_at=time.time(),
+        options={
+            "provider": {
+                "only": ["anthropic"],
+                "allow_fallbacks": False,
+                "require_parameters": True,
+                "data_collection": "deny",
+                "zdr": True,
+            }
+        },
     )
     receipt = None
 
@@ -587,12 +598,11 @@ def test_canonical_screenshot_vlm_profile_passes_real_selector_with_exact_proofs
     from unittest.mock import patch
 
     from config.settings import settings
-    from src.llm_runtime import provider_profiles
-    from src.model_fabric import candidate_from_profile, select_route
+    from src.model_fabric import ProviderProfile, candidate_from_profile, select_route
     from src.model_fabric.caller_context import build_canonical_inference_context
+    from src.model_fabric.configuration import WorkloadPolicy
     from src.model_fabric.proofs import build_model_route_proof
-    from src.security.trust_contract import AuthorityGrant, PrincipalType, TrustPrincipal
-    from src.vlm_runtime import SCREENSHOT_VLM_PROFILE_ID
+    from src.security.trust_contract import AuthorityGrant, EgressClass, PrincipalType, TrustPrincipal
 
     principal = TrustPrincipal(
         principal_id="service:test-vlm",
@@ -601,11 +611,36 @@ def test_canonical_screenshot_vlm_profile_passes_real_selector_with_exact_proofs
         job_id="screenshot-analysis:test-1",
     )
     with (
-        patch.object(settings, "seraph_vlm_base_url", "http://192.168.1.26:8001"),
-        patch.object(settings, "local_vlm_model", "gemma-vlm-test"),
-        patch.object(settings, "local_vlm_timeout_seconds", 5),
+        patch.object(settings, "openrouter_provider_only", True),
+        patch.object(settings, "openrouter_api_key", "test-openrouter-key"),
+        patch.object(settings, "openrouter_allowed_upstreams", "anthropic"),
+        patch.object(settings, "openrouter_allow_fallbacks", False),
+        patch.object(settings, "openrouter_require_parameters", True),
+        patch.object(settings, "openrouter_data_collection", "deny"),
+        patch("src.model_fabric.caller_context.effective_workload_policy", return_value=WorkloadPolicy(
+            "screenshot_image_analysis",
+            egress_class=EgressClass.CLOUD_ALLOWED_FULL,
+            cloud_egress_acknowledged=True,
+            allowed_provider_kinds=("openrouter",),
+            max_cost_microusd=1000,
+        )),
     ):
-        profile = provider_profiles()[SCREENSHOT_VLM_PROFILE_ID]
+        profile = ProviderProfile(
+            id="openrouter-screenshot",
+            provider_kind="openrouter",
+            model="anthropic/claude-sonnet-4",
+            api_base="https://openrouter.ai/api/v1",
+            secret_env="OPENROUTER_API_KEY",
+            options={"provider": {"only": ["anthropic"], "allow_fallbacks": False, "require_parameters": True, "data_collection": "deny", "zdr": True}},
+            capabilities=("vision", "structured_output"),
+            task_classes=("vision_analysis",),
+            context_window_tokens=8192,
+            max_output_tokens=1400,
+            max_latency_ms=5_000,
+            cost_microusd=100,
+            cost_source="test",
+            cost_source_updated_at=time.time(),
+        )
         candidate = candidate_from_profile(profile)
         context = build_canonical_inference_context(
             "screenshot_image_analysis",
@@ -659,115 +694,25 @@ def test_canonical_screenshot_vlm_profile_passes_real_selector_with_exact_proofs
 
 @pytest.mark.asyncio
 async def test_screenshot_vlm_missing_principal_is_zero_transport(tmp_path):
-    from unittest.mock import patch
-
-    from config.settings import settings
-    from src.observer.screenshot_semantic_analysis import _analyze_with_local_vlm
+    from src.observer.screenshot_semantic_analysis import (
+        ScreenshotSemanticAnalysisError,
+        _analyze_with_local_vlm,
+    )
 
     image_path = tmp_path / "screen.png"
     image_path.write_bytes(b"bounded-test-image")
-    artifacts = {
-        "created_at": "2026-07-10T12:00:00Z",
-        "image_sha256": "a" * 64,
-        "file_format": "png",
-        "width": 1,
-        "height": 1,
-    }
-    async def run_inline(function, *args):
-        return function(*args)
-
-    with (
-        patch.object(settings, "seraph_vlm_base_url", "http://192.168.1.26:8001"),
-        patch.object(settings, "local_vlm_model", "gemma-vlm-test"),
-        patch("src.model_fabric.caller_context.get_current_trust_principal", return_value=None),
-        patch("src.observer.screenshot_semantic_analysis.asyncio.to_thread", side_effect=run_inline),
-        patch("src.observer.screenshot_semantic_analysis.httpx.AsyncClient") as transport,
-    ):
-        with pytest.raises(PermissionError, match="authenticated runtime principal"):
-            await _analyze_with_local_vlm(image_path, artifacts)
-    transport.assert_not_called()
+    with pytest.raises(ScreenshotSemanticAnalysisError, match="local_vlm_disabled"):
+        await _analyze_with_local_vlm(image_path, {})
 
 
 @pytest.mark.asyncio
 async def test_screenshot_vlm_binds_exact_multipart_fields_and_file_digest(tmp_path):
-    import hashlib
-    from unittest.mock import AsyncMock, patch
-
-    from config.settings import settings
-    from src.observer.screenshot_analysis_contract import ScreenshotAnalysis, screenshot_analysis_prompt
-    from src.observer.screenshot_semantic_analysis import _analyze_with_local_vlm
-    from src.security.trust_contract import (
-        AuthorityGrant,
-        PrincipalType,
-        TrustPrincipal,
-        canonical_digest,
+    from src.observer.screenshot_semantic_analysis import (
+        ScreenshotSemanticAnalysisError,
+        _analyze_with_local_vlm,
     )
 
-    image_bytes = b"exact-image-body"
     image_path = tmp_path / "screen.png"
-    image_path.write_bytes(image_bytes)
-    artifacts = {
-        "created_at": "2026-07-10T12:00:00Z",
-        "image_sha256": hashlib.sha256(image_bytes).hexdigest(),
-        "file_format": "png",
-        "width": 1,
-        "height": 1,
-    }
-    principal = TrustPrincipal(
-        principal_id="service:test-vlm",
-        principal_type=PrincipalType.SERVICE,
-        grants=(AuthorityGrant.MODEL_INFERENCE,),
-        job_id="screenshot-analysis:test-body",
-    )
-    captured = {}
-    analysis = ScreenshotAnalysis(summary="bounded", confidence=1.0)
-
-    async def run_inline(function, *args):
-        return function(*args)
-
-    async def governed(*, context, profile, transport):
-        captured["context"] = context
-        captured["profile"] = profile
-        captured["transport"] = transport
-        return analysis
-
-    metadata = {
-        "captured_at": artifacts["created_at"],
-        "source": "screenshot_folder",
-        "filename": image_path.name,
-        "image_sha256": artifacts["image_sha256"],
-        "file_format": artifacts["file_format"],
-        "width": 1,
-        "height": 1,
-    }
-    with (
-        patch.object(settings, "seraph_vlm_base_url", "http://192.168.1.26:8001"),
-        patch.object(settings, "local_vlm_model", "gemma-vlm-test"),
-        patch("src.model_fabric.caller_context.get_current_trust_principal", return_value=principal),
-        patch("src.observer.screenshot_semantic_analysis.asyncio.to_thread", side_effect=run_inline),
-        patch(
-            "src.observer.screenshot_semantic_analysis.local_runtime_profile_form_fields",
-            return_value={"runtime_profile": "screenshot_fast", "priority": "background"},
-        ),
-        patch(
-            "src.observer.screenshot_semantic_analysis._run_governed_vlm_adapter",
-            side_effect=governed,
-        ),
-    ):
-        assert await _analyze_with_local_vlm(image_path, artifacts) is analysis
-
-    expected_body = {
-        "fields": {
-            "prompt": screenshot_analysis_prompt(metadata),
-            "runtime_profile": "screenshot_fast",
-            "priority": "background",
-            "model": "gemma-vlm-test",
-        },
-        "file": {
-            "filename": "screen.png",
-            "content_type": "image/png",
-            "sha256": hashlib.sha256(image_bytes).hexdigest(),
-        },
-    }
-    assert captured["profile"].id == "local-vlm-screenshot-fast"
-    assert captured["context"].data_digest == canonical_digest(expected_body)
+    image_path.write_bytes(b"exact-image-body")
+    with pytest.raises(ScreenshotSemanticAnalysisError, match="local_vlm_disabled"):
+        await _analyze_with_local_vlm(image_path, {})

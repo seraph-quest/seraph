@@ -749,6 +749,12 @@ def _screenshot_folder_image_analysis(
         semantic_status = "needs_reanalysis"
     elif semantic_analysis:
         semantic_status = "succeeded"
+    elif str(persisted_status.get("status") or "") == "blocked":
+        # A policy/admission denial is a terminal, operator-actionable state
+        # for this observation.  The structured error detail is retained for
+        # recovery diagnostics, but must not relabel the receipt as a provider
+        # failure.
+        semantic_status = "blocked"
     elif semantic_error:
         semantic_status = "failed"
     else:

@@ -214,9 +214,15 @@ async def test_screen_artifact_root_prefers_screen_analysis_settings(tmp_path, m
 
 
 @pytest.mark.asyncio
-async def test_screenshot_folder_scan_persists_observation_and_serves_image(async_db, client, tmp_path):
+async def test_screenshot_folder_scan_persists_observation_and_serves_image(
+    async_db, client, tmp_path, monkeypatch
+):
     root = tmp_path / "screenshots"
     image = _write_screenshot(root, name="capture-valid.png")
+    monkeypatch.setattr(
+        "src.observer.screenshot_folder_source.screenshot_semantic_analysis_enabled",
+        lambda: False,
+    )
 
     resp = await client.post(
         "/api/observer/screenshot-folder/scan",
@@ -277,8 +283,11 @@ async def test_screenshot_folder_scan_persists_observation_and_serves_image(asyn
     assert analysis["provider"] == "screenshot_folder"
     assert analysis["analysis"]["analysis_owner"] == "seraph"
     assert analysis["analysis"]["source"] == "local_screenshot_folder"
-    assert analysis["analysis"]["semantic_status"] == "pending"
-    assert analysis["analysis"]["semantic_status_detail"]["status"] == "pending"
+    assert analysis["analysis"]["semantic_status"] == "blocked"
+    assert analysis["analysis"]["semantic_status_detail"]["status"] == "blocked"
+    assert analysis["analysis"]["semantic_status_detail"]["reason"] == (
+        "remote_inference_blocked:configuration_required"
+    )
     assert analysis["analysis"]["image_sha256"] == image_sha256
     assert analysis["analysis"]["image_bytes"] == len(image.read_bytes())
     assert analysis["analysis"]["file_format"] == "png"
@@ -401,6 +410,10 @@ async def test_screenshot_folder_scan_serializes_concurrent_duplicate_checks(
         "src.observer.screenshot_folder_source.settings.local_vlm_base_url",
         "http://gpu:8088",
     )
+    monkeypatch.setattr(
+        "src.observer.screenshot_folder_source.screenshot_semantic_analysis_enabled",
+        lambda: True,
+    )
 
     first = asyncio.create_task(
         client.post(
@@ -476,6 +489,10 @@ async def test_screenshot_folder_scan_persists_local_vlm_semantic_analysis(
         "src.observer.screenshot_folder_source.settings.local_vlm_base_url",
         "http://gpu:8088",
     )
+    monkeypatch.setattr(
+        "src.observer.screenshot_folder_source.screenshot_semantic_analysis_enabled",
+        lambda: True,
+    )
 
     scan_resp = await client.post(
         "/api/observer/screenshot-folder/scan",
@@ -542,6 +559,10 @@ async def test_screenshot_folder_scan_keeps_metadata_when_local_vlm_fails(
         "src.observer.screenshot_folder_source.settings.local_vlm_base_url",
         "http://gpu:8088",
     )
+    monkeypatch.setattr(
+        "src.observer.screenshot_folder_source.screenshot_semantic_analysis_enabled",
+        lambda: True,
+    )
 
     first = await client.post(
         "/api/observer/screenshot-folder/scan",
@@ -606,6 +627,10 @@ async def test_screenshot_folder_analysis_marks_missing_file_source_missing(
     monkeypatch.setattr(
         "src.observer.screenshot_folder_source.settings.local_vlm_base_url",
         "http://gpu:8088",
+    )
+    monkeypatch.setattr(
+        "src.observer.screenshot_folder_source.screenshot_semantic_analysis_enabled",
+        lambda: True,
     )
 
     scan_resp = await client.post(
@@ -703,6 +728,10 @@ async def test_screenshot_folder_reanalysis_replaces_failed_status_without_dupli
     monkeypatch.setattr("src.observer.screenshot_semantic_analysis.analyze_screenshot_image", analyzer)
     monkeypatch.setattr("src.observer.screenshot_semantic_analysis.settings.screen_analysis_provider", "local-vlm")
     monkeypatch.setattr("src.observer.screenshot_semantic_analysis.settings.local_vlm_base_url", "http://gpu:8088")
+    monkeypatch.setattr(
+        "src.observer.screenshot_folder_source.screenshot_semantic_analysis_enabled",
+        lambda: True,
+    )
 
     scan = await client.post(
         "/api/observer/screenshot-folder/scan",
@@ -979,6 +1008,10 @@ async def test_screenshot_folder_scan_suppresses_visually_identical_byte_variant
     monkeypatch.setattr(
         "src.observer.screenshot_folder_source.settings.local_vlm_base_url",
         "http://gpu:8088",
+    )
+    monkeypatch.setattr(
+        "src.observer.screenshot_folder_source.screenshot_semantic_analysis_enabled",
+        lambda: True,
     )
 
     resp = await client.post(

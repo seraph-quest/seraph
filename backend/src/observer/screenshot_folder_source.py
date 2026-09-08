@@ -19,6 +19,8 @@ from config.settings import settings
 from src.audit.runtime import log_integration_event
 from src.db.engine import get_session
 from src.db.models import ScreenObservation
+from src.model_fabric import NoCompliantModelRouteError
+from src.model_fabric.remote_inference_admission import RemoteInferenceAdmissionError
 from src.observer.image_metadata import image_metadata_label, local_image_metadata
 from src.observer.screen_repository import screen_observation_repo
 from src.observer.screenshot_semantic_analysis import (
@@ -164,7 +166,10 @@ async def analyze_pending_screenshot_folder_observations(
     worker_limit = max(concurrency, 1)
 
     if not screenshot_semantic_analysis_enabled():
-        return ScreenshotFolderAnalysisResult(scanned=0, analyzed=0, failed=0, skipped=0)
+        blocked = await _mark_pending_observations_blocked(
+            reason="remote_inference_blocked:configuration_required"
+        )
+        return ScreenshotFolderAnalysisResult(scanned=blocked, analyzed=0, failed=0, skipped=blocked)
 
     candidates = await _select_analysis_candidates_with_retry(limit=analysis_limit * 20)
     observations = [
@@ -204,9 +209,17 @@ async def analyze_pending_screenshot_folder_observations(
                 analysis=analysis,
                 error_reason=None if analysis is not None else "provider not configured",
             )
-        except (OSError, ScreenshotFolderImageError, ScreenshotSemanticAnalysisError) as exc:
+        except (
+            OSError,
+            ScreenshotFolderImageError,
+            ScreenshotSemanticAnalysisError,
+            NoCompliantModelRouteError,
+            RemoteInferenceAdmissionError,
+        ) as exc:
             failed_reason = str(exc)
             logger.warning("screenshot_folder_analysis: failed %s: %s", image_path.name, failed_reason)
+            if status_override is None and _is_blocked_analysis_error(exc):
+                status_override = "blocked"
             details = _replace_analysis_details(
                 details,
                 analysis=None,
@@ -237,19 +250,32 @@ async def analyze_pending_screenshot_folder_observations(
     return ScreenshotFolderAnalysisResult(scanned=len(observations), analyzed=analyzed, failed=failed, skipped=skipped)
 
 
-async def _select_analysis_candidates_with_retry(*, limit: int) -> list[ScreenObservation]:
+def _is_blocked_analysis_error(error: BaseException) -> bool:
+    """Classify policy/admission denials separately from provider failures."""
+    if isinstance(error, RemoteInferenceAdmissionError):
+        return True
+    if isinstance(error, NoCompliantModelRouteError):
+        return True
+    return isinstance(error, ScreenshotSemanticAnalysisError) and str(error).startswith(
+        "remote_inference_blocked:"
+    )
+
+
+async def _select_analysis_candidates_with_retry(*, limit: int | None) -> list[ScreenObservation]:
     for attempt in range(_DB_LOCK_RETRY_ATTEMPTS):
         try:
             async with get_session() as db:
-                result = await db.execute(
+                statement = (
                     select(ScreenObservation)
                     .where(col(ScreenObservation.app_name) == "Screenshot Folder")
                     .where(col(ScreenObservation.details_json).contains("capture_artifacts:"))
                     .where(col(ScreenObservation.details_json).contains(SCREENSHOT_FOLDER_PROVIDER))
                     .where(_analysis_candidate_status_filter())
                     .order_by(col(ScreenObservation.timestamp).asc())
-                    .limit(limit)
                 )
+                if limit is not None:
+                    statement = statement.limit(limit)
+                result = await db.execute(statement)
                 return list(result.scalars().all())
         except OperationalError as exc:
             if not _is_database_locked(exc):
@@ -424,7 +450,9 @@ async def _image_to_observation(image_path: Path, root: Path) -> dict[str, objec
     if screenshot_semantic_analysis_enabled():
         details.append(screenshot_analysis_status_detail("pending", reason="queued_for_analysis"))
     else:
-        details.append(screenshot_analysis_status_detail("pending", reason="provider not configured"))
+        blocked_reason = "remote_inference_blocked:configuration_required"
+        details.append(screenshot_analysis_error_detail(blocked_reason))
+        details.append(screenshot_analysis_status_detail("blocked", reason=blocked_reason))
     metadata_label = image_metadata_label(metadata)
     summary_suffix = f" ({metadata_label})" if metadata_label else ""
     return {
@@ -748,6 +776,25 @@ def _replace_analysis_details(
         next_details.append(screenshot_analysis_error_detail(reason))
         next_details.append(screenshot_analysis_status_detail(status, reason=reason, attempts=attempts))
     return next_details
+
+
+async def _mark_pending_observations_blocked(*, reason: str) -> int:
+    """Close every pending visual observation when the route is unavailable."""
+    candidates = await _select_analysis_candidates_with_retry(limit=None)
+    blocked = 0
+    for observation in candidates:
+        details = _observation_details(observation)
+        if not _analysis_candidate_ready(details):
+            continue
+        next_details = _replace_analysis_details(
+            details,
+            analysis=None,
+            error_reason=reason,
+            status="blocked",
+        )
+        await _persist_analysis_details_with_retry(observation.id, next_details)
+        blocked += 1
+    return blocked
 
 
 def _sha256_file(path: Path) -> str:

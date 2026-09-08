@@ -1,5 +1,12 @@
 # Seraph
 
+> **Active Epic #736/#775 phase:** Seraph's inference gateway is OpenRouter
+> only. The canonical workspace, API, storage, tools, and UI run on a CPU
+> host; a local model server, CUDA, model weights, and a VLM wrapper are not
+> active prerequisites. This branch remains a migration target until its
+> reviewed PR merges to `develop`; see the [Current App Guide](docs/implementation/12-current-app-guide.md)
+> and [ADR-006](docs/implementation/decisions/006-openrouter-only-inference-phase.md).
+
 Seraph is a local-first proactive guardian: an operator-controlled system that
 understands your goals, observes permitted context, proposes and executes useful
 work, remembers outcomes, and explains what it is doing.
@@ -15,11 +22,12 @@ cockpit and settings UI, goals and memory foundations, scheduler jobs, tools and
 workflows, screen observation storage, reports, model routing, approvals, audit
 surfaces, and extension adapters.
 
-The accepted target decision and [Epic #736](https://github.com/seraph-quest/seraph/issues/736) move
-the authenticated Seraph core to the GPU server for LAN access, makes the Mac a
-paired observation/interface edge, unifies local and remote inference routes,
-and replaces command-backed external-agent paths with Seraph-owned capabilities.
-These target changes are not shipped merely because they are documented.
+The accepted target decision and [Epic #736](https://github.com/seraph-quest/seraph/issues/736)
+remain the long-term guardian roadmap. The active #775 migration phase keeps
+the authenticated Seraph core and canonical state on a CPU host and routes
+approved text, vision, and embedding inference through OpenRouter. The older
+GPU-core topology is retained below only as historical evidence until its
+replacement milestones are accepted on `develop`.
 
 Use these sources in order:
 
@@ -50,7 +58,7 @@ Seraph has four product layers:
 | --- | --- |
 | Guardian kernel | Goals, policy, planning, priority, intervention, memory coordination, and audit |
 | Capability runtime | Typed execution, durable jobs, artifacts, checkpoints, approvals, and scheduling |
-| Model fabric | Inference through local models, OpenRouter, or generic OpenAI-compatible APIs |
+| Model fabric | Governed OpenRouter inference with explicit cloud consent and bounded remote admission |
 | Interfaces and edges | Browser cockpit, API, paired Mac edge, voice, and paired messaging |
 
 Models provide inference; they do not become the agent runtime. Seraph owns its
@@ -58,9 +66,11 @@ capabilities and does not depend on Codex CLI, Claude Code, or another coding
 agent to operate. See the constitution's five
 [architecture decisions](docs/implementation/00-project-constitution.md#locked-decisions).
 
-## Current Development Topology
+## Historical Development Topology
 
-The currently shipped development path is transitional but supported:
+The following topology describes the pre-#775 `develop` baseline. It is kept
+for diagnosis and rollback evidence and is not an active prerequisite for the
+OpenRouter-only phase:
 
 ```text
 Seraph frontend       http://127.0.0.1:3001
@@ -76,7 +86,8 @@ GPU inventory and maintenance; it is not a Seraph runtime requirement or tunnel.
 
 ```bash
 cp env.dev.example .env.dev
-# Configure a local, OpenRouter, or generic OpenAI-compatible inference route.
+# Configure OPENROUTER_API_KEY, approved upstreams, cloud consent, and a
+# finite workload budget through the authenticated settings surface.
 
 ./manage.sh -e dev local up
 ./manage.sh -e dev local status
@@ -99,8 +110,9 @@ Stop with:
 
 Do not start the backend or frontend directly for normal development; the
 managed launcher loads the expected environment and reports owned process state.
-See the [Current App Guide](docs/implementation/12-current-app-guide.md) for VLM
-health probes, runtime status, Docker mode, and known transitional routes.
+See the [Current App Guide](docs/implementation/12-current-app-guide.md) for
+OpenRouter readiness, runtime status, managed lifecycle, and historical route
+diagnostics.
 
 ## Repository Map
 
@@ -122,7 +134,8 @@ Read [AGENTS.md](AGENTS.md) before changing the repository. In particular:
 - track non-trivial work in GitHub before completion;
 - branch from the required integration base and never commit directly to
   `develop` or `main`;
-- keep runtime truth operator-visible and preserve one-GPU serial priority;
+- keep runtime truth operator-visible and preserve bounded remote-inference
+  priority;
 - use focused tests and operational receipts appropriate to the change;
 - require independent Critic/Contrarian review for PR-sized work; and
 - update `docs/implementation/` when shipped behavior or durable contracts change.

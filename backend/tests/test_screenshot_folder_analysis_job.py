@@ -60,6 +60,99 @@ def test_failed_screenshot_analysis_is_retried_after_cooldown():
     assert not _analysis_candidate_ready(exhausted, now=now + timedelta(minutes=10))
 
 
+def test_route_denial_is_persisted_as_blocked_and_not_auto_retried():
+    from src.model_fabric import NoCompliantModelRouteError
+    from src.observer.screenshot_folder_source import (
+        _analysis_candidate_ready,
+        _is_blocked_analysis_error,
+        _replace_analysis_details,
+    )
+    from src.observer.screenshot_semantic_analysis import (
+        ScreenshotSemanticAnalysisError,
+        semantic_analysis_status_from_details,
+    )
+
+    assert _is_blocked_analysis_error(NoCompliantModelRouteError()) is True
+    assert _is_blocked_analysis_error(ScreenshotSemanticAnalysisError("remote_inference_blocked:no_route")) is True
+    assert _is_blocked_analysis_error(ScreenshotSemanticAnalysisError("provider_timeout")) is False
+
+    details = _replace_analysis_details(
+        ["capture_artifacts:{}"],
+        analysis=None,
+        error_reason="remote_inference_blocked:no_route",
+        status="blocked",
+    )
+    assert (semantic_analysis_status_from_details(details) or {}).get("status") == "blocked"
+    assert _analysis_candidate_ready(details) is False
+
+
+def test_missing_openrouter_configuration_is_a_blocked_receipt():
+    from src.observer.screenshot_folder_source import _replace_analysis_details
+    from src.observer.screenshot_semantic_analysis import semantic_analysis_status_from_details
+
+    details = _replace_analysis_details(
+        ["capture_artifacts:{}"],
+        analysis=None,
+        error_reason="remote_inference_blocked:configuration_required",
+        status="blocked",
+    )
+    status = semantic_analysis_status_from_details(details) or {}
+    assert status["status"] == "blocked"
+    assert status["reason"] == "remote_inference_blocked:configuration_required"
+
+
+@pytest.mark.asyncio
+async def test_disabled_analysis_closes_existing_pending_observations(monkeypatch):
+    from src.observer import screenshot_folder_source as source
+    from src.observer.screenshot_semantic_analysis import semantic_analysis_status_from_details
+
+    observation = ScreenObservation(
+        id="pending-observation",
+        app_name="Screenshot Folder",
+        details_json=json.dumps(["capture_artifacts:{}"]),
+    )
+    persisted: list[tuple[str, list[str]]] = []
+
+    async def select_candidates(*, limit):
+        assert limit is None
+        return [observation]
+
+    async def persist(observation_id, details):
+        persisted.append((observation_id, details))
+
+    monkeypatch.setattr(source, "screenshot_semantic_analysis_enabled", lambda: False)
+    monkeypatch.setattr(source, "_select_analysis_candidates_with_retry", select_candidates)
+    monkeypatch.setattr(source, "_persist_analysis_details_with_retry", persist)
+
+    result = await source.analyze_pending_screenshot_folder_observations(limit=1)
+
+    assert result == ScreenshotFolderAnalysisResult(scanned=1, analyzed=0, failed=0, skipped=1)
+    assert len(persisted) == 1
+    status = semantic_analysis_status_from_details(persisted[0][1]) or {}
+    assert status["status"] == "blocked"
+    assert status["reason"] == "remote_inference_blocked:configuration_required"
+
+
+def test_explicit_reanalysis_preserves_blocked_admission_status():
+    from src.observer.screenshot_folder_source import _analysis_candidate_ready
+    from src.observer.screenshot_semantic_analysis import (
+        replace_semantic_analysis_details,
+        semantic_analysis_status_from_details,
+    )
+
+    details = replace_semantic_analysis_details(
+        ["capture_artifacts:{}"],
+        analysis=None,
+        error_reason="remote_inference_blocked:no_compliant_route",
+        reanalysis_reason="provider_failure_retry",
+    )
+
+    status = semantic_analysis_status_from_details(details) or {}
+    assert status["status"] == "blocked"
+    assert status["reason"] == "remote_inference_blocked:no_compliant_route"
+    assert _analysis_candidate_ready(details) is False
+
+
 @pytest.mark.asyncio
 async def test_screenshot_folder_analysis_selection_retries_database_lock(monkeypatch):
     from src.observer import screenshot_folder_source as source
@@ -223,7 +316,7 @@ async def test_screenshot_folder_analysis_job_drains_pending_backlog_with_bounde
     assert events[0]["details"]["concurrency"] == 2
     assert events[0]["details"]["batch_limit"] == 1
     assert events[0]["details"]["feeder_iterations"] == 2
-    assert events[0]["details"]["stopped_reason"] == "local_vlm_no_background_capacity"
+    assert events[0]["details"]["stopped_reason"] == "remote_inference_no_background_capacity"
 
 
 @pytest.mark.asyncio
@@ -317,7 +410,7 @@ async def test_screenshot_folder_analysis_job_skips_when_vlm_has_no_capacity(mon
                 "concurrency": 2,
                 "batch_limit": 0,
                 "feeder_iterations": 0,
-                "stopped_reason": "local_vlm_no_background_capacity",
+            "stopped_reason": "remote_inference_no_background_capacity",
             },
         }
     ]
@@ -498,6 +591,7 @@ async def test_screenshot_folder_analysis_drains_older_pending_rows_behind_newer
 
     monkeypatch.setattr("src.observer.screenshot_folder_source.settings.screen_analysis_provider", "local-vlm")
     monkeypatch.setattr("src.observer.screenshot_folder_source.settings.local_vlm_base_url", "http://gpu:8088")
+    monkeypatch.setattr("src.observer.screenshot_folder_source.screenshot_semantic_analysis_enabled", lambda: True)
     monkeypatch.setattr("src.observer.screenshot_folder_source.analyze_screenshot_image", fake_analyze)
 
     result = await analyze_pending_screenshot_folder_observations(limit=1)
@@ -570,6 +664,7 @@ async def test_screenshot_folder_analysis_counts_persistence_lock_as_failed(
 
     monkeypatch.setattr("src.observer.screenshot_folder_source.settings.screen_analysis_provider", "local-vlm")
     monkeypatch.setattr("src.observer.screenshot_folder_source.settings.local_vlm_base_url", "http://gpu:8088")
+    monkeypatch.setattr("src.observer.screenshot_folder_source.screenshot_semantic_analysis_enabled", lambda: True)
     monkeypatch.setattr("src.observer.screenshot_folder_source.analyze_screenshot_image", fake_analyze)
     monkeypatch.setattr("src.observer.screenshot_folder_source._persist_analysis_details_with_retry", locked_persist)
 

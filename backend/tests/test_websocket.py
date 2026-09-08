@@ -20,6 +20,7 @@ import src.db.models  # noqa: F401
 from config.settings import settings
 from src.agent.direct_chat import should_use_direct_local_chat as real_should_use_direct_local_chat
 from src.api.ws import _build_agent
+from src.security.trust_contract import AuthorityGrant, PrincipalType, TrustPrincipal
 from src.utils.background import drain_tracked_tasks
 
 
@@ -78,6 +79,16 @@ def _make_sync_client_with_db():
     patches.append(patch("src.app.init_scheduler", return_value=None))
     patches.append(patch("src.app.shutdown_scheduler"))
     patches.append(patch("src.memory.flush.flush_session_memory", AsyncMock(return_value=None)))
+    patches.append(
+        patch(
+            "src.api.chat.get_current_trust_principal",
+            return_value=TrustPrincipal(
+                principal_id="operator:test",
+                principal_type=PrincipalType.OPERATOR,
+                grants=(AuthorityGrant.MODEL_INFERENCE,),
+            ),
+        )
+    )
     patches.append(patch("src.api.ws.should_use_direct_local_chat", return_value=False))
     for p in patches:
         p.start()
@@ -110,6 +121,10 @@ def _close_sync_client_with_db(patches, stack):
 class TestWebSocket:
     def test_websocket_rejects_effective_legacy_runtime_override(self):
         client, patches, stack = _make_sync_client_with_db()
+
+        async def _fake_stream(*args, **kwargs):
+            yield "OpenRouter ready."
+
         try:
             with (
                 patch.object(
@@ -118,16 +133,18 @@ class TestWebSocket:
                     "chat_agent=codex-local,onboarding_agent=codex-local",
                 ),
                 patch("litellm.completion") as completion,
+                patch("src.api.ws.should_use_direct_local_chat", return_value=True),
+                patch("src.api.ws.direct_local_chat_route_error", new=AsyncMock(return_value=None)),
+                patch("src.api.ws.stream_direct_local_chat", _fake_stream),
                 client.websocket_connect("/ws/chat") as ws,
             ):
                 _ = ws.receive_text()
                 ws.send_text(json.dumps({"type": "message", "message": "Hello"}))
-                status = json.loads(ws.receive_text())
-                response = json.loads(ws.receive_text())
+                received = [json.loads(ws.receive_text()) for _ in range(4)]
 
-            assert status["type"] == "status"
-            assert response["type"] == "error"
-            assert json.loads(response["content"])["code"] == "external_agent_runtime_removed"
+            assert received[0]["type"] == "status"
+            assert received[-1]["type"] == "final"
+            assert received[-1]["content"] == "OpenRouter ready."
             completion.assert_not_called()
         finally:
             stack.close()
@@ -204,7 +221,7 @@ class TestWebSocket:
             assert received[0]["type"] == "status"
             assert received[0]["content"] == "Seraph received the message."
             assert received[1]["type"] == "status"
-            assert "local chat runtime" in received[1]["content"]
+            assert "governed OpenRouter chat runtime" in received[1]["content"]
             assert received[2]["type"] == "delta"
             assert received[2]["content"] == "Re"
             assert received[3]["type"] == "delta"
@@ -248,7 +265,7 @@ class TestWebSocket:
             assert received[0]["type"] == "status"
             assert received[0]["content"] == "Seraph received the message."
             assert received[1]["type"] == "status"
-            assert "local chat runtime" in received[1]["content"]
+            assert "governed OpenRouter chat runtime" in received[1]["content"]
             assert received[2]["type"] == "delta"
             assert received[2]["content"] == "Hello."
             assert received[3]["type"] == "final"
@@ -258,7 +275,7 @@ class TestWebSocket:
             for p in patches:
                 p.stop()
 
-    def test_websocket_direct_chat_falls_back_when_streaming_fails_before_delta(self):
+    def test_websocket_direct_chat_does_not_replay_after_streaming_failure(self):
         client, patches, stack = _make_sync_client_with_db()
 
         async def _fake_stream(*args, **kwargs):
@@ -270,22 +287,22 @@ class TestWebSocket:
                 patch("src.api.ws.should_use_direct_local_chat", return_value=True),
                 patch("src.api.ws.direct_local_chat_route_error", new=AsyncMock(return_value=None)),
                 patch("src.api.ws.stream_direct_local_chat", _fake_stream),
-                patch("src.api.ws.run_direct_local_chat", new=AsyncMock(return_value="Fallback ready.")),
+                patch("src.api.ws.run_direct_local_chat", new=AsyncMock(return_value="Fallback ready.")) as mock_direct,
                 client.websocket_connect("/ws/chat") as ws,
             ):
                 _ = ws.receive_text()
                 ws.send_text(json.dumps({"type": "message", "message": "Hello"}))
 
-                received = [json.loads(ws.receive_text()) for _ in range(4)]
+                received = [json.loads(ws.receive_text()) for _ in range(3)]
 
             assert received[0]["type"] == "status"
             assert received[0]["content"] == "Seraph received the message."
             assert received[1]["type"] == "status"
-            assert "local chat runtime" in received[1]["content"]
-            assert received[2]["type"] == "status"
-            assert "falling back" in received[2]["content"]
-            assert received[3]["type"] == "final"
-            assert received[3]["content"] == "Fallback ready."
+            assert "governed OpenRouter chat runtime" in received[1]["content"]
+            assert received[2]["type"] == "error"
+            assert "outcome is uncertain" in received[2]["content"]
+            assert "did not retry automatically" in received[2]["content"]
+            mock_direct.assert_not_awaited()
         finally:
             stack.close()
             for p in patches:
@@ -342,7 +359,7 @@ class TestWebSocket:
                 patch("src.api.ws.should_use_direct_local_chat", return_value=True),
                 patch("src.api.ws.direct_local_chat_route_error", new=AsyncMock(return_value=None)),
                 patch("src.api.ws.stream_direct_local_chat", _fake_stream),
-                patch("src.api.ws.run_direct_local_chat", new=AsyncMock(side_effect=RuntimeError("chat failed"))),
+                patch("src.api.ws.run_direct_local_chat", new=AsyncMock(side_effect=RuntimeError("chat failed"))) as mock_direct,
                 client.websocket_connect("/ws/chat") as ws,
             ):
                 _ = ws.receive_text()
@@ -357,7 +374,8 @@ class TestWebSocket:
                         break
 
             error = next(msg for msg in received if msg["type"] == "error")
-            assert "chat failed" in error["content"]
+            assert "outcome is uncertain" in error["content"]
+            mock_direct.assert_not_awaited()
             messages_response = client.get(f"/api/sessions/{error['session_id']}/messages")
             assert messages_response.status_code == 200
             messages = messages_response.json()

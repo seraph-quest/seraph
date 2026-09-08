@@ -82,6 +82,20 @@ def _uses_local_gemma_profile(runtime_path: str) -> bool:
     return is_local_runtime_profile(resolve_runtime_profile(runtime_path=runtime_path))
 
 
+def _uses_openrouter_profile(runtime_path: str) -> bool:
+    """Return whether the bounded direct-chat path uses the active provider.
+
+    The helper keeps the historical function names used by the API and tests,
+    but the active phase no longer treats a local Gemma process as a valid
+    direct-chat dependency.  Route selection and authority checks still happen
+    in the shared model-fabric completion path.
+    """
+    resolved = resolve_runtime_profile(runtime_path=runtime_path).strip().lower()
+    return resolved == "openrouter" or (
+        resolved == "default" and bool(getattr(settings, "openrouter_provider_only", True))
+    )
+
+
 def looks_like_tool_or_web_request(message: str) -> bool:
     """Return whether a turn needs the agent/tool path instead of direct chat."""
     normalized = " ".join((message or "").strip().lower().split())
@@ -96,8 +110,14 @@ def _normalize_lightweight_chat_text(message: str) -> str:
 
 
 def should_use_direct_local_chat(message: str, *, runtime_path: str, is_onboarding: bool) -> bool:
-    """Return whether this turn should bypass tool orchestration on the local GPU."""
-    if not _uses_local_gemma_profile(runtime_path):
+    """Return whether a lightweight turn may use the bounded direct path.
+
+    ``should_use_direct_local_chat`` is retained as a compatibility name for
+    the existing REST/WebSocket callers.  Active direct turns are admitted only
+    on the governed OpenRouter profile; local model profiles are never revived
+    by this shortcut.
+    """
+    if not _uses_openrouter_profile(runtime_path):
         return False
     if looks_like_tool_or_web_request(message):
         return False
@@ -145,7 +165,7 @@ async def run_direct_local_chat(
     session_id: str = "",
     request_id: str | None = None,
 ) -> str:
-    """Run a single bounded local completion without invoking the tool agent loop."""
+    """Run one bounded governed completion without invoking the tool loop."""
     messages = _direct_local_chat_messages(message, is_onboarding=is_onboarding)
     response = await asyncio.to_thread(
         completion_with_fallback_sync,
@@ -154,7 +174,7 @@ async def run_direct_local_chat(
         max_tokens=min(settings.model_max_tokens, 512),
         runtime_path=runtime_path,
         request_id=request_id,
-        local_runtime_only=True,
+        local_runtime_only=False,
         request_context=build_canonical_inference_context(
             runtime_path,
             payload=messages,
@@ -175,9 +195,11 @@ async def stream_direct_local_chat(
     is_onboarding: bool,
     session_id: str = "",
 ) -> AsyncIterator[str]:
-    """Yield local chat token deltas and return the full response when complete."""
-    if not _uses_local_gemma_profile(runtime_path):
-        raise RuntimeError(f"Runtime path '{runtime_path}' is not configured for local Gemma chat streaming")
+    """Yield governed OpenRouter token deltas for a lightweight turn."""
+    if not _uses_openrouter_profile(runtime_path):
+        raise RuntimeError(
+            f"Runtime path '{runtime_path}' is not configured for the active OpenRouter chat profile"
+        )
 
     messages = _direct_local_chat_messages(message, is_onboarding=is_onboarding)
     context = build_canonical_inference_context(

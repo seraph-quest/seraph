@@ -7,6 +7,7 @@ import time
 import pytest
 from sqlalchemy import text
 
+from config.settings import settings
 from src.model_fabric import (
     EndpointClass,
     InferenceRequestContext,
@@ -46,6 +47,17 @@ from src.security.trust_contract import (
     TrustProvenance,
     canonical_digest,
 )
+
+
+@pytest.fixture(autouse=True)
+def allow_legacy_probe_contract_fixture(monkeypatch):
+    """Exercise transport-free probe receipts without selecting a live route.
+
+    These tests validate the lower-level receipt/proof state machine with
+    synthetic historical profiles.  Active production selection remains
+    OpenRouter-only and is covered by the focused policy suites.
+    """
+    monkeypatch.setattr(settings, "openrouter_provider_only", False)
 
 
 def _profile(*, endpoint: str = "http://192.168.1.26:8001/v1") -> ProviderProfile:

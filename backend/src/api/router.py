@@ -1,6 +1,7 @@
 from fastapi import APIRouter
 
 from src.api.activity import router as activity_router
+from src.api.auth import router as auth_router
 from src.api.audit import router as audit_router
 from src.api.approvals import router as approvals_router
 from src.api.automation import router as automation_router
@@ -28,6 +29,8 @@ from src.api.workflows import router as workflows_router
 from src.api.ws import router as ws_router
 
 api_router = APIRouter()
+
+api_router.include_router(auth_router, prefix="/api/auth", tags=["auth"])
 
 api_router.include_router(activity_router, prefix="/api", tags=["activity"])
 api_router.include_router(audit_router, prefix="/api", tags=["audit"])

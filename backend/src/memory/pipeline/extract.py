@@ -5,7 +5,6 @@ from datetime import datetime, timezone
 
 from config.settings import settings
 from src.approval.runtime import get_current_trust_principal, reset_runtime_context, set_runtime_context
-from src.llm_runtime import prefers_local_runtime_path
 from src.memory.types import ConsolidatedMemoryItem, parse_consolidated_memories
 from src.model_fabric.caller_context import build_canonical_inference_context
 
@@ -68,7 +67,8 @@ async def extract_session_memories(
             max_tokens=1024,
             timeout=settings.consolidation_llm_timeout,
             runtime_path="session_consolidation",
-            local_runtime_only=prefers_local_runtime_path("session_consolidation"),
+            # Canonical memory synthesis uses the governed OpenRouter route.
+            local_runtime_only=False,
             request_context=build_canonical_inference_context(
                 "session_consolidation",
                 payload=transport_messages,

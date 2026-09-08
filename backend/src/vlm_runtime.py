@@ -2,14 +2,13 @@
 
 from __future__ import annotations
 
-import asyncio
 from urllib.parse import urlparse
-
-import httpx
 
 from config.settings import settings
 
-SCREENSHOT_VLM_PROFILE_ID = "local-vlm-screenshot-fast"
+# Canonical active profile identity. The old local-vlm name is intentionally
+# not reused, so persisted local proofs/configuration cannot look current.
+SCREENSHOT_VLM_PROFILE_ID = "openrouter-screenshot-vision"
 
 
 def effective_vlm_base_url() -> str:
@@ -74,8 +73,14 @@ def effective_vlm_status(*, live_probe: dict[str, object] | None = None) -> dict
     base_url = effective_vlm_base_url()
     backend_url = effective_vlm_backend_url()
     mode = effective_vlm_mode()
+    # The OpenRouter migration removes the local wrapper from the active
+    # runtime.  Keep configured endpoint metadata for historical diagnostics,
+    # but never advertise it as active or make readiness depend on it.
+    local_runtime_active = False
     status = {
         "mode": mode,
+        "active": local_runtime_active,
+        "disabled_reason": None if local_runtime_active else "local_vlm_disabled_openrouter_only",
         "configured": bool(base_url),
         "base_url": base_url,
         "backend_url": backend_url,
@@ -109,75 +114,48 @@ def deferred_vlm_live_probe(reason: str = "deferred_fast_metadata") -> dict[str,
 
 
 async def probe_effective_vlm_runtime(*, timeout_seconds: float = 0.75) -> dict[str, object]:
-    """Probe the effective VLM wrapper route from this Seraph process."""
-    base_url = effective_vlm_base_url()
-    if not base_url:
-        return {
-            "checked": False,
-            "reachable": False,
-            "reason": "not_configured",
-            "health": _unprobed_endpoint(),
-            "backend_health": _unprobed_endpoint(),
-            "queue_status": _unprobed_endpoint(),
-            "chat_proxy": _unprobed_endpoint(),
-        }
+    """Return the retired local-runtime receipt without making a network call.
 
-    timeout = max(min(timeout_seconds, 5.0), 0.1)
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        health, backend_health, queue_status, chat_proxy = await asyncio.gather(
-            _probe_json_endpoint(client, base_url + "/health"),
-            _probe_json_endpoint(client, base_url + "/health/backend"),
-            _probe_json_endpoint(client, base_url + "/queue/status"),
-            _probe_chat_health(client, base_url + "/health/chat"),
-        )
-    reachable = bool(
-        health.get("ok")
-        and backend_health.get("ok")
-        and queue_status.get("ok")
-        and chat_proxy.get("ok")
-    )
+    The function remains as a compatibility seam for status callers and older
+    integrations.  The OpenRouter-only phase must never probe or depend on a
+    local wrapper, GPU host, or VLM queue.
+    """
     return {
-        "checked": True,
-        "reachable": reachable,
-        "health": health,
-        "backend_health": backend_health,
-        "queue_status": queue_status,
-        "chat_proxy": chat_proxy,
+        "checked": False,
+        "reachable": False,
+        "reason": "local_vlm_disabled_openrouter_only",
+        "health": _unprobed_endpoint(),
+        "backend_health": _unprobed_endpoint(),
+        "queue_status": _unprobed_endpoint(),
+        "chat_proxy": _unprobed_endpoint(),
     }
 
 
-async def direct_local_chat_route_error(*, timeout_seconds: float = 0.75) -> str | None:
-    """Return an operator-readable route error when local chat cannot run."""
-    status = effective_vlm_status()
-    base_url = str(status.get("base_url") or "")
-    chat_api_base = effective_vlm_chat_api_base()
-    chat_health_endpoint = str(status.get("chat_health_endpoint") or "")
-    if not chat_api_base:
-        return (
-            "Local chat runtime is not configured for the Seraph backend. "
-            "Set SERAPH_VLM_BASE_URL or LOCAL_VLM_BASE_URL before using direct local chat."
-        )
-    if not base_url:
-        return None
+async def direct_local_chat_route_error(
+    *,
+    timeout_seconds: float = 0.75,
+    runtime_path: str | None = None,
+) -> str | None:
+    """Return a route error for legacy local chat callers.
 
-    wrapper_chat_api_base = effective_vlm_wrapper_chat_api_base()
-    if _trim_url(chat_api_base) != _trim_url(wrapper_chat_api_base):
-        # An explicitly configured text endpoint is independent of the VLM
-        # wrapper. The completion transport reports its own reachability error.
-        return None
+    OpenRouter direct chat is governed by the model fabric and must not depend
+    on the retired local VLM health endpoints.  Keep the no-argument behavior
+    for historical diagnostics, while allowing active chat callers to bypass
+    those probes explicitly.
+    """
+    # REST/WebSocket lightweight turns still use this compatibility seam, but
+    # canonical chat/onboarding paths now dispatch through the governed
+    # OpenRouter model fabric. Only callers without a canonical route remain
+    # legacy local-runtime diagnostics.
+    if runtime_path:
+        try:
+            from src.model_fabric.caller_context import is_canonical_inference_route
 
-    probe = await probe_effective_vlm_runtime(timeout_seconds=timeout_seconds)
-    if probe.get("reachable") is True:
-        return None
-
-    detail = _probe_failure_detail(probe)
-    endpoint = chat_health_endpoint or str(status.get("backend_health_endpoint") or status.get("health_endpoint") or base_url)
-    return (
-        "Local chat runtime is unreachable from the Seraph backend at "
-        f"{base_url}. Health endpoint {endpoint} reported {detail}. "
-        "Check the VLM wrapper route before retrying."
-    )
-
+            if is_canonical_inference_route(runtime_path):
+                return None
+        except (ImportError, ValueError):
+            pass
+    return "local_vlm_disabled_openrouter_only"
 
 def _trim_url(value: str | None) -> str:
     return str(value or "").strip().rstrip("/")
@@ -185,142 +163,3 @@ def _trim_url(value: str | None) -> str:
 
 def _unprobed_endpoint() -> dict[str, object]:
     return {"checked": False, "ok": False, "status_code": None, "error": ""}
-
-
-def _probe_failure_detail(probe: dict[str, object]) -> str:
-    for key, label in (
-        ("chat_proxy", "chat proxy"),
-        ("backend_health", "backend health"),
-        ("health", "wrapper health"),
-        ("queue_status", "queue status"),
-    ):
-        endpoint = probe.get(key)
-        if not isinstance(endpoint, dict) or endpoint.get("ok") is True:
-            continue
-        error = str(endpoint.get("error") or "unreachable")
-        status_code = endpoint.get("status_code")
-        if status_code is not None:
-            return f"{label} {error} ({status_code})"
-        return f"{label} {error}"
-    reason = str(probe.get("reason") or "unreachable")
-    return _safe_probe_detail(reason)
-
-
-async def _probe_json_endpoint(client: httpx.AsyncClient, endpoint: str) -> dict[str, object]:
-    try:
-        response = await client.get(endpoint)
-    except httpx.TimeoutException:
-        return {"checked": True, "ok": False, "status_code": None, "error": "timeout"}
-    except httpx.ConnectError:
-        return {"checked": True, "ok": False, "status_code": None, "error": "connect_error"}
-    except httpx.HTTPError:
-        return {"checked": True, "ok": False, "status_code": None, "error": "http_error"}
-
-    payload: object
-    try:
-        payload = response.json()
-    except ValueError:
-        payload = {}
-    ok = 200 <= response.status_code < 400
-    result: dict[str, object] = {
-        "checked": True,
-        "ok": ok,
-        "status_code": response.status_code,
-        "error": "" if ok else "bad_status",
-    }
-    if isinstance(payload, dict):
-        queue = payload.get("queue")
-        if isinstance(queue, dict):
-            result["queue"] = {
-                "queued": queue.get("queued"),
-                "active": queue.get("active"),
-                "workers": queue.get("workers"),
-                "background_workers": queue.get("background_workers"),
-            }
-        elif any(key in payload for key in ("queued", "active", "workers", "background_workers")):
-            result["queue"] = {
-                "queued": payload.get("queued"),
-                "active": payload.get("active"),
-                "workers": payload.get("workers"),
-                "background_workers": payload.get("background_workers"),
-            }
-        for key in ("status", "backend_status", "model"):
-            if key in payload:
-                result[key] = payload[key]
-    return result
-
-
-async def _probe_chat_health(client: httpx.AsyncClient, endpoint: str) -> dict[str, object]:
-    headers = {}
-    api_key = effective_vlm_api_key()
-    if api_key:
-        headers["Authorization"] = f"Bearer {api_key}"
-    try:
-        response = await client.get(endpoint, headers=headers)
-    except httpx.TimeoutException:
-        return {"checked": True, "ok": False, "status_code": None, "error": "timeout"}
-    except httpx.ConnectError:
-        return {"checked": True, "ok": False, "status_code": None, "error": "connect_error"}
-    except httpx.HTTPError:
-        return {"checked": True, "ok": False, "status_code": None, "error": "http_error"}
-
-    try:
-        payload = response.json()
-    except ValueError:
-        payload = {}
-    status = ""
-    enabled = False
-    auth_configured = False
-    auth_ok = False
-    model = ""
-    if isinstance(payload, dict):
-        status = _safe_probe_detail(str(payload.get("status") or ""))
-        enabled = payload.get("enabled") is True
-        auth_configured = payload.get("auth_configured") is True
-        auth_ok = payload.get("auth_ok") is True
-        model_value = payload.get("model")
-        if isinstance(model_value, str):
-            model = _safe_probe_detail(model_value)
-    ok = 200 <= response.status_code < 400 and enabled and auth_configured and auth_ok
-    result: dict[str, object] = {
-        "checked": True,
-        "ok": ok,
-        "status_code": response.status_code,
-        "error": "" if ok else _chat_health_error(response, status, enabled, auth_configured, auth_ok),
-        "enabled": enabled,
-        "auth_configured": auth_configured,
-        "auth_ok": auth_ok,
-    }
-    if status:
-        result["status"] = status
-    if model:
-        result["model"] = model
-    return result
-
-
-def _chat_health_error(
-    response: httpx.Response,
-    status: str,
-    enabled: bool,
-    auth_configured: bool,
-    auth_ok: bool,
-) -> str:
-    if not 200 <= response.status_code < 400:
-        return "bad_status"
-    if status:
-        return _safe_probe_detail(status.strip().lower().replace(" ", "_"))
-    if not enabled:
-        return "disabled"
-    if not auth_configured:
-        return "auth_not_configured"
-    if not auth_ok:
-        return "auth_failed"
-    return "bad_status"
-
-
-def _safe_probe_detail(value: str) -> str:
-    safe = value.strip()
-    for secret in (settings.seraph_vlm_api_key, settings.local_vlm_api_key, settings.local_llm_api_key):
-        if secret:
-            safe = safe.replace(secret, "[redacted]")
-    return safe[:160]

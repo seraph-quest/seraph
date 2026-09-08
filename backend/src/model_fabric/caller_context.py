@@ -133,6 +133,13 @@ CANONICAL_ROUTE_SPECS: dict[str, CanonicalRouteSpec] = {
         ContentOrigin.PAIRED_EDGE,
         "normal",
     ),
+    "memory_embedding": CanonicalRouteSpec(
+        InferenceWorkload.BACKGROUND,
+        (ModelCapability.EMBEDDING,),
+        "memory_embedding",
+        ContentOrigin.CANONICAL_MEMORY,
+        "normal",
+    ),
 }
 
 CANONICAL_SPECIALIST_ROUTES = (
@@ -211,6 +218,11 @@ def build_canonical_inference_context(
 
     data_digest = canonical_digest(payload)
     policy = effective_workload_policy(runtime_path)
+    if bool(getattr(policy, "fallback_allowed", False)):
+        raise PermissionError("active OpenRouter inference forbids provider fallback")
+    allowed_provider_kinds = tuple(getattr(policy, "allowed_provider_kinds", ()) or ())
+    if allowed_provider_kinds and set(allowed_provider_kinds) != {"openrouter"}:
+        raise PermissionError("active OpenRouter inference requires an OpenRouter provider policy")
     egress_class = policy.egress_class
     capabilities = spec.capabilities
     if streaming and ModelCapability.STREAMING not in capabilities:
@@ -242,16 +254,16 @@ def build_canonical_inference_context(
             capabilities=tuple(capability.value for capability in capabilities),
             context_tokens=_estimated_context_tokens(payload),
             output_tokens=max(int(output_tokens), 1),
-            max_cost_microusd=policy.max_cost_microusd,
+            max_cost_microusd=getattr(policy, "max_cost_microusd", None),
             max_local_resource_ms=max(int(timeout_seconds * 1000), 1),
             max_latency_ms=max(int(timeout_seconds * 1000), 1),
             task_class=spec.task_class,
         ),
         deadline_at=time.time() + max(float(timeout_seconds), 0.1),
-        fallback_allowed=policy.fallback_allowed,
+        fallback_allowed=False,
         gpu_priority=spec.gpu_priority,
-        allowed_profile_ids=policy.allowed_profile_ids,
-        allowed_provider_kinds=policy.allowed_provider_kinds,
+        allowed_profile_ids=tuple(getattr(policy, "allowed_profile_ids", ()) or ()),
+        allowed_provider_kinds=("openrouter",),
         redaction_applied=redaction_applied,
     )
 

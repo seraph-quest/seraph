@@ -29,6 +29,7 @@ from src.utils.background import drain_tracked_tasks
 # Every place get_session is imported — use the local attribute name.
 _PATCH_TARGETS = [
     "src.db.engine.get_session",
+    "src.auth.service.get_session",
     "src.agent.session.get_session",
     "src.approval.repository.get_session",
     "src.goals.repository.get_session",

@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { useQuestStore } from "../../stores/questStore";
+import { GoalUpdateError, useQuestStore } from "../../stores/questStore";
 import type { GoalInfo } from "../../types";
 
 const LEVELS = ["daily", "weekly", "monthly", "quarterly", "annual", "vision"] as const;
@@ -38,6 +38,7 @@ export function GoalForm({ goal, onClose }: Props) {
           domain,
           description: description.trim() || undefined,
           due_date: dueDate || null,
+          ...(typeof goal.revision === "number" ? { expected_revision: goal.revision } : {}),
         });
       } else {
         await createGoal({
@@ -49,8 +50,12 @@ export function GoalForm({ goal, onClose }: Props) {
         });
       }
       onClose();
-    } catch {
-      setError("Failed to save");
+    } catch (err) {
+      if (err instanceof GoalUpdateError && err.code === "stale_goal_revision") {
+        setError("This priority changed elsewhere. Your draft is still here; refresh and review before saving again.");
+      } else {
+        setError(err instanceof GoalUpdateError ? err.message : "Failed to save");
+      }
     } finally {
       setSaving(false);
     }

@@ -10,8 +10,10 @@ from src.agent.strategist import (
     parse_strategist_response,
     run_strategist_decision_completion,
 )
+from src.approval.runtime import reset_runtime_context, set_runtime_context
+from src.tools.approval import AuthorityTool
 from src.tools.audit import AuditedTool
-from src.security.trust_contract import canonical_digest
+from src.security.trust_contract import AuthorityGrant, PrincipalType, TrustPrincipal, canonical_digest
 
 
 # ── parse_strategist_response tests ──────────────────────
@@ -107,7 +109,48 @@ def test_create_strategist_agent_returns_agent(mock_model_cls):
     assert agent is not None
     assert len(agent.tools) == 4  # view_soul, get_goals, get_goal_progress + final_answer (built-in)
     for tool_name in ("view_soul", "get_goals", "get_goal_progress"):
-        assert isinstance(agent.tools[tool_name], AuditedTool)
+        assert isinstance(agent.tools[tool_name], AuthorityTool)
+        assert isinstance(agent.tools[tool_name].wrapped_tool, AuditedTool)
+
+
+@patch("src.agent.strategist.LiteLLMModel")
+def test_strategist_state_tool_blocks_before_dispatch_without_authority(mock_model_cls):
+    mock_model_cls.return_value = MagicMock()
+    agent = create_strategist_agent("context")
+    tool = agent.tools["get_goals"]
+    dispatch = MagicMock()
+    tool.wrapped_tool.wrapped_tool = dispatch
+
+    with pytest.raises(PermissionError, match="runtime authority is unavailable"):
+        tool()
+
+    dispatch.assert_not_called()
+
+
+@patch("src.agent.strategist.LiteLLMModel")
+def test_strategist_state_tool_dispatches_with_runtime_authority(mock_model_cls):
+    mock_model_cls.return_value = MagicMock()
+    agent = create_strategist_agent("context")
+    tokens = set_runtime_context(
+        "strategist-test-session",
+        "off",
+        trust_principal=TrustPrincipal(
+            principal_id="operator:strategist-test",
+            principal_type=PrincipalType.OPERATOR,
+            grants=(AuthorityGrant.CAPABILITY_EXECUTE,),
+            session_id="strategist-test-session",
+        ),
+    )
+    try:
+        with (
+            patch.object(AuditedTool, "_log_event", return_value=None),
+            patch("src.agent.strategist.get_goals.forward", return_value="goals") as dispatch,
+        ):
+            assert agent.tools["get_goals"]() == "goals"
+    finally:
+        reset_runtime_context(tokens)
+
+    dispatch.assert_called_once_with()
 
 
 @patch("src.agent.strategist.LiteLLMModel")

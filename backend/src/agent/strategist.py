@@ -16,6 +16,7 @@ from src.llm_runtime import (
     completion_with_fallback,
 )
 from src.model_fabric.caller_context import build_canonical_inference_context
+from src.tools.approval import wrap_tools_for_approval
 from src.tools.audit import wrap_tools_for_audit
 from src.tools.soul_tool import view_soul
 from src.tools.goal_tools import get_goals, get_goal_progress
@@ -107,7 +108,13 @@ def create_strategist_agent(
     )
 
     return ToolCallingAgent(
-        tools=wrap_tools_for_audit([view_soul, get_goals, get_goal_progress]),
+        # Strategist construction is also an executable agent boundary.  The
+        # read-only-looking tools still expose governed Seraph state, so they
+        # must carry the same authenticated capability decision as factory and
+        # workflow tools before they can dispatch.
+        tools=wrap_tools_for_approval(
+            wrap_tools_for_audit([view_soul, get_goals, get_goal_progress])
+        ),
         model=model,
         max_steps=5,
         instructions=instructions,

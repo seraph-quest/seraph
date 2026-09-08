@@ -112,6 +112,8 @@ async def _ensure_rest_authorized(http_request: HttpRequest, scope) -> None:
         return
     try:
         assert_runtime_not_revoked()
+        if scope[0].is_set():
+            raise RuntimeRevokedError("authenticated operator session was revoked")
         await authenticate_token(
             http_request.cookies.get(settings.operator_auth_cookie_name),
             touch=False,
@@ -404,6 +406,7 @@ async def chat(request: ChatRequest, http_request: HttpRequest):
             detail={"code": "session_revoked", "message": "Operator session was revoked during inference."},
         ) from exc
     except ApprovalRequired as exc:
+        await _ensure_rest_authorized(http_request, revocation_scope)
         await approval_repository.merge_details(
             exc.approval_id,
             {"resume_message": request.message},
@@ -431,6 +434,7 @@ async def chat(request: ChatRequest, http_request: HttpRequest):
             },
         )
     except ClarificationRequired as exc:
+        await _ensure_rest_authorized(http_request, revocation_scope)
         rendered = await redact_secrets_in_text(exc.render_message())
         await session_manager.add_message(
             session.id,

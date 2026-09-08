@@ -11,7 +11,7 @@ from config.settings import settings
 from src.auth.middleware import validate_request_boundary
 from src.auth.middleware import OperatorAuthMiddleware
 from src.api.ws import _OperatorSessionRevoked, _await_authorized, watch_operator_session, websocket_chat
-from src.api.chat import _watch_rest_operator_session
+from src.api.chat import _ensure_rest_authorized, _watch_rest_operator_session
 from src.auth.service import AuthFailure, authenticate_token, bind_operator_principal, create_session, revoke_session
 from src.auth.cancellation import RuntimeRevokedError, reset_revocation_guard, set_revocation_guard
 from src.llm_runtime import _governed_openai_chat_completion
@@ -283,6 +283,16 @@ async def test_rest_chat_discards_result_when_session_is_revoked(client, monkeyp
     )
     assert response.status_code == 401
     assert response.json()["detail"]["code"] == "session_revoked"
+
+
+@pytest.mark.asyncio
+async def test_rest_authority_recheck_blocks_revoked_exception_side_effects():
+    guard = Event()
+    guard.set()
+    with pytest.raises(HTTPException) as captured:
+        await _ensure_rest_authorized(None, (guard, None, None, None))
+    assert captured.value.status_code == 401
+    assert captured.value.detail["code"] == "session_revoked"
 
 
 def test_revocation_guard_blocks_new_governed_model_transport():

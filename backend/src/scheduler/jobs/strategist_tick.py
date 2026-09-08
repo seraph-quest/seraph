@@ -10,6 +10,13 @@ from config.settings import settings
 from src.approval.runtime import get_current_trust_principal
 from src.agent.strategist import parse_strategist_response, run_strategist_decision_completion
 from src.audit.runtime import log_scheduler_job_event
+from src.db.models import Goal
+from src.goals.repository import deserialize_success_criterion, goal_repository
+from src.guardian.goal_snapshot_to_file import (
+    GoalSnapshotToFileRequest,
+    GoalSnapshotToFileResult,
+    GoalSnapshotToFileService,
+)
 from src.guardian.state import build_guardian_state
 from src.llm_runtime import (
     _finish_request,
@@ -26,6 +33,7 @@ from src.workflows.job_runtime import (
     DurableJobTransitionError,
     durable_job_repository,
 )
+from src.security.trust_contract import AuthorityGrant, PrincipalType, TrustPrincipal
 
 logger = logging.getLogger(__name__)
 
@@ -209,6 +217,105 @@ def _policy_action_value(result) -> str | None:
     return None
 
 
+def _proactive_goal_sort_key(goal: Goal) -> tuple[int, float, int, str]:
+    due = getattr(goal, "due_date", None)
+    due_timestamp = due.timestamp() if due is not None else float("inf")
+    return (
+        0 if due is not None else 1,
+        due_timestamp,
+        int(getattr(goal, "sort_order", 0) or 0),
+        str(getattr(goal, "id", "")),
+    )
+
+
+async def _run_opted_in_goal_snapshot(
+    *,
+    parent_job_id: str,
+    parent_fencing_token: int,
+) -> dict[str, object]:
+    """Run at most one explicitly enabled goal through the existing adapter."""
+
+    goals = await goal_repository.list_goals(status="active")
+    eligible: list[tuple[Goal, object]] = []
+    for goal in goals:
+        if not bool(getattr(goal, "proactive_enabled", False)):
+            continue
+        criterion = deserialize_success_criterion(goal)
+        if criterion is None or criterion.verifier_kind is None:
+            continue
+        if criterion.verifier_kind.value != "artifact_readback" or not criterion.evidence_refs:
+            continue
+        eligible.append((goal, criterion))
+    if not eligible:
+        details = {"status": "skipped", "reason": "no_eligible_proactive_goal"}
+        await durable_job_repository.record_effect(
+            parent_job_id,
+            effect_type="goal_snapshot_admission",
+            status="unknown",
+            details=details,
+            owner=_STRATEGIST_RUNNER_ID,
+            fencing_token=parent_fencing_token,
+        )
+        return details
+
+    goal, criterion = sorted(eligible, key=lambda item: _proactive_goal_sort_key(item[0]))[0]
+    revision = max(int(goal.revision or 1), 1)
+    # Keep the child authority/session stable across strategist occurrences;
+    # parent_job_id remains the lineage/fence, while the candidate identity
+    # supplies the scheduler idempotency boundary.
+    session_id = f"goal-snapshot:scheduler:{goal.id}:{revision}"
+    principal = TrustPrincipal(
+        principal_id="service:goal-snapshot",
+        principal_type=PrincipalType.SERVICE,
+        authenticated=True,
+        grants=(AuthorityGrant.CAPABILITY_EXECUTE,),
+        session_id=session_id,
+    )
+    request = GoalSnapshotToFileRequest(
+        goal_id=goal.id,
+        goal_revision=revision,
+        file_path=f"goal-snapshots/{goal.id}.md",
+        owner_principal_id="service:goal-snapshot",
+        service_id="service:goal-snapshot",
+        session_id=session_id,
+        parent_job_id=parent_job_id,
+        parent_fencing_token=parent_fencing_token,
+        evidence_refs=list(criterion.evidence_refs),
+        reason="scheduled_proactive_goal_snapshot",
+        expected_outcome=criterion.description,
+    )
+    result = await GoalSnapshotToFileService(authority_principal=principal).run(request)
+    if not isinstance(result, GoalSnapshotToFileResult):
+        raise TypeError("goal snapshot service returned an invalid result")
+    effect_status = (
+        "succeeded"
+        if result.execution_status == "succeeded" and result.verification == "passed"
+        else "blocked"
+        if result.execution_status == "blocked"
+        else "failed"
+    )
+    details = {
+        "status": result.execution_status,
+        "verification": result.verification,
+        "learning": result.learning,
+        "goal_id": result.goal_id,
+        "goal_revision": result.goal_revision,
+        "job_id": result.job_id,
+        "artifact_ref": result.artifact_ref,
+        "reason": result.reason,
+        "operator_visible": True,
+    }
+    await durable_job_repository.record_effect(
+        parent_job_id,
+        effect_type="goal_snapshot_admission",
+        status=effect_status,
+        details=details,
+        owner=_STRATEGIST_RUNNER_ID,
+        fencing_token=parent_fencing_token,
+    )
+    return details
+
+
 async def run_strategist_tick() -> None:
     """Review context and decide if proactive intervention is warranted."""
     started_at = perf_counter()
@@ -234,6 +341,36 @@ async def run_strategist_tick() -> None:
                 "confidence": guardian_state.confidence.overall,
                 "memory_query": "current priorities, commitments, and recent intervention patterns",
             },
+            owner=_STRATEGIST_RUNNER_ID,
+            fencing_token=durable_fencing_token,
+        )
+        proactive_snapshot: dict[str, object]
+        try:
+            proactive_snapshot = await _run_opted_in_goal_snapshot(
+                parent_job_id=durable_job_id,
+                parent_fencing_token=durable_fencing_token,
+            )
+        except Exception as exc:
+            proactive_snapshot = {
+                "status": "blocked",
+                "reason": f"goal_snapshot_scheduler_error:{type(exc).__name__}",
+                "operator_visible": True,
+            }
+            try:
+                await durable_job_repository.record_effect(
+                    durable_job_id,
+                    effect_type="goal_snapshot_admission",
+                    status="blocked",
+                    details=proactive_snapshot,
+                    owner=_STRATEGIST_RUNNER_ID,
+                    fencing_token=durable_fencing_token,
+                )
+            except Exception:
+                logger.exception("strategist_tick: failed to persist goal snapshot degraded receipt")
+        await durable_job_repository.record_checkpoint(
+            durable_job_id,
+            checkpoint_id="goal_snapshot_considered",
+            state=proactive_snapshot,
             owner=_STRATEGIST_RUNNER_ID,
             fencing_token=durable_fencing_token,
         )

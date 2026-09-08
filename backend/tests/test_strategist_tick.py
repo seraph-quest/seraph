@@ -1,17 +1,34 @@
 """Tests for strategist tick runtime audit coverage."""
 
 import asyncio
+from datetime import datetime, timezone
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from src.audit.repository import audit_repository
 from src.guardian.state import GuardianState, GuardianStateConfidence
+from src.guardian.goal_snapshot_to_file import GoalSnapshotToFileResult
+from src.goals.contracts import CriterionVerifierKind, GoalSuccessCriterion
 from src.guardian.world_model import GuardianWorldModel
 from src.observer.context import CurrentContext
 from src.observer.user_state import DeliveryDecision
-from src.scheduler.jobs.strategist_tick import _occurrence_identity, run_strategist_tick
+from src.scheduler.jobs.strategist_tick import (
+    _occurrence_identity,
+    _run_opted_in_goal_snapshot,
+    run_strategist_tick,
+)
 from src.workflows.job_runtime import durable_job_repository
+
+
+class _RecordingDurableJobs:
+    def __init__(self):
+        self.effects = []
+
+    async def record_effect(self, job_id, **kwargs):
+        self.effects.append((job_id, kwargs))
+        return {"status": kwargs["status"]}
 
 
 def _make_context(**overrides) -> CurrentContext:
@@ -51,6 +68,79 @@ def _make_guardian_state() -> GuardianState:
             recent_sessions="grounded",
         ),
     )
+
+
+@pytest.mark.asyncio
+async def test_proactive_goal_snapshot_skips_without_explicit_opt_in():
+    jobs = _RecordingDurableJobs()
+    with (
+        patch(
+            "src.scheduler.jobs.strategist_tick.goal_repository.list_goals",
+            new=AsyncMock(return_value=[]),
+        ),
+        patch("src.scheduler.jobs.strategist_tick.durable_job_repository", jobs),
+    ):
+        receipt = await _run_opted_in_goal_snapshot(
+            parent_job_id="parent-1",
+            parent_fencing_token=2,
+        )
+
+    assert receipt == {"status": "skipped", "reason": "no_eligible_proactive_goal"}
+    assert jobs.effects[0][1]["status"] == "unknown"
+
+
+@pytest.mark.asyncio
+async def test_proactive_goal_snapshot_runs_one_enabled_goal_through_existing_service():
+    criterion = GoalSuccessCriterion(
+        description="Create a verified snapshot",
+        verifier_kind=CriterionVerifierKind.artifact_readback,
+        evidence_refs=["goal:operator-consent"],
+    )
+    goal = SimpleNamespace(
+        id="goal-1",
+        revision=3,
+        proactive_enabled=True,
+        success_criterion_json=criterion.model_dump_json(),
+        due_date=datetime.now(timezone.utc),
+        sort_order=0,
+    )
+    jobs = _RecordingDurableJobs()
+    service_result = GoalSnapshotToFileResult(
+        goal_id="goal-1",
+        goal_revision=3,
+        file_path="goal-snapshots/goal-1.md",
+        execution_status="succeeded",
+        verification="passed",
+        learning="no_learning",
+        job_id="child-1",
+        artifact_ref="artifact-1",
+        reason="goal_snapshot_executed_and_verified",
+    )
+    service = MagicMock()
+    service.run = AsyncMock(return_value=service_result)
+    with (
+        patch(
+            "src.scheduler.jobs.strategist_tick.goal_repository.list_goals",
+            new=AsyncMock(return_value=[goal]),
+        ),
+        patch("src.scheduler.jobs.strategist_tick.durable_job_repository", jobs),
+        patch("src.scheduler.jobs.strategist_tick.GoalSnapshotToFileService", return_value=service),
+    ):
+        receipt = await _run_opted_in_goal_snapshot(
+            parent_job_id="parent-1",
+            parent_fencing_token=2,
+        )
+
+    assert receipt["status"] == "succeeded"
+    assert receipt["verification"] == "passed"
+    assert jobs.effects[0][1]["status"] == "succeeded"
+    request = service.run.await_args.args[0]
+    assert request.goal_id == "goal-1"
+    assert request.goal_revision == 3
+    assert request.owner_principal_id == "service:goal-snapshot"
+    assert request.parent_job_id == "parent-1"
+    assert request.parent_fencing_token == 2
+    assert request.session_id == "goal-snapshot:scheduler:goal-1:3"
 
 
 @pytest.mark.asyncio

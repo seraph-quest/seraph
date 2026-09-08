@@ -143,6 +143,47 @@ def test_admission_binds_authority_and_all_immutable_identity_fields():
         }[field_name])
 
 
+def test_scheduler_goal_snapshot_deduplication_allows_a_new_parent_lineage():
+    spec = replace(
+        _spec(job_id="job-snapshot-1", dedupe_key="candidate-snapshot"),
+        identity=replace(
+            _spec(job_id="job-snapshot-1", dedupe_key="candidate-snapshot").identity,
+            job_kind="goal-snapshot-to-file",
+            idempotency_scope="goal-snapshot-to-file-scheduler",
+        ),
+        parent_job_id="strategist_tick:1",
+    )
+    input_digest, _ = _safe_inputs_digest(spec.inputs)
+    existing = SimpleNamespace(
+        run_identity=spec.identity.job_id,
+        input_digest=input_digest,
+        job_kind=spec.identity.job_kind,
+        capability_version=spec.identity.capability_version,
+        owner_kind=spec.identity.owner_kind,
+        owner_principal_id=spec.identity.owner_principal_id,
+        service_id=spec.service_id,
+        authority_digest=_digest(spec.declared_authority),
+        dependencies_json="[]",
+        resource_claims_json='["cpu"]',
+        deadline_at=datetime.now(timezone.utc),
+        priority=spec.priority,
+        max_attempts=spec.max_attempts,
+        session_id=spec.session_id,
+        parent_job_id="strategist_tick:previous",
+        goal_id=spec.goal_id,
+        goal_revision=spec.goal_revision,
+        plan_revision=spec.plan_revision,
+        candidate_id=spec.candidate_id,
+    )
+    assert _admission_conflicts(
+        existing,
+        spec=spec,
+        input_digest=input_digest,
+        authority_digest=_digest(spec.declared_authority),
+        deadline=None,
+    ) == []
+
+
 def test_retry_requires_owner_identity_and_canonical_reconciliation_receipt():
     run = SimpleNamespace(
         owner_kind="service",
@@ -382,6 +423,37 @@ async def test_admission_is_idempotent_and_lifecycle_records_safe_receipts(async
     assert retried["status"] == "queued"
     assert retried["receipt"]["reconciliation_receipt_digest"]
     assert retried["effects"][0]["status"] == "reconciled"
+
+
+@pytest.mark.asyncio
+async def test_child_admission_requires_the_current_parent_fence(async_db):
+    parent = await durable_job_repository.admit_job(
+        _spec(job_id="parent-strategist", dedupe_key="parent-strategist")
+    )
+    await durable_job_repository.queue_job(parent["job_id"])
+    claimed = await durable_job_repository.claim_job(parent["job_id"], owner="runner-parent")
+    token = claimed["lease"]["fencing_token"]
+    child = replace(
+        _spec(job_id="child-snapshot", dedupe_key="child-snapshot"),
+        identity=replace(
+            _spec(job_id="child-snapshot", dedupe_key="child-snapshot").identity,
+            job_kind="goal-snapshot-to-file",
+            idempotency_scope="goal-snapshot-to-file-scheduler",
+        ),
+        parent_job_id=parent["job_id"],
+        parent_fencing_token=token,
+    )
+    admitted = await durable_job_repository.admit_job(child)
+    assert admitted["status"] == "accepted"
+
+    with pytest.raises(DurableJobLeaseError, match="parent job fence"):
+        await durable_job_repository.admit_job(
+            replace(
+                child,
+                identity=replace(child.identity, job_id="child-snapshot-stale"),
+                parent_fencing_token=token - 1,
+            )
+        )
 
 
 @pytest.mark.asyncio

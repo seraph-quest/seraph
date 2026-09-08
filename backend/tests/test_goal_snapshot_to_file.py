@@ -315,6 +315,42 @@ async def test_service_executes_governed_boundary_records_job_receipts_and_no_le
     assert persisted[0][1]["execution_status"] == "succeeded"
 
 
+async def test_scheduler_child_spec_carries_parent_fence_and_uses_stable_scheduler_identity(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setattr(settings, "workspace_dir", str(tmp_path))
+    goals = _Goals(_goal())
+    jobs = _Jobs()
+    workflow = _GovernedWorkflow(tmp_path)
+    request = _request(
+        parent_job_id="strategist_tick:1",
+        parent_fencing_token=7,
+    )
+
+    async def no_existing(**_kwargs):
+        return None
+
+    async def persist(*, event_type: str, summary: str, details: dict[str, Any]):
+        return details
+
+    monkeypatch.setattr(goal_conditioned_loop, "goal_repository", goals)
+    monkeypatch.setattr(goal_conditioned_loop, "_existing_receipt", no_existing)
+    monkeypatch.setattr(goal_conditioned_loop, "_persist_receipt", persist)
+    result = await GoalSnapshotToFileService(
+        goals=goals,
+        jobs=jobs,
+        workflow_tool_provider=lambda _name: workflow,
+        authority_principal=_authority_principal(),
+    ).run(request)
+
+    spec = jobs.specs[result.job_id]
+    assert spec.parent_job_id == "strategist_tick:1"
+    assert spec.parent_fencing_token == 7
+    assert spec.identity.idempotency_scope == "goal-snapshot-to-file-scheduler"
+    assert "strategist_tick:1" not in result.job_id
+
+
 @pytest.mark.parametrize(
     ("workflow_name", "step_tools", "expected_reason"),
     [

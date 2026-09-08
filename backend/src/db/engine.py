@@ -96,6 +96,17 @@ async def _ensure_legacy_columns(conn) -> None:
         await conn.exec_driver_sql(
             "ALTER TABLE goals ADD COLUMN success_criterion_json VARCHAR"
         )
+    if goal_columns and "proactive_enabled" not in goal_columns:
+        await conn.exec_driver_sql(
+            "ALTER TABLE goals ADD COLUMN proactive_enabled BOOLEAN DEFAULT 0"
+        )
+    if goal_columns and "proactive_enabled" in await _table_columns("goals"):
+        await conn.exec_driver_sql(
+            "UPDATE goals SET proactive_enabled = 0 WHERE proactive_enabled IS NULL"
+        )
+        await conn.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_goals_proactive_enabled ON goals (proactive_enabled)"
+        )
 
     user_profile_columns = await _table_columns("user_profiles")
     if user_profile_columns and "tool_policy_mode" not in user_profile_columns:

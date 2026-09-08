@@ -322,6 +322,14 @@ def _admission_conflicts(
         "plan_revision": getattr(existing, "plan_revision", None),
         "candidate_id": getattr(existing, "candidate_id", None),
     }
+    # Scheduled child work is deliberately deduped across strategist parent
+    # occurrences.  The first admitted child retains its original lineage;
+    # a later parent may replay that same child only after its own fence has
+    # been checked.  Other callers keep parent identity immutable.
+    if identity.idempotency_scope == "goal-snapshot-to-file-scheduler":
+        for field_name in ("parent_job_id", "deadline_at"):
+            expected.pop(field_name, None)
+            actual.pop(field_name, None)
     return [field_name for field_name, value in expected.items() if actual[field_name] != value]
 
 
@@ -479,6 +487,7 @@ class DurableJobSpec:
     inputs: Any = field(default_factory=dict)
     session_id: str | None = None
     parent_job_id: str | None = None
+    parent_fencing_token: int | None = None
     goal_id: str | None = None
     goal_revision: int | None = None
     plan_revision: int | None = None
@@ -516,6 +525,31 @@ class DurableJobRepository:
         )
         authority_digest = _digest(spec.declared_authority)
         async with self._session() as db:
+            if spec.parent_job_id is not None:
+                if spec.parent_fencing_token is None:
+                    raise DurableJobLeaseError("parent fencing token is required for child admission")
+                if spec.parent_job_id == identity.job_id:
+                    raise DurableJobTransitionError("a durable job cannot parent itself")
+                parent = (
+                    await db.execute(
+                        select(WorkflowRunState).where(
+                            WorkflowRunState.run_identity == spec.parent_job_id
+                        )
+                    )
+                ).scalars().first()
+                if parent is None:
+                    raise DurableJobNotFound(spec.parent_job_id)
+                if parent.status != "running":
+                    raise DurableJobTransitionError(
+                        f"parent job is not running (current={parent.status})"
+                    )
+                if (
+                    parent.lease_owner is None
+                    or parent.lease_expires_at is None
+                    or _as_utc(parent.lease_expires_at) <= now
+                    or int(parent.fencing_token or 0) != int(spec.parent_fencing_token)
+                ):
+                    raise DurableJobLeaseError("parent job fence is stale or expired")
             await ensure_sessions_exist(db, [spec.session_id])
             existing = (
                 await db.execute(

@@ -32,6 +32,8 @@ router = APIRouter()
 
 
 class GoalCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     title: str = Field(..., min_length=1)
     level: str = "daily"
     domain: str = "productivity"
@@ -39,14 +41,20 @@ class GoalCreate(BaseModel):
     description: Optional[str] = None
     due_date: Optional[str] = None
     success_criterion: Optional[GoalSuccessCriterion] = None
+    proactive_enabled: bool = False
 
 
 class GoalUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     title: Optional[str] = None
     description: Optional[str] = None
+    level: Optional[str] = None
+    domain: Optional[str] = None
     status: Optional[str] = None
     due_date: Optional[str] = None
     success_criterion: Optional[GoalSuccessCriterion] = None
+    proactive_enabled: Optional[bool] = None
     expected_revision: Optional[int] = Field(default=None, ge=1)
 
 
@@ -101,6 +109,49 @@ def _session_digest(session_id: str) -> str:
     return hashlib.sha256(session_id.encode("utf-8")).hexdigest()
 
 
+async def _record_proactive_permission(
+    operator: AuthenticatedOperator,
+    *,
+    goal_id: str,
+    enabled: bool,
+    revision: int,
+    phase: str,
+) -> None:
+    """Record an authenticated permission authorization or applied change."""
+
+    try:
+        await audit_repository.log_event(
+            actor=operator.principal.principal_id,
+            event_type=(
+                "goal_proactive_permission_authorized"
+                if phase == "before_enable"
+                else "goal_proactive_permission_changed"
+            ),
+            tool_name="goal_scheduler",
+            risk_level="medium",
+            policy_mode="authenticated_operator",
+            summary=(
+                "Authenticated operator authorized goal proactive permission"
+                if phase == "before_enable"
+                else "Authenticated operator changed goal proactive permission"
+            ),
+            details={
+                "goal_id": goal_id,
+                "goal_revision": revision,
+                "proactive_enabled": bool(enabled),
+                "phase": phase,
+                "session_id_digest": _session_digest(operator.session_id),
+                "service_id": GOAL_SNAPSHOT_SERVICE_ID,
+            },
+        )
+    except Exception as exc:
+        logger.exception("goal proactive permission receipt could not be persisted")
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "proactive_permission_audit_unavailable"},
+        ) from exc
+
+
 def _goal_payload(goal) -> dict:
     criterion = deserialize_success_criterion(goal)
     return {
@@ -115,6 +166,7 @@ def _goal_payload(goal) -> dict:
         "created_at": goal.created_at.isoformat(),
         "revision": max(int(goal.revision or 1), 1),
         "success_criterion": criterion.model_dump(mode="json") if criterion else None,
+        "proactive_enabled": bool(getattr(goal, "proactive_enabled", False)),
     }
 
 
@@ -142,9 +194,10 @@ async def get_goal_dashboard():
 
 
 @router.post("/goals")
-async def create_goal(body: GoalCreate):
+async def create_goal(body: GoalCreate, request: Request):
     """Create a new goal."""
     due = datetime.fromisoformat(body.due_date) if body.due_date else None
+    operator = _require_authenticated_operator(request) if body.proactive_enabled else None
     goal = await goal_repository.create(
         title=body.title,
         level=body.level,
@@ -153,7 +206,21 @@ async def create_goal(body: GoalCreate):
         description=body.description,
         due_date=due,
         success_criterion=body.success_criterion,
+        proactive_enabled=False,
     )
+    if body.proactive_enabled:
+        await _record_proactive_permission(
+            operator,
+            goal_id=goal.id,
+            enabled=True,
+            revision=max(int(goal.revision or 1), 1),
+            phase="before_enable",
+        )
+        goal = await goal_repository.update(
+            goal_id=goal.id,
+            proactive_enabled=True,
+            expected_revision=max(int(goal.revision or 1), 1),
+        )
     return {
         "id": goal.id,
         "title": goal.title,
@@ -166,21 +233,50 @@ async def create_goal(body: GoalCreate):
             if body.success_criterion
             else None
         ),
+        "proactive_enabled": bool(getattr(goal, "proactive_enabled", False)),
     }
 
 
 @router.patch("/goals/{goal_id}")
-async def update_goal(goal_id: str, body: GoalUpdate):
+async def update_goal(goal_id: str, body: GoalUpdate, request: Request):
     """Update a goal."""
     due = datetime.fromisoformat(body.due_date) if body.due_date else None
+    operator = _require_authenticated_operator(request) if body.proactive_enabled is not None else None
+    current = await goal_repository.get(goal_id) if body.proactive_enabled is not None else None
+    if body.proactive_enabled is not None and current is None:
+        raise HTTPException(status_code=404, detail="Goal not found")
+    if body.proactive_enabled is not None:
+        current_revision = max(int(current.revision or 1), 1)
+        if body.expected_revision is not None and body.expected_revision != current_revision:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "stale_goal_revision",
+                    "goal_id": goal_id,
+                    "expected_revision": body.expected_revision,
+                    "current_revision": current_revision,
+                    "recovery": "Refresh the goal and resubmit against the current revision.",
+                },
+            )
+        if body.proactive_enabled:
+            await _record_proactive_permission(
+                operator,
+                goal_id=goal_id,
+                enabled=True,
+                revision=current_revision,
+                phase="before_enable",
+            )
     try:
         goal = await goal_repository.update(
             goal_id=goal_id,
             title=body.title,
             description=body.description,
+            level=body.level,
+            domain=body.domain,
             status=body.status,
             due_date=due,
             success_criterion=body.success_criterion,
+            proactive_enabled=body.proactive_enabled,
             expected_revision=body.expected_revision,
         )
     except GoalRevisionConflict as exc:
@@ -198,12 +294,21 @@ async def update_goal(goal_id: str, body: GoalUpdate):
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     if not goal:
         raise HTTPException(status_code=404, detail="Goal not found")
+    if body.proactive_enabled is False:
+        await _record_proactive_permission(
+            operator,
+            goal_id=goal_id,
+            enabled=False,
+            revision=max(int(goal.revision or 1), 1),
+            phase="after_disable",
+        )
     criterion = deserialize_success_criterion(goal)
     return {
         "status": "ok",
         "id": goal.id,
         "revision": max(int(goal.revision or 1), 1),
         "success_criterion": criterion.model_dump(mode="json") if criterion else None,
+        "proactive_enabled": bool(getattr(goal, "proactive_enabled", False)),
     }
 
 

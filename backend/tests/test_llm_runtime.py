@@ -154,7 +154,15 @@ def test_provider_profile_status_does_not_expose_unsafe_legacy_api_base():
 
 
 @pytest.fixture(autouse=True)
-def clear_ambient_runtime_profile_preferences():
+def clear_ambient_runtime_profile_preferences(monkeypatch):
+    # This module exercises the historical provider-matrix and LiteLLM
+    # compatibility helpers.  Canonical production-route enforcement is
+    # covered by the dedicated model-fabric and chat suites; keep these
+    # synthetic helper tests off that boundary so their explicit local,
+    # fallback, and provider-profile assertions remain meaningful.
+    from src.model_fabric import caller_context
+
+    monkeypatch.setattr(caller_context, "is_canonical_inference_route", lambda _path: False)
     with (
         patch.object(settings, "runtime_profile_preferences", ""),
         patch.object(settings, "local_runtime_paths", ""),

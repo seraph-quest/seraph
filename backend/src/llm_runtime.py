@@ -3352,9 +3352,10 @@ class FallbackLiteLLMModel(BaseLiteLLMModel):
                 # An unregistered route has no caller-owned authority
                 # envelope and must not fall through to raw LiteLLM transport
                 # during the OpenRouter-only phase.
-                raise PermissionError(
-                    "active OpenRouter-only inference requires a registered canonical runtime path"
-                )
+                if bool(getattr(settings, "openrouter_provider_only", True)):
+                    raise PermissionError(
+                        "active OpenRouter-only inference requires a registered canonical runtime path"
+                    )
         request_id = _current_llm_request_id()
         primary_target = {
             "model_id": primary_model,
@@ -3828,9 +3829,10 @@ def completion_with_fallback_sync(
                 job_id=principal.job_id,
             )
         else:
-            raise PermissionError(
-                "active OpenRouter-only inference requires a registered canonical runtime path"
-            )
+            if bool(getattr(settings, "openrouter_provider_only", True)):
+                raise PermissionError(
+                    "active OpenRouter-only inference requires a registered canonical runtime path"
+                )
 
     try:
         resolved_profile = resolve_runtime_profile(runtime_path=runtime_path, profile=profile)

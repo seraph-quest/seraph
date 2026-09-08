@@ -46,6 +46,22 @@ class DummyExecuteCodeTool(Tool):
         return f"ran:{code}"
 
 
+class DummyWorkspaceReadTool(Tool):
+    name = "read_file"
+    description = "Dummy workspace read tool"
+    inputs = {"path": {"type": "string", "description": "Workspace path"}}
+    output_type = "string"
+
+    def __init__(self):
+        super().__init__()
+        self.calls: list[str] = []
+        self.is_initialized = True
+
+    def forward(self, path: str) -> str:
+        self.calls.append(path)
+        return f"read:{path}"
+
+
 class DummyPrivilegedWorkflowTool(Tool):
     name = "workflow_release_repair"
     description = "Dummy workflow-shaped privileged tool"
@@ -315,6 +331,36 @@ def test_session_without_principal_denies_even_when_approval_mode_is_off(async_d
     consume_approved.assert_not_called()
     get_or_create_pending.assert_not_called()
     assert tool_impl.calls == []
+
+
+def test_workspace_read_denies_without_authority_before_dispatch():
+    tool_impl = DummyWorkspaceReadTool()
+    tool = wrap_tools_for_approval([tool_impl])[0]
+
+    tokens = set_runtime_context("s1", "off")
+    try:
+        with pytest.raises(PermissionError, match="runtime authority is unavailable"):
+            tool(path="README.md")
+    finally:
+        reset_runtime_context(tokens)
+
+    assert tool_impl.calls == []
+
+
+def test_workspace_read_runs_with_scoped_authority_without_approval():
+    tool_impl = DummyWorkspaceReadTool()
+    tool = wrap_tools_for_approval([tool_impl])[0]
+    tokens = set_runtime_context(
+        "s1",
+        "high_risk",
+        trust_principal=_operator_principal(),
+    )
+    try:
+        assert tool(path="README.md") == "read:README.md"
+    finally:
+        reset_runtime_context(tokens)
+
+    assert tool_impl.calls == ["README.md"]
 
 
 def test_explicit_scoped_operator_can_run_capability_without_approval_mode(async_db):

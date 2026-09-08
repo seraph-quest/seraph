@@ -4823,7 +4823,16 @@ class TestWorkflowSurfaces:
 
         assert not isinstance(workflow_tool, ApprovalTool)
 
-        tokens = set_runtime_context("s1", "high_risk")
+        tokens = set_runtime_context(
+            "s1",
+            "high_risk",
+            trust_principal=TrustPrincipal(
+                principal_id="operator:workflow-medium-test",
+                principal_type=PrincipalType.OPERATOR,
+                grants=(AuthorityGrant.CAPABILITY_EXECUTE,),
+                session_id="s1",
+            ),
+        )
         try:
             assert workflow_tool(query="seraph", file_path="notes.md") == "ok"
         finally:

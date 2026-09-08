@@ -5,6 +5,7 @@ import {
 } from "../../stores/questStore";
 import type {
   GoalInfo,
+  GoalSuccessCriterion,
   GoalLoopPayload,
   GoalLoopReceipt,
   GoalStrategyDelta,
@@ -40,7 +41,29 @@ function asRecord(value: unknown): Record<string, unknown> | null {
 }
 
 function latestReceipt(payload: GoalLoopPayload | null): GoalLoopReceipt | null {
-  return payload?.receipts?.[0] ?? null;
+  return payload && Array.isArray(payload.receipts) && payload.receipts.length > 0
+    ? payload.receipts[0] ?? null
+    : null;
+}
+
+function validCriterion(value: unknown): GoalSuccessCriterion | null {
+  const record = asRecord(value);
+  if (!record) return null;
+  const target = record.target;
+  if (
+    typeof record.criterion_id !== "string" ||
+    typeof record.description !== "string" ||
+    (record.verifier_kind !== null &&
+      record.verifier_kind !== "artifact_readback" &&
+      record.verifier_kind !== "external_readback" &&
+      record.verifier_kind !== "operator_attestation") ||
+    (typeof target !== "string" && !asRecord(target)) ||
+    !Array.isArray(record.evidence_refs) ||
+    !record.evidence_refs.every((ref) => typeof ref === "string")
+  ) {
+    return null;
+  }
+  return record as unknown as GoalSuccessCriterion;
 }
 
 function receiptAxis(receipt: GoalLoopReceipt | null, key: "execution_status" | "verification" | "usefulness" | "learning") {
@@ -63,7 +86,7 @@ function viewState({
   recovered: boolean;
 }): GoalLoopViewState {
   if (!goal) return "empty";
-  if (loading && !payload) return "loading";
+  if (loading) return "loading";
   const errorCode = actionFailure?.code ?? error?.code;
   const errorStatus = error?.status ?? 0;
   if (errorCode === "stale_goal_revision") return "stale";
@@ -71,6 +94,7 @@ function viewState({
     return "unauthorized";
   }
   if (error && (errorStatus === 503 || errorStatus === 0)) return "degraded";
+  if (errorStatus === 502) return "partial_metadata";
   if (errorStatus === 404) return "failed";
   if (!payload) return "partial_metadata";
   if (!payload.goal || typeof payload.goal.revision !== "number") return "partial_metadata";
@@ -83,7 +107,8 @@ function viewState({
   if (executionStatus === "awaiting_approval" || executionStatus === "pending_approval" || executionStatus === "approval_required") {
     return "awaiting_approval";
   }
-  if (!payload.criterion || !payload.criterion.verifier_kind) return "partial_metadata";
+  const criterion = validCriterion(payload.criterion);
+  if (!criterion || !criterion.verifier_kind) return "partial_metadata";
   if (recovered) return "recovered";
   return "active";
 }
@@ -145,19 +170,30 @@ export function GoalLoopPanel({ goal, onEdit }: Props) {
     if (goal) void loadGoalLoop(goal.id);
   }, [goal?.id, loadGoalLoop]);
 
-  const criterion = payload ? payload.criterion : goal?.success_criterion ?? null;
+  const activePayload = loadedGoalId === goal?.id ? payload : null;
+  const criterion = validCriterion(activePayload ? activePayload.criterion : goal?.success_criterion);
   const target = asRecord(criterion?.target);
-  const latest = latestReceipt(payload);
+  const latest = latestReceipt(activePayload);
+  const strategyDeltas = activePayload && Array.isArray(activePayload.strategy_deltas)
+    ? activePayload.strategy_deltas
+    : [];
   const state = viewState({
     goal,
-    payload: loadedGoalId === goal?.id ? payload : null,
+    payload: activePayload,
     loading,
     error: loopError,
     actionFailure,
     recovered,
   });
-  const effectsDisabled = !goal || state === "stale" || state === "unauthorized";
-  const snapshotDisabled = effectsDisabled || state === "awaiting_approval";
+  const effectsDisabled = !goal || [
+    "loading",
+    "stale",
+    "degraded",
+    "partial_metadata",
+    "awaiting_approval",
+    "unauthorized",
+  ].includes(state);
+  const snapshotDisabled = effectsDisabled;
   const actionBusy = activeAction !== null;
   const canSnapshot = Boolean(goal && criterion?.verifier_kind && criterion.evidence_refs.length > 0);
   const canCorrect = criterion?.verifier_kind === "artifact_readback" && Boolean(target?.query);
@@ -172,7 +208,7 @@ export function GoalLoopPanel({ goal, onEdit }: Props) {
     setFilePath(typeof target?.file_path === "string" ? target.file_path : "");
     setPriority(typeof target?.priority === "number" ? String(target.priority) : "");
     setReason("");
-  }, [payload?.goal.id, payload?.goal.revision, criterion?.criterion_id]);
+  }, [activePayload?.goal.id, activePayload?.goal.revision, criterion?.criterion_id]);
 
   const axes = useMemo(
     () => [
@@ -208,7 +244,7 @@ export function GoalLoopPanel({ goal, onEdit }: Props) {
     setActionFailure(null);
     try {
       await runGoalSnapshot(goal.id, {
-        expected_revision: goal.revision ?? payload?.goal.revision ?? 1,
+        expected_revision: goal.revision ?? activePayload?.goal.revision ?? 1,
         file_path: typeof target?.file_path === "string" ? target.file_path : undefined,
         evidence_refs: criterion?.evidence_refs ?? [],
         expected_outcome: criterion?.description,
@@ -223,7 +259,7 @@ export function GoalLoopPanel({ goal, onEdit }: Props) {
     if (!goal || effectsDisabled) return;
     setActionFailure(null);
     try {
-      const expectedRevision = goal.revision ?? payload?.goal.revision;
+      const expectedRevision = goal.revision ?? activePayload?.goal.revision;
       await updateGoal(goal.id, {
         status: goal.status === "paused" ? "active" : "paused",
         ...(typeof expectedRevision === "number" ? { expected_revision: expectedRevision } : {}),
@@ -242,7 +278,7 @@ export function GoalLoopPanel({ goal, onEdit }: Props) {
     try {
       await applyStrategyCorrection(goal.id, {
         correction_id: correctionId.current,
-        expected_revision: goal.revision ?? payload?.goal.revision ?? 1,
+        expected_revision: goal.revision ?? activePayload?.goal.revision ?? 1,
         query: query.trim() || undefined,
         file_path: filePath.trim() || undefined,
         priority: parsedPriority,
@@ -260,7 +296,7 @@ export function GoalLoopPanel({ goal, onEdit }: Props) {
     setActionFailure(null);
     try {
       await rollbackStrategyCorrection(goal.id, delta.delta_id, {
-        expected_revision: goal.revision ?? payload?.goal.revision ?? 1,
+        expected_revision: goal.revision ?? activePayload?.goal.revision ?? 1,
         reason: "Operator rolled back the bounded strategy correction.",
       });
       setRecovered(true);
@@ -315,7 +351,7 @@ export function GoalLoopPanel({ goal, onEdit }: Props) {
       {goal && (
         <>
           <div className="flex flex-wrap gap-x-2 gap-y-1 mt-2 text-[9px] text-retro-text/60">
-            <span>revision {goal.revision ?? payload?.goal.revision ?? "unknown"}</span>
+            <span>revision {goal.revision ?? activePayload?.goal.revision ?? "unknown"}</span>
             <span>status {goal.status}</span>
             {criterion && <span>criterion {criterion.criterion_id}</span>}
           </div>
@@ -425,11 +461,11 @@ export function GoalLoopPanel({ goal, onEdit }: Props) {
             </div>
           )}
 
-          {payload && payload.strategy_deltas.length > 0 && (
+          {strategyDeltas.length > 0 && (
             <div className="mt-2 border-t border-retro-text/10 pt-2">
               <div className="text-[9px] uppercase tracking-wider text-retro-text/50">Strategy history</div>
               <div className="flex flex-col gap-1 mt-1">
-                {payload.strategy_deltas.map((delta) => (
+                {strategyDeltas.map((delta) => (
                   <div key={delta.delta_id} className="flex items-center justify-between gap-2 text-[9px] text-retro-text/50">
                     <span className="truncate" title={delta.reason}>
                       {delta.status} · {delta.field_name}

@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { GoalLoopPanel } from "./GoalLoopPanel";
 import { useQuestStore } from "../../stores/questStore";
-import type { GoalInfo, GoalLoopPayload } from "../../types";
+import type { GoalInfo, GoalLoopPayload, GoalStrategyDelta } from "../../types";
 
 const goal: GoalInfo = {
   id: "g1",
@@ -52,6 +52,25 @@ const payload: GoalLoopPayload = {
     },
   ],
   strategy_deltas: [],
+};
+
+const appliedDelta: GoalStrategyDelta = {
+  delta_id: "delta-1",
+  goal_id: "g1",
+  scope: "goal",
+  field_name: "web_brief_target",
+  before: { query: "old" },
+  after: { query: "new" },
+  source_event_id: "event-1",
+  author_id: "operator-1",
+  evaluator_id: null,
+  goal_revision_before: 3,
+  goal_revision_after: 4,
+  status: "applied",
+  rollback_target_id: null,
+  reason: "operator correction",
+  created_at: "2026-09-09T08:00:00Z",
+  updated_at: "2026-09-09T08:00:00Z",
 };
 
 function setupStore(overrides: Partial<ReturnType<typeof useQuestStore.getState>> = {}) {
@@ -171,6 +190,18 @@ describe("GoalLoopPanel", () => {
     expect(screen.getByRole("button", { name: "run snapshot" })).toBeDisabled();
   });
 
+  it("keeps retained evidence read-only while loop data is loading", () => {
+    setupStore({ goalLoopLoading: true, goalLoop: { ...payload, strategy_deltas: [appliedDelta] } });
+    render(<GoalLoopPanel goal={goal} onEdit={vi.fn()} />);
+
+    expect(screen.getByTestId("goal-loop-panel")).toHaveAttribute("data-state", "loading");
+    expect(screen.getByRole("button", { name: "edit" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "pause" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "run snapshot" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "apply correction" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "rollback" })).toBeDisabled();
+  });
+
   it.each([
     ["blocked", "blocked"],
     ["failed", "failed"],
@@ -195,11 +226,47 @@ describe("GoalLoopPanel", () => {
         payload: null,
       },
     });
-    render(<GoalLoopPanel goal={goal} />);
+    render(<GoalLoopPanel goal={goal} onEdit={vi.fn()} />);
 
     expect(screen.getByTestId("goal-loop-panel")).toHaveAttribute("data-state", "degraded");
     expect(screen.getByText("The governed runtime is unavailable.")).toBeInTheDocument();
     expect(screen.getByTestId("goal-axis-verification")).toHaveTextContent("passed");
+    expect(screen.getByRole("button", { name: "edit" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "pause" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "run snapshot" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "apply correction" })).toBeDisabled();
+  });
+
+  it("renders malformed criterion metadata as partial and disables effects", () => {
+    setupStore({
+      goalLoop: {
+        ...payload,
+        criterion: { ...payload.criterion, evidence_refs: null } as unknown as GoalLoopPayload["criterion"],
+      },
+    });
+    render(<GoalLoopPanel goal={goal} onEdit={vi.fn()} />);
+
+    expect(screen.getByTestId("goal-loop-panel")).toHaveAttribute("data-state", "partial_metadata");
+    expect(screen.getByText("No bounded success criterion is configured.")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "edit" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "pause" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "run snapshot" })).toBeDisabled();
+  });
+
+  it("keeps an approval-pending loop informational and disables every effect", () => {
+    setupStore({
+      goalLoop: {
+        ...payload,
+        receipts: [{ ...payload.receipts[0], execution_status: "awaiting_approval" }],
+      },
+    });
+    render(<GoalLoopPanel goal={goal} onEdit={vi.fn()} />);
+
+    expect(screen.getByTestId("goal-loop-panel")).toHaveAttribute("data-state", "awaiting_approval");
+    expect(screen.getByRole("button", { name: "edit" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "pause" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "run snapshot" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "apply correction" })).toBeDisabled();
   });
 
   it("renders empty and partial metadata states explicitly", () => {
@@ -215,5 +282,7 @@ describe("GoalLoopPanel", () => {
     rerender(<GoalLoopPanel goal={goal} />);
     expect(screen.getByTestId("goal-loop-panel")).toHaveAttribute("data-state", "partial_metadata");
     expect(screen.getByText(/No bounded success criterion/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "pause" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "run snapshot" })).toBeDisabled();
   });
 });

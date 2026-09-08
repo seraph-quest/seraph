@@ -108,16 +108,59 @@ function goalLoopError(
   return new GoalLoopError(response.status ?? 0, message, { code, payload });
 }
 
-function isGoalLoopPayload(payload: unknown): payload is GoalLoopPayload {
-  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return false;
-  const record = payload as Record<string, unknown>;
-  return Boolean(
-    record.goal &&
-      typeof record.goal === "object" &&
-      Array.isArray(record.receipts) &&
-      Array.isArray(record.strategy_deltas),
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value));
+}
+
+function isGoalCriterion(value: unknown): boolean {
+  if (!isRecord(value)) return false;
+  const target = value.target;
+  return (
+    typeof value.criterion_id === "string" &&
+    typeof value.description === "string" &&
+    (value.verifier_kind === null ||
+      value.verifier_kind === "artifact_readback" ||
+      value.verifier_kind === "external_readback" ||
+      value.verifier_kind === "operator_attestation") &&
+    (typeof target === "string" || isRecord(target)) &&
+    Array.isArray(value.evidence_refs) &&
+    value.evidence_refs.every((ref) => typeof ref === "string")
   );
 }
+
+function isGoalLoopReceipt(value: unknown): boolean {
+  return isRecord(value);
+}
+
+function isStrategyDelta(value: unknown): boolean {
+  if (!isRecord(value)) return false;
+  return (
+    typeof value.delta_id === "string" &&
+    typeof value.goal_id === "string" &&
+    typeof value.status === "string" &&
+    typeof value.field_name === "string"
+  );
+}
+
+function isGoalLoopPayload(payload: unknown): payload is GoalLoopPayload {
+  if (!isRecord(payload) || !isRecord(payload.goal)) return false;
+  const goal = payload.goal;
+  return Boolean(
+    typeof goal.id === "string" &&
+      typeof goal.title === "string" &&
+      typeof goal.status === "string" &&
+      typeof goal.revision === "number" &&
+      Number.isInteger(goal.revision) &&
+      goal.revision >= 1 &&
+      (payload.criterion === null || isGoalCriterion(payload.criterion)) &&
+      Array.isArray(payload.receipts) &&
+      payload.receipts.every(isGoalLoopReceipt) &&
+      Array.isArray(payload.strategy_deltas) &&
+      payload.strategy_deltas.every(isStrategyDelta),
+  );
+}
+
+let goalLoopRequestSequence = 0;
 
 interface QuestStore {
   goals: GoalInfo[];
@@ -250,6 +293,7 @@ export const useQuestStore = create<QuestStore>((set, get) => ({
   },
 
   loadGoalLoop: async (id) => {
+    const requestSequence = ++goalLoopRequestSequence;
     const previous = get().goalLoopGoalId === id ? get().goalLoop : null;
     set({
       goalLoopGoalId: id,
@@ -261,11 +305,13 @@ export const useQuestStore = create<QuestStore>((set, get) => ({
       const res = await fetch(`${API_URL}/api/goals/${id}/loop`);
       const payload = await readResponsePayload(res);
       if (!res.ok) throw goalLoopError(res, payload, "Goal loop could not be loaded");
-      if (!isGoalLoopPayload(payload)) {
-        throw new GoalLoopError(502, "Goal loop returned incomplete metadata.", { payload });
+      if (!isGoalLoopPayload(payload) || payload.goal.id !== id) {
+        throw new GoalLoopError(502, "Goal loop returned incomplete or mismatched metadata.", { payload });
       }
+      if (requestSequence !== goalLoopRequestSequence || get().goalLoopGoalId !== id) return;
       set({ goalLoop: payload, goalLoopError: null });
     } catch (err) {
+      if (requestSequence !== goalLoopRequestSequence || get().goalLoopGoalId !== id) return;
       const failure =
         err instanceof GoalLoopError
           ? err
@@ -273,7 +319,9 @@ export const useQuestStore = create<QuestStore>((set, get) => ({
       console.error("Failed to load goal loop:", err);
       set({ goalLoopError: failure.asState() });
     } finally {
-      set({ goalLoopLoading: false });
+      if (requestSequence === goalLoopRequestSequence && get().goalLoopGoalId === id) {
+        set({ goalLoopLoading: false });
+      }
     }
   },
 
@@ -311,6 +359,7 @@ export const useQuestStore = create<QuestStore>((set, get) => ({
       });
       const payload = await readResponsePayload(res);
       if (!res.ok) throw goalLoopError(res, payload, "Strategy correction could not be applied");
+      await get().refresh();
       await get().loadGoalLoop(id);
       return (payload ?? {}) as GoalLoopActionResponse;
     } catch (err) {
@@ -335,6 +384,7 @@ export const useQuestStore = create<QuestStore>((set, get) => ({
       });
       const payload = await readResponsePayload(res);
       if (!res.ok) throw goalLoopError(res, payload, "Strategy correction could not be rolled back");
+      await get().refresh();
       await get().loadGoalLoop(id);
       return (payload ?? {}) as GoalLoopActionResponse;
     } catch (err) {

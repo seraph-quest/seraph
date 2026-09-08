@@ -104,6 +104,7 @@ export function GoalTree({ goals, depth, onEdit, onInspect }: Props) {
               <div className="flex items-center gap-0.5 shrink-0 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100">
                 {onInspect && (
                   <button
+                    type="button"
                     onClick={() => onInspect(goal)}
                     className="text-[9px] text-retro-text/30 hover:text-retro-highlight px-0.5"
                     title="Inspect goal loop"

@@ -95,6 +95,16 @@ existing goal-conditioned loop with explicit `no_learning`. Stale, cancelled,
 unavailable, failed, and unreadable paths remain blocked or failed with no
 learning.
 
+The branch-local authenticated `POST /api/goals/{goal_id}/snapshot` endpoint is
+the first operator-triggered canary boundary for this adapter. It accepts only
+the middleware-authenticated operator session, delegates to the fixed
+least-privilege `service:goal-snapshot` identity, and returns separate
+execution, verification, artifact, learning, durable, operator, and audit
+receipts. It rejects stale revisions and body-supplied actor identities; an
+audit-store failure is returned as an explicit degraded response. This endpoint
+does not yet make the scheduler proactive or prove the live OpenRouter/web-brief
+journey.
+
 **Live/runtime limits:** This is a partial branch-local slice, not the full
 guardian brief journey. Its default provider requires the app-started workflow
 registry, governed tool wrappers, and a migrated durable-state database; the

@@ -1,11 +1,20 @@
+import hashlib
 import logging
 from datetime import datetime
-from typing import Optional
+from typing import Any, Optional
 
-from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel, Field
+from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, ConfigDict, Field
 
+from src.audit.repository import audit_repository
+from src.auth.service import AuthenticatedOperator
 from src.goals.contracts import GoalCandidateRequest, GoalSuccessCriterion
+from src.guardian.goal_snapshot_to_file import (
+    GoalSnapshotToFileRequest,
+    GoalSnapshotToFileResult,
+    GoalSnapshotToFileService,
+)
 from src.goals.repository import (
     GoalRevisionConflict,
     deserialize_success_criterion,
@@ -15,6 +24,7 @@ from src.guardian.goal_conditioned_loop import (
     list_goal_loop_receipts,
     propose_goal_candidate,
 )
+from src.security.trust_contract import AuthorityGrant, PrincipalType, TrustPrincipal
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +48,57 @@ class GoalUpdate(BaseModel):
     due_date: Optional[str] = None
     success_criterion: Optional[GoalSuccessCriterion] = None
     expected_revision: Optional[int] = Field(default=None, ge=1)
+
+
+class GoalSnapshotRunRequest(BaseModel):
+    """Bounded operator input for the first real goal-loop canary."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    expected_revision: int = Field(ge=1)
+    file_path: Optional[str] = Field(default=None, min_length=1, max_length=512)
+    evidence_refs: list[str] = Field(default_factory=list, max_length=32)
+    reason: str = Field(default="operator_requested_goal_snapshot", max_length=1_000)
+    expected_outcome: str = Field(default="", max_length=1_000)
+    cancel_requested: bool = False
+
+
+GOAL_SNAPSHOT_SERVICE_ID = "service:goal-snapshot"
+
+
+def _require_authenticated_operator(request: Request) -> AuthenticatedOperator:
+    """Use only middleware-authenticated identity; never accept a body actor."""
+
+    operator = getattr(request.state, "operator", None)
+    principal = getattr(operator, "principal", None)
+    session_id = str(getattr(operator, "session_id", "") or "").strip()
+    if not isinstance(operator, AuthenticatedOperator) or principal is None:
+        raise HTTPException(status_code=401, detail={"code": "authentication_required"})
+    grants = {str(getattr(grant, "value", grant)) for grant in principal.grants}
+    if (
+        not principal.authenticated
+        or principal.revoked
+        or not session_id
+        or AuthorityGrant.CAPABILITY_EXECUTE.value not in grants
+    ):
+        raise HTTPException(status_code=401, detail={"code": "session_unavailable"})
+    return operator
+
+
+def _goal_snapshot_service_principal(operator: AuthenticatedOperator) -> TrustPrincipal:
+    """Return the fixed least-privilege service identity for one operator run."""
+
+    return TrustPrincipal(
+        principal_id=GOAL_SNAPSHOT_SERVICE_ID,
+        principal_type=PrincipalType.SERVICE,
+        authenticated=True,
+        grants=(AuthorityGrant.CAPABILITY_EXECUTE,),
+        session_id=operator.session_id,
+    )
+
+
+def _session_digest(session_id: str) -> str:
+    return hashlib.sha256(session_id.encode("utf-8")).hexdigest()
 
 
 def _goal_payload(goal) -> dict:
@@ -183,3 +244,92 @@ async def propose_goal_loop_candidate(goal_id: str, body: GoalCandidateRequest):
             "reason": "proposal_only_until_governed_admission_prerequisites_are_available",
         },
     }
+
+
+@router.post("/goals/{goal_id}/snapshot")
+async def run_goal_snapshot(goal_id: str, body: GoalSnapshotRunRequest, request: Request):
+    """Run the first real goal-loop canary through the canonical runtime.
+
+    This is an authenticated operator request, not a model-granted permission
+    or a second execution path.  The service identity is fixed in code and is
+    bound to the operator session for the child durable job; all goal, authority,
+    workflow, artifact, and readback checks remain in ``GoalSnapshotToFileService``.
+    """
+
+    operator = _require_authenticated_operator(request)
+    goal = await goal_repository.get(goal_id)
+    if goal is None:
+        raise HTTPException(status_code=404, detail="Goal not found")
+    current_revision = max(int(goal.revision or 1), 1)
+    if body.expected_revision != current_revision:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "stale_goal_revision",
+                "goal_id": goal_id,
+                "expected_revision": body.expected_revision,
+                "current_revision": current_revision,
+                "recovery": "Refresh the goal and resubmit against the current revision.",
+            },
+        )
+
+    file_path = body.file_path or f"goal-snapshots/{goal_id}.md"
+    service_principal = _goal_snapshot_service_principal(operator)
+    try:
+        service_request = GoalSnapshotToFileRequest(
+            goal_id=goal_id,
+            goal_revision=current_revision,
+            file_path=file_path,
+            owner_principal_id=GOAL_SNAPSHOT_SERVICE_ID,
+            service_id=GOAL_SNAPSHOT_SERVICE_ID,
+            session_id=operator.session_id,
+            evidence_refs=body.evidence_refs,
+            reason=body.reason,
+            expected_outcome=body.expected_outcome,
+            cancel_requested=body.cancel_requested,
+        )
+        result = await GoalSnapshotToFileService(
+            authority_principal=service_principal,
+        ).run(service_request)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail={"code": "invalid_goal_snapshot_request", "reason": str(exc)}) from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail={"code": "goal_snapshot_authority_denied", "reason": str(exc)}) from exc
+
+    payload: dict[str, Any] = result.model_dump(mode="json") if isinstance(result, GoalSnapshotToFileResult) else dict(result)
+    payload["operator_receipt"] = {
+        "principal_id": operator.principal.principal_id,
+        "session_id_digest": _session_digest(operator.session_id),
+        "delegated_service_id": GOAL_SNAPSHOT_SERVICE_ID,
+        "authority_boundary": "authenticated_operator_to_fixed_service",
+    }
+    try:
+        await audit_repository.log_event(
+            actor=operator.principal.principal_id,
+            event_type="goal_snapshot_operator_run",
+            tool_name="workflow.goal-snapshot-to-file",
+            risk_level="low",
+            policy_mode="authenticated_operator",
+            summary="Authenticated operator requested goal snapshot canary",
+            details={
+                "goal_id": goal_id,
+                "goal_revision": current_revision,
+                "session_id_digest": _session_digest(operator.session_id),
+                "delegated_service_id": GOAL_SNAPSHOT_SERVICE_ID,
+                "execution_status": payload.get("execution_status"),
+                "verification": payload.get("verification"),
+                "learning": payload.get("learning"),
+                "job_id": payload.get("job_id"),
+                "artifact_ref": payload.get("artifact_ref"),
+                "reason": payload.get("reason"),
+            },
+        )
+    except Exception:
+        logger.exception("goal snapshot operator receipt could not be persisted")
+        payload["audit_receipt"] = {
+            "status": "degraded",
+            "reason": "audit_persistence_failed",
+        }
+        return JSONResponse(status_code=503, content=payload)
+    payload["audit_receipt"] = {"status": "recorded"}
+    return payload

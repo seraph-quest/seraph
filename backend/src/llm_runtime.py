@@ -3061,6 +3061,10 @@ def _execute_sync_with_gpu_admission(
         request = GpuAdmissionRequest.from_inference_context(
             context,
             operation_id=operation_id,
+            uncertain_on_error=(
+                getattr(getattr(getattr(decision, "selected", None), "profile", None), "provider_kind", "")
+                == "openrouter"
+            ),
         )
     except (TypeError, ValueError) as error:
         reasons = ("gpu_admission_rejected", "gpu_admission_identity_conflict")

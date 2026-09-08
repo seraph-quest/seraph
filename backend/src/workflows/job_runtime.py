@@ -61,6 +61,58 @@ DURABLE_JOB_TRANSITIONS: dict[str, frozenset[str]] = {
 }
 DURABLE_JOB_TERMINAL_STATUSES = frozenset({"succeeded", "cancelled"})
 
+# Remote admission remains process-local, but an existing durable job may keep
+# an operator-safe projection of its admission lifecycle in the canonical
+# effect ledger.  These values describe the broker receipt; they are not a
+# second durable job state machine.
+REMOTE_INFERENCE_RECEIPT_STATUSES = frozenset(
+    {"queued", "running", "blocked", "succeeded", "settled", "failed", "cancelled", "expired", "rejected"}
+)
+REMOTE_INFERENCE_EFFECT_STATUSES = {
+    "queued": "unknown",
+    "running": "unknown",
+    "blocked": "blocked",
+    "succeeded": "succeeded",
+    "settled": "succeeded",
+    "failed": "failed",
+    "cancelled": "failed",
+    "expired": "failed",
+    "rejected": "failed",
+}
+REMOTE_INFERENCE_RECEIPT_FIELDS = (
+    "schema_version",
+    "operation_id",
+    "job_id",
+    "owner_id",
+    "parent_job_id",
+    "runtime_path",
+    "priority",
+    "priority_rank",
+    "status",
+    "queue_position",
+    "active_operation_id",
+    "fencing_token",
+    "reason_code",
+    "queued",
+    "max_queued",
+    "serial_gpu",
+    "resource_class",
+    "serial_remote_inference",
+    "cancel_requested",
+    "reconciliation_required",
+    "recovery_action",
+    "deadline_exceeded",
+    "callback_completed",
+    "capability_version",
+    "owner_outstanding",
+    "max_owner_outstanding",
+    "cost_reserved_microusd",
+    "owner_cost_budget_microusd",
+    "unknown_cost_outstanding",
+    "cost_settled_microusd",
+    "operator_visible",
+)
+
 
 class DurableJobError(RuntimeError):
     """Base error for rejected durable job operations."""
@@ -289,6 +341,29 @@ def _canonical_reconciliation_receipt(value: Any) -> tuple[str, str]:
     if canonical in {"{}", "null", "\"\""}:
         raise ValueError("reconciliation_receipt must be nonempty")
     return canonical, _digest(safe)
+
+
+def _canonical_remote_inference_receipt(
+    value: Mapping[str, Any],
+) -> tuple[dict[str, Any], str]:
+    """Allowlist and redact a typed remote admission receipt before storage."""
+    if not isinstance(value, Mapping):
+        raise ValueError("remote inference receipt must be a mapping")
+    raw = dict(value)
+    status = _text(raw.get("status"))
+    if status not in REMOTE_INFERENCE_RECEIPT_STATUSES:
+        raise ValueError(f"unsupported remote inference receipt status: {status or '<empty>'}")
+    required = ("operation_id", "job_id", "owner_id")
+    missing = [field_name for field_name in required if not _text(raw.get(field_name))]
+    if missing:
+        raise ValueError("remote inference receipt requires " + ", ".join(missing))
+    safe = _safe_structure(
+        {field_name: raw[field_name] for field_name in REMOTE_INFERENCE_RECEIPT_FIELDS if field_name in raw}
+    )
+    # The status is validated above and normalized explicitly so a custom
+    # mapping cannot smuggle a non-string status into the durable projection.
+    safe["status"] = status
+    return safe, _digest(safe)
 
 
 def _validate_retry_actor(
@@ -977,6 +1052,49 @@ class DurableJobRepository:
             fencing_token=fencing_token,
         )
 
+    async def record_remote_inference_receipt(
+        self,
+        receipt: Mapping[str, Any],
+        *,
+        owner: str | None = None,
+        fencing_token: int | None = None,
+    ) -> dict[str, Any]:
+        """Persist one redacted remote admission receipt on an existing job.
+
+        This is an explicit caller-adoption seam for the process-local remote
+        broker.  It records the broker status as an effect receipt and leaves
+        the canonical job lifecycle under the existing job methods.  In
+        particular, an uncertain ``blocked`` receipt cannot release or retry
+        the remote lease, and a queued/cancelled/expired receipt cannot invoke
+        a provider callback through this method.
+
+        A durable job row is required; this method never creates one.  Active
+        durable jobs must provide their existing owner/fencing pair, while an
+        ``accepted`` row may record an admission receipt before it is claimed.
+        """
+        safe_receipt, receipt_digest = _canonical_remote_inference_receipt(receipt)
+        job_id = str(safe_receipt["job_id"])
+        current = await self.get_job(job_id)
+        if current is None:
+            raise DurableJobNotFound(job_id)
+        persisted_owner = str(current["owner"].get("principal_id") or "")
+        if persisted_owner != str(safe_receipt["owner_id"]):
+            raise DurableJobLeaseError("remote inference receipt owner does not match the durable job owner")
+        admission_status = str(safe_receipt["status"])
+        return await self.record_effect(
+            job_id,
+            effect_type="remote_inference_admission",
+            target_path=f"remote_inference:{safe_receipt['operation_id']}",
+            status=REMOTE_INFERENCE_EFFECT_STATUSES[admission_status],
+            details={
+                "admission_status": admission_status,
+                "receipt": safe_receipt,
+                "receipt_digest": receipt_digest,
+            },
+            owner=owner,
+            fencing_token=fencing_token,
+        )
+
     async def retry_job(
         self,
         job_id: str,
@@ -1125,6 +1243,8 @@ __all__ = [
     "DURABLE_JOB_STATUSES",
     "DURABLE_JOB_TRANSITIONS",
     "DURABLE_JOB_TERMINAL_STATUSES",
+    "REMOTE_INFERENCE_RECEIPT_STATUSES",
+    "REMOTE_INFERENCE_EFFECT_STATUSES",
     "DurableJobError",
     "DurableJobNotFound",
     "DurableJobTransitionError",
@@ -1133,5 +1253,6 @@ __all__ = [
     "DurableJobIdentity",
     "DurableJobSpec",
     "DurableJobRepository",
+    "_canonical_remote_inference_receipt",
     "durable_job_repository",
 ]

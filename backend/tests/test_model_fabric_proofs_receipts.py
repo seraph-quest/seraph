@@ -419,6 +419,78 @@ async def test_capability_probe_bootstraps_without_existing_proof_and_returns_no
 
 
 @pytest.mark.asyncio
+async def test_capability_probe_admits_transport_once_through_injected_broker(async_db):
+    now = time.time()
+    profile = _profile()
+    candidate = candidate_from_profile(profile)
+    broker_calls = []
+    transport_calls = []
+
+    class RecordingBroker:
+        async def execute(self, request, operation, **_kwargs):
+            broker_calls.append(request)
+            return await operation()
+
+    async def transport(_candidate, _trust_request, _requirements):
+        transport_calls.append(True)
+        return CapabilityProbeObservation(True, proven_value="verified")
+
+    result = await run_capability_probe(
+        context=_context(profile, now=now),
+        candidate=candidate,
+        capability="structured_output",
+        canary_version="canary-v1",
+        proof_ttl_seconds=60,
+        transport=transport,
+        repository=ModelFabricRepository(async_db),
+        now=now,
+        admission_broker=RecordingBroker(),
+    )
+
+    assert result.outcome == "passed"
+    assert len(broker_calls) == 1
+    assert broker_calls[0].operation_id.endswith(":capability_probe:local-gemma")
+    assert transport_calls == [True]
+
+
+@pytest.mark.asyncio
+async def test_capability_probe_admission_rejection_makes_zero_provider_calls(async_db):
+    now = time.time()
+    profile = _profile()
+    transport_calls = []
+
+    class RejectingBroker:
+        async def execute(self, _request, _operation, **_kwargs):
+            from src.model_fabric.remote_inference_admission import RemoteInferenceAdmissionError
+
+            raise RemoteInferenceAdmissionError(
+                "admission rejected",
+                receipt=object(),
+            )
+
+    async def transport(_candidate, _trust_request, _requirements):
+        transport_calls.append(True)
+        raise AssertionError("provider transport must not run after admission rejection")
+
+    result = await run_capability_probe(
+        context=_context(profile, now=now),
+        candidate=candidate_from_profile(profile),
+        capability="structured_output",
+        canary_version="canary-v1",
+        proof_ttl_seconds=60,
+        transport=transport,
+        repository=ModelFabricRepository(async_db),
+        now=now,
+        admission_broker=RejectingBroker(),
+    )
+
+    assert result.outcome == "failed"
+    assert result.error_code == "remote_inference_admission_gpu_admission_failed"
+    assert transport_calls == []
+    assert result.proof is None
+
+
+@pytest.mark.asyncio
 async def test_health_canary_runs_before_health_is_declared_or_proven():
     now = time.time()
     profile = replace(_profile(), capabilities=("structured_output",))

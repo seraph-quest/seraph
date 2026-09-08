@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 import hashlib
 import time
+from typing import Protocol
 from uuid import uuid4
 
 from src.security.trust_contract import TrustRequest
@@ -28,6 +29,11 @@ from .receipts import (
     safe_code,
 )
 from .repository import ModelFabricRepository, ProofPersistenceResult, model_fabric_repository
+from .remote_inference_admission import (
+    RemoteInferenceAdmissionError,
+    RemoteInferenceAdmissionRequest,
+    remote_inference_admission_broker,
+)
 from .selector import preflight_candidate
 
 
@@ -52,6 +58,20 @@ ProbeTransport = Callable[
 ]
 
 
+class CapabilityProbeAdmission(Protocol):
+    """Minimal broker contract required by the generating probe seam."""
+
+    async def execute(
+        self,
+        request: RemoteInferenceAdmissionRequest,
+        operation: Callable[[], Awaitable[CapabilityProbeObservation]],
+        *,
+        now: float | None = None,
+        uncertain_on_error: bool | None = None,
+    ) -> CapabilityProbeObservation:
+        """Run the provider callback only after admission."""
+
+
 @dataclass(frozen=True)
 class CapabilityProbeResult:
     proof: ModelRouteProof | None
@@ -71,8 +91,15 @@ async def run_capability_probe(
     transport: ProbeTransport,
     repository: ModelFabricRepository = model_fabric_repository,
     now: float | None = None,
+    admission_broker: CapabilityProbeAdmission | None = None,
 ) -> CapabilityProbeResult:
-    """Run one no-fallback canary and persist its sanitized receipt and proof."""
+    """Run one no-fallback canary under remote admission and persist its proof.
+
+    The broker is owned here, at the shared generating-probe seam, so callers
+    cannot accidentally turn a capability probe into an unadmitted provider
+    request.  ``admission_broker`` remains injectable for deterministic tests
+    and bounded runtime fakes.
+    """
     checked_at = time.time() if now is None else float(now)
     safe_code(capability, field_name="capability")
     safe_code(canary_version, field_name="canary version")
@@ -99,15 +126,30 @@ async def run_capability_probe(
 
     started = time.time()
     timeout_seconds = max(context.deadline_at - started, 0.0)
+    broker = admission_broker if admission_broker is not None else remote_inference_admission_broker
+    admission_request = RemoteInferenceAdmissionRequest.from_inference_context(
+        context,
+        operation_id=f"{context.request_id}:capability_probe:{candidate.profile.id}",
+        uncertain_on_error=(candidate.profile.provider_kind == "openrouter"),
+    )
+
+    async def admitted_transport() -> CapabilityProbeObservation:
+        return await broker.execute(
+            admission_request,
+            lambda: transport(candidate, trust_request, context.requirements),
+        )
+
     try:
         if timeout_seconds <= 0:
             raise asyncio.TimeoutError
-        observation = await asyncio.wait_for(
-            transport(candidate, trust_request, context.requirements),
-            timeout=timeout_seconds,
-        )
+        observation = await asyncio.wait_for(admitted_transport(), timeout=timeout_seconds)
     except asyncio.TimeoutError:
         observation = CapabilityProbeObservation(False, error_code="probe_deadline_exceeded")
+    except RemoteInferenceAdmissionError as exc:
+        observation = CapabilityProbeObservation(
+            False,
+            error_code=f"remote_inference_admission_{exc.code}",
+        )
     except Exception:
         observation = CapabilityProbeObservation(False, error_code="probe_transport_failed")
     finished = time.time()

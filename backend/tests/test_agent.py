@@ -45,6 +45,18 @@ class TestAgentFactory:
 
         assert "delegate_task" in {tool.name for tool in tools}
 
+    @patch("src.agent.factory.mcp_manager")
+    @patch("src.tools.policy.context_manager.get_context", return_value=CurrentContext(tool_policy_mode="full", mcp_policy_mode="full"))
+    def test_get_tools_blocks_workspace_read_without_runtime_authority(self, _mock_context, mock_mcp):
+        mock_mcp.get_tools.return_value = []
+        tools = {tool.name: tool for tool in get_tools()}
+        tokens = set_runtime_context("s1", "off")
+        try:
+            with pytest.raises(PermissionError, match="runtime authority is unavailable"):
+                tools["read_file"](path="README.md")
+        finally:
+            reset_runtime_context(tokens)
+
     @patch("src.agent.factory.LiteLLMModel")
     def test_get_model(self, mock_litellm_cls):
         mock_litellm_cls.return_value = MagicMock()

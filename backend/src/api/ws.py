@@ -11,7 +11,7 @@ from smolagents import ActionStep, ToolCall, FinalAnswerStep
 from config.settings import settings
 from src.approval.exceptions import ApprovalRequired
 from src.approval.repository import approval_repository
-from src.approval.runtime import reset_runtime_context, set_runtime_context
+from src.approval.runtime import get_current_approval_mode, reset_runtime_context, set_runtime_context
 from src.agent.exceptions import ClarificationRequired
 from src.agent.direct_chat import run_direct_local_chat, should_use_direct_local_chat, stream_direct_local_chat
 from src.agent.factory import build_agent
@@ -21,6 +21,9 @@ from src.audit.formatting import format_tool_call_summary
 from src.audit.runtime import log_agent_run_event
 from src.audit.repository import audit_repository
 from src.api.profile import get_or_create_profile, mark_onboarding_complete, reset_onboarding
+from src.api.chat import ChatAuthorityError, _bind_chat_principal
+from src.auth.middleware import authenticate_websocket
+from src.auth.service import AuthFailure, bind_operator_principal
 from src.guardian.state import build_guardian_state
 from src.models.schemas import WSMessage, WSResponse
 from src.operators.local_codex import ExternalAgentRuntimeRemovedError
@@ -46,6 +49,10 @@ _INTERRUPTED_TURN_MESSAGE = (
     "Response interrupted because the browser connection closed before Seraph could finish. "
     "Please send that turn again."
 )
+
+
+class _DirectStreamOutcomeUncertain(Exception):
+    """A remote stream failed without a confirmed complete response."""
 
 
 def _format_tool_step(step_name: str, arguments: dict, specialist_names: set[str]) -> str:
@@ -100,6 +107,11 @@ async def _build_agent(session_id: str, message: str):
 @router.websocket("/chat")
 async def websocket_chat(websocket: WebSocket):
     """WebSocket endpoint for streaming chat responses."""
+    try:
+        operator = await authenticate_websocket(websocket)
+    except AuthFailure as exc:
+        await websocket.close(code=4401, reason=exc.code)
+        return
     await websocket.accept()
     ws_manager.connect(websocket)
     _seq = 0
@@ -173,6 +185,23 @@ async def websocket_chat(websocket: WebSocket):
                 continue
 
             session = await session_manager.get_or_create(ws_msg.session_id)
+            try:
+                chat_principal = _bind_chat_principal(
+                    session.id,
+                    principal=bind_operator_principal(operator, session.id),
+                )
+            except ChatAuthorityError as exc:
+                active_turn_session_id = session.id
+                active_turn_completed = True
+                await websocket.send_text(
+                    WSResponse(
+                        type="error",
+                        content=exc.message,
+                        session_id=session.id,
+                        seq=_next_seq(),
+                    ).model_dump_json()
+                )
+                continue
             if ws_msg.type != "resume_message":
                 await session_manager.add_message(session.id, "user", ws_msg.message)
             active_turn_session_id = session.id
@@ -245,6 +274,11 @@ async def websocket_chat(websocket: WebSocket):
                     continue
                 llm_request_id = f"direct-ws:{session.id}:{started_at}"
                 _register_request(llm_request_id)
+                auth_tokens = set_runtime_context(
+                    session.id,
+                    get_current_approval_mode(),
+                    trust_principal=chat_principal,
+                )
                 try:
                     await websocket.send_text(
                         WSResponse(
@@ -286,28 +320,11 @@ async def websocket_chat(websocket: WebSocket):
                             _stream_direct_reply(),
                             timeout=min(settings.agent_chat_timeout, 60),
                         )
-                    except Exception:
-                        if streamed_parts:
-                            raise
-                        logger.warning("Direct OpenRouter websocket streaming unavailable; falling back to non-streaming chat")
-                        await websocket.send_text(
-                            WSResponse(
-                                type="status",
-                                content="OpenRouter streaming is unavailable; Seraph is using the bounded non-streaming OpenRouter route.",
-                                session_id=session.id,
-                                seq=_next_seq(),
-                            ).model_dump_json()
-                        )
-                        final_result = ""
+                    except asyncio.TimeoutError:
+                        raise
+                    except Exception as exc:
+                        raise _DirectStreamOutcomeUncertain(str(exc)) from exc
 
-                    if not final_result:
-                        final_result = await run_direct_local_chat(
-                            ws_msg.message,
-                            runtime_path=direct_runtime_path,
-                            is_onboarding=direct_is_onboarding,
-                            session_id=session.id,
-                            request_id=llm_request_id,
-                        )
                     final_result = await redact_secrets_in_text(final_result, fail_closed=True)
                 except asyncio.TimeoutError:
                     _mark_request_timed_out(llm_request_id)
@@ -330,6 +347,44 @@ async def websocket_chat(websocket: WebSocket):
                         WSResponse(
                             type="error",
                             content="OpenRouter chat timed out — try again",
+                            session_id=session.id,
+                            seq=_next_seq(),
+                        ).model_dump_json()
+                    )
+                    continue
+                except _DirectStreamOutcomeUncertain as exc:
+                    logger.warning(
+                        "Direct OpenRouter websocket stream ended with an uncertain outcome; automatic retry suppressed",
+                        exc_info=True,
+                    )
+                    safe_error = await redact_secrets_in_text(str(exc) or "provider stream failed")
+                    uncertain_message = (
+                        "OpenRouter streaming ended before Seraph received a confirmed complete response. "
+                        "The remote outcome is uncertain, so Seraph did not retry automatically. "
+                        "Retry this message explicitly if you want to try again."
+                    )
+                    await log_agent_run_event(
+                        session_id=session.id,
+                        transport="websocket",
+                        is_onboarding=direct_is_onboarding,
+                        outcome="uncertain",
+                        policy_mode=get_current_tool_policy_mode(),
+                        details={
+                            "duration_ms": int((perf_counter() - started_at) * 1000),
+                            "message_length": len(ws_msg.message),
+                            "error": safe_error,
+                            "request_id": llm_request_id,
+                            "runtime": "direct-openrouter-chat",
+                            "failure_stage": "streaming",
+                            "remote_outcome": "uncertain",
+                            "retry_required": True,
+                        },
+                    )
+                    active_turn_completed = True
+                    await websocket.send_text(
+                        WSResponse(
+                            type="error",
+                            content=uncertain_message,
                             session_id=session.id,
                             seq=_next_seq(),
                         ).model_dump_json()
@@ -363,6 +418,7 @@ async def websocket_chat(websocket: WebSocket):
                     )
                     continue
                 finally:
+                    reset_runtime_context(auth_tokens)
                     _finish_request(llm_request_id)
 
                 await session_manager.add_message(session.id, "assistant", final_result)
@@ -403,7 +459,7 @@ async def websocket_chat(websocket: WebSocket):
             await websocket.send_text(
                 WSResponse(
                     type="status",
-                    content="Seraph is running the local model.",
+                    content="Seraph is using the governed OpenRouter chat runtime.",
                     session_id=session.id,
                     seq=_next_seq(),
                 ).model_dump_json()
@@ -420,7 +476,11 @@ async def websocket_chat(websocket: WebSocket):
                 loop = asyncio.get_running_loop()
                 llm_request_id = f"agent-ws:{session.id}:{started_at}"
                 _register_request(llm_request_id)
-                tokens = set_runtime_context(session.id, context_manager.get_context().approval_mode)
+                tokens = set_runtime_context(
+                    session.id,
+                    context_manager.get_context().approval_mode,
+                    trust_principal=chat_principal,
+                )
                 llm_request_token = set_current_llm_request_id(llm_request_id)
                 run_ctx = contextvars.copy_context()
                 reset_runtime_context(tokens)

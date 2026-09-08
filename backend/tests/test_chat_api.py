@@ -6,12 +6,25 @@ from config.settings import settings
 from src.agent.exceptions import ClarificationRequired
 from src.agent.direct_chat import should_use_direct_local_chat
 from src.approval.exceptions import ApprovalRequired
+from src.api.chat import _bind_chat_principal
 from src.audit.repository import audit_repository
+from src.security.trust_contract import AuthorityGrant, PrincipalType, TrustPrincipal
 from src.vault.repository import vault_repository
 
 
 @pytest.mark.asyncio
 class TestChatAPI:
+    @pytest.fixture(autouse=True)
+    def _bind_test_operator_principal(self, monkeypatch):
+        monkeypatch.setattr(
+            "src.api.chat.get_current_trust_principal",
+            lambda: TrustPrincipal(
+                principal_id="operator:test",
+                principal_type=PrincipalType.OPERATOR,
+                grants=(AuthorityGrant.MODEL_INFERENCE,),
+            ),
+        )
+
     @pytest.fixture(autouse=True)
     def _disable_direct_local_chat_by_default(self, monkeypatch):
         monkeypatch.setattr(
@@ -273,6 +286,35 @@ class TestChatAPI:
         response = await client.post("/api/chat", json={"message": "Hello"})
         assert response.status_code == 200
         assert response.json()["response"] == "The token is [redacted secret]"
+
+    async def test_chat_principal_is_bound_to_server_session(self):
+        principal = TrustPrincipal(
+            principal_id="operator:test",
+            principal_type=PrincipalType.OPERATOR,
+            grants=(AuthorityGrant.MODEL_INFERENCE,),
+        )
+        with patch("src.api.chat.get_current_trust_principal", return_value=principal):
+            bound = _bind_chat_principal("session-from-server")
+
+        assert bound.principal_id == principal.principal_id
+        assert bound.authenticated is True
+        assert bound.session_id == "session-from-server"
+        assert bound.grants == (AuthorityGrant.MODEL_INFERENCE,)
+
+    async def test_chat_principal_missing_or_forged_fails_closed(self):
+        with patch("src.api.chat.get_current_trust_principal", return_value=None):
+            with pytest.raises(Exception, match="authenticated operator"):
+                _bind_chat_principal("session-from-server")
+
+        forged = TrustPrincipal(
+            principal_id="operator:forged",
+            principal_type=PrincipalType.OPERATOR,
+            grants=(AuthorityGrant.MODEL_INFERENCE,),
+            session_id="different-session",
+        )
+        with patch("src.api.chat.get_current_trust_principal", return_value=forged):
+            with pytest.raises(Exception, match="not bound to this session"):
+                _bind_chat_principal("session-from-server")
 
 
 @pytest.mark.asyncio

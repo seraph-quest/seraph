@@ -55,6 +55,22 @@ class Settings(BaseSettings):
     database_echo: bool = False
     workspace_dir: str = "/app/data"
 
+    # Single-operator authentication. Authentication is activated when a
+    # credential is configured and is mandatory in production. The explicit
+    # test bypass is accepted only when deployment_environment is ``test``.
+    deployment_environment: str = "development"
+    operator_auth_secret: str = ""
+    operator_auth_secret_hash: str = ""
+    operator_auth_cookie_name: str = "seraph_operator_session"
+    operator_auth_cookie_secure: bool = False
+    operator_auth_idle_seconds: int = 3600
+    operator_auth_absolute_seconds: int = 86400
+    operator_auth_allowed_hosts: str = "localhost,127.0.0.1,test"
+    operator_auth_allowed_origins: str = "http://localhost:3001,http://127.0.0.1:3001"
+    operator_auth_trusted_proxy_ips: str = ""
+    operator_auth_allow_unauthenticated_tests: bool = False
+    operator_auth_backend_workers: int = 1
+
     # Phase 1 — Soul & Memory
     soul_file: str = "soul.md"
     embedding_model: str = ""

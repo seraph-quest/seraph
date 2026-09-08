@@ -2,13 +2,19 @@ import asyncio
 import contextvars
 import json
 import logging
+from dataclasses import replace
 from time import perf_counter
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request as HttpRequest
 
 from src.approval.exceptions import ApprovalRequired
 from src.approval.repository import approval_repository
-from src.approval.runtime import reset_runtime_context, set_runtime_context
+from src.approval.runtime import (
+    get_current_approval_mode,
+    get_current_trust_principal,
+    reset_runtime_context,
+    set_runtime_context,
+)
 from src.agent.exceptions import ClarificationRequired
 from config.settings import settings
 from src.agent.direct_chat import run_direct_local_chat, should_use_direct_local_chat
@@ -24,6 +30,8 @@ from src.operators.local_codex import ExternalAgentRuntimeRemovedError
 from src.tools.policy import get_current_tool_policy_mode
 from src.vault.redaction import redact_secrets_in_text
 from src.vlm_runtime import direct_local_chat_route_error
+from src.security.trust_contract import AuthorityGrant, PrincipalType, TrustPrincipal
+from src.auth.service import bind_operator_principal
 from src.llm_runtime import (
     _finish_request,
     _mark_request_timed_out,
@@ -37,10 +45,113 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
+class ChatAuthorityError(Exception):
+    """Raised when an interactive chat turn has no usable operator authority."""
+
+    def __init__(self, message: str, *, status_code: int, code: str):
+        super().__init__(message)
+        self.message = message
+        self.status_code = status_code
+        self.code = code
+
+
+def _bind_chat_principal(
+    session_id: str,
+    *,
+    principal: TrustPrincipal | None = None,
+    operator=None,
+) -> TrustPrincipal:
+    """Bind an already authenticated operator to the server-owned chat session.
+
+    The API route has no authority to mint an operator identity.  A trusted
+    ingress boundary must bind the principal to the current runtime context;
+    this helper only validates that identity and narrows it to the chat
+    session selected by Seraph.
+    """
+    if operator is not None:
+        principal = bind_operator_principal(operator, session_id)
+    if principal is None:
+        principal = get_current_trust_principal()
+    if principal is None:
+        raise ChatAuthorityError(
+            "Chat requires an authenticated operator before OpenRouter inference.",
+            status_code=401,
+            code="chat_authentication_required",
+        )
+    try:
+        principal_type = PrincipalType(principal.principal_type)
+    except (TypeError, ValueError):
+        raise ChatAuthorityError(
+            "Chat principal identity is invalid; inference is blocked.",
+            status_code=401,
+            code="chat_principal_invalid",
+        ) from None
+    if (
+        not principal.authenticated
+        or principal.revoked
+        or not principal.principal_id
+        or principal_type is PrincipalType.ANONYMOUS
+    ):
+        raise ChatAuthorityError(
+            "Chat requires an authenticated, active operator principal.",
+            status_code=401,
+            code="chat_principal_unauthorized",
+        )
+    if principal_type is not PrincipalType.OPERATOR:
+        raise ChatAuthorityError(
+            "Interactive chat requires an operator principal.",
+            status_code=403,
+            code="chat_principal_forbidden",
+        )
+    grants = set()
+    for grant in principal.grants:
+        try:
+            grants.add(AuthorityGrant(grant))
+        except (TypeError, ValueError):
+            continue
+    if AuthorityGrant.MODEL_INFERENCE not in grants:
+        raise ChatAuthorityError(
+            "Chat principal lacks model-inference authority.",
+            status_code=403,
+            code="chat_model_inference_forbidden",
+        )
+    normalized_session_id = str(session_id or "").strip()
+    if not normalized_session_id:
+        raise ChatAuthorityError(
+            "Chat requires a server-owned session identity.",
+            status_code=403,
+            code="chat_session_missing",
+        )
+    if principal.session_id and principal.session_id != normalized_session_id:
+        raise ChatAuthorityError(
+            "Chat principal is not bound to this session.",
+            status_code=403,
+            code="chat_principal_session_mismatch",
+        )
+    return replace(principal, session_id=normalized_session_id)
+
+
 @router.post("/chat", response_model=ChatResponse)
-async def chat(request: ChatRequest):
+async def chat(request: ChatRequest, http_request: HttpRequest):
     """Send a message and receive an AI response."""
     session = await session_manager.get_or_create(request.session_id)
+    try:
+        operator = getattr(http_request.state, "operator", None)
+        if operator is None:
+            raise ChatAuthorityError(
+                "Chat requires an authenticated operator ingress session.",
+                status_code=401,
+                code="chat_authentication_required",
+            )
+        chat_principal = _bind_chat_principal(
+            session.id,
+            operator=operator,
+        )
+    except ChatAuthorityError as exc:
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail={"code": exc.code, "message": exc.message},
+        ) from exc
     await session_manager.add_message(session.id, "user", request.message)
 
     # Check onboarding status
@@ -79,6 +190,11 @@ async def chat(request: ChatRequest):
             raise HTTPException(status_code=503, detail=safe_detail)
         llm_request_id = f"direct-rest:{session.id}:{started_at}"
         _register_request(llm_request_id)
+        auth_tokens = set_runtime_context(
+            session.id,
+            get_current_approval_mode(),
+            trust_principal=chat_principal,
+        )
         try:
             response_text = await asyncio.wait_for(
                 run_direct_local_chat(
@@ -127,6 +243,7 @@ async def chat(request: ChatRequest):
             )
             raise HTTPException(status_code=500, detail=safe_detail)
         finally:
+            reset_runtime_context(auth_tokens)
             _finish_request(llm_request_id)
 
         await session_manager.add_message(session.id, "assistant", response_text)
@@ -170,7 +287,11 @@ async def chat(request: ChatRequest):
         started_at = perf_counter()
         llm_request_id = f"agent-rest:{session.id}:{started_at}"
         _register_request(llm_request_id)
-        tokens = set_runtime_context(session.id, obs_manager.get_context().approval_mode)
+        tokens = set_runtime_context(
+            session.id,
+            obs_manager.get_context().approval_mode,
+            trust_principal=chat_principal,
+        )
         llm_request_token = set_current_llm_request_id(llm_request_id)
         run_ctx = contextvars.copy_context()
         reset_runtime_context(tokens)

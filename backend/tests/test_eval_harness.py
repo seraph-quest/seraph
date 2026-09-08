@@ -5436,159 +5436,106 @@ def test_runtime_eval_scenarios_expose_expected_details():
     assert details_by_name["vault_runtime_audit"]["missing_delete_reason"] == "missing_secret"
     assert details_by_name["vault_runtime_audit"]["failed_operation"] == "get"
     assert details_by_name["vault_runtime_audit"]["failed_error"] == "bad decrypt"
-    assert details_by_name["runtime_model_overrides"]["completion_runtime_profile"] == "default"
-    assert details_by_name["runtime_model_overrides"]["completion_model"] == "openai/gpt-4o-mini"
-    assert details_by_name["runtime_model_overrides"]["agent_runtime_profile"] == "default"
-    assert details_by_name["runtime_model_overrides"]["agent_model"] == "openai/gpt-4.1-mini"
-    assert details_by_name["runtime_fallback_overrides"]["completion_attempted_models"] == [
-        "openrouter/anthropic/claude-sonnet-4",
-        "openai/gpt-4.1-mini",
-        "openai/gpt-4.1-nano",
-    ]
-    assert details_by_name["runtime_fallback_overrides"]["completion_final_model"] == "openai/gpt-4.1-nano"
-    assert details_by_name["runtime_fallback_overrides"]["agent_fallback_models"] == [
-        "openai/gpt-4.1-mini",
-        "openai/gpt-4.1-nano",
-    ]
-    assert details_by_name["runtime_profile_preferences"]["completion_runtime_profile"] == "local"
-    assert details_by_name["runtime_profile_preferences"]["completion_attempted_models"] == [
-        "ollama/llama3.2",
-        "openrouter/anthropic/claude-sonnet-4",
-    ]
-    assert details_by_name["runtime_profile_preferences"]["completion_final_model"] == "openrouter/anthropic/claude-sonnet-4"
-    assert details_by_name["runtime_profile_preferences"]["agent_runtime_profile"] == "local"
-    assert details_by_name["runtime_profile_preferences"]["agent_fallback_models"] == [
-        "openrouter/anthropic/claude-sonnet-4",
-        "openai/gpt-4.1-mini",
-    ]
-    assert details_by_name["runtime_path_patterns"]["wildcard_runtime_profile"] == "local"
-    assert details_by_name["runtime_path_patterns"]["wildcard_model"] == "openai/gpt-4.1-mini"
-    assert details_by_name["runtime_path_patterns"]["wildcard_fallback_models"] == [
-        "openai/gpt-4.1-mini",
-        "openai/gpt-4.1-nano",
-    ]
-    assert details_by_name["runtime_path_patterns"]["exact_runtime_profile"] == "local"
-    assert details_by_name["runtime_path_patterns"]["exact_model"] == "ollama/coder"
-    assert details_by_name["runtime_path_patterns"]["exact_fallback_models"] == [
-        "openrouter/anthropic/claude-sonnet-4",
-        "openai/gpt-4o-mini",
-        "openai/gpt-4.1-mini",
-    ]
-    assert details_by_name["provider_policy_capabilities"]["chat_runtime_profile"] == "local"
-    assert details_by_name["provider_policy_capabilities"]["chat_fallback_models"] == [
-        "openai/gpt-4.1-mini",
-        "openrouter/anthropic/claude-sonnet-4",
-        "openai/gpt-4.1-nano",
-        "openai/gpt-4o-mini",
-    ]
-    assert details_by_name["provider_policy_capabilities"]["completion_attempted_models"] == [
-        "openrouter/anthropic/claude-sonnet-4",
-        "openai/gpt-4o-mini",
-    ]
-    assert details_by_name["provider_policy_capabilities"]["completion_final_model"] == "openai/gpt-4o-mini"
-    assert details_by_name["provider_policy_scoring"]["completion_attempted_models"] == [
-        "openrouter/anthropic/claude-sonnet-4",
-        "openai/gpt-4.1-nano",
-    ]
-    assert details_by_name["provider_policy_scoring"]["completion_final_model"] == "openai/gpt-4.1-nano"
-    assert details_by_name["provider_policy_scoring"]["completion_weighted_scores"] == {
-        "fast": 5.0,
-        "cheap": 4.0,
-        "tool_use": 4.0,
-    }
-    assert details_by_name["provider_policy_scoring"]["agent_weighted_scores"] == {
-        "fast": 6.0,
-        "reasoning": 4.0,
-        "tool_use": 4.0,
-    }
-    assert details_by_name["provider_policy_scoring"]["agent_fallback_models"] == [
-        "openai/gpt-4.1-mini",
-        "openai/gpt-4o-mini",
-    ]
-    assert details_by_name["provider_policy_safeguards"]["attempted_models"] == ["openai/gpt-4o-mini"]
-    assert details_by_name["provider_policy_safeguards"]["selected_model"] == "openai/gpt-4o-mini"
-    assert details_by_name["provider_policy_safeguards"]["rerouted_from_policy_guardrails"] is True
-    assert details_by_name["provider_policy_safeguards"]["required_policy_intents"] == ["tool_use"]
-    assert details_by_name["provider_policy_safeguards"]["max_cost_tier"] == "medium"
-    assert details_by_name["provider_policy_safeguards"]["max_latency_tier"] == "medium"
-    assert details_by_name["provider_policy_safeguards"]["required_task_class"] == "chat"
-    assert details_by_name["provider_policy_safeguards"]["max_budget_class"] == "medium"
-    assert details_by_name["provider_policy_safeguards"]["primary_missing_required_intents"] == ["tool_use"]
-    assert details_by_name["provider_policy_safeguards"]["primary_cost_guardrail"] is False
-    assert details_by_name["provider_policy_safeguards"]["primary_latency_guardrail"] is False
-    assert details_by_name["provider_policy_safeguards"]["primary_task_class"] == "analysis"
-    assert details_by_name["provider_policy_safeguards"]["primary_task_guardrail"] is False
-    assert details_by_name["provider_policy_safeguards"]["primary_budget_class"] == "high"
-    assert details_by_name["provider_policy_safeguards"]["primary_budget_guardrail"] is False
-    assert details_by_name["provider_routing_decision_audit"]["completion_selected_model"] == (
-        "openrouter/anthropic/claude-sonnet-4"
-    )
-    assert details_by_name["provider_routing_decision_audit"]["completion_attempt_order"] == [
-        "openrouter/anthropic/claude-sonnet-4",
-        "openai/gpt-4o-mini",
-        "openai/gpt-4.1-nano",
-        "openai/gpt-4.1-mini",
-    ]
-    assert details_by_name["provider_routing_decision_audit"]["completion_budget_steering_mode"] == "prefer_lower_budget"
-    assert details_by_name["provider_routing_decision_audit"]["completion_selected_route_score"] < 0.0
-    assert details_by_name["provider_routing_decision_audit"]["completion_selection_policy_mode"] == (
-        "retain_primary_until_reroute"
-    )
-    assert details_by_name["provider_routing_decision_audit"]["completion_planning_winner_model"] == (
-        "openai/gpt-4o-mini"
-    )
-    assert details_by_name["provider_routing_decision_audit"]["completion_planning_winner_selected"] is False
-    assert details_by_name["provider_routing_decision_audit"]["completion_best_alternate_model"] == (
-        "openai/gpt-4o-mini"
-    )
-    assert details_by_name["provider_routing_decision_audit"]["completion_selected_vs_best_alternate_margin"] < 0.0
-    assert details_by_name["provider_routing_decision_audit"]["completion_selected_failure_risk_score"] == 0.0
-    assert details_by_name["provider_routing_decision_audit"]["completion_selected_production_readiness"] == "ready"
-    assert details_by_name["provider_routing_decision_audit"]["completion_route_explanation"].startswith(
-        "selected openrouter/anthropic/claude-sonnet-4"
-    )
-    assert details_by_name["provider_routing_decision_audit"]["completion_route_comparison_summary"].startswith(
-        "retained primary openrouter/anthropic/claude-sonnet-4 even though openai/gpt-4o-mini"
-    )
-    assert details_by_name["provider_routing_decision_audit"]["completion_simulated_route_count"] == 4
-    assert details_by_name["provider_routing_decision_audit"]["completion_first_route_entry"] == (
-        "openrouter/anthropic/claude-sonnet-4"
-    )
-    assert details_by_name["provider_routing_decision_audit"]["completion_rejected_summary_count"] == 3
-    assert details_by_name["provider_routing_decision_audit"]["completion_rejected_models"] == [
-        "openai/gpt-4o-mini",
-        "openai/gpt-4.1-nano",
-        "openai/gpt-4.1-mini",
-    ]
-    assert details_by_name["provider_routing_decision_audit"]["agent_selected_model"] == "ollama/llama3.2"
-    assert details_by_name["provider_routing_decision_audit"]["agent_attempt_order"] == [
-        "ollama/llama3.2",
-        "openai/gpt-4.1-nano",
-        "openai/gpt-4o-mini",
-    ]
-    assert details_by_name["provider_routing_decision_audit"]["agent_budget_steering_mode"] == "none"
-    assert details_by_name["provider_routing_decision_audit"]["agent_selection_policy_mode"] == (
-        "highest_ranked_attemptable"
-    )
-    assert details_by_name["provider_routing_decision_audit"]["agent_planning_winner_model"] == "ollama/llama3.2"
-    assert details_by_name["provider_routing_decision_audit"]["agent_planning_winner_selected"] is True
-    assert details_by_name["provider_routing_decision_audit"]["agent_best_alternate_model"] == (
-        "openai/gpt-4.1-nano"
-    )
-    assert details_by_name["provider_routing_decision_audit"]["agent_selected_vs_best_alternate_margin"] >= 0.0
-    assert details_by_name["provider_routing_decision_audit"]["agent_primary_decision"] == "skipped"
-    assert details_by_name["provider_routing_decision_audit"]["agent_primary_feedback_state"] == "cooldown"
-    assert details_by_name["provider_routing_decision_audit"]["agent_primary_failure_risk_score"] > 0.0
-    assert details_by_name["provider_routing_decision_audit"]["agent_route_comparison_summary"].startswith(
-        "selected ollama/llama3.2 over openai/gpt-4.1-nano"
-    )
-    assert "unhealthy_cooldown" in details_by_name["provider_routing_decision_audit"][
-        "agent_primary_reason_codes"
-    ]
+    governed_model = "openrouter/anthropic/claude-sonnet-4"
+    for scenario_name in (
+        "runtime_model_overrides",
+        "runtime_fallback_overrides",
+        "runtime_profile_preferences",
+        "provider_policy_capabilities",
+        "provider_policy_scoring",
+        "provider_routing_decision_audit",
+    ):
+        scenario_details = details_by_name[scenario_name]
+        assert scenario_details["principal_authenticated"] is True
+        assert scenario_details["principal_grants"] == ["model_inference"]
+        assert scenario_details["allowed_provider_kinds"] == ["openrouter"]
+        assert scenario_details["fallback_allowed"] is False
+        assert scenario_details["egress_class"] == "cloud_allowed_full"
+        assert scenario_details["transport_api_key_present"] is True
+        assert scenario_details["transport_call_count"] == 1
+        assert scenario_details["receipt_finalized"] is True
+        assert scenario_details["receipt_outcome"] == "succeeded"
+
+    assert details_by_name["runtime_model_overrides"]["completion_runtime_profile"] == "openrouter"
+    assert details_by_name["runtime_model_overrides"]["completion_model"] == governed_model
+    assert details_by_name["runtime_model_overrides"]["agent_runtime_profile"] == "openrouter"
+    assert details_by_name["runtime_model_overrides"]["agent_model"] == governed_model
+    assert details_by_name["runtime_model_overrides"]["agent_fallback_models"] == []
+    assert details_by_name["runtime_model_overrides"]["override_ignored"] is True
+
+    assert details_by_name["runtime_fallback_overrides"]["completion_attempted_models"] == [governed_model]
+    assert details_by_name["runtime_fallback_overrides"]["completion_final_model"] == governed_model
+    assert details_by_name["runtime_fallback_overrides"]["fallback_forbidden"] is True
+
+    assert details_by_name["runtime_profile_preferences"]["completion_runtime_profile"] == "openrouter"
+    assert details_by_name["runtime_profile_preferences"]["completion_attempted_models"] == [governed_model]
+    assert details_by_name["runtime_profile_preferences"]["completion_final_model"] == governed_model
+    assert details_by_name["runtime_profile_preferences"]["agent_runtime_profile"] == "openrouter"
+    assert details_by_name["runtime_profile_preferences"]["local_preference_ignored"] is True
+
+    assert details_by_name["runtime_path_patterns"]["wildcard_runtime_profile"] == "openrouter"
+    assert details_by_name["runtime_path_patterns"]["wildcard_model"] == governed_model
+    assert details_by_name["runtime_path_patterns"]["exact_runtime_profile"] == "openrouter"
+    assert details_by_name["runtime_path_patterns"]["exact_model"] == governed_model
+    assert details_by_name["runtime_path_patterns"]["legacy_path_rules_ignored"] is True
+
+    assert details_by_name["provider_policy_capabilities"]["chat_runtime_profile"] == "openrouter"
+    assert details_by_name["provider_policy_capabilities"]["completion_attempted_models"] == [governed_model]
+    assert details_by_name["provider_policy_capabilities"]["completion_final_model"] == governed_model
+    assert details_by_name["provider_policy_capabilities"]["legacy_capability_policy_ignored"] is True
+
+    assert details_by_name["provider_policy_scoring"]["completion_attempted_models"] == [governed_model]
+    assert details_by_name["provider_policy_scoring"]["completion_final_model"] == governed_model
+    assert details_by_name["provider_policy_scoring"]["completion_weighted_scores"] == {}
+    assert details_by_name["provider_policy_scoring"]["agent_weighted_scores"] == {}
+    assert details_by_name["provider_policy_scoring"]["policy_scoring_ignored"] is True
+
+    safeguards = details_by_name["provider_policy_safeguards"]
+    assert safeguards["attempted_models"] == []
+    assert safeguards["governed_primary_model"] == governed_model
+    assert safeguards["rerouted_from_policy_guardrails"] is True
+    assert safeguards["required_policy_intents"] == ["tool_use"]
+    assert safeguards["max_cost_tier"] == "medium"
+    assert safeguards["max_latency_tier"] == "medium"
+    assert safeguards["required_task_class"] == "chat"
+    assert safeguards["max_budget_class"] == "medium"
+    assert safeguards["primary_missing_required_intents"] == []
+    assert safeguards["primary_cost_guardrail"] is True
+    assert safeguards["primary_latency_guardrail"] is True
+    assert safeguards["primary_task_class"] == "general"
+    assert safeguards["primary_task_guardrail"] is False
+    assert safeguards["primary_budget_class"] == "medium"
+    assert safeguards["primary_budget_guardrail"] is True
+    assert safeguards["guardrails_cannot_select_legacy_provider"] is True
+    assert safeguards["transport_suppressed"] is True
+    assert safeguards["no_compliant_route"] is True
+    assert safeguards["transport_call_count"] == 0
+
+    routing = details_by_name["provider_routing_decision_audit"]
+    assert routing["completion_selected_model"] == governed_model
+    assert routing["completion_attempt_order"] == [governed_model]
+    assert routing["completion_budget_steering_mode"] == "none"
+    assert routing["completion_selected_route_score"] == 0.0
+    assert routing["completion_selection_policy_mode"] == "retain_primary_until_reroute"
+    assert routing["completion_planning_winner_model"] == governed_model
+    assert routing["completion_planning_winner_selected"] is True
+    assert routing["completion_best_alternate_model"] is None
+    assert routing["completion_selected_vs_best_alternate_margin"] is None
+    assert routing["completion_selected_failure_risk_score"] == 0.0
+    assert routing["completion_selected_production_readiness"] == "ready"
+    assert routing["completion_route_explanation"].startswith(f"selected {governed_model}")
+    assert routing["completion_route_comparison_summary"].startswith(f"selected {governed_model}")
+    assert routing["completion_simulated_route_count"] == 1
+    assert routing["completion_first_route_entry"] == governed_model
+    assert routing["completion_rejected_summary_count"] == 0
+    assert routing["completion_rejected_models"] == []
+    assert routing["route_is_single_governed_openrouter"] is True
     assert details_by_name["session_bound_llm_trace"]["session_id"] == "trace-session"
     assert details_by_name["session_bound_llm_trace"]["title_trace_has_request_id"] is True
     assert details_by_name["session_bound_llm_trace"]["consolidation_trace_has_request_id"] is True
     assert details_by_name["session_bound_llm_trace"]["request_ids_differ"] is True
+    assert details_by_name["session_bound_llm_trace"]["governed_openrouter_targets"] is True
+    assert details_by_name["session_bound_llm_trace"]["transport_call_count"] == 2
     assert details_by_name["session_consolidation_behavior"]["stored_memory_count"] == 2
     assert details_by_name["session_consolidation_behavior"]["soul_update_count"] == 1
     assert details_by_name["session_consolidation_behavior"]["memory_categories"] == ["fact", "goal"]
@@ -5698,20 +5645,22 @@ def test_runtime_eval_scenarios_expose_expected_details():
     assert details_by_name["procedural_memory_adaptation_behavior"]["adapted_bounded_context_has_timing_rule"] is True
     assert details_by_name["procedural_memory_adaptation_behavior"]["active_procedural_memory_count"] == 8
     assert details_by_name["procedural_memory_adaptation_behavior"]["bounded_snapshot_line_count"] <= 8
-    assert details_by_name["scheduled_local_runtime_profile"]["runtime_profile"] == "local"
+    assert details_by_name["scheduled_local_runtime_profile"]["runtime_profile"] == "openrouter"
     assert details_by_name["scheduled_local_runtime_profile"]["routed_models"] == {
-        "daily_briefing": "ollama/llama3.2",
-        "evening_review": "ollama/llama3.2",
-        "activity_digest": "ollama/llama3.2",
-        "weekly_activity_review": "ollama/llama3.2",
+        "daily_briefing": "openrouter/anthropic/claude-sonnet-4",
+        "evening_review": "openrouter/anthropic/claude-sonnet-4",
+        "activity_digest": "openrouter/anthropic/claude-sonnet-4",
+        "weekly_activity_review": "openrouter/anthropic/claude-sonnet-4",
     }
     assert details_by_name["scheduled_local_runtime_profile"]["routed_api_bases"] == {
-        "daily_briefing": "http://localhost:11434/v1",
-        "evening_review": "http://localhost:11434/v1",
-        "activity_digest": "http://localhost:11434/v1",
-        "weekly_activity_review": "http://localhost:11434/v1",
+        "daily_briefing": "https://openrouter.ai/api/v1",
+        "evening_review": "https://openrouter.ai/api/v1",
+        "activity_digest": "https://openrouter.ai/api/v1",
+        "weekly_activity_review": "https://openrouter.ai/api/v1",
     }
     assert details_by_name["scheduled_local_runtime_profile"]["delivery_count"] == 4
+    assert details_by_name["scheduled_local_runtime_profile"]["fallback_forbidden"] is True
+    assert details_by_name["scheduled_local_runtime_profile"]["route_event_count"] == 4
     assert details_by_name["process_recovery_boundary_behavior"]["session_scoped"] is True
     assert details_by_name["process_recovery_boundary_behavior"]["output_path_within_workspace"] is False
     assert details_by_name["process_recovery_boundary_behavior"]["output_path_under_runtime_tmp"] is True

@@ -26,6 +26,8 @@ from src.utils.background import drain_tracked_tasks
 from src.vlm_runtime import deferred_vlm_live_probe, effective_vlm_status
 from src.workflows.manager import workflow_manager
 from src.security.trust_contract import EgressClass
+from src.auth.middleware import OperatorAuthMiddleware
+from src.auth.service import validate_auth_configuration
 
 limiter = Limiter(key_func=get_remote_address, default_limits=["60/minute"])
 _LOCAL_DEV_ORIGIN_REGEX = r"https?://(localhost|127\.0\.0\.1)(:\d+)?$"
@@ -364,6 +366,7 @@ async def lifespan(app: FastAPI):
 
 
 def create_app() -> FastAPI:
+    validate_auth_configuration()
     app = FastAPI(
         title="Seraph AI Assistant",
         version="2026.4.11",
@@ -374,9 +377,21 @@ def create_app() -> FastAPI:
     app.state.limiter = limiter
     app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
+    # Keep the authentication boundary outside API handlers so model and
+    # capability authority cannot depend on model discretion. WebSocket
+    # routes perform the equivalent handshake check themselves.
+    app.add_middleware(OperatorAuthMiddleware)
+
+    configured_origins = [
+        value.strip().rstrip("/")
+        for value in settings.operator_auth_allowed_origins.split(",")
+        if value.strip()
+    ]
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["http://localhost:3000", "http://localhost:5173"],
+        allow_origins=list(dict.fromkeys([
+            "http://localhost:3000", "http://localhost:5173", *configured_origins
+        ])),
         allow_origin_regex=_LOCAL_DEV_ORIGIN_REGEX,
         allow_credentials=True,
         allow_methods=["*"],

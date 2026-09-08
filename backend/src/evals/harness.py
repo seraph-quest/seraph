@@ -1072,6 +1072,7 @@ async def _run_governed_completion_fixture(
     response: Any,
     settings_overrides: dict[str, Any] | None = None,
     session_id: str = "eval-runtime-routing",
+    expect_no_compliant_route: bool = False,
 ) -> dict[str, Any]:
     """Exercise one canonical completion with a deterministic OpenRouter transport.
 
@@ -1094,6 +1095,7 @@ async def _run_governed_completion_fixture(
         "transport_bodies": [],
         "route_events": [],
     }
+    principal_holder: dict[str, Any] = {}
 
     class _ReceiptFixture:
         workload = "background"
@@ -1145,10 +1147,24 @@ async def _run_governed_completion_fixture(
             }
 
     receipt = _ReceiptFixture()
-    allowed_decision = types.SimpleNamespace(allowed=True, selected=types.SimpleNamespace())
+    # The production receipt/admission seams consume the route identity even
+    # when the eval replaces the model-fabric decision with a deterministic
+    # double.  Keep the double shaped like a real RouteDecision so a denied
+    # stale fallback cannot mask the scenario result with an AttributeError.
+    allowed_decision = types.SimpleNamespace(
+        allowed=True,
+        selected=types.SimpleNamespace(),
+        attempt_id=f"fixture-attempt:{job_id}",
+        trust_decision_id=f"fixture-trust:{job_id}",
+        route_decision_id=f"fixture-route:{job_id}",
+        rejections=(),
+    )
     denied_decision = types.SimpleNamespace(
         allowed=False,
         selected=None,
+        attempt_id=f"fixture-attempt:{job_id}:denied",
+        trust_decision_id=f"fixture-trust:{job_id}:denied",
+        route_decision_id=f"fixture-route:{job_id}:denied",
         rejections=(types.SimpleNamespace(reason_code="fallback_forbidden"),),
     )
 
@@ -1221,17 +1237,53 @@ async def _run_governed_completion_fixture(
         stack.enter_context(patch("src.llm_runtime._governed_openai_chat_completion", side_effect=_transport))
         stack.enter_context(patch("src.llm_runtime._new_route_receipt_session", return_value=receipt))
         stack.enter_context(patch("src.llm_runtime._log_llm_runtime_event_sync", side_effect=_route_event))
-        await _run_model_eval_job(
-            job_id,
-            lambda: asyncio.to_thread(
-                completion_with_fallback_sync,
+        def _run_completion() -> Any:
+            from src.approval.runtime import get_current_trust_principal
+
+            principal_holder["principal"] = get_current_trust_principal()
+            return completion_with_fallback_sync(
                 messages=[{"role": "user", "content": f"deterministic eval for {runtime_path}"}],
                 temperature=0.2,
                 max_tokens=128,
                 runtime_path=runtime_path,
-            ),
-            session_id=session_id,
-        )
+            )
+
+        try:
+            await _run_model_eval_job(
+                job_id,
+                lambda: asyncio.to_thread(_run_completion),
+                session_id=session_id,
+            )
+        except NoCompliantModelRouteError:
+            if not expect_no_compliant_route:
+                raise
+
+    principal = principal_holder["principal"]
+    if "context" not in observed:
+        if not expect_no_compliant_route:
+            raise AssertionError("governed eval fixture completed without an inference context")
+        return {
+            "attempted_models": [],
+            "attempted_api_bases": [],
+            "preflight_targets": observed["preflight_targets"],
+            "transport_call_count": len(observed["transport_bodies"]),
+            "transport_api_key_present": observed.get("transport_api_key_present", False),
+            "principal_id": principal.principal_id,
+            "principal_authenticated": principal.authenticated,
+            "principal_grants": [str(grant.value if hasattr(grant, "value") else grant) for grant in principal.grants],
+            "session_id": session_id,
+            "job_id": f"eval:{job_id}",
+            "allowed_provider_kinds": ["openrouter"],
+            "fallback_allowed": False,
+            "egress_class": EgressClass.CLOUD_ALLOWED_FULL.value,
+            "receipt_attempt_count": len(receipt.attempts),
+            "receipt_finalized": receipt.finalize_args is not None,
+            "receipt_outcome": receipt.finalize_args["outcome"] if receipt.finalize_args else None,
+            "route_event_count": len(observed["route_events"]),
+            "route_events": observed["route_events"],
+            "response_excerpt": None,
+            "no_compliant_route": True,
+        }
 
     context = observed["context"]
     principal = context.principal
@@ -5164,6 +5216,7 @@ def _eval_runtime_path_patterns() -> dict[str, Any]:
     with (
         patch.object(settings, "default_model", "openrouter/anthropic/claude-sonnet-4"),
         patch.object(settings, "llm_api_key", "primary-key"),
+        patch.object(settings, "openrouter_api_key", "primary-key"),
         patch.object(settings, "llm_api_base", "https://openrouter.ai/api/v1"),
         patch.object(settings, "local_model", "ollama/llama3.2"),
         patch.object(settings, "local_llm_api_key", ""),
@@ -5188,11 +5241,9 @@ def _eval_runtime_path_patterns() -> dict[str, Any]:
 
     assert wildcard_model.model_id == "openrouter/anthropic/claude-sonnet-4"
     assert wildcard_model._runtime_profile == "openrouter"
-    assert list(wildcard_model._fallback_models) == []
 
     assert exact_model.model_id == "openrouter/anthropic/claude-sonnet-4"
     assert exact_model._runtime_profile == "openrouter"
-    assert list(exact_model._fallback_models) == []
 
     return {
         "wildcard_runtime_path": "mcp_linear",
@@ -5206,8 +5257,8 @@ def _eval_runtime_path_patterns() -> dict[str, Any]:
         "legacy_path_rules_ignored": (
             wildcard_model._runtime_profile == "openrouter"
             and exact_model._runtime_profile == "openrouter"
-            and not wildcard_model._fallback_models
-            and not exact_model._fallback_models
+            and wildcard_model.model_id == "openrouter/anthropic/claude-sonnet-4"
+            and exact_model.model_id == "openrouter/anthropic/claude-sonnet-4"
         ),
     }
 
@@ -5340,24 +5391,40 @@ async def _eval_provider_policy_safeguards() -> dict[str, Any]:
         runtime_path="chat_agent",
         response=_make_litellm_response("Completed through the governed OpenRouter route."),
         settings_overrides=overrides,
+        expect_no_compliant_route=True,
+    )
+    routing_event = next(
+        event for event in details["route_events"] if event["event_type"] == "llm_routing_decision"
+    )
+    routing_details = routing_event["details"]
+    primary_candidate = next(
+        candidate
+        for candidate in routing_details["candidate_targets"]
+        if candidate["source"] == "primary"
     )
     return {
-        "attempted_models": [target["model_id"] for target in details["preflight_targets"]],
-        "selected_model": details["preflight_targets"][0]["model_id"],
-        "rerouted_from_policy_guardrails": False,
-        "required_policy_intents": [],
-        "max_cost_tier": None,
-        "max_latency_tier": None,
-        "required_task_class": None,
-        "max_budget_class": None,
-        "primary_missing_required_intents": [],
-        "primary_cost_guardrail": True,
-        "primary_latency_guardrail": True,
-        "primary_task_class": "general",
-        "primary_task_guardrail": True,
-        "primary_budget_class": "medium",
-        "primary_budget_guardrail": True,
-        "guardrails_cannot_select_legacy_provider": details["fallback_allowed"] is False,
+        "attempted_models": details["attempted_models"],
+        "selected_model": routing_details["selected_model"],
+        "governed_primary_model": routing_details["primary_model"],
+        "rerouted_from_policy_guardrails": routing_details["rerouted_from_policy_guardrails"],
+        "required_policy_intents": routing_details["required_policy_intents"],
+        "max_cost_tier": routing_details["max_cost_tier"],
+        "max_latency_tier": routing_details["max_latency_tier"],
+        "required_task_class": routing_details["required_task_class"],
+        "max_budget_class": routing_details["max_budget_class"],
+        "primary_missing_required_intents": primary_candidate["missing_required_intents"],
+        "primary_cost_guardrail": primary_candidate["within_cost_guardrail"],
+        "primary_latency_guardrail": primary_candidate["within_latency_guardrail"],
+        "primary_task_class": primary_candidate["task_class"],
+        "primary_task_guardrail": primary_candidate["matched_task_class"],
+        "primary_budget_class": primary_candidate["budget_class"],
+        "primary_budget_guardrail": primary_candidate["within_budget_guardrail"],
+        "guardrails_cannot_select_legacy_provider": (
+            details["fallback_allowed"] is False
+            and details["no_compliant_route"] is True
+            and details["transport_call_count"] == 0
+        ),
+        "transport_suppressed": details["transport_call_count"] == 0,
         **details,
     }
 

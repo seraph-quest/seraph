@@ -432,6 +432,68 @@ class GoalSnapshotToFileAdapter:
         self.last_receipt: dict[str, Any] | None = None
         self._resolved_workflow_binding: dict[str, Any] | None = None
 
+    # The snapshot adapter owns the durable execution contract.  Narrow
+    # workflow variants may override these hooks while retaining the same
+    # admission, authority, lease, artifact, readback, and recovery path.
+    def _capability_identifier(self) -> str:
+        return CAPABILITY_ID
+
+    def _workflow_identifier(self) -> str:
+        return WORKFLOW_NAME
+
+    def _workflow_tool_identifier(self) -> str:
+        return WORKFLOW_TOOL_NAME
+
+    def _allowed_workflow_steps(self) -> tuple[str, ...]:
+        return _ALLOWED_WORKFLOW_STEP_SEQUENCE
+
+    def _canonical_workflow_steps(self) -> tuple[dict[str, Any], ...]:
+        return _CANONICAL_WORKFLOW_STEP_DEFINITIONS
+
+    def _authority_source_identifier(self) -> str:
+        return _AUTHORITY_SOURCE_ID
+
+    def _authority_egress_class(self) -> EgressClass:
+        return EgressClass.LOCAL_ONLY
+
+    def _authority_operations(self) -> tuple[str, ...]:
+        return ("write_file",)
+
+    def _authority_network_hosts(self) -> tuple[str, ...]:
+        return ()
+
+    def _resource_claims(self) -> tuple[str, ...]:
+        return ("workspace_read", "workspace_write")
+
+    def _artifact_type(self) -> str:
+        return "goal_snapshot"
+
+    def _workflow_inputs(self, path: str) -> dict[str, Any]:
+        return {"file_path": path}
+
+    def _job_identifier(self, candidate: GoalCandidateDecision) -> str:
+        return "job_goal_snapshot_" + _safe_digest(
+            {
+                "candidate": candidate.dedupe_key,
+                "owner": self.request.owner_principal_id,
+                "service": self.request.service_id,
+                "origin": "scheduler" if self.request.parent_job_id else "operator",
+            }
+        )[:24]
+
+    def _idempotency_scope(self) -> str:
+        return (
+            "goal-snapshot-to-file-scheduler"
+            if self.request.parent_job_id
+            else "goal-snapshot-to-file"
+        )
+
+    def _success_reason(self) -> str:
+        return "goal_snapshot_executed_and_verified"
+
+    def _extra_evidence_refs(self, readback: _Readback) -> tuple[str, ...]:
+        return ()
+
     @staticmethod
     def _approval_requirement(
         context: dict[str, Any] | None,
@@ -520,16 +582,18 @@ class GoalSnapshotToFileAdapter:
     ) -> dict[str, Any]:
         """Return the immutable workflow contract carried by this capability."""
 
-        step_sequence = list(_ALLOWED_WORKFLOW_STEP_SEQUENCE)
+        step_sequence = list(self._allowed_workflow_steps())
         binding = {
-            "workflow_name": WORKFLOW_NAME,
+            "workflow_name": self._workflow_identifier(),
             "workflow_version": self.request.capability_version,
             "step_sequence": step_sequence,
             "step_sequence_digest": _safe_digest(step_sequence),
             "workflow_definition_digest": _workflow_definition_digest(
-                workflow_name=WORKFLOW_NAME,
+                workflow_name=self._workflow_identifier(),
                 workflow_version=self.request.capability_version,
                 step_sequence=step_sequence,
+                workflow_tool_name=self._workflow_tool_identifier(),
+                step_definitions=self._canonical_workflow_steps(),
             ),
             "binding_mode": "exact_step_sequence",
             "binding_status": status,
@@ -583,18 +647,18 @@ class GoalSnapshotToFileAdapter:
             )
         return definitions
 
-    @staticmethod
-    def _sequence_mismatch_reason(sequence: list[str] | None) -> str | None:
+    def _sequence_mismatch_reason(self, sequence: list[str] | None) -> str | None:
         if sequence is None or not sequence:
             return "workflow_step_sequence_missing"
-        if sequence == list(_ALLOWED_WORKFLOW_STEP_SEQUENCE):
+        expected_sequence = list(self._allowed_workflow_steps())
+        if sequence == expected_sequence:
             return None
-        expected = set(_ALLOWED_WORKFLOW_STEP_SEQUENCE)
+        expected = set(expected_sequence)
         if any(tool_name not in expected for tool_name in sequence):
             return "workflow_step_sequence_extra"
-        if len(sequence) < len(_ALLOWED_WORKFLOW_STEP_SEQUENCE) or not expected.issubset(sequence):
+        if len(sequence) < len(expected_sequence) or not expected.issubset(sequence):
             return "workflow_step_sequence_missing"
-        if len(sequence) == len(_ALLOWED_WORKFLOW_STEP_SEQUENCE) and set(sequence) == expected:
+        if len(sequence) == len(expected_sequence) and set(sequence) == expected:
             return "workflow_step_sequence_reordered"
         return "workflow_step_sequence_mismatch"
 
@@ -643,7 +707,7 @@ class GoalSnapshotToFileAdapter:
                 observed_version=observed_version,
                 observed_sequence=observed_sequence,
             )
-        if observed_name != WORKFLOW_NAME:
+        if observed_name != self._workflow_identifier():
             return self._rejected_workflow_binding(
                 reason="workflow_name_mismatch",
                 observed_name=observed_name,
@@ -672,7 +736,7 @@ class GoalSnapshotToFileAdapter:
         while current is not None and id(current) not in visited:
             visited.add(id(current))
             tool_name = _text(getattr(current, "name", None))
-            if tool_name and tool_name != WORKFLOW_TOOL_NAME:
+            if tool_name and tool_name != self._workflow_tool_identifier():
                 return self._rejected_workflow_binding(
                     reason="workflow_tool_name_mismatch",
                     observed_name=observed_name,
@@ -703,14 +767,14 @@ class GoalSnapshotToFileAdapter:
                         observed_version=definition_version,
                         observed_sequence=definition_steps,
                     )
-                if definition_name != WORKFLOW_NAME:
+                if definition_name != self._workflow_identifier():
                     return self._rejected_workflow_binding(
                         reason="workflow_name_mismatch",
                         observed_name=definition_name,
                         observed_version=definition_version,
                         observed_sequence=definition_steps,
                     )
-                if definition_tool_name and definition_tool_name != WORKFLOW_TOOL_NAME:
+                if definition_tool_name and definition_tool_name != self._workflow_tool_identifier():
                     return self._rejected_workflow_binding(
                         reason="workflow_tool_name_mismatch",
                         observed_name=definition_name,
@@ -815,13 +879,14 @@ class GoalSnapshotToFileAdapter:
                 deadline_seconds=_AUTHORITY_POLICY_DEADLINE_SECONDS,
             )
             scope = CapabilityScope(
-                operations=("write_file",),
+                operations=self._authority_operations(),
                 paths=(str(root),),
-                sources=(_AUTHORITY_SOURCE_ID,),
-                egress_class=EgressClass.LOCAL_ONLY,
+                sources=(self._authority_source_identifier(),),
+                egress_class=self._authority_egress_class(),
+                network_hosts=self._authority_network_hosts(),
             )
             policy = CapabilityPolicy(
-                capability_id=CAPABILITY_ID,
+                capability_id=self._capability_identifier(),
                 capability_version=self.request.capability_version,
                 owner_id=self.request.owner_principal_id,
                 principal_type=PrincipalType.SERVICE,
@@ -840,7 +905,7 @@ class GoalSnapshotToFileAdapter:
             global_policy = GlobalCapabilityPolicy(
                 scope=policy.scope,
                 resource_limits=policy.resource_limits,
-                allowed_capabilities=(CAPABILITY_ID,),
+                allowed_capabilities=(self._capability_identifier(),),
                 allowed_versions=(self.request.capability_version,),
                 expires_at=self.request.deadline_at.timestamp(),
             )
@@ -873,8 +938,8 @@ class GoalSnapshotToFileAdapter:
             deadline_at=self.request.deadline_at.timestamp(),
             now=now,
             path=str(workspace_path),
-            source_id=_AUTHORITY_SOURCE_ID,
-            egress_class=EgressClass.LOCAL_ONLY,
+            source_id=self._authority_source_identifier(),
+            egress_class=self._authority_egress_class(),
             goal_id=goal_id,
             resource_type="workspace_file",
             resource_id="goal-snapshot:" + _safe_digest(
@@ -901,7 +966,7 @@ class GoalSnapshotToFileAdapter:
             "request_digest": _safe_digest({"job_id": job_id, "path": path}),
             "decision_id": "authority_failure_" + _safe_digest({"job_id": job_id, "reason": reason})[:24],
             "degradation": "blocked_before_effect",
-            "capability_id": CAPABILITY_ID,
+            "capability_id": self._capability_identifier(),
             "capability_version": self.request.capability_version,
             "identity": {
                 "owner_digest": _safe_digest({"owner_id": self.request.owner_principal_id}),
@@ -912,8 +977,8 @@ class GoalSnapshotToFileAdapter:
             "scope": {
                 "operation": "write_file",
                 "path_digest": _safe_digest({"path": path}),
-                "source_digest": _safe_digest({"source_id": _AUTHORITY_SOURCE_ID}),
-                "egress_class": EgressClass.LOCAL_ONLY.value,
+                "source_digest": _safe_digest({"source_id": self._authority_source_identifier()}),
+                "egress_class": self._authority_egress_class().value,
             },
             "content": {
                 "raw_content_stored": False,
@@ -1047,10 +1112,10 @@ class GoalSnapshotToFileAdapter:
         workflow_binding: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         effect = _text(getattr(decision, "effect", None)) or _text(receipt.get("effect")) or "deny"
-        stable_receipt = GoalSnapshotToFileAdapter._stable_authority_receipt(receipt)
+        stable_receipt = self._stable_authority_receipt(receipt)
         stable_request_digest = _safe_digest(
             {
-                "capability_id": CAPABILITY_ID,
+                "capability_id": self._capability_identifier(),
                 "capability_version": self.request.capability_version,
                 "receipt": stable_receipt,
             }
@@ -1060,7 +1125,7 @@ class GoalSnapshotToFileAdapter:
             {"request": stable_request_digest, "reason": stable_reason}
         )[:24]
         return {
-            "capability_id": CAPABILITY_ID,
+            "capability_id": self._capability_identifier(),
             "capability_version": self.request.capability_version,
             "required_grant": AuthorityGrant.CAPABILITY_EXECUTE.value,
             "principal": material.principal.principal_id if material else self.request.owner_principal_id,
@@ -1097,7 +1162,7 @@ class GoalSnapshotToFileAdapter:
             "approval_context": self._safe_approval_context(approval_context),
             "permissions": {
                 "workspace_relative_output_only": True,
-                "allowed_step_tools": ["get_goals", "write_file"],
+                "allowed_step_tools": list(self._allowed_workflow_steps()),
             },
             "workflow_binding": workflow_binding,
         }
@@ -1120,7 +1185,7 @@ class GoalSnapshotToFileAdapter:
             return self._blocked("candidate_output_path_mismatch")
         if path != request_path:
             return self._blocked("candidate_output_path_mismatch")
-        if candidate.capability_id != CAPABILITY_ID or candidate.capability_version != self.request.capability_version:
+        if candidate.capability_id != self._capability_identifier() or candidate.capability_version != self.request.capability_version:
             return self._blocked("capability_contract_mismatch")
         if candidate.goal_id != self.request.goal_id or candidate.goal_revision != self.request.goal_revision:
             return self._blocked("request_goal_binding_mismatch")
@@ -1143,7 +1208,7 @@ class GoalSnapshotToFileAdapter:
             and workflow_binding.get("binding_status") == "rejected"
             else None
         )
-        job_id = _job_id(candidate, self.request)
+        job_id = self._job_identifier(candidate)
         runner_owner = f"{self.request.service_id}:{job_id}"
         if self.request.cancel_requested:
             authority_material = None
@@ -1185,8 +1250,8 @@ class GoalSnapshotToFileAdapter:
         declared_authority.update(
             {
                 "goal_revision": candidate.goal_revision,
-                "workflow_name": WORKFLOW_NAME,
-                "workflow_tool_name": WORKFLOW_TOOL_NAME,
+                "workflow_name": self._workflow_identifier(),
+                "workflow_tool_name": self._workflow_tool_identifier(),
                 "workflow_available": workflow_tool is not None,
                 "workflow_blocked_reason": workflow_reason,
             }
@@ -1202,19 +1267,15 @@ class GoalSnapshotToFileAdapter:
                 job_id=job_id,
                 owner_kind="service",
                 owner_principal_id=self.request.owner_principal_id,
-                job_kind=CAPABILITY_ID,
+                job_kind=self._capability_identifier(),
                 capability_version=self.request.capability_version,
-                idempotency_scope=(
-                    "goal-snapshot-to-file-scheduler"
-                    if self.request.parent_job_id
-                    else "goal-snapshot-to-file"
-                ),
+                idempotency_scope=self._idempotency_scope(),
                 idempotency_key=candidate.dedupe_key,
             ),
             inputs={
                 "goal_id": candidate.goal_id,
                 "goal_revision": candidate.goal_revision,
-                "file_path": path,
+                **self._workflow_inputs(path),
                 "workflow_binding": workflow_binding,
             },
             session_id=self.request.session_id,
@@ -1224,7 +1285,7 @@ class GoalSnapshotToFileAdapter:
             goal_revision=candidate.goal_revision,
             candidate_id=candidate.candidate_id,
             priority=self.request.priority,
-            resource_claims=("workspace_read", "workspace_write"),
+            resource_claims=self._resource_claims(),
             declared_authority=declared_authority,
             deadline_at=self.request.deadline_at,
             max_attempts=1,
@@ -1349,7 +1410,7 @@ class GoalSnapshotToFileAdapter:
                 effect_type="workflow_invocation",
                 status="blocked",
                 details={
-                    "workflow_name": WORKFLOW_NAME,
+                    "workflow_name": self._workflow_identifier(),
                     "reason": workflow_reason or "workflow_unavailable",
                     "workflow_binding": workflow_binding,
                 },
@@ -1417,7 +1478,7 @@ class GoalSnapshotToFileAdapter:
                     effect_type="workflow_invocation",
                     status="blocked",
                     details={
-                        "workflow_name": WORKFLOW_NAME,
+                        "workflow_name": self._workflow_identifier(),
                         "reason": "approval_required",
                         "workflow_binding": workflow_binding,
                     },
@@ -1451,7 +1512,7 @@ class GoalSnapshotToFileAdapter:
                 effect_type="workflow_invocation",
                 status="failed",
                 details={
-                    "workflow_name": WORKFLOW_NAME,
+                    "workflow_name": self._workflow_identifier(),
                     "error_type": type(exc).__name__,
                     "workflow_binding": workflow_binding,
                 },
@@ -1477,7 +1538,7 @@ class GoalSnapshotToFileAdapter:
             effect_type="workflow_invocation",
             status="failed" if _text(raw_result).startswith("Error:") else "succeeded",
             details={
-                "workflow_name": WORKFLOW_NAME,
+                "workflow_name": self._workflow_identifier(),
                 "workflow_binding": workflow_binding,
                 "result_error": _text(raw_result).startswith("Error:"),
                 "workflow_audit_digest": _safe_digest(workflow_audit or {}),
@@ -1529,7 +1590,7 @@ class GoalSnapshotToFileAdapter:
             artifact = await self.jobs.record_artifact(
                 job_id,
                 file_path=path,
-                artifact_type="goal_snapshot",
+                artifact_type=self._artifact_type(),
                 content=readback.content,
                 owner=runner_owner,
                 fencing_token=fencing_token,
@@ -1595,6 +1656,7 @@ class GoalSnapshotToFileAdapter:
             *candidate.evidence_refs,
             f"job:{job_id}",
             f"readback:{readback.content_sha256}",
+            *self._extra_evidence_refs(readback),
         ))
         transitioned = await self._transition(
             job_id,
@@ -1636,13 +1698,13 @@ class GoalSnapshotToFileAdapter:
             learning="no_learning",
             artifact_ref=artifact_id,
             evidence_refs=evidence,
-            reason="goal_snapshot_executed_and_verified",
+            reason=self._success_reason(),
         )
 
     def _resolve_workflow_tool(self, path: str) -> tuple[Any | None, dict[str, Any] | None, str | None]:
         if self.workflow_tool_provider is not None:
             try:
-                tool = self.workflow_tool_provider(WORKFLOW_NAME)
+                tool = self.workflow_tool_provider(self._workflow_identifier())
             except Exception as exc:
                 return None, None, f"workflow_resolution_failed:{type(exc).__name__}"
             if tool is None:
@@ -1666,7 +1728,7 @@ class GoalSnapshotToFileAdapter:
             from src.agent.factory import get_tools
             from src.workflows.manager import workflow_manager
 
-            workflow = workflow_manager.get_workflow(WORKFLOW_NAME)
+            workflow = workflow_manager.get_workflow(self._workflow_identifier())
             if workflow is None or not workflow.enabled:
                 return None, None, "workflow_not_loaded_or_disabled"
             tools = get_tools()
@@ -1711,7 +1773,7 @@ class GoalSnapshotToFileAdapter:
         if principal is None:
             raise PermissionError("authenticated_owner_missing")
         effective_principal = principal
-        call = partial(tool, file_path=path, sanitize_inputs_outputs=True)
+        call = partial(tool, **self._workflow_inputs(path), sanitize_inputs_outputs=True)
         if self.workflow_tool_provider is not None:
             # The injectable boundary is deliberately synchronous for tests;
             # the production provider below runs wrappers off the event loop.
@@ -1735,18 +1797,18 @@ class GoalSnapshotToFileAdapter:
             finally:
                 reset_runtime_context(tokens)
             result = await asyncio.to_thread(run_context.run, call)
-        audit_payload = self._audit_result_payload(tool, path, result)
+        audit_payload = self._audit_result_payload(tool, self._workflow_inputs(path), result)
         return result, audit_payload
 
     @staticmethod
-    def _audit_result_payload(tool: Any, path: str, result: Any) -> dict[str, Any] | None:
+    def _audit_result_payload(tool: Any, arguments: dict[str, Any], result: Any) -> dict[str, Any] | None:
         current = tool
         visited: set[int] = set()
         while current is not None and id(current) not in visited:
             visited.add(id(current))
             hook = getattr(current, "get_audit_result_payload", None)
             if callable(hook):
-                payload = hook({"file_path": path}, result)
+                payload = hook(arguments, result)
                 if isinstance(payload, tuple) and len(payload) == 2 and isinstance(payload[1], dict):
                     return payload[1]
             current = getattr(current, "wrapped_tool", None)
@@ -2048,7 +2110,7 @@ class GoalSnapshotToFileAdapter:
         )
 
     async def _replay_admission(self, projection: dict[str, Any], candidate: GoalCandidateDecision, path: str) -> GoalExecutionResult:
-        job_id = _text(projection.get("job_id")) or _job_id(candidate, self.request)
+        job_id = _text(projection.get("job_id")) or self._job_identifier(candidate)
         status = _status(projection)
         if status == "succeeded":
             artifact = _artifact_from_projection(projection)
@@ -2071,7 +2133,11 @@ class GoalSnapshotToFileAdapter:
                     verification="passed",
                     learning="no_learning",
                     artifact_ref=artifact_id,
-                    evidence_refs=[f"job:{job_id}", f"readback:{digest}"],
+                    evidence_refs=[
+                        f"job:{job_id}",
+                        f"readback:{digest}",
+                        *self._extra_evidence_refs(readback),
+                    ],
                     reason="idempotent_replay_verified",
                 )
             return self._blocked("idempotent_terminal_artifact_readback_failed", job_id=job_id, durable_status=status)
@@ -2174,28 +2240,29 @@ class GoalSnapshotToFileService:
         self.authority_principal = authority_principal
         self.authority_approval = authority_approval
 
-    async def run(self, request: GoalSnapshotToFileRequest | dict[str, Any]) -> GoalSnapshotToFileResult:
-        request = request if isinstance(request, GoalSnapshotToFileRequest) else GoalSnapshotToFileRequest.model_validate(request)
-        goal = await self.goals.get(request.goal_id)
-        candidate = (
+    request_model = GoalSnapshotToFileRequest
+    adapter_type = GoalSnapshotToFileAdapter
+    result_type = GoalSnapshotToFileResult
+
+    def _candidate_for_request(
+        self,
+        goal: Goal | None,
+        request: GoalSnapshotToFileRequest,
+    ) -> GoalCandidateDecision:
+        return (
             _candidate_for_missing_goal(request)
             if goal is None
             else _candidate_with_requested_revision(goal, request)
         )
-        adapter = GoalSnapshotToFileAdapter(
-            request,
-            jobs=self.jobs,
-            goals=self.goals,
-            workflow_tool_provider=self.workflow_tool_provider,
-            authority_policy=self.authority_policy,
-            global_authority_policy=self.global_authority_policy,
-            authority_principal=self.authority_principal,
-            authority_approval=self.authority_approval,
-        )
-        outcome = await self.dispatcher(candidate, adapter=adapter)
-        if not isinstance(outcome, GoalOutcomeReceipt):
-            outcome = GoalOutcomeReceipt.model_validate(outcome)
-        receipt = adapter.last_receipt or {}
+
+    def _result_for_outcome(
+        self,
+        *,
+        request: GoalSnapshotToFileRequest,
+        candidate: GoalCandidateDecision,
+        outcome: GoalOutcomeReceipt,
+        receipt: dict[str, Any],
+    ) -> GoalSnapshotToFileResult:
         return GoalSnapshotToFileResult(
             job_id=_text(receipt.get("job_id")) or None,
             durable_status=_text(receipt.get("durable_status")) or None,
@@ -2224,6 +2291,31 @@ class GoalSnapshotToFileService:
             ),
             evidence_refs=list(outcome.evidence_refs),
             reason=outcome.reason,
+        )
+
+    async def run(self, request: GoalSnapshotToFileRequest | dict[str, Any]) -> GoalSnapshotToFileResult:
+        request = request if isinstance(request, self.request_model) else self.request_model.model_validate(request)
+        goal = await self.goals.get(request.goal_id)
+        candidate = self._candidate_for_request(goal, request)
+        adapter = self.adapter_type(
+            request,
+            jobs=self.jobs,
+            goals=self.goals,
+            workflow_tool_provider=self.workflow_tool_provider,
+            authority_policy=self.authority_policy,
+            global_authority_policy=self.global_authority_policy,
+            authority_principal=self.authority_principal,
+            authority_approval=self.authority_approval,
+        )
+        outcome = await self.dispatcher(candidate, adapter=adapter)
+        if not isinstance(outcome, GoalOutcomeReceipt):
+            outcome = GoalOutcomeReceipt.model_validate(outcome)
+        receipt = adapter.last_receipt or {}
+        return self._result_for_outcome(
+            request=request,
+            candidate=candidate,
+            outcome=outcome,
+            receipt=receipt,
         )
 
 

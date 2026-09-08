@@ -10,12 +10,14 @@ import pytest
 from src.audit.repository import audit_repository
 from src.guardian.state import GuardianState, GuardianStateConfidence
 from src.guardian.goal_snapshot_to_file import GoalSnapshotToFileResult
+from src.guardian.web_brief_to_file import WebBriefToFileResult
 from src.goals.contracts import CriterionVerifierKind, GoalSuccessCriterion
 from src.guardian.world_model import GuardianWorldModel
 from src.observer.context import CurrentContext
 from src.observer.user_state import DeliveryDecision
 from src.scheduler.jobs.strategist_tick import (
     _occurrence_identity,
+    _run_opted_in_goal_web_brief,
     _run_opted_in_goal_snapshot,
     run_strategist_tick,
 )
@@ -141,6 +143,100 @@ async def test_proactive_goal_snapshot_runs_one_enabled_goal_through_existing_se
     assert request.parent_job_id == "parent-1"
     assert request.parent_fencing_token == 2
     assert request.session_id == "goal-snapshot:scheduler:goal-1:3"
+
+
+@pytest.mark.asyncio
+async def test_proactive_web_brief_requires_explicit_target_and_reuses_existing_service():
+    criterion = GoalSuccessCriterion(
+        description="Create a source-backed brief",
+        verifier_kind=CriterionVerifierKind.artifact_readback,
+        evidence_refs=["operator:source-consent"],
+        target={"query": "Seraph project", "file_path": "briefs/goal-1.md"},
+    )
+    goal = SimpleNamespace(
+        id="goal-1",
+        revision=4,
+        proactive_enabled=True,
+        success_criterion_json=criterion.model_dump_json(),
+        due_date=datetime.now(timezone.utc),
+        sort_order=0,
+    )
+    jobs = _RecordingDurableJobs()
+    service_result = WebBriefToFileResult(
+        goal_id="goal-1",
+        goal_revision=4,
+        query="Seraph project",
+        file_path="briefs/goal-1.md",
+        execution_status="succeeded",
+        verification="passed",
+        learning="no_learning",
+        source_read=True,
+        query_read_back=True,
+        job_id="brief-child-1",
+        artifact_ref="artifact-brief-1",
+        reason="web_brief_workflow_executed_and_source_readback_verified",
+    )
+    service = MagicMock()
+    service.run = AsyncMock(return_value=service_result)
+    with (
+        patch(
+            "src.scheduler.jobs.strategist_tick.goal_repository.list_goals",
+            new=AsyncMock(return_value=[goal]),
+        ),
+        patch("src.scheduler.jobs.strategist_tick.durable_job_repository", jobs),
+        patch("src.scheduler.jobs.strategist_tick.WebBriefToFileService", return_value=service),
+    ):
+        receipt = await _run_opted_in_goal_web_brief(
+            parent_job_id="parent-brief-1",
+            parent_fencing_token=5,
+        )
+
+    assert receipt["status"] == "succeeded"
+    assert receipt["source_read"] is True
+    assert jobs.effects[0][1]["status"] == "succeeded"
+    request = service.run.await_args.args[0]
+    assert request.query == "Seraph project"
+    assert request.file_path == "briefs/goal-1.md"
+    assert request.parent_job_id == "parent-brief-1"
+    assert request.parent_fencing_token == 5
+    assert request.session_id == "web-brief:scheduler:goal-1:4"
+
+
+@pytest.mark.asyncio
+async def test_malformed_explicit_web_brief_target_does_not_downgrade_to_snapshot():
+    criterion = GoalSuccessCriterion(
+        description="Create a source-backed brief",
+        verifier_kind=CriterionVerifierKind.artifact_readback,
+        evidence_refs=["operator:source-consent"],
+        target={"query": "Seraph project", "file_path": "../outside.md"},
+    )
+    goal = SimpleNamespace(
+        id="goal-1",
+        revision=4,
+        proactive_enabled=True,
+        success_criterion_json=criterion.model_dump_json(),
+        due_date=datetime.now(timezone.utc),
+        sort_order=0,
+    )
+    jobs = _RecordingDurableJobs()
+    with (
+        patch(
+            "src.scheduler.jobs.strategist_tick.goal_repository.list_goals",
+            new=AsyncMock(return_value=[goal]),
+        ),
+        patch("src.scheduler.jobs.strategist_tick.durable_job_repository", jobs),
+    ):
+        web_receipt = await _run_opted_in_goal_web_brief(
+            parent_job_id="parent-brief-2",
+            parent_fencing_token=6,
+        )
+        snapshot_receipt = await _run_opted_in_goal_snapshot(
+            parent_job_id="parent-brief-2",
+            parent_fencing_token=6,
+        )
+
+    assert web_receipt == {"status": "skipped", "reason": "no_eligible_web_brief_goal"}
+    assert snapshot_receipt == {"status": "skipped", "reason": "no_eligible_proactive_goal"}
 
 
 @pytest.mark.asyncio

@@ -16,6 +16,12 @@ from src.guardian.goal_snapshot_to_file import (
     GoalSnapshotToFileRequest,
     GoalSnapshotToFileResult,
     GoalSnapshotToFileService,
+    normalize_workspace_relative_path,
+)
+from src.guardian.web_brief_to_file import (
+    WebBriefToFileRequest,
+    WebBriefToFileResult,
+    WebBriefToFileService,
 )
 from src.guardian.state import build_guardian_state
 from src.llm_runtime import (
@@ -228,6 +234,119 @@ def _proactive_goal_sort_key(goal: Goal) -> tuple[int, float, int, str]:
     )
 
 
+def _web_brief_target(goal: Goal, criterion: object) -> tuple[str, str] | None:
+    """Read an explicit public-brief target; never infer a query from prose."""
+
+    target = getattr(criterion, "target", None)
+    if not isinstance(target, dict):
+        return None
+    query = str(target.get("query") or "").strip()
+    raw_file_path = str(target.get("file_path") or f"web-briefs/{goal.id}.md").strip()
+    if not query or len(query) > 500 or not raw_file_path:
+        return None
+    try:
+        file_path = normalize_workspace_relative_path(raw_file_path)
+    except ValueError:
+        return None
+    return query, file_path
+
+
+def _has_explicit_web_brief_target(criterion: object) -> bool:
+    target = getattr(criterion, "target", None)
+    return isinstance(target, dict) and any(key in target for key in ("query", "file_path"))
+
+
+async def _run_opted_in_goal_web_brief(
+    *,
+    parent_job_id: str,
+    parent_fencing_token: int,
+) -> dict[str, object]:
+    """Run one explicitly configured public-source research goal."""
+
+    goals = await goal_repository.list_goals(status="active")
+    eligible: list[tuple[Goal, object, str, str]] = []
+    for goal in goals:
+        if not bool(getattr(goal, "proactive_enabled", False)):
+            continue
+        criterion = deserialize_success_criterion(goal)
+        if criterion is None or criterion.verifier_kind is None:
+            continue
+        if criterion.verifier_kind.value != "artifact_readback" or not criterion.evidence_refs:
+            continue
+        target = _web_brief_target(goal, criterion)
+        if target is None:
+            continue
+        eligible.append((goal, criterion, target[0], target[1]))
+    if not eligible:
+        details = {"status": "skipped", "reason": "no_eligible_web_brief_goal"}
+        await durable_job_repository.record_effect(
+            parent_job_id,
+            effect_type="web_brief_admission",
+            status="unknown",
+            details=details,
+            owner=_STRATEGIST_RUNNER_ID,
+            fencing_token=parent_fencing_token,
+        )
+        return details
+
+    goal, criterion, query, file_path = sorted(eligible, key=lambda item: _proactive_goal_sort_key(item[0]))[0]
+    revision = max(int(goal.revision or 1), 1)
+    session_id = f"web-brief:scheduler:{goal.id}:{revision}"
+    principal = TrustPrincipal(
+        principal_id="service:web-brief",
+        principal_type=PrincipalType.SERVICE,
+        authenticated=True,
+        grants=(AuthorityGrant.CAPABILITY_EXECUTE,),
+        session_id=session_id,
+    )
+    request = WebBriefToFileRequest(
+        goal_id=goal.id,
+        goal_revision=revision,
+        query=query,
+        file_path=file_path,
+        owner_principal_id="service:web-brief",
+        service_id="service:web-brief",
+        session_id=session_id,
+        parent_job_id=parent_job_id,
+        parent_fencing_token=parent_fencing_token,
+        evidence_refs=list(criterion.evidence_refs),
+        reason="scheduled_proactive_web_brief",
+        expected_outcome=criterion.description,
+    )
+    result = await WebBriefToFileService(authority_principal=principal).run(request)
+    if not isinstance(result, WebBriefToFileResult):
+        raise TypeError("web brief service returned an invalid result")
+    effect_status = (
+        "succeeded"
+        if result.execution_status == "succeeded" and result.verification == "passed"
+        else "blocked"
+        if result.execution_status == "blocked"
+        else "failed"
+    )
+    details = {
+        "status": result.execution_status,
+        "verification": result.verification,
+        "learning": result.learning,
+        "goal_id": result.goal_id,
+        "goal_revision": result.goal_revision,
+        "job_id": result.job_id,
+        "artifact_ref": result.artifact_ref,
+        "query_digest": hashlib.sha256(query.encode("utf-8")).hexdigest(),
+        "source_read": result.source_read,
+        "reason": result.reason,
+        "operator_visible": True,
+    }
+    await durable_job_repository.record_effect(
+        parent_job_id,
+        effect_type="web_brief_admission",
+        status=effect_status,
+        details=details,
+        owner=_STRATEGIST_RUNNER_ID,
+        fencing_token=parent_fencing_token,
+    )
+    return details
+
+
 async def _run_opted_in_goal_snapshot(
     *,
     parent_job_id: str,
@@ -244,6 +363,8 @@ async def _run_opted_in_goal_snapshot(
         if criterion is None or criterion.verifier_kind is None:
             continue
         if criterion.verifier_kind.value != "artifact_readback" or not criterion.evidence_refs:
+            continue
+        if _has_explicit_web_brief_target(criterion):
             continue
         eligible.append((goal, criterion))
     if not eligible:
@@ -344,24 +465,29 @@ async def run_strategist_tick() -> None:
             owner=_STRATEGIST_RUNNER_ID,
             fencing_token=durable_fencing_token,
         )
-        proactive_snapshot: dict[str, object]
+        proactive_work: dict[str, object]
         try:
-            proactive_snapshot = await _run_opted_in_goal_snapshot(
+            proactive_work = await _run_opted_in_goal_web_brief(
                 parent_job_id=durable_job_id,
                 parent_fencing_token=durable_fencing_token,
             )
+            if proactive_work.get("status") == "skipped":
+                proactive_work = await _run_opted_in_goal_snapshot(
+                    parent_job_id=durable_job_id,
+                    parent_fencing_token=durable_fencing_token,
+                )
         except Exception as exc:
-            proactive_snapshot = {
+            proactive_work = {
                 "status": "blocked",
-                "reason": f"goal_snapshot_scheduler_error:{type(exc).__name__}",
+                "reason": f"goal_work_scheduler_error:{type(exc).__name__}",
                 "operator_visible": True,
             }
             try:
                 await durable_job_repository.record_effect(
                     durable_job_id,
-                    effect_type="goal_snapshot_admission",
+                    effect_type="goal_work_admission",
                     status="blocked",
-                    details=proactive_snapshot,
+                    details=proactive_work,
                     owner=_STRATEGIST_RUNNER_ID,
                     fencing_token=durable_fencing_token,
                 )
@@ -369,8 +495,8 @@ async def run_strategist_tick() -> None:
                 logger.exception("strategist_tick: failed to persist goal snapshot degraded receipt")
         await durable_job_repository.record_checkpoint(
             durable_job_id,
-            checkpoint_id="goal_snapshot_considered",
-            state=proactive_snapshot,
+            checkpoint_id="goal_work_considered",
+            state=proactive_work,
             owner=_STRATEGIST_RUNNER_ID,
             fencing_token=durable_fencing_token,
         )

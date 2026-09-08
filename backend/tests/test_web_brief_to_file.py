@@ -207,6 +207,7 @@ async def test_web_brief_executes_public_source_workflow_and_reads_back_artifact
     assert result.authority_receipt["scope"]["egress_class"] == "cloud_allowed_redacted"
     assert workflow.calls == [{"query": "Seraph project", "file_path": "briefs/goal-brief.md"}]
     assert jobs.specs[result.job_id].identity.job_kind == CAPABILITY_ID
+    assert jobs.specs[result.job_id].identity.idempotency_scope == "web-brief-to-file"
 
 
 @pytest.mark.asyncio

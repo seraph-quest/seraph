@@ -481,6 +481,13 @@ class GoalSnapshotToFileAdapter:
             }
         )[:24]
 
+    def _idempotency_scope(self) -> str:
+        return (
+            "goal-snapshot-to-file-scheduler"
+            if self.request.parent_job_id
+            else "goal-snapshot-to-file"
+        )
+
     def _success_reason(self) -> str:
         return "goal_snapshot_executed_and_verified"
 
@@ -1262,11 +1269,7 @@ class GoalSnapshotToFileAdapter:
                 owner_principal_id=self.request.owner_principal_id,
                 job_kind=self._capability_identifier(),
                 capability_version=self.request.capability_version,
-                idempotency_scope=(
-                    "goal-snapshot-to-file-scheduler"
-                    if self.request.parent_job_id
-                    else "goal-snapshot-to-file"
-                ),
+                idempotency_scope=self._idempotency_scope(),
                 idempotency_key=candidate.dedupe_key,
             ),
             inputs={
@@ -2130,7 +2133,11 @@ class GoalSnapshotToFileAdapter:
                     verification="passed",
                     learning="no_learning",
                     artifact_ref=artifact_id,
-                    evidence_refs=[f"job:{job_id}", f"readback:{digest}"],
+                    evidence_refs=[
+                        f"job:{job_id}",
+                        f"readback:{digest}",
+                        *self._extra_evidence_refs(readback),
+                    ],
                     reason="idempotent_replay_verified",
                 )
             return self._blocked("idempotent_terminal_artifact_readback_failed", job_id=job_id, durable_status=status)

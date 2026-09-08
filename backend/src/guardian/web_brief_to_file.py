@@ -194,6 +194,9 @@ class WebBriefToFileAdapter(GoalSnapshotToFileAdapter):
             }
         )[:24]
 
+    def _idempotency_scope(self) -> str:
+        return "web-brief-to-file-scheduler" if self.request.parent_job_id else "web-brief-to-file"
+
     def _success_reason(self) -> str:
         return "web_brief_workflow_executed_and_source_readback_verified"
 

@@ -1,12 +1,59 @@
+import asyncio
+from dataclasses import replace
+from types import SimpleNamespace
 from unittest.mock import patch
 
+from fastapi import HTTPException
 import pytest
 
 from config.settings import settings
+from src.api import memory as memory_api
+from src.auth.service import test_bypass_operator
 from src.db.models import MemoryEdgeType, MemoryKind
 from src.memory.hybrid_retrieval import retrieve_hybrid_memory
 from src.memory.repository import memory_repository
 from src.memory.retrieval_planner import plan_memory_retrieval
+from src.security.trust_contract import PrincipalType
+
+
+def test_memory_correction_route_binds_test_bypass_principal_without_database():
+    operator = test_bypass_operator()
+    request = SimpleNamespace(state=SimpleNamespace(operator=operator))
+
+    async def capture(**kwargs):
+        return kwargs
+
+    async def invoke_route():
+        with patch.object(memory_api, "correct_memory", capture):
+            return await memory_api.create_memory_correction(
+                request,
+                memory_api.MemoryCorrectionRequest(
+                    content="Route-binding unit test memory.",
+                    actor="attacker",
+                ),
+            )
+
+    receipt = asyncio.run(invoke_route())
+
+    assert receipt["actor"] == "operator:test-bypass"
+
+
+def test_memory_actor_rejects_non_operator_or_mismatched_session():
+    operator = test_bypass_operator()
+    request = SimpleNamespace(state=SimpleNamespace(operator=operator))
+
+    for principal in (
+        replace(operator.principal, principal_type=PrincipalType.SERVICE),
+        replace(operator.principal, session_id="other-session"),
+    ):
+        forged_request = SimpleNamespace(
+            state=SimpleNamespace(operator=replace(operator, principal=principal))
+        )
+        with pytest.raises(HTTPException) as raised:
+            memory_api.authenticated_memory_actor(forged_request)
+        assert raised.value.status_code == 401
+
+    assert memory_api.authenticated_memory_actor(request) == "operator:test-bypass"
 
 
 @pytest.mark.asyncio

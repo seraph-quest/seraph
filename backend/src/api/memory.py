@@ -17,7 +17,7 @@ from src.memory.control import (
 )
 from src.memory.decay import summarize_memory_reconciliation_state
 from src.memory.providers import list_memory_provider_inventory
-from src.security.trust_contract import AuthorityGrant
+from src.security.trust_contract import AuthorityGrant, PrincipalType
 
 router = APIRouter()
 
@@ -80,14 +80,20 @@ def authenticated_memory_actor(request: Request) -> str:
     principal = getattr(operator, "principal", None)
     principal_id = str(getattr(principal, "principal_id", "") or "").strip()
     session_id = str(getattr(operator, "session_id", "") or "").strip()
+    principal_type = getattr(getattr(principal, "principal_type", None), "value", None) or str(
+        getattr(principal, "principal_type", "") or ""
+    ).strip()
+    principal_session_id = str(getattr(principal, "session_id", "") or "").strip()
     grants = {str(getattr(grant, "value", grant)) for grant in getattr(principal, "grants", ())}
     if (
         not isinstance(operator, AuthenticatedOperator)
         or principal is None
+        or principal_type != PrincipalType.OPERATOR.value
         or not bool(getattr(principal, "authenticated", False))
         or bool(getattr(principal, "revoked", False))
         or not principal_id
         or not session_id
+        or principal_session_id != session_id
         or AuthorityGrant.CAPABILITY_EXECUTE.value not in grants
     ):
         raise HTTPException(status_code=401, detail={"code": "authentication_required"})

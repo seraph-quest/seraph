@@ -169,7 +169,10 @@ legacy `/api/operator/memory-live-controls/actions`,
 `/api/operator/guardian-memory-live-control/actions`, and
 `/api/operator/memory-control/{memory_id}` routes use the same binding. Existing
 middleware rejection remains the first boundary for unauthenticated or invalid
-sessions, and read-only memory routes are unchanged.
+sessions, and read-only memory routes are unchanged. Caller-supplied source or
+session metadata such as `source_session_id`, `owner_session_id`, and legacy
+`session_id` retains its existing scoped metadata behavior; this slice does not
+promote those fields to authority or add ownership validation.
 
 Focused route tests cover the canonical mutations, all live-control aliases,
 legacy operator control, audit actor persistence, and disabled test-bypass

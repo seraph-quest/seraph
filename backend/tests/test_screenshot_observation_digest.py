@@ -7,17 +7,39 @@ from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-
-pytestmark = pytest.mark.usefixtures("mocked_canonical_inference_context")
+from config.settings import settings
 from sqlmodel import select
 
 import src.db.models  # noqa: F401
 from src.db.models import MemoryEpisode, ScreenObservation
 
+pytestmark = pytest.mark.usefixtures("mocked_canonical_inference_context")
+
 
 @pytest.fixture(autouse=True)
-def allow_remote_screen_llm_for_existing_digest_tests():
-    with patch("src.scheduler.screen_llm_policy.settings.screen_derived_llm_allow_remote", True):
+def allow_openrouter_screen_llm_for_existing_digest_tests():
+    """Exercise digest persistence independently from live cloud proofs."""
+    from src.scheduler.screen_llm_policy import ScreenDerivedLlmDecision
+
+    async def admitted_decision(runtime_path: str) -> ScreenDerivedLlmDecision:
+        if not settings.screenshot_observation_digest_enabled:
+            return ScreenDerivedLlmDecision(
+                allowed=False,
+                reason="llm_disabled",
+                runtime_path=runtime_path,
+                runtime_profile="",
+            )
+        return ScreenDerivedLlmDecision(
+            allowed=True,
+            reason="test_openrouter_profile_ready",
+            runtime_path=runtime_path,
+            runtime_profile="openrouter",
+        )
+
+    with patch(
+        "src.scheduler.jobs.screenshot_observation_digest.screen_derived_llm_decision",
+        side_effect=admitted_decision,
+    ):
         yield
 
 
@@ -155,7 +177,7 @@ async def test_screenshot_digest_excludes_stale_incomplete_observations(async_db
 
 
 @pytest.mark.asyncio
-async def test_screenshot_digest_blocks_without_local_profile_or_remote_opt_in(async_db):
+async def test_screenshot_digest_blocks_without_openrouter_cloud_policy(async_db):
     from src.scheduler.jobs.screenshot_observation_digest import build_screenshot_observation_digest
 
     start = datetime(2026, 6, 30, 9, 0, tzinfo=timezone.utc)
@@ -169,7 +191,19 @@ async def test_screenshot_digest_blocks_without_local_profile_or_remote_opt_in(a
             )
         )
 
-    with patch("src.scheduler.screen_llm_policy.settings.screen_derived_llm_allow_remote", False), patch(
+    from src.scheduler.screen_llm_policy import ScreenDerivedLlmDecision
+
+    with patch(
+        "src.scheduler.jobs.screenshot_observation_digest.screen_derived_llm_decision",
+        new=AsyncMock(
+            return_value=ScreenDerivedLlmDecision(
+                allowed=False,
+                reason="openrouter_cloud_policy_missing",
+                runtime_path="screenshot_observation_digest",
+                runtime_profile="openrouter",
+            )
+        ),
+    ), patch(
         "src.scheduler.jobs.screenshot_observation_digest.completion_with_fallback",
         new=AsyncMock(),
     ) as completion:
@@ -185,6 +219,7 @@ async def test_screenshot_digest_blocks_without_local_profile_or_remote_opt_in(a
 @pytest.mark.asyncio
 async def test_screenshot_digest_blocks_generic_local_profile_even_with_safe_proof(async_db):
     from src.scheduler.jobs.screenshot_observation_digest import build_screenshot_observation_digest
+    from src.scheduler.screen_llm_policy import ScreenDerivedLlmDecision
 
     start = datetime(2026, 6, 30, 9, 0, tzinfo=timezone.utc)
     end = datetime(2026, 6, 30, 9, 30, tzinfo=timezone.utc)
@@ -197,7 +232,17 @@ async def test_screenshot_digest_blocks_generic_local_profile_even_with_safe_pro
             )
         )
 
-    with patch("src.scheduler.screen_llm_policy.settings.screen_derived_llm_allow_remote", False), patch(
+    with patch(
+        "src.scheduler.jobs.screenshot_observation_digest.screen_derived_llm_decision",
+        new=AsyncMock(
+            return_value=ScreenDerivedLlmDecision(
+                allowed=False,
+                reason="openrouter_cloud_policy_missing",
+                runtime_path="screenshot_observation_digest",
+                runtime_profile="openrouter",
+            )
+        ),
+    ), patch(
         "src.scheduler.screen_llm_policy.settings.runtime_profile_preferences",
         "screenshot_observation_digest=local",
     ), patch(
@@ -206,9 +251,6 @@ async def test_screenshot_digest_blocks_generic_local_profile_even_with_safe_pro
     ), patch(
         "src.scheduler.screen_llm_policy.settings.local_llm_api_base",
         "http://127.0.0.1:8000/v1",
-    ), patch(
-        "src.scheduler.screen_llm_policy.latest_local_runtime_profile_proof",
-        return_value={"safe_for_single_backend_profile_routing": True},
     ), patch(
         "src.scheduler.jobs.screenshot_observation_digest.completion_with_fallback",
         new=AsyncMock(),

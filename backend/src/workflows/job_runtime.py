@@ -616,6 +616,71 @@ class DurableJobRepository:
     async def cancel_job(self, job_id: str, *, owner: str | None = None, fencing_token: int | None = None, reason: str = "operator_cancelled") -> dict[str, Any]:
         return await self.transition_job(job_id, "cancelled", owner=owner, fencing_token=fencing_token, reason=reason)
 
+    async def fail_unclaimed_job(
+        self,
+        job_id: str,
+        *,
+        owner_principal_id: str,
+        service_id: str,
+        reason: str,
+        result_summary: str | None = None,
+    ) -> dict[str, Any]:
+        """Fail an admitted job before lease acquisition with an atomic owner fence.
+
+        Admission and queue failures happen before a runner lease exists. This
+        narrow path is still conditional on the authenticated service owner and
+        accepted/queued status, so a competing claim or authority change wins
+        the race instead of being overwritten by an ownerless transition.
+        """
+        _validate_owner_fields(
+            owner_kind="service",
+            owner_principal_id=owner_principal_id,
+            service_id=service_id,
+        )
+        async with self._session() as db:
+            now = _utc_now()
+            updated = await db.execute(
+                update(WorkflowRunState)
+                .where(
+                    WorkflowRunState.run_identity == job_id,
+                    WorkflowRunState.status.in_(("accepted", "queued")),
+                    WorkflowRunState.owner_kind == "service",
+                    WorkflowRunState.owner_principal_id == owner_principal_id,
+                    WorkflowRunState.service_id == service_id,
+                )
+                .values(
+                    status="failed",
+                    failure_reason=_text(reason, "unclaimed_job_failed"),
+                    result_summary=result_summary,
+                    updated_at=now,
+                    heartbeat_at=now,
+                    finished_at=now,
+                )
+            )
+            if updated.rowcount != 1:
+                current = await self._fetch(db, job_id)
+                db.expunge(current)
+                return _serialize(
+                    current,
+                    receipt={
+                        "kind": "unclaimed_failure",
+                        "status": "not_recorded",
+                        "reason": "job_changed_before_owner_fence",
+                        "operator_visible": True,
+                    },
+                )
+            failed = await self._fetch(db, job_id)
+            receipt = {
+                "kind": "unclaimed_failure",
+                "status": "recorded",
+                "reason": _text(reason, "unclaimed_job_failed"),
+                "owner_principal_id": owner_principal_id,
+                "service_id": service_id,
+                "operator_visible": True,
+            }
+            db.expunge(failed)
+            return _serialize(failed, receipt=receipt)
+
     async def claim_job(self, job_id: str, *, owner: str, lease_seconds: int = 300) -> dict[str, Any]:
         owner = _text(owner)
         if not owner:

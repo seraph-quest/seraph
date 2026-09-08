@@ -344,3 +344,26 @@ async def test_replay_with_changed_execution_contract_is_rejected(async_db):
         await durable_job_repository.admit_job(
             replace(_spec(job_id="job-743-4", dedupe_key="candidate-4"), priority=10)
         )
+
+
+@pytest.mark.asyncio
+async def test_unclaimed_failure_uses_atomic_service_owner_fence(async_db):
+    admitted = await durable_job_repository.admit_job(_spec(job_id="job-743-5", dedupe_key="candidate-5"))
+
+    wrong_owner = await durable_job_repository.fail_unclaimed_job(
+        admitted["job_id"],
+        owner_principal_id="service:other",
+        service_id="service:other",
+        reason="queue_error",
+    )
+    assert wrong_owner["status"] == "accepted"
+    assert wrong_owner["receipt"]["status"] == "not_recorded"
+
+    failed = await durable_job_repository.fail_unclaimed_job(
+        admitted["job_id"],
+        owner_principal_id="service:strategist",
+        service_id="service:strategist",
+        reason="queue_error",
+    )
+    assert failed["status"] == "failed"
+    assert failed["failure_reason"] == "queue_error"

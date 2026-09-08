@@ -490,6 +490,36 @@ class Goal(SQLModel, table=True):
     updated_at: datetime = Field(default_factory=_now)
 
 
+class StrategyDelta(SQLModel, table=True):
+    """Durable, reversible goal-scoped planning correction."""
+
+    __tablename__ = "strategy_deltas"
+    __table_args__ = (
+        Index(
+            "ux_strategy_deltas_source_event_id",
+            "source_event_id",
+            unique=True,
+        ),
+    )
+
+    delta_id: str = Field(default_factory=_uuid, primary_key=True)
+    goal_id: str = Field(index=True)
+    scope: str = Field(default="goal", index=True)
+    field_name: str = Field(default="web_brief_target", index=True)
+    before_json: str = Field(default="{}")
+    after_json: str = Field(default="{}")
+    source_event_id: str = Field(index=True)
+    author_id: str = Field(default="")
+    evaluator_id: Optional[str] = Field(default=None)
+    goal_revision_before: int = Field(default=1, index=True)
+    goal_revision_after: Optional[int] = Field(default=None, index=True)
+    status: str = Field(default="proposed", index=True)
+    rollback_target_id: Optional[str] = Field(default=None, index=True)
+    reason: str = Field(default="")
+    created_at: datetime = Field(default_factory=_now, index=True)
+    updated_at: datetime = Field(default_factory=_now)
+
+
 # ─── UserProfile ─────────────────────────────────────────
 
 class UserProfile(SQLModel, table=True):

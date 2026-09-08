@@ -47,6 +47,7 @@ OPERATOR_REQUIRED_TABLES = (
     "workflow_step_states",
     "queued_insights",
     "guardian_interventions",
+    "strategy_deltas",
 )
 
 _LEGACY_WORKFLOW_STATUS_MAP = {

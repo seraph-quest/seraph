@@ -43,7 +43,6 @@ from src.model_fabric.selector import (
     active_provider_exclusion_reason,
 )
 from src.model_fabric.remote_inference_admission import (
-    RemoteInferenceAdmissionRequest,
     remote_inference_admission_broker,
 )
 from src.security.trust_contract import (
@@ -251,19 +250,12 @@ async def _run_model_fabric_canary_locked(body, profile, policy, candidate, prin
     )
 
     async def transport(candidate, _trust_request, requirements):
-        admission_request = RemoteInferenceAdmissionRequest.from_inference_context(
-            context,
-            operation_id=f"{context.request_id}:canary",
-        )
-        return await remote_inference_admission_broker.execute(
-            admission_request,
-            lambda: _execute_canary_transport(
-                candidate.profile,
-                capability=body.capability,
-                timeout_seconds=body.timeout_seconds,
-                requirements=requirements,
-                fixture=fixture,
-            ),
+        return await _execute_canary_transport(
+            candidate.profile,
+            capability=body.capability,
+            timeout_seconds=body.timeout_seconds,
+            requirements=requirements,
+            fixture=fixture,
         )
 
     result = await run_capability_probe(
@@ -274,6 +266,7 @@ async def _run_model_fabric_canary_locked(body, profile, policy, candidate, prin
         proof_ttl_seconds=body.proof_ttl_seconds,
         transport=transport,
         now=now,
+        admission_broker=remote_inference_admission_broker,
     )
     publish_receipt_persistence(
         runtime_path="capability_probe",

@@ -1206,6 +1206,14 @@ def _resolved_primary_model_id(
     runtime_path: str | None = None,
     profile: str = "default",
 ) -> str:
+    if runtime_path:
+        from src.model_fabric.caller_context import is_canonical_inference_route
+
+        # Persisted path overrides belong to the historical provider matrix.
+        # Canonical routes are bound to their governed OpenRouter profile so
+        # status, transport, and receipts cannot disagree about the model.
+        if is_canonical_inference_route(runtime_path):
+            return _profile_model_id(profile)
     override = _runtime_model_override(runtime_path)
     if override:
         override_profile, override_model_id = override

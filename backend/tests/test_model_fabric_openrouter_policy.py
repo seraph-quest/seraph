@@ -28,6 +28,7 @@ from src.model_fabric.configuration import (
     validate_active_model_fabric_configuration,
 )
 from src.model_fabric.proofs import build_model_route_proof
+from src.llm_runtime import effective_runtime_model_id
 from src.security.trust_contract import (
     AuthorityGrant,
     ContentOrigin,
@@ -346,6 +347,17 @@ def test_canonical_caller_context_defaults_to_openrouter_and_disables_legacy_fal
     )
     assert context.allowed_provider_kinds == ("openrouter",)
     assert context.fallback_allowed is False
+
+
+def test_canonical_runtime_ignores_persisted_model_override():
+    with patch.object(
+        settings,
+        "runtime_model_overrides",
+        "chat_agent=default:openai/gpt-4.1-mini",
+    ):
+        model_id = effective_runtime_model_id(runtime_path="chat_agent")
+
+    assert model_id == "openrouter/anthropic/claude-sonnet-4"
 
 
 def test_operator_settings_status_excludes_legacy_profiles_from_active_profiles():

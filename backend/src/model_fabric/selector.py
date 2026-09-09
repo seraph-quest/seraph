@@ -38,6 +38,7 @@ from .contracts import (
     credential_ref_allowed,
     OPENROUTER_API_BASE,
     OPENROUTER_PROVIDER_KIND,
+    transport_model_for_provider,
 )
 
 
@@ -57,6 +58,12 @@ OPENROUTER_UPSTREAMS_REASON = "openrouter_upstream_allowlist_missing"
 OPENROUTER_PARAMETERS_REASON = "openrouter_parameters_required"
 OPENROUTER_DATA_POLICY_REASON = "openrouter_data_policy_missing"
 OPENROUTER_ZDR_REASON = "openrouter_zdr_required_for_vision"
+OPENROUTER_MODEL_REASON = "openrouter_model_not_qualified"
+OPENROUTER_TARGET_MODEL_REASON = "openrouter_model_not_allowed"
+OPENROUTER_CREDENTIAL_OVERRIDE_REASON = "openrouter_credential_override_forbidden"
+
+
+_TARGET_API_KEY_UNSET = object()
 
 
 def provider_family_exclusion_reason(provider_kind: str) -> str | None:
@@ -105,6 +112,26 @@ def active_provider_exclusion_reason(profile: ProviderProfile) -> str | None:
         return OPENROUTER_CREDENTIAL_REASON
     if profile.fallback_models:
         return OPENROUTER_FALLBACK_REASON
+    configured_model = str(profile.routing_model or profile.model).strip()
+    exact_model = transport_model_for_provider(OPENROUTER_PROVIDER_KIND, configured_model)
+    model_provider, separator, model_name = exact_model.partition("/")
+    if (
+        not exact_model
+        or not separator
+        or not model_provider.strip()
+        or not model_name.strip()
+        or len(exact_model) > 256
+        or any(character.isspace() or ord(character) < 32 for character in exact_model)
+        or model_provider.lower() in {"local", "ollama", "openai-compatible", "openai_compatible"}
+        or (
+            profile.routing_model
+            and profile.model != transport_model_for_provider(
+                OPENROUTER_PROVIDER_KIND,
+                profile.routing_model,
+            )
+        )
+    ):
+        return OPENROUTER_MODEL_REASON
     provider_policy = _openrouter_provider_policy(profile.options)
     if provider_policy is None:
         return OPENROUTER_PROVIDER_POLICY_REASON
@@ -220,6 +247,8 @@ def preflight_candidate(
     now: float | None = None,
     replayed_attempt_ids: tuple[str, ...] = (),
     replayed_replay_ids: tuple[str, ...] = (),
+    target_model_id: str | None = None,
+    target_api_key: str | None | object = _TARGET_API_KEY_UNSET,
 ) -> tuple[TrustRequest | None, str | None, str | None]:
     checked_at = time.time() if now is None else float(now)
     profile = candidate.profile
@@ -232,6 +261,19 @@ def preflight_candidate(
     exclusion = active_provider_exclusion_reason if active_context else profile_exclusion_reason
     if reason := exclusion(profile):
         return None, None, reason
+    if active_context:
+        if target_model_id is not None:
+            requested_model = transport_model_for_provider(
+                profile.provider_kind,
+                str(target_model_id).strip(),
+            )
+            if requested_model != profile.model:
+                return None, None, OPENROUTER_TARGET_MODEL_REASON
+        if target_api_key is not _TARGET_API_KEY_UNSET:
+            configured_key = profile.api_key if not profile.keyless else ""
+            supplied_key = "" if target_api_key is None else str(target_api_key)
+            if supplied_key != configured_key:
+                return None, None, OPENROUTER_CREDENTIAL_OVERRIDE_REASON
     if context.deadline_at <= checked_at:
         return None, None, "request_deadline_expired"
     if candidate.endpoint != transport_endpoint(profile) or candidate.endpoint_class is not classify_endpoint(candidate.endpoint):
@@ -329,10 +371,19 @@ def select_route(
     proofs: tuple[ModelRouteProof, ...],
     *,
     now: float | None = None,
+    target_model_id: str | None = None,
+    target_api_key: str | None | object = _TARGET_API_KEY_UNSET,
 ) -> RouteDecision:
     rejections: list[RouteRejection] = []
     for candidate in candidates:
-        request, decision_id, reason = preflight_candidate(context, candidate, proofs, now=now)
+        request, decision_id, reason = preflight_candidate(
+            context,
+            candidate,
+            proofs,
+            now=now,
+            target_model_id=target_model_id,
+            target_api_key=target_api_key,
+        )
         if reason is None and request is not None:
             from src.security.trust_contract import trust_request_digest
             from .proofs import proof_is_fresh

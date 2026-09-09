@@ -69,6 +69,17 @@ class RemoteInferenceReceiptRepository(Protocol):
     ) -> Mapping[str, object]: ...
 
 
+class RemoteInferenceReceiptPersistenceError(GpuAdmissionError):
+    """Durable receipt adoption failed after a remote operation was admitted.
+
+    This remains an admission error so the shared fallback loops treat the
+    remote outcome as terminal for this caller. Retrying another provider
+    after the canonical job fence or receipt sink failed could spend twice.
+    """
+
+    code = "durable_receipt_persistence_failed"
+
+
 @dataclass(frozen=True, slots=True)
 class RemoteInferenceReceiptBinding:
     """Durable caller fence carried across one governed inference call.
@@ -176,11 +187,17 @@ class RemoteInferenceAdmissionBroker(GpuAdmissionBroker[Any]):
             raise ValueError("receipt does not belong to the remote inference resource class")
         if receipt.schema_version != REMOTE_INFERENCE_ADMISSION_SCHEMA_VERSION:
             raise ValueError("receipt schema version is not supported by the remote adapter")
-        return await repository.record_remote_inference_receipt(
-            receipt.as_dict(),
-            owner=owner,
-            fencing_token=fencing_token,
-        )
+        try:
+            return await repository.record_remote_inference_receipt(
+                receipt.as_dict(),
+                owner=owner,
+                fencing_token=fencing_token,
+            )
+        except Exception as error:
+            raise RemoteInferenceReceiptPersistenceError(
+                "remote inference receipt could not be adopted by the durable job",
+                receipt=receipt,
+            ) from error
 
     async def cancel_owner(
         self,
@@ -298,6 +315,7 @@ __all__ = [
     "REMOTE_INFERENCE_OWNER_REVOCATION_REASON",
     "GPU_OWNER_REVOCATION_REASON",
     "RemoteInferenceReceiptRepository",
+    "RemoteInferenceReceiptPersistenceError",
     "RemoteInferenceReceiptBinding",
     "set_remote_inference_receipt_binding",
     "reset_remote_inference_receipt_binding",

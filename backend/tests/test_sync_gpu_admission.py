@@ -32,6 +32,7 @@ from src.model_fabric.remote_inference_admission import (
     RemoteInferenceAdmissionBroker,
     RemoteInferenceAdmissionUncertainError,
     RemoteInferenceReceiptBinding,
+    RemoteInferenceReceiptPersistenceError,
     current_remote_inference_receipt_binding,
     reset_remote_inference_receipt_binding,
     set_remote_inference_receipt_binding,
@@ -104,8 +105,9 @@ def _capacity_error(operation_id: str = "denied") -> GpuAdmissionCapacityError:
 
 
 class _RecordingReceiptRepository:
-    def __init__(self) -> None:
+    def __init__(self, *, fail: bool = False) -> None:
         self.calls: list[dict[str, object]] = []
+        self.fail = fail
 
     async def record_remote_inference_receipt(
         self,
@@ -121,6 +123,8 @@ class _RecordingReceiptRepository:
                 "fencing_token": fencing_token,
             }
         )
+        if self.fail:
+            raise RuntimeError("durable fence expired")
         return {"persisted": True}
 
 
@@ -263,6 +267,42 @@ def test_bound_sync_provider_error_reads_back_terminal_receipt():
     assert len(repository.calls) == 1
     assert repository.calls[0]["payload"]["status"] == "failed"
     assert repository.calls[0]["payload"]["operation_id"] == "attempt-sync-durable-failure"
+
+
+def test_bound_receipt_persistence_failure_is_terminal_and_does_not_enable_retry_spend():
+    broker = RemoteInferenceAdmissionBroker()
+    repository = _RecordingReceiptRepository(fail=True)
+    calls = 0
+    token = set_remote_inference_receipt_binding(
+        RemoteInferenceReceiptBinding(
+            repository=repository,
+            owner="scheduler:strategist_tick",
+            fencing_token=10,
+        )
+    )
+
+    def provider() -> str:
+        nonlocal calls
+        calls += 1
+        return "remote-result"
+
+    try:
+        with patch("src.llm_runtime.gpu_admission_broker", broker):
+            with pytest.raises(RemoteInferenceReceiptPersistenceError) as error:
+                _execute_sync_with_gpu_admission(
+                    context=_canonical_context(request_id="sync-durable-fence"),
+                    decision=SimpleNamespace(
+                        selected=SimpleNamespace(profile=SimpleNamespace(provider_kind="local"))
+                    ),
+                    operation_id="attempt-sync-durable-fence",
+                    operation=provider,
+                )
+    finally:
+        reset_remote_inference_receipt_binding(token)
+
+    assert error.value.code == "durable_receipt_persistence_failed"
+    assert calls == 1
+    assert len(repository.calls) == 1
 
 
 @pytest.mark.parametrize("terminal", ["cancelled", "expired"])

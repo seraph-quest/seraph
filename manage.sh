@@ -625,7 +625,7 @@ function start_local_backend() {
     nohup /bin/bash -c '
         cd "$1" || exit 1
         export WORKSPACE_DIR="$2" LLM_LOG_DIR="$3" UV_CACHE_DIR="$4" DEFAULT_MODEL="$5" SERAPH_LOCAL_SERVICE=backend
-        exec uv run uvicorn src.app:create_app --factory --host 0.0.0.0 --port "$6"
+        exec uv run uvicorn src.app:create_app --factory --host 127.0.0.1 --port "$6"
     ' seraph-local-backend "$SCRIPT_DIR/backend" "$LOCAL_WORKSPACE_DIR" "$LOCAL_LLM_LOG_DIR" "$LOCAL_UV_CACHE_DIR" "$LOCAL_DEFAULT_MODEL" "$LOCAL_BACKEND_PORT" </dev/null >> "$LOCAL_BACKEND_LOG_FILE" 2>&1 &
     local pid=$!
     echo "$pid" > "$LOCAL_BACKEND_PID_FILE"
@@ -652,9 +652,9 @@ function start_local_frontend() {
         cd "$1" || exit 1
         export VITE_API_URL="$2" VITE_WS_URL="$3" SERAPH_LOCAL_SERVICE=frontend
         if [ -x ./node_modules/.bin/vite ]; then
-            exec ./node_modules/.bin/vite --host 0.0.0.0 --port "$4"
+            exec ./node_modules/.bin/vite --host 127.0.0.1 --port "$4"
         fi
-        exec npm run dev -- --host 0.0.0.0 --port "$4"
+        exec npm run dev -- --host 127.0.0.1 --port "$4"
     ' seraph-local-frontend "$SCRIPT_DIR/frontend" "/api" "ws://127.0.0.1:$LOCAL_BACKEND_PORT/ws/chat" "$LOCAL_FRONTEND_PORT" </dev/null >> "$LOCAL_FRONTEND_LOG_FILE" 2>&1 &
     local pid=$!
     echo "$pid" > "$LOCAL_FRONTEND_PID_FILE"
@@ -669,6 +669,13 @@ function start_local_frontend() {
 
 function local_up() {
     ensure_runtime_dirs
+    if [ "$ENV" = "prod" ]; then
+        echo "Running CPU-host production preflight..."
+        if ! WORKSPACE_DIR="$LOCAL_WORKSPACE_DIR" python3 "$SCRIPT_DIR/backend/production_preflight.py" --format text; then
+            echo "Local production stack blocked: CPU-host preflight requires operator auth and a usable workspace." >&2
+            return 1
+        fi
+    fi
     if ! start_local_backend; then
         echo "Local stack failed: backend did not start cleanly." >&2
         return 1
@@ -706,6 +713,10 @@ function local_status() {
     echo "Default model: ${DEFAULT_MODEL:-openrouter/anthropic/claude-sonnet-4}"
     echo "Workspace dir: $LOCAL_WORKSPACE_DIR"
     echo "LLM log dir: $LOCAL_LLM_LOG_DIR"
+    if [ "$ENV" = "prod" ]; then
+        echo "CPU-host preflight:"
+        WORKSPACE_DIR="$LOCAL_WORKSPACE_DIR" python3 "$SCRIPT_DIR/backend/production_preflight.py" --format text || true
+    fi
     print_local_service_status "Local backend" "$LOCAL_BACKEND_PID_FILE" "$LOCAL_BACKEND_PORT" backend
     print_local_service_status "Local frontend" "$LOCAL_FRONTEND_PID_FILE" "$LOCAL_FRONTEND_PORT" frontend
     if daemon_is_running; then

@@ -29,23 +29,52 @@ def _approval_details(request) -> dict:
 
 
 def _require_approval_owner(request: Request, approval, operator) -> dict:
-    """Bind a decision to the session or principal that created the approval."""
+    """Bind a decision to its authenticated owner and conversation context.
+
+    ``approval_owner_operator_session_id`` is the browser authentication
+    session that created the request.  ``approval_conversation_id`` is only
+    the execution context and is checked separately against the repository
+    session id.  The old ``approval_owner_session_id`` field was ambiguous;
+    it is accepted only for rows whose conversation id is exactly the same
+    value, otherwise the decision fails closed.
+    """
 
     details = _approval_details(approval)
-    owner_session_id = str(details.get("approval_owner_session_id") or "").strip()
+    owner_operator_session_id = str(
+        details.get("approval_owner_operator_session_id")
+        or details.get("approval_owner_auth_session_id")
+        or ""
+    ).strip()
+    legacy_owner_session_id = str(details.get("approval_owner_session_id") or "").strip()
     owner_principal_id = str(details.get("approval_owner_principal_id") or "").strip()
     current_principal_id = str(
         getattr(getattr(operator, "principal", None), "principal_id", "") or ""
     ).strip()
+    conversation_id = str(details.get("approval_conversation_id") or "").strip()
 
-    if owner_session_id:
-        allowed = owner_session_id == operator.session_id
+    if conversation_id and conversation_id != str(approval.session_id or ""):
+        allowed = False
+    elif owner_operator_session_id:
+        allowed = owner_operator_session_id == operator.session_id
+    elif legacy_owner_session_id:
+        # Migration rule for pre-contract rows: the legacy value can only be
+        # treated as an auth session when it was also the repository session.
+        allowed = (
+            legacy_owner_session_id == operator.session_id
+            and approval.session_id == operator.session_id
+        )
     elif owner_principal_id:
-        allowed = owner_principal_id == current_principal_id
+        # Principal-only rows cannot prove which revocable browser session
+        # authorized the request, so do not widen their authority.
+        allowed = False
     else:
-        # Older rows have no explicit owner metadata.  Their session binding
-        # remains the only safe authority available for a decision.
+        # Older auth-session-only rows retain their exact repository session
+        # binding.  Conversation-bound rows without migration metadata fail
+        # closed because their owner cannot be established safely.
         allowed = bool(approval.session_id) and approval.session_id == operator.session_id
+
+    if owner_principal_id and owner_principal_id != current_principal_id:
+        allowed = False
     if not allowed:
         raise HTTPException(
             status_code=403,

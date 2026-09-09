@@ -2855,6 +2855,7 @@ def update_extension_path(path: str) -> dict[str, Any]:
     _validate_extension_candidate_root(existing, package_root)
 
     target_root = Path(existing.root_path)
+    mcp_snapshot = _capture_mcp_transaction_state()
     with tempfile.TemporaryDirectory(prefix="seraph-extension-update-") as temp_root:
         staging_root = Path(temp_root) / "package"
         backup_root = Path(temp_root) / "backup"
@@ -2874,10 +2875,22 @@ def update_extension_path(path: str) -> dict[str, Any]:
             persistent_snapshot_root.parent.mkdir(parents=True, exist_ok=True)
             _copy_extension_package(backup_root, persistent_snapshot_root)
         except Exception:
-            if target_root.exists():
-                shutil.rmtree(target_root, ignore_errors=True)
-            shutil.move(backup_root, target_root)
-            _refresh_runtime()
+            recovery_errors: list[BaseException] = []
+            try:
+                if target_root.exists():
+                    shutil.rmtree(target_root, ignore_errors=True)
+                shutil.move(backup_root, target_root)
+                _refresh_runtime()
+            except BaseException as recovery_error:  # pragma: no cover - defensive boundary
+                recovery_errors.append(recovery_error)
+            try:
+                _restore_mcp_transaction_state(mcp_snapshot)
+            except BaseException as recovery_error:  # pragma: no cover - defensive boundary
+                recovery_errors.append(recovery_error)
+            if recovery_errors:
+                raise RuntimeError(
+                    f"extension '{manifest.id}' update failed and lifecycle recovery was incomplete"
+                ) from recovery_errors[0]
             raise
     payload = _state_payload()
     previous_version = existing.manifest.version if existing.manifest is not None else None
@@ -2907,7 +2920,75 @@ def update_extension_path(path: str) -> dict[str, Any]:
     return get_extension(manifest.id)
 
 
+def _capture_mcp_transaction_state() -> dict[str, Any]:
+    """Capture mutable MCP state before a lifecycle filesystem effect."""
+    return {
+        "config": deepcopy(getattr(mcp_manager, "_config", {})),
+        "status": deepcopy(getattr(mcp_manager, "_status", {})),
+        "tools": {
+            str(name): list(tools)
+            for name, tools in getattr(mcp_manager, "_tools", {}).items()
+        },
+        # Client objects are live transports and cannot be deep-copied. Their
+        # names are the durable connection state; restoration reconnects them
+        # from the captured config.
+        "clients": {
+            str(name): client
+            for name, client in getattr(mcp_manager, "_clients", {}).items()
+        },
+    }
+
+
+def _restore_mcp_transaction_state(snapshot: dict[str, Any]) -> None:
+    """Restore MCP config, connection membership, statuses, and tool lists."""
+    current_clients = getattr(mcp_manager, "_clients", {})
+    disconnect_errors: list[BaseException] = []
+    for name in list(current_clients):
+        try:
+            mcp_manager.disconnect(name)
+        except BaseException as exc:  # pragma: no cover - defensive boundary
+            disconnect_errors.append(exc)
+        finally:
+            # A mocked or partially failed disconnect must not leave a live
+            # client outside the captured connection set.
+            current_clients.pop(name, None)
+
+    mcp_manager._config = deepcopy(snapshot.get("config", {}))
+    expected_clients = set(snapshot.get("clients", {}))
+    connect_errors: list[BaseException] = []
+    for name in expected_clients:
+        server = mcp_manager._config.get(name)
+        if not isinstance(server, dict):
+            connect_errors.append(RuntimeError(f"MCP snapshot is missing server '{name}'"))
+            continue
+        try:
+            mcp_manager.connect(name, server.get("url", ""), headers=server.get("headers"))
+        except BaseException as exc:  # pragma: no cover - defensive boundary
+            connect_errors.append(exc)
+
+    # ``connect`` normally records status and tool objects. Restore the
+    # captured values after reconnect so a failed transaction has the exact
+    # pre-mutation operator-visible state, including degraded statuses.
+    mcp_manager._status = deepcopy(snapshot.get("status", {}))
+    mcp_manager._tools = {
+        str(name): list(tools)
+        for name, tools in snapshot.get("tools", {}).items()
+    }
+    mcp_manager._save_config()
+    missing_clients = expected_clients - set(getattr(mcp_manager, "_clients", {}))
+    if disconnect_errors or connect_errors or missing_clients:
+        details = []
+        if disconnect_errors:
+            details.append("disconnect failed")
+        if connect_errors:
+            details.append("reconnect failed")
+        if missing_clients:
+            details.append("; ".join(f"client:{name}" for name in sorted(missing_clients)))
+        raise RuntimeError("MCP runtime recovery was incomplete: " + ", ".join(details))
+
+
 def _capture_enable_transaction_state() -> dict[str, Any]:
+    mcp_snapshot = _capture_mcp_transaction_state()
     return {
         "skills": {
             str(skill.name): bool(skill.enabled)
@@ -2921,12 +3002,10 @@ def _capture_enable_transaction_state() -> dict[str, Any]:
             if getattr(workflow, "name", None)
         },
         "workflows_disabled": set(getattr(workflow_manager, "_disabled", set())),
-        "mcp_config": deepcopy(getattr(mcp_manager, "_config", {})),
-        "mcp_status": deepcopy(getattr(mcp_manager, "_status", {})),
-        "mcp_tools": {
-            str(name): list(tools)
-            for name, tools in getattr(mcp_manager, "_tools", {}).items()
-        },
+        "mcp_config": mcp_snapshot["config"],
+        "mcp_status": mcp_snapshot["status"],
+        "mcp_tools": mcp_snapshot["tools"],
+        "mcp_clients": mcp_snapshot["clients"],
         "state": deepcopy(_state_payload()),
     }
 
@@ -2946,21 +3025,14 @@ def _restore_enable_transaction_state(snapshot: dict[str, Any]) -> None:
     workflow_manager._disabled = set(snapshot.get("workflows_disabled", set()))
     workflow_manager._save_config()
 
-    # Tear down any connection opened by the failed transaction before
-    # restoring the immutable config snapshot.  Reconnect only the servers
-    # that were connected before the transaction began.
-    for name in list(getattr(mcp_manager, "_clients", {})):
-        mcp_manager.disconnect(name)
-    mcp_manager._config = deepcopy(snapshot.get("mcp_config", {}))
-    mcp_manager._status = deepcopy(snapshot.get("mcp_status", {}))
-    mcp_manager._tools = {
-        str(name): list(tools)
-        for name, tools in snapshot.get("mcp_tools", {}).items()
-    }
-    for name, server in mcp_manager._config.items():
-        if bool(server.get("enabled", True)):
-            mcp_manager.connect(name, server.get("url", ""), headers=server.get("headers"))
-    mcp_manager._save_config()
+    _restore_mcp_transaction_state(
+        {
+            "config": snapshot.get("mcp_config", {}),
+            "status": snapshot.get("mcp_status", {}),
+            "tools": snapshot.get("mcp_tools", {}),
+            "clients": snapshot.get("mcp_clients", {}),
+        }
+    )
     _save_state(deepcopy(snapshot.get("state", {"extensions": {}})))
 
 
@@ -3460,6 +3532,7 @@ def rollback_extension(extension_id: str, *, snapshot_id: str | None = None) -> 
     target_root = Path(extension.root_path)
     current_digest = _extension_package_digest(extension.root_path)
     current_version = extension.manifest.version if extension.manifest is not None else None
+    mcp_snapshot = _capture_mcp_transaction_state()
     with tempfile.TemporaryDirectory(prefix="seraph-extension-rollback-") as temp_root:
         current_backup = Path(temp_root) / "current"
         candidate = Path(temp_root) / "candidate"
@@ -3475,10 +3548,22 @@ def rollback_extension(extension_id: str, *, snapshot_id: str | None = None) -> 
                 raise ValueError(f"extension '{extension_id}' did not load after rollback")
             _sync_mcp_servers_for_updated_extension(extension, rolled_back)
         except Exception:
-            if target_root.exists():
-                shutil.rmtree(target_root, ignore_errors=True)
-            shutil.move(current_backup, target_root)
-            _refresh_runtime()
+            recovery_errors: list[BaseException] = []
+            try:
+                if target_root.exists():
+                    shutil.rmtree(target_root, ignore_errors=True)
+                shutil.move(current_backup, target_root)
+                _refresh_runtime()
+            except BaseException as recovery_error:  # pragma: no cover - defensive boundary
+                recovery_errors.append(recovery_error)
+            try:
+                _restore_mcp_transaction_state(mcp_snapshot)
+            except BaseException as recovery_error:  # pragma: no cover - defensive boundary
+                recovery_errors.append(recovery_error)
+            if recovery_errors:
+                raise RuntimeError(
+                    f"extension '{extension_id}' rollback failed and lifecycle recovery was incomplete"
+                ) from recovery_errors[0]
             raise
     payload = _state_payload()
     event = append_extension_lifecycle_event(
@@ -3579,22 +3664,32 @@ def remove_extension(extension_id: str) -> None:
         raise KeyError(extension_id)
     if _location_for_extension(extension) != "workspace" or not extension.root_path:
         raise ValueError(f"extension '{extension_id}' is not removable")
-    skill_config_changed = False
-    workflow_config_changed = False
-    for target in _toggle_targets(extension):
-        if target["type"] == "skill" and target["name"] in skill_manager._disabled:
-            skill_manager._disabled.discard(target["name"])
-            skill_config_changed = True
-        if target["type"] == "workflow" and target["name"] in workflow_manager._disabled:
-            workflow_manager._disabled.discard(target["name"])
-            workflow_config_changed = True
-    if skill_config_changed:
-        skill_manager._save_config()
-    if workflow_config_changed:
-        workflow_manager._save_config()
-    _remove_mcp_servers_for_extension(extension)
-    shutil.rmtree(extension.root_path)
-    payload = _state_payload()
-    payload.get("extensions", {}).pop(extension_id, None)
-    _save_state(payload)
-    _refresh_runtime()
+    mcp_snapshot = _capture_mcp_transaction_state()
+    try:
+        skill_config_changed = False
+        workflow_config_changed = False
+        for target in _toggle_targets(extension):
+            if target["type"] == "skill" and target["name"] in skill_manager._disabled:
+                skill_manager._disabled.discard(target["name"])
+                skill_config_changed = True
+            if target["type"] == "workflow" and target["name"] in workflow_manager._disabled:
+                workflow_manager._disabled.discard(target["name"])
+                workflow_config_changed = True
+        if skill_config_changed:
+            skill_manager._save_config()
+        if workflow_config_changed:
+            workflow_manager._save_config()
+        _remove_mcp_servers_for_extension(extension)
+        shutil.rmtree(extension.root_path)
+        payload = _state_payload()
+        payload.get("extensions", {}).pop(extension_id, None)
+        _save_state(payload)
+        _refresh_runtime()
+    except Exception:
+        try:
+            _restore_mcp_transaction_state(mcp_snapshot)
+        except Exception as recovery_error:  # pragma: no cover - defensive boundary
+            raise RuntimeError(
+                f"extension '{extension_id}' removal failed and MCP recovery was incomplete"
+            ) from recovery_error
+        raise

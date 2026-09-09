@@ -114,6 +114,7 @@ def _principal(session_id: str) -> TrustPrincipal:
             AuthorityGrant.ARTIFACT_TRANSFER,
         ),
         session_id=session_id,
+        operator_session_id=session_id,
     )
 
 
@@ -125,6 +126,7 @@ def bind_operator_principal(operator: AuthenticatedOperator, conversation_id: st
         authenticated=True,
         grants=operator.principal.grants,
         session_id=conversation_id,
+        operator_session_id=operator.session_id,
     )
 
 
@@ -154,6 +156,7 @@ def test_bypass_operator() -> AuthenticatedOperator:
                 AuthorityGrant.ARTIFACT_TRANSFER,
             ),
             session_id="test-auth-bypass",
+            operator_session_id="test-auth-bypass",
         ),
         now + timedelta(hours=1),
         now + timedelta(hours=1),

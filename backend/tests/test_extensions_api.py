@@ -1,5 +1,7 @@
 from dataclasses import replace
+from copy import deepcopy
 from pathlib import Path
+import shutil
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -761,6 +763,56 @@ async def test_extension_lifecycle_approval_and_failure_receipts_redact_private_
         "digest": _content_hash(private_manifest_path),
     }
     assert details["error"] == f"failed to install [private path:{_content_hash(private_path)}]"
+
+
+def test_lifecycle_receipt_redaction_covers_nested_recovery_errors():
+    from src.api.extensions import _redact_lifecycle_api_value
+    from src.extensions.state import append_extension_lifecycle_event
+
+    secret = "Bearer super-secret-token-value"
+    private_path = "/private/operator-secret/recovery-package"
+    raw = {
+        "error": {
+            "code": "policy_blocked",
+            "type": "PolicyError",
+            "message": f"blocked {secret} at {private_path}",
+            "cause": {
+                "details": {
+                    "token": secret,
+                    "path": private_path,
+                },
+            },
+        },
+        "original_error": {
+            "code": "filesystem_failed",
+            "type": "OSError",
+            "details": {"nested": {"secret": secret, "path": private_path}},
+        },
+    }
+
+    state_payload: dict[str, object] = {"extensions": {}}
+    event = append_extension_lifecycle_event(
+        state_payload,
+        "seraph.recovery",
+        action="enable",
+        status="recovery_required",
+        details=raw,
+    )
+    state_text = repr(state_payload)
+    assert secret not in state_text
+    assert private_path not in state_text
+    assert event["details"]["error"]["code"] == "policy_blocked"
+    assert event["details"]["error"]["type"] == "PolicyError"
+    assert event["details"]["original_error"]["code"] == "filesystem_failed"
+    assert event["details"]["original_error"]["type"] == "OSError"
+
+    api_value = _redact_lifecycle_api_value(raw)
+    assert secret not in repr(api_value)
+    assert private_path not in repr(api_value)
+    assert api_value["error"]["code"] == "policy_blocked"
+    assert api_value["error"]["type"] == "PolicyError"
+    assert api_value["original_error"]["code"] == "filesystem_failed"
+    assert api_value["original_error"]["type"] == "OSError"
 
 
 @pytest.mark.asyncio
@@ -3603,6 +3655,93 @@ async def test_update_workspace_connector_refreshes_packaged_mcp_server(client, 
         assert mcp_manager._config["github-packaged"]["enabled"] is True
         assert connect_mock.call_count == 2
         assert disconnect_mock.call_count == 1
+
+
+def test_extension_lifecycle_restores_mcp_state_on_update_rollback_and_remove_failure(
+    extension_runtime,
+    tmp_path,
+):
+    from src.extensions.lifecycle import (
+        extension_lifecycle_status,
+        install_extension_path,
+        remove_extension,
+        rollback_extension,
+        update_extension_path,
+    )
+
+    package_dir = _write_multi_mcp_connector_extension(tmp_path)
+    updated_package_dir = tmp_path / "multi-connector-pack-update"
+    shutil.copytree(package_dir, updated_package_dir)
+    updated_manifest = updated_package_dir / "manifest.yaml"
+    updated_manifest.write_text(
+        updated_manifest.read_text(encoding="utf-8").replace(
+            "version: 2026.3.21", "version: 2026.4.01"
+        ),
+        encoding="utf-8",
+    )
+
+    def mcp_state() -> dict[str, object]:
+        return {
+            "config": deepcopy(mcp_manager._config),
+            "status": deepcopy(mcp_manager._status),
+            "tools": deepcopy(mcp_manager._tools),
+            "clients": dict(mcp_manager._clients),
+        }
+
+    install_extension_path(str(package_dir))
+    extension_id = "seraph.multi-connector-pack"
+    root = extension_runtime / "extensions" / "seraph-multi-connector-pack"
+    original_manifest = (root / "manifest.yaml").read_text(encoding="utf-8")
+    before_update = mcp_state()
+
+    def block_secondary_after_primary(_previous, _updated):
+        mcp_manager._config["github-primary"]["url"] = "https://blocked.example/primary"
+        raise ValueError("secondary policy blocked")
+
+    with patch(
+        "src.extensions.lifecycle._sync_mcp_servers_for_updated_extension",
+        side_effect=block_secondary_after_primary,
+    ):
+        with pytest.raises(ValueError, match="secondary policy blocked"):
+            update_extension_path(str(updated_package_dir))
+
+    assert (root / "manifest.yaml").read_text(encoding="utf-8") == original_manifest
+    assert mcp_state() == before_update
+
+    update_extension_path(str(updated_package_dir))
+    assert "version: 2026.4.01" in (root / "manifest.yaml").read_text(encoding="utf-8")
+    rollback_snapshot = extension_lifecycle_status(extension_id)["rollback"]["snapshots"][0]
+    before_rollback = mcp_state()
+
+    def block_rollback_after_primary(_previous, _updated):
+        mcp_manager._config["github-primary"]["enabled"] = True
+        raise RuntimeError("rollback secondary policy blocked")
+
+    with patch(
+        "src.extensions.lifecycle._sync_mcp_servers_for_updated_extension",
+        side_effect=block_rollback_after_primary,
+    ):
+        with pytest.raises(RuntimeError, match="rollback secondary policy blocked"):
+            rollback_extension(extension_id, snapshot_id=rollback_snapshot["id"])
+
+    assert "version: 2026.4.01" in (root / "manifest.yaml").read_text(encoding="utf-8")
+    assert mcp_state() == before_rollback
+
+    before_remove = mcp_state()
+
+    def block_remove(_extension):
+        mcp_manager._config.pop("github-secondary", None)
+        raise RuntimeError("secondary removal policy blocked")
+
+    with patch(
+        "src.extensions.lifecycle._remove_mcp_servers_for_extension",
+        side_effect=block_remove,
+    ):
+        with pytest.raises(RuntimeError, match="secondary removal policy blocked"):
+            remove_extension(extension_id)
+
+    assert root.is_dir()
+    assert mcp_state() == before_remove
 
 
 @pytest.mark.asyncio

@@ -9,6 +9,10 @@ from uuid import uuid4
 from smolagents import Tool
 
 from src.approval.exceptions import ApprovalRequired
+from src.approval.identity import (
+    approval_owner_operator_session_id,
+    build_approval_owner_details,
+)
 from src.approval.repository import approval_repository, fingerprint_tool_call
 from src.approval.runtime import (
     get_current_approval_mode,
@@ -335,6 +339,10 @@ class ApprovalTool(Tool):
                 session_id=session_id,
                 tool_name=self.name,
                 fingerprint=fingerprint,
+                owner_operator_session_id=approval_owner_operator_session_id(
+                    session_id=session_id,
+                    principal=principal,
+                ),
             )
         ):
             assert_runtime_not_revoked()
@@ -351,16 +359,7 @@ class ApprovalTool(Tool):
                 fingerprint=fingerprint,
                 details={
                     "arguments": redact_for_audit(arguments),
-                    **(
-                        {"approval_owner_session_id": session_id}
-                        if session_id
-                        else {}
-                    ),
-                    **(
-                        {"approval_owner_principal_id": principal.principal_id}
-                        if principal is not None and principal.principal_id
-                        else {}
-                    ),
+                    **build_approval_owner_details(session_id=session_id, principal=principal),
                     **({"approval_context": approval_context} if approval_context else {}),
                 },
             )

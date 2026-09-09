@@ -17,6 +17,7 @@ from pydantic import BaseModel, Field
 from smolagents import MCPClient
 
 from config.settings import settings
+from src.approval.identity import build_approval_owner_details
 from src.approval.repository import approval_repository, fingerprint_tool_call
 from src.approval.runtime import (
     get_current_trust_principal,
@@ -67,6 +68,8 @@ from src.extensions.scaffold import scaffold_extension_package
 from src.extensions.state import (
     connector_enabled_overrides,
     load_extension_state_payload,
+    redact_lifecycle_error_text,
+    redact_lifecycle_receipt_value,
     save_extension_state_payload,
 )
 from src.native_tools.registry import canonical_tool_name
@@ -188,68 +191,17 @@ def _redacted_path_receipt(value: Any) -> dict[str, Any] | None:
 
 def _redact_extension_error(value: Any) -> str:
     """Keep lifecycle errors useful without returning paths, URLs, or secrets."""
-
-    text = str(value)
-
-    def replace(match: re.Match[str]) -> str:
-        return f"{match.group(1)}[private path:{_content_hash(match.group(2))}]"
-
-    text = _PRIVATE_PATH_PATTERN.sub(replace, text)
-
-    def replace_url(match: re.Match[str]) -> str:
-        return f"[redacted url:{_content_hash(match.group(0))}]"
-
-    text = _EXTERNAL_URL_PATTERN.sub(replace_url, text)
-
-    def replace_secret(match: re.Match[str]) -> str:
-        return f"{match.group(1)}{match.group(2)}[redacted]"
-
-    return _SENSITIVE_ASSIGNMENT_PATTERN.sub(replace_secret, text)
+    return redact_lifecycle_error_text(value)
 
 
 def _redact_lifecycle_receipt_value(value: Any) -> Any:
-    """Recursively redact private paths in approval and audit metadata."""
-
-    if isinstance(value, dict):
-        return {
-            key: _redact_lifecycle_receipt_value(item)
-            for key, item in value.items()
-        }
-    if isinstance(value, list):
-        return [_redact_lifecycle_receipt_value(item) for item in value]
-    if isinstance(value, tuple):
-        return tuple(_redact_lifecycle_receipt_value(item) for item in value)
-    if isinstance(value, str):
-        return _redact_extension_error(value)
-    return value
+    """Apply the shared structured lifecycle redaction contract."""
+    return redact_lifecycle_receipt_value(value)
 
 
 def _redact_lifecycle_api_value(value: Any, *, key: str | None = None) -> Any:
-    """Redact lifecycle reasons and connector diagnostics while preserving paths."""
-
-    key_text = (key or "").lower()
-    if isinstance(value, dict):
-        return {
-            str(item_key): _redact_lifecycle_api_value(item, key=str(item_key))
-            for item_key, item in value.items()
-        }
-    if isinstance(value, list):
-        return [_redact_lifecycle_api_value(item, key=key) for item in value]
-    if isinstance(value, tuple):
-        return tuple(_redact_lifecycle_api_value(item, key=key) for item in value)
-    if not isinstance(value, str):
-        return value
-    if key_text == "reason" or "reason" in key_text:
-        return f"[redacted reason:{_content_hash(value)}]"
-    if (
-        key_text in {"error", "status_message", "url", "authorization", "headers", "password", "secret", "token"}
-        or "url" in key_text
-        or "secret" in key_text
-        or "token" in key_text
-        or _EXTERNAL_URL_PATTERN.search(value)
-    ):
-        return _redact_extension_error(value)
-    return value
+    """Apply the shared structured lifecycle redaction contract."""
+    return redact_lifecycle_receipt_value(value, key=key)
 
 
 def _snapshot_digest(value: Any) -> str:
@@ -1242,7 +1194,6 @@ async def _require_extension_lifecycle_approval(
         **package_identity,
     }
     owner_principal = get_current_trust_principal()
-    owner_principal_id = str(getattr(owner_principal, "principal_id", "") or "").strip()
     if isinstance(safe_fingerprint_context, dict):
         arguments.update(safe_fingerprint_context)
     if safe_target_reference:
@@ -1309,10 +1260,12 @@ async def _require_extension_lifecycle_approval(
         "approval_scope": approval_scope,
         **package_identity,
     }
-    if session_id:
-        details["approval_owner_session_id"] = session_id
-    if owner_principal_id:
-        details["approval_owner_principal_id"] = owner_principal_id
+    details.update(
+        build_approval_owner_details(
+            session_id=session_id,
+            principal=owner_principal,
+        )
+    )
     if isinstance(safe_fingerprint_context, dict):
         details.update(safe_fingerprint_context)
     request = await approval_repository.get_or_create_pending(

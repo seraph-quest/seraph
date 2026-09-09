@@ -29,6 +29,42 @@ def fingerprint_tool_call(
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+def _approval_belongs_to_operator_session(
+    request: ApprovalRequest,
+    owner_operator_session_id: str,
+) -> bool:
+    """Check the explicit operator-session owner binding on an approval.
+
+    Old rows used ``session_id`` for both conversation and authentication
+    scope.  They are accepted only when those values are exactly the same;
+    an ambiguous conversation-only row therefore fails closed.
+    """
+    owner_operator_session_id = str(owner_operator_session_id or "").strip()
+    if not owner_operator_session_id:
+        return False
+    try:
+        details = json.loads(request.details_json) if request.details_json else {}
+    except (TypeError, ValueError):
+        details = {}
+    if not isinstance(details, dict):
+        details = {}
+    explicit_owner = str(
+        details.get("approval_owner_operator_session_id")
+        or details.get("approval_owner_auth_session_id")
+        or ""
+    ).strip()
+    if explicit_owner:
+        return explicit_owner == owner_operator_session_id
+
+    # ``approval_owner_session_id`` is the pre-migration field.  Its meaning
+    # was ambiguous, so only preserve rows where it is also the persisted
+    # repository session id (the old auth-session-only route).
+    legacy_owner = str(details.get("approval_owner_session_id") or "").strip()
+    return bool(legacy_owner) and legacy_owner == owner_operator_session_id and (
+        request.session_id == owner_operator_session_id
+    )
+
+
 class ApprovalRepository:
     async def get(self, approval_id: str) -> ApprovalRequest | None:
         """Fetch an approval without resolving it."""
@@ -124,6 +160,7 @@ class ApprovalRepository:
         session_id: str | None,
         tool_name: str,
         fingerprint: str,
+        owner_operator_session_id: str | None = None,
     ) -> bool:
         async with get_session() as db:
             result = await db.execute(
@@ -137,6 +174,11 @@ class ApprovalRepository:
             request = result.scalars().first()
             if request is None:
                 return False
+            if owner_operator_session_id is not None and not _approval_belongs_to_operator_session(
+                request,
+                owner_operator_session_id,
+            ):
+                return False
 
             request.status = "consumed"
             request.resolved_at = datetime.now(timezone.utc)
@@ -149,6 +191,7 @@ class ApprovalRepository:
         session_id: str | None,
         tool_name: str,
         fingerprint: str,
+        owner_operator_session_id: str | None = None,
     ) -> bool:
         async with get_session() as db:
             result = await db.execute(
@@ -159,7 +202,11 @@ class ApprovalRepository:
                 .where(ApprovalRequest.status == "approved")
                 .order_by(col(ApprovalRequest.created_at).desc())
             )
-            return result.scalars().first() is not None
+            request = result.scalars().first()
+            return request is not None and (
+                owner_operator_session_id is None
+                or _approval_belongs_to_operator_session(request, owner_operator_session_id)
+            )
 
     async def list_pending(
         self,

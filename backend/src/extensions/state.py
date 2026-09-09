@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import hashlib
 import os
+import re
+from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
 from typing import Any
 
@@ -27,6 +29,29 @@ _SENSITIVE_DETAIL_KEYS = {
     "token",
     "url",
 }
+_ERROR_SCOPE_KEYS = {"error", "original_error", "cause", "details", "exception", "failure"}
+_SAFE_ERROR_KEYS = {
+    "code",
+    "type",
+    "error_code",
+    "error_type",
+    "reason_code",
+    "status_code",
+}
+_PRIVATE_PATH_PATTERN = re.compile(
+    r"(^|[\s'\"=:])"
+    r"((?:/(?:Users|private|tmp|var|home|etc|Volumes|opt|run|srv)/[^\s'\",;)]*"
+    r"|~/?[^\s'\",;)]*"
+    r"|[A-Za-z]:\\[^\s'\",;)]*))"
+)
+_EXTERNAL_URL_PATTERN = re.compile(r"https?://[^\s'\",;)\]}]+", re.IGNORECASE)
+_SENSITIVE_ASSIGNMENT_PATTERN = re.compile(
+    r"(?i)\b(authorization|api[_-]?key|access[_-]?token|client[_-]?secret|password|secret|token)"
+    r"(\s*[:=]\s*)[^\s,;]+"
+)
+_SENSITIVE_BARE_VALUE_PATTERN = re.compile(
+    r"(?i)(?:bearer\s+[A-Za-z0-9._~+/=-]{8,}|(?:secret|token|password)[-_][A-Za-z0-9._~+/=-]{6,})"
+)
 
 
 def _safe_reason(reason: Any, *, default: str = "operator lifecycle request") -> str:
@@ -39,23 +64,85 @@ def _safe_reason(reason: Any, *, default: str = "operator lifecycle request") ->
     return f"{default} (input:{digest})"
 
 
-def _safe_detail_value(key: str, value: Any) -> Any:
-    if isinstance(value, dict):
-        return {str(item_key): _safe_detail_value(str(item_key), item) for item_key, item in value.items()}
-    if isinstance(value, list):
-        return [_safe_detail_value(key, item) for item in value]
-    if isinstance(value, tuple):
-        return tuple(_safe_detail_value(key, item) for item in value)
-    if isinstance(value, str) and (
-        key.lower() in _SENSITIVE_DETAIL_KEYS
-        or "reason" in key.lower()
-        or "url" in key.lower()
-        or "secret" in key.lower()
-        or "token" in key.lower()
-    ):
-        digest = hashlib.sha256(value.encode("utf-8")).hexdigest()[:16]
-        return f"[redacted:{digest}]"
+def _redacted_text(value: str) -> str:
+    digest = hashlib.sha256(value.encode("utf-8")).hexdigest()[:16]
+    return f"[redacted:{digest}]"
+
+
+def _redact_inline_text(value: str) -> str:
+    """Remove identifiable paths, URLs, and inline secret assignments."""
+    text = _PRIVATE_PATH_PATTERN.sub(
+        lambda match: f"{match.group(1)}[private path:{hashlib.sha256(match.group(2).encode('utf-8')).hexdigest()[:16]}]",
+        value,
+    )
+    text = _EXTERNAL_URL_PATTERN.sub(
+        lambda match: f"[redacted url:{hashlib.sha256(match.group(0).encode('utf-8')).hexdigest()[:16]}]",
+        text,
+    )
+    text = _SENSITIVE_ASSIGNMENT_PATTERN.sub(
+        lambda match: f"{match.group(1)}{match.group(2)}[redacted]",
+        text,
+    )
+    return _SENSITIVE_BARE_VALUE_PATTERN.sub("[redacted]", text)
+
+
+def redact_lifecycle_error_text(value: Any) -> str:
+    """Redact a scalar lifecycle error using the shared text contract."""
+    return _redact_inline_text(str(value))
+
+
+def redact_lifecycle_receipt_value(
+    value: Any,
+    *,
+    key: str | None = None,
+    _error_scope: bool = False,
+) -> Any:
+    """Recursively redact lifecycle state and API receipt values.
+
+    Error-like branches are treated as sensitive by default, including
+    ``original_error``, ``cause``, and nested ``details``. Only explicit safe
+    ``code``/``type`` fields survive so operators retain a stable failure
+    classification without exposing exception text, paths, or credentials.
+    """
+    key_text = str(key or "").strip().lower()
+    sensitive_key = (
+        key_text in _SENSITIVE_DETAIL_KEYS
+        or "reason" in key_text
+        or "url" in key_text
+        or "secret" in key_text
+        or "token" in key_text
+    )
+    error_scope = _error_scope or key_text in _ERROR_SCOPE_KEYS
+    if isinstance(value, Mapping):
+        result: dict[str, Any] = {}
+        for item_key, item in value.items():
+            normalized_key = str(item_key)
+            normalized_lower = normalized_key.lower()
+            if error_scope and normalized_lower in _SAFE_ERROR_KEYS:
+                result[normalized_key] = item if isinstance(item, (str, int, float, bool)) or item is None else str(item)
+                continue
+            result[normalized_key] = redact_lifecycle_receipt_value(
+                item,
+                key=normalized_key,
+                _error_scope=error_scope,
+            )
+        return result
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        return [
+            redact_lifecycle_receipt_value(item, key=key, _error_scope=error_scope)
+            for item in value
+        ]
+    if isinstance(value, (bytes, bytearray)):
+        return f"[binary:{len(value)} bytes]"
+    if isinstance(value, str):
+        if error_scope or sensitive_key:
+            return _redacted_text(value)
+        return _redact_inline_text(value)
     return value
+
+
+def _safe_detail_value(key: str, value: Any) -> Any:
+    return redact_lifecycle_receipt_value(value, key=key)
 
 
 def _safe_lifecycle_details(details: dict[str, Any] | None) -> dict[str, Any]:

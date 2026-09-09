@@ -960,8 +960,9 @@ async def test_activate_starter_pack_binds_operator_for_full_route_and_resets_co
         observe("overview")
         return {"starter_packs": [], "summary": {}}
 
-    async def activate(_name: str):
+    async def activate(_name: str, *, session_id: str | None = None):
         observe("activation")
+        assert session_id == operator.session_id
         return {
             "status": "activated",
             "name": "research-briefing",
@@ -1375,6 +1376,72 @@ async def test_activate_starter_pack_preflights_all_approvals_without_consuming_
         ("install", "alpha", None),
         ("approval", "beta", True),
         ("install", "beta", None),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_starter_pack_activation_threads_authenticated_owner_session():
+    from src.api.capabilities import _activate_starter_pack_by_name
+
+    approval_calls: list[tuple[str, bool, str | None]] = []
+
+    async def approval_side_effect(
+        name: str,
+        *,
+        consume: bool = True,
+        session_id: str | None = None,
+    ):
+        approval_calls.append((name, consume, session_id))
+
+    with (
+        patch(
+            "src.api.capabilities._load_starter_packs",
+            return_value=[
+                {
+                    "name": "owner-bound-pack",
+                    "label": "Owner Bound Pack",
+                    "description": "",
+                    "skills": [],
+                    "workflows": [],
+                    "install_items": ["alpha", "beta"],
+                }
+            ],
+        ),
+        patch(
+            "src.api.capabilities.require_catalog_install_approval",
+            AsyncMock(side_effect=approval_side_effect),
+        ),
+        patch(
+            "src.api.capabilities.install_catalog_item_by_name",
+            return_value={"ok": True, "status": "installed", "type": "mcp_server"},
+        ),
+        patch(
+            "src.api.capabilities._build_capability_overview",
+            return_value={
+                "starter_packs": [
+                    {
+                        "name": "owner-bound-pack",
+                        "availability": "ready",
+                        "missing_install_items": [],
+                        "blocked_skills": [],
+                        "blocked_workflows": [],
+                    }
+                ]
+            },
+        ),
+        patch("src.api.capabilities.log_integration_event", AsyncMock()),
+    ):
+        result = await _activate_starter_pack_by_name(
+            "owner-bound-pack",
+            session_id="operator-session-a",
+        )
+
+    assert result["status"] == "activated"
+    assert approval_calls == [
+        ("alpha", False, "operator-session-a"),
+        ("beta", False, "operator-session-a"),
+        ("alpha", True, "operator-session-a"),
+        ("beta", True, "operator-session-a"),
     ]
 
 

@@ -295,6 +295,31 @@ async def test_rest_authority_recheck_blocks_revoked_exception_side_effects():
     assert captured.value.detail["code"] == "session_revoked"
 
 
+@pytest.mark.asyncio
+async def test_rest_authority_recheck_closes_revocation_after_authentication(monkeypatch):
+    from types import SimpleNamespace
+
+    guard = Event()
+    request = SimpleNamespace(
+        cookies={settings.operator_auth_cookie_name: "token"},
+    )
+
+    async def _authenticated(_token, *, touch=False):
+        guard.set()
+        return SimpleNamespace()
+
+    monkeypatch.setattr("src.api.chat.authenticate_token", _authenticated)
+    token = set_revocation_guard(guard)
+    try:
+        with pytest.raises(HTTPException) as captured:
+            await _ensure_rest_authorized(request, (guard, None, None, token))
+    finally:
+        reset_revocation_guard(token)
+
+    assert captured.value.status_code == 401
+    assert captured.value.detail["code"] == "session_revoked"
+
+
 def test_revocation_guard_blocks_new_governed_model_transport():
     guard = Event()
     guard.set()

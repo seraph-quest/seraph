@@ -1,5 +1,7 @@
 from dataclasses import replace
+from copy import deepcopy
 from pathlib import Path
+import shutil
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -31,6 +33,786 @@ def _extension_mutator_request(operator, path: str):
             "state": {"operator": operator},
         }
     )
+
+
+@pytest.mark.asyncio
+async def test_extension_package_mutators_deny_invalid_operator_before_validation_lookup_or_effect():
+    from src.api.extensions import (
+        ExtensionPathRequest,
+        disable_extension_package,
+        enable_extension_package,
+        install_extension_package,
+        remove_extension_package,
+        update_extension_package,
+    )
+
+    operator = _test_bypass_operator()
+    invalid_operators = (
+        None,
+        object(),
+        replace(operator, principal=replace(operator.principal, authenticated=False)),
+        replace(operator, principal=replace(operator.principal, revoked=True)),
+        replace(operator, principal=replace(operator.principal, session_id="other-session")),
+        replace(operator, principal=replace(operator.principal, principal_type=PrincipalType.SERVICE)),
+        replace(operator, principal=replace(operator.principal, grants=())),
+    )
+    route_calls = (
+        (
+            install_extension_package,
+            (ExtensionPathRequest(path="/private/secret-token/install"),),
+            "/api/extensions/install",
+        ),
+        (
+            update_extension_package,
+            (ExtensionPathRequest(path="/private/secret-token/update"),),
+            "/api/extensions/update",
+        ),
+        (enable_extension_package, ("seraph.example",), "/api/extensions/seraph.example/enable"),
+        (disable_extension_package, ("seraph.example",), "/api/extensions/seraph.example/disable"),
+        (remove_extension_package, ("seraph.example",), "/api/extensions/seraph.example"),
+    )
+
+    with (
+        patch("src.api.extensions.validate_extension_path") as validate,
+        patch("src.api.extensions.get_extension") as lookup,
+        patch("src.api.extensions._require_extension_lifecycle_approval", new_callable=AsyncMock) as approval,
+        patch("src.api.extensions.install_extension_path") as install,
+        patch("src.api.extensions.update_extension_path") as update,
+        patch("src.api.extensions.enable_extension") as enable,
+        patch("src.api.extensions.disable_extension") as disable,
+        patch("src.api.extensions.remove_extension") as remove,
+        patch("src.api.extensions._log_extension_lifecycle_event", new_callable=AsyncMock) as audit,
+        patch("src.api.extensions.context_manager.get_context") as get_context,
+    ):
+        for invalid_operator in invalid_operators:
+            for route, args, path in route_calls:
+                with pytest.raises(HTTPException) as raised:
+                    await route(*args, _extension_mutator_request(invalid_operator, path))
+                assert raised.value.status_code == 401
+                assert raised.value.detail == {"code": "authentication_required"}
+                assert "/private/secret-token" not in repr(raised.value.detail)
+
+    validate.assert_not_called()
+    lookup.assert_not_called()
+    approval.assert_not_awaited()
+    install.assert_not_called()
+    update.assert_not_called()
+    enable.assert_not_called()
+    disable.assert_not_called()
+    remove.assert_not_called()
+    audit.assert_not_awaited()
+    get_context.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_extension_package_mutators_bind_operator_for_approval_effect_audit_and_reset_context():
+    from src.api.extensions import (
+        ExtensionPathRequest,
+        disable_extension_package,
+        enable_extension_package,
+        install_extension_package,
+        remove_extension_package,
+        update_extension_package,
+    )
+
+    operator = _test_bypass_operator()
+    install_path = "/private/install/secret-package"
+    update_path = "/private/update/secret-package"
+    install_preview = {
+        "ok": True,
+        "id": "seraph.installable",
+        "extension_id": "seraph.installable",
+        "path": install_path,
+        "package_digest": "install-digest",
+        "approval_profile": {"requires_lifecycle_approval": False},
+    }
+    update_preview = {
+        **install_preview,
+        "path": update_path,
+        "lifecycle_plan": {
+            "recommended_action": "update",
+            "version_relation": "upgrade",
+        },
+    }
+    extension = {
+        "id": "seraph.example",
+        "display_name": "Example",
+        "status": "ready",
+        "location": "workspace",
+        "root_path": "/private/installed/secret-package",
+        "package_digest": "installed-digest",
+    }
+    observed: list[tuple[str, object]] = []
+    approval_sessions: list[tuple[str, str | None]] = []
+
+    def observe(label: str):
+        observed.append((label, get_current_trust_principal()))
+
+    def validate(path: str):
+        observe("validate")
+        return install_preview if path == install_path else update_preview
+
+    async def approval(action: str, _preview: dict[str, object], **kwargs):
+        observe(f"{action}_approval")
+        approval_sessions.append((action, kwargs.get("session_id")))
+
+    async def audit(**kwargs):
+        observe(f"{kwargs['action']}_audit")
+
+    with (
+        patch("src.api.extensions.context_manager.get_context", return_value=SimpleNamespace(approval_mode="high_risk")),
+        patch("src.api.extensions.validate_extension_path", side_effect=validate),
+        patch("src.api.extensions.get_extension", side_effect=lambda *_args, **_kwargs: (observe("lookup") or extension)),
+        patch("src.api.extensions._require_extension_lifecycle_approval", side_effect=approval),
+        patch("src.api.extensions.assert_runtime_not_revoked", side_effect=lambda: observe("revocation")),
+        patch("src.api.extensions.install_extension_path", side_effect=lambda *_args: (observe("install_effect") or extension)),
+        patch("src.api.extensions.update_extension_path", side_effect=lambda *_args: (observe("update_effect") or extension)),
+        patch("src.api.extensions.enable_extension", side_effect=lambda *_args: (observe("enable_effect") or {"extension": extension, "changed": []})),
+        patch("src.api.extensions.disable_extension", side_effect=lambda *_args: (observe("disable_effect") or {"extension": extension, "changed": []})),
+        patch("src.api.extensions.remove_extension", side_effect=lambda *_args: observe("remove_effect")),
+        patch("src.api.extensions._log_extension_lifecycle_event", side_effect=audit),
+    ):
+        install_result = await install_extension_package(
+            ExtensionPathRequest(path=install_path),
+            _extension_mutator_request(operator, "/api/extensions/install"),
+        )
+        assert install_result["status"] == "installed"
+        assert get_current_session_id() is None
+        assert get_current_trust_principal() is None
+
+        update_result = await update_extension_package(
+            ExtensionPathRequest(path=update_path),
+            _extension_mutator_request(operator, "/api/extensions/update"),
+        )
+        assert update_result["status"] == "updated"
+        assert get_current_session_id() is None
+        assert get_current_trust_principal() is None
+
+        enable_result = await enable_extension_package(
+            "seraph.example",
+            _extension_mutator_request(operator, "/api/extensions/seraph.example/enable"),
+        )
+        assert enable_result["status"] == "enabled"
+        assert get_current_session_id() is None
+        assert get_current_trust_principal() is None
+
+        disable_result = await disable_extension_package(
+            "seraph.example",
+            _extension_mutator_request(operator, "/api/extensions/seraph.example/disable"),
+        )
+        assert disable_result["status"] == "disabled"
+        assert get_current_session_id() is None
+        assert get_current_trust_principal() is None
+
+        remove_result = await remove_extension_package(
+            "seraph.example",
+            _extension_mutator_request(operator, "/api/extensions/seraph.example"),
+        )
+        assert remove_result == {"status": "removed", "name": "seraph.example"}
+
+    assert [action for action, _session_id in approval_sessions] == [
+        "install",
+        "update",
+        "enable",
+        "disable",
+        "remove",
+    ]
+    assert all(session_id == operator.session_id for _action, session_id in approval_sessions)
+    assert observed
+    assert all(
+        principal is not None
+        and principal.principal_id == operator.principal.principal_id
+        and principal.principal_type is PrincipalType.OPERATOR
+        and principal.session_id == operator.session_id
+        for _label, principal in observed
+    )
+    assert get_current_session_id() is None
+    assert get_current_trust_principal() is None
+
+
+@pytest.mark.asyncio
+async def test_extension_package_mutators_recheck_revocation_before_effect_and_reset_context():
+    from src.api.extensions import (
+        ExtensionPathRequest,
+        disable_extension_package,
+        enable_extension_package,
+        install_extension_package,
+        remove_extension_package,
+        update_extension_package,
+    )
+
+    operator = _test_bypass_operator()
+    install_preview = {
+        "ok": True,
+        "id": "seraph.installable",
+        "extension_id": "seraph.installable",
+        "path": "/private/install/package",
+        "package_digest": "install-digest",
+        "approval_profile": {"requires_lifecycle_approval": False},
+    }
+    update_preview = {
+        **install_preview,
+        "path": "/private/update/package",
+        "lifecycle_plan": {"recommended_action": "update", "version_relation": "upgrade"},
+    }
+    extension = {
+        "id": "seraph.example",
+        "status": "ready",
+        "root_path": "/private/installed/secret-package",
+        "package_digest": "installed-digest",
+    }
+    revoked = RuntimeRevokedError("operator session was revoked")
+    route_calls = (
+        (
+            install_extension_package,
+            (ExtensionPathRequest(path="/private/install/package"),),
+            "/api/extensions/install",
+        ),
+        (
+            update_extension_package,
+            (ExtensionPathRequest(path="/private/update/package"),),
+            "/api/extensions/update",
+        ),
+        (enable_extension_package, ("seraph.example",), "/api/extensions/seraph.example/enable"),
+        (disable_extension_package, ("seraph.example",), "/api/extensions/seraph.example/disable"),
+        (remove_extension_package, ("seraph.example",), "/api/extensions/seraph.example"),
+    )
+
+    with (
+        patch("src.api.extensions.context_manager.get_context", return_value=SimpleNamespace(approval_mode="safe")),
+        patch(
+            "src.api.extensions.validate_extension_path",
+            side_effect=[install_preview, install_preview, update_preview, update_preview],
+        ),
+        patch("src.api.extensions.get_extension", return_value=extension),
+        patch("src.api.extensions._require_extension_lifecycle_approval", new_callable=AsyncMock) as approval,
+        patch("src.api.extensions.assert_runtime_not_revoked", side_effect=revoked) as check_revoked,
+        patch("src.api.extensions.install_extension_path") as install,
+        patch("src.api.extensions.update_extension_path") as update,
+        patch("src.api.extensions.enable_extension") as enable,
+        patch("src.api.extensions.disable_extension") as disable,
+        patch("src.api.extensions.remove_extension") as remove,
+        patch("src.api.extensions._log_extension_lifecycle_event", new_callable=AsyncMock) as audit,
+    ):
+        for route, args, path in route_calls:
+            with pytest.raises(HTTPException) as revoked_error:
+                await route(*args, _extension_mutator_request(operator, path))
+            assert revoked_error.value.status_code == 401
+            assert revoked_error.value.detail == {
+                "code": "session_revoked",
+                "message": "Operator session was revoked.",
+            }
+            assert get_current_session_id() is None
+            assert get_current_trust_principal() is None
+
+    assert check_revoked.call_count == len(route_calls)
+    assert approval.await_count == len(route_calls)
+    install.assert_not_called()
+    update.assert_not_called()
+    enable.assert_not_called()
+    disable.assert_not_called()
+    remove.assert_not_called()
+    audit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_extension_package_mutators_reject_package_or_registry_swap_after_approval():
+    from src.api.extensions import (
+        ExtensionPathRequest,
+        disable_extension_package,
+        enable_extension_package,
+        install_extension_package,
+        remove_extension_package,
+        update_extension_package,
+    )
+
+    operator = _test_bypass_operator()
+    install_path = "/private/install/swap-package"
+    update_path = "/private/update/swap-package"
+    install_preview = {
+        "ok": True,
+        "id": "seraph.installable",
+        "extension_id": "seraph.installable",
+        "path": install_path,
+        "package_digest": "approved-install-digest",
+        "approval_profile": {"requires_lifecycle_approval": False},
+    }
+    update_preview = {
+        **install_preview,
+        "path": update_path,
+        "lifecycle_plan": {"recommended_action": "update", "version_relation": "upgrade"},
+    }
+    extension = {
+        "id": "seraph.example",
+        "status": "ready",
+        "root_path": "/private/installed/swap-package",
+        "package_digest": "approved-registry-digest",
+    }
+    changed_install = {**install_preview, "package_digest": "changed-install-digest"}
+    changed_update = {**update_preview, "package_digest": "changed-update-digest"}
+    changed_extension = {**extension, "package_digest": "changed-registry-digest"}
+
+    with (
+        patch("src.api.extensions.validate_extension_path", side_effect=[install_preview, changed_install, update_preview, changed_update]) as validate,
+        patch(
+            "src.api.extensions.get_extension",
+            side_effect=[extension, changed_extension, extension, changed_extension, extension, changed_extension],
+        ) as lookup,
+        patch("src.api.extensions._require_extension_lifecycle_approval", new_callable=AsyncMock) as approval,
+        patch("src.api.extensions._ensure_rest_authorized", new_callable=AsyncMock) as ensure_authorized,
+        patch("src.api.extensions.assert_runtime_not_revoked") as check_revoked,
+        patch("src.api.extensions.install_extension_path") as install,
+        patch("src.api.extensions.update_extension_path") as update,
+        patch("src.api.extensions.enable_extension") as enable,
+        patch("src.api.extensions.disable_extension") as disable,
+        patch("src.api.extensions.remove_extension") as remove,
+        patch("src.api.extensions.log_integration_event", new_callable=AsyncMock) as audit,
+    ):
+        with pytest.raises(HTTPException) as install_error:
+            await install_extension_package(
+                ExtensionPathRequest(path=install_path),
+                _extension_mutator_request(operator, "/api/extensions/install"),
+            )
+        assert install_error.value.status_code == 422
+
+        with pytest.raises(HTTPException) as update_error:
+            await update_extension_package(
+                ExtensionPathRequest(path=update_path),
+                _extension_mutator_request(operator, "/api/extensions/update"),
+            )
+        assert update_error.value.status_code == 422
+
+        with pytest.raises(HTTPException) as enable_error:
+            await enable_extension_package(
+                "seraph.example",
+                _extension_mutator_request(operator, "/api/extensions/seraph.example/enable"),
+            )
+        assert enable_error.value.status_code == 422
+
+        with pytest.raises(HTTPException) as disable_error:
+            await disable_extension_package(
+                "seraph.example",
+                _extension_mutator_request(operator, "/api/extensions/seraph.example/disable"),
+            )
+        assert disable_error.value.status_code == 422
+
+        with pytest.raises(HTTPException) as remove_error:
+            await remove_extension_package(
+                "seraph.example",
+                _extension_mutator_request(operator, "/api/extensions/seraph.example"),
+            )
+        assert remove_error.value.status_code == 409
+
+    assert validate.call_count == 4
+    assert lookup.call_count == 6
+    assert approval.await_count == 5
+    assert ensure_authorized.await_count == 5
+    assert check_revoked.call_count == 0
+    install.assert_not_called()
+    update.assert_not_called()
+    enable.assert_not_called()
+    disable.assert_not_called()
+    remove.assert_not_called()
+    assert install_path not in repr(audit.await_args_list)
+    assert update_path not in repr(audit.await_args_list)
+    assert "/private/installed/swap-package" not in repr(audit.await_args_list)
+    assert get_current_session_id() is None
+    assert get_current_trust_principal() is None
+
+
+@pytest.mark.asyncio
+async def test_extension_package_install_rechecks_rest_revocation_after_approval():
+    from threading import Event
+
+    from src.api.extensions import ExtensionPathRequest, install_extension_package
+
+    operator = _test_bypass_operator()
+    package_path = "/private/revoked-during-approval/package"
+    preview = {
+        "ok": True,
+        "id": "seraph.revoked",
+        "extension_id": "seraph.revoked",
+        "path": package_path,
+        "package_digest": "revoked-digest",
+        "approval_profile": {"requires_lifecycle_approval": False},
+    }
+    revocation_guard = Event()
+    revocation_scope = (revocation_guard, None, None, None)
+
+    async def approve(*_args, **_kwargs):
+        revocation_guard.set()
+
+    with (
+        patch("src.api.extensions._begin_rest_revocation_watch", return_value=revocation_scope) as begin_watch,
+        patch("src.api.extensions._end_rest_revocation_watch", new_callable=AsyncMock) as end_watch,
+        patch("src.api.extensions.validate_extension_path", return_value=preview) as validate,
+        patch("src.api.extensions._require_extension_lifecycle_approval", side_effect=approve),
+        patch("src.api.extensions.install_extension_path") as install,
+    ):
+        with pytest.raises(HTTPException) as revoked_error:
+            await install_extension_package(
+                ExtensionPathRequest(path=package_path),
+                _extension_mutator_request(operator, "/api/extensions/install"),
+            )
+
+    assert revoked_error.value.status_code == 401
+    assert revoked_error.value.detail == {
+        "code": "session_revoked",
+        "message": "Operator session was revoked.",
+    }
+    begin_watch.assert_called_once()
+    end_watch.assert_awaited_once_with(revocation_scope)
+    validate.assert_called_once()
+    install.assert_not_called()
+    assert get_current_session_id() is None
+    assert get_current_trust_principal() is None
+
+
+@pytest.mark.asyncio
+async def test_public_install_maps_late_runtime_revocation_to_bounded_401(client, tmp_path):
+    from src.api.extensions import install_extension_path
+
+    package_path = str(tmp_path / "revoked-package")
+    preview = {
+        "ok": True,
+        "id": "seraph.revoked-public",
+        "extension_id": "seraph.revoked-public",
+        "path": package_path,
+        "package_digest": "revoked-public-digest",
+        "approval_profile": {"requires_lifecycle_approval": False},
+    }
+    revoked = RuntimeRevokedError("session token and secret should never reach the response")
+    with (
+        patch("src.api.extensions.validate_extension_path", return_value=preview),
+        patch("src.api.extensions._require_extension_lifecycle_approval", new_callable=AsyncMock),
+        patch("src.api.extensions.assert_runtime_not_revoked", side_effect=revoked),
+        patch("src.api.extensions.install_extension_path") as install,
+        patch("src.api.extensions.log_integration_event", new_callable=AsyncMock),
+    ):
+        response = await client.post("/api/extensions/install", json={"path": package_path})
+
+    assert response.status_code == 401
+    assert response.json() == {
+        "detail": {
+            "code": "session_revoked",
+            "message": "Operator session was revoked.",
+        }
+    }
+    install.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_extension_mutators_recheck_watcher_after_authorizer_await():
+    from threading import Event
+
+    from src.api.extensions import (
+        ExtensionLifecycleReasonRequest,
+        review_extension_package,
+    )
+
+    operator = _test_bypass_operator()
+    extension = {
+        "id": "seraph.revoked",
+        "root_path": "/private/revoked/package",
+        "package_digest": "approved-digest",
+        "status": "ready",
+    }
+    revocation_guard = Event()
+    revocation_scope = (revocation_guard, None, None, None)
+
+    async def authorizer_returns_after_revocation(*_args, **_kwargs):
+        # Model the watcher setting its guard at the completion boundary of
+        # token authentication, after the delegated await has returned.
+        revocation_guard.set()
+
+    with (
+        patch("src.api.extensions._begin_rest_revocation_watch", return_value=revocation_scope),
+        patch("src.api.extensions._end_rest_revocation_watch", new_callable=AsyncMock) as end_watch,
+        patch("src.api.extensions.context_manager.get_context", return_value=SimpleNamespace(approval_mode="high_risk")),
+        patch("src.api.extensions.get_extension", return_value=extension),
+        patch("src.api.extensions._require_extension_lifecycle_approval", new_callable=AsyncMock),
+        patch("src.api.extensions._ensure_rest_authorized", side_effect=authorizer_returns_after_revocation) as ensure_authorized,
+        patch("src.api.extensions.record_extension_review") as record_review,
+    ):
+        with pytest.raises(HTTPException) as revoked_error:
+            await review_extension_package(
+                "seraph.revoked",
+                ExtensionLifecycleReasonRequest(reason="review"),
+                _extension_mutator_request(operator, "/api/extensions/seraph.revoked/review"),
+            )
+
+    assert revoked_error.value.status_code == 401
+    assert revoked_error.value.detail == {
+        "code": "session_revoked",
+        "message": "Operator session was revoked.",
+    }
+    ensure_authorized.assert_awaited_once()
+    end_watch.assert_awaited_once_with(revocation_scope)
+    record_review.assert_not_called()
+    assert get_current_session_id() is None
+    assert get_current_trust_principal() is None
+
+
+@pytest.mark.asyncio
+async def test_extension_remaining_mutators_reject_snapshot_swap_before_effect():
+    from src.api.extensions import (
+        ExtensionConfigRequest,
+        ExtensionConnectorToggleRequest,
+        ExtensionLifecycleReasonRequest,
+        ExtensionRollbackRequest,
+        ExtensionSourceSaveRequest,
+        configure_extension_package,
+        quarantine_extension_package,
+        reenter_extension_package,
+        review_extension_package,
+        rollback_extension_package,
+        save_extension_package_source,
+        set_extension_package_connector_enabled,
+    )
+
+    operator = _test_bypass_operator()
+    connector = {
+        "extension_id": "seraph.snapshot-pack",
+        "reference": "connectors/example.yaml",
+        "name": "example",
+        "type": "observer_definitions",
+        "status": "ready",
+        "health": {"state": "ready", "ready": True},
+    }
+    extension = {
+        "id": "seraph.snapshot-pack",
+        "root_path": "/private/snapshot-pack",
+        "package_digest": "approved-digest",
+        "status": "ready",
+        "config": {},
+        "contributions": [connector],
+    }
+    changed_config = {
+        **extension,
+        "config": {"managed_connectors": {"example": {"mode": "changed"}}},
+    }
+    changed_extension = {**extension, "package_digest": "changed-digest"}
+    source_preview = {
+        "extension": extension,
+        "reference": "workflows/example.md",
+        "content": "approved source",
+        "validation": {"valid": True},
+    }
+    changed_source_preview = {**source_preview, "content": "swapped source"}
+    snapshot = {
+        "id": "snapshot-1",
+        "version": "2026.3.21",
+        "digest": "snapshot-digest",
+        "path": "/private/snapshots/one",
+    }
+    changed_snapshot = {**snapshot, "path": "/private/snapshots/swapped"}
+    lifecycle = {"rollback": {"snapshots": [snapshot]}}
+    changed_lifecycle = {"rollback": {"snapshots": [changed_snapshot]}}
+
+    common_patches = (
+        patch("src.api.extensions.context_manager.get_context", return_value=SimpleNamespace(approval_mode="high_risk")),
+        patch("src.api.extensions._require_extension_lifecycle_approval", new_callable=AsyncMock),
+        patch("src.api.extensions._ensure_rest_authorized", new_callable=AsyncMock),
+        patch("src.api.extensions._log_extension_lifecycle_event", new_callable=AsyncMock),
+    )
+
+    with common_patches[0], common_patches[1], common_patches[2], common_patches[3], patch(
+        "src.api.extensions.get_extension", side_effect=[extension, changed_config]
+    ), patch("src.api.extensions.configure_extension") as configure:
+        with pytest.raises(HTTPException) as error:
+            await configure_extension_package(
+                "seraph.snapshot-pack",
+                ExtensionConfigRequest(config={}),
+                _extension_mutator_request(operator, "/api/extensions/seraph.snapshot-pack/configure"),
+            )
+        assert error.value.status_code == 422
+    configure.assert_not_called()
+
+    with common_patches[0], common_patches[1], common_patches[2], common_patches[3], patch(
+        "src.api.extensions.get_extension", side_effect=[extension, changed_extension]
+    ), patch("src.api.extensions.set_extension_connector_enabled") as toggle:
+        with pytest.raises(HTTPException) as error:
+            await set_extension_package_connector_enabled(
+                "seraph.snapshot-pack",
+                ExtensionConnectorToggleRequest(reference=connector["reference"], enabled=True),
+                _extension_mutator_request(operator, "/api/extensions/seraph.snapshot-pack/connectors/enabled"),
+            )
+        assert error.value.status_code == 422
+    toggle.assert_not_called()
+
+    with common_patches[0], common_patches[1], common_patches[2], common_patches[3], patch(
+        "src.api.extensions.get_extension_source", side_effect=[source_preview, changed_source_preview]
+    ), patch("src.api.extensions.save_extension_source") as save_source:
+        with pytest.raises(HTTPException) as error:
+            await save_extension_package_source(
+                "seraph.snapshot-pack",
+                ExtensionSourceSaveRequest(reference=source_preview["reference"], content="requested source"),
+                _extension_mutator_request(operator, "/api/extensions/seraph.snapshot-pack/source"),
+            )
+        assert error.value.status_code == 422
+    save_source.assert_not_called()
+
+    for action, route, body, effect_name in (
+        (
+            "review",
+            review_extension_package,
+            ExtensionLifecycleReasonRequest(reason="review"),
+            "record_extension_review",
+        ),
+        (
+            "quarantine",
+            quarantine_extension_package,
+            ExtensionLifecycleReasonRequest(reason="quarantine"),
+            "quarantine_extension",
+        ),
+        (
+            "reentry",
+            reenter_extension_package,
+            ExtensionLifecycleReasonRequest(reason="re-entry"),
+            "reenter_extension",
+        ),
+    ):
+        with common_patches[0], common_patches[1], common_patches[2], common_patches[3], patch(
+            "src.api.extensions.get_extension", side_effect=[extension, changed_extension]
+        ), patch(f"src.api.extensions.{effect_name}") as effect:
+            with pytest.raises(HTTPException) as error:
+                await route(
+                    "seraph.snapshot-pack",
+                    body,
+                    _extension_mutator_request(operator, f"/api/extensions/seraph.snapshot-pack/{action}"),
+                )
+            assert error.value.status_code == 422
+        effect.assert_not_called()
+
+    with common_patches[0], common_patches[1], common_patches[2], common_patches[3], patch(
+        "src.api.extensions.get_extension", side_effect=[extension, extension]
+    ), patch("src.api.extensions.extension_lifecycle_status", side_effect=[lifecycle, changed_lifecycle]), patch(
+        "src.api.extensions.rollback_extension"
+    ) as rollback:
+        with pytest.raises(HTTPException) as error:
+            await rollback_extension_package(
+                "seraph.snapshot-pack",
+                ExtensionRollbackRequest(snapshot_id="snapshot-1"),
+                _extension_mutator_request(operator, "/api/extensions/seraph.snapshot-pack/rollback"),
+            )
+        assert error.value.status_code == 422
+    rollback.assert_not_called()
+    assert get_current_session_id() is None
+    assert get_current_trust_principal() is None
+
+
+@pytest.mark.asyncio
+async def test_extension_lifecycle_approval_and_failure_receipts_redact_private_paths():
+    from src.api.extensions import (
+        _content_hash,
+        _log_extension_lifecycle_event,
+        _require_extension_lifecycle_approval,
+    )
+
+    private_path = "/private/operator-secret/extension-package"
+    private_manifest_path = f"{private_path}/manifest.yaml"
+    preview = {
+        "id": "seraph.secret",
+        "display_name": "Secret extension",
+        "path": private_path,
+        "root_path": private_path,
+        "manifest_path": private_manifest_path,
+        "package_digest": "secret-package-digest",
+        "approval_profile": {
+            "requires_lifecycle_approval": True,
+            "lifecycle_boundaries": ["secret_read"],
+            "risk_level": "high",
+        },
+    }
+    pending = SimpleNamespace(id="approval-secret", risk_level="high")
+    with (
+        patch("src.api.extensions.approval_repository.consume_approved", new_callable=AsyncMock, return_value=False),
+        patch("src.api.extensions.approval_repository.get_or_create_pending", new_callable=AsyncMock, return_value=pending) as create_pending,
+    ):
+        with pytest.raises(HTTPException) as approval_error:
+            await _require_extension_lifecycle_approval(
+                "install",
+                preview,
+                session_id="session-secret",
+                redact_paths=True,
+            )
+
+    assert approval_error.value.status_code == 409
+    pending_payload = create_pending.await_args.kwargs
+    assert private_path not in repr(pending_payload)
+    assert "package_path" not in pending_payload["details"]
+    assert pending_payload["details"]["package_path_hash"] == _content_hash(private_path)
+    assert private_path not in repr(approval_error.value.detail)
+
+    with patch("src.api.extensions.log_integration_event", new_callable=AsyncMock) as audit:
+        await _log_extension_lifecycle_event(
+            action="install",
+            outcome="failed",
+            preview=preview,
+            path=private_path,
+            error=f"failed to install {private_path}",
+            redact_paths=True,
+        )
+
+    details = audit.await_args.kwargs["details"]
+    assert private_path not in repr(details)
+    assert private_manifest_path not in repr(details)
+    assert details["path"] == {"redacted": True, "digest": _content_hash(private_path)}
+    assert details["manifest_path"] == {
+        "redacted": True,
+        "digest": _content_hash(private_manifest_path),
+    }
+    assert details["error"] == f"failed to install [private path:{_content_hash(private_path)}]"
+
+
+def test_lifecycle_receipt_redaction_covers_nested_recovery_errors():
+    from src.api.extensions import _redact_lifecycle_api_value
+    from src.extensions.state import append_extension_lifecycle_event
+
+    secret = "Bearer super-secret-token-value"
+    private_path = "/private/operator-secret/recovery-package"
+    raw = {
+        "error": {
+            "code": "policy_blocked",
+            "type": "PolicyError",
+            "message": f"blocked {secret} at {private_path}",
+            "cause": {
+                "details": {
+                    "token": secret,
+                    "path": private_path,
+                },
+            },
+        },
+        "original_error": {
+            "code": "filesystem_failed",
+            "type": "OSError",
+            "details": {"nested": {"secret": secret, "path": private_path}},
+        },
+    }
+
+    state_payload: dict[str, object] = {"extensions": {}}
+    event = append_extension_lifecycle_event(
+        state_payload,
+        "seraph.recovery",
+        action="enable",
+        status="recovery_required",
+        details=raw,
+    )
+    state_text = repr(state_payload)
+    assert secret not in state_text
+    assert private_path not in state_text
+    assert event["details"]["error"]["code"] == "policy_blocked"
+    assert event["details"]["error"]["type"] == "PolicyError"
+    assert event["details"]["original_error"]["code"] == "filesystem_failed"
+    assert event["details"]["original_error"]["type"] == "OSError"
+
+    api_value = _redact_lifecycle_api_value(raw)
+    assert secret not in repr(api_value)
+    assert private_path not in repr(api_value)
+    assert api_value["error"]["code"] == "policy_blocked"
+    assert api_value["error"]["type"] == "PolicyError"
+    assert api_value["original_error"]["code"] == "filesystem_failed"
+    assert api_value["original_error"]["type"] == "OSError"
 
 
 @pytest.mark.asyncio
@@ -135,6 +917,8 @@ async def test_extension_mutators_bind_operator_context_and_redact_source_receip
     }
     extension = {
         "id": "seraph.example",
+        "root_path": "/private/installed/secret-package",
+        "package_digest": "installed-digest",
         "status": "ready",
         "contributions": [connector],
     }
@@ -176,11 +960,15 @@ async def test_extension_mutators_bind_operator_context_and_redact_source_receip
     assert toggle_payload["status"] == "enabled"
     assert source_payload["extension"]["id"] == "seraph.example"
     assert [label for label, _principal in observed] == [
+        "toggle_lookup",
         "test_lookup",
+        "toggle_lookup",
         "succeeded",
+        "toggle_lookup",
         "toggle_lookup",
         "toggle_write",
         "succeeded",
+        "source_lookup",
         "source_lookup",
         "source_write",
         "succeeded",
@@ -220,6 +1008,8 @@ async def test_extension_mutators_recheck_revocation_before_external_or_file_eff
     }
     extension = {
         "id": "seraph.example",
+        "root_path": "/private/installed/secret-package",
+        "package_digest": "installed-digest",
         "status": "ready",
         "contributions": [
             {
@@ -249,25 +1039,28 @@ async def test_extension_mutators_recheck_revocation_before_external_or_file_eff
         patch("src.api.extensions.get_extension_source", return_value=source_preview),
         patch("src.api.extensions.save_extension_source") as save_source,
     ):
-        with pytest.raises(RuntimeRevokedError):
+        with pytest.raises(HTTPException) as connector_error:
             await test_extension_package_connector(
                 "seraph.example",
                 ExtensionConnectorTestRequest(reference="connectors/example.yaml"),
                 _extension_mutator_request(operator, "/api/extensions/seraph.example/connectors/test"),
             )
-        with pytest.raises(RuntimeRevokedError):
+        with pytest.raises(HTTPException) as enabled_error:
             await set_extension_package_connector_enabled(
                 "seraph.example",
                 ExtensionConnectorToggleRequest(reference="connectors/example.yaml", enabled=True),
                 _extension_mutator_request(operator, "/api/extensions/seraph.example/connectors/enabled"),
             )
-        with pytest.raises(RuntimeRevokedError):
+        with pytest.raises(HTTPException) as source_error:
             await save_extension_package_source(
                 "seraph.example",
                 ExtensionSourceSaveRequest(reference="workflows/example.md", content="new content"),
                 _extension_mutator_request(operator, "/api/extensions/seraph.example/source"),
             )
 
+    assert connector_error.value.status_code == 401
+    assert enabled_error.value.status_code == 401
+    assert source_error.value.status_code == 401
     test_connector.assert_not_awaited()
     set_enabled.assert_not_called()
     save_source.assert_not_called()
@@ -434,6 +1227,8 @@ async def test_extension_configure_binds_context_preserves_approval_and_redacts_
     preview = {
         "id": "seraph.secret-pack",
         "display_name": "Secret Pack",
+        "root_path": "/private/secret-pack",
+        "package_digest": "secret-pack-digest",
         "status": "ready",
         "approval_profile": {
             "requires_lifecycle_approval": True,
@@ -489,7 +1284,13 @@ async def test_extension_configure_binds_context_preserves_approval_and_redacts_
         )
 
     assert payload == {"status": "configured", "extension": configured}
-    assert [label for label, _principal in observed] == ["lookup", "approval", "configure", "succeeded"]
+    assert [label for label, _principal in observed] == [
+        "lookup",
+        "approval",
+        "lookup",
+        "configure",
+        "succeeded",
+    ]
     assert all(
         principal is not None
         and principal.principal_id == operator.principal.principal_id
@@ -515,6 +1316,8 @@ async def test_extension_configure_rechecks_revocation_and_resets_context_on_err
     operator = _test_bypass_operator()
     preview = {
         "id": "seraph.example",
+        "root_path": "/private/example-pack",
+        "package_digest": "example-pack-digest",
         "status": "ready",
         "approval_profile": {"requires_lifecycle_approval": False},
         "contributions": [],
@@ -528,12 +1331,17 @@ async def test_extension_configure_rechecks_revocation_and_resets_context_on_err
         patch("src.api.extensions.configure_extension") as configure_extension,
         patch("src.api.extensions.log_integration_event", new_callable=AsyncMock),
     ):
-        with pytest.raises(RuntimeRevokedError):
+        with pytest.raises(HTTPException) as revoked_error:
             await configure_extension_package(
                 "seraph.example",
                 ExtensionConfigRequest(config={}),
                 _extension_mutator_request(operator, "/api/extensions/seraph.example/configure"),
             )
+        assert revoked_error.value.status_code == 401
+        assert revoked_error.value.detail == {
+            "code": "session_revoked",
+            "message": "Operator session was revoked.",
+        }
         configure_extension.assert_not_called()
         assert get_current_session_id() is None
         assert get_current_trust_principal() is None
@@ -648,7 +1456,13 @@ async def test_extension_lifecycle_routes_bind_operator_context_and_reset_it():
     )
 
     operator = _test_bypass_operator()
-    extension = {"id": "seraph.example", "display_name": "Example", "status": "ready"}
+    extension = {
+        "id": "seraph.example",
+        "display_name": "Example",
+        "root_path": "/private/example-pack",
+        "package_digest": "example-pack-digest",
+        "status": "ready",
+    }
     snapshot = {
         "id": "snapshot-1",
         "version": "2026.3.21",
@@ -744,7 +1558,12 @@ async def test_extension_lifecycle_routes_deny_revocation_before_effect():
     )
 
     operator = _test_bypass_operator()
-    extension = {"id": "seraph.example", "status": "ready"}
+    extension = {
+        "id": "seraph.example",
+        "root_path": "/private/example-pack",
+        "package_digest": "example-pack-digest",
+        "status": "ready",
+    }
     lifecycle = {
         "rollback": {
             "snapshots": [
@@ -792,12 +1611,17 @@ async def test_extension_lifecycle_routes_deny_revocation_before_effect():
             ),
         )
         for route, body, path in route_calls:
-            with pytest.raises(RuntimeRevokedError):
+            with pytest.raises(HTTPException) as revoked_error:
                 await route(
                     "seraph.example",
                     body,
                     _extension_mutator_request(operator, path),
                 )
+            assert revoked_error.value.status_code == 401
+            assert revoked_error.value.detail == {
+                "code": "session_revoked",
+                "message": "Operator session was revoked.",
+            }
             assert get_current_session_id() is None
             assert get_current_trust_principal() is None
 
@@ -823,6 +1647,7 @@ async def test_extension_rollback_binds_hashed_snapshot_path_without_secret_rece
         "display_name": "Example",
         "version": "2026.4.01",
         "root_path": "/private/rollback/current",
+        "package_digest": "current-digest",
         "permissions": {"credential_ref": secret_value},
         "status": "ready",
     }
@@ -2263,6 +3088,26 @@ async def test_install_configure_toggle_and_remove_workspace_extension(client, e
         assert workflow_manager.get_workflow("local-workflow").enabled is True
 
 
+def test_whole_extension_enable_rolls_back_prior_targets_on_middle_failure(extension_runtime, tmp_path):
+    from src.extensions.lifecycle import disable_extension, enable_extension, install_extension_path
+
+    package_dir = _write_installable_extension(tmp_path)
+    install_extension_path(str(package_dir))
+    disable_extension("seraph.test-installable")
+    assert skill_manager.get_skill("local-skill").enabled is False
+    assert workflow_manager.get_workflow("local-workflow").enabled is False
+
+    with patch(
+        "src.extensions.lifecycle.workflow_manager.enable",
+        side_effect=RuntimeError("workflow runtime failed after skill mutation"),
+    ):
+        with pytest.raises(RuntimeError, match="workflow runtime failed"):
+            enable_extension("seraph.test-installable")
+
+    assert skill_manager.get_skill("local-skill").enabled is False
+    assert workflow_manager.get_workflow("local-workflow").enabled is False
+
+
 @pytest.mark.asyncio
 async def test_validate_extension_path_reports_workspace_update_plan(client, extension_runtime, tmp_path):
     package_dir = _write_installable_extension(tmp_path)
@@ -2810,6 +3655,154 @@ async def test_update_workspace_connector_refreshes_packaged_mcp_server(client, 
         assert mcp_manager._config["github-packaged"]["enabled"] is True
         assert connect_mock.call_count == 2
         assert disconnect_mock.call_count == 1
+
+
+def test_extension_lifecycle_restores_mcp_state_on_update_rollback_and_remove_failure(
+    extension_runtime,
+    tmp_path,
+):
+    from src.extensions.lifecycle import (
+        extension_lifecycle_status,
+        install_extension_path,
+        remove_extension,
+        rollback_extension,
+        update_extension_path,
+    )
+
+    package_dir = _write_multi_mcp_connector_extension(tmp_path)
+    updated_package_dir = tmp_path / "multi-connector-pack-update"
+    shutil.copytree(package_dir, updated_package_dir)
+    updated_manifest = updated_package_dir / "manifest.yaml"
+    updated_manifest.write_text(
+        updated_manifest.read_text(encoding="utf-8").replace(
+            "version: 2026.3.21", "version: 2026.4.01"
+        ),
+        encoding="utf-8",
+    )
+
+    def mcp_state() -> dict[str, object]:
+        return {
+            "config": deepcopy(mcp_manager._config),
+            "status": deepcopy(mcp_manager._status),
+            "tools": deepcopy(mcp_manager._tools),
+            "clients": dict(mcp_manager._clients),
+        }
+
+    install_extension_path(str(package_dir))
+    extension_id = "seraph.multi-connector-pack"
+    root = extension_runtime / "extensions" / "seraph-multi-connector-pack"
+    original_manifest = (root / "manifest.yaml").read_text(encoding="utf-8")
+    before_update = mcp_state()
+
+    lifecycle_module = __import__("src.extensions.lifecycle", fromlist=["shutil"])
+    real_move = lifecycle_module.shutil.move
+
+    def fail_staged_update_move(source, destination):
+        if Path(destination) == root and Path(source).name == "package":
+            raise OSError("staged extension move blocked")
+        return real_move(source, destination)
+
+    with patch("src.extensions.lifecycle.shutil.move", side_effect=fail_staged_update_move):
+        with pytest.raises(OSError, match="staged extension move blocked"):
+            update_extension_path(str(updated_package_dir))
+
+    assert (root / "manifest.yaml").read_text(encoding="utf-8") == original_manifest
+    assert mcp_state() == before_update
+
+    def block_secondary_after_primary(_previous, _updated):
+        mcp_manager._config["github-primary"]["url"] = "https://blocked.example/primary"
+        raise ValueError("secondary policy blocked")
+
+    with patch(
+        "src.extensions.lifecycle._sync_mcp_servers_for_updated_extension",
+        side_effect=block_secondary_after_primary,
+    ):
+        with pytest.raises(ValueError, match="secondary policy blocked"):
+            update_extension_path(str(updated_package_dir))
+
+    assert (root / "manifest.yaml").read_text(encoding="utf-8") == original_manifest
+    assert mcp_state() == before_update
+
+    update_extension_path(str(updated_package_dir))
+    assert "version: 2026.4.01" in (root / "manifest.yaml").read_text(encoding="utf-8")
+    rollback_snapshot = extension_lifecycle_status(extension_id)["rollback"]["snapshots"][0]
+    before_rollback = mcp_state()
+
+    real_move = lifecycle_module.shutil.move
+
+    def fail_rollback_move(source, destination):
+        if Path(destination) == root and Path(source).name == "candidate":
+            raise OSError("rollback extension move blocked")
+        return real_move(source, destination)
+
+    with patch("src.extensions.lifecycle.shutil.move", side_effect=fail_rollback_move):
+        with pytest.raises(OSError, match="rollback extension move blocked"):
+            rollback_extension(extension_id, snapshot_id=rollback_snapshot["id"])
+
+    assert "version: 2026.4.01" in (root / "manifest.yaml").read_text(encoding="utf-8")
+    assert mcp_state() == before_rollback
+
+    def block_rollback_after_primary(_previous, _updated):
+        mcp_manager._config["github-primary"]["enabled"] = True
+        raise RuntimeError("rollback secondary policy blocked")
+
+    with patch(
+        "src.extensions.lifecycle._sync_mcp_servers_for_updated_extension",
+        side_effect=block_rollback_after_primary,
+    ):
+        with pytest.raises(RuntimeError, match="rollback secondary policy blocked"):
+            rollback_extension(extension_id, snapshot_id=rollback_snapshot["id"])
+
+    assert "version: 2026.4.01" in (root / "manifest.yaml").read_text(encoding="utf-8")
+    assert mcp_state() == before_rollback
+
+    before_remove = mcp_state()
+
+    def block_remove(_extension):
+        mcp_manager._config.pop("github-secondary", None)
+        raise RuntimeError("secondary removal policy blocked")
+
+    with patch(
+        "src.extensions.lifecycle._remove_mcp_servers_for_extension",
+        side_effect=block_remove,
+    ):
+        with pytest.raises(RuntimeError, match="secondary removal policy blocked"):
+            remove_extension(extension_id)
+
+    assert root.is_dir()
+    assert mcp_state() == before_remove
+
+    before_remove = mcp_state()
+    with patch(
+        "src.extensions.lifecycle._save_state",
+        side_effect=RuntimeError("extension state save blocked"),
+    ):
+        with pytest.raises(RuntimeError, match="extension state save blocked"):
+            remove_extension(extension_id)
+
+    assert root.is_dir()
+    assert mcp_state() == before_remove
+
+    before_remove = mcp_state()
+    real_refresh = lifecycle_module._refresh_runtime
+    refresh_calls = 0
+
+    def fail_remove_refresh_once():
+        nonlocal refresh_calls
+        refresh_calls += 1
+        if refresh_calls == 1:
+            raise RuntimeError("extension runtime refresh blocked")
+        return real_refresh()
+
+    with patch(
+        "src.extensions.lifecycle._refresh_runtime",
+        side_effect=fail_remove_refresh_once,
+    ):
+        with pytest.raises(RuntimeError, match="extension runtime refresh blocked"):
+            remove_extension(extension_id)
+
+    assert root.is_dir()
+    assert mcp_state() == before_remove
 
 
 @pytest.mark.asyncio

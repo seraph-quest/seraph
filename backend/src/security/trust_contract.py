@@ -102,6 +102,10 @@ class TrustPrincipal:
     grants: tuple[AuthorityGrant | str, ...] = ()
     session_id: str = ""
     job_id: str = ""
+    # ``session_id`` is the execution/conversation scope used by the trust
+    # contract.  Authenticated operator sessions are a separate identity
+    # binding so a browser session cannot be confused with a conversation id.
+    operator_session_id: str = ""
 
 
 @dataclass(frozen=True)

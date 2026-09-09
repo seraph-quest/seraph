@@ -15,7 +15,12 @@ from sqlmodel import select
 
 from config.settings import settings
 from src.agent.factory import get_base_tools_and_active_skills
-from src.approval.runtime import get_current_session_id, reset_runtime_context, set_runtime_context
+from src.approval.runtime import (
+    get_current_session_id,
+    get_current_trust_principal,
+    reset_runtime_context,
+    set_runtime_context,
+)
 from src.api.catalog import (
     catalog_skill_by_name,
     install_catalog_item_by_name,
@@ -987,7 +992,11 @@ def _starter_pack_recommended_actions(
     return actions
 
 
-async def _activate_starter_pack_by_name(name: str) -> dict[str, Any]:
+async def _activate_starter_pack_by_name(
+    name: str,
+    *,
+    session_id: str | None = None,
+) -> dict[str, Any]:
     pack = next((item for item in _load_starter_packs() if item.get("name") == name), None)
     if pack is None:
         raise HTTPException(status_code=404, detail=f"Starter pack '{name}' not found")
@@ -998,11 +1007,16 @@ async def _activate_starter_pack_by_name(name: str) -> dict[str, Any]:
     missing_entries: list[str] = []
 
     install_item_names = [str(item) for item in pack.get("install_items", [])]
+    approval_session_kwargs = {"session_id": session_id} if session_id else {}
     for item_name in install_item_names:
-        await require_catalog_install_approval(item_name, consume=False)
+        await require_catalog_install_approval(
+            item_name,
+            consume=False,
+            **approval_session_kwargs,
+        )
 
     for item_name in install_item_names:
-        await require_catalog_install_approval(item_name)
+        await require_catalog_install_approval(item_name, **approval_session_kwargs)
         install_result = install_catalog_item_by_name(item_name)
         if install_result["ok"] or install_result["status"] == "already_installed":
             installed_catalog_items.append({
@@ -1148,6 +1162,14 @@ async def _apply_safe_capability_action(action: dict[str, Any]) -> dict[str, Any
     if action_type not in _LOW_RISK_AUTOREPAIR_ACTION_TYPES:
         return {"type": action_type, "label": label, "status": "unsupported"}
 
+    principal = get_current_trust_principal()
+    owner_operator_session_id = (
+        str(getattr(principal, "operator_session_id", "") or "").strip()
+        if principal is not None
+        and getattr(principal, "principal_type", None) is PrincipalType.OPERATOR
+        else ""
+    )
+
     match action_type:
         case "toggle_skill":
             if not name:
@@ -1216,7 +1238,17 @@ async def _apply_safe_capability_action(action: dict[str, Any]) -> dict[str, Any
         case "activate_starter_pack":
             if not name:
                 return {"type": action_type, "label": label, "status": "invalid"}
-            result = await _activate_starter_pack_by_name(name)
+            if not owner_operator_session_id:
+                return {
+                    "type": action_type,
+                    "label": label,
+                    "status": "blocked",
+                    "detail": "authenticated operator session required",
+                }
+            result = await _activate_starter_pack_by_name(
+                name,
+                session_id=owner_operator_session_id,
+            )
             return {
                 "type": action_type,
                 "label": label,
@@ -2177,7 +2209,10 @@ async def activate_starter_pack(name: str, request: Request):
             target_type="starter_pack",
             name=name,
         )
-        result = await _activate_starter_pack_by_name(name)
+        result = await _activate_starter_pack_by_name(
+            name,
+            session_id=active_session_id,
+        )
         overview = _build_capability_overview()
         preflight_after = _capability_preflight_payload(
             overview=overview,

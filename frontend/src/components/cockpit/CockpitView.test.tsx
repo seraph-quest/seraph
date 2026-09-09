@@ -686,6 +686,55 @@ describe("CockpitView", () => {
     expect(screen.queryByText("UNKNOWN · UNKNOWN")).not.toBeInTheDocument();
   });
 
+  it("surfaces backend OpenRouter configuration readiness as blocked", async () => {
+    mockCockpitBaselineFetch(fetchMock, {
+      runtimeStatus: {
+        version: "test",
+        build_id: "SERAPH_TEST",
+        provider: "openrouter",
+        model: "x-ai/grok-4.1-fast",
+        model_label: "grok-4.1-fast",
+        effective_runtime: {
+          runtime_path: "chat_agent",
+          active_profile: "openrouter",
+          provider: "openrouter",
+          provider_label: "openrouter",
+          model: "x-ai/grok-4.1-fast",
+          model_label: "grok-4.1-fast",
+          mode: "remote_provider",
+          route_label: "openrouter",
+          inference_ready: false,
+          inference_readiness: {
+            status: "configuration_required",
+            reasons: ["openrouter_api_key_missing"],
+          },
+        },
+      },
+    });
+
+    render(<CockpitView onSend={vi.fn()} />);
+
+    expect(await screen.findByText("OPENROUTER BLOCKED · GROK 4.1 FAST")).toBeInTheDocument();
+    expect(screen.queryByText("OPENROUTER · GROK 4.1 FAST")).not.toBeInTheDocument();
+  });
+
+  it("preserves legacy runtime labels when readiness fields are absent", async () => {
+    mockCockpitBaselineFetch(fetchMock, {
+      runtimeStatus: {
+        version: "test",
+        build_id: "SERAPH_TEST",
+        provider: "legacy-provider",
+        model: "legacy-model",
+        model_label: "legacy-model",
+      },
+    });
+
+    render(<CockpitView onSend={vi.fn()} />);
+
+    expect(await screen.findByText("LEGACY PROVIDER · LEGACY MODEL")).toBeInTheDocument();
+    expect(screen.queryByText(/LEGACY PROVIDER (BLOCKED|DEGRADED)/)).not.toBeInTheDocument();
+  });
+
   it("renders GPU VLM route labels from effective runtime status", async () => {
     mockCockpitBaselineFetch(fetchMock, {
       runtimeStatus: {

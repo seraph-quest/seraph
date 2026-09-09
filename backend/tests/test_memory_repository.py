@@ -1,11 +1,29 @@
 import json
+from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from unittest.mock import patch
 
 import pytest
 from sqlalchemy.exc import IntegrityError
 
-from src.db.models import Memory, MemoryEdgeType, MemoryEntityType, MemoryKind, MemorySnapshotKind
+from src.db.models import (
+    Memory,
+    MemoryEdgeType,
+    MemoryEntityType,
+    MemoryKind,
+    MemorySnapshotKind,
+    MemorySource,
+    MemoryStatus,
+)
 from src.memory.repository import memory_repository
+
+
+_SCOPED_LEARNING_SCOPE = {
+    "writer": "guardian_feedback",
+    "memory_scope": "procedural_learning",
+    "intervention_type": "advisory",
+    "lesson_type": "delivery",
+}
 
 
 @pytest.mark.asyncio
@@ -354,6 +372,535 @@ async def test_sync_scoped_memory_backfills_scope_key_for_legacy_metadata_match(
     assert len(memories) == 1
     assert memories[0].scope_key is not None
     assert json.loads(memories[0].metadata_json or "{}")["lesson_type"] == "delivery"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "marker_metadata,content,summary",
+    [
+        ({"archived_reason": "operator_delete_export"}, "Original", "Original"),
+        (
+            {"operator_control": {"delete_export_state": "canonical_memory_redacted"}},
+            "Original",
+            "Original",
+        ),
+        ({"delete_export_state": "canonical_memory_redacted"}, "Original", "Original"),
+        (
+            {"operator_control": {"last_action": "propagate_delete_export"}},
+            "Original",
+            "Original",
+        ),
+        (
+            {"operator_control": {"last_action": "operator_delete_export"}},
+            "Original",
+            "Original",
+        ),
+        ({}, "[delete/export propagated by operator]", "Original"),
+        ({}, "Original", "[delete/export propagated by operator]"),
+    ],
+)
+async def test_sync_scoped_memory_suppresses_provider_echo_for_canonical_tombstone(
+    async_db,
+    marker_metadata,
+    content,
+    summary,
+):
+    metadata = {**_SCOPED_LEARNING_SCOPE, **marker_metadata}
+    scope_key = memory_repository._scoped_memory_key(
+        kind=MemoryKind.procedural,
+        scope=_SCOPED_LEARNING_SCOPE,
+    )
+    async with async_db() as db:
+        memory = Memory(
+            content=content,
+            summary=summary,
+            kind=MemoryKind.procedural,
+            category="preference",
+            status=MemoryStatus.archived,
+            confidence=0.0,
+            importance=0.0,
+            reinforcement=0.0,
+            source_session_id="delete-session",
+            scope_key=scope_key,
+            metadata_json=json.dumps(metadata, sort_keys=True),
+        )
+        db.add(memory)
+        await db.flush()
+        db.add(
+            MemorySource(
+                memory_id=memory.id,
+                source_type="session",
+                source_session_id="delete-session",
+                snippet="redacted source",
+            )
+        )
+        await db.commit()
+
+    before = await memory_repository.get_memory(memory.id)
+    before_sources = await memory_repository.list_sources(memory_id=memory.id)
+    assert before is not None
+
+    result = await memory_repository.sync_scoped_memory(
+        kind=MemoryKind.procedural,
+        scope=_SCOPED_LEARNING_SCOPE,
+        content="Provider echo must never revive this deleted learning.",
+        summary="Provider echo",
+        source_session_id="provider-echo-session",
+        confidence=0.99,
+        importance=0.99,
+        reinforcement=9.0,
+        metadata={"bias_value": "revive_deleted_learning"},
+    )
+
+    after = await memory_repository.get_memory(memory.id)
+    after_sources = await memory_repository.list_sources(memory_id=memory.id)
+    assert result is None
+    assert after is not None
+    for field in (
+        "content",
+        "summary",
+        "status",
+        "category",
+        "confidence",
+        "importance",
+        "reinforcement",
+        "source_session_id",
+        "scope_key",
+        "metadata_json",
+        "created_at",
+        "updated_at",
+        "last_confirmed_at",
+    ):
+        assert getattr(after, field) == getattr(before, field)
+    assert [
+        (source.source_type, source.source_session_id, source.snippet)
+        for source in after_sources
+    ] == [
+        (source.source_type, source.source_session_id, source.snippet)
+        for source in before_sources
+    ]
+
+
+@pytest.mark.asyncio
+async def test_sync_scoped_memory_suppresses_tombstone_before_legacy_scope_backfill(async_db):
+    metadata = {
+        **_SCOPED_LEARNING_SCOPE,
+        "operator_control": {"delete_export_state": "canonical_memory_redacted"},
+    }
+    async with async_db() as db:
+        memory = Memory(
+            content="[delete/export propagated by operator]",
+            summary="[delete/export propagated by operator]",
+            kind=MemoryKind.procedural,
+            category="preference",
+            status=MemoryStatus.archived,
+            scope_key=None,
+            metadata_json=json.dumps(metadata, sort_keys=True),
+        )
+        db.add(memory)
+        await db.commit()
+
+    before = await memory_repository.get_memory(memory.id)
+    assert before is not None
+    result = await memory_repository.sync_scoped_memory(
+        kind=MemoryKind.procedural,
+        scope=_SCOPED_LEARNING_SCOPE,
+        content="A legacy scope match must stay deleted.",
+        summary="A legacy scope match must stay deleted.",
+        metadata={"bias_value": "revive_deleted_learning"},
+    )
+    after = await memory_repository.get_memory(memory.id)
+
+    assert result is None
+    assert after is not None
+    assert after.scope_key == before.scope_key
+    assert before.scope_key is None
+    assert after.content == before.content
+    assert after.summary == before.summary
+    assert after.metadata_json == before.metadata_json
+    assert after.updated_at == before.updated_at
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [MemoryStatus.archived, MemoryStatus.superseded])
+async def test_sync_scoped_memory_still_refreshes_ordinary_archived_or_superseded_memory(
+    async_db,
+    status,
+):
+    metadata = dict(_SCOPED_LEARNING_SCOPE)
+    scope_key = memory_repository._scoped_memory_key(
+        kind=MemoryKind.procedural,
+        scope=_SCOPED_LEARNING_SCOPE,
+    )
+    async with async_db() as db:
+        memory = Memory(
+            content="Ordinary historical learning.",
+            summary="Ordinary historical learning.",
+            kind=MemoryKind.procedural,
+            category="preference",
+            status=status,
+            scope_key=scope_key,
+            metadata_json=json.dumps(metadata, sort_keys=True),
+        )
+        db.add(memory)
+        await db.commit()
+
+    result = await memory_repository.sync_scoped_memory(
+        kind=MemoryKind.procedural,
+        scope=_SCOPED_LEARNING_SCOPE,
+        content="Fresh ordinary learning remains writable.",
+        summary="Fresh ordinary learning remains writable.",
+        metadata={"bias_value": "fresh"},
+    )
+    after = await memory_repository.get_memory(memory.id)
+
+    assert result is not None
+    assert result.memory_id == memory.id
+    assert after is not None
+    assert after.status is MemoryStatus.active
+    assert after.content == "Fresh ordinary learning remains writable."
+    assert after.summary == "Fresh ordinary learning remains writable."
+    assert json.loads(after.metadata_json or "{}")["bias_value"] == "fresh"
+
+
+@pytest.mark.asyncio
+async def test_sync_scoped_memory_fails_safe_for_malformed_suppressed_metadata(async_db):
+    scope_key = memory_repository._scoped_memory_key(
+        kind=MemoryKind.procedural,
+        scope=_SCOPED_LEARNING_SCOPE,
+    )
+    async with async_db() as db:
+        memory = Memory(
+            content="Unknown archived content.",
+            summary="Unknown archived content.",
+            kind=MemoryKind.procedural,
+            category="preference",
+            status=MemoryStatus.archived,
+            scope_key=scope_key,
+            metadata_json='{"operator_control":',
+        )
+        db.add(memory)
+        await db.commit()
+
+    before = await memory_repository.get_memory(memory.id)
+    assert before is not None
+    result = await memory_repository.sync_scoped_memory(
+        kind=MemoryKind.procedural,
+        scope=_SCOPED_LEARNING_SCOPE,
+        content="Malformed metadata must not permit a possible tombstone revival.",
+        summary="Possible tombstone revival",
+        metadata={"bias_value": "unsafe"},
+    )
+    after = await memory_repository.get_memory(memory.id)
+
+    assert result is None
+    assert after is not None
+    assert after.content == before.content
+    assert after.summary == before.summary
+    assert after.status is MemoryStatus.archived
+    assert after.metadata_json == before.metadata_json
+    assert after.updated_at == before.updated_at
+
+
+@pytest.mark.asyncio
+async def test_sync_scoped_memory_refreshes_active_malformed_metadata(async_db):
+    scope_key = memory_repository._scoped_memory_key(
+        kind=MemoryKind.procedural,
+        scope=_SCOPED_LEARNING_SCOPE,
+    )
+    async with async_db() as db:
+        memory = Memory(
+            content="Active legacy learning.",
+            summary="Active legacy learning.",
+            kind=MemoryKind.procedural,
+            category="preference",
+            status=MemoryStatus.active,
+            scope_key=scope_key,
+            metadata_json='{"operator_control":',
+        )
+        db.add(memory)
+        await db.commit()
+
+    result = await memory_repository.sync_scoped_memory(
+        kind=MemoryKind.procedural,
+        scope=_SCOPED_LEARNING_SCOPE,
+        content="Active malformed metadata remains refreshable.",
+        summary="Active malformed metadata remains refreshable.",
+        metadata={"bias_value": "refreshed"},
+    )
+    after = await memory_repository.get_memory(memory.id)
+
+    assert result is not None
+    assert result.memory_id == memory.id
+    assert after is not None
+    assert after.status is MemoryStatus.active
+    assert after.content == "Active malformed metadata remains refreshable."
+    assert after.summary == "Active malformed metadata remains refreshable."
+    assert json.loads(after.metadata_json or "{}")["bias_value"] == "refreshed"
+
+
+@pytest.mark.asyncio
+async def test_cas_scoped_memory_suppresses_tombstone_winning_interleaving():
+    original = Memory(
+        content="Ordinary content before delete/export.",
+        summary="Ordinary content before delete/export.",
+        kind=MemoryKind.procedural,
+        category="preference",
+        status=MemoryStatus.archived,
+        scope_key="scoped-memory-key",
+        metadata_json="{}",
+    )
+    tombstone = Memory(
+        content="[delete/export propagated by operator]",
+        summary="[delete/export propagated by operator]",
+        kind=MemoryKind.procedural,
+        category="preference",
+        status=MemoryStatus.archived,
+        scope_key="scoped-memory-key",
+        metadata_json=json.dumps(
+            {
+                "archived_reason": "operator_delete_export",
+                "operator_control": {
+                    "delete_export_state": "canonical_memory_redacted"
+                },
+            },
+            sort_keys=True,
+        ),
+    )
+
+    class _Result:
+        def __init__(self, *, rowcount=None, row=None):
+            self.rowcount = rowcount
+            self._row = row
+
+        def scalars(self):
+            return self
+
+        def first(self):
+            return self._row
+
+    class _InterleavingSession:
+        def __init__(self):
+            self.execute_calls = 0
+            self.rollback_calls = 0
+
+        async def execute(self, _statement):
+            self.execute_calls += 1
+            if self.execute_calls == 1:
+                return _Result(rowcount=0)
+            return _Result(row=tombstone)
+
+        async def rollback(self):
+            self.rollback_calls += 1
+
+    db = _InterleavingSession()
+    result = await memory_repository._cas_update_scoped_memory(
+        db,
+        original,
+        values_builder=lambda _current: {
+            "content": "This update must lose to delete/export.",
+            "updated_at": datetime.now(timezone.utc),
+        },
+    )
+
+    assert result is None
+    assert db.execute_calls == 2
+    assert db.rollback_calls == 1
+    assert original.content == "Ordinary content before delete/export."
+    assert tombstone.content == "[delete/export propagated by operator]"
+    assert tombstone.status is MemoryStatus.archived
+
+
+@pytest.mark.asyncio
+async def test_sync_scoped_memory_integrity_error_recovery_preserves_tombstone():
+    scope = dict(_SCOPED_LEARNING_SCOPE)
+    scope_key = memory_repository._scoped_memory_key(
+        kind=MemoryKind.procedural,
+        scope=scope,
+    )
+    tombstone = Memory(
+        content="[delete/export propagated by operator]",
+        summary="[delete/export propagated by operator]",
+        kind=MemoryKind.procedural,
+        category="preference",
+        status=MemoryStatus.archived,
+        scope_key=scope_key,
+        source_session_id="delete-session",
+        metadata_json=json.dumps(
+            {
+                **scope,
+                "archived_reason": "operator_delete_export",
+                "operator_control": {
+                    "last_action": "operator_delete_export",
+                    "delete_export_state": "canonical_memory_redacted",
+                },
+            },
+            sort_keys=True,
+        ),
+    )
+    snapshot = {
+        field: getattr(tombstone, field)
+        for field in (
+            "content",
+            "summary",
+            "status",
+            "category",
+            "confidence",
+            "importance",
+            "reinforcement",
+            "scope_key",
+            "source_session_id",
+            "metadata_json",
+            "created_at",
+            "updated_at",
+            "last_confirmed_at",
+        )
+    }
+
+    class _Result:
+        def __init__(self, *, first=None, all_rows=None):
+            self._first = first
+            self._all_rows = list(all_rows or [])
+
+        def scalars(self):
+            return self
+
+        def first(self):
+            return self._first
+
+        def all(self):
+            return self._all_rows
+
+    class _RecoverySession:
+        def __init__(self):
+            self.execute_calls = 0
+            self.flush_calls = 0
+            self.rollback_calls = 0
+
+        async def execute(self, _statement):
+            self.execute_calls += 1
+            if self.execute_calls == 1:
+                return _Result(first=None)
+            if self.execute_calls == 2:
+                return _Result(all_rows=[])
+            return _Result(first=tombstone)
+
+        def add(self, _memory):
+            return None
+
+        async def flush(self):
+            self.flush_calls += 1
+            raise IntegrityError(
+                "forced unique scope conflict",
+                {},
+                RuntimeError("forced unique scope conflict"),
+            )
+
+        async def rollback(self):
+            self.rollback_calls += 1
+
+    db = _RecoverySession()
+
+    @asynccontextmanager
+    async def fake_get_session():
+        yield db
+
+    with patch("src.memory.repository.get_session", fake_get_session):
+        result = await memory_repository.sync_scoped_memory(
+            kind=MemoryKind.procedural,
+            scope=scope,
+            content="Provider echo must not overwrite the recovered tombstone.",
+            summary="Provider echo",
+            source_session_id="provider-echo-session",
+            metadata={"unsafe": "revival"},
+        )
+
+    assert result is None
+    assert db.flush_calls == 1
+    assert db.rollback_calls == 1
+    assert db.execute_calls == 3
+    assert {
+        field: getattr(tombstone, field)
+        for field in snapshot
+    } == snapshot
+
+
+@pytest.mark.asyncio
+async def test_sync_scoped_memory_empty_echo_preserves_metadata_only_tombstone():
+    scope = dict(_SCOPED_LEARNING_SCOPE)
+    scope_key = memory_repository._scoped_memory_key(
+        kind=MemoryKind.procedural,
+        scope=scope,
+    )
+    tombstone = Memory(
+        content="Legacy content already deleted.",
+        summary="Legacy summary already deleted.",
+        kind=MemoryKind.procedural,
+        category="preference",
+        status=MemoryStatus.archived,
+        scope_key=scope_key,
+        metadata_json=json.dumps(
+            {**scope, "archived_reason": "operator_delete_export"},
+            sort_keys=True,
+        ),
+    )
+    snapshot = {
+        field: getattr(tombstone, field)
+        for field in (
+            "content",
+            "summary",
+            "status",
+            "scope_key",
+            "metadata_json",
+            "created_at",
+            "updated_at",
+        )
+    }
+
+    class _Result:
+        def scalars(self):
+            return self
+
+        def first(self):
+            return tombstone
+
+    class _Session:
+        def __init__(self):
+            self.execute_calls = 0
+            self.flush_calls = 0
+
+        async def execute(self, _statement):
+            self.execute_calls += 1
+            return _Result()
+
+        def add(self, _memory):
+            raise AssertionError("tombstone must not be rewritten")
+
+        async def flush(self):
+            self.flush_calls += 1
+
+    db = _Session()
+
+    @asynccontextmanager
+    async def fake_get_session():
+        yield db
+
+    with patch("src.memory.repository.get_session", fake_get_session):
+        result = await memory_repository.sync_scoped_memory(
+            kind=MemoryKind.procedural,
+            scope=scope,
+            content=None,
+            summary=None,
+            metadata={"unsafe": "metadata overwrite"},
+        )
+
+    assert result is None
+    assert db.execute_calls == 1
+    assert db.flush_calls == 0
+    assert {
+        field: getattr(tombstone, field)
+        for field in snapshot
+    } == snapshot
 
 
 @pytest.mark.asyncio

@@ -102,6 +102,10 @@ class GpuAdmissionCapacityError(GpuAdmissionError):
     code = "capacity_exhausted"
 
 
+class GpuAdmissionOwnerRevokedError(GpuAdmissionError):
+    code = GPU_OWNER_REVOCATION_REASON
+
+
 class GpuAdmissionOwnerCapacityError(GpuAdmissionCapacityError):
     code = GPU_OWNER_CAPACITY_REASON
 
@@ -418,6 +422,9 @@ class GpuAdmissionBroker(Generic[T]):
         self._sequence = 0
         self._fencing_token = 0
         self._last_degraded_reason: str | None = None
+        # Owner revocation is intentionally process-local.  Durable job
+        # authority and restart adoption remain outside this admission lease.
+        self._revoked_owners: set[str] = set()
 
     async def enqueue(
         self,
@@ -461,6 +468,18 @@ class GpuAdmissionBroker(Generic[T]):
                 return self._receipt_locked(existing)
             raise GpuAdmissionIdentityError(
                 f"operation is already admitted and active: {request.operation_id}"
+            )
+        if request.owner_id in self._revoked_owners:
+            operation = self._record_terminal_locked(
+                request,
+                status="rejected",
+                reason_code=GPU_OWNER_REVOCATION_REASON,
+                observed_at=observed_at,
+            )
+            self._last_degraded_reason = GPU_OWNER_REVOCATION_REASON
+            raise GpuAdmissionOwnerRevokedError(
+                "GPU operation owner has been revoked",
+                receipt=self._receipt_locked(operation),
             )
         if request.deadline_at <= observed_at:
             operation = self._record_terminal_locked(
@@ -719,10 +738,11 @@ class GpuAdmissionBroker(Generic[T]):
         normalized_reason = str(reason_code or "").strip()
         if not normalized_owner:
             raise ValueError("owner_id is required")
-        if not normalized_reason or len(normalized_reason) > 128:
-            raise ValueError("reason_code is required and must be <= 128 characters")
+        if normalized_reason != GPU_OWNER_REVOCATION_REASON:
+            raise ValueError("reason_code must be owner_revoked")
         with self._condition:
             self._mark_active_deadline_locked()
+            self._revoked_owners.add(normalized_owner)
             matches = [
                 operation
                 for operation in self._operations.values()
@@ -1431,6 +1451,7 @@ class GpuAdmissionBroker(Generic[T]):
             self._queue.clear()
             self._active_task = None
             self._last_degraded_reason = None
+            self._revoked_owners.clear()
             self._notify_all_locked()
 
     async def _cancel_after_wait(
@@ -1637,6 +1658,11 @@ class GpuAdmissionBroker(Generic[T]):
                 receipt=receipt,
             )
         if operation.status == "rejected":
+            if operation.reason_code == GPU_OWNER_REVOCATION_REASON:
+                raise GpuAdmissionOwnerRevokedError(
+                    "GPU operation owner has been revoked",
+                    receipt=receipt,
+                )
             if operation.reason_code == GPU_OWNER_CAPACITY_REASON:
                 raise GpuAdmissionOwnerCapacityError(
                     "GPU operation was rejected at the owner outstanding limit",
@@ -1794,6 +1820,7 @@ __all__ = [
     "GPU_OWNER_REVOCATION_REASON",
     "GpuAdmissionBroker",
     "GpuAdmissionCapacityError",
+    "GpuAdmissionOwnerRevokedError",
     "GpuAdmissionCancelledError",
     "GpuAdmissionError",
     "GpuAdmissionExpiredError",

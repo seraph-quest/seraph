@@ -10,11 +10,13 @@ import pytest
 from src.model_fabric.remote_inference_admission import (
     REMOTE_INFERENCE_ADMISSION_SCHEMA_VERSION,
     REMOTE_INFERENCE_OWNER_COST_UNKNOWN_REASON,
+    REMOTE_INFERENCE_OWNER_REVOCATION_REASON,
     RemoteInferenceAdmissionBroker,
     RemoteInferenceAdmissionCancelledError,
     RemoteInferenceAdmissionExpiredError,
     RemoteInferenceAdmissionOwnerBudgetError,
     RemoteInferenceAdmissionOwnerCapacityError,
+    RemoteInferenceAdmissionOwnerRevokedError,
     RemoteInferenceAdmissionRequest,
     RemoteInferenceAdmissionUncertainError,
     RemoteInferencePriority,
@@ -258,6 +260,64 @@ async def test_owner_revocation_rejects_empty_scope_without_touching_other_owner
 
     status = await broker.status()
     assert [item["operation_id"] for item in status["queued"]] == [other.operation_id]
+
+
+@pytest.mark.asyncio
+async def test_revoked_owner_cannot_reenter_and_other_owner_still_runs():
+    broker = RemoteInferenceAdmissionBroker(clock=_Clock())
+    await broker.cancel_owner("owner-a")
+    revoked_request = _request("revoked-owner-reentry", owner_id="owner-a")
+    revoked_provider_called = False
+
+    async def revoked_provider():
+        nonlocal revoked_provider_called
+        revoked_provider_called = True
+
+    with pytest.raises(RemoteInferenceAdmissionOwnerRevokedError) as rejected:
+        await broker.execute(revoked_request, revoked_provider)
+    assert rejected.value.code == REMOTE_INFERENCE_OWNER_REVOCATION_REASON
+    assert rejected.value.receipt.status == "rejected"
+    assert rejected.value.receipt.reason_code == REMOTE_INFERENCE_OWNER_REVOCATION_REASON
+    assert revoked_provider_called is False
+
+    # The terminal receipt remains idempotent, and acquire reports the same
+    # stable owner-revoked denial if a caller retries the operation identity.
+    terminal = await broker.enqueue(revoked_request)
+    assert terminal.status == "rejected"
+    with pytest.raises(RemoteInferenceAdmissionOwnerRevokedError) as acquire_error:
+        await broker.acquire(revoked_request.operation_id)
+    assert acquire_error.value.receipt.reason_code == REMOTE_INFERENCE_OWNER_REVOCATION_REASON
+
+    other_request = _request("owner-b-after-revocation", owner_id="owner-b")
+    other_called = False
+
+    async def other_provider():
+        nonlocal other_called
+        other_called = True
+        return "owner-b-result"
+
+    assert await broker.execute(other_request, other_provider) == "owner-b-result"
+    assert other_called is True
+
+
+@pytest.mark.asyncio
+async def test_owner_revocation_reason_is_strictly_allowlisted_and_redacted():
+    broker = RemoteInferenceAdmissionBroker(clock=_Clock())
+    secret_like_reason = "provider_key=sk-live-secret"
+
+    with pytest.raises(ValueError, match="reason_code must be owner_revoked") as error:
+        await broker.cancel_owner("owner-a", reason_code=secret_like_reason)
+    assert secret_like_reason not in str(error.value)
+
+    status = await broker.status()
+    assert status["degraded"] is False
+    assert secret_like_reason not in str(status)
+
+    # The rejected custom reason did not create a tombstone or alter the
+    # admission lane; the owner can still be revoked with the safe token.
+    receipts = await broker.cancel_owner("owner-a")
+    assert receipts == ()
+    assert receipts == await broker.cancel_owner("owner-a")
 
 
 @pytest.mark.asyncio

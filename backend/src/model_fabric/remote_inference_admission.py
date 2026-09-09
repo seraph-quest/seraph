@@ -30,6 +30,7 @@ from .gpu_admission import (
     GpuAdmissionLeaseError,
     GpuAdmissionOwnerBudgetError,
     GpuAdmissionOwnerCapacityError,
+    GpuAdmissionOwnerRevokedError,
     GpuAdmissionReceipt,
     GpuAdmissionRequest,
     GpuAdmissionUncertainError,
@@ -237,6 +238,7 @@ RemoteInferenceAdmissionLease = GpuAdmissionLease
 RemoteInferenceAdmissionLeaseError = GpuAdmissionLeaseError
 RemoteInferenceAdmissionOwnerBudgetError = GpuAdmissionOwnerBudgetError
 RemoteInferenceAdmissionOwnerCapacityError = GpuAdmissionOwnerCapacityError
+RemoteInferenceAdmissionOwnerRevokedError = GpuAdmissionOwnerRevokedError
 RemoteInferenceAdmissionReceipt = GpuAdmissionReceipt
 RemoteInferenceAdmissionRequest = GpuAdmissionRequest
 RemoteInferenceAdmissionUncertainError = GpuAdmissionUncertainError
@@ -266,6 +268,7 @@ __all__ = [
     "RemoteInferenceAdmissionLeaseError",
     "RemoteInferenceAdmissionOwnerBudgetError",
     "RemoteInferenceAdmissionOwnerCapacityError",
+    "RemoteInferenceAdmissionOwnerRevokedError",
     "RemoteInferenceAdmissionReceipt",
     "RemoteInferenceAdmissionRequest",
     "RemoteInferenceAdmissionUncertainError",

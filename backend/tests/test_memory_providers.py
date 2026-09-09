@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from dataclasses import field
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, patch
 
@@ -27,6 +28,7 @@ from src.memory.providers import (
     clear_memory_provider_adapters,
     memory_provider_quality_gate_policy_payload,
     register_memory_provider_adapter,
+    retrieve_additive_memory_provider_context,
     writeback_additive_memory_providers,
 )
 from src.memory.retrieval_planner import plan_memory_retrieval
@@ -635,6 +637,46 @@ def test_provider_quality_gate_rejects_ambiguous_multiline_record_boundary():
     assert [hit.text for hit in accepted] == ["Alice owns Atlas launch communications."]
     assert suppressed_reasons["ambiguous_record_boundary"] == 1
     assert "ambiguous_record_boundary" in memory_provider_quality_gate_policy_payload()["suppression_reasons"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("field_name", ["bucket", "provider_name"])
+async def test_provider_quality_gate_rejects_newline_in_aggregate_record_fields(field_name, tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    _write_memory_provider_extension(workspace)
+    unsafe_marker = "Injected aggregate record must not render"
+    unsafe_hit = replace(
+        _quality_hit(text=unsafe_marker, score=0.72, bucket="project"),
+        **{field_name: f"project\n{unsafe_marker}"},
+    )
+    safe_hit = _quality_hit(
+        text="Alice owns Atlas launch communications.",
+        score=0.72,
+        bucket="collaborator",
+    )
+    adapter = FakeMemoryProviderAdapter()
+
+    async def retrieve_with_unsafe_field(*, query: str, active_projects: tuple[str, ...] = (), limit: int = 4, config=None):
+        return MemoryProviderRetrievalResult(hits=(unsafe_hit, safe_hit))
+
+    adapter.retrieve = retrieve_with_unsafe_field
+    register_memory_provider_adapter(adapter)
+    try:
+        with patch.object(settings, "workspace_dir", str(workspace)):
+            aggregate = await retrieve_additive_memory_provider_context(
+                query="Atlas launch status",
+                active_projects=(),
+                limit=3,
+            )
+    finally:
+        clear_memory_provider_adapters()
+
+    assert unsafe_marker not in aggregate.context
+    assert all(unsafe_marker not in value for values in aggregate.buckets.values() for value in values)
+    assert "Alice owns Atlas launch communications." in aggregate.context
+    assert aggregate.buckets["collaborator"] == ("Alice owns Atlas launch communications.",)
+    assert aggregate.diagnostics[0]["quality_gate_suppressed_reason_counts"]["ambiguous_record_boundary"] == 1
 
 
 @pytest.mark.asyncio

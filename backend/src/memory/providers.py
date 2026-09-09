@@ -482,7 +482,11 @@ def _provider_hit_quality_failures(hit: MemoryProviderHit) -> tuple[str, ...]:
     failures: list[str] = []
     if not str(hit.text or "").strip():
         failures.append("missing_text")
-    if isinstance(hit.text, str) and ("\r" in hit.text or "\n" in hit.text):
+    rendered_fields = (hit.bucket, hit.provider_name, hit.text)
+    if any(
+        isinstance(value, str) and ("\r" in value or "\n" in value)
+        for value in rendered_fields
+    ):
         failures.append("ambiguous_record_boundary")
     if not str(hit.evidence_id or "").strip():
         failures.append("missing_evidence_id")

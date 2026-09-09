@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import date
 from importlib.metadata import PackageNotFoundError, version as package_version
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 import tomllib
 from typing import Any
 
@@ -23,6 +23,42 @@ from src.extensions.capability_contributions import parse_prompt_pack_definition
 WORKSPACE_CAPABILITY_PACKAGE_ID = "seraph.workspace-capabilities"
 WORKSPACE_CAPABILITY_PACKAGE_DIRNAME = "workspace-capabilities"
 WORKSPACE_CAPABILITY_DISPLAY_NAME = "Workspace capabilities"
+EVOLUTION_CANDIDATE_FILE_NAME_ERROR = "Review candidate filenames are reserved for governed evolution"
+EVOLUTION_CANDIDATE_SUFFIXES = ("-review-candidate", "review-candidate")
+WORKSPACE_FILE_NAME_ERROR = "Workspace contribution file name must be a plain file name"
+
+
+def _canonical_workspace_file_name(file_name: str) -> str:
+    """Accept only one safe basename before it can enter the manifest."""
+    candidate = str(file_name or "").strip()
+    windows_path = PureWindowsPath(candidate)
+    if (
+        not candidate
+        or "\x00" in candidate
+        or "/" in candidate
+        or "\\" in candidate
+        or windows_path.is_absolute()
+        or bool(windows_path.drive)
+        or any(part in {".", ".."} for part in windows_path.parts)
+        or Path(candidate).name != candidate
+    ):
+        raise ValueError(WORKSPACE_FILE_NAME_ERROR)
+    return candidate
+
+
+def is_evolution_candidate_file_name(file_name: str) -> bool:
+    """Identify every filename accepted by the governed evolution engine."""
+    try:
+        candidate = _canonical_workspace_file_name(file_name)
+    except ValueError:
+        return False
+    stem = Path(candidate).stem.casefold()
+    return any(stem.endswith(suffix) for suffix in EVOLUTION_CANDIDATE_SUFFIXES)
+
+
+# Keep the old private import available for callers that used the package
+# helper before the predicate became the shared cross-surface contract.
+_is_evolution_candidate_file_name = is_evolution_candidate_file_name
 
 
 def _current_seraph_version() -> str:
@@ -160,17 +196,34 @@ def save_workspace_contribution(
 ) -> Path:
     if contribution_type not in {"skills", "workflows", "runbooks", "starter_packs", "prompt_packs"}:
         raise ValueError(f"unsupported managed workspace contribution type: {contribution_type}")
+    file_name = _canonical_workspace_file_name(file_name)
+    if is_evolution_candidate_file_name(file_name):
+        raise ValueError(EVOLUTION_CANDIDATE_FILE_NAME_ERROR)
 
-    package_root = workspace_capability_package_root(workspace_dir)
-    payload = _load_or_create_manifest_payload(package_root)
     relative_reference = f"{expected_layout_prefixes(contribution_type)[0]}{file_name}"
+    package_root = workspace_capability_package_root(workspace_dir)
+    target_path = package_root / relative_reference
+    if target_path.parent.is_dir() and any(
+        sibling.name.casefold() == target_path.name.casefold()
+        and sibling.name != target_path.name
+        for sibling in target_path.parent.iterdir()
+    ):
+        raise ValueError(WORKSPACE_FILE_NAME_ERROR)
+
+    payload = _load_or_create_manifest_payload(package_root)
     contribution_bucket = payload.setdefault("contributes", {}).setdefault(contribution_type, [])
+    if any(
+        isinstance(existing_reference, str)
+        and existing_reference.casefold() == relative_reference.casefold()
+        and existing_reference != relative_reference
+        for existing_reference in contribution_bucket
+    ):
+        raise ValueError(WORKSPACE_FILE_NAME_ERROR)
     if relative_reference not in contribution_bucket:
         contribution_bucket.append(relative_reference)
         contribution_bucket.sort()
     payload["version"] = _today_version()
 
-    target_path = package_root / relative_reference
     _validate_workspace_contribution(contribution_type, target_path, content)
 
     manifest_path = package_root / "manifest.yaml"

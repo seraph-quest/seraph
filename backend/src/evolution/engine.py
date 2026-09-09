@@ -2,20 +2,32 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
+import fcntl
+import hashlib
 import json
-from pathlib import Path
+import os
+from pathlib import Path, PureWindowsPath
 import re
-from typing import Any, Literal
+from threading import Lock
+from typing import Any, Callable, Literal
+import uuid
 
 import yaml
 
 from config.settings import settings
 from src.extensions.capability_contributions import parse_prompt_pack_definition
+from src.approval.runtime import get_current_session_id, get_current_trust_principal
+from src.auth.cancellation import RuntimeRevokedError, assert_runtime_not_revoked
 from src.extensions.manifest import load_extension_manifest
+from src.extensions.layout import MANIFEST_FILENAMES, expected_layout_prefixes
 from src.extensions.registry import ExtensionRegistry, default_manifest_roots_for_workspace
-from src.extensions.workspace_package import save_workspace_contribution, workspace_capability_package_root
+from src.extensions.workspace_package import (
+    is_evolution_candidate_file_name,
+    workspace_capability_package_root,
+)
 from src.evals.benchmark_catalog import benchmark_suite_names
 from src.native_tools.registry import TOOL_METADATA
 from src.runbooks.loader import Runbook, parse_runbook_content
@@ -24,8 +36,32 @@ from src.skills.loader import Skill, parse_skill_content
 from src.skills.manager import skill_manager
 from src.starter_packs.loader import StarterPack, parse_starter_pack_payload
 from src.starter_packs.manager import starter_pack_manager
+from src.security.trust_contract import AuthorityGrant, PrincipalType, TrustPrincipal
 
 EvolutionTargetType = Literal["skill", "runbook", "starter_pack", "prompt_pack"]
+EvolutionAuthorityCheck = Callable[[], None]
+EVOLUTION_FILE_NAME_ERROR = "Candidate file name must stay within the managed workspace package"
+
+
+class EvolutionPersistenceError(ValueError):
+    """Describe a post-write failure without retaining sensitive host paths."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        lineage: dict[str, str],
+        artifacts_written: bool,
+        rollback_failed: bool,
+        target_type: EvolutionTargetType | None = None,
+        candidate_file_name: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.evolution_lineage = dict(lineage)
+        self.artifacts_written = bool(artifacts_written)
+        self.rollback_failed = bool(rollback_failed)
+        self.target_type = target_type
+        self.candidate_file_name = candidate_file_name
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _CANDIDATE_SUFFIX = "-review-candidate"
@@ -61,6 +97,218 @@ _PREFERENCE_COLLAPSE_TOKENS = (
     "regardless of user preference",
 )
 
+_EVOLUTION_TARGET_LOCKS_GUARD = Lock()
+_EVOLUTION_TARGET_LOCKS: dict[tuple[str, str], Lock] = {}
+_LINEAGE_DIGEST_RE = re.compile(r"^[0-9a-fA-F]{64}$")
+_LINEAGE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,95}$")
+_EVOLUTION_RECOVERY_REASON = "post_persist_rollback_required"
+
+
+def require_evolution_operator_authority() -> TrustPrincipal:
+    """Require a live human operator for declarative evolution.
+
+    Service and scheduled principals are deliberately denied. Evolution can
+    change the future capability surface, so it remains a human operator and
+    review-gated operation even when the candidate itself is declarative.
+    """
+    principal = get_current_trust_principal()
+    session_id = str(get_current_session_id() or "").strip()
+    principal_id = str(getattr(principal, "principal_id", "") or "").strip()
+    principal_session_id = str(getattr(principal, "session_id", "") or "").strip()
+    principal_type = getattr(getattr(principal, "principal_type", None), "value", None) or str(
+        getattr(principal, "principal_type", "") or ""
+    ).strip()
+    grants = {
+        str(getattr(grant, "value", grant))
+        for grant in getattr(principal, "grants", ())
+    }
+    if (
+        principal is None
+        or principal_type != PrincipalType.OPERATOR.value
+        or not bool(getattr(principal, "authenticated", False))
+        or bool(getattr(principal, "revoked", False))
+        or not principal_id
+        or not session_id
+        or principal_session_id != session_id
+        or AuthorityGrant.CAPABILITY_EXECUTE.value not in grants
+    ):
+        raise PermissionError("governed evolution requires an authenticated operator capability principal")
+    return principal
+
+
+def _check_evolution_boundary(authority_check: EvolutionAuthorityCheck | None = None) -> None:
+    require_evolution_operator_authority()
+    # The engine owns the revocation fence even when a caller supplies an
+    # additional callback.  A callback may be incomplete or accidentally omit
+    # the built-in session check, so it can only add checks here.
+    assert_runtime_not_revoked()
+    if authority_check is not None:
+        authority_check()
+
+
+def validate_evolution_file_name(file_name: str) -> str:
+    """Allow one canonical, case-insensitive managed-package filename."""
+    candidate = str(file_name or "").strip()
+    windows_path = PureWindowsPath(candidate)
+    if (
+        not candidate
+        or "\x00" in candidate
+        or os.path.isabs(candidate)
+        or "/" in candidate
+        or "\\" in candidate
+        or windows_path.is_absolute()
+        or bool(windows_path.drive)
+        or any(part in {".", ".."} for part in windows_path.parts)
+        or Path(candidate).name != candidate
+    ):
+        raise ValueError(EVOLUTION_FILE_NAME_ERROR)
+    return candidate.casefold()
+
+
+def _candidate_file_name_for_target(
+    target_type: EvolutionTargetType,
+    *,
+    source_path: Path,
+    requested_file_name: str | None,
+) -> str:
+    """Return a review-candidate filename that cannot masquerade as a source.
+
+    The request may provide a readable label for compatibility with the
+    validation surface, but the engine owns the extension and candidate suffix.
+    Candidate files are never allowed to use the active source basename.
+    """
+    candidate = validate_evolution_file_name(
+        requested_file_name or _default_candidate_file_name(source_path)
+    )
+    expected_extension = _candidate_extension(target_type)
+    stem = Path(candidate).stem.casefold()
+    if Path(candidate).suffix.casefold() != expected_extension.casefold():
+        raise ValueError(EVOLUTION_FILE_NAME_ERROR)
+    if not is_evolution_candidate_file_name(candidate):
+        raise ValueError(EVOLUTION_FILE_NAME_ERROR)
+    if candidate.casefold() == source_path.name.casefold():
+        raise ValueError(EVOLUTION_FILE_NAME_ERROR)
+    return candidate
+
+
+def _contribution_type_for_target(target_type: EvolutionTargetType) -> str:
+    return {
+        "skill": "skills",
+        "runbook": "runbooks",
+        "starter_pack": "starter_packs",
+        "prompt_pack": "prompt_packs",
+    }[target_type]
+
+
+def _candidate_path(target_type: EvolutionTargetType, file_name: str) -> Path:
+    file_name = validate_evolution_file_name(file_name)
+    package_root = workspace_capability_package_root()
+    contribution_type = _contribution_type_for_target(target_type)
+    path = package_root / expected_layout_prefixes(contribution_type)[0] / file_name
+    return _validate_evolution_path_containment(path)
+
+
+def _receipt_path(target_type: EvolutionTargetType, file_name: str) -> Path:
+    file_name = validate_evolution_file_name(file_name)
+    package_root = workspace_capability_package_root()
+    path = package_root / "evolution" / "receipts" / target_type / f"{Path(file_name).stem}.json"
+    return _validate_evolution_path_containment(path)
+
+
+def _evolution_lock_path(target_type: EvolutionTargetType, file_name: str) -> Path:
+    file_name = validate_evolution_file_name(file_name)
+    package_root = workspace_capability_package_root()
+    path = package_root / "evolution" / "locks" / target_type / f"{file_name}.lock"
+    return _validate_evolution_path_containment(path)
+
+
+def _case_insensitive_path_exists(path: Path) -> bool:
+    """Return whether a destination exists under the managed name identity."""
+    try:
+        if path.exists():
+            return True
+        if not path.parent.is_dir():
+            return False
+        normalized_name = path.name.casefold()
+        return any(item.name.casefold() == normalized_name for item in path.parent.iterdir())
+    except (OSError, RuntimeError) as exc:
+        raise ValueError(EVOLUTION_FILE_NAME_ERROR) from exc
+
+
+def _assert_review_candidate_destination_available(
+    target_type: EvolutionTargetType,
+    *,
+    source_path: Path,
+    file_name: str,
+) -> None:
+    """Fail closed before any generated content or artifact is written."""
+    candidate_path = _candidate_path(target_type, file_name)
+    receipt_path = _receipt_path(target_type, file_name)
+    package_root = workspace_capability_package_root().resolve()
+    manifest_declares_candidate = False
+    relative_candidate_path = candidate_path.resolve().relative_to(package_root).as_posix().casefold()
+    for manifest_name in MANIFEST_FILENAMES:
+        manifest_path = package_root / manifest_name
+        if not manifest_path.is_file():
+            continue
+        try:
+            manifest = load_extension_manifest(manifest_path)
+        except ValueError as exc:
+            raise ValueError(EVOLUTION_FILE_NAME_ERROR) from exc
+        declared_paths = getattr(manifest.contributes, _contribution_type_for_target(target_type), ())
+        manifest_declares_candidate = manifest_declares_candidate or any(
+            str(declared_path).casefold() == relative_candidate_path
+            for declared_path in declared_paths
+        )
+    if (
+        candidate_path.resolve() == source_path.resolve()
+        or _case_insensitive_path_exists(candidate_path)
+        or _case_insensitive_path_exists(receipt_path)
+        or manifest_declares_candidate
+    ):
+        raise ValueError(EVOLUTION_FILE_NAME_ERROR)
+
+
+@contextmanager
+def _evolution_target_write_lock(target_type: EvolutionTargetType, candidate_file_name: str):
+    """Serialize candidate lifecycle writes for one final destination.
+
+    Candidate generation and validation stay independent across targets.  A
+    proposal owns this narrow lock from destination preflight through snapshot,
+    writes, and rollback so competing sources cannot race on one candidate.
+    """
+    key = (target_type, os.path.normcase(validate_evolution_file_name(candidate_file_name)))
+    with _EVOLUTION_TARGET_LOCKS_GUARD:
+        lock = _EVOLUTION_TARGET_LOCKS.get(key)
+        if lock is None:
+            lock = Lock()
+            _EVOLUTION_TARGET_LOCKS[key] = lock
+    with lock:
+        lock_path = _evolution_lock_path(target_type, candidate_file_name)
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        open_flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(lock_path, open_flags, 0o600)
+        try:
+            os.fchmod(descriptor, 0o600)
+            fcntl.flock(descriptor, fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(descriptor, fcntl.LOCK_UN)
+        finally:
+            os.close(descriptor)
+
+
+def _validate_evolution_path_containment(path: Path) -> Path:
+    """Reject managed artifact paths whose resolved parent escapes the package."""
+    package_root = workspace_capability_package_root().resolve()
+    resolved = path.resolve()
+    try:
+        resolved.relative_to(package_root)
+    except ValueError as exc:
+        raise ValueError(EVOLUTION_FILE_NAME_ERROR) from exc
+    return path
+
 
 @dataclass(frozen=True)
 class EvolutionConstraint:
@@ -92,6 +340,13 @@ class EvolutionReceipt:
     pr_draft: dict[str, str]
     saved_path: str | None = None
     receipt_path: str | None = None
+    proposal_id: str = ""
+    source_content_digest: str = ""
+    candidate_content_digest: str = ""
+    candidate_artifact_digest: str = ""
+    source_version: str = ""
+    candidate_handle: str = ""
+    receipt_handle: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)
@@ -685,22 +940,488 @@ def _benchmark_gate_payload(
     }
 
 
+def _safe_receipt_payload(receipt: EvolutionReceipt) -> dict[str, Any]:
+    """Return a metadata-only durable receipt.
+
+    The operator response retains the existing detailed validation contract,
+    while the durable receipt and benchmark readback must not become a second
+    copy of arbitrary candidate input, objectives, observations, or paths.
+    """
+    payload = receipt.to_dict()
+    benchmark_gate = payload.get("benchmark_gate")
+    saved_path_reference = _safe_artifact_reference(receipt.saved_path or receipt.candidate_handle)
+    receipt_path_reference = _safe_artifact_reference(receipt.receipt_path or receipt.receipt_handle)
+    safe_gate = {
+        key: benchmark_gate[key]
+        for key in (
+            "rollout_state",
+            "regression_gate",
+            "acceptance_state",
+            "diversity_guard_state",
+            "preference_signal_count",
+            "requires_human_review",
+            "canary_required",
+            "rollback_ready_required",
+            "rollback_ready",
+            "safety_receipt_state",
+            "adoption_policy",
+            "rollback_policy",
+            "required_benchmark_suites",
+            "blocked_constraints",
+            "proof_contract",
+            "receipt_surfaces",
+        )
+        if isinstance(benchmark_gate, dict) and key in benchmark_gate
+    }
+    if saved_path_reference:
+        safe_gate["saved_candidate_path"] = saved_path_reference
+    if receipt_path_reference:
+        safe_gate["receipt_path"] = receipt_path_reference
+    lineage = {
+        "proposal_id": str(receipt.proposal_id or ""),
+        "source_content_digest": str(receipt.source_content_digest or ""),
+        "source_version": str(receipt.source_version or receipt.source_content_digest or ""),
+        "candidate_content_digest": str(receipt.candidate_content_digest or ""),
+        "candidate_artifact_digest": str(receipt.candidate_artifact_digest or ""),
+        "candidate_handle": saved_path_reference,
+        "receipt_handle": receipt_path_reference,
+    }
+    safe_gate.update({key: value for key, value in lineage.items() if value})
+    return {
+        "target_type": receipt.target_type,
+        **lineage,
+        "lineage": lineage,
+        "source_name_digest": _digest_metadata(receipt.source_name),
+        # Candidate names are generated from the registered baseline asset;
+        # strip control characters before retaining this stable receipt label.
+        "candidate_name": re.sub(r"[\x00-\x1f\x7f]", "-", str(receipt.candidate_name))[:160],
+        "candidate_name_digest": _digest_metadata(receipt.candidate_name),
+        "candidate_file_name_digest": _digest_metadata(receipt.candidate_file_name),
+        "source_path_digest": _digest_metadata(receipt.source_path),
+        "saved_path": saved_path_reference,
+        "receipt_path": receipt_path_reference,
+        "valid": bool(receipt.valid),
+        "blocked": bool(receipt.blocked),
+        "score": receipt.score,
+        "quality_state": receipt.quality_state,
+        "constraints": [
+            {
+                "name": item.get("name"),
+                "status": item.get("status"),
+                "blocked": bool(item.get("blocked")),
+            }
+            for item in payload.get("constraints", [])
+            if isinstance(item, dict)
+        ],
+        "evals": [
+            {
+                "name": item.get("name"),
+                "passed": bool(item.get("passed")),
+                "score": item.get("score"),
+            }
+            for item in payload.get("evals", [])
+            if isinstance(item, dict)
+        ],
+        "change_summary": ["Candidate content withheld from the durable receipt."],
+        "review_risks": ["Human review remains required before promotion."],
+        "benchmark_gate": safe_gate,
+        "pr_draft": {
+            "title": "Governed evolution review candidate",
+            "body": "Candidate content and operator-provided rationale are withheld from this receipt.",
+        },
+    }
+
+
+def _digest_metadata(value: object) -> str:
+    return hashlib.sha256(str(value).encode("utf-8")).hexdigest()
+
+
+def _safe_artifact_reference(value: str | None, *, package_root: Path | None = None) -> str:
+    """Return a package-relative artifact handle without host path details.
+
+    Stored receipts may contain either a legacy absolute path or the current
+    package-relative handle.  Resolve both against the managed package and
+    return a neutral marker for anything outside it.
+    """
+    if not value:
+        return ""
+    raw_value = str(value).strip()
+    if not raw_value:
+        return ""
+    package_root = (package_root or workspace_capability_package_root()).resolve()
+    try:
+        windows_path = PureWindowsPath(raw_value)
+        if windows_path.is_absolute() or bool(windows_path.drive):
+            return "artifact"
+        raw_path = Path(raw_value)
+        resolved = (
+            raw_path.resolve()
+            if raw_path.is_absolute()
+            else (package_root / raw_path).resolve()
+        )
+        return resolved.relative_to(package_root).as_posix()
+    except (OSError, RuntimeError, ValueError):
+        return "artifact"
+
+
+def _sha256_bytes(value: bytes) -> str:
+    return hashlib.sha256(value).hexdigest()
+
+
+def _sha256_text(value: str) -> str:
+    return _sha256_bytes(value.encode("utf-8"))
+
+
+def _sha256_artifact(path: str | Path) -> str:
+    """Hash a managed artifact after writing it, with containment enforced."""
+    resolved_path = _validate_evolution_path_containment(Path(path)).resolve()
+    return _sha256_bytes(resolved_path.read_bytes())
+
+
+def _safe_lineage_handle(value: str | None) -> str:
+    try:
+        return _safe_artifact_reference(value)
+    except Exception:
+        return "artifact" if value else ""
+
+
+def _evolution_lineage_payload(
+    receipt: EvolutionReceipt,
+    *,
+    saved_path: str | None = None,
+    receipt_path: str | None = None,
+    candidate_artifact_digest: str | None = None,
+) -> dict[str, str]:
+    """Expose only stable lineage fields for audit and persistence failures."""
+    return {
+        "proposal_id": str(receipt.proposal_id or ""),
+        "source_content_digest": str(receipt.source_content_digest or ""),
+        "source_version": str(receipt.source_version or receipt.source_content_digest or ""),
+        "candidate_content_digest": str(receipt.candidate_content_digest or ""),
+        "candidate_artifact_digest": str(
+            candidate_artifact_digest or receipt.candidate_artifact_digest or receipt.candidate_content_digest or ""
+        ),
+        "candidate_handle": _safe_lineage_handle(saved_path or receipt.candidate_handle),
+        "receipt_handle": _safe_lineage_handle(receipt_path or receipt.receipt_handle),
+    }
+
+
+def _new_proposal_id() -> str:
+    return uuid.uuid4().hex
+
+
 def _write_receipt(candidate_file_name: str, receipt: EvolutionReceipt) -> str:
-    receipts_dir = workspace_capability_package_root() / "evolution" / "receipts"
+    candidate_file_name = validate_evolution_file_name(candidate_file_name)
+    target = _receipt_path(receipt.target_type, candidate_file_name)
+    receipts_dir = target.parent
     receipts_dir.mkdir(parents=True, exist_ok=True)
-    target = receipts_dir / f"{Path(candidate_file_name).stem}.json"
-    target.write_text(json.dumps(receipt.to_dict(), indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    payload = json.dumps(_safe_receipt_payload(receipt), indent=2, sort_keys=True) + "\n"
+    try:
+        descriptor = os.open(
+            target,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+            0o600,
+        )
+    except FileExistsError as exc:
+        raise ValueError(EVOLUTION_FILE_NAME_ERROR) from exc
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write(payload)
+    except Exception:
+        target.unlink(missing_ok=True)
+        raise
     return str(target)
 
 
+def _evolution_artifact_snapshot(
+    target_type: EvolutionTargetType,
+    *,
+    candidate_file_name: str,
+) -> tuple[tuple[Path, bool, bytes | None], ...]:
+    candidate_file_name = validate_evolution_file_name(candidate_file_name)
+    package_root = workspace_capability_package_root()
+    candidate_path = _candidate_path(target_type, candidate_file_name)
+    receipt_path = _receipt_path(target_type, candidate_file_name)
+    # Keep the legacy receipt location in the rollback set so a partially
+    # written older worker or test double cannot leave sensitive data behind.
+    legacy_receipt_path = package_root / "evolution" / "receipts" / f"{Path(candidate_file_name).stem}.json"
+    # Candidate writes are intentionally inert and never mutate the manifest;
+    # restoring a manifest snapshot could clobber an unrelated operator change.
+    for path in (candidate_path, receipt_path, legacy_receipt_path):
+        _validate_evolution_path_containment(path)
+    snapshot: list[tuple[Path, bool, bytes | None]] = []
+    for path in (candidate_path, receipt_path, legacy_receipt_path):
+        snapshot.append((path, path.exists(), path.read_bytes() if path.exists() else None))
+    return tuple(snapshot)
+
+
+def _restore_evolution_artifacts(snapshot: tuple[tuple[Path, bool, bytes | None], ...]) -> None:
+    for path, existed, content in snapshot:
+        if existed:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(content or b"")
+        else:
+            path.unlink(missing_ok=True)
+
+
+def _safe_lineage_digest(value: Any) -> str:
+    if not isinstance(value, str):
+        return ""
+    candidate = value.strip().lower()
+    return candidate if _LINEAGE_DIGEST_RE.fullmatch(candidate) else ""
+
+
+def _safe_lineage_identifier(value: Any) -> str:
+    if not isinstance(value, str):
+        return ""
+    candidate = value.strip()
+    return candidate if _LINEAGE_ID_RE.fullmatch(candidate) else ""
+
+
+def _lineage_value(payload: dict[str, Any], lineage: dict[str, Any], *keys: str) -> Any:
+    for key in keys:
+        value = payload.get(key)
+        if value not in (None, ""):
+            return value
+        value = lineage.get(key)
+        if value not in (None, ""):
+            return value
+    return None
+
+
+def _safe_lineage_reference(value: Any, *, package_root: Path) -> str:
+    if not value:
+        return ""
+    try:
+        reference = _safe_artifact_reference(value, package_root=package_root)
+    except Exception:
+        return "artifact"
+    if (
+        not reference
+        or len(reference) > 160
+        or any(ord(character) < 32 or ord(character) == 127 for character in reference)
+    ):
+        return "artifact"
+    return reference
+
+
+def _safe_lineage_from_receipt_payload(
+    receipt_payload: dict[str, Any],
+    *,
+    package_root: Path,
+) -> dict[str, str]:
+    raw_lineage = receipt_payload.get("lineage")
+    lineage = raw_lineage if isinstance(raw_lineage, dict) else {}
+    proposal_id = _safe_lineage_identifier(_lineage_value(receipt_payload, lineage, "proposal_id"))
+    source_content_digest = _safe_lineage_digest(
+        _lineage_value(receipt_payload, lineage, "source_content_digest")
+    )
+    source_version = _safe_lineage_digest(
+        _lineage_value(receipt_payload, lineage, "source_version")
+    ) or source_content_digest
+    candidate_content_digest = _safe_lineage_digest(
+        _lineage_value(receipt_payload, lineage, "candidate_content_digest")
+    )
+    candidate_artifact_digest = _safe_lineage_digest(
+        _lineage_value(receipt_payload, lineage, "candidate_artifact_digest")
+    )
+    candidate_handle = _safe_lineage_reference(
+        _lineage_value(receipt_payload, lineage, "candidate_handle", "saved_path"),
+        package_root=package_root,
+    )
+    receipt_handle = _safe_lineage_reference(
+        _lineage_value(receipt_payload, lineage, "receipt_handle", "receipt_path"),
+        package_root=package_root,
+    )
+    result = {
+        "proposal_id": proposal_id,
+        "source_content_digest": source_content_digest,
+        "source_version": source_version,
+        "candidate_content_digest": candidate_content_digest,
+        "candidate_artifact_digest": candidate_artifact_digest,
+        "candidate_handle": candidate_handle,
+        "receipt_handle": receipt_handle,
+    }
+    return {key: value for key, value in result.items() if value}
+
+
+def _proposal_artifact_metadata(
+    proposal: dict[str, Any],
+    *,
+    package_root: Path,
+) -> tuple[str, str, Path, Path, dict[str, Any]] | None:
+    raw_receipt = proposal.get("receipt") if isinstance(proposal, dict) else None
+    if not isinstance(raw_receipt, dict):
+        return None
+    target_type = raw_receipt.get("target_type") or proposal.get("target_type")
+    candidate_file_name = raw_receipt.get("candidate_file_name")
+    if target_type not in {"skill", "runbook", "starter_pack", "prompt_pack"}:
+        return None
+    if not isinstance(candidate_file_name, str):
+        return None
+    try:
+        candidate_file_name = validate_evolution_file_name(candidate_file_name)
+        if not is_evolution_candidate_file_name(candidate_file_name):
+            return None
+        candidate_path = _candidate_path(target_type, candidate_file_name)
+        receipt_path = _receipt_path(target_type, candidate_file_name)
+    except (KeyError, OSError, RuntimeError, ValueError):
+        return None
+    return target_type, candidate_file_name, candidate_path, receipt_path, raw_receipt
+
+
+def rollback_evolution_proposal(proposal: dict[str, Any]) -> bool:
+    """Remove only artifacts owned by a saved proposal after a final fence.
+
+    The operation deliberately skips authority checks: it is used to clean up
+    an already-persisted candidate after the operator session has been revoked.
+    Destination locking and lineage verification prevent it from deleting a
+    candidate or receipt that no longer belongs to this proposal.
+    """
+    raw_receipt = proposal.get("receipt") if isinstance(proposal, dict) else None
+    if not isinstance(raw_receipt, dict):
+        return True
+    package_root = workspace_capability_package_root().resolve()
+    metadata = _proposal_artifact_metadata(proposal, package_root=package_root)
+    if metadata is None:
+        return not bool(
+            raw_receipt.get("saved_path")
+            or raw_receipt.get("receipt_path")
+            or raw_receipt.get("candidate_handle")
+            or raw_receipt.get("receipt_handle")
+        )
+    target_type, candidate_file_name, candidate_path, receipt_path, receipt_payload = metadata
+    with _evolution_target_write_lock(target_type, candidate_file_name):
+        try:
+            candidate_exists = candidate_path.exists()
+            receipt_exists = receipt_path.exists()
+            candidate_name_exists = _case_insensitive_path_exists(candidate_path)
+            receipt_name_exists = _case_insensitive_path_exists(receipt_path)
+            if (candidate_name_exists and not candidate_exists) or (receipt_name_exists and not receipt_exists):
+                return False
+            if not candidate_exists and not receipt_exists:
+                return True
+
+            relative_candidate = candidate_path.resolve().relative_to(package_root).as_posix()
+            relative_receipt = receipt_path.resolve().relative_to(package_root).as_posix()
+            lineage = _safe_lineage_from_receipt_payload(receipt_payload, package_root=package_root)
+            candidate_handle = lineage.get("candidate_handle", "")
+            receipt_handle = lineage.get("receipt_handle", "")
+            expected_digest = lineage.get("candidate_artifact_digest", "")
+            if (
+                not lineage.get("proposal_id")
+                or not expected_digest
+                or candidate_handle != relative_candidate
+                or receipt_handle != relative_receipt
+            ):
+                return False
+
+            if candidate_exists:
+                if candidate_path.is_symlink() or not candidate_path.is_file():
+                    return False
+                if _sha256_artifact(candidate_path) != expected_digest:
+                    return False
+
+            if receipt_exists:
+                if receipt_path.is_symlink() or not receipt_path.is_file():
+                    return False
+                try:
+                    stored_payload = json.loads(receipt_path.read_text(encoding="utf-8"))
+                except Exception:
+                    return False
+                if not isinstance(stored_payload, dict):
+                    return False
+                stored_lineage = _safe_lineage_from_receipt_payload(
+                    stored_payload,
+                    package_root=package_root,
+                )
+                if (
+                    stored_lineage.get("proposal_id") != lineage.get("proposal_id")
+                    or stored_lineage.get("candidate_artifact_digest") != expected_digest
+                    or stored_lineage.get("candidate_handle") != relative_candidate
+                    or stored_lineage.get("receipt_handle") != relative_receipt
+                ):
+                    return False
+
+            try:
+                if candidate_exists:
+                    candidate_path.unlink()
+                if receipt_exists:
+                    receipt_path.unlink()
+            except OSError:
+                return False
+            return True
+        except (OSError, RuntimeError, ValueError):
+            return False
+
+
+def write_evolution_recovery_receipt(proposal: dict[str, Any]) -> str | None:
+    """Persist a redacted durable recovery marker when cleanup cannot verify ownership."""
+    raw_receipt = proposal.get("receipt") if isinstance(proposal, dict) else None
+    if not isinstance(raw_receipt, dict):
+        return None
+    package_root = workspace_capability_package_root().resolve()
+    lineage = _safe_lineage_from_receipt_payload(raw_receipt, package_root=package_root)
+    recovery_id = lineage.get("proposal_id") or uuid.uuid4().hex
+    recovery_dir = package_root / "evolution" / "receipts" / "recovery"
+    recovery_dir.mkdir(parents=True, exist_ok=True)
+    recovery_path = recovery_dir / f"{recovery_id}-{uuid.uuid4().hex}.json"
+    recovery_handle = _safe_artifact_reference(recovery_path, package_root=package_root)
+    payload: dict[str, Any] = {
+        "status": "recovery_required",
+        "reason": _EVOLUTION_RECOVERY_REASON,
+        "target_type": raw_receipt.get("target_type")
+        if raw_receipt.get("target_type") in {"skill", "runbook", "starter_pack", "prompt_pack"}
+        else "unknown",
+        **lineage,
+        "lineage": lineage,
+        "recovery_receipt_handle": recovery_handle,
+    }
+    candidate_file_name = raw_receipt.get("candidate_file_name")
+    if isinstance(candidate_file_name, str):
+        try:
+            candidate_file_name = validate_evolution_file_name(candidate_file_name)
+            if is_evolution_candidate_file_name(candidate_file_name):
+                payload["candidate_file_name"] = candidate_file_name
+        except ValueError:
+            pass
+    descriptor = os.open(
+        recovery_path,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+        0o600,
+    )
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+    except Exception:
+        recovery_path.unlink(missing_ok=True)
+        raise
+    return recovery_handle
+
+
 def _save_candidate(target_type: EvolutionTargetType, *, file_name: str, content: str) -> str:
-    contribution_type = {
-        "skill": "skills",
-        "runbook": "runbooks",
-        "starter_pack": "starter_packs",
-        "prompt_pack": "prompt_packs",
-    }[target_type]
-    return str(save_workspace_contribution(contribution_type, file_name=file_name, content=content))
+    file_name = validate_evolution_file_name(file_name)
+    # Keep the familiar contribution layout for operator receipts, but do not
+    # register the file in the active manifest.  A review candidate therefore
+    # remains inert until a separately approved promotion copies it into a
+    # manifest-backed contribution.
+    candidate_path = _candidate_path(target_type, file_name)
+    candidate_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        descriptor = os.open(
+            candidate_path,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+            0o600,
+        )
+    except FileExistsError as exc:
+        raise ValueError(EVOLUTION_FILE_NAME_ERROR) from exc
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write(content)
+    except Exception:
+        candidate_path.unlink(missing_ok=True)
+        raise
+    return str(candidate_path)
 
 
 def evaluate_candidate(
@@ -711,16 +1432,27 @@ def evaluate_candidate(
     objective: str = "",
     observations: list[str] | None = None,
     candidate_file_name: str | None = None,
+    proposal_id: str | None = None,
 ) -> EvolutionReceipt:
+    _check_evolution_boundary()
     resolved_source = _resolve_registered_target_path(target_type, source_path)
-    base_content = resolved_source.read_text(encoding="utf-8")
+    candidate_file_name = _candidate_file_name_for_target(
+        target_type,
+        source_path=resolved_source,
+        requested_file_name=candidate_file_name,
+    )
+    source_bytes = resolved_source.read_bytes()
+    base_content = source_bytes.decode("utf-8")
+    source_content_digest = _sha256_bytes(source_bytes)
+    candidate_content_digest = _sha256_text(candidate_content)
+    proposal_id = str(proposal_id or "").strip() or _new_proposal_id()
     objective_text = str(objective or "").strip()
     normalized_observations = _normalize_observations(observations)
     source_metadata = _validate_target(target_type, content=base_content, path=str(resolved_source))
     candidate_metadata = _validate_target(
         target_type,
         content=candidate_content,
-        path=str(resolved_source.with_name(candidate_file_name or _default_candidate_file_name(resolved_source))),
+        path=str(resolved_source.with_name(candidate_file_name)),
     )
     constraints = _evaluate_constraints(
         target_type,
@@ -749,7 +1481,7 @@ def evaluate_candidate(
         source_path=str(resolved_source),
         source_name=str(source_metadata.get("name") or source_metadata.get("title") or resolved_source.stem),
         candidate_name=str(candidate_metadata.get("name") or candidate_metadata.get("title") or resolved_source.stem),
-        candidate_file_name=candidate_file_name or _default_candidate_file_name(resolved_source),
+        candidate_file_name=candidate_file_name,
         valid=True,
         blocked=blocked,
         score=score,
@@ -772,6 +1504,14 @@ def evaluate_candidate(
             objective=objective_text,
             review_risks=review_risks,
         ),
+        proposal_id=proposal_id,
+        source_content_digest=source_content_digest,
+        candidate_content_digest=candidate_content_digest,
+        # The candidate artifact is a UTF-8 file written from this exact
+        # content.  create_evolution_proposal verifies the on-disk digest
+        # again after the O_EXCL write before persisting the receipt.
+        candidate_artifact_digest=candidate_content_digest,
+        source_version=source_content_digest,
     )
     return receipt
 
@@ -802,36 +1542,120 @@ def create_evolution_proposal(
     objective: str = "",
     observations: list[str] | None = None,
     file_name: str | None = None,
+    authority_check: EvolutionAuthorityCheck | None = None,
 ) -> dict[str, Any]:
+    _check_evolution_boundary(authority_check)
     resolved_source = _resolve_registered_target_path(target_type, source_path)
-    candidate_name, candidate_content = generate_candidate_content(
+    proposal_id = _new_proposal_id()
+    candidate_file_name = _candidate_file_name_for_target(
         target_type,
-        source_path=str(resolved_source),
-        objective=objective,
-        observations=observations,
+        source_path=resolved_source,
+        requested_file_name=file_name,
     )
-    candidate_file_name = file_name or _default_candidate_file_name(resolved_source)
-    receipt = evaluate_candidate(
-        target_type,
-        source_path=str(resolved_source),
-        candidate_content=candidate_content,
-        objective=objective,
-        observations=observations,
-        candidate_file_name=candidate_file_name,
-    )
-    saved_path = None
-    receipt_path = None
-    if not receipt.blocked and receipt.score >= 0.7:
-        saved_path = _save_candidate(target_type, file_name=candidate_file_name, content=candidate_content)
-        receipt = replace(receipt, saved_path=saved_path)
-        receipt_path = _write_receipt(candidate_file_name, receipt)
-        updated_gate = dict(receipt.benchmark_gate)
-        updated_gate["rollback_ready"] = True
-        updated_gate["safety_receipt_state"] = "candidate_and_receipt_written"
-        updated_gate["saved_candidate_path"] = saved_path
-        updated_gate["receipt_path"] = receipt_path
-        receipt = replace(receipt, benchmark_gate=updated_gate, receipt_path=receipt_path)
-        _write_receipt(candidate_file_name, receipt)
+    with _evolution_target_write_lock(target_type, candidate_file_name):
+        _check_evolution_boundary(authority_check)
+        _assert_review_candidate_destination_available(
+            target_type,
+            source_path=resolved_source,
+            file_name=candidate_file_name,
+        )
+        _check_evolution_boundary(authority_check)
+        source_digest_before_generation = _sha256_bytes(resolved_source.read_bytes())
+        _check_evolution_boundary(authority_check)
+        candidate_name, candidate_content = generate_candidate_content(
+            target_type,
+            source_path=str(resolved_source),
+            objective=objective,
+            observations=observations,
+        )
+        _check_evolution_boundary(authority_check)
+        receipt = evaluate_candidate(
+            target_type,
+            source_path=str(resolved_source),
+            candidate_content=candidate_content,
+            objective=objective,
+            observations=observations,
+            candidate_file_name=candidate_file_name,
+            proposal_id=proposal_id,
+        )
+        _check_evolution_boundary(authority_check)
+        if receipt.source_content_digest and receipt.source_content_digest != source_digest_before_generation:
+            raise ValueError("source content changed during evolution proposal")
+        saved_path = None
+        receipt_path = None
+        if not receipt.blocked and receipt.score >= 0.7:
+            _check_evolution_boundary(authority_check)
+            if receipt.source_content_digest:
+                current_source_digest = _sha256_bytes(resolved_source.read_bytes())
+                if current_source_digest != receipt.source_content_digest:
+                    raise ValueError("source content changed during evolution proposal")
+            _check_evolution_boundary(authority_check)
+            snapshot = _evolution_artifact_snapshot(target_type, candidate_file_name=candidate_file_name)
+            artifact_written = False
+            candidate_artifact_digest = ""
+            receipt_for_error = receipt
+            try:
+                _check_evolution_boundary(authority_check)
+                saved_path = _save_candidate(target_type, file_name=candidate_file_name, content=candidate_content)
+                artifact_written = True
+                _check_evolution_boundary(authority_check)
+                candidate_artifact_digest = _sha256_artifact(saved_path)
+                _check_evolution_boundary(authority_check)
+                expected_candidate_digest = receipt.candidate_content_digest or _sha256_text(candidate_content)
+                if candidate_artifact_digest != expected_candidate_digest:
+                    raise ValueError("candidate artifact digest did not match evaluated content")
+                receipt_path = str(_receipt_path(target_type, candidate_file_name))
+                updated_gate = dict(receipt.benchmark_gate)
+                updated_gate["rollback_ready"] = True
+                updated_gate["safety_receipt_state"] = "candidate_and_receipt_written"
+                updated_gate["saved_candidate_path"] = saved_path
+                updated_gate["receipt_path"] = receipt_path
+                receipt = replace(
+                    receipt,
+                    saved_path=saved_path,
+                    benchmark_gate=updated_gate,
+                    receipt_path=receipt_path,
+                    proposal_id=proposal_id,
+                    candidate_content_digest=expected_candidate_digest,
+                    candidate_artifact_digest=candidate_artifact_digest,
+                    candidate_handle=_safe_artifact_reference(saved_path),
+                    receipt_handle=_safe_artifact_reference(receipt_path),
+                )
+                receipt_for_error = receipt
+                _check_evolution_boundary(authority_check)
+                _write_receipt(candidate_file_name, receipt)
+                _check_evolution_boundary(authority_check)
+            except Exception as exc:
+                rollback_error = None
+                try:
+                    _restore_evolution_artifacts(snapshot)
+                except Exception as restore_exc:
+                    rollback_error = restore_exc
+                if artifact_written or saved_path or receipt_path:
+                    lineage = _evolution_lineage_payload(
+                        receipt_for_error,
+                        saved_path=saved_path,
+                        receipt_path=receipt_path,
+                        candidate_artifact_digest=candidate_artifact_digest,
+                    )
+                    setattr(exc, "evolution_lineage", lineage)
+                    setattr(exc, "artifacts_written", bool(artifact_written or saved_path or receipt_path))
+                    setattr(exc, "rollback_failed", rollback_error is not None)
+                    setattr(exc, "target_type", target_type)
+                    setattr(exc, "candidate_file_name", candidate_file_name)
+                    if isinstance(exc, RuntimeRevokedError):
+                        raise
+                    raise EvolutionPersistenceError(
+                        "Evolution artifact persistence failed",
+                        lineage=lineage,
+                        artifacts_written=bool(artifact_written or saved_path or receipt_path),
+                        rollback_failed=rollback_error is not None,
+                        target_type=target_type,
+                        candidate_file_name=candidate_file_name,
+                    ) from (rollback_error or exc)
+                if rollback_error is not None:
+                    raise rollback_error from exc
+                raise
     return {
         "status": "saved" if saved_path else "blocked",
         "candidate_name": candidate_name,

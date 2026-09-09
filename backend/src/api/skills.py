@@ -12,7 +12,10 @@ from src.audit.runtime import log_integration_event
 from src.agent.factory import get_base_tools_and_active_skills
 from src.auth.service import bind_operator_principal
 from src.extensions.registry import default_manifest_roots_for_workspace
-from src.extensions.workspace_package import save_workspace_contribution
+from src.extensions.workspace_package import (
+    EVOLUTION_CANDIDATE_FILE_NAME_ERROR,
+    save_workspace_contribution,
+)
 from src.observer.manager import context_manager
 from src.skills.loader import parse_skill_content
 from src.skills.manager import skill_manager
@@ -158,7 +161,12 @@ async def save_skill_draft(req: SkillDraftRequest, request: Request):
             default_name=_safe_markdown_filename(str(validation["skill"]["name"])),
         )
         _ensure_skill_manager_workspace_extensions_loaded()
-        target_path = str(save_workspace_contribution("skills", file_name=file_name, content=req.content))
+        try:
+            target_path = str(save_workspace_contribution("skills", file_name=file_name, content=req.content))
+        except ValueError as exc:
+            if str(exc) == EVOLUTION_CANDIDATE_FILE_NAME_ERROR:
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
+            raise
         skills = skill_manager.reload()
         await log_integration_event(
             integration_type="skill",

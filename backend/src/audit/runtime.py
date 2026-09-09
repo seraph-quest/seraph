@@ -167,25 +167,48 @@ async def log_integration_event(
     name: str,
     outcome: str,
     details: dict[str, Any] | None = None,
-) -> None:
-    """Record an external integration lifecycle event without breaking callers."""
+    session_id: str | None = None,
+    actor: str = "system",
+    policy_mode: str = "full",
+    principal_id: str | None = None,
+) -> bool:
+    """Record an integration lifecycle event and report persistence state.
+
+    Existing callers retain the fail-open behavior when they ignore the return
+    value. Governed operator routes may supply authenticated lineage and fail
+    closed or return an explicit degraded receipt when persistence fails.
+    """
     summary = f"{integration_type.replace('_', ' ').capitalize()} {name} {outcome.replace('_', ' ')}"
     try:
+        event_details: dict[str, Any] = {
+            "integration_type": integration_type,
+            "name": name,
+            **(details or {}),
+        }
+        if session_id or principal_id:
+            existing_lineage = event_details.get("lineage")
+            lineage = dict(existing_lineage) if isinstance(existing_lineage, dict) else {}
+            lineage.update(
+                {
+                    "principal_id": principal_id or actor,
+                    "session_id": session_id,
+                }
+            )
+            event_details["lineage"] = lineage
         await audit_repository.log_event(
-            actor="system",
+            session_id=session_id,
+            actor=actor,
             event_type=f"integration_{outcome}",
             tool_name=f"{integration_type}:{name}",
             risk_level="low",
-            policy_mode="full",
+            policy_mode=policy_mode,
             summary=summary,
-            details={
-                "integration_type": integration_type,
-                "name": name,
-                **(details or {}),
-            },
+            details=event_details,
         )
+        return True
     except Exception:
         logger.debug("Failed to record integration runtime audit event", exc_info=True)
+        return False
 
 
 async def log_observer_delivery_event(

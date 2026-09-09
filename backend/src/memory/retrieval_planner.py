@@ -160,10 +160,11 @@ def _provider_context_hit(line: str) -> HybridMemoryHit | None:
         return None
     bucket, _, payload = line.removeprefix("- [").partition("] ")
     provider_name, separator, text = payload.partition(": ")
-    if not bucket.strip() or not separator or not provider_name.strip() or not text.strip():
+    normalized_text = _normalize_provider_claim_value(text)
+    if not bucket.strip() or not separator or not provider_name.strip() or not normalized_text:
         return None
     return HybridMemoryHit(
-        text=text.strip(),
+        text=normalized_text,
         bucket=bucket.strip(),
         source="provider",
         score=0.0,
@@ -219,6 +220,12 @@ def _provider_conflicts_with_canonical(
     )
 
 
+def _normalize_provider_claim_value(value: object) -> str:
+    if not isinstance(value, str):
+        return ""
+    return " ".join(value.split())
+
+
 def _suppress_provider_context_conflicts(
     *,
     canonical_context: str,
@@ -247,15 +254,27 @@ def _filter_provider_buckets(
     buckets: dict[str, tuple[str, ...]],
     suppressed: tuple[tuple[str, str], ...],
 ) -> dict[str, tuple[str, ...]]:
-    suppressed_keys = set(suppressed)
+    suppressed_keys = {
+        (normalized_bucket, normalized_text)
+        for raw_bucket, raw_text in suppressed
+        if (normalized_bucket := _normalize_provider_claim_value(raw_bucket))
+        and (normalized_text := _normalize_provider_claim_value(raw_text))
+    }
+    normalized_buckets: dict[str, list[str]] = {}
+    for raw_bucket, values in buckets.items():
+        bucket = _normalize_provider_claim_value(raw_bucket)
+        if not bucket or not isinstance(values, (tuple, list)):
+            continue
+        normalized_values = normalized_buckets.setdefault(bucket, [])
+        for raw_text in values:
+            text = _normalize_provider_claim_value(raw_text)
+            if not text or (bucket, text) in suppressed_keys or text in normalized_values:
+                continue
+            normalized_values.append(text)
     return {
-        bucket: tuple(
-            text
-            for text in values
-            if (bucket, text) not in suppressed_keys
-        )
-        for bucket, values in buckets.items()
-        if any((bucket, text) not in suppressed_keys for text in values)
+        bucket: tuple(values)
+        for bucket, values in normalized_buckets.items()
+        if values
     }
 
 

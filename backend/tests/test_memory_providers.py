@@ -514,6 +514,55 @@ async def test_plan_memory_retrieval_keeps_canonical_memory_ahead_of_conflicting
 
 
 @pytest.mark.asyncio
+async def test_plan_memory_retrieval_filters_normalized_provider_conflict_from_buckets():
+    suppressed_text = "  Atlas launch is on track. \n"
+    provider_result = MemoryProviderAggregateResult(
+        context=(
+            f"- [project] graph-memory: {suppressed_text}"
+            "- [collaborator] graph-memory: Alice owns Atlas launch communications."
+        ),
+        buckets={
+            " project ": (suppressed_text,),
+            "collaborator": (" Alice owns Atlas launch communications. ",),
+        },
+        degraded=False,
+        diagnostics=({"name": "graph-memory", "capabilities_used": ["retrieval"]},),
+    )
+
+    with (
+        patch(
+            "src.memory.retrieval_planner.build_structured_memory_context_bundle",
+            return_value=(
+                "- [project] Atlas launch is delayed.",
+                {"project": ("Atlas launch is delayed.",)},
+            ),
+        ),
+        patch(
+            "src.memory.retrieval_planner.retrieve_hybrid_memory",
+            return_value=HybridMemoryRetrievalResult(
+                context="",
+                buckets={},
+                degraded=False,
+                hits=(),
+            ),
+        ),
+        patch(
+            "src.memory.retrieval_planner.retrieve_additive_memory_provider_context",
+            return_value=provider_result,
+        ),
+    ):
+        retrieval = await plan_memory_retrieval(query="Atlas launch status", active_projects=())
+
+    assert "Atlas launch is on track." not in retrieval.semantic_context
+    assert suppressed_text not in retrieval.semantic_context
+    assert "Atlas launch is on track." not in retrieval.memory_buckets.get("project", ())
+    assert suppressed_text not in retrieval.memory_buckets.get("project", ())
+    assert retrieval.memory_buckets["collaborator"] == (
+        "Alice owns Atlas launch communications.",
+    )
+
+
+@pytest.mark.asyncio
 async def test_plan_memory_retrieval_uses_provider_user_model_for_active_project_without_query(tmp_path):
     workspace = tmp_path / "workspace"
     workspace.mkdir()

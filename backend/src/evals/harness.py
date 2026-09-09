@@ -13085,33 +13085,47 @@ async def _eval_approval_explainability_surface_behavior() -> dict[str, Any]:
     with (
         patch(
             "src.api.approvals.session_manager.list_sessions",
-            return_value=[{"id": "thread-1", "title": "Research thread"}],
+            AsyncMock(return_value=[{"id": "thread-1", "title": "Research thread"}]),
         ),
-        patch("src.api.approvals.approval_repository.list_pending", return_value=[approval]),
+        patch("src.api.approvals.approval_repository.list_pending", AsyncMock(return_value=[approval])),
         patch(
             "src.api.operator.session_manager.list_sessions",
-            return_value=[{"id": "thread-1", "title": "Research thread"}],
+            AsyncMock(return_value=[{"id": "thread-1", "title": "Research thread"}]),
         ),
-        patch("src.api.operator._list_workflow_runs", return_value=[]),
-        patch("src.api.operator.approval_repository.list_pending", return_value=[approval]),
-        patch("src.api.operator.native_notification_queue.list", return_value=[]),
-        patch("src.api.operator.insight_queue.peek_all", return_value=[]),
-        patch("src.api.operator.guardian_feedback_repository.list_recent", return_value=[]),
-        patch("src.api.operator.audit_repository.list_events", return_value=[]),
+        patch("src.api.operator._list_workflow_runs", AsyncMock(return_value=[])),
+        patch("src.api.operator.approval_repository.list_pending", AsyncMock(return_value=[approval])),
+        patch("src.api.operator.native_notification_queue.list", AsyncMock(return_value=[])),
+        patch("src.api.operator.insight_queue.peek_all", AsyncMock(return_value=[])),
+        patch("src.api.operator.guardian_feedback_repository.list_recent", AsyncMock(return_value=[])),
+        patch("src.api.operator.audit_repository.list_events", AsyncMock(return_value=[])),
         patch(
             "src.api.activity.session_manager.list_sessions",
-            return_value=[{"id": "thread-1", "title": "Research thread"}],
+            AsyncMock(return_value=[{"id": "thread-1", "title": "Research thread"}]),
         ),
-        patch("src.api.activity._list_workflow_runs", return_value=[]),
-        patch("src.api.activity.approval_repository.list_pending", return_value=[approval]),
-        patch("src.api.activity.native_notification_queue.list", return_value=[]),
-        patch("src.api.activity.insight_queue.peek_all", return_value=[]),
-        patch("src.api.activity.guardian_feedback_repository.list_recent", return_value=[]),
-        patch("src.api.activity.audit_repository.list_events", return_value=[]),
+        patch("src.api.activity._list_workflow_runs", AsyncMock(return_value=[])),
+        patch("src.api.activity.approval_repository.list_pending", AsyncMock(return_value=[approval])),
+        patch("src.api.activity.native_notification_queue.list", AsyncMock(return_value=[])),
+        patch("src.api.activity.insight_queue.peek_all", AsyncMock(return_value=[])),
+        patch("src.api.activity.guardian_feedback_repository.list_recent", AsyncMock(return_value=[])),
+        patch("src.api.activity.audit_repository.list_events", AsyncMock(return_value=[])),
         patch("src.api.activity.list_recent_llm_calls", return_value=[]),
         patch("src.api.operator._operator_database_missing_tables", AsyncMock(return_value=[])),
     ):
-        pending_payload = await list_pending_approvals(session_id="thread-1", limit=10)
+        approvals_request = Request(
+            {
+                "type": "http",
+                "method": "GET",
+                "path": "/api/approvals/pending",
+                "headers": [],
+                "query_string": b"",
+                "state": {"operator": test_bypass_operator()},
+            }
+        )
+        pending_payload = await list_pending_approvals(
+            request=approvals_request,
+            session_id="thread-1",
+            limit=10,
+        )
         operator_payload = await get_operator_timeline(limit=10, session_id="thread-1")
         activity_payload = await get_activity_ledger(limit=10, session_id="thread-1", window_hours=24)
 
@@ -16592,7 +16606,22 @@ async def _m7_cockpit_endpoint_payload() -> dict[str, Any]:
         ),
         patch("src.api.operator.process_runtime_manager.list_all_processes", return_value=[]),
     ):
-        return await get_operator_m7_cockpit(session_id="session-1", window_hours=24, limit_workflows=20)
+        cockpit_request = Request(
+            {
+                "type": "http",
+                "method": "GET",
+                "path": "/api/operator/m7-cockpit",
+                "headers": [],
+                "query_string": b"",
+                "state": {"operator": test_bypass_operator()},
+            }
+        )
+        return await get_operator_m7_cockpit(
+            request=cockpit_request,
+            session_id="session-1",
+            window_hours=24,
+            limit_workflows=20,
+        )
 
 
 def _eval_operator_cockpit_receipt_legibility_behavior() -> dict[str, Any]:

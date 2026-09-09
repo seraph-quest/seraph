@@ -86,6 +86,48 @@ describe("cockpit approval authority", () => {
     )).toBe(null);
   });
 
+  it("requires one explicit approval id and complete workflow, goal, and session lineage", () => {
+    const linkedApproval = {
+      ...approval,
+      workflow_id: "workflow-1",
+      goal_id: "goal-1",
+      goal_revision: 3,
+    };
+    const linkedWorkflow = {
+      workflowId: "workflow-1",
+      goalId: "goal-1",
+      goalRevision: 3,
+      sessionId: "conversation-1",
+      toolName: "filesystem:workspace",
+      pendingApprovalIds: ["approval-1"],
+    };
+    expect(selectApprovalForWorkflow([linkedApproval], linkedWorkflow)).toEqual(linkedApproval);
+    expect(selectApprovalForWorkflow(
+      [linkedApproval],
+      { ...linkedWorkflow, pendingApprovalIds: [] },
+    )).toBe(null);
+    expect(selectApprovalForWorkflow(
+      [linkedApproval],
+      { ...linkedWorkflow, pendingApprovalIds: ["approval-1", "approval-2"] },
+    )).toBe(null);
+    expect(selectApprovalForWorkflow(
+      [linkedApproval],
+      { ...linkedWorkflow, workflowId: undefined },
+    )).toBe(null);
+    expect(selectApprovalForWorkflow(
+      [linkedApproval],
+      { ...linkedWorkflow, goalRevision: 2 },
+    )).toBe(null);
+    expect(selectApprovalForWorkflow(
+      [linkedApproval],
+      { ...linkedWorkflow, sessionId: "other-conversation" },
+    )).toBe(null);
+    expect(selectApprovalForWorkflow(
+      [{ ...linkedApproval, workflow_id: undefined }],
+      linkedWorkflow,
+    )).toBe(null);
+  });
+
   it("keeps owner metadata inspectable without exposing full identifiers", () => {
     const metadata = displayApprovalOwnerMetadata({
       ...approval,

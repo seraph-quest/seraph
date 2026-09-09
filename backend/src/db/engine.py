@@ -125,6 +125,19 @@ async def _ensure_legacy_columns(conn) -> None:
             "ALTER TABLE user_profiles ADD COLUMN approval_mode VARCHAR DEFAULT 'high_risk'"
         )
 
+    approval_columns = await _table_columns("approval_requests")
+    if approval_columns and "expires_at" not in approval_columns:
+        # Keep this nullable for legacy rows. They fail closed until a new
+        # approval request is created with a bounded deadline.
+        await conn.exec_driver_sql(
+            "ALTER TABLE approval_requests ADD COLUMN expires_at DATETIME"
+        )
+    if "expires_at" in await _table_columns("approval_requests"):
+        await conn.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_approval_requests_expires_at "
+            "ON approval_requests (expires_at)"
+        )
+
     queued_insight_columns = await _table_columns("queued_insights")
     if queued_insight_columns and "intervention_id" not in queued_insight_columns:
         await conn.exec_driver_sql(

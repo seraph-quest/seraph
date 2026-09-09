@@ -760,6 +760,10 @@ class ApprovalRequest(SQLModel, table=True):
     summary: str = Field(default="")
     details_json: Optional[str] = Field(default=None)
     created_at: datetime = Field(default_factory=_now, index=True)
+    # Nullable for legacy rows. The approval repository assigns a bounded
+    # deadline to newly-created requests and treats missing deadlines as
+    # non-actionable during resolution/consumption.
+    expires_at: Optional[datetime] = Field(default=None, index=True)
     resolved_at: Optional[datetime] = Field(default=None)
 
 

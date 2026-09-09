@@ -6554,7 +6554,7 @@ describe("CockpitView", () => {
     expect(useChatStore.getState().sessionId).toBe("session-1");
   }, 15000);
 
-  it("uses workflow-attached approvals when the pending sidebar is capped away", async () => {
+  it("locks workflow approvals when the pending sidebar has no validated lineage", async () => {
     fetchMock.mockImplementation((input: RequestInfo | URL) => {
       const url = String(input);
       if (url.includes("/api/auth/session")) {
@@ -6660,31 +6660,18 @@ describe("CockpitView", () => {
 
     await loadAllDeepPanes();
 
-    expect(await screen.findByRole("button", { name: "Approve" }, { timeout: 5000 })).toBeInTheDocument();
-    expect(screen.getAllByRole("button", { name: "Approve" })).toHaveLength(1);
-    expect(screen.getByRole("button", { name: "Deny" })).toBeInTheDocument();
-    fireEvent.click(await screen.findByRole("button", { name: "Continue" }, { timeout: 5000 }));
-
-    await waitFor(() => expect(useChatStore.getState().sessionId).toBe("session-2"), { timeout: 5000 });
-    expect(
-      await screen.findByDisplayValue("Continue workflow after approval.", {}, { timeout: 5000 }),
-    ).toBeInTheDocument();
-
+    await waitFor(() => {
+      expect(screen.queryByRole("button", { name: "Approve" })).not.toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: "Deny" })).not.toBeInTheDocument();
+    });
     fireEvent.click(screen.getByText("workflow_web_brief_to_file is waiting for approval"));
     const inspector = document.querySelector(".cockpit-inspector") as HTMLElement;
     expect(inspector).not.toBeNull();
-    fireEvent.click(within(inspector).getByRole("button", { name: "Approve" }));
-    await waitFor(() =>
-      expect(fetchMock).toHaveBeenCalledWith(
-        expect.stringContaining("/api/approvals/approval-run-1/approve"),
-        expect.objectContaining({ method: "POST", credentials: "include" }),
-      ),
-    );
-    await waitFor(() => {
-      expect(within(inspector).queryByRole("button", { name: "Approve" })).not.toBeInTheDocument();
-      expect(within(inspector).queryByRole("button", { name: "Approve approval context for web-brief-to-file" })).not.toBeInTheDocument();
-    });
-    expect(within(inspector).getByText("Approval approval-run-1 resolved: approved.")).toBeInTheDocument();
+    expect(within(inspector).getByText(
+      /Approval controls locked: explicit workflow, goal, and session lineage is unavailable\./,
+    )).toBeInTheDocument();
+    expect(within(inspector).queryByRole("button", { name: "Approve" })).not.toBeInTheDocument();
+    expect(within(inspector).queryByRole("button", { name: "Deny" })).not.toBeInTheDocument();
   }, 15000);
 
   it("shows a visible pending state and fresh-thread guidance while the agent is working", async () => {

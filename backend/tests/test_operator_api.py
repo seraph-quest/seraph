@@ -1017,6 +1017,26 @@ async def test_operator_timeline_uses_persisted_queued_insight_session_id_when_r
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("path", ["/api/operator/control-plane", "/api/operator/m7-cockpit"])
+async def test_operator_cockpit_routes_require_browser_operator_before_listing_approvals(client, path):
+    with (
+        patch(
+            "src.api.operator._require_authenticated_capability_operator",
+            side_effect=HTTPException(
+                status_code=401,
+                detail={"code": "authentication_required"},
+            ),
+        ),
+        patch("src.api.operator.approval_repository.list_pending", AsyncMock()) as pending,
+    ):
+        response = await client.get(path, params={"session_id": "conversation-id"})
+
+    assert response.status_code == 401
+    assert response.json()["detail"] == {"code": "authentication_required"}
+    pending.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_operator_control_plane_synthesizes_governance_usage_runtime_and_handoff(client):
     with (
         patch("src.api.operator.settings.use_delegation", True),
@@ -1075,7 +1095,7 @@ async def test_operator_control_plane_synthesizes_governance_usage_runtime_and_h
                     }
                 ]
             ),
-        ),
+        ) as control_plane_pending,
         patch(
             "src.api.operator.build_observer_continuity_snapshot",
             AsyncMock(
@@ -1176,6 +1196,8 @@ async def test_operator_control_plane_synthesizes_governance_usage_runtime_and_h
         resp = await client.get("/api/operator/control-plane", params={"window_hours": 24})
 
     assert resp.status_code == 200
+    control_plane_pending.assert_awaited_once()
+    assert control_plane_pending.await_args.kwargs["owner_operator_session_id"] == "test-auth-bypass"
     payload = resp.json()
     assert payload["governance"]["workspace_mode"] == "single_operator_guarded_workspace"
     assert payload["governance"]["approval_mode"] == "high_risk"
@@ -1281,7 +1303,7 @@ async def test_operator_m7_cockpit_composes_dense_control_surface(client):
                     }
                 ]
             ),
-        ),
+        ) as m7_pending,
         patch(
             "src.api.operator.build_observer_continuity_snapshot",
             AsyncMock(
@@ -1399,6 +1421,8 @@ async def test_operator_m7_cockpit_composes_dense_control_surface(client):
         resp = await client.get("/api/operator/m7-cockpit", params={"session_id": "session-1"})
 
     assert resp.status_code == 200
+    m7_pending.assert_awaited_once()
+    assert m7_pending.await_args.kwargs["owner_operator_session_id"] == "test-auth-bypass"
     payload = resp.json()
     assert payload["summary"]["operator_status"] == "m7_operator_cockpit_visible"
     assert payload["summary"]["pending_approval_count"] == 1

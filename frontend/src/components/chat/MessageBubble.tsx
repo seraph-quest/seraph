@@ -32,6 +32,7 @@ const ROLE_LABELS: Record<string, string> = {
 export function MessageBubble({ message }: MessageBubbleProps) {
   const [approvalStatus, setApprovalStatus] = useState(message.approvalStatus ?? "pending");
   const [submitting, setSubmitting] = useState(false);
+  const [approvalError, setApprovalError] = useState<string | null>(null);
   const style = ROLE_STYLES[message.role] ?? ROLE_STYLES.agent;
   const label = ROLE_LABELS[message.role] ?? "Agent";
   const isStep = message.role === "step";
@@ -41,24 +42,32 @@ export function MessageBubble({ message }: MessageBubbleProps) {
   const handleApproval = async (decision: "approve" | "deny") => {
     if (!message.approvalId || submitting || approvalStatus !== "pending") return;
     setSubmitting(true);
+    setApprovalError(null);
     try {
       const res = await fetch(`${API_URL}/api/approvals/${message.approvalId}/${decision}`, {
         method: "POST",
+        credentials: "include",
       });
-      if (res.ok) {
-        const data = await res.json();
-        if (data?.status) {
-          setApprovalStatus(data.status);
-          if (decision === "approve" && data.status === "approved" && data.resume_message) {
-            appEventBus.emit("approval-resume", {
-              sessionId: data.session_id ?? null,
-              message: data.resume_message,
-            });
-          }
+      const data = await res.json().catch(() => null);
+      if (!res.ok) {
+        const detail = data?.detail;
+        const code = typeof detail === "object" && detail !== null && "code" in detail
+          ? String(detail.code)
+          : typeof detail === "string" ? detail : null;
+        setApprovalError(code ? `Approval decision unavailable (${code}). Refresh before retrying.` : "Approval decision failed. Refresh before retrying.");
+        return;
+      }
+      if (typeof data?.status === "string" && data.status.trim()) {
+        setApprovalStatus(data.status);
+        if (decision === "approve" && data.status === "approved" && data.resume_message) {
+          appEventBus.emit("approval-resume", {
+            sessionId: data.session_id ?? null,
+            message: data.resume_message,
+          });
         }
       }
     } catch {
-      // ignore
+      setApprovalError("Approval decision failed. Refresh before retrying.");
     } finally {
       setSubmitting(false);
     }
@@ -115,6 +124,11 @@ export function MessageBubble({ message }: MessageBubbleProps) {
               >
                 Deny
               </button>
+              {approvalError && (
+                <span className="text-[10px] text-red-300" role="alert">
+                  {approvalError}
+                </span>
+              )}
             </>
           ) : (
             <div className="text-[10px] text-retro-text/60 uppercase tracking-wider">

@@ -106,6 +106,50 @@ async def test_ensure_legacy_columns_adds_session_owner_principal_id(tmp_path):
         await engine.dispose()
 
 
+async def test_ensure_legacy_columns_adds_nullable_approval_deadline_and_index(tmp_path):
+    db_path = tmp_path / "legacy-approvals.db"
+    engine = create_async_engine(f"sqlite+aiosqlite:///{db_path}")
+    event.listen(engine.sync_engine, "connect", _configure_sqlite_connection)
+
+    try:
+        async with engine.begin() as conn:
+            await conn.exec_driver_sql(
+                """
+                CREATE TABLE approval_requests (
+                    id VARCHAR PRIMARY KEY,
+                    session_id VARCHAR,
+                    tool_name VARCHAR,
+                    risk_level VARCHAR,
+                    status VARCHAR,
+                    fingerprint VARCHAR,
+                    summary VARCHAR,
+                    details_json VARCHAR,
+                    created_at DATETIME,
+                    resolved_at DATETIME
+                )
+                """
+            )
+            await _ensure_legacy_columns(conn)
+            await _ensure_legacy_columns(conn)
+
+            columns = {
+                row[1]
+                for row in (
+                    await conn.exec_driver_sql("PRAGMA table_info(approval_requests)")
+                ).fetchall()
+            }
+            indexes = {
+                row[1]
+                for row in (
+                    await conn.exec_driver_sql("PRAGMA index_list(approval_requests)")
+                ).fetchall()
+            }
+            assert "expires_at" in columns
+            assert "ix_approval_requests_expires_at" in indexes
+    finally:
+        await engine.dispose()
+
+
 async def test_ensure_legacy_columns_claims_only_transcript_sessions_for_single_operator(
     tmp_path,
     monkeypatch,

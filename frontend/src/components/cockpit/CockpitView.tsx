@@ -9662,6 +9662,18 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   const outcomeApprovalCandidate = outcomeWorkflow ? approvalForWorkflow(outcomeWorkflow) : null;
   const outcomeApproval = outcomeBindingState === "matched" ? outcomeApprovalCandidate : null;
   const outcomeApprovalActionState = outcomeApproval ? approvalState[outcomeApproval.id] ?? null : null;
+  const outcomeApprovalNeedsMetadata = Boolean(
+    outcomeWorkflow
+    && outcomeBindingState === "matched"
+    && !outcomeApproval
+    && (
+      (outcomeWorkflow.pendingApprovalCount ?? 0) > 0
+      || (outcomeWorkflow.pendingApprovalIds?.length ?? 0) > 0
+    ),
+  );
+  const outcomeApprovalUnavailableReason = outcomeApprovalNeedsMetadata
+    ? "The current approval lacks an explicit, validated workflow, goal, and session binding; controls are locked."
+    : null;
   const approvalAuthorityReady = isApprovalAuthorityReady(
     outcomeApproval,
     operatorAuth,
@@ -9677,7 +9689,9 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
             ? "stale"
             : outcomeWorkflow && outcomeBindingState !== "matched"
               ? "partial_metadata"
-              : "empty";
+              : outcomeApprovalNeedsMetadata
+                ? "partial_metadata"
+                : "empty";
     }
     if (approvalLoadState !== "ready") return approvalLoadState;
     const status = outcomeApproval.status.toLowerCase();
@@ -9765,6 +9779,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       artifactLabel: outcomeWorkflow.artifacts[0]?.filePath ?? outcomeWorkflow.artifactPaths[0] ?? null,
       threadLabel: outcomeWorkflow.threadLabel ?? outcomeWorkflow.threadId ?? outcomeWorkflow.sessionId ?? null,
       nextAction: outcomeBindingUnavailableReason
+        ?? outcomeApprovalUnavailableReason
         ?? (outcomeApproval
         ? `Review approval for ${outcomeApproval.tool_name}`
         : outcomeFailedStep
@@ -10789,37 +10804,16 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   }
 
   function approvalForWorkflow(workflow: WorkflowRunRecord): PendingApproval | null {
-    const selected = selectApprovalForWorkflow(pendingApprovals, workflow);
-    if (selected && "tool_name" in selected && typeof selected.tool_name === "string") {
-      if (terminalApprovalState(selected.id)) return null;
-      return selected;
-    }
-
-    const pendingIds = workflow.pendingApprovalIds?.filter((id) => typeof id === "string" && id.trim()) ?? [];
-    const attached = pendingIds.length > 0
-      ? workflow.pendingApprovals?.find((item) => pendingIds.includes(item.id))
-      : workflow.pendingApprovals?.[0];
-    if (!attached) return null;
-    if (terminalApprovalState(attached.id)) return null;
-    return {
-      id: attached.id,
-      goal_id: attached.goalId ?? workflow.goalId ?? null,
-      goal_revision: attached.goalRevision ?? workflow.goalRevision ?? null,
-      workflow_id: workflow.runIdentity ?? workflow.id,
-      session_id: workflow.sessionId ?? null,
-      thread_id: attached.threadId ?? workflow.threadId ?? workflow.sessionId ?? null,
-      approval_owner_principal_id: attached.ownerPrincipalId ?? null,
-      approval_owner_operator_session_id: attached.ownerSessionId ?? null,
-      approval_owner_source: attached.ownerSource ?? null,
-      approval_owner_expires_at: attached.ownerExpiresAt ?? null,
-      thread_label: attached.threadLabel ?? workflow.threadLabel ?? null,
-      tool_name: workflow.toolName,
-      risk_level: attached.riskLevel ?? workflow.riskLevel ?? "unknown",
-      status: attached.status ?? "unknown",
-      summary: attached.summary,
-      created_at: attached.createdAt,
-      resume_message: attached.resumeMessage ?? workflow.approvalRecoveryMessage ?? null,
-    };
+    const selected = selectApprovalForWorkflow(pendingApprovals, {
+      workflowId: workflow.runIdentity ?? workflow.id,
+      goalId: workflow.goalId,
+      goalRevision: workflow.goalRevision,
+      toolName: workflow.toolName,
+      sessionId: workflow.sessionId,
+      pendingApprovalIds: workflow.pendingApprovalIds,
+    });
+    if (!selected || terminalApprovalState(selected.id)) return null;
+    return selected;
   }
 
   function interventionsForWorkflow(workflow: WorkflowRunRecord): GuardianContinuityIntervention[] {
@@ -12979,6 +12973,16 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                 </button>
               </>
             )}
+            {selectedWorkflow
+              && !selectedWorkflowApproval
+              && (
+                (selectedWorkflow.pendingApprovalCount ?? 0) > 0
+                || (selectedWorkflow.pendingApprovalIds?.length ?? 0) > 0
+              ) && (
+              <span className="cockpit-feedback-status" role="status">
+                Approval controls locked: explicit workflow, goal, and session lineage is unavailable.
+              </span>
+            )}
             {selectedWorkflowApprovalResolution && (
               <span className="cockpit-feedback-status" role="status">
                 Approval {selectedWorkflowApprovalResolution.id} resolved: {selectedWorkflowApprovalResolution.status}.
@@ -14806,7 +14810,9 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                   goalState={outcomeGoalState}
                   goalUnavailableReason={outcomeGoalUnavailableReason}
                   approvalStateOverride={outcomeApprovalSummary ? undefined : approvalOutcomeState}
-                  approvalUnavailableReason={outcomeApprovalSummary ? null : outcomeBindingUnavailableReason}
+                  approvalUnavailableReason={outcomeApprovalSummary
+                    ? null
+                    : outcomeApprovalUnavailableReason ?? outcomeBindingUnavailableReason}
                   route={outcomeRoute}
                   evidence={outcomeEvidence}
                   result={outcomeResult}

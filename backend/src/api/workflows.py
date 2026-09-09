@@ -2151,6 +2151,7 @@ async def _list_workflow_runs(
     limit: int,
     session_id: str | None,
     events: list[dict[str, Any]] | None = None,
+    owner_operator_session_id: str | None = None,
 ) -> list[dict[str, Any]]:
     if events is None:
         events = await audit_repository.list_events(limit=max(limit * 6, 30), session_id=session_id)
@@ -2161,7 +2162,11 @@ async def _list_workflow_runs(
     workflow_events.sort(key=lambda item: item.get("created_at", ""))
     pending_by_key: dict[str, list[dict[str, Any]]] = defaultdict(list)
     completed: list[dict[str, Any]] = []
-    pending_approvals = await approval_repository.list_pending(session_id=session_id, limit=100)
+    pending_approvals = await approval_repository.list_pending(
+        session_id=session_id,
+        limit=100,
+        owner_operator_session_id=owner_operator_session_id,
+    )
     workflow_statuses = _workflow_runtime_statuses()
     workflow_runtime_contexts = _workflow_runtime_approval_contexts()
     pending_by_tool: dict[tuple[str | None, str], list[dict[str, Any]]] = defaultdict(list)

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import datetime
+
 from src.security.trust_contract import PrincipalType, TrustPrincipal
 
 
@@ -9,6 +11,7 @@ def build_approval_owner_details(
     *,
     session_id: str | None,
     principal: TrustPrincipal | None,
+    approval_expires_at: datetime | str | None = None,
 ) -> dict[str, str]:
     """Persist auth-session ownership separately from execution context.
 
@@ -20,6 +23,11 @@ def build_approval_owner_details(
     conversation_id = str(session_id or "").strip()
     if conversation_id:
         details["approval_conversation_id"] = conversation_id
+    if approval_expires_at is not None:
+        if isinstance(approval_expires_at, datetime):
+            details["approval_expires_at"] = approval_expires_at.isoformat()
+        elif isinstance(approval_expires_at, str) and approval_expires_at.strip():
+            details["approval_expires_at"] = approval_expires_at.strip()
     if principal is None:
         return details
 

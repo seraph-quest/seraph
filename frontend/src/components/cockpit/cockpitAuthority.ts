@@ -8,6 +8,9 @@
 
 export type ApprovalAuthorityRecord = {
   status?: unknown;
+  workflow_id?: unknown;
+  goal_id?: unknown;
+  goal_revision?: unknown;
   approval_owner_principal_id?: unknown;
   approval_owner_operator_session_id?: unknown;
   approval_conversation_id?: unknown;
@@ -131,6 +134,9 @@ export type ApprovalCandidate = ApprovalAuthorityRecord & {
 };
 
 export type WorkflowApprovalBinding = {
+  workflowId?: unknown;
+  goalId?: unknown;
+  goalRevision?: unknown;
   toolName?: unknown;
   sessionId?: unknown;
   pendingApprovalIds?: readonly string[] | null;
@@ -174,24 +180,38 @@ export function selectApprovalForWorkflow<T extends ApprovalCandidate>(
   if (!workflow) return null;
 
   const pendingIds = workflow.pendingApprovalIds?.filter((id) => typeof id === "string" && id.trim()) ?? [];
-  if (pendingIds.length > 0) {
-    const byId = pending.find((approval) => pendingIds.includes(approval.id));
-    if (byId) return byId;
-    const attachedById = workflow.pendingApprovals?.find((approval) => pendingIds.includes(approval.id));
-    if (attachedById) return attachedById as T;
-    return null;
-  }
+  // A workflow may report several pending approvals, but this panel has one
+  // consequential decision surface. Refuse to choose by list order or by a
+  // conversation/tool match when the backend did not provide one explicit id.
+  if (pendingIds.length !== 1) return null;
+
+  const candidate = pending.find((approval) => approval.id === pendingIds[0]);
+  if (!candidate) return null;
+
+  const workflowId = text(workflow.workflowId);
+  const candidateWorkflowId = text(candidate.workflow_id);
+  const goalId = text(workflow.goalId);
+  const candidateGoalId = text(candidate.goal_id);
+  const goalRevision = integer(workflow.goalRevision);
+  const candidateGoalRevision = integer(candidate.goal_revision);
+  const sessionId = text(workflow.sessionId);
+  const candidateSessionId = text(candidate.session_id) || text(candidate.thread_id);
+  if (
+    !workflowId
+    || !candidateWorkflowId
+    || workflowId !== candidateWorkflowId
+    || !goalId
+    || !candidateGoalId
+    || goalId !== candidateGoalId
+    || goalRevision === null
+    || candidateGoalRevision === null
+    || goalRevision !== candidateGoalRevision
+    || !sessionId
+    || !candidateSessionId
+    || sessionId !== candidateSessionId
+  ) return null;
 
   const toolName = text(workflow.toolName);
-  const sessionId = text(workflow.sessionId);
-  if (toolName && sessionId) {
-    const byContext = pending.find((approval) => (
-      text(approval.tool_name) === toolName
-      && (text(approval.session_id) || text(approval.thread_id)) === sessionId
-    ));
-    if (byContext) return byContext;
-  }
-
-  const attached = workflow.pendingApprovals?.[0];
-  return attached ? attached as T : null;
+  if (toolName && text(candidate.tool_name) !== toolName) return null;
+  return candidate;
 }

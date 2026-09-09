@@ -83,6 +83,26 @@ def _require_approval_owner(request: Request, approval, operator) -> dict:
     return details
 
 
+def _raise_resolution_conflict(resolution) -> None:
+    approval = resolution.request
+    status = approval.status if approval is not None else None
+    code = {
+        "already_terminal": "approval_already_resolved",
+        "expiry_missing": "approval_expiry_missing",
+        "expired": "approval_expired",
+    }.get(resolution.reason, "approval_resolution_conflict")
+    raise HTTPException(
+        status_code=409,
+        detail={
+            "code": code,
+            "id": approval.id if approval is not None else None,
+            "status": status,
+            "transitioned": False,
+            "reason": resolution.reason,
+        },
+    )
+
+
 @router.get("/approvals/pending")
 async def list_pending_approvals(
     request: Request,
@@ -136,26 +156,34 @@ async def approve_request(approval_id: str, request: Request):
     if pending is None:
         raise HTTPException(status_code=404, detail="Approval request not found")
     details = _require_approval_owner(request, pending, operator)
-    request = await approval_repository.resolve(approval_id, "approved")
-    if request is None:
+    resolution = await approval_repository.resolve_with_metadata(approval_id, "approved")
+    resolved = resolution.request
+    if resolved is None:
         raise HTTPException(status_code=404, detail="Approval request not found")
+    if not resolution.transitioned:
+        _raise_resolution_conflict(resolution)
 
     await audit_repository.log_event(
-        session_id=request.session_id,
+        session_id=resolved.session_id,
         actor="user",
         event_type="approval_approved",
-        tool_name=request.tool_name,
-        risk_level=request.risk_level,
+        tool_name=resolved.tool_name,
+        risk_level=resolved.risk_level,
         policy_mode=get_current_tool_policy_mode(),
-        summary=f"Approved high-risk action for {request.tool_name}",
+        summary=f"Approved high-risk action for {resolved.tool_name}",
     )
 
-    details = details if isinstance(details, dict) else _approval_details(request)
+    details = details if isinstance(details, dict) else _approval_details(resolved)
     resume_message = details.get("resume_message")
 
-    response = {"status": request.status, "id": request.id}
-    if request.session_id and resume_message:
-        response["session_id"] = request.session_id
+    response = {
+        "status": resolved.status,
+        "id": resolved.id,
+        "expires_at": resolved.expires_at.isoformat() if resolved.expires_at else None,
+        "transitioned": True,
+    }
+    if resolved.session_id and resume_message:
+        response["session_id"] = resolved.session_id
         response["resume_message"] = resume_message
     return response
 
@@ -167,17 +195,25 @@ async def deny_request(approval_id: str, request: Request):
     if pending is None:
         raise HTTPException(status_code=404, detail="Approval request not found")
     _require_approval_owner(request, pending, operator)
-    request = await approval_repository.resolve(approval_id, "denied")
-    if request is None:
+    resolution = await approval_repository.resolve_with_metadata(approval_id, "denied")
+    resolved = resolution.request
+    if resolved is None:
         raise HTTPException(status_code=404, detail="Approval request not found")
+    if not resolution.transitioned:
+        _raise_resolution_conflict(resolution)
 
     await audit_repository.log_event(
-        session_id=request.session_id,
+        session_id=resolved.session_id,
         actor="user",
         event_type="approval_denied",
-        tool_name=request.tool_name,
-        risk_level=request.risk_level,
+        tool_name=resolved.tool_name,
+        risk_level=resolved.risk_level,
         policy_mode=get_current_tool_policy_mode(),
-        summary=f"Denied high-risk action for {request.tool_name}",
+        summary=f"Denied high-risk action for {resolved.tool_name}",
     )
-    return {"status": request.status, "id": request.id}
+    return {
+        "status": resolved.status,
+        "id": resolved.id,
+        "expires_at": resolved.expires_at.isoformat() if resolved.expires_at else None,
+        "transitioned": True,
+    }

@@ -1,13 +1,16 @@
 """Tests for approval request APIs."""
 
 from dataclasses import replace
+from datetime import datetime, timedelta, timezone
 import pytest
 from fastapi import HTTPException
 from starlette.requests import Request
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from src.approval.repository import approval_repository
 from src.auth.service import test_bypass_operator as _test_bypass_operator
+from src.db import engine as db_engine
+from src.db.models import ApprovalRequest
 
 
 def _approval_request(operator) -> Request:
@@ -40,6 +43,140 @@ async def test_list_pending_approvals_rejects_anonymous_call(client):
 
     assert resp.status_code == 401
     assert resp.json()["detail"] == {"code": "authentication_required"}
+
+
+@pytest.mark.asyncio
+async def test_approval_deadline_defaults_and_explicit_deadline_is_preserved(async_db):
+    now = datetime.now(timezone.utc)
+    default_request = await approval_repository.get_or_create_pending(
+        session_id="deadline-default",
+        tool_name="shell_execute",
+        risk_level="high",
+        summary="Bounded approval",
+        fingerprint="deadline-default",
+    )
+    assert default_request.expires_at is not None
+    default_expiry = default_request.expires_at
+    if default_expiry.tzinfo is None:
+        default_expiry = default_expiry.replace(tzinfo=timezone.utc)
+    assert now < default_expiry <= now + timedelta(minutes=5, seconds=2)
+
+    explicit_expiry = now + timedelta(hours=2)
+    explicit_request = await approval_repository.get_or_create_pending(
+        session_id="deadline-explicit",
+        tool_name="shell_execute",
+        risk_level="high",
+        summary="Explicit deadline",
+        fingerprint="deadline-explicit",
+        expires_at=explicit_expiry,
+    )
+    assert explicit_request.expires_at is not None
+    stored_expiry = explicit_request.expires_at
+    if stored_expiry.tzinfo is None:
+        stored_expiry = stored_expiry.replace(tzinfo=timezone.utc)
+    assert stored_expiry == explicit_expiry.replace(microsecond=explicit_expiry.microsecond)
+
+
+@pytest.mark.asyncio
+async def test_missing_or_expired_deadline_cannot_resolve_or_consume(async_db):
+    now = datetime.now(timezone.utc)
+    expired = await approval_repository.get_or_create_pending(
+        session_id="deadline-expired",
+        tool_name="shell_execute",
+        risk_level="high",
+        summary="Expired approval",
+        fingerprint="deadline-expired",
+        expires_at=now - timedelta(seconds=1),
+    )
+    expired_resolution = await approval_repository.resolve_with_metadata(
+        expired.id,
+        "approved",
+        now=now,
+    )
+    assert expired_resolution.transitioned is False
+    assert expired_resolution.reason == "expired"
+    assert expired_resolution.request is not None
+    assert expired_resolution.request.status == "pending"
+
+    missing = await approval_repository.get_or_create_pending(
+        session_id="deadline-missing",
+        tool_name="shell_execute",
+        risk_level="high",
+        summary="Legacy approval",
+        fingerprint="deadline-missing",
+    )
+    async with db_engine.get_session() as db:
+        stored = await db.get(ApprovalRequest, missing.id)
+        assert stored is not None
+        stored.expires_at = None
+        await db.flush()
+    missing_resolution = await approval_repository.resolve_with_metadata(
+        missing.id,
+        "denied",
+        now=now,
+    )
+    assert missing_resolution.transitioned is False
+    assert missing_resolution.reason == "expiry_missing"
+    assert missing_resolution.request is not None
+    assert missing_resolution.request.status == "pending"
+
+    async with db_engine.get_session() as db:
+        stored = await db.get(ApprovalRequest, missing.id)
+        assert stored is not None
+        stored.status = "approved"
+        stored.expires_at = now - timedelta(seconds=1)
+        await db.flush()
+    assert await approval_repository.consume_approved(
+        session_id="deadline-missing",
+        tool_name="shell_execute",
+        fingerprint="deadline-missing",
+    ) is False
+    async with db_engine.get_session() as db:
+        stored = await db.get(ApprovalRequest, missing.id)
+        assert stored is not None
+        assert stored.status == "approved"
+
+
+@pytest.mark.asyncio
+async def test_terminal_approval_is_a_conflict_without_duplicate_audit(client):
+    request = await approval_repository.get_or_create_pending(
+        session_id="test-auth-bypass",
+        tool_name="shell_execute",
+        risk_level="high",
+        summary="Resolve once",
+        fingerprint="resolve-once",
+    )
+    with patch("src.api.approvals.audit_repository.log_event", new_callable=AsyncMock) as audit:
+        first = await client.post(f"/api/approvals/{request.id}/approve")
+        second = await client.post(f"/api/approvals/{request.id}/approve")
+
+    assert first.status_code == 200
+    assert first.json()["transitioned"] is True
+    assert second.status_code == 409
+    assert second.json()["detail"]["code"] == "approval_already_resolved"
+    assert second.json()["detail"]["transitioned"] is False
+    assert audit.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_expired_approval_decision_has_no_audit_or_terminal_effect(client):
+    expired = await approval_repository.get_or_create_pending(
+        session_id="test-auth-bypass",
+        tool_name="shell_execute",
+        risk_level="high",
+        summary="Expired decision",
+        fingerprint="expired-decision",
+        expires_at=datetime.now(timezone.utc) - timedelta(seconds=1),
+    )
+    with patch("src.api.approvals.audit_repository.log_event", new_callable=AsyncMock) as audit:
+        response = await client.post(f"/api/approvals/{expired.id}/deny")
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "approval_expired"
+    assert audit.await_count == 0
+    stored = await approval_repository.get(expired.id)
+    assert stored is not None
+    assert stored.status == "pending"
 
 
 @pytest.mark.asyncio

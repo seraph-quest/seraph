@@ -3355,9 +3355,11 @@ def _m7_fast_controls_catalog(
 
 @router.get("/operator/control-plane")
 async def get_operator_control_plane(
+    request: Request,
     session_id: str | None = Query(default=None),
     window_hours: int = Query(default=24, ge=1, le=168),
 ):
+    operator = _require_authenticated_capability_operator(request)
     cutoff = datetime.now(timezone.utc) - timedelta(hours=window_hours)
     ctx = context_manager.get_context()
     session_titles = {
@@ -3367,8 +3369,16 @@ async def get_operator_control_plane(
     }
 
     workflow_runs, pending_approvals, continuity_snapshot, audit_events, llm_calls = await asyncio.gather(
-        _list_workflow_runs(limit=60, session_id=session_id),
-        approval_repository.list_pending(session_id=session_id, limit=20),
+        _list_workflow_runs(
+            limit=60,
+            session_id=session_id,
+            owner_operator_session_id=operator.session_id,
+        ),
+        approval_repository.list_pending(
+            session_id=session_id,
+            limit=20,
+            owner_operator_session_id=operator.session_id,
+        ),
         build_observer_continuity_snapshot(),
         audit_repository.list_events(limit=40, session_id=session_id, since=cutoff),
         asyncio.to_thread(list_recent_llm_calls, limit=300, session_id=session_id, since=cutoff),
@@ -3448,10 +3458,12 @@ async def get_operator_control_plane(
 
 @router.get("/operator/m7-cockpit")
 async def get_operator_m7_cockpit(
+    request: Request,
     session_id: str | None = Query(default=None),
     window_hours: int = Query(default=24, ge=1, le=168),
     limit_workflows: int = Query(default=20, ge=1, le=50),
 ):
+    operator = _require_authenticated_capability_operator(request)
     cutoff = datetime.now(timezone.utc) - timedelta(hours=window_hours)
     workflow_limit = max(limit_workflows * 3, 60)
     (
@@ -3465,8 +3477,16 @@ async def get_operator_m7_cockpit(
         memory_payload,
     ) = await asyncio.gather(
         session_manager.list_sessions(),
-        _list_workflow_runs(limit=workflow_limit, session_id=session_id),
-        approval_repository.list_pending(session_id=session_id, limit=40),
+        _list_workflow_runs(
+            limit=workflow_limit,
+            session_id=session_id,
+            owner_operator_session_id=operator.session_id,
+        ),
+        approval_repository.list_pending(
+            session_id=session_id,
+            limit=40,
+            owner_operator_session_id=operator.session_id,
+        ),
         build_observer_continuity_snapshot(),
         audit_repository.list_events(limit=120, session_id=session_id, since=cutoff),
         scheduled_job_repository.list_jobs(include_disabled=True, limit=30),

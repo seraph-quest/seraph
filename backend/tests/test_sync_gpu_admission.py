@@ -317,6 +317,7 @@ def test_late_sync_callback_holds_gpu_until_provider_result_is_reconciled():
             broker.reconcile(
                 late_request.operation_id,
                 owner_id=late_request.owner_id,
+                job_id=late_request.job_id,
                 fencing_token=active["fencing_token"],
                 outcome="failed",
                 reason_code="provider_result_reconciled_failed",
@@ -359,6 +360,7 @@ def test_active_deadline_watchdog_blocks_before_sync_callback_returns():
                 broker.reconcile(
                     request.operation_id,
                     owner_id=request.owner_id,
+                    job_id=request.job_id,
                     fencing_token=active["fencing_token"],
                 )
             )
@@ -387,6 +389,7 @@ def test_active_deadline_watchdog_blocks_before_sync_callback_returns():
             broker.reconcile(
                 request.operation_id,
                 owner_id=request.owner_id,
+                job_id=request.job_id,
                 fencing_token=active["fencing_token"],
                 outcome="failed",
                 reason_code="provider_result_reconciled_failed",

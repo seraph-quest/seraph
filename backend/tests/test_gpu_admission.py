@@ -236,6 +236,7 @@ async def test_late_callback_holds_gpu_until_provider_result_is_reconciled():
     reconciled = await broker.reconcile(
         late_request.operation_id,
         owner_id=late_request.owner_id,
+        job_id=late_request.job_id,
         fencing_token=active["fencing_token"],
         outcome="failed",
         reason_code="provider_result_reconciled_failed",
@@ -280,6 +281,7 @@ async def test_active_deadline_watchdog_blocks_before_async_callback_returns():
         await broker.reconcile(
             request.operation_id,
             owner_id=request.owner_id,
+            job_id=request.job_id,
             fencing_token=active["fencing_token"],
         )
     assert reconciliation_error.value.receipt.reason_code == "provider_callback_still_running"
@@ -302,6 +304,7 @@ async def test_active_deadline_watchdog_blocks_before_async_callback_returns():
     reconciled = await broker.reconcile(
         request.operation_id,
         owner_id=request.owner_id,
+        job_id=request.job_id,
         fencing_token=active["fencing_token"],
         outcome="failed",
         reason_code="provider_result_reconciled_failed",

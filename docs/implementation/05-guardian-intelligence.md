@@ -208,9 +208,13 @@ count, filters the suppressed claim from memory buckets, and remains stateless
 so retries produce the same result. Provider failure and recovery continue to
 fall back to or rejoin canonical retrieval without granting provider authority.
 
-This deterministic boundary does not implement the remaining #753 Gate A
-corpus/metrics artifact, canonical delete/export/rebuild ledger, remote
-provider deletion, or later #745 behavioral usefulness proof.
+The deterministic boundary does not implement the remaining #753 Gate A
+corpus/metrics artifact, remote provider deletion, or later #745 behavioral
+usefulness proof. A local `memory_tombstones` ledger now records canonical
+delete/export authority without retaining deleted content. The operator delete
+path writes the ledger and redaction atomically and invalidates the bounded
+guardian snapshot cache; repeated requests preserve the first actor, reason,
+and timestamp.
 
 The branch-local live-control rollback guard now treats canonical delete/export
 redaction as terminal: records marked with the operator delete/export archive
@@ -222,15 +226,18 @@ deletion remains asynchronous and receipt-bound, with pending or failed
 propagation still requiring bounded retry and operator-visible reconciliation.
 The scoped learning/provider ingress path also suppresses non-empty echoes when
 an existing canonical tombstone is found, before it can change content,
-metadata, scope, timestamps, or source state. Malformed metadata on a matched
-archived or superseded row is treated as suppressed when deletion cannot be
-disproved; active malformed rows remain writable. External provider deletion
-and restart/restore tombstone-ledger reconciliation remain deferred gaps. The
-scoped write uses an `updated_at`/status/metadata compare-and-swap and
-reconciles a competing write before retrying, so a delete/export commit wins
-the interleaving.
-The separate review-outcome and pin reactivation paths are unchanged and remain
-deferred follow-up scope for the broader deletion ledger.
+metadata, scope, timestamps, or source state. `reconcile_memory_tombstones`
+re-applies content-free redaction after a stale row restore, and
+`list_memories_for_reindex` reconciles before admitting active canonical rows to
+a local deterministic reindex. Snapshot reads and writes carry a content-free
+tombstone-ledger revision and fail closed when that authority is unavailable or
+changes during assembly. `MemoryEpisode` rows remain outside this Gate A
+tombstone ledger and require the deferred episodic-retention/deletion slice.
+Hybrid retrieval performs the same reconciliation
+and fails closed with an explicit degraded/no-learning receipt if the local
+authority check is unavailable. External provider deletion remains
+asynchronous and receipt-bound; the review-outcome and pin reactivation paths
+remain deferred follow-up scope for broader provider and restore orchestration.
 
 ## Memory Upgrade Program Record
 

@@ -400,6 +400,23 @@ class Memory(SQLModel, table=True):
     last_confirmed_at: Optional[datetime] = Field(default=None)
 
 
+class MemoryTombstone(SQLModel, table=True):
+    """Durable local deletion authority for a canonical memory row.
+
+    This ledger intentionally stores no memory content.  It survives a stale
+    row restore and lets the canonical repository re-apply redaction before a
+    deterministic read or reindex path exposes the row again.
+    """
+
+    __tablename__ = "memory_tombstones"
+
+    id: str = Field(default_factory=_uuid, primary_key=True)
+    memory_id: str = Field(foreign_key="memories.id", index=True, unique=True)
+    actor: str = Field(default="operator", index=True)
+    reason: str = Field(default="operator_delete_export")
+    created_at: datetime = Field(default_factory=_now, index=True)
+
+
 class MemoryEntity(SQLModel, table=True):
     __tablename__ = "memory_entities"
 
@@ -431,6 +448,7 @@ class MemorySnapshot(SQLModel, table=True):
     kind: MemorySnapshotKind = Field(default=MemorySnapshotKind.bounded_guardian_context, index=True, unique=True)
     content: str = Field(default="")
     source_hash: Optional[str] = Field(default=None)
+    canonical_tombstone_revision: Optional[str] = Field(default=None, index=True)
     created_at: datetime = Field(default_factory=_now)
     updated_at: datetime = Field(default_factory=_now)
 

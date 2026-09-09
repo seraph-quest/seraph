@@ -7,9 +7,10 @@ import pytest
 pytestmark = pytest.mark.usefixtures("mocked_canonical_inference_context")
 
 from src.audit.repository import audit_repository
+from src.memory.hybrid_retrieval import HybridMemoryRetrievalResult
 from src.security.trust_contract import canonical_digest
 from src.observer.context import CurrentContext
-from src.scheduler.jobs.daily_briefing import run_daily_briefing
+from src.scheduler.jobs.daily_briefing import _get_relevant_memories, run_daily_briefing
 
 
 def _make_context(**overrides) -> CurrentContext:
@@ -32,6 +33,26 @@ def _mock_litellm_response(text: str):
     return mock_response
 
 
+def _hybrid_memories(
+    texts: tuple[str, ...] = (),
+    *,
+    degraded: bool = False,
+    reason: str | None = None,
+) -> HybridMemoryRetrievalResult:
+    diagnostics = (
+        ({"reason": reason, "status": "degraded_no_learning"},)
+        if reason
+        else ()
+    )
+    return HybridMemoryRetrievalResult(
+        context="\n".join(f"- [fact] {text}" for text in texts),
+        buckets={"fact": texts} if texts else {},
+        degraded=degraded,
+        hits=(),
+        diagnostics=diagnostics,
+    )
+
+
 @pytest.mark.asyncio
 async def test_daily_briefing_happy_path():
     ctx = _make_context()
@@ -43,7 +64,10 @@ async def test_daily_briefing_happy_path():
     with (
         patch("src.observer.manager.context_manager", mock_cm),
         patch("src.memory.soul.read_soul", return_value="# Soul\nName: Hero"),
-        patch("src.memory.vector_store.search_with_status", return_value=([{"category": "fact", "text": "User likes mornings"}], False)),
+        patch(
+            "src.scheduler.jobs.daily_briefing.retrieve_hybrid_memory",
+            new=AsyncMock(return_value=_hybrid_memories(("User likes mornings",))),
+        ),
         patch("litellm.completion", return_value=_mock_litellm_response("Good morning, Hero! Here's your briefing...")),
         patch("src.observer.delivery.deliver_or_queue", mock_deliver),
     ):
@@ -68,7 +92,10 @@ async def test_daily_briefing_logs_success(async_db):
     with (
         patch("src.observer.manager.context_manager", mock_cm),
         patch("src.memory.soul.read_soul", return_value="# Soul\nName: Hero"),
-        patch("src.memory.vector_store.search_with_status", return_value=([{"category": "fact", "text": "User likes mornings"}], False)),
+        patch(
+            "src.scheduler.jobs.daily_briefing.retrieve_hybrid_memory",
+            new=AsyncMock(return_value=_hybrid_memories(("User likes mornings",))),
+        ),
         patch("litellm.completion", return_value=_mock_litellm_response("Good morning, Hero! Here's your briefing...")),
         patch("src.observer.delivery.deliver_or_queue", AsyncMock()),
     ):
@@ -92,7 +119,10 @@ async def test_daily_briefing_uses_named_runtime_path():
     with (
         patch("src.observer.manager.context_manager", mock_cm),
         patch("src.memory.soul.read_soul", return_value="# Soul\nName: Hero"),
-        patch("src.memory.vector_store.search_with_status", return_value=([{"category": "fact", "text": "User likes mornings"}], False)),
+        patch(
+            "src.scheduler.jobs.daily_briefing.retrieve_hybrid_memory",
+            new=AsyncMock(return_value=_hybrid_memories(("User likes mornings",))),
+        ),
         patch(
             "src.scheduler.jobs.daily_briefing.completion_with_fallback",
             new=AsyncMock(return_value=mock_response),
@@ -135,7 +165,10 @@ async def test_daily_briefing_llm_failure():
     with (
         patch("src.observer.manager.context_manager", mock_cm),
         patch("src.memory.soul.read_soul", return_value="# Soul"),
-        patch("src.memory.vector_store.search_with_status", return_value=([], False)),
+        patch(
+            "src.scheduler.jobs.daily_briefing.retrieve_hybrid_memory",
+            new=AsyncMock(return_value=_hybrid_memories()),
+        ),
         patch("litellm.completion", side_effect=Exception("LLM API error")),
         patch("src.observer.delivery.deliver_or_queue", mock_deliver),
     ):
@@ -155,7 +188,10 @@ async def test_daily_briefing_empty_calendar_goals():
     with (
         patch("src.observer.manager.context_manager", mock_cm),
         patch("src.memory.soul.read_soul", return_value="# Soul"),
-        patch("src.memory.vector_store.search_with_status", return_value=([], False)),
+        patch(
+            "src.scheduler.jobs.daily_briefing.retrieve_hybrid_memory",
+            new=AsyncMock(return_value=_hybrid_memories()),
+        ),
         patch("litellm.completion", return_value=_mock_litellm_response("A quiet morning ahead.")),
         patch("src.observer.delivery.deliver_or_queue", mock_deliver),
     ):
@@ -186,7 +222,10 @@ async def test_daily_briefing_with_events():
     with (
         patch("src.observer.manager.context_manager", mock_cm),
         patch("src.memory.soul.read_soul", return_value="# Soul"),
-        patch("src.memory.vector_store.search_with_status", return_value=([], False)),
+        patch(
+            "src.scheduler.jobs.daily_briefing.retrieve_hybrid_memory",
+            new=AsyncMock(return_value=_hybrid_memories()),
+        ),
         patch("litellm.completion", side_effect=mock_completion),
         patch("src.observer.delivery.deliver_or_queue", mock_deliver),
     ):
@@ -207,7 +246,15 @@ async def test_daily_briefing_logs_degraded_runtime_details(async_db):
     with (
         patch("src.observer.manager.context_manager", mock_cm),
         patch("src.memory.soul.read_soul", return_value="# Soul\nName: Hero"),
-        patch("src.memory.vector_store.search_with_status", return_value=([], True)),
+        patch(
+            "src.scheduler.jobs.daily_briefing.retrieve_hybrid_memory",
+            new=AsyncMock(
+                return_value=_hybrid_memories(
+                    degraded=True,
+                    reason="canonical_vector_search_unavailable",
+                )
+            ),
+        ),
         patch("litellm.completion", return_value=_mock_litellm_response("Good morning, Hero! Here's your briefing...")),
         patch("src.observer.delivery.deliver_or_queue", AsyncMock()),
     ):
@@ -218,7 +265,7 @@ async def test_daily_briefing_logs_degraded_runtime_details(async_db):
         event["event_type"] == "background_task_degraded"
         and event["tool_name"] == "daily_briefing_inputs"
         and event["details"]["source"] == "relevant_memories"
-        and event["details"]["error"] == "vector_store_search_failed"
+        and event["details"]["error"] == "canonical_vector_search_unavailable"
         for event in events
     )
     assert any(
@@ -228,3 +275,23 @@ async def test_daily_briefing_logs_degraded_runtime_details(async_db):
         and event["details"]["degraded_inputs"] == ["relevant_memories"]
         for event in events
     )
+
+
+@pytest.mark.asyncio
+async def test_daily_briefing_does_not_use_raw_vector_rows_after_canonical_delete():
+    """Briefing context must come from the canonical tombstone-filtered lane."""
+
+    with (
+        patch(
+            "src.scheduler.jobs.daily_briefing.retrieve_hybrid_memory",
+            new=AsyncMock(return_value=_hybrid_memories()),
+        ),
+        patch(
+            "src.memory.vector_store.search_with_status",
+            side_effect=AssertionError("daily briefing bypassed canonical retrieval"),
+        ),
+    ):
+        memories, degraded = await _get_relevant_memories()
+
+    assert memories == "No relevant memories yet."
+    assert degraded is False

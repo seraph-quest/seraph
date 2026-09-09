@@ -48,6 +48,7 @@ OPERATOR_REQUIRED_TABLES = (
     "queued_insights",
     "guardian_interventions",
     "strategy_deltas",
+    "memory_tombstones",
 )
 
 _LEGACY_WORKFLOW_STATUS_MAP = {
@@ -233,6 +234,11 @@ async def _ensure_legacy_columns(conn) -> None:
                 )
                 columns.add(column)
         return columns
+
+    await _add_missing_columns(
+        "memory_snapshots",
+        {"canonical_tombstone_revision": "VARCHAR"},
+    )
 
     session_columns = await _add_missing_columns(
         "sessions",

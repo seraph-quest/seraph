@@ -1,14 +1,15 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import func, or_, update
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy import exists, func, or_, text, update
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlmodel import col, select
 
 from src.db.engine import get_session
@@ -26,6 +27,7 @@ from src.db.models import (
     MemorySnapshotKind,
     MemorySource,
     MemoryStatus,
+    MemoryTombstone,
 )
 
 
@@ -80,6 +82,57 @@ _CANONICAL_MEMORY_DELETE_ACTIONS = {
     "operator_delete_export",
 }
 _CANONICAL_MEMORY_DELETE_CONTENT = "[delete/export propagated by operator]"
+_EMPTY_TOMBSTONE_REVISION = hashlib.sha256(b"[]").hexdigest()
+
+
+async def _begin_canonical_write(db) -> None:
+    """Serialize canonical writes across tasks and processes on SQLite.
+
+    Canonical deletion is a durable authority.  A deferred SQLite transaction
+    can otherwise read a clean row and only acquire the writer lock after a
+    concurrent delete has committed.  ``BEGIN IMMEDIATE`` makes the read,
+    guard, and write one cross-process critical section.
+    """
+
+    await db.execute(text("BEGIN IMMEDIATE"))
+
+
+async def _memory_tombstone_revision(db) -> str:
+    """Return a content-free revision for the durable delete ledger."""
+
+    rows = (
+        await db.execute(
+            select(
+                MemoryTombstone.id,
+                MemoryTombstone.memory_id,
+                MemoryTombstone.created_at,
+            ).order_by(MemoryTombstone.created_at.asc(), MemoryTombstone.id.asc())
+        )
+    ).all()
+    payload = [
+        {
+            "id": str(row[0]),
+            "memory_id": str(row[1]),
+            "created_at": row[2].isoformat() if row[2] is not None else None,
+        }
+        for row in rows
+    ]
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
+def _canonical_memory_without_tombstone_clause():
+    """Return the SQL predicate for a memory with no durable delete authority."""
+
+    return ~exists().where(MemoryTombstone.memory_id == Memory.id)
+
+
+def _canonical_memory_is_active(memory: Memory) -> bool:
+    try:
+        return _coerce_enum(memory.status, MemoryStatus) is MemoryStatus.active
+    except (TypeError, ValueError):
+        return False
 
 
 def _canonical_memory_deletion_marker(memory: Memory) -> str | None:
@@ -193,9 +246,17 @@ class MemorySourceWriteResult:
     created: bool
 
 
+@dataclass(frozen=True)
+class MemoryTombstoneWriteResult:
+    memory: Memory
+    tombstone: MemoryTombstone
+    created: bool
+
+
 class MemoryRepository:
     def __init__(self) -> None:
         self._scoped_memory_locks: dict[str, asyncio.Lock] = {}
+        self._canonical_memory_lock = asyncio.Lock()
 
     @staticmethod
     def _normalize_memory_text(value: str | None) -> str:
@@ -369,6 +430,8 @@ class MemoryRepository:
         status: MemoryStatus | str = MemoryStatus.active,
         last_confirmed_at: datetime | None = None,
         additional_sources: list[dict[str, str | None]] | None = None,
+        supersedes_memory_id: str | None = None,
+        supersedes_metadata: dict[str, Any] | None = None,
     ) -> MemoryWriteResult:
         normalized_content = content.strip()
         if not normalized_content:
@@ -399,7 +462,46 @@ class MemoryRepository:
             )
         source_rows.extend(additional_sources or [])
 
+        normalized_supersedes_memory_id = (
+            str(supersedes_memory_id or "").strip() or None
+        )
         async with get_session() as db:
+            superseded_memory: Memory | None = None
+            superseded_expected_metadata: str | None = None
+            superseded_expected_status: MemoryStatus | None = None
+            superseded_expected_updated_at: datetime | None = None
+            if normalized_supersedes_memory_id is not None:
+                await _begin_canonical_write(db)
+                superseded_memory = (
+                    await db.execute(
+                        select(Memory).where(
+                            Memory.id == normalized_supersedes_memory_id
+                        )
+                    )
+                ).scalars().first()
+                if superseded_memory is None:
+                    raise ValueError(
+                        f"Unknown memory id: {normalized_supersedes_memory_id}"
+                    )
+                tombstone = (
+                    await db.execute(
+                        select(MemoryTombstone).where(
+                            MemoryTombstone.memory_id == normalized_supersedes_memory_id
+                        )
+                    )
+                ).scalars().first()
+                if tombstone is not None or _canonical_memory_deletion_marker(
+                    superseded_memory
+                ) is not None:
+                    raise ValueError(
+                        "cannot correct canonical memory after operator delete/export redaction"
+                    )
+                superseded_expected_metadata = superseded_memory.metadata_json
+                superseded_expected_status = _coerce_enum(
+                    superseded_memory.status, MemoryStatus
+                )
+                superseded_expected_updated_at = superseded_memory.updated_at
+
             metadata_map = dict(metadata or {})
             memory = Memory(
                 content=normalized_content,
@@ -461,6 +563,46 @@ class MemoryRepository:
             if source_rows:
                 await db.flush()
 
+            if superseded_memory is not None:
+                try:
+                    superseded_metadata_map = json.loads(
+                        superseded_memory.metadata_json or "{}"
+                    )
+                except (TypeError, json.JSONDecodeError):
+                    superseded_metadata_map = {}
+                if not isinstance(superseded_metadata_map, dict):
+                    superseded_metadata_map = {}
+                superseded_metadata_map.update(supersedes_metadata or {})
+                superseded_metadata_map.setdefault(
+                    "superseded_by_memory_id", memory.id
+                )
+                expected_metadata_guard = (
+                    Memory.metadata_json.is_(None)
+                    if superseded_expected_metadata is None
+                    else Memory.metadata_json == superseded_expected_metadata
+                )
+                superseded_updated = await db.execute(
+                    update(Memory)
+                    .where(
+                        Memory.id == normalized_supersedes_memory_id,
+                        Memory.status == superseded_expected_status,
+                        Memory.updated_at == superseded_expected_updated_at,
+                        expected_metadata_guard,
+                        _canonical_memory_without_tombstone_clause(),
+                    )
+                    .values(
+                        status=MemoryStatus.superseded,
+                        metadata_json=json.dumps(
+                            superseded_metadata_map, sort_keys=True
+                        ),
+                        updated_at=_now(),
+                    )
+                )
+                if superseded_updated.rowcount != 1:
+                    raise ValueError(
+                        "memory changed before correction; canonical deletion or another memory control won"
+                    )
+
             db.expunge(memory)
             return MemoryWriteResult(
                 memory_id=memory.id,
@@ -486,6 +628,23 @@ class MemoryRepository:
             else None
         )
         async with get_session() as db:
+            await _begin_canonical_write(db)
+            memory = (
+                await db.execute(select(Memory).where(Memory.id == memory_id))
+            ).scalars().first()
+            if memory is None:
+                raise ValueError(f"Unknown memory id: {memory_id}")
+            tombstone = (
+                await db.execute(
+                    select(MemoryTombstone).where(
+                        MemoryTombstone.memory_id == memory_id
+                    )
+                )
+            ).scalars().first()
+            if tombstone is not None or _canonical_memory_deletion_marker(memory) is not None:
+                raise ValueError(
+                    "cannot add provenance to canonical memory after operator delete/export redaction"
+                )
             stmt = select(MemorySource).where(MemorySource.memory_id == memory_id)
             if source_message_id:
                 stmt = stmt.where(MemorySource.source_message_id == source_message_id)
@@ -498,6 +657,22 @@ class MemoryRepository:
             if existing is not None:
                 db.expunge(existing)
                 return MemorySourceWriteResult(source_id=existing.id, created=False)
+
+            # Touch the canonical row under the tombstone predicate before
+            # inserting provenance.  The write lock now serializes this
+            # source insertion with delete/export across processes.
+            guarded_memory_update = await db.execute(
+                update(Memory)
+                .where(
+                    Memory.id == memory_id,
+                    _canonical_memory_without_tombstone_clause(),
+                )
+                .values(updated_at=_now())
+            )
+            if guarded_memory_update.rowcount != 1:
+                raise ValueError(
+                    "cannot add provenance to canonical memory after operator delete/export redaction"
+                )
 
             source = MemorySource(
                 memory_id=memory_id,
@@ -517,6 +692,19 @@ class MemoryRepository:
         memory_id: str,
     ) -> list[MemorySource]:
         async with get_session() as db:
+            tombstone = (
+                await db.execute(
+                    select(MemoryTombstone).where(
+                        MemoryTombstone.memory_id == memory_id
+                    )
+                )
+            ).scalars().first()
+            memory = (
+                await db.execute(select(Memory).where(Memory.id == memory_id))
+            ).scalars().first()
+            redact_sources = tombstone is not None or (
+                memory is not None and _canonical_memory_deletion_marker(memory) is not None
+            )
             result = await db.execute(
                 select(MemorySource)
                 .where(MemorySource.memory_id == memory_id)
@@ -524,6 +712,8 @@ class MemoryRepository:
             )
             sources = result.scalars().all()
             for source in sources:
+                if redact_sources:
+                    source.snippet = None
                 db.expunge(source)
             return list(sources)
 
@@ -549,6 +739,7 @@ class MemoryRepository:
                 select(Memory)
                 .where(Memory.kind == normalized_kind)
                 .where(Memory.status == normalized_status)
+                .where(_canonical_memory_without_tombstone_clause())
                 .order_by(
                     col(Memory.reinforcement).desc(),
                     col(Memory.importance).desc(),
@@ -577,6 +768,8 @@ class MemoryRepository:
 
             candidates = (await db.execute(stmt)).scalars().all()
             for memory in candidates:
+                if _canonical_memory_deletion_marker(memory) is not None:
+                    continue
                 candidate_summary = self._normalize_memory_text(memory.summary)
                 candidate_content = self._normalize_memory_text(memory.content)
                 if normalized_summary and candidate_summary == normalized_summary:
@@ -611,14 +804,34 @@ class MemoryRepository:
             return value.astimezone(timezone.utc)
 
         async with get_session() as db:
+            await _begin_canonical_write(db)
             memory = (
                 await db.execute(select(Memory).where(Memory.id == memory_id))
             ).scalars().first()
             if memory is None:
                 raise ValueError(f"Unknown memory id: {memory_id}")
+            tombstone = (
+                await db.execute(
+                    select(MemoryTombstone).where(
+                        MemoryTombstone.memory_id == memory_id
+                    )
+                )
+            ).scalars().first()
+            if tombstone is not None or _canonical_memory_deletion_marker(memory) is not None:
+                raise ValueError(
+                    "cannot merge canonical memory after operator delete/export redaction"
+                )
 
             created_message_source_count = 0
             session_source_created = False
+            expected_metadata = memory.metadata_json
+            expected_status = _coerce_enum(memory.status, MemoryStatus)
+            expected_updated_at = _normalize_timestamp(memory.updated_at)
+            expected_metadata_guard = (
+                Memory.metadata_json.is_(None)
+                if expected_metadata is None
+                else Memory.metadata_json == expected_metadata
+            )
             existing_metadata = json.loads(memory.metadata_json or "{}")
             metadata_changed = False
 
@@ -661,8 +874,34 @@ class MemoryRepository:
             if metadata_changed:
                 memory.metadata_json = json.dumps(existing_metadata, sort_keys=True)
             memory.updated_at = _now()
-            db.add(memory)
-
+            updated_at = memory.updated_at
+            db.expunge(memory)
+            updated_memory = await db.execute(
+                update(Memory)
+                .where(
+                    Memory.id == memory_id,
+                    Memory.updated_at == expected_updated_at,
+                    Memory.status == expected_status,
+                    expected_metadata_guard,
+                    _canonical_memory_without_tombstone_clause(),
+                )
+                .values(
+                    summary=memory.summary,
+                    confidence=memory.confidence,
+                    importance=memory.importance,
+                    reinforcement=memory.reinforcement,
+                    subject_entity_id=memory.subject_entity_id,
+                    project_entity_id=memory.project_entity_id,
+                    embedding_id=memory.embedding_id,
+                    last_confirmed_at=memory.last_confirmed_at,
+                    metadata_json=memory.metadata_json,
+                    updated_at=updated_at,
+                )
+            )
+            if updated_memory.rowcount != 1:
+                raise ValueError(
+                    "memory changed before merge; canonical deletion or another memory control won"
+                )
             for source in message_sources or []:
                 source_message_id = source.get("source_message_id")
                 if not source_message_id:
@@ -711,6 +950,9 @@ class MemoryRepository:
                         session_source_created = True
 
             await db.flush()
+            memory = (
+                await db.execute(select(Memory).where(Memory.id == memory_id))
+            ).scalars().one()
             db.expunge(memory)
             return MemoryWriteResult(
                 memory_id=memory.id,
@@ -757,6 +999,7 @@ class MemoryRepository:
                     Memory.updated_at == expected_updated_at,
                     Memory.status == expected_status,
                     expected_metadata_guard,
+                    _canonical_memory_without_tombstone_clause(),
                 )
                 .values(**values_builder(memory))
             )
@@ -767,6 +1010,7 @@ class MemoryRepository:
             # this transaction before reconciling the current row so a winning
             # canonical delete can never be overwritten.
             await db.rollback()
+            await _begin_canonical_write(db)
             memory = await _select_memory_by_id(memory.id)
             if memory is None:
                 return None
@@ -843,6 +1087,7 @@ class MemoryRepository:
         )
         async with lock:
             async with get_session() as db:
+                await _begin_canonical_write(db)
                 memory = (
                     await db.execute(
                         select(Memory)
@@ -861,8 +1106,16 @@ class MemoryRepository:
                     ).scalars().all()
                     memory = next((item for item in candidates if _matches_scope(item)), None)
 
-                if memory is not None and _canonical_memory_deletion_marker(memory) is not None:
-                    return None
+                if memory is not None:
+                    if not normalized_content and _canonical_memory_deletion_marker(memory) is not None:
+                        return None
+                    tombstone = (
+                        await db.execute(select(MemoryTombstone).where(MemoryTombstone.memory_id == memory.id))
+                    ).scalars().first()
+                    if tombstone is not None:
+                        return None
+                    if _canonical_memory_deletion_marker(memory) is not None:
+                        return None
 
                 if not normalized_content:
                     if memory is None:
@@ -880,6 +1133,21 @@ class MemoryRepository:
                     return None
 
                 if memory is None:
+                    try:
+                        unresolved_tombstone = (
+                            await db.execute(
+                                select(MemoryTombstone.id)
+                                .outerjoin(Memory, Memory.id == MemoryTombstone.memory_id)
+                                .where(Memory.id.is_(None))
+                                .limit(1)
+                            )
+                        ).scalars().first()
+                    except SQLAlchemyError:
+                        # A missing or unavailable deletion authority must not
+                        # permit a new learning/provider row to be created.
+                        return None
+                    if unresolved_tombstone is not None:
+                        return None
                     memory = Memory(
                         content=normalized_content,
                         category=normalized_category,
@@ -899,6 +1167,7 @@ class MemoryRepository:
                         await db.flush()
                     except IntegrityError:
                         await db.rollback()
+                        await _begin_canonical_write(db)
                         memory = (
                             await db.execute(
                                 select(Memory)
@@ -1120,10 +1389,17 @@ class MemoryRepository:
                 .order_by(col(Memory.importance).desc(), col(Memory.created_at).desc())
                 .limit(limit)
             )
+            stmt = stmt.where(_canonical_memory_without_tombstone_clause())
             if kind:
                 stmt = stmt.where(Memory.kind == _coerce_enum(kind, MemoryKind))
             result = await db.execute(stmt)
-            memories = result.scalars().all()
+            memories = [
+                memory
+                for memory in result.scalars().all()
+                if not (
+                    _canonical_memory_deletion_marker(memory) is not None
+                )
+            ]
             for memory in memories:
                 db.expunge(memory)
             return list(memories)
@@ -1133,12 +1409,331 @@ class MemoryRepository:
         if not normalized_memory_id:
             return None
         async with get_session() as db:
+            stmt = select(Memory).where(
+                Memory.id == normalized_memory_id,
+                _canonical_memory_without_tombstone_clause(),
+            )
             memory = (
-                await db.execute(select(Memory).where(Memory.id == normalized_memory_id))
+                await db.execute(stmt)
             ).scalars().first()
+            if memory is not None and _canonical_memory_deletion_marker(memory) is not None:
+                return None
             if memory is not None:
                 db.expunge(memory)
             return memory
+
+    async def get_memory_tombstone(self, memory_id: str) -> MemoryTombstone | None:
+        """Read the local canonical deletion authority for one memory."""
+
+        normalized_memory_id = str(memory_id or "").strip()
+        if not normalized_memory_id:
+            return None
+        async with get_session() as db:
+            tombstone = (
+                await db.execute(
+                    select(MemoryTombstone).where(
+                        MemoryTombstone.memory_id == normalized_memory_id
+                    )
+                )
+            ).scalars().first()
+            if tombstone is not None:
+                db.expunge(tombstone)
+            return tombstone
+
+    async def get_memory_tombstone_revision(self) -> str:
+        """Read a content-free revision of the canonical tombstone ledger."""
+
+        async with get_session() as db:
+            return await _memory_tombstone_revision(db)
+
+    async def mark_memory_tombstoned(
+        self,
+        memory_id: str,
+        *,
+        actor: str,
+        reason: str | None = None,
+        metadata_updates: dict[str, Any] | None = None,
+        deleted_at: datetime | None = None,
+    ) -> MemoryTombstoneWriteResult:
+        """Serialize repeated local delete requests for one canonical row."""
+
+        normalized_memory_id = str(memory_id or "").strip()
+        lock = self._get_scoped_memory_lock(
+            kind=MemoryKind.fact,
+            scope={"purpose": "canonical_tombstone", "memory_id": normalized_memory_id},
+        )
+        async with lock:
+            async with self._canonical_memory_lock:
+                return await self._mark_memory_tombstoned(
+                    memory_id,
+                    actor=actor,
+                    reason=reason,
+                    metadata_updates=metadata_updates,
+                    deleted_at=deleted_at,
+                )
+
+    async def _mark_memory_tombstoned(
+        self,
+        memory_id: str,
+        *,
+        actor: str,
+        reason: str | None = None,
+        metadata_updates: dict[str, Any] | None = None,
+        deleted_at: datetime | None = None,
+    ) -> MemoryTombstoneWriteResult:
+        """Atomically redact a canonical row and record its delete authority.
+
+        Repeating the operation is idempotent: the first actor/reason/time in
+        the ledger remain authoritative while the canonical redaction is
+        re-applied.  The ledger has no content field so a restore cannot use
+        it to recover deleted material.
+        """
+
+        normalized_memory_id = str(memory_id or "").strip()
+        normalized_actor = str(actor or "").strip()
+        normalized_reason = str(reason or _CANONICAL_MEMORY_DELETE_EXPORT_REASON).strip()
+        if not normalized_memory_id:
+            raise ValueError("memory_id must be non-empty")
+        if not normalized_actor:
+            raise ValueError("actor must be non-empty")
+        if not normalized_reason:
+            normalized_reason = _CANONICAL_MEMORY_DELETE_EXPORT_REASON
+        if len(normalized_actor) > 255 or len(normalized_reason) > 255:
+            raise ValueError("actor and reason must be at most 255 characters")
+        deletion_time = deleted_at or _now()
+        if deletion_time.tzinfo is None:
+            deletion_time = deletion_time.replace(tzinfo=timezone.utc)
+        else:
+            deletion_time = deletion_time.astimezone(timezone.utc)
+
+        async with get_session() as db:
+            await _begin_canonical_write(db)
+            memory = (
+                await db.execute(select(Memory).where(Memory.id == normalized_memory_id))
+            ).scalars().first()
+            if memory is None:
+                raise ValueError(f"Unknown memory id: {normalized_memory_id}")
+
+            tombstone = (
+                await db.execute(
+                    select(MemoryTombstone).where(
+                        MemoryTombstone.memory_id == normalized_memory_id
+                    )
+                )
+            ).scalars().first()
+            created = tombstone is None
+            if tombstone is None:
+                tombstone = MemoryTombstone(
+                    memory_id=normalized_memory_id,
+                    actor=normalized_actor,
+                    reason=normalized_reason,
+                    created_at=deletion_time,
+                )
+                db.add(tombstone)
+                try:
+                    # The process-local lock covers the normal path.  Keep a
+                    # database-level retry as well for two workers with
+                    # separate repository instances racing on the unique key.
+                    await db.flush()
+                except IntegrityError:
+                    await db.rollback()
+                    await _begin_canonical_write(db)
+                    tombstone = (
+                        await db.execute(
+                            select(MemoryTombstone).where(
+                                MemoryTombstone.memory_id == normalized_memory_id
+                            )
+                        )
+                    ).scalars().first()
+                    memory = (
+                        await db.execute(
+                            select(Memory).where(Memory.id == normalized_memory_id)
+                        )
+                    ).scalars().first()
+                    if tombstone is None or memory is None:
+                        raise
+                    created = False
+            # Once the ledger row exists its actor, reason, and timestamp are
+            # immutable audit authority.  A repeated request may reapply
+            # redaction, but must not replace first-request provenance with a
+            # later caller's metadata.
+            updates = dict(metadata_updates or {}) if created else {}
+            try:
+                metadata = json.loads(memory.metadata_json or "{}")
+            except (TypeError, json.JSONDecodeError):
+                metadata = {}
+            if not isinstance(metadata, dict):
+                metadata = {}
+            metadata.update(updates)
+            metadata["canonical_tombstone_id"] = tombstone.id
+            metadata["archived_reason"] = _CANONICAL_MEMORY_DELETE_EXPORT_REASON
+            memory.status = MemoryStatus.archived
+            memory.content = _CANONICAL_MEMORY_DELETE_CONTENT
+            memory.summary = _CANONICAL_MEMORY_DELETE_CONTENT
+            memory.confidence = 0.0
+            memory.importance = 0.0
+            memory.reinforcement = 0.0
+            memory.metadata_json = json.dumps(metadata, sort_keys=True)
+            memory.updated_at = tombstone.created_at
+            db.add(memory)
+            await db.execute(
+                update(MemorySource)
+                .where(MemorySource.memory_id == normalized_memory_id)
+                .where(MemorySource.snippet.is_not(None))
+                .values(snippet=None)
+            )
+            await db.execute(
+                update(MemorySnapshot)
+                .values(content="", source_hash=None, updated_at=tombstone.created_at)
+            )
+            await db.flush()
+            db.expunge(memory)
+            db.expunge(tombstone)
+            return MemoryTombstoneWriteResult(
+                memory=memory,
+                tombstone=tombstone,
+                created=created,
+            )
+
+    async def reconcile_memory_tombstones(
+        self,
+        *,
+        _acquire_lock: bool = True,
+    ) -> dict[str, int | str]:
+        """Re-apply durable canonical deletion authority after a stale restore.
+
+        The result is a deterministic operator receipt.  ``degraded`` means a
+        ledger row refers to a missing memory row and therefore requires
+        operator restore repair; no deleted content is returned.
+        """
+
+        if _acquire_lock:
+            async with self._canonical_memory_lock:
+                return await self.reconcile_memory_tombstones(_acquire_lock=False)
+
+        checked_count = 0
+        reapplied_count = 0
+        missing_memory_count = 0
+        async with get_session() as db:
+            await _begin_canonical_write(db)
+            tombstones = (
+                await db.execute(
+                    select(MemoryTombstone).order_by(
+                        col(MemoryTombstone.created_at).asc(),
+                        col(MemoryTombstone.id).asc(),
+                    )
+                )
+            ).scalars().all()
+            for tombstone in tombstones:
+                checked_count += 1
+                memory = (
+                    await db.execute(
+                        select(Memory).where(Memory.id == tombstone.memory_id)
+                    )
+                ).scalars().first()
+                if memory is None:
+                    missing_memory_count += 1
+                    continue
+                try:
+                    metadata = json.loads(memory.metadata_json or "{}")
+                except (TypeError, json.JSONDecodeError):
+                    metadata = {}
+                if not isinstance(metadata, dict):
+                    metadata = {}
+                operator_control = metadata.get("operator_control")
+                if not isinstance(operator_control, dict):
+                    operator_control = {}
+                operator_control.update(
+                    {
+                        "last_action": "propagate_delete_export",
+                        "last_actor": tombstone.actor,
+                        "last_reason": tombstone.reason,
+                        "last_action_at": tombstone.created_at.isoformat(),
+                        "delete_export_state": _CANONICAL_MEMORY_REDACTED_STATE,
+                        "provider_propagation_state": "runtime_receipt_only_no_full_provider_parity_claim",
+                    }
+                )
+                metadata["operator_control"] = operator_control
+                metadata["archived_reason"] = _CANONICAL_MEMORY_DELETE_EXPORT_REASON
+                metadata["canonical_tombstone_id"] = tombstone.id
+                metadata["provenance"] = {
+                    "kind": "operator_propagate_delete_export",
+                    "actor": tombstone.actor,
+                    "source": "canonical_tombstone_ledger",
+                    "recorded_at": tombstone.created_at.isoformat(),
+                }
+                source_redaction = await db.execute(
+                    update(MemorySource)
+                    .where(MemorySource.memory_id == tombstone.memory_id)
+                    .where(MemorySource.snippet.is_not(None))
+                    .values(snippet=None)
+                )
+                needs_reapply = any(
+                    (
+                        memory.status != MemoryStatus.archived,
+                        memory.content != _CANONICAL_MEMORY_DELETE_CONTENT,
+                        memory.summary != _CANONICAL_MEMORY_DELETE_CONTENT,
+                        float(memory.confidence or 0.0) != 0.0,
+                        float(memory.importance or 0.0) != 0.0,
+                        float(memory.reinforcement or 0.0) != 0.0,
+                        memory.metadata_json != json.dumps(metadata, sort_keys=True),
+                    )
+                )
+                if needs_reapply or source_redaction.rowcount > 0:
+                    memory.status = MemoryStatus.archived
+                    memory.content = _CANONICAL_MEMORY_DELETE_CONTENT
+                    memory.summary = _CANONICAL_MEMORY_DELETE_CONTENT
+                    memory.confidence = 0.0
+                    memory.importance = 0.0
+                    memory.reinforcement = 0.0
+                    memory.metadata_json = json.dumps(metadata, sort_keys=True)
+                    memory.updated_at = _now()
+                    db.add(memory)
+                    reapplied_count += 1
+            if reapplied_count > 0:
+                await db.execute(
+                    update(MemorySnapshot)
+                    .values(content="", source_hash=None, updated_at=_now())
+                )
+            await db.flush()
+        return {
+            "schema_version": "guardian.memory_tombstone.v1",
+            "status": "degraded" if missing_memory_count else "ready",
+            "checked_count": checked_count,
+            "reapplied_count": reapplied_count,
+            "missing_memory_count": missing_memory_count,
+        }
+
+    async def list_memories_for_reindex(self, *, limit: int = 10_000) -> list[Memory]:
+        """Return active canonical rows safe for a local deterministic reindex.
+
+        Reconciliation runs first, so a stale active row from restore is
+        redacted before it can be admitted to a derived index.
+        """
+
+        bounded_limit = min(max(int(limit), 1), 10_000)
+        async with self._canonical_memory_lock:
+            reconciliation = await self.reconcile_memory_tombstones(_acquire_lock=False)
+            if reconciliation.get("status") != "ready":
+                return []
+            async with get_session() as db:
+                result = await db.execute(
+                    select(Memory)
+                    .outerjoin(MemoryTombstone, MemoryTombstone.memory_id == Memory.id)
+                    .where(Memory.status == MemoryStatus.active)
+                    .where(MemoryTombstone.id.is_(None))
+                    .order_by(col(Memory.updated_at).asc(), col(Memory.id).asc())
+                    .limit(bounded_limit)
+                )
+                memories = result.scalars().all()
+                memories = [
+                    memory
+                    for memory in memories
+                    if _canonical_memory_deletion_marker(memory) is None
+                ]
+                for memory in memories:
+                    db.expunge(memory)
+                return list(memories)
 
     async def update_memory_control_metadata(
         self,
@@ -1165,14 +1760,50 @@ class MemoryRepository:
             return value.astimezone(timezone.utc)
 
         async with get_session() as db:
+            await _begin_canonical_write(db)
             memory = (
                 await db.execute(select(Memory).where(Memory.id == normalized_memory_id))
             ).scalars().first()
             if memory is None:
                 raise ValueError(f"Unknown memory id: {normalized_memory_id}")
 
+            requested_status = (
+                _coerce_enum(status, MemoryStatus)
+                if status is not None
+                else None
+            )
+            tombstone = (
+                await db.execute(
+                    select(MemoryTombstone).where(
+                        MemoryTombstone.memory_id == normalized_memory_id
+                    )
+                )
+            ).scalars().first()
+            if tombstone is not None or _canonical_memory_deletion_marker(memory) is not None:
+                if requested_status is MemoryStatus.active:
+                    raise ValueError(
+                        "cannot reactivate canonical memory after operator delete/export redaction"
+                    )
+                raise ValueError(
+                    "cannot mutate canonical memory after operator delete/export redaction"
+                )
+
+            expected_status = _coerce_enum(memory.status, MemoryStatus)
+            expected_metadata = memory.metadata_json
+            expected_updated_at = _normalize_timestamp(memory.updated_at)
+            expected_metadata_guard = (
+                Memory.metadata_json.is_(None)
+                if expected_metadata is None
+                else Memory.metadata_json == expected_metadata
+            )
+            expected_updated_at_guard = (
+                Memory.updated_at.is_(None)
+                if expected_updated_at is None
+                else Memory.updated_at == expected_updated_at
+            )
+
             if status is not None:
-                memory.status = _coerce_enum(status, MemoryStatus)
+                memory.status = requested_status
             if isinstance(content, str):
                 normalized_content = content.strip()
                 if not normalized_content:
@@ -1200,8 +1831,37 @@ class MemoryRepository:
                 memory.metadata_json = json.dumps(metadata, sort_keys=True)
 
             memory.updated_at = _now()
-            db.add(memory)
-            await db.flush()
+            db.expunge(memory)
+            guarded_update = await db.execute(
+                update(Memory)
+                .where(
+                    Memory.id == normalized_memory_id,
+                    Memory.status == expected_status,
+                    expected_metadata_guard,
+                    expected_updated_at_guard,
+                    _canonical_memory_without_tombstone_clause(),
+                )
+                .values(
+                    status=requested_status or expected_status,
+                    content=memory.content,
+                    summary=memory.summary,
+                    confidence=memory.confidence,
+                    importance=memory.importance,
+                    reinforcement=memory.reinforcement,
+                    last_confirmed_at=memory.last_confirmed_at,
+                    metadata_json=memory.metadata_json,
+                    updated_at=memory.updated_at,
+                )
+            )
+            if guarded_update.rowcount != 1:
+                raise ValueError(
+                    "memory changed before control update; canonical deletion or another memory control won"
+                )
+            memory = (
+                await db.execute(
+                    select(Memory).where(Memory.id == normalized_memory_id)
+                )
+            ).scalars().one()
             db.expunge(memory)
             return memory
 
@@ -1249,6 +1909,14 @@ class MemoryRepository:
             else Memory.metadata_json == expected_metadata
         )
         async with get_session() as db:
+            await _begin_canonical_write(db)
+            existing = (
+                await db.execute(select(Memory).where(Memory.id == normalized_memory_id))
+            ).scalars().first()
+            if existing is not None and _canonical_memory_deletion_marker(existing) is not None:
+                raise ValueError(
+                    "cannot rollback canonical memory after operator delete/export redaction"
+                )
             result = await db.execute(
                 update(Memory)
                 .where(
@@ -1256,6 +1924,7 @@ class MemoryRepository:
                     Memory.updated_at == _normalize_timestamp(expected_updated_at),
                     Memory.status == normalized_status,
                     expected_metadata_guard,
+                    _canonical_memory_without_tombstone_clause(),
                 )
                 .values(
                     status=MemoryStatus.active,
@@ -1357,8 +2026,11 @@ class MemoryRepository:
                 )
                 .limit(limit)
             )
+            exact_stmt = exact_stmt.where(_canonical_memory_without_tombstone_clause())
             exact_result = await db.execute(exact_stmt)
             for memory in exact_result.scalars().all():
+                if _canonical_memory_deletion_marker(memory) is not None:
+                    continue
                 try:
                     metadata = json.loads(memory.metadata_json or "{}")
                 except json.JSONDecodeError:
@@ -1385,12 +2057,15 @@ class MemoryRepository:
                 )
                 .limit(limit)
             )
+            legacy_stmt = legacy_stmt.where(_canonical_memory_without_tombstone_clause())
             for key, value in normalized_scope.items():
                 legacy_stmt = legacy_stmt.where(
                     func.json_extract(Memory.metadata_json, _sqlite_json_object_path(key)) == value
                 )
             result = await db.execute(legacy_stmt)
             for memory in result.scalars().all():
+                if _canonical_memory_deletion_marker(memory) is not None:
+                    continue
                 try:
                     metadata = json.loads(memory.metadata_json or "{}")
                 except json.JSONDecodeError:
@@ -1437,6 +2112,7 @@ class MemoryRepository:
                 )
                 .limit(limit)
             )
+            stmt = stmt.where(_canonical_memory_without_tombstone_clause())
             filters = []
             if normalized_subject_ids:
                 filters.append(col(Memory.subject_entity_id).in_(normalized_subject_ids))
@@ -1446,7 +2122,11 @@ class MemoryRepository:
             if normalized_kinds:
                 stmt = stmt.where(col(Memory.kind).in_(normalized_kinds))
             result = await db.execute(stmt)
-            memories = result.scalars().all()
+            memories = [
+                memory
+                for memory in result.scalars().all()
+                if _canonical_memory_deletion_marker(memory) is None
+            ]
             for memory in memories:
                 db.expunge(memory)
             return list(memories)
@@ -1474,9 +2154,12 @@ class MemoryRepository:
                     col(Memory.created_at).desc(),
                 )
             )
+            stmt = stmt.where(_canonical_memory_without_tombstone_clause())
             result = await db.execute(stmt)
             grouped: dict[str, list[Memory]] = {kind.value: [] for kind in normalized_kinds}
             for memory in result.scalars().all():
+                if _canonical_memory_deletion_marker(memory) is not None:
+                    continue
                 bucket = grouped.setdefault(memory.kind.value, [])
                 if len(bucket) >= limit_per_kind:
                     continue
@@ -1538,32 +2221,56 @@ class MemoryRepository:
         weight: float = 1.0,
         metadata: dict[str, Any] | None = None,
     ) -> MemoryEdge:
-        if not from_memory_id or not to_memory_id:
+        normalized_from_memory_id = str(from_memory_id or "").strip()
+        normalized_to_memory_id = str(to_memory_id or "").strip()
+        if not normalized_from_memory_id or not normalized_to_memory_id:
             raise ValueError("from_memory_id and to_memory_id must be non-empty")
         normalized_edge_type = _coerce_enum(edge_type, MemoryEdgeType)
-        async with get_session() as db:
-            existing = (
-                await db.execute(
-                    select(MemoryEdge)
-                    .where(MemoryEdge.from_memory_id == from_memory_id)
-                    .where(MemoryEdge.to_memory_id == to_memory_id)
-                    .where(MemoryEdge.edge_type == normalized_edge_type)
+        endpoint_ids = {normalized_from_memory_id, normalized_to_memory_id}
+        async with self._canonical_memory_lock:
+            async with get_session() as db:
+                # Edge creation is a canonical write.  Serialize the endpoint
+                # check with tombstone writes so a deleted endpoint cannot be
+                # admitted between the check and the insert.
+                await _begin_canonical_write(db)
+                endpoint_result = await db.execute(
+                    select(Memory).where(
+                        Memory.id.in_(endpoint_ids),
+                        _canonical_memory_without_tombstone_clause(),
+                    )
                 )
-            ).scalars().first()
-            if existing is not None:
-                db.expunge(existing)
-                return existing
-            edge = MemoryEdge(
-                from_memory_id=from_memory_id,
-                to_memory_id=to_memory_id,
-                edge_type=normalized_edge_type,
-                weight=weight,
-                metadata_json=json.dumps(metadata or {}, sort_keys=True),
-            )
-            db.add(edge)
-            await db.flush()
-            db.expunge(edge)
-            return edge
+                canonical_endpoint_ids = {
+                    memory.id
+                    for memory in endpoint_result.scalars().all()
+                    if _canonical_memory_deletion_marker(memory) is None
+                }
+                if canonical_endpoint_ids != endpoint_ids:
+                    raise ValueError(
+                        "edge endpoints must reference existing canonical memories"
+                    )
+
+                existing = (
+                    await db.execute(
+                        select(MemoryEdge)
+                        .where(MemoryEdge.from_memory_id == normalized_from_memory_id)
+                        .where(MemoryEdge.to_memory_id == normalized_to_memory_id)
+                        .where(MemoryEdge.edge_type == normalized_edge_type)
+                    )
+                ).scalars().first()
+                if existing is not None:
+                    db.expunge(existing)
+                    return existing
+                edge = MemoryEdge(
+                    from_memory_id=normalized_from_memory_id,
+                    to_memory_id=normalized_to_memory_id,
+                    edge_type=normalized_edge_type,
+                    weight=weight,
+                    metadata_json=json.dumps(metadata or {}, sort_keys=True),
+                )
+                db.add(edge)
+                await db.flush()
+                db.expunge(edge)
+                return edge
 
     async def list_edges(
         self,
@@ -1573,15 +2280,53 @@ class MemoryRepository:
         edge_type: MemoryEdgeType | str | None = None,
     ) -> list[MemoryEdge]:
         async with get_session() as db:
-            stmt = select(MemoryEdge).order_by(col(MemoryEdge.created_at).asc())
+            # Tombstones are canonical authority.  Keep both endpoint
+            # predicates in the same read transaction so a stale edge never
+            # becomes context merely because its row survived deletion.
+            stmt = (
+                select(MemoryEdge)
+                .where(
+                    ~exists().where(
+                        MemoryTombstone.memory_id == MemoryEdge.from_memory_id
+                    ),
+                    ~exists().where(
+                        MemoryTombstone.memory_id == MemoryEdge.to_memory_id
+                    ),
+                )
+                .order_by(col(MemoryEdge.created_at).asc())
+            )
             if from_memory_id is not None:
-                stmt = stmt.where(MemoryEdge.from_memory_id == from_memory_id)
+                stmt = stmt.where(
+                    MemoryEdge.from_memory_id == str(from_memory_id).strip()
+                )
             if to_memory_id is not None:
-                stmt = stmt.where(MemoryEdge.to_memory_id == to_memory_id)
+                stmt = stmt.where(
+                    MemoryEdge.to_memory_id == str(to_memory_id).strip()
+                )
             if edge_type is not None:
                 stmt = stmt.where(MemoryEdge.edge_type == _coerce_enum(edge_type, MemoryEdgeType))
             result = await db.execute(stmt)
             edges = result.scalars().all()
+            endpoint_ids = {
+                memory_id
+                for edge in edges
+                for memory_id in (edge.from_memory_id, edge.to_memory_id)
+            }
+            if endpoint_ids:
+                endpoint_result = await db.execute(
+                    select(Memory).where(Memory.id.in_(endpoint_ids))
+                )
+                canonical_endpoint_ids = {
+                    memory.id
+                    for memory in endpoint_result.scalars().all()
+                    if _canonical_memory_deletion_marker(memory) is None
+                }
+                edges = [
+                    edge
+                    for edge in edges
+                    if edge.from_memory_id in canonical_endpoint_ids
+                    and edge.to_memory_id in canonical_endpoint_ids
+                ]
             for edge in edges:
                 db.expunge(edge)
             return list(edges)
@@ -1592,24 +2337,46 @@ class MemoryRepository:
         kind: MemorySnapshotKind | str = MemorySnapshotKind.bounded_guardian_context,
         content: str,
         source_hash: str | None = None,
+        canonical_tombstone_revision: str | None = None,
     ) -> MemorySnapshot:
         normalized_kind = _coerce_enum(kind, MemorySnapshotKind)
+        reconciliation = await self.reconcile_memory_tombstones()
+        if reconciliation.get("status") != "ready":
+            raise RuntimeError("canonical memory authority unavailable for snapshot write")
         async with get_session() as db:
+            await _begin_canonical_write(db)
+            current_revision = await _memory_tombstone_revision(db)
+            if canonical_tombstone_revision is None:
+                if current_revision != _EMPTY_TOMBSTONE_REVISION:
+                    raise RuntimeError(
+                        "snapshot write requires a canonical tombstone revision"
+                    )
+            elif canonical_tombstone_revision != current_revision:
+                raise RuntimeError(
+                    "canonical memory changed before snapshot write"
+                )
             result = await db.execute(
                 select(MemorySnapshot).where(MemorySnapshot.kind == normalized_kind)
             )
             snapshot = result.scalars().first()
             if snapshot is None:
-                snapshot = MemorySnapshot(kind=normalized_kind, content=content, source_hash=source_hash)
+                snapshot = MemorySnapshot(
+                    kind=normalized_kind,
+                    content=content,
+                    source_hash=source_hash,
+                    canonical_tombstone_revision=current_revision,
+                )
             else:
                 snapshot.content = content
                 snapshot.source_hash = source_hash
+                snapshot.canonical_tombstone_revision = current_revision
                 snapshot.updated_at = _now()
             db.add(snapshot)
             try:
                 await db.flush()
             except IntegrityError:
                 await db.rollback()
+                await _begin_canonical_write(db)
                 snapshot = (
                     await db.execute(
                         select(MemorySnapshot).where(MemorySnapshot.kind == normalized_kind)
@@ -1617,6 +2384,7 @@ class MemoryRepository:
                 ).scalars().one()
                 snapshot.content = content
                 snapshot.source_hash = source_hash
+                snapshot.canonical_tombstone_revision = current_revision
                 snapshot.updated_at = _now()
                 db.add(snapshot)
                 await db.flush()
@@ -1625,11 +2393,31 @@ class MemoryRepository:
 
     async def get_snapshot(self, kind: MemorySnapshotKind | str = MemorySnapshotKind.bounded_guardian_context) -> MemorySnapshot | None:
         normalized_kind = _coerce_enum(kind, MemorySnapshotKind)
+        reconciliation = await self.reconcile_memory_tombstones()
+        if reconciliation.get("status") != "ready":
+            return None
         async with get_session() as db:
+            await _begin_canonical_write(db)
+            current_revision = await _memory_tombstone_revision(db)
             result = await db.execute(
                 select(MemorySnapshot).where(MemorySnapshot.kind == normalized_kind)
             )
             snapshot = result.scalars().first()
+            if snapshot is not None:
+                snapshot_revision = snapshot.canonical_tombstone_revision
+                if (
+                    snapshot_revision != current_revision
+                    and not (
+                        snapshot_revision is None
+                        and current_revision == _EMPTY_TOMBSTONE_REVISION
+                    )
+                ):
+                    snapshot.content = ""
+                    snapshot.source_hash = None
+                    snapshot.canonical_tombstone_revision = current_revision
+                    snapshot.updated_at = _now()
+                    await db.flush()
+                    return None
             if snapshot is not None:
                 db.expunge(snapshot)
             return snapshot

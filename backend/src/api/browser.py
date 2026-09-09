@@ -67,37 +67,21 @@ def _metadata_only_session_payload(payload: dict[str, object] | None) -> dict[st
 
 
 def _bind_browser_operator(request: Request, owner_session_id: str | None):
-    """Bind one browser request to the authenticated operator session."""
+    """Bind browser authority to the authenticated operator's conversation.
 
-    operator = _require_authenticated_capability_operator(request)
-    active_session_id = operator.session_id
-    requested_session_id = str(owner_session_id or "").strip()
-    if requested_session_id and requested_session_id != active_session_id:
-        raise HTTPException(
-            status_code=403,
-            detail={"code": "browser_owner_session_mismatch"},
-        )
-    tokens = set_runtime_context(
-        active_session_id,
-        context_manager.get_context().approval_mode,
-        trust_principal=bind_operator_principal(operator, active_session_id),
-    )
-    return active_session_id, tokens
+    The authentication cookie session is the revocation handle for the
+    operator. Chat and WebSocket ingress then bind that operator principal to
+    the server-created conversation session, which is the owner persisted by
+    the browser runtime and sent by the cockpit. Browser routes use that same
+    conversation identity; the caller-supplied value is never authority on its
+    own. If an execution context is already active, the request owner must
+    match it so a nested request cannot switch to another browser owner.
 
-
-def _bind_browser_read_operator(request: Request, owner_session_id: str | None):
-    """Bind reads to the server-owned conversation/browser session.
-
-    ``AuthenticatedOperator.session_id`` identifies the authentication cookie
-    and is intentionally different from the conversation session created by
-    chat/WS.  Browser sessions are owned by that conversation session, so a
-    read request may select its canonical ``owner_session_id``.  When a
-    runtime context is already active (for example an agent or a nested
-    cockpit call), the request owner must match it; the caller cannot switch
-    browser owners through a query parameter.  Provider inventory is global and
-    may bind an auth-session context only when no conversation owner exists.
+    The current operator authentication model has one authenticated operator
+    principal, so the middleware-bound principal is the server-side relation
+    for every conversation session it creates. A future multi-operator owner
+    relation must be added at the session boundary before that model changes.
     """
-
     operator = _require_authenticated_capability_operator(request)
     requested_session_id = str(owner_session_id or "").strip()
     active_runtime_session_id = get_current_session_id()
@@ -120,14 +104,20 @@ def _bind_browser_read_operator(request: Request, owner_session_id: str | None):
     return canonical_owner_session_id, tokens
 
 
+def _bind_browser_read_operator(request: Request, owner_session_id: str | None):
+    """Keep read routes on the same canonical authority path as mutators."""
+
+    return _bind_browser_operator(request, owner_session_id)
+
+
 @asynccontextmanager
-async def _browser_read_authority(
+async def _browser_request_authority(
     request: Request,
     owner_session_id: str | None,
 ) -> AsyncIterator[str | None]:
-    """Authorize, watch, and clean up one browser metadata read."""
+    """Authorize, watch, and clean up one browser request."""
 
-    bound_owner_session_id, tokens = _bind_browser_read_operator(request, owner_session_id)
+    bound_owner_session_id, tokens = _bind_browser_operator(request, owner_session_id)
     revocation_scope = None
     try:
         revocation_scope = _begin_rest_revocation_watch(request)
@@ -193,7 +183,7 @@ async def list_browser_providers(
     http_request: Request,
     owner_session_id: str | None = Query(default=None, min_length=1),
 ):
-    async with _browser_read_authority(http_request, owner_session_id):
+    async with _browser_request_authority(http_request, owner_session_id):
         payload = _browser_provider_inventory_payload()
         return payload
 
@@ -207,7 +197,7 @@ async def list_browser_sessions(
     http_request: Request,
     owner_session_id: str = Query(..., min_length=1),
 ):
-    async with _browser_read_authority(http_request, owner_session_id) as bound_owner_session_id:
+    async with _browser_request_authority(http_request, owner_session_id) as bound_owner_session_id:
         sessions = browser_session_runtime.list_sessions(owner_session_id=bound_owner_session_id)
         journal = browser_session_runtime.list_journal(owner_session_id=bound_owner_session_id)
         return {
@@ -219,9 +209,7 @@ async def list_browser_sessions(
 
 @router.post("/browser/sessions")
 async def open_browser_session(request: BrowserSessionOpenRequest, http_request: Request):
-    owner_session_id, tokens = _bind_browser_operator(http_request, request.owner_session_id)
-    try:
-        assert_runtime_not_revoked()
+    async with _browser_request_authority(http_request, request.owner_session_id) as owner_session_id:
         provider_info, provider_error = _resolve_browser_provider(request.provider)
         if provider_error:
             raise HTTPException(status_code=400, detail=provider_error)
@@ -238,8 +226,6 @@ async def open_browser_session(request: BrowserSessionOpenRequest, http_request:
             content=content,
         )
         return {"session": _metadata_only_session_payload(payload)}
-    finally:
-        reset_runtime_context(tokens)
 
 
 @router.get("/browser/sessions/{session_id}")
@@ -248,7 +234,7 @@ async def get_browser_session(
     http_request: Request,
     owner_session_id: str = Query(..., min_length=1),
 ):
-    async with _browser_read_authority(http_request, owner_session_id) as bound_owner_session_id:
+    async with _browser_request_authority(http_request, owner_session_id) as bound_owner_session_id:
         payload = browser_session_runtime.get_session(
             session_id,
             owner_session_id=bound_owner_session_id,
@@ -265,9 +251,7 @@ async def snapshot_browser_session(
     request: BrowserSessionSnapshotRequest,
     http_request: Request,
 ):
-    owner_session_id, tokens = _bind_browser_operator(http_request, request.owner_session_id)
-    try:
-        assert_runtime_not_revoked()
+    async with _browser_request_authority(http_request, request.owner_session_id) as owner_session_id:
         capture_url = browser_session_runtime.get_session_capture_url(
             session_id,
             owner_session_id=owner_session_id,
@@ -286,8 +270,6 @@ async def snapshot_browser_session(
         if isinstance(payload, dict) and payload.get("error") == "session_quarantined":
             raise HTTPException(status_code=409, detail=payload)
         return {"session": _metadata_only_session_payload(payload)}
-    finally:
-        reset_runtime_context(tokens)
 
 
 @router.get("/browser/sessions/{session_id}/journal")
@@ -296,7 +278,7 @@ async def get_browser_session_journal(
     http_request: Request,
     owner_session_id: str = Query(..., min_length=1),
 ):
-    async with _browser_read_authority(http_request, owner_session_id) as bound_owner_session_id:
+    async with _browser_request_authority(http_request, owner_session_id) as bound_owner_session_id:
         if browser_session_runtime.get_session(
             session_id,
             owner_session_id=bound_owner_session_id,
@@ -319,7 +301,7 @@ async def read_browser_ref(
     http_request: Request,
     owner_session_id: str = Query(..., min_length=1),
 ):
-    async with _browser_read_authority(http_request, owner_session_id) as bound_owner_session_id:
+    async with _browser_request_authority(http_request, owner_session_id) as bound_owner_session_id:
         payload = browser_session_runtime.read_ref(ref, owner_session_id=bound_owner_session_id)
         if payload is None:
             raise HTTPException(status_code=404, detail="browser_ref_not_found")
@@ -332,9 +314,7 @@ async def control_browser_session(
     request: BrowserSessionControlRequest,
     http_request: Request,
 ):
-    owner_session_id, tokens = _bind_browser_operator(http_request, request.owner_session_id)
-    try:
-        assert_runtime_not_revoked()
+    async with _browser_request_authority(http_request, request.owner_session_id) as owner_session_id:
         if request.action == "replay_snapshot":
             replay_state = browser_session_runtime.validate_replay_session(
                 session_id,
@@ -397,8 +377,6 @@ async def control_browser_session(
         if isinstance(result, dict) and result.get("error"):
             raise HTTPException(status_code=409, detail=result)
         return result
-    finally:
-        reset_runtime_context(tokens)
 
 
 @router.delete("/browser/sessions/{session_id}")
@@ -407,15 +385,11 @@ async def close_browser_session(
     session_id: str,
     owner_session_id: str = Query(..., min_length=1),
 ):
-    owner_session_id, tokens = _bind_browser_operator(http_request, owner_session_id)
-    try:
-        assert_runtime_not_revoked()
+    async with _browser_request_authority(http_request, owner_session_id) as owner_session_id:
         payload = browser_session_runtime.close_session(session_id, owner_session_id=owner_session_id)
         if payload is None:
             raise HTTPException(status_code=404, detail="browser_session_not_found")
         return {"session": payload}
-    finally:
-        reset_runtime_context(tokens)
 
 
 @router.get("/operator/browser-computer-use-control")
@@ -423,7 +397,7 @@ async def browser_computer_use_control(
     http_request: Request,
     owner_session_id: str = Query(..., min_length=1),
 ):
-    async with _browser_read_authority(http_request, owner_session_id) as bound_owner_session_id:
+    async with _browser_request_authority(http_request, owner_session_id) as bound_owner_session_id:
         provider_payload = await _browser_provider_payload()
         sessions = browser_session_runtime.list_sessions(owner_session_id=bound_owner_session_id)
         journal = browser_session_runtime.list_journal(owner_session_id=bound_owner_session_id)

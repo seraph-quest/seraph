@@ -40,8 +40,8 @@ def _browser_request(operator, *, method: str, path: str, headers=None):
     )
 
 
-def _browser_mutator_request(operator):
-    return _browser_request(operator, method="POST", path="/api/browser/sessions")
+def _browser_mutator_request(operator, *, headers=None):
+    return _browser_request(operator, method="POST", path="/api/browser/sessions", headers=headers)
 
 
 def _browser_read_request(operator, path: str = "/api/browser/providers", *, headers=None):
@@ -157,45 +157,49 @@ async def test_browser_mutators_reject_caller_owner_scope_before_effects():
     )
 
     http_request = _browser_mutator_request(_test_bypass_operator())
-    with (
-        patch("src.api.browser._resolve_browser_provider") as resolve_provider,
-        patch("src.api.browser.browse_webpage") as capture,
-        patch("src.api.browser.browser_session_runtime.get_session_capture_url") as get_capture_url,
-        patch("src.api.browser.browser_session_runtime.open_session") as open_session,
-        patch("src.api.browser.browser_session_runtime.snapshot_session") as snapshot,
-        patch("src.api.browser.browser_session_runtime.control_session") as control,
-        patch("src.api.browser.browser_session_runtime.close_session") as close,
-        patch("src.api.browser.context_manager.get_context") as get_context,
-    ):
-        with pytest.raises(HTTPException) as open_error:
-            await open_browser_session(
-                BrowserSessionOpenRequest(
-                    owner_session_id="other-session",
-                    url="https://example.test/blocked",
-                ),
-                http_request,
-            )
-        assert open_error.value.status_code == 403
+    context_tokens = set_runtime_context("conversation-a", "safe")
+    try:
+        with (
+            patch("src.api.browser._resolve_browser_provider") as resolve_provider,
+            patch("src.api.browser.browse_webpage") as capture,
+            patch("src.api.browser.browser_session_runtime.get_session_capture_url") as get_capture_url,
+            patch("src.api.browser.browser_session_runtime.open_session") as open_session,
+            patch("src.api.browser.browser_session_runtime.snapshot_session") as snapshot,
+            patch("src.api.browser.browser_session_runtime.control_session") as control,
+            patch("src.api.browser.browser_session_runtime.close_session") as close,
+            patch("src.api.browser.context_manager.get_context") as get_context,
+        ):
+            with pytest.raises(HTTPException) as open_error:
+                await open_browser_session(
+                    BrowserSessionOpenRequest(
+                        owner_session_id="other-session",
+                        url="https://example.test/blocked",
+                    ),
+                    http_request,
+                )
+            assert open_error.value.status_code == 403
 
-        with pytest.raises(HTTPException) as snapshot_error:
-            await snapshot_browser_session(
-                "bs-missing",
-                BrowserSessionSnapshotRequest(owner_session_id="other-session"),
-                http_request,
-            )
-        assert snapshot_error.value.status_code == 403
+            with pytest.raises(HTTPException) as snapshot_error:
+                await snapshot_browser_session(
+                    "bs-missing",
+                    BrowserSessionSnapshotRequest(owner_session_id="other-session"),
+                    http_request,
+                )
+            assert snapshot_error.value.status_code == 403
 
-        with pytest.raises(HTTPException) as control_error:
-            await control_browser_session(
-                "bs-missing",
-                BrowserSessionControlRequest(owner_session_id="other-session", action="close"),
-                http_request,
-            )
-        assert control_error.value.status_code == 403
+            with pytest.raises(HTTPException) as control_error:
+                await control_browser_session(
+                    "bs-missing",
+                    BrowserSessionControlRequest(owner_session_id="other-session", action="close"),
+                    http_request,
+                )
+            assert control_error.value.status_code == 403
 
-        with pytest.raises(HTTPException) as close_error:
-            await close_browser_session(http_request, "bs-missing", "other-session")
-        assert close_error.value.status_code == 403
+            with pytest.raises(HTTPException) as close_error:
+                await close_browser_session(http_request, "bs-missing", "other-session")
+            assert close_error.value.status_code == 403
+    finally:
+        reset_runtime_context(context_tokens)
 
     resolve_provider.assert_not_called()
     capture.assert_not_called()
@@ -258,6 +262,118 @@ async def test_browser_open_binds_operator_context_and_resets_it():
 
 
 @pytest.mark.asyncio
+async def test_browser_mutators_bind_cockpit_conversation_owner_and_deny_cross_owner():
+    from src.api.browser import (
+        BrowserComputerUseControlActionRequest,
+        BrowserSessionControlRequest,
+        BrowserSessionOpenRequest,
+        BrowserSessionSnapshotRequest,
+        browser_computer_use_control_action,
+        close_browser_session,
+        control_browser_session,
+        open_browser_session,
+        snapshot_browser_session,
+    )
+
+    conversation_owner = "conversation-owner"
+    operator = replace(
+        _test_bypass_operator(),
+        session_id="auth-cookie-session",
+        principal=replace(_test_bypass_operator().principal, session_id="auth-cookie-session"),
+    )
+    observed: list[tuple[str | None, object]] = []
+    real_open_session = browser_session_runtime.open_session
+    real_snapshot_session = browser_session_runtime.snapshot_session
+
+    def observe_open(*args, **kwargs):
+        observed.append((get_current_session_id(), get_current_trust_principal()))
+        return real_open_session(*args, **kwargs)
+
+    def observe_snapshot(*args, **kwargs):
+        observed.append((get_current_session_id(), get_current_trust_principal()))
+        return real_snapshot_session(*args, **kwargs)
+
+    with (
+        patch(
+            "src.api.browser._resolve_browser_provider",
+            return_value=(
+                {
+                    "provider_name": "local-browser",
+                    "provider_kind": "local",
+                    "execution_mode": "local_runtime",
+                },
+                None,
+            ),
+        ),
+        patch("src.api.browser.browse_webpage", return_value="conversation body"),
+        patch("src.api.browser.browser_session_runtime.open_session", side_effect=observe_open),
+        patch("src.api.browser.browser_session_runtime.snapshot_session", side_effect=observe_snapshot),
+    ):
+        opened = await open_browser_session(
+            BrowserSessionOpenRequest(
+                owner_session_id=conversation_owner,
+                url="https://example.test/cockpit",
+            ),
+            _browser_mutator_request(operator),
+        )
+        session_id = str(opened["session"]["session_id"])
+        snapshot = await snapshot_browser_session(
+            session_id,
+            BrowserSessionSnapshotRequest(owner_session_id=conversation_owner),
+            _browser_mutator_request(operator),
+        )
+        quarantine = await control_browser_session(
+            session_id,
+            BrowserSessionControlRequest(owner_session_id=conversation_owner, action="quarantine"),
+            _browser_mutator_request(operator),
+        )
+        recover = await browser_computer_use_control_action(
+            BrowserComputerUseControlActionRequest(
+                owner_session_id=conversation_owner,
+                session_id=session_id,
+                action="recover",
+            ),
+            _browser_mutator_request(operator),
+        )
+        closed = await close_browser_session(
+            _browser_mutator_request(operator),
+            session_id,
+            conversation_owner,
+        )
+
+    assert opened["session"]["owner_session_id"] == conversation_owner
+    assert snapshot["session"]["owner_session_id"] == conversation_owner
+    assert quarantine["session"]["status"] == "quarantined"
+    assert recover["session"]["status"] == "open"
+    assert closed["session"]["status"] == "closed"
+    assert len(observed) == 2
+    assert all(
+        session_id == conversation_owner
+        and principal is not None
+        and principal.principal_id == operator.principal.principal_id
+        and principal.principal_type is PrincipalType.OPERATOR
+        and principal.session_id == conversation_owner
+        for session_id, principal in observed
+    )
+    assert get_current_session_id() is None
+    assert get_current_trust_principal() is None
+
+    active_tokens = set_runtime_context(conversation_owner, "safe")
+    try:
+        with patch("src.api.browser.browser_session_runtime.control_session") as control:
+            with pytest.raises(HTTPException) as cross_owner_error:
+                await control_browser_session(
+                    session_id,
+                    BrowserSessionControlRequest(owner_session_id="other-conversation", action="close"),
+                    _browser_mutator_request(operator),
+                )
+        assert cross_owner_error.value.status_code == 403
+        control.assert_not_called()
+    finally:
+        reset_runtime_context(active_tokens)
+
+
+@pytest.mark.asyncio
 async def test_browser_open_rechecks_revocation_before_capture_and_state_mutation():
     from src.api.browser import BrowserSessionOpenRequest, open_browser_session
 
@@ -279,16 +395,78 @@ async def test_browser_open_rechecks_revocation_before_capture_and_state_mutatio
         patch("src.api.browser.browse_webpage") as capture,
         patch("src.api.browser.browser_session_runtime.open_session") as open_session,
     ):
-        with pytest.raises(RuntimeRevokedError):
+        with pytest.raises(HTTPException) as revoked_error:
             await open_browser_session(
                 BrowserSessionOpenRequest(owner_session_id=AUTH_SESSION_ID, url="https://example.test"),
                 _browser_mutator_request(_test_bypass_operator()),
             )
 
+    assert revoked_error.value.status_code == 401
+    assert revoked_error.value.detail["code"] == "session_revoked"
     assert recheck.call_count == 3
     resolve_provider.assert_called_once()
     capture.assert_not_called()
     open_session.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_browser_mutator_watcher_maps_revocation_during_awaited_capture():
+    from src.api.browser import BrowserSessionOpenRequest, open_browser_session
+
+    operator = replace(
+        _test_bypass_operator(),
+        session_id="auth-cookie-session",
+        principal=replace(_test_bypass_operator().principal, session_id="auth-cookie-session"),
+    )
+    cookie = f"{settings.operator_auth_cookie_name}=opaque-auth-cookie".encode()
+    auth_calls = 0
+
+    async def authenticate(_token, *, touch=False):
+        nonlocal auth_calls
+        assert touch is False
+        auth_calls += 1
+        if auth_calls == 1:
+            return operator
+        raise AuthFailure("session_revoked")
+
+    def slow_capture(*_args, **_kwargs):
+        time.sleep(0.65)
+        return "capture body"
+
+    request = _browser_mutator_request(operator, headers=[(b"cookie", cookie)])
+    with (
+        patch.object(settings, "operator_auth_revocation_poll_seconds", 0.25),
+        patch("src.api.chat.auth_enabled", return_value=True),
+        patch("src.api.chat.authenticate_token", side_effect=authenticate),
+        patch(
+            "src.api.browser._resolve_browser_provider",
+            return_value=(
+                {
+                    "provider_name": "local-browser",
+                    "provider_kind": "local",
+                    "execution_mode": "local_runtime",
+                },
+                None,
+            ),
+        ),
+        patch("src.api.browser.browse_webpage", side_effect=slow_capture),
+        patch("src.api.browser.browser_session_runtime.open_session") as open_session,
+    ):
+        with pytest.raises(HTTPException) as revoked_error:
+            await open_browser_session(
+                BrowserSessionOpenRequest(
+                    owner_session_id="conversation-owner",
+                    url="https://example.test/slow",
+                ),
+                request,
+            )
+
+    assert revoked_error.value.status_code == 401
+    assert revoked_error.value.detail["code"] == "session_revoked"
+    assert auth_calls >= 1
+    open_session.assert_not_called()
+    assert get_current_session_id() is None
+    assert get_current_trust_principal() is None
 
 
 @pytest.mark.asyncio

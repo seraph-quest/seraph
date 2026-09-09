@@ -273,7 +273,8 @@ on a covered path makes a decision. It does not mean universal adoption.
 | Agent-factory executable authority gate | `backend/src/tools/approval.py`, `backend/src/agent/factory.py`, `backend/tests/test_agent.py` | Partial real enforcement for factory-returned data-bound tools and workflows: the shared trust decision runs before wrapped dispatch, while pure conversation helpers and direct non-factory callers remain outside this slice |
 | Onboarding executable authority gate | `backend/src/tools/approval.py`, `backend/src/agent/onboarding.py`, `backend/tests/test_tool_audit.py` | Real on onboarding guardian-state and explicitly scoped webpage tools: missing session or principal denies before wrapped dispatch, while pure conversation behavior remains ungated and other direct non-factory callers remain #747 migration work |
 | Public source-evidence adapter authority gate | `backend/src/api/capabilities.py`, `backend/src/extensions/source_operations.py`, `backend/tests/test_source_operations.py` | Real on `POST /api/capabilities/source-evidence`: middleware-authenticated operator authority is rebound to the runtime context and the shared capability decision runs before public-web or managed-MCP dispatch; site policy, connector credential egress, and other direct adapters remain separately governed |
-| Public starter-pack activation authority gate | `backend/src/api/capabilities.py`, `backend/tests/test_capabilities_api.py` | Real on `POST /api/capabilities/starter-packs/{name}/activate`: middleware-authenticated `OPERATOR` authority with `CAPABILITY_EXECUTE` and an exact session is bound for the full activation and denied before overview, install, enable, reload, or audit side effects when absent, revoked, or mismatched; workflow-draft save remains a separate direct mutation path |
+| Public starter-pack activation authority gate | `backend/src/api/capabilities.py`, `backend/tests/test_capabilities_api.py` | Real on `POST /api/capabilities/starter-packs/{name}/activate`: middleware-authenticated `OPERATOR` authority with `CAPABILITY_EXECUTE` and an exact session is bound for the full activation and denied before overview, install, enable, reload, or audit side effects when absent, revoked, or mismatched; workflow-draft save has its own route gate |
+| Public workflow-draft save authority gate | `backend/src/api/capabilities.py`, `backend/tests/test_capabilities_api.py` | Real on `POST /api/capabilities/workflow-drafts/save`: middleware-authenticated `OPERATOR` authority with `CAPABILITY_EXECUTE` and an exact session is bound for validation, workspace write, reload, and audit, and denied before those side effects when absent, revoked, or mismatched; direct connector and other mutation routes remain separately governed under #747 |
 | Governed artifact builder | `backend/src/artifacts/registry.py`, `backend/tests/test_artifact_registry.py` | Real opt-in exact content decision with canonical input digests and digested principal/source/provenance receipts; legacy producers remain visibly `legacy_unclassified` for #742/#747 migration |
 | Secret runtime-authority gate | `backend/src/tools/secret_ref_tools.py`, `backend/src/security/trust_contract.py`, `backend/tests/test_secret_ref_tools.py` | Real preflight of `CREDENTIAL_EGRESS` through the shared principal/operation matrix before secret resolution, followed by capability evaluation; missing/under-scoped authority, `SERVICE`, and paired-edge principals deny even when grant strings are present, while full destination-bound durable credential approval/audit/replay remains #747 |
 | Secret-reference field/host boundary | `backend/src/tools/secret_ref_tools.py`, `backend/src/vault/refs.py` | Real on wrapped paths; universal host adoption is #747 |
@@ -353,11 +354,12 @@ Every entry also classifies existing evidence as `real`, `partial`, `metadata`,
   authoritative principals for all remaining callers and capability classes.
 - The scheduled-workflow service principal is enforced only on that named path;
   other internal/service callers remain #747 adoption work.
-- Public starter-pack activation now binds middleware-authenticated operator
-  authority before capability installation/enabling and resets the runtime
-  context after the route completes. `POST /api/capabilities/workflow-drafts/save`
-  still writes, reloads, and audits a workflow directly without this route gate;
-  that residual mutation path remains #747 adoption work.
+- Public starter-pack activation and workflow-draft save now bind
+  middleware-authenticated operator authority before their full mutation paths
+  and reset the runtime context after each route completes. Workflow-draft save
+  denies before validation, workspace write, reload, or audit when the operator
+  is absent, revoked, session-mismatched, or lacks `CAPABILITY_EXECUTE`. Direct
+  connector and other mutation routes remain separately governed under #747.
 - Governed artifact records are opt-in; existing producers remain explicitly
   unclassified until #742/#747 migrates them.
 - Secret-ref runtime authority now fails closed on its covered wrapper, but the

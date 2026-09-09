@@ -7,13 +7,16 @@ from pathlib import Path
 import re
 from typing import Any
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 from smolagents import MCPClient
 
 from config.settings import settings
 from src.approval.repository import approval_repository, fingerprint_tool_call
+from src.approval.runtime import reset_runtime_context, set_runtime_context
 from src.audit.runtime import log_integration_event
+from src.auth.cancellation import assert_runtime_not_revoked
+from src.auth.service import bind_operator_principal
 from src.extensions.channel_routing import (
     SUPPORTED_CHANNEL_ROUTE_TRANSPORTS,
     list_channel_route_bindings,
@@ -52,6 +55,7 @@ from src.extensions.state import (
     save_extension_state_payload,
 )
 from src.native_tools.registry import canonical_tool_name
+from src.observer.manager import context_manager
 from src.tools.policy import get_tool_execution_boundaries, get_tool_risk_level
 from src.tools.mcp_manager import mcp_manager
 
@@ -89,6 +93,14 @@ _PRIVATE_PATH_PATTERN = re.compile(
     r"|[A-Za-z]:\\[^\s'\",;)]*"
     r")"
 )
+
+
+def _require_authenticated_capability_operator(request: Request):
+    """Load the shared capability operator gate without an API import cycle."""
+
+    from src.api.capabilities import _require_authenticated_capability_operator
+
+    return _require_authenticated_capability_operator(request)
 
 
 def _content_hash(value: str) -> str:
@@ -993,15 +1005,25 @@ async def _test_extension_mcp_connector(connector: dict[str, Any]) -> dict[str, 
 
 
 @router.post("/extensions/scaffold", status_code=201)
-async def scaffold_extension_package_in_workspace(req: ExtensionScaffoldRequest):
+async def scaffold_extension_package_in_workspace(
+    req: ExtensionScaffoldRequest,
+    request: Request,
+):
+    operator = _require_authenticated_capability_operator(request)
+    tokens = set_runtime_context(
+        operator.session_id,
+        context_manager.get_context().approval_mode,
+        trust_principal=bind_operator_principal(operator, operator.session_id),
+    )
     preview: dict[str, Any] | None = None
-    display_name = req.display_name.strip()
-    if not display_name:
-        raise HTTPException(status_code=422, detail="display_name must be non-empty")
     try:
+        display_name = req.display_name.strip()
+        if not display_name:
+            raise HTTPException(status_code=422, detail="display_name must be non-empty")
         slug = _scaffold_package_slug(req.package_name)
         extension_id = req.extension_id.strip() if isinstance(req.extension_id, str) and req.extension_id.strip() else f"seraph.{slug}"
         package_root = Path(settings.workspace_dir) / "extensions" / slug
+        assert_runtime_not_revoked()
         scaffold = scaffold_extension_package(
             package_root,
             extension_id=extension_id,
@@ -1010,6 +1032,22 @@ async def scaffold_extension_package_in_workspace(req: ExtensionScaffoldRequest)
             contributions=req.contributions,
         )
         preview = validate_extension_path(str(package_root))
+        await _log_extension_lifecycle_event(
+            action="scaffold",
+            outcome="succeeded",
+            preview=preview,
+            path=str(scaffold.package_root),
+            extra_details={
+                "created_file_count": len(scaffold.created_files),
+                "created_files": [str(path.relative_to(scaffold.package_root)) for path in scaffold.created_files],
+            },
+        )
+        return {
+            "status": "scaffolded" if preview.get("ok") else "scaffolded_invalid",
+            "path": str(scaffold.package_root),
+            "created_files": [str(path.relative_to(scaffold.package_root)) for path in scaffold.created_files],
+            "preview": preview,
+        }
     except FileExistsError as exc:
         await _log_extension_lifecycle_event(
             action="scaffold",
@@ -1026,23 +1064,8 @@ async def scaffold_extension_package_in_workspace(req: ExtensionScaffoldRequest)
             error=str(exc),
         )
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-
-    await _log_extension_lifecycle_event(
-        action="scaffold",
-        outcome="succeeded",
-        preview=preview,
-        path=str(scaffold.package_root),
-        extra_details={
-            "created_file_count": len(scaffold.created_files),
-            "created_files": [str(path.relative_to(scaffold.package_root)) for path in scaffold.created_files],
-        },
-    )
-    return {
-        "status": "scaffolded" if preview.get("ok") else "scaffolded_invalid",
-        "path": str(scaffold.package_root),
-        "created_files": [str(path.relative_to(scaffold.package_root)) for path in scaffold.created_files],
-        "preview": preview,
-    }
+    finally:
+        reset_runtime_context(tokens)
 
 
 @router.get("/extensions")
@@ -1092,9 +1115,15 @@ async def get_channel_routing():
 
 
 @router.put("/extensions/channel-routing")
-async def update_channel_routing(req: ChannelRoutingUpdateRequest):
-    state_payload = load_extension_state_payload()
+async def update_channel_routing(req: ChannelRoutingUpdateRequest, request: Request):
+    operator = _require_authenticated_capability_operator(request)
+    tokens = set_runtime_context(
+        operator.session_id,
+        context_manager.get_context().approval_mode,
+        trust_principal=bind_operator_principal(operator, operator.session_id),
+    )
     try:
+        state_payload = load_extension_state_payload()
         for route, binding in req.bindings.items():
             set_channel_route_binding(
                 state_payload,
@@ -1102,16 +1131,19 @@ async def update_channel_routing(req: ChannelRoutingUpdateRequest):
                 primary_transport=binding.primary_transport,
                 fallback_transport=binding.fallback_transport,
             )
+        assert_runtime_not_revoked()
+        save_extension_state_payload(state_payload)
+        await log_integration_event(
+            integration_type="channel_routing",
+            name="observer_delivery",
+            outcome="updated",
+            details={"routes": sorted(req.bindings.keys())},
+        )
+        return _channel_routing_response(state_payload)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    save_extension_state_payload(state_payload)
-    await log_integration_event(
-        integration_type="channel_routing",
-        name="observer_delivery",
-        outcome="updated",
-        details={"routes": sorted(req.bindings.keys())},
-    )
-    return _channel_routing_response(state_payload)
+    finally:
+        reset_runtime_context(tokens)
 
 
 @router.get("/extensions/{extension_id}")

@@ -2,15 +2,145 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from fastapi import HTTPException
 import pytest
+from starlette.requests import Request
 
 from config.settings import settings
+from src.approval.runtime import get_current_session_id, get_current_trust_principal
+from src.auth.service import test_bypass_operator as _test_bypass_operator
+from src.security.trust_contract import PrincipalType
 from src.extensions.registry import default_manifest_roots_for_workspace
 from src.runbooks.manager import runbook_manager
 from src.skills.manager import skill_manager
 from src.starter_packs.manager import starter_pack_manager
 from src.tools.mcp_manager import mcp_manager
 from src.workflows.manager import workflow_manager
+
+
+def _extension_mutator_request(operator, path: str):
+    return Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": path,
+            "headers": [],
+            "query_string": b"",
+            "state": {"operator": operator},
+        }
+    )
+
+
+@pytest.mark.asyncio
+async def test_extension_scaffold_and_channel_routing_deny_invalid_operator_before_side_effects():
+    from src.api.extensions import (
+        ChannelRoutingUpdateRequest,
+        ExtensionScaffoldRequest,
+        scaffold_extension_package_in_workspace,
+        update_channel_routing,
+    )
+
+    operator = _test_bypass_operator()
+    invalid_operators = (
+        None,
+        object(),
+        operator.__class__(
+            session_id=operator.session_id,
+            principal=operator.principal.__class__(
+                **{**operator.principal.__dict__, "authenticated": False}
+            ),
+            idle_expires_at=operator.idle_expires_at,
+            absolute_expires_at=operator.absolute_expires_at,
+        ),
+    )
+    with (
+        patch("src.api.extensions.scaffold_extension_package") as scaffold,
+        patch("src.api.extensions.load_extension_state_payload") as load_state,
+        patch("src.api.extensions.save_extension_state_payload") as save_state,
+        patch("src.api.extensions._log_extension_lifecycle_event", new_callable=AsyncMock) as audit,
+        patch("src.api.extensions.context_manager.get_context") as get_context,
+    ):
+        for invalid_operator in invalid_operators:
+            with pytest.raises(HTTPException) as scaffold_error:
+                await scaffold_extension_package_in_workspace(
+                    ExtensionScaffoldRequest(package_name="example-pack", display_name="Example"),
+                    _extension_mutator_request(invalid_operator, "/api/extensions/scaffold"),
+                )
+            assert scaffold_error.value.status_code == 401
+
+            with pytest.raises(HTTPException) as routing_error:
+                await update_channel_routing(
+                    ChannelRoutingUpdateRequest(bindings={}),
+                    _extension_mutator_request(invalid_operator, "/api/extensions/channel-routing"),
+                )
+            assert routing_error.value.status_code == 401
+
+    scaffold.assert_not_called()
+    load_state.assert_not_called()
+    save_state.assert_not_called()
+    audit.assert_not_awaited()
+    get_context.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_extension_scaffold_and_channel_routing_bind_context_and_reset(tmp_path):
+    from src.api.extensions import (
+        ChannelRoutingUpdateRequest,
+        ExtensionScaffoldRequest,
+        scaffold_extension_package_in_workspace,
+        update_channel_routing,
+    )
+
+    operator = _test_bypass_operator()
+    package_root = tmp_path / "example-pack"
+    created_file = package_root / "manifest.yaml"
+    observed: list[tuple[str, object]] = []
+
+    def observe(label: str):
+        observed.append((label, get_current_trust_principal()))
+
+    scaffold_result = SimpleNamespace(package_root=package_root, created_files=[created_file])
+    with (
+        patch("src.api.extensions.context_manager.get_context", return_value=SimpleNamespace(approval_mode="safe")),
+        patch("src.api.extensions.settings.workspace_dir", str(tmp_path)),
+        patch("src.api.extensions.scaffold_extension_package", side_effect=lambda *args, **kwargs: (observe("scaffold") or scaffold_result)),
+        patch("src.api.extensions.validate_extension_path", return_value={"ok": True}),
+        patch("src.api.extensions._log_extension_lifecycle_event", new_callable=AsyncMock, side_effect=lambda **kwargs: observe("scaffold_audit")),
+        patch("src.api.extensions.load_extension_state_payload", side_effect=lambda: (observe("load") or {})),
+        patch("src.api.extensions.set_channel_route_binding", side_effect=lambda *args, **kwargs: observe("route")),
+        patch("src.api.extensions.save_extension_state_payload", side_effect=lambda payload: observe("save")),
+        patch("src.api.extensions._channel_routing_response", side_effect=lambda payload: (observe("response") or {"bindings": []})),
+        patch("src.api.extensions.log_integration_event", new_callable=AsyncMock, side_effect=lambda **kwargs: observe("route_audit")),
+    ):
+        scaffold_payload = await scaffold_extension_package_in_workspace(
+            ExtensionScaffoldRequest(package_name="example-pack", display_name="Example"),
+            _extension_mutator_request(operator, "/api/extensions/scaffold"),
+        )
+        routing_payload = await update_channel_routing(
+            ChannelRoutingUpdateRequest(bindings={"observer_delivery": {"primary_transport": "websocket"}}),
+            _extension_mutator_request(operator, "/api/extensions/channel-routing"),
+        )
+
+    assert scaffold_payload["status"] == "scaffolded"
+    assert routing_payload == {"bindings": []}
+    assert [label for label, _principal in observed] == [
+        "scaffold",
+        "scaffold_audit",
+        "load",
+        "route",
+        "save",
+        "route_audit",
+        "response",
+    ]
+    assert all(
+        principal is not None
+        and principal.principal_id == operator.principal.principal_id
+        and principal.principal_type is PrincipalType.OPERATOR
+        and principal.session_id == operator.session_id
+        for _label, principal in observed
+    )
+    assert get_current_session_id() is None
+    assert get_current_trust_principal() is None
 
 
 def _write_installable_extension(

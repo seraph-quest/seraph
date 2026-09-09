@@ -12,6 +12,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -102,6 +103,7 @@ _OUTPUT_CHAR_LIMIT = 12_000
 _PROCESS_OUTPUT_DEFAULT = 4_000
 _PROCESS_OUTPUT_MAX = 24_000
 _COMMAND_TIMEOUT_MAX = 120
+_PROCESS_STOP_WAIT_SECONDS = 1.0
 _SECRET_FILE_NAMES = {
     ".env",
     ".envrc",
@@ -605,17 +607,55 @@ def _delete_runtime_dir(path: Path) -> None:
         logger.debug("Failed to delete runtime directory %s", path, exc_info=True)
 
 
-def _kill_process_group(process: subprocess.Popen[Any]) -> None:
-    """Stop a command and every child it may have started."""
-    if process.poll() is not None:
-        return
+def _kill_process_group(
+    process: subprocess.Popen[Any],
+    *,
+    process_group_id: int | None = None,
+    wait_timeout: float = _PROCESS_STOP_WAIT_SECONDS,
+) -> bool:
+    """Stop a command and every same-group child within a bound.
+
+    The parent may have exited while a descendant still owns a pipe.  Do not
+    use ``poll()`` as an early return in that case: the process group ID is
+    retained by callers that create a new session, and a missing group is a
+    normal race during cleanup.  ``wait`` is deliberately bounded so a broken
+    child or pipe cannot turn force-stop into an unbounded operation.  A
+    descendant that calls ``setsid`` intentionally escapes this group boundary;
+    a general sandbox is outside this process-tool contract.
+    """
+    group_id = process_group_id
+    if group_id is None:
+        try:
+            group_id = os.getpgid(process.pid)
+        except (AttributeError, ProcessLookupError, PermissionError, OSError):
+            group_id = None
+
+    if group_id is not None and group_id > 0:
+        try:
+            os.killpg(group_id, signal.SIGKILL)
+        except (AttributeError, ProcessLookupError, PermissionError, OSError):
+            # The group can disappear between lookup and signal delivery.
+            pass
     try:
-        os.killpg(os.getpgid(process.pid), signal.SIGKILL)
-    except (AttributeError, ProcessLookupError, PermissionError):
+        if process.poll() is None:
+            process.kill()
+    except (ProcessLookupError, PermissionError, OSError):
+        pass
+
+    try:
+        process.wait(timeout=max(0.01, float(wait_timeout)))
+    except subprocess.TimeoutExpired:
+        # A final direct kill/reap remains bounded even if the group was
+        # already missing or a platform did not honor the group signal.
         try:
             process.kill()
-        except ProcessLookupError:
+        except (ProcessLookupError, PermissionError, OSError):
             pass
+        try:
+            process.wait(timeout=max(0.01, float(wait_timeout)))
+        except subprocess.TimeoutExpired:
+            pass
+    return process.poll() is not None
 
 
 def _bounded_reap_process(process: subprocess.Popen[Any], *, timeout: float = 1.0) -> tuple[str, str]:
@@ -686,6 +726,7 @@ class ManagedProcess:
     worker_root: Path
     started_at: datetime
     owner_session_id: str | None
+    process_group_id: int | None
 
     def status_payload(self) -> dict[str, Any]:
         exit_code = self.popen.poll()
@@ -731,26 +772,30 @@ class ProcessRuntimeManager:
 
     @staticmethod
     def _stop_managed_process(process: ManagedProcess, *, force: bool) -> dict[str, Any]:
-        if process.popen.poll() is None:
-            if force:
-                _kill_process_group(process.popen)
+        if force:
+            _kill_process_group(process.popen, process_group_id=process.process_group_id)
+        else:
+            # Preserve graceful stop for a live parent, but still attempt the
+            # retained group after the parent has exited so descendants do not
+            # survive solely because their leader is gone.
+            try:
+                group_id = process.process_group_id
+                if group_id is None:
+                    group_id = os.getpgid(process.popen.pid)
+                os.killpg(group_id, signal.SIGTERM)
+            except (AttributeError, ProcessLookupError, PermissionError, OSError):
                 try:
-                    process.popen.wait(timeout=2)
-                except subprocess.TimeoutExpired:
-                    process.popen.kill()
-            else:
-                try:
-                    os.killpg(os.getpgid(process.popen.pid), signal.SIGTERM)
-                except (AttributeError, ProcessLookupError, PermissionError):
                     process.popen.terminate()
-                try:
-                    process.popen.wait(timeout=2)
-                except subprocess.TimeoutExpired:
-                    _kill_process_group(process.popen)
-                    try:
-                        process.popen.wait(timeout=2)
-                    except subprocess.TimeoutExpired:
-                        pass
+                except (ProcessLookupError, PermissionError, OSError):
+                    pass
+            try:
+                process.popen.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                _kill_process_group(process.popen, process_group_id=process.process_group_id)
+            else:
+                # The parent can be reaped while a same-group descendant still
+                # owns output; group cleanup is safe to attempt and bounded.
+                _kill_process_group(process.popen, process_group_id=process.process_group_id)
         payload = process.status_payload()
         payload["stopped"] = True
         return payload
@@ -775,6 +820,7 @@ class ProcessRuntimeManager:
         args_json: str = "",
         cwd: str = "",
         timeout_seconds: int | None = None,
+        cancel_event: threading.Event | None = None,
     ) -> dict[str, Any]:
         executable, args, resolved_cwd = _normalize_command_invocation(
             command=command,
@@ -784,7 +830,20 @@ class ProcessRuntimeManager:
         timeout = _normalize_timeout_seconds(timeout_seconds)
         worker_root = _worker_runtime_root(uuid.uuid4().hex)
         process: subprocess.Popen[str] | None = None
+        process_group_id: int | None = None
         try:
+            if cancel_event is not None and cancel_event.is_set():
+                return {
+                    "ok": False,
+                    "cancelled": True,
+                    "timed_out": False,
+                    "exit_code": None,
+                    "stdout": "",
+                    "stderr": "",
+                    "display_command": _display_command([executable, *args]),
+                    "cwd": str(resolved_cwd),
+                    "timeout_seconds": timeout,
+                }
             process = subprocess.Popen(
                 [executable, *args],
                 cwd=str(resolved_cwd),
@@ -795,15 +854,42 @@ class ProcessRuntimeManager:
                 env=_command_env(worker_root=worker_root),
                 start_new_session=True,
             )
-            stdout, stderr = process.communicate(timeout=timeout)
+            # start_new_session makes the child PID the process-group leader.
+            # Retain it because getpgid(parent_pid) fails after the leader has
+            # exited even when a descendant still owns the group.
+            process_group_id = process.pid
+            deadline = time.monotonic() + timeout
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise subprocess.TimeoutExpired([executable, *args], timeout)
+                try:
+                    stdout, stderr = process.communicate(timeout=min(remaining, 0.25))
+                    break
+                except subprocess.TimeoutExpired:
+                    if cancel_event is not None and cancel_event.is_set():
+                        _kill_process_group(process, process_group_id=process_group_id)
+                        stdout, stderr = _bounded_reap_process(process)
+                        return {
+                            "ok": False,
+                            "cancelled": True,
+                            "timed_out": False,
+                            "exit_code": process.returncode,
+                            "stdout": stdout or "",
+                            "stderr": stderr or "",
+                            "display_command": _display_command([executable, *args]),
+                            "cwd": str(resolved_cwd),
+                            "timeout_seconds": timeout,
+                        }
         except subprocess.TimeoutExpired as exc:
             if process is not None:
-                _kill_process_group(process)
+                _kill_process_group(process, process_group_id=process_group_id)
                 stdout, stderr = _bounded_reap_process(process)
             else:
                 stdout, stderr = exc.stdout or "", exc.stderr or ""
             return {
                 "ok": False,
+                "cancelled": False,
                 "timed_out": True,
                 "exit_code": process.returncode if process is not None else None,
                 "stdout": stdout or "",
@@ -819,6 +905,7 @@ class ProcessRuntimeManager:
 
         return {
             "ok": process.returncode == 0,
+            "cancelled": bool(cancel_event is not None and cancel_event.is_set()),
             "timed_out": False,
             "exit_code": process.returncode,
             "stdout": stdout or "",
@@ -867,6 +954,7 @@ class ProcessRuntimeManager:
             worker_root=worker_root,
             started_at=_utc_now(),
             owner_session_id=get_current_session_id(),
+            process_group_id=popen.pid,
         )
         with self._lock:
             self._processes[process_id] = managed

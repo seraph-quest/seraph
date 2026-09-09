@@ -16,12 +16,14 @@ sole authority identity.
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import hashlib
 import json
 import os
 import re
 import shutil
 import stat
+import threading
 import time
 from dataclasses import dataclass, field, replace
 from datetime import datetime
@@ -115,6 +117,13 @@ _UNTRUSTED_INSTRUCTION_MARKERS = (
     "urllib.request",
 )
 
+_NATIVE_CANCEL_EVENT: contextvars.ContextVar[threading.Event | None] = contextvars.ContextVar(
+    "native_software_engineering_cancel_event",
+    default=None,
+)
+_NATIVE_EXECUTION_LOCK = threading.Lock()
+_NATIVE_EXECUTIONS: dict[str, "_NativeExecutionControl"] = {}
+
 
 class NativeSoftwareEngineeringError(ValueError):
     """A deterministic fixture request was rejected before or during execution."""
@@ -185,6 +194,13 @@ class _JobWorkspace:
     branch: str
     artifact_dir: Path
     relative_artifact_dir: str
+
+
+@dataclass(frozen=True, slots=True)
+class _NativeExecutionControl:
+    owner: str
+    fencing_token: int
+    cancel_event: threading.Event
 
 
 def native_software_engineering_fixture_root() -> Path:
@@ -589,6 +605,24 @@ def _job_token(job_id: str) -> str:
     return hashlib.sha256(job_id.encode("utf-8")).hexdigest()[:24]
 
 
+def _register_native_execution(job_id: str, control: _NativeExecutionControl) -> None:
+    with _NATIVE_EXECUTION_LOCK:
+        _NATIVE_EXECUTIONS[job_id] = control
+
+
+def _unregister_native_execution(job_id: str, control: _NativeExecutionControl | None) -> None:
+    if control is None:
+        return
+    with _NATIVE_EXECUTION_LOCK:
+        if _NATIVE_EXECUTIONS.get(job_id) is control:
+            _NATIVE_EXECUTIONS.pop(job_id, None)
+
+
+def _native_execution_for_job(job_id: str) -> _NativeExecutionControl | None:
+    with _NATIVE_EXECUTION_LOCK:
+        return _NATIVE_EXECUTIONS.get(job_id)
+
+
 def _job_workspace(request: NativeSoftwareEngineeringRequest) -> _JobWorkspace:
     root = _workspace_root()
     token = _job_token(request.job_id)
@@ -654,17 +688,20 @@ def _process_result(
     include_output: bool = False,
 ) -> dict[str, Any]:
     args_list = list(args)
+    cancel_event = _NATIVE_CANCEL_EVENT.get()
     try:
         result = process_runtime_manager.run_command(
             command=command,
             args_json=json.dumps(args_list),
             cwd=cwd,
             timeout_seconds=timeout_seconds,
+            cancel_event=cancel_event,
         )
     except ValueError as exc:
         return {
             "ok": False,
             "blocked": True,
+            "cancelled": False,
             "reason_code": "native_command_policy_blocked",
             "exit_code": None,
             "timed_out": False,
@@ -677,6 +714,7 @@ def _process_result(
         return {
             "ok": False,
             "blocked": False,
+            "cancelled": False,
             "reason_code": "native_process_unavailable",
             "exit_code": None,
             "timed_out": False,
@@ -688,7 +726,12 @@ def _process_result(
     payload = {
         "ok": bool(result.get("ok")),
         "blocked": False,
-        "reason_code": "process_completed" if result.get("ok") else "process_failed",
+        "cancelled": bool(result.get("cancelled")),
+        "reason_code": (
+            "operator_cancelled_during_process"
+            if result.get("cancelled")
+            else "process_completed" if result.get("ok") else "process_failed"
+        ),
         "exit_code": result.get("exit_code"),
         "timed_out": bool(result.get("timed_out")),
         "stdout_sha256": _digest_text(str(result.get("stdout") or "")),
@@ -789,6 +832,45 @@ async def _cancel_claimed_job(
         )
     except Exception:
         return await durable_job_repository.get_job(job_id)
+
+
+def _cancellation_result(
+    request: NativeSoftwareEngineeringRequest,
+    prepared: _PreparedFixture,
+    job_workspace: _JobWorkspace,
+    durable_job: dict[str, Any] | None,
+    *,
+    reason_code: str,
+    test_result: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Build a recovery receipt that can never be mistaken for success."""
+    cancellation_payload = {
+        "schema_version": "seraph.native-software-engineering.cancellation.v1",
+        "job_id": request.job_id,
+        "reason_code": reason_code,
+        "phase": "test" if test_result is not None else "apply",
+        "test": test_result or None,
+        "success_eligible": False,
+        "workspace_recoverable": True,
+    }
+    # A cancellation can race the durable terminal transition. The local file
+    # is best-effort recovery evidence; the durable transition receipt remains
+    # the authoritative cancellation record.
+    try:
+        _write_json(job_workspace.artifact_dir / "cancellation.json", cancellation_payload)
+    except OSError:
+        cancellation_payload["artifact_write_failed"] = True
+    return {
+        "status": "cancelled",
+        "reason_code": reason_code,
+        "evidence_mode": NATIVE_SOFTWARE_ENGINEERING_EVIDENCE_MODE,
+        "provider": None,
+        "workspace": _workspace_receipt(job_workspace),
+        "durable_job": durable_job,
+        "cancellation": cancellation_payload,
+        "original_fixture_immutable": _fixture_tree_digest(prepared.source) == prepared.source_digest,
+        "operator_visible": True,
+    }
 
 
 async def _fail_unclaimed_job(request: NativeSoftwareEngineeringRequest, reason_code: str) -> dict[str, Any] | None:
@@ -939,6 +1021,14 @@ async def run_native_software_engineering_fixture(
             "provider": None,
             "operator_visible": True,
         }
+    if prepared.source_digest != preflight.get("source_digest"):
+        return {
+            "status": "blocked",
+            "reason_code": "fixture_changed_after_preflight",
+            "evidence_mode": NATIVE_SOFTWARE_ENGINEERING_EVIDENCE_MODE,
+            "provider": None,
+            "operator_visible": True,
+        }
     inspection = preflight
     plan = build_native_software_engineering_plan(request, inspection)
     declared_authority = {
@@ -1007,6 +1097,8 @@ async def run_native_software_engineering_fixture(
     worker_owner = f"native-swe-worker:{_job_token(request.job_id)}"
     fencing_token: int | None = None
     durable_job: dict[str, Any] | None = admitted
+    execution_control: _NativeExecutionControl | None = None
+    cancel_context_token: Any = None
     try:
         try:
             await durable_job_repository.queue_job(request.job_id)
@@ -1034,6 +1126,13 @@ async def run_native_software_engineering_fixture(
             }
         durable_job = claimed
         fencing_token = int(claimed["lease"]["fencing_token"])
+        execution_control = _NativeExecutionControl(
+            owner=worker_owner,
+            fencing_token=fencing_token,
+            cancel_event=threading.Event(),
+        )
+        _register_native_execution(request.job_id, execution_control)
+        cancel_context_token = _NATIVE_CANCEL_EVENT.set(execution_control.cancel_event)
         job_workspace = _job_workspace(request)
         _copy_fixture(prepared, job_workspace)
         relative_bug_path = _relative_workspace_path(job_workspace.root / FIXTURE_BUG_FILE)
@@ -1230,6 +1329,20 @@ async def run_native_software_engineering_fixture(
                 "original_fixture_immutable": _fixture_tree_digest(prepared.source) == prepared.source_digest,
                 "operator_visible": True,
             }
+        if execution_control is not None and execution_control.cancel_event.is_set():
+            durable_job = await _cancel_claimed_job(
+                request.job_id,
+                owner=worker_owner,
+                fencing_token=fencing_token,
+                reason="operator_cancelled_before_apply",
+            )
+            return _cancellation_result(
+                request,
+                prepared,
+                job_workspace,
+                durable_job,
+                reason_code="operator_cancelled_before_apply",
+            )
         applied_raw = apply_workspace_patch(
             file_path=relative_bug_path,
             old_text=FIXTURE_BEFORE_TEXT,
@@ -1284,16 +1397,13 @@ async def run_native_software_engineering_fixture(
                 fencing_token=fencing_token,
                 reason="operator_cancelled_before_test",
             )
-            return {
-                "status": "cancelled",
-                "reason_code": "operator_cancelled_before_test",
-                "evidence_mode": NATIVE_SOFTWARE_ENGINEERING_EVIDENCE_MODE,
-                "provider": None,
-                "workspace": _workspace_receipt(job_workspace),
-                "durable_job": durable_job,
-                "original_fixture_immutable": _fixture_tree_digest(prepared.source) == prepared.source_digest,
-                "operator_visible": True,
-            }
+            return _cancellation_result(
+                request,
+                prepared,
+                job_workspace,
+                durable_job,
+                reason_code="operator_cancelled_before_test",
+            )
 
         try:
             test_result = await asyncio.wait_for(
@@ -1320,6 +1430,24 @@ async def run_native_software_engineering_fixture(
                 "stdout_chars": 0,
                 "stderr_chars": 0,
             }
+        if (
+            execution_control is not None
+            and (execution_control.cancel_event.is_set() or test_result.get("cancelled"))
+        ):
+            durable_job = await _cancel_claimed_job(
+                request.job_id,
+                owner=worker_owner,
+                fencing_token=fencing_token,
+                reason="operator_cancelled_during_test",
+            )
+            return _cancellation_result(
+                request,
+                prepared,
+                job_workspace,
+                durable_job,
+                reason_code="operator_cancelled_during_test",
+                test_result=test_result,
+            )
         test_payload = {
             "schema_version": "seraph.native-software-engineering.test.v1",
             "job_id": request.job_id,
@@ -1508,6 +1636,8 @@ async def run_native_software_engineering_fixture(
             "operator_visible": True,
         }
     except asyncio.CancelledError:
+        if execution_control is not None:
+            execution_control.cancel_event.set()
         if fencing_token is not None:
             durable_job = await _cancel_claimed_job(
                 request.job_id,
@@ -1517,6 +1647,15 @@ async def run_native_software_engineering_fixture(
             )
         raise
     except NativeSoftwareEngineeringError as exc:
+        if execution_control is not None and execution_control.cancel_event.is_set() and job_workspace is not None:
+            current_job = await durable_job_repository.get_job(request.job_id)
+            return _cancellation_result(
+                request,
+                prepared,
+                job_workspace,
+                current_job,
+                reason_code="operator_cancelled",
+            )
         if fencing_token is not None:
             durable_job = await _fail_claimed_job(
                 request.job_id,
@@ -1536,6 +1675,15 @@ async def run_native_software_engineering_fixture(
             "operator_visible": True,
         }
     except Exception:
+        if execution_control is not None and execution_control.cancel_event.is_set() and job_workspace is not None:
+            current_job = await durable_job_repository.get_job(request.job_id)
+            return _cancellation_result(
+                request,
+                prepared,
+                job_workspace,
+                current_job,
+                reason_code="operator_cancelled",
+            )
         if fencing_token is not None:
             durable_job = await _fail_claimed_job(
                 request.job_id,
@@ -1553,6 +1701,10 @@ async def run_native_software_engineering_fixture(
             "original_fixture_immutable": _fixture_tree_digest(prepared.source) == prepared.source_digest,
             "operator_visible": True,
         }
+    finally:
+        if cancel_context_token is not None:
+            _NATIVE_CANCEL_EVENT.reset(cancel_context_token)
+        _unregister_native_execution(request.job_id, execution_control)
 
 
 async def resume_native_software_engineering_fixture(
@@ -1597,13 +1749,24 @@ async def cancel_native_software_engineering_job(
     fencing_token: int,
     reason: str = "operator_cancelled",
 ) -> dict[str, Any]:
-    """Cancel a claimed fixture job through the existing durable job contract."""
-    return await durable_job_repository.cancel_job(
+    """Cancel a claimed fixture job and signal its bounded native process.
+
+    Durable owner/fence validation remains authoritative.  The in-process
+    event is set only after that transition succeeds, so an unauthorized
+    caller cannot kill another job's test process; a runner that observes the
+    event cannot produce a success receipt.
+    """
+    result = await durable_job_repository.cancel_job(
         job_id,
         owner=owner,
         fencing_token=fencing_token,
         reason=reason,
     )
+    if result.get("status") == "cancelled":
+        control = _native_execution_for_job(job_id)
+        if control is not None and control.owner == owner and control.fencing_token == fencing_token:
+            control.cancel_event.set()
+    return result
 
 
 __all__ = [

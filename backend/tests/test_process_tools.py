@@ -4,6 +4,7 @@ import asyncio
 import os
 import stat
 import textwrap
+import threading
 import time
 from pathlib import Path
 
@@ -66,6 +67,9 @@ def test_run_command_success():
 
 
 def test_run_command_timeout_does_not_wait_for_descendant_held_pipes():
+    # The child intentionally calls setsid and escapes the managed group. This
+    # bounds the caller but documents the residual: a general sandbox/tree
+    # kill for detached sessions is outside this process-tool contract.
     script_name = _write_script(
         "wave_process_orphaned_pipe.py",
         """
@@ -92,6 +96,78 @@ def test_run_command_timeout_does_not_wait_for_descendant_held_pipes():
 
     assert result["timed_out"] is True
     assert time.monotonic() - started < 4
+
+
+def test_run_command_kills_same_group_descendant_after_parent_exits():
+    """A non-detached child must not outlive a reaped process-group leader."""
+    script_name = _write_script(
+        "wave_process_parent_exits_same_group.py",
+        """
+        import pathlib
+        import subprocess
+        import sys
+
+        subprocess.Popen(
+            [
+                sys.executable,
+                "-c",
+                "import pathlib,time; time.sleep(2); pathlib.Path('same-group-survivor.marker').write_text('survived')",
+            ],
+            stdout=sys.stdout,
+            stderr=sys.stderr,
+        )
+        pathlib.Path("parent-exited.marker").write_text("parent-exited")
+        """,
+    )
+    workspace = Path(settings.workspace_dir)
+    survivor_marker = workspace / "same-group-survivor.marker"
+    parent_marker = workspace / "parent-exited.marker"
+    survivor_marker.unlink(missing_ok=True)
+    parent_marker.unlink(missing_ok=True)
+    started = time.monotonic()
+
+    result = process_runtime_manager.run_command(
+        command="python3",
+        args_json=f'["{script_name}"]',
+        timeout_seconds=1,
+    )
+
+    assert result["timed_out"] is True
+    assert parent_marker.is_file()
+    assert time.monotonic() - started < 4
+    time.sleep(2.2)
+    assert not survivor_marker.exists()
+
+
+def test_run_command_cancel_event_kills_in_flight_process_within_bound():
+    script_name = _write_script(
+        "wave_process_cancellation.py",
+        """
+        import time
+        time.sleep(30)
+        """,
+    )
+    cancel_event = threading.Event()
+    result_holder = {}
+
+    def run():
+        result_holder["result"] = process_runtime_manager.run_command(
+            command="python3",
+            args_json=f'["{script_name}"]',
+            timeout_seconds=30,
+            cancel_event=cancel_event,
+        )
+
+    worker = threading.Thread(target=run)
+    worker.start()
+    time.sleep(0.35)
+    cancel_event.set()
+    worker.join(timeout=3)
+
+    assert not worker.is_alive()
+    assert result_holder["result"]["cancelled"] is True
+    assert result_holder["result"]["ok"] is False
+    assert result_holder["result"]["timed_out"] is False
 
 
 def test_run_command_uses_disposable_worker_home_and_cleans_up():

@@ -3,7 +3,12 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from src.db.models import MemoryEntityType, MemoryKind
-from src.memory.hybrid_retrieval import HybridMemoryHit, _apply_contradiction_aware_ranking, retrieve_hybrid_memory
+from src.memory.hybrid_retrieval import (
+    HybridMemoryHit,
+    _apply_contradiction_aware_ranking,
+    _contradictory_hits,
+    retrieve_hybrid_memory,
+)
 from src.memory.providers import retrieve_additive_memory_provider_context
 from src.memory.repository import memory_repository
 from src.memory.types import bucket_name_for_kind
@@ -148,6 +153,208 @@ def _merge_buckets(
     return {key: tuple(values) for key, values in merged.items()}
 
 
+def _provider_context_hit(line: str) -> HybridMemoryHit | None:
+    """Parse one provider context line without retaining provider payloads."""
+
+    if not line.startswith("- [") or "] " not in line:
+        return None
+    bucket, _, payload = line.removeprefix("- [").partition("] ")
+    provider_name, separator, text = payload.partition(": ")
+    normalized_text = _normalize_provider_claim_value(text)
+    if not bucket.strip() or not separator or not provider_name.strip() or not normalized_text:
+        return None
+    return HybridMemoryHit(
+        text=normalized_text,
+        bucket=bucket.strip(),
+        source="provider",
+        score=0.0,
+    )
+
+
+def _canonical_context_hits(context: str) -> tuple[HybridMemoryHit, ...]:
+    hits: list[HybridMemoryHit] = []
+    for line in context.splitlines():
+        if not line.startswith("- [") or "] " not in line:
+            continue
+        bucket, _, text = line.removeprefix("- [").partition("] ")
+        if not bucket.strip() or not text.strip():
+            continue
+        hits.append(
+            HybridMemoryHit(
+                text=text.strip(),
+                bucket=bucket.strip(),
+                source="canonical",
+                score=1.0,
+            )
+        )
+    return tuple(hits)
+
+
+def _provider_conflicts_with_canonical(
+    provider_hit: HybridMemoryHit,
+    canonical_hits: tuple[HybridMemoryHit, ...],
+) -> bool:
+    """Return whether a provider claim contradicts an active canonical claim.
+
+    Providers may use ``external_memory`` for a cross-bucket claim. Such a
+    claim is compared with every canonical bucket; typed provider buckets are
+    compared only with the matching canonical bucket to avoid suppressing
+    unrelated project, collaborator, or preference evidence.
+    """
+
+    return any(
+        (
+            provider_hit.bucket == "external_memory"
+            or provider_hit.bucket == canonical_hit.bucket
+        )
+        and _contradictory_hits(
+            canonical_hit,
+            HybridMemoryHit(
+                text=provider_hit.text,
+                bucket=canonical_hit.bucket,
+                source=provider_hit.source,
+                score=provider_hit.score,
+            ),
+        )
+        for canonical_hit in canonical_hits
+    )
+
+
+def _normalize_provider_claim_value(value: object) -> str:
+    if not isinstance(value, str):
+        return ""
+    return " ".join(value.split())
+
+
+def _ambiguous_provider_buckets(
+    buckets: dict[str, tuple[str, ...]],
+) -> frozenset[str]:
+    ambiguous: set[str] = set()
+    for raw_bucket, values in buckets.items():
+        bucket = _normalize_provider_claim_value(raw_bucket)
+        if not bucket:
+            continue
+        if not isinstance(values, (tuple, list)):
+            ambiguous.add(bucket)
+            continue
+        if any(
+            not isinstance(value, str) or "\r" in value or "\n" in value
+            for value in values
+        ):
+            ambiguous.add(bucket)
+    return frozenset(ambiguous)
+
+
+def _normalize_provider_context_records(provider_context: str) -> tuple[str, ...]:
+    """Keep multiline provider claims attached to their record boundary."""
+
+    records: list[str] = []
+    current: list[str] = []
+    for raw_line in provider_context.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        if line.startswith("- ["):
+            if current:
+                records.append(" ".join(current))
+            current = [line]
+            continue
+        if current:
+            current.append(line)
+    if current:
+        records.append(" ".join(current))
+    return tuple(record for record in records if _provider_context_hit(record) is not None)
+
+
+def _drop_ambiguous_provider_context_buckets(
+    provider_context: str,
+    ambiguous_buckets: frozenset[str],
+) -> str:
+    if not ambiguous_buckets:
+        return provider_context
+    safe_records: list[str] = []
+    for record in _normalize_provider_context_records(provider_context):
+        provider_hit = _provider_context_hit(record)
+        if provider_hit is None:
+            continue
+        bucket = _normalize_provider_claim_value(provider_hit.bucket)
+        if bucket in ambiguous_buckets:
+            continue
+        safe_records.append(record)
+    return "\n".join(safe_records)
+
+
+def _suppress_provider_context_conflicts(
+    *,
+    canonical_context: str,
+    provider_context: str,
+) -> tuple[str, tuple[tuple[str, str], ...]]:
+    """Keep provider context advisory when it does not contradict local canon."""
+
+    canonical_hits = _canonical_context_hits(canonical_context)
+    provider_records = _normalize_provider_context_records(provider_context)
+    normalized_context = "\n".join(provider_records)
+    if not canonical_hits or not normalized_context:
+        return normalized_context, ()
+
+    retained_lines: list[str] = []
+    suppressed: list[tuple[str, str]] = []
+    for line in provider_records:
+        provider_hit = _provider_context_hit(line)
+        if provider_hit is None:
+            continue
+        if not _provider_conflicts_with_canonical(provider_hit, canonical_hits):
+            retained_lines.append(line)
+            continue
+        suppressed.append((provider_hit.bucket, provider_hit.text))
+    return "\n".join(retained_lines), tuple(suppressed)
+
+
+def _filter_provider_buckets(
+    buckets: dict[str, tuple[str, ...]],
+    suppressed: tuple[tuple[str, str], ...],
+    *,
+    excluded_buckets: frozenset[str] = frozenset(),
+) -> dict[str, tuple[str, ...]]:
+    suppressed_keys = {
+        (normalized_bucket, normalized_text)
+        for raw_bucket, raw_text in suppressed
+        if (normalized_bucket := _normalize_provider_claim_value(raw_bucket))
+        and (normalized_text := _normalize_provider_claim_value(raw_text))
+    }
+    normalized_buckets: dict[str, list[str]] = {}
+    for raw_bucket, values in buckets.items():
+        bucket = _normalize_provider_claim_value(raw_bucket)
+        if not bucket or bucket in excluded_buckets or not isinstance(values, (tuple, list)):
+            continue
+        normalized_values = normalized_buckets.setdefault(bucket, [])
+        for raw_text in values:
+            text = _normalize_provider_claim_value(raw_text)
+            if not text or (bucket, text) in suppressed_keys or text in normalized_values:
+                continue
+            normalized_values.append(text)
+    return {
+        bucket: tuple(values)
+        for bucket, values in normalized_buckets.items()
+        if values
+    }
+
+
+def _canonical_provider_conflict_diagnostic(
+    suppressed_count: int,
+) -> tuple[dict[str, object], ...]:
+    if suppressed_count <= 0:
+        return ()
+    return (
+        {
+            "ranking_policy": "canonical_first_provider_conflict_suppression",
+            "canonical_provider_conflict_suppressed_count": suppressed_count,
+            "suppression_reasons": ["canonical_memory_conflict"],
+            "authority_boundary": "provider_evidence_remains_advisory",
+        },
+    )
+
+
 def _suppress_structured_context_contradictions(
     lines: list[str],
 ) -> tuple[list[str], dict[str, tuple[str, ...]]]:
@@ -225,6 +432,17 @@ def _hybrid_suppression_count(diagnostics: tuple[dict[str, object], ...]) -> int
     return total
 
 
+def _canonical_provider_suppression_count(
+    diagnostics: tuple[dict[str, object], ...],
+) -> int:
+    total = 0
+    for item in diagnostics:
+        value = item.get("canonical_provider_conflict_suppressed_count")
+        if isinstance(value, int):
+            total += value
+    return total
+
+
 def _memory_decision_receipt(
     *,
     lane: str,
@@ -246,11 +464,13 @@ def _memory_decision_receipt(
         "suppressed_irrelevant_hit_count",
     )
     contradiction_suppression_count = _hybrid_suppression_count(retrieval_diagnostics)
+    canonical_provider_suppression_count = _canonical_provider_suppression_count(retrieval_diagnostics)
     suppression_count = (
         stale_provider_hit_count
         + quality_gate_suppressed_count
         + irrelevant_provider_hit_count
         + contradiction_suppression_count
+        + canonical_provider_suppression_count
     )
     context_changed_decision = bool(
         semantic_context.strip()
@@ -285,6 +505,7 @@ def _memory_decision_receipt(
             "quality_gate_suppressed_count": quality_gate_suppressed_count,
             "stale_provider_hit_count": stale_provider_hit_count,
             "irrelevant_provider_hit_count": irrelevant_provider_hit_count,
+            "canonical_memory_conflict_count": canonical_provider_suppression_count,
             "reasons": [
                 reason
                 for reason, count in (
@@ -292,6 +513,7 @@ def _memory_decision_receipt(
                     ("provider_quality_gate", quality_gate_suppressed_count),
                     ("stale_provider_evidence", stale_provider_hit_count),
                     ("irrelevant_provider_evidence", irrelevant_provider_hit_count),
+                    ("canonical_memory_conflict", canonical_provider_suppression_count),
                 )
                 if count
             ],
@@ -452,10 +674,31 @@ async def plan_memory_retrieval(
         limit=3,
         include_user_model=bool(provider_project_hints),
     )
+    ambiguous_provider_buckets = _ambiguous_provider_buckets(provider_retrieval.buckets)
+    provider_context_input = _drop_ambiguous_provider_context_buckets(
+        provider_retrieval.context,
+        ambiguous_provider_buckets,
+    )
     if not normalized_query:
-        semantic_context = _merge_contexts(structured_context, provider_retrieval.context)
-        buckets = _merge_buckets(structured_buckets, provider_retrieval.buckets)
-        lane = "structured_plus_provider_model" if _provider_uses_user_model(provider_retrieval.diagnostics) else "structured_only"
+        provider_context, suppressed_provider = _suppress_provider_context_conflicts(
+            canonical_context=structured_context,
+            provider_context=provider_context_input,
+        )
+        provider_buckets = _filter_provider_buckets(
+            provider_retrieval.buckets,
+            suppressed_provider,
+            excluded_buckets=ambiguous_provider_buckets,
+        )
+        retrieval_diagnostics = _canonical_provider_conflict_diagnostic(
+            len(suppressed_provider),
+        )
+        semantic_context = _merge_contexts(structured_context, provider_context)
+        buckets = _merge_buckets(structured_buckets, provider_buckets)
+        lane = (
+            "structured_plus_provider_model"
+            if provider_context and _provider_uses_user_model(provider_retrieval.diagnostics)
+            else "structured_only"
+        )
         return MemoryRetrievalPlanResult(
             semantic_context=semantic_context,
             episodic_context="",
@@ -463,16 +706,16 @@ async def plan_memory_retrieval(
             degraded=False,
             lane=lane,
             provider_diagnostics=provider_retrieval.diagnostics,
-            retrieval_diagnostics=(),
+            retrieval_diagnostics=retrieval_diagnostics,
             decision_receipt=_memory_decision_receipt(
                 lane=lane,
                 semantic_context=semantic_context,
                 episodic_context="",
                 structured_context=structured_context,
-                provider_context=provider_retrieval.context,
+                provider_context=provider_context,
                 degraded=False,
                 provider_diagnostics=provider_retrieval.diagnostics,
-                retrieval_diagnostics=(),
+                retrieval_diagnostics=retrieval_diagnostics,
                 memory_buckets=buckets,
             ),
         )
@@ -493,10 +736,27 @@ async def plan_memory_retrieval(
         limit=4 if _prefer_episodic_lane(normalized_query) else 2,
     )
     lane = "episodic" if _prefer_episodic_lane(normalized_query) else "hybrid"
-    if provider_retrieval.context:
-        lane = f"{lane}_plus_provider_model" if _provider_uses_user_model(provider_retrieval.diagnostics) else f"{lane}_plus_provider"
-    merged_semantic_context = _merge_contexts(structured_context, semantic_context, provider_retrieval.context)
-    merged_buckets = _merge_buckets(structured_buckets, semantic_buckets, provider_retrieval.buckets)
+    provider_context, suppressed_provider = _suppress_provider_context_conflicts(
+        canonical_context=_merge_contexts(structured_context, semantic_context),
+        provider_context=provider_context_input,
+    )
+    provider_buckets = _filter_provider_buckets(
+        provider_retrieval.buckets,
+        suppressed_provider,
+        excluded_buckets=ambiguous_provider_buckets,
+    )
+    retrieval_diagnostics = (
+        *hybrid.diagnostics,
+        *_canonical_provider_conflict_diagnostic(len(suppressed_provider)),
+    )
+    if provider_context:
+        lane = (
+            f"{lane}_plus_provider_model"
+            if _provider_uses_user_model(provider_retrieval.diagnostics)
+            else f"{lane}_plus_provider"
+        )
+    merged_semantic_context = _merge_contexts(structured_context, semantic_context, provider_context)
+    merged_buckets = _merge_buckets(structured_buckets, semantic_buckets, provider_buckets)
     degraded = hybrid.degraded or provider_retrieval.degraded
 
     return MemoryRetrievalPlanResult(
@@ -506,16 +766,16 @@ async def plan_memory_retrieval(
         degraded=degraded,
         lane=lane,
         provider_diagnostics=provider_retrieval.diagnostics,
-        retrieval_diagnostics=hybrid.diagnostics,
+        retrieval_diagnostics=retrieval_diagnostics,
         decision_receipt=_memory_decision_receipt(
             lane=lane,
             semantic_context=merged_semantic_context,
             episodic_context=episodic_context,
             structured_context=structured_context,
-            provider_context=provider_retrieval.context,
+            provider_context=provider_context,
             degraded=degraded,
             provider_diagnostics=provider_retrieval.diagnostics,
-            retrieval_diagnostics=hybrid.diagnostics,
+            retrieval_diagnostics=retrieval_diagnostics,
             memory_buckets=merged_buckets,
         ),
     )

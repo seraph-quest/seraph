@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from dataclasses import field
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, patch
 
@@ -19,11 +20,15 @@ from src.extensions.lifecycle import (
 from src.extensions.registry import _current_seraph_version
 from src.memory.hybrid_retrieval import HybridMemoryRetrievalResult
 from src.memory.providers import (
+    MemoryProviderAggregateResult,
     MemoryProviderHit,
     MemoryProviderRetrievalResult,
     MemoryProviderWritebackResult,
+    _filter_quality_gated_provider_hits,
     clear_memory_provider_adapters,
+    memory_provider_quality_gate_policy_payload,
     register_memory_provider_adapter,
+    retrieve_additive_memory_provider_context,
     writeback_additive_memory_providers,
 )
 from src.memory.retrieval_planner import plan_memory_retrieval
@@ -446,6 +451,232 @@ async def test_plan_memory_retrieval_merges_provider_hits_without_overriding_can
     assert retrieval.provider_diagnostics[0]["sync_policy"] == "read_augment_only"
     assert retrieval.provider_diagnostics[0]["capability_contracts_used"]["retrieval"]["operation_mode"] == "augment_recall"
     assert retrieval.provider_diagnostics[0]["runtime_state"] == "ready"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("query", ["Atlas launch status", ""])
+async def test_plan_memory_retrieval_keeps_canonical_memory_ahead_of_conflicting_provider_context(query):
+    provider_result = MemoryProviderAggregateResult(
+        context=(
+            "- [project] graph-memory: Atlas launch is on track.\n"
+            "- [collaborator] graph-memory: Alice owns Atlas launch communications."
+        ),
+        buckets={
+            "project": ("Atlas launch is on track.",),
+            "collaborator": ("Alice owns Atlas launch communications.",),
+        },
+        degraded=False,
+        diagnostics=(
+            {
+                "name": "graph-memory",
+                "capabilities_used": ["retrieval"],
+                "failed_capabilities": [],
+            },
+        ),
+    )
+
+    with (
+        patch(
+            "src.memory.retrieval_planner.build_structured_memory_context_bundle",
+            return_value=(
+                "- [project] Atlas launch is delayed.",
+                {"project": ("Atlas launch is delayed.",)},
+            ),
+        ),
+        patch(
+            "src.memory.retrieval_planner.retrieve_hybrid_memory",
+            return_value=HybridMemoryRetrievalResult(
+                context="",
+                buckets={},
+                degraded=False,
+                hits=(),
+            ),
+        ),
+        patch(
+            "src.memory.retrieval_planner.retrieve_additive_memory_provider_context",
+            return_value=provider_result,
+        ),
+    ):
+        first = await plan_memory_retrieval(query=query, active_projects=())
+        second = await plan_memory_retrieval(query=query, active_projects=())
+
+    assert first == second
+    assert "Atlas launch is delayed." in first.semantic_context
+    assert "Atlas launch is on track." not in first.semantic_context
+    assert "Alice owns Atlas launch communications." in first.semantic_context
+    assert first.memory_buckets["project"] == ("Atlas launch is delayed.",)
+    assert first.memory_buckets["collaborator"] == ("Alice owns Atlas launch communications.",)
+    conflict_diagnostic = next(
+        item
+        for item in first.retrieval_diagnostics
+        if item.get("ranking_policy") == "canonical_first_provider_conflict_suppression"
+    )
+    assert conflict_diagnostic["canonical_provider_conflict_suppressed_count"] == 1
+    assert "Atlas launch is on track." not in json.dumps(first.retrieval_diagnostics)
+    assert first.decision_receipt["suppression"]["canonical_memory_conflict_count"] == 1
+    assert "canonical_memory_conflict" in first.decision_receipt["suppression"]["reasons"]
+
+
+@pytest.mark.asyncio
+async def test_plan_memory_retrieval_filters_normalized_provider_conflict_from_buckets():
+    suppressed_text = "  Atlas launch is on track. \n"
+    provider_result = MemoryProviderAggregateResult(
+        context=(
+            f"- [project] graph-memory: {suppressed_text}"
+            "- [collaborator] graph-memory: Alice owns Atlas launch communications."
+        ),
+        buckets={
+            " project ": (suppressed_text,),
+            "collaborator": (" Alice owns Atlas launch communications. ",),
+        },
+        degraded=False,
+        diagnostics=({"name": "graph-memory", "capabilities_used": ["retrieval"]},),
+    )
+
+    with (
+        patch(
+            "src.memory.retrieval_planner.build_structured_memory_context_bundle",
+            return_value=(
+                "- [project] Atlas launch is delayed.",
+                {"project": ("Atlas launch is delayed.",)},
+            ),
+        ),
+        patch(
+            "src.memory.retrieval_planner.retrieve_hybrid_memory",
+            return_value=HybridMemoryRetrievalResult(
+                context="",
+                buckets={},
+                degraded=False,
+                hits=(),
+            ),
+        ),
+        patch(
+            "src.memory.retrieval_planner.retrieve_additive_memory_provider_context",
+            return_value=provider_result,
+        ),
+    ):
+        retrieval = await plan_memory_retrieval(query="Atlas launch status", active_projects=())
+
+    assert "Atlas launch is on track." not in retrieval.semantic_context
+    assert suppressed_text not in retrieval.semantic_context
+    assert "Atlas launch is on track." not in retrieval.memory_buckets.get("project", ())
+    assert suppressed_text not in retrieval.memory_buckets.get("project", ())
+    assert retrieval.memory_buckets["collaborator"] == (
+        "Alice owns Atlas launch communications.",
+    )
+
+
+@pytest.mark.asyncio
+async def test_plan_memory_retrieval_suppresses_multiline_provider_conflict_record():
+    suppressed_text = "Atlas launch is on track.\n- [project] graph-memory: continuation"
+    provider_result = MemoryProviderAggregateResult(
+        context=(
+            "- [project] graph-memory: Atlas launch is on track.\n"
+            "- [project] graph-memory: continuation\n"
+            "- [collaborator] graph-memory: Alice owns Atlas launch communications."
+        ),
+        buckets={
+            "project": (suppressed_text,),
+            "collaborator": ("Alice owns Atlas launch communications.",),
+        },
+        degraded=False,
+        diagnostics=({"name": "graph-memory", "capabilities_used": ["retrieval"]},),
+    )
+
+    with (
+        patch(
+            "src.memory.retrieval_planner.build_structured_memory_context_bundle",
+            return_value=(
+                "- [project] Atlas launch is delayed.",
+                {"project": ("Atlas launch is delayed.",)},
+            ),
+        ),
+        patch(
+            "src.memory.retrieval_planner.retrieve_hybrid_memory",
+            return_value=HybridMemoryRetrievalResult(
+                context="",
+                buckets={},
+                degraded=False,
+                hits=(),
+            ),
+        ),
+        patch(
+            "src.memory.retrieval_planner.retrieve_additive_memory_provider_context",
+            return_value=provider_result,
+        ),
+    ):
+        retrieval = await plan_memory_retrieval(query="Atlas launch status", active_projects=())
+
+    assert "Atlas launch is on track." not in retrieval.semantic_context
+    assert "continuation" not in retrieval.semantic_context
+    assert "Atlas launch is on track." not in retrieval.memory_buckets.get("project", ())
+    assert "continuation" not in retrieval.memory_buckets.get("project", ())
+    assert "Alice owns Atlas launch communications." in retrieval.semantic_context
+    assert retrieval.memory_buckets["collaborator"] == (
+        "Alice owns Atlas launch communications.",
+    )
+
+
+def test_provider_quality_gate_rejects_ambiguous_multiline_record_boundary():
+    accepted, suppressed_reasons = _filter_quality_gated_provider_hits(
+        (
+            _quality_hit(
+                text="Atlas launch is on track.\n- [project] graph-memory: continuation",
+                score=0.72,
+                bucket="project",
+            ),
+            _quality_hit(
+                text="Alice owns Atlas launch communications.",
+                score=0.72,
+                bucket="collaborator",
+            ),
+        ),
+        provider_declaration_complete=True,
+    )
+
+    assert [hit.text for hit in accepted] == ["Alice owns Atlas launch communications."]
+    assert suppressed_reasons["ambiguous_record_boundary"] == 1
+    assert "ambiguous_record_boundary" in memory_provider_quality_gate_policy_payload()["suppression_reasons"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("field_name", ["bucket", "provider_name"])
+async def test_provider_quality_gate_rejects_newline_in_aggregate_record_fields(field_name, tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    _write_memory_provider_extension(workspace)
+    unsafe_marker = "Injected aggregate record must not render"
+    unsafe_hit = replace(
+        _quality_hit(text=unsafe_marker, score=0.72, bucket="project"),
+        **{field_name: f"project\n{unsafe_marker}"},
+    )
+    safe_hit = _quality_hit(
+        text="Alice owns Atlas launch communications.",
+        score=0.72,
+        bucket="collaborator",
+    )
+    adapter = FakeMemoryProviderAdapter()
+
+    async def retrieve_with_unsafe_field(*, query: str, active_projects: tuple[str, ...] = (), limit: int = 4, config=None):
+        return MemoryProviderRetrievalResult(hits=(unsafe_hit, safe_hit))
+
+    adapter.retrieve = retrieve_with_unsafe_field
+    register_memory_provider_adapter(adapter)
+    try:
+        with patch.object(settings, "workspace_dir", str(workspace)):
+            aggregate = await retrieve_additive_memory_provider_context(
+                query="Atlas launch status",
+                active_projects=(),
+                limit=3,
+            )
+    finally:
+        clear_memory_provider_adapters()
+
+    assert unsafe_marker not in aggregate.context
+    assert all(unsafe_marker not in value for values in aggregate.buckets.values() for value in values)
+    assert "Alice owns Atlas launch communications." in aggregate.context
+    assert aggregate.buckets["collaborator"] == ("Alice owns Atlas launch communications.",)
+    assert aggregate.diagnostics[0]["quality_gate_suppressed_reason_counts"]["ambiguous_record_boundary"] == 1
 
 
 @pytest.mark.asyncio

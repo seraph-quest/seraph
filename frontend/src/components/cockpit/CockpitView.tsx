@@ -38,6 +38,16 @@ import {
   getDefaultPaneVisibility,
   type CockpitPaneId,
 } from "./layouts";
+import {
+  OutcomeCockpitPanel,
+  type OutcomeCockpitState,
+  type OutcomeEvidenceSummary,
+  type OutcomeGoalSummary,
+  type OutcomeResultSummary,
+  type OutcomeRouteSummary,
+  type OutcomeWorkSummary,
+  type OutcomeApprovalSummary,
+} from "./OutcomeCockpitPanel";
 import { SeraphPresencePane } from "./SeraphPresencePane";
 
 interface CockpitViewProps {
@@ -5969,6 +5979,44 @@ function collectGoalTitles(goals: GoalInfo[], limit: number): string[] {
   return titles;
 }
 
+function findCurrentGoal(goals: GoalInfo[]): GoalInfo | null {
+  const candidates: GoalInfo[] = [];
+  const visit = (items: GoalInfo[]) => {
+    items.forEach((item) => {
+      candidates.push(item);
+      if (item.children?.length) visit(item.children);
+    });
+  };
+  visit(goals);
+  const activeStatuses = new Set([
+    "active",
+    "in_progress",
+    "in-progress",
+    "running",
+    "paused",
+    "blocked",
+    "awaiting_approval",
+    "awaiting-approval",
+  ]);
+  const rank = (goal: GoalInfo) => {
+    const normalizedStatus = goal.status.trim().toLowerCase();
+    if (activeStatuses.has(normalizedStatus)) return 0;
+    if (![
+      "completed",
+      "complete",
+      "done",
+      "retired",
+      "archived",
+      "cancelled",
+      "canceled",
+    ].includes(normalizedStatus)) return 1;
+    return 2;
+  };
+  return candidates
+    .sort((left, right) => rank(left) - rank(right) || left.level.localeCompare(right.level) || left.sort_order - right.sort_order)
+    .find((goal) => rank(goal) < 2) ?? null;
+}
+
 function buildWorkflowReplayDraft(workflow: WorkflowRunRecord): string {
   if (workflow.retryFromStepDraft) {
     return workflow.retryFromStepDraft;
@@ -6962,6 +7010,10 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   const dashboard = useQuestStore((s) => s.dashboard);
   const goalTree = useQuestStore((s) => s.goalTree);
   const loadingGoals = useQuestStore((s) => s.loading);
+  const goalLoop = useQuestStore((s) => s.goalLoop);
+  const goalLoopGoalId = useQuestStore((s) => s.goalLoopGoalId);
+  const goalLoopLoading = useQuestStore((s) => s.goalLoopLoading);
+  const goalLoopError = useQuestStore((s) => s.goalLoopError);
   const refreshGoals = useQuestStore((s) => s.refresh);
 
   const handleResetWorkspace = useCallback(() => {
@@ -8129,7 +8181,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
             sourceWorkflow: entry,
             scopeLabel,
             draft: entry.retryFromStepDraft,
-            actionHandle: entry.actionHandle,
+            actionHandle: entry.actionHandle ?? undefined,
           });
         }
       }
@@ -9336,6 +9388,197 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     { label: "artifacts", value: `${m7ArtifactCount} files · ${m7PrimaryOutputPath ?? "no primary output"}` },
     { label: "next action", value: m7NextActionLabel },
   ];
+  const currentGoal = findCurrentGoal(goalTree);
+  const currentGoalLoop = currentGoal && goalLoopGoalId === currentGoal.id ? goalLoop : null;
+  const latestGoalReceipt = currentGoalLoop?.receipts?.[0] ?? null;
+  const goalOutcomeState: OutcomeCockpitState = (() => {
+    if (!currentGoal) return goalTree.length === 0 && loadingGoals ? "loading" : "empty";
+    if (loadingGoals || goalLoopLoading) return "loading";
+    if (goalLoopError) {
+      if (goalLoopError.code === "stale_goal_revision") return "stale";
+      if (goalLoopError.status === 401 || goalLoopError.status === 403 || goalLoopError.code === "authentication_required") return "unauthorized";
+      if (goalLoopError.status === 503 || goalLoopError.status === 0) return "degraded";
+      return goalLoopError.status === 502 ? "partial_metadata" : "failed";
+    }
+    if (!currentGoalLoop || currentGoalLoop.goal.revision !== (currentGoal.revision ?? currentGoalLoop.goal.revision)) return "partial_metadata";
+    if (!currentGoalLoop.criterion) return "partial_metadata";
+    const execution = latestGoalReceipt?.execution_status?.toLowerCase();
+    if (execution === "failed") return "failed";
+    if (execution === "blocked") return "blocked";
+    if (["awaiting_approval", "pending_approval", "approval_required"].includes(execution ?? "")) return "awaiting_approval";
+    return "active";
+  })();
+  const workflowLoadState = deepPaneLoadState.workflows;
+  const outcomeWorkflow = m7PrimaryWorkflow;
+  const workOutcomeState: OutcomeCockpitState = (() => {
+    if (workflowLoadState === "loading") return "loading";
+    if (workflowLoadState === "stale") return "stale";
+    if (workflowLoadState === "failed") return "degraded";
+    if (workflowLoadState === "idle") return "partial_metadata";
+    if (!outcomeWorkflow) return "empty";
+    if (outcomeWorkflow.status === "awaiting_approval") return "awaiting_approval";
+    if (outcomeWorkflow.status === "failed") return "failed";
+    if (outcomeWorkflow.status === "degraded") return "degraded";
+    if (outcomeWorkflow.status === "denied") return "blocked";
+    if (outcomeWorkflow.status === "succeeded" || outcomeWorkflow.status === "approved") return "recovered";
+    return "active";
+  })();
+  const outcomeFailedStep = outcomeWorkflow ? failedWorkflowStep(outcomeWorkflow) : null;
+  const outcomeCheckpoint = outcomeWorkflow
+    ? workflowCheckpointActions(outcomeWorkflow).find((action) => action.kind !== "retry_failed_step") ?? null
+    : null;
+  const outcomeApproval = pendingApprovals[0] ?? null;
+  const outcomeApprovalActionState = outcomeApproval ? approvalState[outcomeApproval.id] ?? null : null;
+  const approvalOutcomeState: OutcomeCockpitState = (() => {
+    if (!outcomeApproval) return "empty";
+    const status = outcomeApproval.status.toLowerCase();
+    if (!sessionId || status === "unauthorized" || status === "forbidden") return "unauthorized";
+    if (["expired", "stale", "revoked"].includes(status)) return "stale";
+    if (status === "blocked") return "blocked";
+    if (outcomeApprovalActionState?.toLowerCase().includes("fail")) return "failed";
+    return "awaiting_approval";
+  })();
+  const routeOutcomeState: OutcomeCockpitState = !runtimeAvailable
+    ? "partial_metadata"
+    : runtimeReceipt?.source === "retained"
+      ? "stale"
+      : runtimeBlocked
+        ? "blocked"
+        : runtimeDegraded || runtimeReadinessDegraded
+          ? "degraded"
+          : runtimeStatus?.effective_runtime
+            ? "active"
+            : "partial_metadata";
+  const routeReadiness = runtimeStatus?.effective_runtime?.inference_readiness;
+  const outcomeRoute: OutcomeRouteSummary = {
+    state: routeOutcomeState,
+    provider: runtimeStatus?.effective_runtime?.provider_label ?? runtimeStatus?.provider ?? "unknown",
+    model: runtimeModelLabel,
+    route: runtimeStatus?.effective_runtime?.route_label ?? runtimeRouteLabel,
+    upstream: actualFabricRoute
+      ? `${actualFabricRoute.profile_id} · receipt persisted`
+      : attemptedFabricRoute
+        ? `${attemptedFabricRoute.profile_id} · ${attemptedFabricRoute.outcome}`
+        : selectedFabricRoute?.profile_id ?? runtimeStatus?.effective_runtime?.active_profile ?? null,
+    egress: routeReadiness?.cloud_egress ?? "unknown",
+    budget: typeof routeReadiness?.cost_ceiling_microusd === "number"
+      ? `${routeReadiness.cost_ceiling_microusd} µUSD ceiling`
+      : "cost ceiling unknown",
+    queue: runtimeStatus?.effective_runtime?.queue_status_endpoint ? "status endpoint advertised" : "queue status unavailable",
+    detail: runtimeBlocked
+      ? "Runtime readiness is blocked by the backend; inspect settings and retry after recovery."
+      : routeReadiness?.status && routeReadiness.status !== "ready"
+        ? `Runtime readiness: ${routeReadiness.status.replace(/_/g, " ")}`
+        : runtimeStatus?.effective_runtime?.summary_label ?? null,
+  };
+  const outcomeGoal: OutcomeGoalSummary | null = currentGoal
+    ? {
+      id: currentGoal.id,
+      title: currentGoal.title,
+      status: currentGoal.status,
+      state: goalOutcomeState,
+      revision: currentGoal.revision ?? currentGoalLoop?.goal.revision ?? null,
+      progress: currentGoal.progress ?? null,
+      criterionId: currentGoalLoop?.criterion?.criterion_id ?? currentGoal.success_criterion?.criterion_id ?? null,
+      criterionSummary: currentGoalLoop?.criterion?.description ?? currentGoal.success_criterion?.description ?? null,
+      latestExecution: latestGoalReceipt?.execution_status ?? null,
+      latestVerification: latestGoalReceipt?.verification ?? null,
+      latestUsefulness: latestGoalReceipt?.usefulness ?? null,
+      latestLearning: latestGoalReceipt?.learning ?? null,
+    }
+    : null;
+  const outcomeWork: OutcomeWorkSummary | null = outcomeWorkflow
+    ? {
+      id: outcomeWorkflow.id,
+      label: outcomeWorkflow.workflowName,
+      status: outcomeWorkflow.status,
+      state: workOutcomeState,
+      summary: outcomeWorkflow.summary,
+      updatedAt: formatAge(outcomeWorkflow.updatedAt),
+      stepLabel: outcomeWorkflow.resumeFromStep
+        ?? outcomeWorkflow.stepRecords?.find((step) => step.status !== "succeeded")?.id
+        ?? outcomeWorkflow.resumeCheckpointLabel
+        ?? null,
+      artifactLabel: outcomeWorkflow.artifacts[0]?.filePath ?? outcomeWorkflow.artifactPaths[0] ?? null,
+      threadLabel: outcomeWorkflow.threadLabel ?? outcomeWorkflow.threadId ?? outcomeWorkflow.sessionId ?? null,
+      nextAction: outcomeApproval
+        ? `Review approval for ${outcomeApproval.tool_name}`
+        : outcomeFailedStep
+          ? `Inspect failed step ${outcomeFailedStep.id}`
+          : outcomeWorkflow.status === "running"
+            ? "Monitor backend run"
+            : workflowCanContinue(outcomeWorkflow)
+              ? `Continue ${outcomeWorkflow.resumeCheckpointLabel ?? "from the recorded checkpoint"}`
+              : "Inspect backend receipt",
+      recoveryHint: outcomeWorkflow.approvalRecoveryMessage
+        ?? outcomeFailedStep?.recoveryHint
+        ?? outcomeWorkflow.resumeCheckpointLabel
+        ?? null,
+      canInspect: true,
+      canContinue: workflowCanContinue(outcomeWorkflow),
+      canRetry: Boolean(outcomeWorkflow.retryFromStepDraft),
+      canBranch: Boolean(outcomeCheckpoint),
+    }
+    : null;
+  const outcomeApprovalSummary: OutcomeApprovalSummary | null = outcomeApproval
+    ? {
+      id: outcomeApproval.id,
+      toolLabel: [outcomeApproval.extension_display_name, outcomeApproval.extension_action].filter(Boolean).join(" · ") || outcomeApproval.tool_name,
+      summary: outcomeApproval.summary,
+      riskLevel: outcomeApproval.risk_level,
+      state: approvalOutcomeState,
+      createdAt: outcomeApproval.created_at,
+      actionStatus: outcomeApprovalActionState,
+      scope: outcomeApproval.lifecycle_boundaries ?? [],
+      permissions: outcomeApproval.permissions ? Object.keys(outcomeApproval.permissions) : [],
+      threadLabel: outcomeApproval.thread_label ?? outcomeApproval.thread_id ?? outcomeApproval.session_id ?? null,
+      authorized: Boolean(sessionId),
+    }
+    : null;
+  const latestArtifact = [...artifacts].sort((left, right) => new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime())[0] ?? null;
+  const artifactEvidenceEntry = operatorEvidenceEntries.find((entry) => entry.artifact) ?? null;
+  const outcomeEvidence: OutcomeEvidenceSummary = latestArtifact
+    ? {
+      state: "active",
+      label: latestArtifact.filePath,
+      summary: latestArtifact.summary,
+      source: latestArtifact.source,
+      createdAt: latestArtifact.createdAt,
+      provenance: artifactEvidenceEntry?.detail ?? latestArtifact.source,
+      handle: latestArtifact.id,
+    }
+    : {
+      state: auditEvents.length ? "partial_metadata" : "empty",
+      label: "No artifact receipt",
+      summary: auditEvents.length ? "Audit events are present, but no file artifact receipt is linked." : "No artifact receipt is available in the current audit window.",
+      source: "audit endpoint",
+      provenance: null,
+      handle: null,
+    };
+  const outcomeExecution = latestGoalReceipt?.execution_status ?? "unknown";
+  const outcomeVerification = latestGoalReceipt?.verification ?? "unknown";
+  const outcomeResultState: OutcomeCockpitState = !latestGoalReceipt
+    ? "partial_metadata"
+    : outcomeExecution.toLowerCase() === "failed"
+      ? "failed"
+      : outcomeExecution.toLowerCase() === "blocked"
+        ? "blocked"
+        : ["awaiting_approval", "pending_approval", "approval_required"].includes(outcomeExecution.toLowerCase())
+          ? "awaiting_approval"
+          : "active";
+  const outcomeResult: OutcomeResultSummary = {
+    state: outcomeResultState,
+    label: latestGoalReceipt?.receipt_type ?? latestGoalReceipt?.event_type ?? "No outcome receipt",
+    summary: latestGoalReceipt
+      ? [latestGoalReceipt.reason, latestGoalReceipt.artifact_ref ? `artifact ${latestGoalReceipt.artifact_ref}` : null].filter(Boolean).join(" · ") || "Receipt fields are available; inspect verification before deciding success."
+      : "The goal loop endpoint has not supplied a backend outcome receipt.",
+    source: "goal loop endpoint",
+    execution: outcomeExecution,
+    verification: outcomeVerification,
+    usefulness: latestGoalReceipt?.usefulness ?? "unknown",
+    learning: latestGoalReceipt?.learning ?? "unknown",
+    createdAt: latestGoalReceipt?.created_at ?? null,
+  };
   const m7ControlByAction = new Map(
     (operatorM7Cockpit?.fast_controls ?? []).map((control) => [control.action, control]),
   );
@@ -14141,6 +14384,58 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
             onClose={() => closeWindowPane("guardian_state_pane")}
           >
             <section className="cockpit-panel cockpit-panel--embedded">
+              <OutcomeCockpitPanel
+                goal={outcomeGoal}
+                work={outcomeWork}
+                approval={outcomeApprovalSummary}
+                route={outcomeRoute}
+                evidence={outcomeEvidence}
+                result={outcomeResult}
+                workLoadState={workflowLoadState === "failed"
+                  ? "degraded"
+                  : workflowLoadState === "idle"
+                    ? "partial_metadata"
+                    : workflowLoadState === "loaded"
+                      ? "active"
+                      : workflowLoadState}
+                onOpenPriorities={() => setQuestPanelOpen(true)}
+                onLoadWork={() => void loadWorkflowRuns()}
+                onInspectWork={() => inspectWorkflowRun(outcomeWorkflow)}
+                onOpenThread={() => {
+                  const threadId = outcomeApproval?.thread_id ?? outcomeApproval?.session_id ?? outcomeWorkflow?.threadId ?? outcomeWorkflow?.sessionId;
+                  if (threadId) void openThread(threadId);
+                }}
+                onApprove={() => {
+                  if (outcomeApproval) void handleApprovalDecision(outcomeApproval, "approve");
+                }}
+                onDeny={() => {
+                  if (outcomeApproval) void handleApprovalDecision(outcomeApproval, "deny");
+                }}
+                onInspectEvidence={() => inspectOperatorEvidenceEntry(artifactEvidenceEntry)}
+                onInspectOutcome={() => setQuestPanelOpen(true)}
+                onContinue={() => continueWorkflowRun(outcomeWorkflow)}
+                onRetry={() => {
+                  if (outcomeWorkflow?.retryFromStepDraft) {
+                    void queueLiveWorkflowResumePlan(outcomeWorkflow, {
+                      action: "retry",
+                      stepId: outcomeFailedStep?.id ?? outcomeWorkflow.resumeFromStep,
+                      fallbackDraft: outcomeWorkflow.retryFromStepDraft,
+                      label: outcomeWorkflow.workflowName,
+                    });
+                  }
+                }}
+                onBranch={() => {
+                  if (outcomeWorkflow && outcomeCheckpoint) {
+                    void queueLiveWorkflowResumePlan(outcomeWorkflow, {
+                      action: "branch",
+                      stepId: outcomeCheckpoint.stepId,
+                      actionHandle: outcomeCheckpoint.actionHandle,
+                      fallbackDraft: outcomeCheckpoint.draft,
+                      label: outcomeWorkflow.workflowName,
+                    });
+                  }
+                }}
+              />
               <div className="cockpit-operator-row">
                 <span className="cockpit-key">proof controls</span>
                 <span className="cockpit-operator-link">{renderDeepLoadState("benchmark")} · {renderDeepLoadState("m8")}</span>

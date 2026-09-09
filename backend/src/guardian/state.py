@@ -549,7 +549,13 @@ def _memory_benchmark_diagnostic_lines(
         if not isinstance(item, dict):
             continue
         ranking_policy = str(item.get("ranking_policy") or "").strip()
-        suppressed_contradictions = int(item.get("suppressed_contradiction_count") or 0)
+        suppressed_contradictions = sum(
+            int(item.get(key) or 0)
+            for key in (
+                "suppressed_contradiction_count",
+                "canonical_provider_conflict_suppressed_count",
+            )
+        )
         status_filter = str(item.get("status_filter") or "").strip()
         suppression_reasons = [
             str(reason)

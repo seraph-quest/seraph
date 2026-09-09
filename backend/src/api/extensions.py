@@ -15,6 +15,7 @@ from config.settings import settings
 from src.approval.repository import approval_repository, fingerprint_tool_call
 from src.approval.runtime import reset_runtime_context, set_runtime_context
 from src.audit.runtime import log_integration_event
+from src.auth.cancellation import assert_runtime_not_revoked
 from src.auth.service import bind_operator_principal
 from src.extensions.channel_routing import (
     SUPPORTED_CHANNEL_ROUTE_TRANSPORTS,
@@ -1350,6 +1351,7 @@ async def test_extension_package_connector(
         connector_type = str(connector.get("type") or "")
         health = connector.get("health") if isinstance(connector.get("health"), dict) else None
         if connector_type == "mcp_servers":
+            assert_runtime_not_revoked()
             return await _test_extension_mcp_connector(connector)
 
         await log_integration_event(
@@ -1445,6 +1447,7 @@ async def set_extension_package_connector_enabled(
                 connector_preview,
                 session_id=active_session_id,
             )
+        assert_runtime_not_revoked()
         result = set_extension_connector_enabled(extension_id, req.reference, enabled=req.enabled)
         await _log_extension_lifecycle_event(
             action="enable" if req.enabled else "disable",
@@ -1534,6 +1537,7 @@ async def save_extension_package_source(
                 session_id=active_session_id,
                 summary_suffix="for requested source changes",
             )
+        assert_runtime_not_revoked()
         payload = save_extension_source(extension_id, req.reference, req.content)
         await _log_extension_lifecycle_event(
             action="save_source",

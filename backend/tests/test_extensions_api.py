@@ -9,6 +9,7 @@ from starlette.requests import Request
 
 from config.settings import settings
 from src.approval.runtime import get_current_session_id, get_current_trust_principal
+from src.auth.cancellation import RuntimeRevokedError
 from src.auth.service import test_bypass_operator as _test_bypass_operator
 from src.extensions.registry import default_manifest_roots_for_workspace
 from src.runbooks.manager import runbook_manager
@@ -195,6 +196,81 @@ async def test_extension_mutators_bind_operator_context_and_redact_source_receip
     assert "secret-value" not in repr(audit_details)
     assert get_current_session_id() is None
     assert get_current_trust_principal() is None
+
+
+@pytest.mark.asyncio
+async def test_extension_mutators_recheck_revocation_before_external_or_file_effect():
+    from src.api.extensions import (
+        ExtensionConnectorTestRequest,
+        ExtensionConnectorToggleRequest,
+        ExtensionSourceSaveRequest,
+        save_extension_package_source,
+        set_extension_package_connector_enabled,
+        test_extension_package_connector,
+    )
+
+    operator = _test_bypass_operator()
+    connector = {
+        "extension_id": "seraph.example",
+        "reference": "connectors/example.yaml",
+        "name": "example",
+        "type": "mcp_servers",
+        "status": "ready",
+        "health": {"state": "ready", "ready": True},
+    }
+    extension = {
+        "id": "seraph.example",
+        "status": "ready",
+        "contributions": [
+            {
+                **connector,
+                "permission_profile": {
+                    "requires_approval": False,
+                    "lifecycle_approval_boundaries": [],
+                    "risk_level": "low",
+                },
+            }
+        ],
+    }
+    source_preview = {
+        "extension": extension,
+        "reference": "workflows/example.md",
+        "content": "old content",
+        "validation": {"valid": True},
+    }
+    revoked = RuntimeRevokedError("operator session was revoked")
+    with (
+        patch("src.api.extensions.context_manager.get_context", return_value=SimpleNamespace(approval_mode="safe")),
+        patch("src.api.extensions.assert_runtime_not_revoked", side_effect=revoked),
+        patch("src.api.extensions.get_extension_connector", return_value=connector),
+        patch("src.api.extensions._test_extension_mcp_connector", new_callable=AsyncMock) as test_connector,
+        patch("src.api.extensions.get_extension", return_value=extension),
+        patch("src.api.extensions.set_extension_connector_enabled") as set_enabled,
+        patch("src.api.extensions.get_extension_source", return_value=source_preview),
+        patch("src.api.extensions.save_extension_source") as save_source,
+    ):
+        with pytest.raises(RuntimeRevokedError):
+            await test_extension_package_connector(
+                "seraph.example",
+                ExtensionConnectorTestRequest(reference="connectors/example.yaml"),
+                _extension_mutator_request(operator, "/api/extensions/seraph.example/connectors/test"),
+            )
+        with pytest.raises(RuntimeRevokedError):
+            await set_extension_package_connector_enabled(
+                "seraph.example",
+                ExtensionConnectorToggleRequest(reference="connectors/example.yaml", enabled=True),
+                _extension_mutator_request(operator, "/api/extensions/seraph.example/connectors/enabled"),
+            )
+        with pytest.raises(RuntimeRevokedError):
+            await save_extension_package_source(
+                "seraph.example",
+                ExtensionSourceSaveRequest(reference="workflows/example.md", content="new content"),
+                _extension_mutator_request(operator, "/api/extensions/seraph.example/source"),
+            )
+
+    test_connector.assert_not_awaited()
+    set_enabled.assert_not_called()
+    save_source.assert_not_called()
 
 
 def _write_installable_extension(

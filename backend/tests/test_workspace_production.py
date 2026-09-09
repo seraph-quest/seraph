@@ -11,6 +11,7 @@ import pytest
 
 from src.workspace import (
     DuplicateWorkspaceOwnerError,
+    ProductionWorkspace,
     ProductionWorkspaceConfigurationError,
     ProductionWorkspaceError,
     ProductionWorkspaceMountError,
@@ -59,7 +60,8 @@ def test_production_resolution_binds_only_the_configured_host_root(tmp_path):
     receipt = workspace.receipt()
     assert receipt["canonical_container_mount"] == "/app/data"
     assert receipt["active_root_is_host_bind"] is False
-    assert receipt["host_bind_identity"] == "configured_path_digest_only"
+    assert receipt["host_bind_identity"] == "configured_path_and_stat_digest"
+    assert receipt["host_bind_identity_digest"] == workspace.bind_identity_digest
     assert receipt["sidecars_are_active_roots"] is False
     assert str(root) not in json.dumps(receipt, sort_keys=True)
 
@@ -91,25 +93,32 @@ def test_container_mount_requires_exact_app_data_and_safe_directory(tmp_path):
         "1 2 0:3 / /app/data rw,nosuid,nodev - ext4 /dev/test rw\n",
         encoding="utf-8",
     )
+    values = {
+        "WORKSPACE_DIR": "/app/data",
+        "BACKEND_DATA_PATH_PROD": str(mount),
+        "SERAPH_PRODUCTION_MOUNT_SOURCE": "/dev/test",
+        "SERAPH_PRODUCTION_BIND_IDENTITY": ProductionWorkspace(host_root=mount).bind_identity_digest,
+    }
     assert validate_container_workspace_mount(
-        {
-            "WORKSPACE_DIR": "/app/data",
-            "SERAPH_PRODUCTION_MOUNT_SOURCE": "/dev/test",
-        },
+        values,
         mounted_root=mount,
         mountinfo=mountinfo,
     )["canonical_mount"] is True
 
     with pytest.raises(ProductionWorkspaceMountError, match="identity is required"):
         validate_container_workspace_mount(
-            {"WORKSPACE_DIR": "/app/data"}, mounted_root=mount, mountinfo=mountinfo
+            {"WORKSPACE_DIR": "/app/data", "BACKEND_DATA_PATH_PROD": str(mount)},
+            mounted_root=mount,
+            mountinfo=mountinfo,
         )
 
     with pytest.raises(ProductionWorkspaceMountError, match="dedicated bind mount evidence"):
         validate_container_workspace_mount(
             {
                 "WORKSPACE_DIR": "/app/data",
+                "BACKEND_DATA_PATH_PROD": str(mount),
                 "SERAPH_PRODUCTION_MOUNT_SOURCE": "/dev/wrong",
+                "SERAPH_PRODUCTION_BIND_IDENTITY": ProductionWorkspace(host_root=mount).bind_identity_digest,
             },
             mounted_root=mount,
             mountinfo=mountinfo,
@@ -125,6 +134,8 @@ def test_container_mount_requires_exact_app_data_and_safe_directory(tmp_path):
             {
                 "WORKSPACE_DIR": "/app/data",
                 "SERAPH_PRODUCTION_MOUNT_SOURCE": "/dev/test",
+                "BACKEND_DATA_PATH_PROD": str(mount),
+                "SERAPH_PRODUCTION_BIND_IDENTITY": ProductionWorkspace(host_root=mount).bind_identity_digest,
             },
             mounted_root=link,
             mountinfo=mountinfo,
@@ -132,8 +143,35 @@ def test_container_mount_requires_exact_app_data_and_safe_directory(tmp_path):
 
     with pytest.raises(ProductionWorkspaceMountError):
         validate_container_workspace_mount(
-            {"WORKSPACE_DIR": "/app/data"}, mounted_root=mount, mountinfo=tmp_path / "missing"
+            {
+                "WORKSPACE_DIR": "/app/data",
+                "BACKEND_DATA_PATH_PROD": str(mount),
+                "SERAPH_PRODUCTION_MOUNT_SOURCE": "/dev/test",
+                "SERAPH_PRODUCTION_BIND_IDENTITY": ProductionWorkspace(host_root=mount).bind_identity_digest,
+            },
+            mounted_root=mount,
+            mountinfo=tmp_path / "missing",
         )
+
+
+def test_container_mount_identity_cannot_be_reused_for_a_different_directory(tmp_path):
+    mount = tmp_path / "mounted"
+    mount.mkdir()
+    other = tmp_path / "other"
+    other.mkdir()
+    mountinfo = tmp_path / "mountinfo"
+    mountinfo.write_text(
+        "1 2 0:3 / /app/data rw,nosuid,nodev - ext4 /dev/test rw\n",
+        encoding="utf-8",
+    )
+    values = {
+        "WORKSPACE_DIR": "/app/data",
+        "BACKEND_DATA_PATH_PROD": str(mount),
+        "SERAPH_PRODUCTION_MOUNT_SOURCE": "/dev/test",
+        "SERAPH_PRODUCTION_BIND_IDENTITY": ProductionWorkspace(host_root=other).bind_identity_digest,
+    }
+    with pytest.raises(ProductionWorkspaceMountError, match="does not match"):
+        validate_container_workspace_mount(values, mounted_root=mount, mountinfo=mountinfo)
 
 
 def test_maintenance_fence_rejects_duplicate_owner(tmp_path):
@@ -191,6 +229,27 @@ def test_managed_cli_backup_restore_is_redacted_and_staged(tmp_path):
     assert restore.returncode == 0, restore.stderr
     assert json.loads(restore.stdout)["status"] == "restored"
     assert (root / "soul.md").read_text(encoding="utf-8") == "canonical\n"
+
+
+def test_managed_cli_identity_is_redacted_and_reproducible(tmp_path):
+    root = _workspace(tmp_path)
+    environment = os.environ.copy()
+    environment.update(_env(root))
+    environment["PYTHONPATH"] = str(ROOT / "backend")
+    identity = subprocess.run(
+        [sys.executable, str(CLI), "--base-dir", str(tmp_path), "identity"],
+        env=environment,
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert identity.returncode == 0, identity.stderr
+    receipt = json.loads(identity.stdout)
+    assert receipt["status"] == "ready"
+    assert receipt["bind_identity"] == ProductionWorkspace(host_root=root).bind_identity_digest
+    assert str(root) not in identity.stdout
+    assert receipt["secret_values_included"] is False
 
 
 def test_managed_restore_invalidates_authority_sessions_and_optional_tokens(tmp_path):

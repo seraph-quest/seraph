@@ -44,6 +44,7 @@ from src.workspace.lifecycle import (
 )
 from src.workspace.production import (
     CANONICAL_CONTAINER_WORKSPACE,
+    BIND_IDENTITY_ENV,
     MOUNT_SOURCE_ENV,
     PRODUCTION_BIND_ENV,
     WORKSPACE_ENV,
@@ -103,6 +104,7 @@ __all__ = [
     "workspace_backup_dir",
     "workspace_restore_staging_dir",
     "CANONICAL_CONTAINER_WORKSPACE",
+    "BIND_IDENTITY_ENV",
     "MOUNT_SOURCE_ENV",
     "PRODUCTION_BIND_ENV",
     "WORKSPACE_ENV",

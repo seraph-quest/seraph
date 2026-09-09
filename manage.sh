@@ -87,6 +87,7 @@ function display_help() {
     echo "  $PROG_NAME -e prod backup"
     echo "  $PROG_NAME -e prod restore --archive <archive> --confirm"
     echo "  $PROG_NAME -e prod status"
+    echo "  $PROG_NAME -e prod identity"
     echo "  $PROG_NAME -e prod rollback --restore-id <id> --confirm"
 }
 
@@ -615,7 +616,7 @@ function production_workspace_lifecycle() {
     local lifecycle_command="$1"
     shift
     if [ "$ENV" != "prod" ]; then
-        echo "Error: workspace backup and restore are production-only commands." >&2
+        echo "Error: production workspace lifecycle commands are production-only." >&2
         return 1
     fi
 
@@ -911,7 +912,7 @@ if [ "$COMMAND" = "local" ]; then
     exit "$LOCAL_EXIT_STATUS"
 fi
 
-if [ "$COMMAND" = "backup" ] || [ "$COMMAND" = "restore" ] || [ "$COMMAND" = "status" ] || [ "$COMMAND" = "rollback" ]; then
+if [ "$COMMAND" = "backup" ] || [ "$COMMAND" = "restore" ] || [ "$COMMAND" = "status" ] || [ "$COMMAND" = "identity" ] || [ "$COMMAND" = "rollback" ]; then
     production_workspace_lifecycle "$COMMAND" "$@"
     exit $?
 fi

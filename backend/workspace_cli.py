@@ -57,6 +57,11 @@ def _parser() -> argparse.ArgumentParser:
     )
     status = subparsers.add_parser("status", help="show the durable last lifecycle result")
     status.set_defaults(command="status")
+    identity = subparsers.add_parser(
+        "identity",
+        help="print the redacted host bind identity for container preflight",
+    )
+    identity.set_defaults(command="identity")
     rollback = subparsers.add_parser("rollback", help="rollback a promoted restore")
     rollback.add_argument("--restore-id", required=True)
     rollback.add_argument(
@@ -192,6 +197,14 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
     try:
         if args.command == "status":
             return _status_receipt(workspace)
+        if args.command == "identity":
+            return {
+                "schema_version": "seraph.production-workspace-bind-identity.v1",
+                "status": "ready",
+                "bind_identity": workspace.bind_identity_digest,
+                "identity_basis": "resolved_configured_path_plus_device_inode",
+                "secret_values_included": False,
+            }
         registry = canonical_workspace_registry(workspace.host_root)
         with maintenance_fence(workspace):
             if args.command == "backup":

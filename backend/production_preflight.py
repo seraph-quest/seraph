@@ -193,8 +193,22 @@ def build_preflight_report(env: Mapping[str, str] | None = None) -> dict[str, ob
     values = env if env is not None else os.environ
     production = _value(values, "DEPLOYMENT_ENVIRONMENT").lower() in {"prod", "production"}
     checks = [_auth_check(values, production=production), _workspace_check(values)]
-    if production and _bool(_value(values, "SERAPH_PRODUCTION_MOUNT_CHECK"), default=False):
-        checks.append(_production_mount_check(values))
+    if production:
+        if _bool(_value(values, "SERAPH_PRODUCTION_MOUNT_CHECK"), default=False):
+            checks.append(_production_mount_check(values))
+        else:
+            # The documented host invocation cannot inspect a container's
+            # /proc/self/mountinfo. Keep that limitation explicit instead of
+            # silently presenting a host-static receipt as mount proof. The
+            # production Compose command sets this flag and fails closed in
+            # the container before the backend starts.
+            checks.append(
+                Check(
+                    "canonical_workspace_mount",
+                    "deferred",
+                    "container startup performs the /app/data bind identity check",
+                )
+            )
     core_status = "ready"
     if any(check.status == "invalid" for check in checks):
         core_status = "invalid"

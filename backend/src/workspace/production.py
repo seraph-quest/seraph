@@ -17,6 +17,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 import fcntl
 import hashlib
+import hmac
 import json
 import os
 from pathlib import Path
@@ -31,6 +32,7 @@ CANONICAL_CONTAINER_WORKSPACE = "/app/data"
 PRODUCTION_BIND_ENV = "BACKEND_DATA_PATH_PROD"
 WORKSPACE_ENV = "WORKSPACE_DIR"
 MOUNT_SOURCE_ENV = "SERAPH_PRODUCTION_MOUNT_SOURCE"
+BIND_IDENTITY_ENV = "SERAPH_PRODUCTION_BIND_IDENTITY"
 MAINTENANCE_LOCK_NAME = ".seraph-workspace-maintenance.lock"
 MOUNTINFO_PATH = "/proc/self/mountinfo"
 MAX_LIFECYCLE_RECEIPT_BYTES = 64 * 1024
@@ -126,6 +128,24 @@ def _existing_directory(path: Path, *, label: str) -> Path:
     return resolved
 
 
+def _bind_identity_digest(configured_path: Path, observed_root: Path) -> str:
+    """Bind a configured host path to the inode visible at the mountpoint.
+
+    The path component prevents a second directory on the same filesystem from
+    satisfying the receipt. The device/inode component is stable across a
+    Linux bind mount, allowing the container to compare its effective
+    ``/app/data`` directory with the host-generated identity without exposing a
+    host path or trusting the mount source label alone.
+    """
+    try:
+        metadata = os.stat(observed_root, follow_symlinks=False)
+    except OSError as exc:
+        raise ProductionWorkspaceMountError("production bind identity stat is unavailable") from exc
+    normalized = str(configured_path.expanduser().absolute())
+    material = f"{normalized}\x00{metadata.st_dev}:{metadata.st_ino}"
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()[:24]
+
+
 @dataclass(frozen=True)
 class ProductionWorkspace:
     """Resolved production identity and derived maintenance locations."""
@@ -152,8 +172,21 @@ class ProductionWorkspace:
     def identity_digest(self) -> str:
         return hashlib.sha256(str(self.host_root).encode("utf-8")).hexdigest()[:24]
 
+    @property
+    def bind_identity_digest(self) -> str:
+        """Return the host path plus device/inode identity used by preflight."""
+        return _bind_identity_digest(self.host_root, self.host_root)
+
     def receipt(self) -> dict[str, object]:
         """Return operator-safe ownership metadata without exposing host paths."""
+        try:
+            bind_identity = self.bind_identity_digest
+            bind_identity_status = "configured_path_and_stat_digest"
+        except ProductionWorkspaceMountError:
+            # ``status`` remains useful after an interrupted rename or missing
+            # root, but must not claim that an unavailable inode was verified.
+            bind_identity = None
+            bind_identity_status = "configured_path_digest_only_unverified"
         return {
             "schema_version": "seraph.production-workspace.v1",
             "status": "ready",
@@ -167,7 +200,8 @@ class ProductionWorkspace:
             # command owns; it does not prove what a container mounted at
             # /app/data.  The preflight supplies that separate mount receipt.
             "active_root_is_host_bind": False,
-            "host_bind_identity": "configured_path_digest_only",
+            "host_bind_identity": bind_identity_status,
+            "host_bind_identity_digest": bind_identity,
             "sidecars_are_active_roots": False,
             "secret_values_included": False,
         }
@@ -246,8 +280,34 @@ def validate_container_workspace_mount(
     _assert_no_symlink_components(path, label="production /app/data mount")
     if not os.access(path, os.R_OK | os.W_OK | os.X_OK):
         raise ProductionWorkspaceMountError("production /app/data mount is not writable")
+    raw_bind = _env_value(values, PRODUCTION_BIND_ENV)
+    if not raw_bind:
+        raise ProductionWorkspaceMountError(
+            "production configured bind path identity is required"
+        )
+    if "\x00" in raw_bind or "$" in raw_bind:
+        raise ProductionWorkspaceMountError(
+            "production configured bind path contains unresolved syntax"
+        )
+    configured_bind = Path(raw_bind).expanduser()
+    if not configured_bind.is_absolute():
+        raise ProductionWorkspaceMountError(
+            "production configured bind path must be absolute"
+        )
+    expected_bind_identity = _env_value(values, BIND_IDENTITY_ENV)
+    if not expected_bind_identity:
+        raise ProductionWorkspaceMountError(
+            "production configured bind identity is required"
+        )
+    observed_bind_identity = _bind_identity_digest(configured_bind, path)
+    if not hmac.compare_digest(observed_bind_identity, expected_bind_identity):
+        raise ProductionWorkspaceMountError(
+            "production configured bind identity does not match /app/data"
+        )
     expected_source = _env_value(values, MOUNT_SOURCE_ENV)
     mount_receipt = _mountinfo_receipt(mountinfo, expected_source=expected_source)
+    mount_receipt["bind_identity_digest"] = observed_bind_identity
+    mount_receipt["bind_identity_verified"] = True
     return {
         "schema_version": "seraph.production-workspace-mount.v1",
         "status": "ready",

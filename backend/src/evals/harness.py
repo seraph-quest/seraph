@@ -13137,10 +13137,12 @@ async def _eval_approval_explainability_surface_behavior() -> dict[str, Any]:
 async def _eval_source_adapter_evidence_behavior() -> dict[str, Any]:
     import tempfile
 
-    from src.approval.runtime import reset_runtime_context, set_runtime_context
+    from src.approval.runtime import get_current_trust_principal, reset_runtime_context, set_runtime_context
     from src.api.capabilities import _build_capability_overview
     from src.browser.sessions import browser_session_runtime
     from src.extensions.source_operations import collect_source_evidence_bundle, list_source_adapter_inventory
+
+    observed_principals: list[TrustPrincipal | None] = []
 
     class _FakeTool:
         def __init__(self, name: str, payload: list[dict[str, Any]]) -> None:
@@ -13148,6 +13150,7 @@ async def _eval_source_adapter_evidence_behavior() -> dict[str, Any]:
             self._payload = payload
 
         def __call__(self, **kwargs):
+            observed_principals.append(get_current_trust_principal())
             return self._payload
 
     workspace_dir = tempfile.mkdtemp(prefix="seraph-source-adapters-")
@@ -13240,20 +13243,26 @@ async def _eval_source_adapter_evidence_behavior() -> dict[str, Any]:
         patch("src.extensions.source_operations.mcp_manager.get_server_tools", return_value=github_tools),
         patch(
             "src.extensions.source_operations.search_web_records",
-            return_value=(
-                [
-                    {
-                        "title": "Seraph roadmap",
-                        "href": "https://example.com/roadmap",
-                        "body": "Roadmap summary for the product.",
-                    }
-                ],
-                [],
+            side_effect=lambda *_args, **_kwargs: (
+                observed_principals.append(get_current_trust_principal())
+                or (
+                    [
+                        {
+                            "title": "Seraph roadmap",
+                            "href": "https://example.com/roadmap",
+                            "body": "Roadmap summary for the product.",
+                        }
+                    ],
+                    [],
+                )
             ),
         ),
         patch(
             "src.extensions.source_operations.browse_webpage",
-            return_value="Seraph can inspect public webpages and summarize them.",
+            side_effect=lambda *_args, **_kwargs: (
+                observed_principals.append(get_current_trust_principal())
+                or "Seraph can inspect public webpages and summarize them."
+            ),
         ),
         patch("src.api.capabilities.get_base_tools_and_active_skills", return_value=([], [], "disabled")),
         patch("src.api.capabilities.get_current_tool_policy_mode", return_value="safe"),
@@ -13309,6 +13318,17 @@ async def _eval_source_adapter_evidence_behavior() -> dict[str, Any]:
 
     browser_session_runtime.reset_for_tests()
     github_adapter = next(item for item in adapter_inventory["adapters"] if item["name"] == "github-managed")
+    authority_bound = (
+        len(observed_principals) == 3
+        and all(
+            principal is not None
+            and principal.principal_id == "operator:source-evidence-eval"
+            and principal.principal_type is PrincipalType.OPERATOR
+            and principal.session_id == "session-1"
+            and AuthorityGrant.CAPABILITY_EXECUTE in principal.grants
+            for principal in observed_principals
+        )
+    )
     return {
         "adapter_count": adapter_inventory["summary"]["adapter_count"],
         "ready_adapter_count": adapter_inventory["summary"]["ready_adapter_count"],
@@ -13329,6 +13349,8 @@ async def _eval_source_adapter_evidence_behavior() -> dict[str, Any]:
         "github_runtime_server": github_bundle["items"][0]["metadata"]["runtime_server"],
         "overview_source_adapters_total": overview["summary"]["source_adapters_total"],
         "overview_source_adapters_ready": overview["summary"]["source_adapters_ready"],
+        "authority_bound": authority_bound,
+        "context_reset": get_current_trust_principal() is None,
     }
 
 

@@ -159,6 +159,7 @@ def _require_authenticated_capability_operator(request: Request) -> Authenticate
     """Require middleware-bound operator authority for capability execution."""
     operator = getattr(request.state, "operator", None)
     principal = getattr(operator, "principal", None)
+    principal_id = str(getattr(principal, "principal_id", "") or "").strip()
     session_id = str(getattr(operator, "session_id", "") or "").strip()
     principal_type = getattr(getattr(principal, "principal_type", None), "value", None) or str(
         getattr(principal, "principal_type", "") or ""
@@ -171,6 +172,7 @@ def _require_authenticated_capability_operator(request: Request) -> Authenticate
         or principal_type != PrincipalType.OPERATOR.value
         or not bool(getattr(principal, "authenticated", False))
         or bool(getattr(principal, "revoked", False))
+        or not principal_id
         or not session_id
         or principal_session_id != session_id
         or AuthorityGrant.CAPABILITY_EXECUTE.value not in grants

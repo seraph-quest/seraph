@@ -5298,6 +5298,8 @@ def test_runtime_eval_scenarios_expose_expected_details():
     assert details_by_name["source_adapter_evidence_behavior"]["github_runtime_server"] == "github"
     assert details_by_name["source_adapter_evidence_behavior"]["overview_source_adapters_total"] >= 4
     assert details_by_name["source_adapter_evidence_behavior"]["overview_source_adapters_ready"] >= 3
+    assert details_by_name["source_adapter_evidence_behavior"]["authority_bound"] is True
+    assert details_by_name["source_adapter_evidence_behavior"]["context_reset"] is True
     assert details_by_name["source_review_routine_behavior"]["daily_plan_status"] == "ready"
     assert details_by_name["source_review_routine_behavior"]["daily_ready_step_count"] >= 4
     assert details_by_name["source_review_routine_behavior"]["daily_work_items_source"] == "github-managed"

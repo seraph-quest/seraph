@@ -2193,79 +2193,89 @@ async def activate_starter_pack(name: str, request: Request):
 
 
 @router.post("/capabilities/bootstrap")
-async def bootstrap_capability(body: CapabilityBootstrapRequest):
-    overview_before = _build_capability_overview()
-    preflight = _capability_preflight_payload(
-        overview=overview_before,
-        target_type=body.target_type,
-        name=body.name,
+async def bootstrap_capability(body: CapabilityBootstrapRequest, request: Request):
+    operator = _require_authenticated_capability_operator(request)
+    active_session_id = operator.session_id
+    tokens = set_runtime_context(
+        active_session_id,
+        context_manager.get_context().approval_mode,
+        trust_principal=bind_operator_principal(operator, active_session_id),
     )
-    seen_actions: set[tuple[str, str | None, str | None, bool | None, str | None]] = set()
-    applied_actions: list[dict[str, Any]] = []
-    manual_actions: list[dict[str, Any]] = []
-
-    for _ in range(6):
-        if preflight["ready"]:
-            break
-        safe_actions = [
-            action
-            for action in preflight.get("autorepair_actions", []) or []
-            if (
-                isinstance(action, dict)
-                and str(action.get("type") or "") in _LOW_RISK_AUTOREPAIR_ACTION_TYPES
-                and _action_key(action) not in seen_actions
-            )
-        ]
-        if not safe_actions:
-            break
-        for action in _ordered_bootstrap_actions(safe_actions):
-            seen_actions.add(_action_key(action))
-            applied_actions.append(await _apply_safe_capability_action(action))
-        refreshed = _build_capability_overview()
+    try:
+        overview_before = _build_capability_overview()
         preflight = _capability_preflight_payload(
-            overview=refreshed,
+            overview=overview_before,
             target_type=body.target_type,
             name=body.name,
         )
+        seen_actions: set[tuple[str, str | None, str | None, bool | None, str | None]] = set()
+        applied_actions: list[dict[str, Any]] = []
+        manual_actions: list[dict[str, Any]] = []
 
-    manual_actions = _manual_bootstrap_actions(preflight, seen=seen_actions)
-    outcome = (
-        "ready"
-        if preflight["ready"]
-        else ("partially_repaired" if any(_action_made_progress(action) for action in applied_actions) else "blocked")
-    )
-    await log_integration_event(
-        integration_type="capability_bootstrap",
-        name=f"{body.target_type}:{body.name}",
-        outcome="succeeded" if preflight["ready"] else "degraded",
-        details={
+        for _ in range(6):
+            if preflight["ready"]:
+                break
+            safe_actions = [
+                action
+                for action in preflight.get("autorepair_actions", []) or []
+                if (
+                    isinstance(action, dict)
+                    and str(action.get("type") or "") in _LOW_RISK_AUTOREPAIR_ACTION_TYPES
+                    and _action_key(action) not in seen_actions
+                )
+            ]
+            if not safe_actions:
+                break
+            for action in _ordered_bootstrap_actions(safe_actions):
+                seen_actions.add(_action_key(action))
+                applied_actions.append(await _apply_safe_capability_action(action))
+            refreshed = _build_capability_overview()
+            preflight = _capability_preflight_payload(
+                overview=refreshed,
+                target_type=body.target_type,
+                name=body.name,
+            )
+
+        manual_actions = _manual_bootstrap_actions(preflight, seen=seen_actions)
+        outcome = (
+            "ready"
+            if preflight["ready"]
+            else ("partially_repaired" if any(_action_made_progress(action) for action in applied_actions) else "blocked")
+        )
+        await log_integration_event(
+            integration_type="capability_bootstrap",
+            name=f"{body.target_type}:{body.name}",
+            outcome="succeeded" if preflight["ready"] else "degraded",
+            details={
+                "target_type": body.target_type,
+                "ready_before": overview_before.get("summary", {}),
+                "availability_after": preflight["availability"],
+                "blocking_reasons_after": preflight["blocking_reasons"],
+                "applied_actions": applied_actions,
+                "manual_actions": manual_actions,
+                "command_ready": bool(preflight.get("command")) and preflight["ready"],
+            },
+        )
+        return {
             "target_type": body.target_type,
-            "ready_before": overview_before.get("summary", {}),
-            "availability_after": preflight["availability"],
-            "blocking_reasons_after": preflight["blocking_reasons"],
+            "name": body.name,
+            "label": preflight["label"],
+            "status": outcome,
+            "ready": preflight["ready"],
+            "availability": preflight["availability"],
+            "blocking_reasons": preflight["blocking_reasons"],
             "applied_actions": applied_actions,
             "manual_actions": manual_actions,
-            "command_ready": bool(preflight.get("command")) and preflight["ready"],
-        },
-    )
-    return {
-        "target_type": body.target_type,
-        "name": body.name,
-        "label": preflight["label"],
-        "status": outcome,
-        "ready": preflight["ready"],
-        "availability": preflight["availability"],
-        "blocking_reasons": preflight["blocking_reasons"],
-        "applied_actions": applied_actions,
-        "manual_actions": manual_actions,
-        "command": preflight["command"] if preflight["ready"] else None,
-        "parameter_schema": preflight["parameter_schema"],
-        "risk_level": preflight["risk_level"],
-        "execution_boundaries": preflight["execution_boundaries"],
-        "doctor_plan": _doctor_plan(
-            preflight=preflight,
-            applied_actions=applied_actions,
-            manual_actions=manual_actions,
-        ),
-        "overview": _build_capability_overview(),
-    }
+            "command": preflight["command"] if preflight["ready"] else None,
+            "parameter_schema": preflight["parameter_schema"],
+            "risk_level": preflight["risk_level"],
+            "execution_boundaries": preflight["execution_boundaries"],
+            "doctor_plan": _doctor_plan(
+                preflight=preflight,
+                applied_actions=applied_actions,
+                manual_actions=manual_actions,
+            ),
+            "overview": _build_capability_overview(),
+        }
+    finally:
+        reset_runtime_context(tokens)

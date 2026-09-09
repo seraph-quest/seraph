@@ -231,6 +231,23 @@ def test_active_openrouter_profile_requires_explicit_route_policy(changes, reaso
     assert profile_exclusion_reason(_profile(**changes)) == reason
 
 
+@pytest.mark.parametrize(
+    "model",
+    [
+        "ollama/llama3.2",
+        "local/gemma",
+        "openai-compatible/team-model",
+        "anthropic",
+    ],
+)
+def test_active_openrouter_profile_rejects_unqualified_or_local_model_identifiers(model):
+    assert profile_exclusion_reason(_profile(model=model)) == "openrouter_model_not_qualified"
+
+
+def test_active_openrouter_profile_accepts_provider_qualified_model_identifier():
+    assert profile_exclusion_reason(_profile(model="openai/gpt-4.1-mini")) is None
+
+
 def test_openrouter_profile_with_explicit_policy_is_accepted_and_selectable(monkeypatch):
     monkeypatch.setattr("config.settings.settings.openrouter_api_key", "openrouter-test-key")
     profile = _profile()
@@ -241,6 +258,63 @@ def test_openrouter_profile_with_explicit_policy_is_accepted_and_selectable(monk
     decision = select_route(_context(), (candidate,), _proofs(profile), now=100.0)
     assert decision.allowed is True
     assert decision.selected.profile.provider_kind == "openrouter"
+
+
+def test_active_selector_binds_target_model_and_credential_to_profile(monkeypatch):
+    monkeypatch.setattr(settings, "openrouter_api_key", "openrouter-test-key")
+    profile = _profile()
+    context = replace(_context(), allowed_provider_kinds=("openrouter",))
+
+    wrong_model = select_route(
+        context,
+        (candidate_from_profile(profile),),
+        _proofs(profile),
+        now=100.0,
+        target_model_id="openrouter/anthropic/another-model",
+        target_api_key="openrouter-test-key",
+    )
+    assert wrong_model.allowed is False
+    assert wrong_model.rejections[0].reason_code == "openrouter_model_not_allowed"
+
+    wrong_key = select_route(
+        context,
+        (candidate_from_profile(profile),),
+        _proofs(profile),
+        now=100.0,
+        target_model_id="openrouter/anthropic/claude-sonnet-4",
+        target_api_key="caller-supplied-key",
+    )
+    assert wrong_key.allowed is False
+    assert wrong_key.rejections[0].reason_code == "openrouter_credential_override_forbidden"
+
+    accepted = select_route(
+        context,
+        (candidate_from_profile(profile),),
+        _proofs(profile),
+        now=100.0,
+        target_model_id="openrouter/anthropic/claude-sonnet-4",
+        target_api_key="openrouter-test-key",
+    )
+    assert accepted.allowed is True
+
+
+def test_active_selector_reports_missing_key_as_blocked_without_transport(monkeypatch):
+    monkeypatch.setattr(settings, "openrouter_api_key", "")
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    profile = _profile()
+    context = replace(_context(), allowed_provider_kinds=("openrouter",))
+
+    decision = select_route(
+        context,
+        (candidate_from_profile(profile),),
+        _proofs(profile),
+        now=100.0,
+        target_model_id="openrouter/anthropic/claude-sonnet-4",
+        target_api_key=None,
+    )
+
+    assert decision.allowed is False
+    assert decision.rejections[0].reason_code == "credential_missing"
 
 
 def test_selector_never_uses_legacy_local_fallback_even_when_it_is_offered(monkeypatch):
@@ -268,6 +342,32 @@ def test_selector_never_uses_legacy_local_fallback_even_when_it_is_offered(monke
     assert decision.allowed is True
     assert decision.selected.profile.id == primary.id
     assert decision.rejections[0].reason_code == "provider_kind_not_allowed"
+
+
+def test_governed_preflight_rejects_caller_local_endpoint_before_transport(monkeypatch):
+    from src.llm_runtime import _governed_preflight_target
+
+    monkeypatch.setattr(settings, "openrouter_api_key", "openrouter-test-key")
+    profile = _profile()
+    context = replace(_context(), allowed_provider_kinds=("openrouter",))
+    with (
+        patch("src.llm_runtime.provider_profiles", return_value={profile.id: profile}),
+        patch("src.llm_runtime._is_target_healthy", return_value=True),
+    ):
+        decision, proof_hashes = _governed_preflight_target(
+            {
+                "profile": profile.id,
+                "model_id": profile.routing_model or profile.model,
+                "api_base": "http://127.0.0.1:8000/v1",
+                "api_key": "openrouter-test-key",
+                "source": "primary",
+            },
+            context,
+        )
+
+    assert decision.allowed is False
+    assert decision.rejections[0].reason_code == "openrouter_endpoint_not_canonical"
+    assert proof_hashes == ()
 
 
 def test_openrouter_phase_rejects_unregistered_sync_route_before_litellm(monkeypatch):
@@ -383,6 +483,36 @@ def test_operator_settings_status_excludes_legacy_profiles_from_active_profiles(
     assert local_status["model_fabric_eligible"] is False
     assert local_status["model_fabric_exclusion_reason"] == "provider_kind_not_allowed"
     assert openrouter_status["model_fabric_eligible"] is True
+
+
+def test_active_profile_readiness_surfaces_missing_key_as_configuration_required():
+    from src.api.model_fabric_settings import _active_profile_readiness
+    from src.model_fabric.configuration import WorkloadPolicy
+
+    with patch(
+        "src.api.model_fabric_settings.effective_workload_policy",
+        return_value=WorkloadPolicy(
+            "chat_agent",
+            egress_class=EgressClass.CLOUD_ALLOWED_FULL,
+            cloud_egress_acknowledged=True,
+            allowed_provider_kinds=("openrouter",),
+            max_cost_microusd=1000,
+        ),
+    ):
+        readiness = _active_profile_readiness(
+            [
+                {
+                    "id": "openrouter",
+                    "model_fabric_eligible": True,
+                    "routable": False,
+                    "non_routable_reasons": ["credential_missing"],
+                }
+            ],
+            active_profile="openrouter",
+        )
+
+    assert readiness["status"] == "configuration_required"
+    assert readiness["reasons"] == ["credential_missing"]
 
 
 def test_openrouter_embeddings_adapter_requires_embedding_capability():

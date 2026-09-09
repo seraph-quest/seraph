@@ -455,11 +455,16 @@ async def model_fabric_runtime_status(active_profile: str | None) -> dict[str, o
         "capability_probe": runtime_paths["capability_probe"],
     }
     all_profiles = _operator_profile_statuses(proof_statuses)
+    inference_readiness = _active_profile_readiness(
+        all_profiles,
+        active_profile=active_profile,
+    )
     return {
-        "status": "degraded" if degraded else "ready",
+        "status": "degraded" if degraded else inference_readiness["status"],
         "configuration_status": configured.status,
         "configuration_error": configured.error_code,
         "configured_chat_profile": active_profile,
+        "inference_readiness": inference_readiness,
         "profiles": [item for item in all_profiles if item["model_fabric_eligible"]],
         "excluded_profiles": [item for item in all_profiles if not item["model_fabric_eligible"]],
         "workload_policies": [_policy_payload(policy) for policy in configured.workload_policies],
@@ -476,6 +481,55 @@ async def model_fabric_runtime_status(active_profile: str | None) -> dict[str, o
         },
         "runtime_paths": runtime_paths,
         "workloads": workloads,
+    }
+
+
+def _active_profile_readiness(
+    profiles: list[dict[str, object]],
+    *,
+    active_profile: str | None,
+) -> dict[str, object]:
+    """Return explicit active-route readiness without probing the provider."""
+    profile_id = str(active_profile or "").strip()
+    reasons: list[str] = []
+    profile = next(
+        (
+            item
+            for item in profiles
+            if isinstance(item, dict) and str(item.get("id") or "") == profile_id
+        ),
+        None,
+    )
+    if profile is None:
+        reasons.append("active_profile_missing")
+    else:
+        if profile.get("model_fabric_eligible") is not True:
+            reasons.append(
+                "profile_ineligible:" + str(profile.get("model_fabric_exclusion_reason") or "unknown")
+            )
+        if profile.get("routable") is not True:
+            non_routable = profile.get("non_routable_reasons")
+            if isinstance(non_routable, list):
+                reasons.extend(str(reason) for reason in non_routable if str(reason).strip())
+            if not non_routable:
+                reasons.append("profile_not_routable")
+
+    policy = effective_workload_policy("chat_agent")
+    if policy.egress_class is EgressClass.LOCAL_ONLY:
+        reasons.append("chat_cloud_egress_not_allowed")
+    if not policy.cloud_egress_acknowledged:
+        reasons.append("chat_cloud_consent_missing")
+    if policy.max_cost_microusd is None:
+        reasons.append("chat_cost_ceiling_missing")
+    if set(policy.allowed_provider_kinds) != {"openrouter"}:
+        reasons.append("chat_provider_policy_missing")
+
+    deduped_reasons = list(dict.fromkeys(reasons))
+    return {
+        "status": "ready" if not deduped_reasons else "configuration_required",
+        "profile_id": profile_id or None,
+        "provider": "openrouter",
+        "reasons": deduped_reasons,
     }
 
 

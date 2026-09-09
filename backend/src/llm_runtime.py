@@ -2891,13 +2891,21 @@ async def _governed_preflight_target_async(
         api_base=str(target.get("api_base") or ""),
     )
     candidate = candidate_from_profile(profile, source=str(target.get("source") or "primary"))
+    target_model_id = target.get("model_id")
+    target_api_key = target.get("api_key")
     exclusion = (
         active_provider_exclusion_reason
         if "openrouter" in getattr(request_context, "allowed_provider_kinds", ())
         else profile_exclusion_reason
     )
     if exclusion(profile) is not None:
-        decision = select_route(request_context, (candidate,), ())
+        decision = select_route(
+            request_context,
+            (candidate,),
+            (),
+            target_model_id=str(target_model_id) if target_model_id is not None else None,
+            target_api_key=target_api_key,
+        )
         return decision, ()
     capabilities = set(request_context.requirements.capabilities)
     capabilities.update({"latency_ms", "health"})
@@ -2915,7 +2923,13 @@ async def _governed_preflight_target_async(
         )
         if proof is not None:
             proofs.append(proof)
-    decision = select_route(request_context, (candidate,), tuple(proofs))
+    decision = select_route(
+        request_context,
+        (candidate,),
+        tuple(proofs),
+        target_model_id=str(target_model_id) if target_model_id is not None else None,
+        target_api_key=target_api_key,
+    )
     return decision, tuple(proof.proof_hash for proof in proofs)
 
 

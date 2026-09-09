@@ -7,24 +7,30 @@ import os
 import re
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel
 from sqlmodel import col, select
 
 from config.settings import settings
-from src.api.capabilities import _recommended_tool_policy_mode
+from src.api.capabilities import (
+    _recommended_tool_policy_mode,
+    _require_authenticated_capability_operator,
+)
 from src.agent.session import session_manager
 from src.agent.factory import get_base_tools_and_active_skills
 from src.artifacts.registry import artifact_records_from_paths
 from src.approval.repository import fingerprint_tool_call
 from src.approval.repository import approval_repository
+from src.approval.runtime import reset_runtime_context, set_runtime_context
 from src.audit.repository import audit_repository
 from src.audit.runtime import log_integration_event
+from src.auth.service import bind_operator_principal
 from src.db.engine import get_session
 from src.db.models import AuditEvent
 from src.extensions.registry import ExtensionRegistry
 from src.extensions.registry import default_manifest_roots_for_workspace
 from src.extensions.workflow_runtimes import list_workflow_runtime_inventory
+from src.observer.manager import context_manager
 from src.extensions.workspace_package import save_workspace_contribution
 from src.tools.policy import get_current_tool_policy_mode
 from src.workflows.loader import parse_workflow_content
@@ -2065,32 +2071,42 @@ async def validate_workflow_draft(req: WorkflowDraftRequest):
 
 
 @router.post("/workflows/save")
-async def save_workflow_draft(req: WorkflowDraftRequest):
-    validation = _validate_workflow_content(req.content, path=req.file_name or "<draft>")
-    if not bool(validation["valid"]) or not isinstance(validation["workflow"], dict):
-        raise HTTPException(status_code=400, detail={"message": "Workflow draft is invalid", **validation})
-    file_name = _resolve_workflow_file_name(
-        req.file_name,
-        default_name=_safe_markdown_filename(str(validation["workflow"]["name"])),
+async def save_workflow_draft(req: WorkflowDraftRequest, request: Request):
+    operator = _require_authenticated_capability_operator(request)
+    active_session_id = operator.session_id
+    tokens = set_runtime_context(
+        active_session_id,
+        context_manager.get_context().approval_mode,
+        trust_principal=bind_operator_principal(operator, active_session_id),
     )
-    _ensure_workflow_manager_workspace_extensions_loaded()
-    target_path = str(save_workspace_contribution("workflows", file_name=file_name, content=req.content))
-    workflows = workflow_manager.reload()
-    await log_integration_event(
-        integration_type="workflow",
-        name=str(validation["workflow"]["name"]),
-        outcome="succeeded",
-        details={
-            "saved_path": target_path,
-            "validation": validation,
-        },
-    )
-    return {
-        "status": "saved",
-        "file_path": target_path,
-        "workflows": workflows,
-        **_validate_workflow_content(req.content, path=target_path),
-    }
+    try:
+        validation = _validate_workflow_content(req.content, path=req.file_name or "<draft>")
+        if not bool(validation["valid"]) or not isinstance(validation["workflow"], dict):
+            raise HTTPException(status_code=400, detail={"message": "Workflow draft is invalid", **validation})
+        file_name = _resolve_workflow_file_name(
+            req.file_name,
+            default_name=_safe_markdown_filename(str(validation["workflow"]["name"])),
+        )
+        _ensure_workflow_manager_workspace_extensions_loaded()
+        target_path = str(save_workspace_contribution("workflows", file_name=file_name, content=req.content))
+        workflows = workflow_manager.reload()
+        await log_integration_event(
+            integration_type="workflow",
+            name=str(validation["workflow"]["name"]),
+            outcome="succeeded",
+            details={
+                "saved_path": target_path,
+                "validation": validation,
+            },
+        )
+        return {
+            "status": "saved",
+            "file_path": target_path,
+            "workflows": workflows,
+            **_validate_workflow_content(req.content, path=target_path),
+        }
+    finally:
+        reset_runtime_context(tokens)
 
 
 @router.put("/workflows/{name}")

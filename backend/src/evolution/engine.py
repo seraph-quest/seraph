@@ -5,12 +5,14 @@ from __future__ import annotations
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
+import hashlib
 import json
 import os
 from pathlib import Path, PureWindowsPath
 import re
 from threading import Lock
 from typing import Any, Callable, Literal
+import uuid
 
 import yaml
 
@@ -274,6 +276,13 @@ class EvolutionReceipt:
     pr_draft: dict[str, str]
     saved_path: str | None = None
     receipt_path: str | None = None
+    proposal_id: str = ""
+    source_content_digest: str = ""
+    candidate_content_digest: str = ""
+    candidate_artifact_digest: str = ""
+    source_version: str = ""
+    candidate_handle: str = ""
+    receipt_handle: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)
@@ -876,8 +885,8 @@ def _safe_receipt_payload(receipt: EvolutionReceipt) -> dict[str, Any]:
     """
     payload = receipt.to_dict()
     benchmark_gate = payload.get("benchmark_gate")
-    saved_path_reference = _safe_artifact_reference(receipt.saved_path)
-    receipt_path_reference = _safe_artifact_reference(receipt.receipt_path)
+    saved_path_reference = _safe_artifact_reference(receipt.saved_path or receipt.candidate_handle)
+    receipt_path_reference = _safe_artifact_reference(receipt.receipt_path or receipt.receipt_handle)
     safe_gate = {
         key: benchmark_gate[key]
         for key in (
@@ -904,8 +913,20 @@ def _safe_receipt_payload(receipt: EvolutionReceipt) -> dict[str, Any]:
         safe_gate["saved_candidate_path"] = saved_path_reference
     if receipt_path_reference:
         safe_gate["receipt_path"] = receipt_path_reference
+    lineage = {
+        "proposal_id": str(receipt.proposal_id or ""),
+        "source_content_digest": str(receipt.source_content_digest or ""),
+        "source_version": str(receipt.source_version or receipt.source_content_digest or ""),
+        "candidate_content_digest": str(receipt.candidate_content_digest or ""),
+        "candidate_artifact_digest": str(receipt.candidate_artifact_digest or ""),
+        "candidate_handle": saved_path_reference,
+        "receipt_handle": receipt_path_reference,
+    }
+    safe_gate.update({key: value for key, value in lineage.items() if value})
     return {
         "target_type": receipt.target_type,
+        **lineage,
+        "lineage": lineage,
         "source_name_digest": _digest_metadata(receipt.source_name),
         # Candidate names are generated from the registered baseline asset;
         # strip control characters before retaining this stable receipt label.
@@ -948,20 +969,53 @@ def _safe_receipt_payload(receipt: EvolutionReceipt) -> dict[str, Any]:
 
 
 def _digest_metadata(value: object) -> str:
-    import hashlib
-
     return hashlib.sha256(str(value).encode("utf-8")).hexdigest()
 
 
-def _safe_artifact_reference(value: str | None) -> str:
-    """Return a package-relative artifact handle without host path details."""
+def _safe_artifact_reference(value: str | None, *, package_root: Path | None = None) -> str:
+    """Return a package-relative artifact handle without host path details.
+
+    Stored receipts may contain either a legacy absolute path or the current
+    package-relative handle.  Resolve both against the managed package and
+    return a neutral marker for anything outside it.
+    """
     if not value:
         return ""
-    package_root = workspace_capability_package_root().resolve()
+    raw_value = str(value).strip()
+    if not raw_value:
+        return ""
+    package_root = (package_root or workspace_capability_package_root()).resolve()
     try:
-        return Path(value).resolve().relative_to(package_root).as_posix()
-    except ValueError:
+        windows_path = PureWindowsPath(raw_value)
+        if windows_path.is_absolute() or bool(windows_path.drive):
+            return "artifact"
+        raw_path = Path(raw_value)
+        resolved = (
+            raw_path.resolve()
+            if raw_path.is_absolute()
+            else (package_root / raw_path).resolve()
+        )
+        return resolved.relative_to(package_root).as_posix()
+    except (OSError, RuntimeError, ValueError):
         return "artifact"
+
+
+def _sha256_bytes(value: bytes) -> str:
+    return hashlib.sha256(value).hexdigest()
+
+
+def _sha256_text(value: str) -> str:
+    return _sha256_bytes(value.encode("utf-8"))
+
+
+def _sha256_artifact(path: str | Path) -> str:
+    """Hash a managed artifact after writing it, with containment enforced."""
+    resolved_path = _validate_evolution_path_containment(Path(path)).resolve()
+    return _sha256_bytes(resolved_path.read_bytes())
+
+
+def _new_proposal_id() -> str:
+    return uuid.uuid4().hex
 
 
 def _write_receipt(candidate_file_name: str, receipt: EvolutionReceipt) -> str:
@@ -1051,6 +1105,7 @@ def evaluate_candidate(
     objective: str = "",
     observations: list[str] | None = None,
     candidate_file_name: str | None = None,
+    proposal_id: str | None = None,
 ) -> EvolutionReceipt:
     _check_evolution_boundary()
     resolved_source = _resolve_registered_target_path(target_type, source_path)
@@ -1059,7 +1114,11 @@ def evaluate_candidate(
         source_path=resolved_source,
         requested_file_name=candidate_file_name,
     )
-    base_content = resolved_source.read_text(encoding="utf-8")
+    source_bytes = resolved_source.read_bytes()
+    base_content = source_bytes.decode("utf-8")
+    source_content_digest = _sha256_bytes(source_bytes)
+    candidate_content_digest = _sha256_text(candidate_content)
+    proposal_id = str(proposal_id or "").strip() or _new_proposal_id()
     objective_text = str(objective or "").strip()
     normalized_observations = _normalize_observations(observations)
     source_metadata = _validate_target(target_type, content=base_content, path=str(resolved_source))
@@ -1118,6 +1177,14 @@ def evaluate_candidate(
             objective=objective_text,
             review_risks=review_risks,
         ),
+        proposal_id=proposal_id,
+        source_content_digest=source_content_digest,
+        candidate_content_digest=candidate_content_digest,
+        # The candidate artifact is a UTF-8 file written from this exact
+        # content.  create_evolution_proposal verifies the on-disk digest
+        # again after the O_EXCL write before persisting the receipt.
+        candidate_artifact_digest=candidate_content_digest,
+        source_version=source_content_digest,
     )
     return receipt
 
@@ -1152,6 +1219,7 @@ def create_evolution_proposal(
 ) -> dict[str, Any]:
     _check_evolution_boundary(authority_check)
     resolved_source = _resolve_registered_target_path(target_type, source_path)
+    proposal_id = _new_proposal_id()
     candidate_file_name = _candidate_file_name_for_target(
         target_type,
         source_path=resolved_source,
@@ -1179,6 +1247,7 @@ def create_evolution_proposal(
             objective=objective,
             observations=observations,
             candidate_file_name=candidate_file_name,
+            proposal_id=proposal_id,
         )
         _check_evolution_boundary(authority_check)
         saved_path = None
@@ -1189,13 +1258,28 @@ def create_evolution_proposal(
                 _check_evolution_boundary(authority_check)
                 saved_path = _save_candidate(target_type, file_name=candidate_file_name, content=candidate_content)
                 _check_evolution_boundary(authority_check)
+                candidate_artifact_digest = _sha256_artifact(saved_path)
+                _check_evolution_boundary(authority_check)
+                expected_candidate_digest = receipt.candidate_content_digest or _sha256_text(candidate_content)
+                if candidate_artifact_digest != expected_candidate_digest:
+                    raise ValueError("candidate artifact digest did not match evaluated content")
                 receipt_path = str(_receipt_path(target_type, candidate_file_name))
                 updated_gate = dict(receipt.benchmark_gate)
                 updated_gate["rollback_ready"] = True
                 updated_gate["safety_receipt_state"] = "candidate_and_receipt_written"
                 updated_gate["saved_candidate_path"] = saved_path
                 updated_gate["receipt_path"] = receipt_path
-                receipt = replace(receipt, saved_path=saved_path, benchmark_gate=updated_gate, receipt_path=receipt_path)
+                receipt = replace(
+                    receipt,
+                    saved_path=saved_path,
+                    benchmark_gate=updated_gate,
+                    receipt_path=receipt_path,
+                    proposal_id=proposal_id,
+                    candidate_content_digest=expected_candidate_digest,
+                    candidate_artifact_digest=candidate_artifact_digest,
+                    candidate_handle=_safe_artifact_reference(saved_path),
+                    receipt_handle=_safe_artifact_reference(receipt_path),
+                )
                 _check_evolution_boundary(authority_check)
                 _write_receipt(candidate_file_name, receipt)
                 _check_evolution_boundary(authority_check)

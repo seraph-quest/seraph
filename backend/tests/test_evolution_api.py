@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
+import hashlib
 import json
 from dataclasses import replace
 from pathlib import Path
@@ -1069,6 +1070,22 @@ async def test_evolution_proposal_saves_skill_review_candidate(client, tmp_path,
     assert "governed_improvement" in payload["receipt"]["benchmark_gate"]["required_benchmark_suites"]
     assert "Required tool scope is unchanged." in payload["receipt"]["change_summary"]
     assert payload["receipt"]["review_risks"]
+    candidate_path = Path(payload["receipt"]["saved_path"])
+    assert len(payload["receipt"]["proposal_id"]) == 32
+    assert payload["receipt"]["source_content_digest"] == hashlib.sha256(
+        source_path.read_bytes()
+    ).hexdigest()
+    assert payload["receipt"]["source_version"] == payload["receipt"]["source_content_digest"]
+    assert payload["receipt"]["candidate_content_digest"] == hashlib.sha256(
+        payload["candidate_content"].encode("utf-8")
+    ).hexdigest()
+    assert payload["receipt"]["candidate_artifact_digest"] == hashlib.sha256(
+        candidate_path.read_bytes()
+    ).hexdigest()
+    assert payload["receipt"]["candidate_handle"] == "skills/web-briefing-review-candidate.md"
+    assert payload["receipt"]["receipt_handle"] == (
+        "evolution/receipts/skill/web-briefing-review-candidate.json"
+    )
     stored_receipt_path = Path(payload["receipt"]["receipt_path"])
     stored_receipt_text = stored_receipt_path.read_text(encoding="utf-8")
     stored_receipt = json.loads(stored_receipt_text)
@@ -1077,6 +1094,77 @@ async def test_evolution_proposal_saves_skill_review_candidate(client, tmp_path,
     assert "The current skill does not state the review goal clearly." not in stored_receipt_text
     assert stored_receipt["candidate_name"] == "Web Briefing Review Candidate"
     assert "candidate secret" not in stored_receipt_text
+    assert stored_receipt["proposal_id"] == payload["receipt"]["proposal_id"]
+    assert stored_receipt["source_content_digest"] == payload["receipt"]["source_content_digest"]
+    assert stored_receipt["candidate_content_digest"] == payload["receipt"]["candidate_content_digest"]
+    assert stored_receipt["candidate_artifact_digest"] == payload["receipt"]["candidate_artifact_digest"]
+    assert stored_receipt["candidate_handle"] == payload["receipt"]["candidate_handle"]
+    assert stored_receipt["receipt_handle"] == payload["receipt"]["receipt_handle"]
+    assert stored_receipt["lineage"]["proposal_id"] == stored_receipt["proposal_id"]
+    assert str(candidate_path) not in stored_receipt_text
+
+
+def test_evolution_benchmark_readback_redacts_legacy_and_tampered_receipt_paths(tmp_path):
+    from src.evolution.benchmark import _recent_evolution_receipts
+
+    package_root = tmp_path / "extensions" / "workspace-capabilities"
+    receipts_dir = package_root / "evolution" / "receipts"
+    legacy_path = receipts_dir / "legacy.json"
+    current_path = receipts_dir / "prompt_pack" / "current.json"
+    current_path.parent.mkdir(parents=True)
+    legacy_path.parent.mkdir(parents=True, exist_ok=True)
+    legacy_path.write_text(
+        json.dumps(
+            {
+                "candidate_name": "Legacy Candidate",
+                "target_type": "prompt_pack",
+                "saved_path": "/private/operator/legacy-candidate.md",
+                "receipt_path": "/private/operator/legacy-receipt.json",
+                "benchmark_gate": {
+                    "saved_candidate_path": "/private/operator/legacy-candidate.md",
+                    "receipt_path": "/private/operator/legacy-receipt.json",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    current_path.write_text(
+        json.dumps(
+            {
+                "proposal_id": "proposal-current",
+                "candidate_name": "Current Candidate",
+                "target_type": "prompt_pack",
+                "source_content_digest": "source-digest",
+                "source_version": "source-version",
+                "candidate_content_digest": "candidate-digest",
+                "candidate_artifact_digest": "artifact-digest",
+                "saved_path": str(package_root / "prompts" / "current.md"),
+                "receipt_path": str(current_path),
+                "benchmark_gate": {
+                    "saved_candidate_path": str(package_root / "prompts" / "current.md"),
+                    "receipt_path": str(current_path),
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with patch(
+        "src.evolution.benchmark.workspace_capability_package_root",
+        return_value=package_root,
+    ):
+        receipts = _recent_evolution_receipts(limit=10)
+
+    legacy = next(item for item in receipts if item["candidate_name"] == "Legacy Candidate")
+    current = next(item for item in receipts if item["candidate_name"] == "Current Candidate")
+    assert legacy["saved_candidate_path"] == "artifact"
+    assert legacy["receipt_path"] == "artifact"
+    assert current["saved_candidate_path"] == "prompts/current.md"
+    assert current["receipt_path"] == "evolution/receipts/prompt_pack/current.json"
+    assert current["candidate_handle"] == "prompts/current.md"
+    assert current["receipt_handle"] == "evolution/receipts/prompt_pack/current.json"
+    assert all(not Path(item[field]).is_absolute() for item in receipts for field in ("saved_candidate_path", "receipt_path"))
+    assert "/private/operator" not in repr(receipts)
 
 
 @pytest.mark.asyncio

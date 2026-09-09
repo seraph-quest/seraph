@@ -100,9 +100,12 @@ def governed_improvement_benchmark_policy_payload() -> dict[str, Any]:
 
 
 def _recent_evolution_receipts(limit: int = 6) -> list[dict[str, Any]]:
-    receipts_dir = workspace_capability_package_root() / "evolution" / "receipts"
+    package_root = workspace_capability_package_root()
+    receipts_dir = package_root / "evolution" / "receipts"
     if not receipts_dir.exists():
         return []
+
+    from src.evolution.engine import _safe_artifact_reference
 
     receipts: list[dict[str, Any]] = []
     # Receipts are partitioned by target type so identically named candidates
@@ -116,12 +119,51 @@ def _recent_evolution_receipts(limit: int = 6) -> list[dict[str, Any]]:
         gate = payload.get("benchmark_gate")
         if not isinstance(gate, dict):
             gate = {}
+        lineage = payload.get("lineage")
+        if not isinstance(lineage, dict):
+            lineage = {}
         blocked_constraints = gate.get("blocked_constraints")
+        saved_candidate_reference = _safe_artifact_reference(
+            gate.get("saved_candidate_path")
+            or payload.get("saved_path")
+            or lineage.get("candidate_handle")
+            or payload.get("candidate_handle"),
+            package_root=package_root,
+        )
+        receipt_reference = _safe_artifact_reference(
+            gate.get("receipt_path")
+            or payload.get("receipt_path")
+            or lineage.get("receipt_handle")
+            or payload.get("receipt_handle")
+            or str(path),
+            package_root=package_root,
+        )
         receipts.append(
             {
                 "id": path.stem,
+                "proposal_id": str(payload.get("proposal_id") or lineage.get("proposal_id") or ""),
                 "candidate_name": str(payload.get("candidate_name") or path.stem),
                 "target_type": str(payload.get("target_type") or "unknown"),
+                "source_content_digest": str(
+                    payload.get("source_content_digest") or lineage.get("source_content_digest") or ""
+                ),
+                "source_version": str(
+                    payload.get("source_version") or lineage.get("source_version") or ""
+                ),
+                "candidate_content_digest": str(
+                    payload.get("candidate_content_digest") or lineage.get("candidate_content_digest") or ""
+                ),
+                "candidate_artifact_digest": str(
+                    payload.get("candidate_artifact_digest") or lineage.get("candidate_artifact_digest") or ""
+                ),
+                "candidate_handle": _safe_artifact_reference(
+                    lineage.get("candidate_handle") or payload.get("candidate_handle") or saved_candidate_reference,
+                    package_root=package_root,
+                ),
+                "receipt_handle": _safe_artifact_reference(
+                    lineage.get("receipt_handle") or payload.get("receipt_handle") or receipt_reference,
+                    package_root=package_root,
+                ),
                 "quality_state": str(payload.get("quality_state") or "unknown"),
                 "score": float(payload.get("score") or 0.0),
                 "rollout_state": str(gate.get("rollout_state") or "unknown"),
@@ -135,8 +177,8 @@ def _recent_evolution_receipts(limit: int = 6) -> list[dict[str, Any]]:
                 ]
                 if isinstance(blocked_constraints, list)
                 else [],
-                "saved_candidate_path": str(gate.get("saved_candidate_path") or payload.get("saved_path") or ""),
-                "receipt_path": str(gate.get("receipt_path") or payload.get("receipt_path") or str(path)),
+                "saved_candidate_path": saved_candidate_reference,
+                "receipt_path": receipt_reference,
                 "updated_at": datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc).isoformat(),
             }
         )

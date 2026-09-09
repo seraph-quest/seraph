@@ -630,6 +630,30 @@ function production_workspace_lifecycle() {
         --base-dir "$SCRIPT_DIR" "$lifecycle_command" "$@"
 }
 
+function refresh_production_bind_identity() {
+    # A restore or rollback atomically replaces the workspace directory and
+    # therefore changes its inode. Derive the current redacted identity on
+    # every managed production start so the container check remains strict
+    # without leaving operators to edit a stale env value by hand.
+    local identity_json identity
+    if ! identity_json=$(
+        PYTHONPATH="$SCRIPT_DIR/backend${PYTHONPATH:+:$PYTHONPATH}" \
+            python3 "$SCRIPT_DIR/backend/workspace_cli.py" \
+            --base-dir "$SCRIPT_DIR" identity
+    ); then
+        echo "Error: unable to derive the production bind identity; workspace startup is blocked." >&2
+        return 1
+    fi
+    identity=$(printf '%s' "$identity_json" | python3 -c \
+        'import json, sys; print(json.load(sys.stdin).get("bind_identity", ""))')
+    if [[ ! "$identity" =~ ^[0-9a-f]{24}$ ]]; then
+        echo "Error: production bind identity receipt is invalid; workspace startup is blocked." >&2
+        return 1
+    fi
+    export SERAPH_PRODUCTION_BIND_IDENTITY="$identity"
+    echo "Production bind identity refreshed for managed startup."
+}
+
 # --- Local Stack Functions ---
 function local_backend_is_running() {
     pid_is_running "$LOCAL_BACKEND_PID_FILE"
@@ -911,6 +935,10 @@ if [ "$COMMAND" = "local" ]; then
             ;;
     esac
     exit "$LOCAL_EXIT_STATUS"
+fi
+
+if [ "$ENV" = "prod" ] && [ "$COMMAND" = "up" ]; then
+    refresh_production_bind_identity || exit $?
 fi
 
 if [ "$COMMAND" = "backup" ] || [ "$COMMAND" = "restore" ] || [ "$COMMAND" = "status" ] || [ "$COMMAND" = "identity" ] || [ "$COMMAND" = "rollback" ]; then

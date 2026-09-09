@@ -227,7 +227,12 @@ def test_managed_cli_backup_restore_is_redacted_and_staged(tmp_path):
         check=False,
     )
     assert restore.returncode == 0, restore.stderr
-    assert json.loads(restore.stdout)["status"] == "restored"
+    restore_receipt = json.loads(restore.stdout)
+    assert restore_receipt["status"] == "restored"
+    assert restore_receipt["bind_identity_refresh"]["status"] == "ready"
+    assert restore_receipt["bind_identity_refresh"]["bind_identity"] == ProductionWorkspace(
+        host_root=root
+    ).bind_identity_digest
     assert (root / "soul.md").read_text(encoding="utf-8") == "canonical\n"
 
 

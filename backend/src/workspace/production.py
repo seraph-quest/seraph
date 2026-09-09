@@ -192,7 +192,7 @@ class ProductionWorkspace:
             bind_identity_status = "configured_path_digest_only_unverified"
         return {
             "schema_version": "seraph.production-workspace.v1",
-            "status": "ready",
+            "status": "ready" if bind_identity is not None else "blocked",
             "workspace_id": "workspace-runtime",
             "root_kind": "production",
             "canonical_container_mount": str(self.container_root),
@@ -205,6 +205,11 @@ class ProductionWorkspace:
             "active_root_is_host_bind": False,
             "host_bind_identity": bind_identity_status,
             "host_bind_identity_digest": bind_identity,
+            "operator_status": (
+                "production_workspace_bind_identity_verified"
+                if bind_identity is not None
+                else "production_workspace_bind_identity_unavailable"
+            ),
             "sidecars_are_active_roots": False,
             "secret_values_included": False,
         }

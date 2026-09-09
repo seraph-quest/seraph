@@ -80,7 +80,11 @@ alone is not treated as proof of the configured host bind:
 
 `./manage.sh -e prod identity` prints the redacted digest to place in
 `SERAPH_PRODUCTION_BIND_IDENTITY`; it never prints the host path or secret
-values.
+values. A successful managed `restore` or `rollback` returns the new digest in
+`bind_identity_refresh`, and the next managed `./manage.sh -e prod up -d`
+refreshes it automatically before Compose interpolation. Direct Compose users
+must copy that receipt (or rerun `workspace_cli.py identity`) before starting
+the container after an atomic root replacement.
 
 Archives and restore staging are derived siblings of the host bind and are not
 active workspace roots. Archives contain checksummed canonical files and

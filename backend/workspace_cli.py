@@ -233,6 +233,15 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
             else:  # pragma: no cover - argparse enforces the command set.
                 raise WorkspaceLifecycleError("unsupported workspace lifecycle command")
         receipt["workspace_ownership"] = workspace.receipt()
+        if args.command in {"restore", "rollback"}:
+            # Atomic promotion/rollback changes the active directory inode.
+            # Return the post-operation digest so direct Compose operators can
+            # refresh their env file; managed ``up`` derives it automatically.
+            receipt["bind_identity_refresh"] = {
+                "status": "ready",
+                "bind_identity": workspace.bind_identity_digest,
+                "next_managed_start": "auto_refreshes",
+            }
         receipt["secret_values_included"] = False
         _persist_result(workspace, args.command, receipt)
         return receipt

@@ -186,6 +186,9 @@ def test_managed_local_ports_bind_loopback_and_production_env_uses_prod_paths():
     assert "SERAPH_VLM_BACKEND_URL=" in env
     assert "OPERATOR_AUTH_COOKIE_SECURE=true" in env
     assert "OPERATOR_AUTH_ALLOWED_ORIGINS=https://localhost" in env
+    assert "refresh_production_bind_identity" in manage
+    assert 'COMMAND" = "up"' in manage
+    assert 'export SERAPH_PRODUCTION_BIND_IDENTITY="$identity"' in manage
 
 
 def test_prod_local_up_rejects_plain_http_before_start(tmp_path):

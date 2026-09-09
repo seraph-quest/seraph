@@ -88,6 +88,7 @@ async def test_extension_package_mutators_deny_invalid_operator_before_validatio
                     await route(*args, _extension_mutator_request(invalid_operator, path))
                 assert raised.value.status_code == 401
                 assert raised.value.detail == {"code": "authentication_required"}
+                assert "/private/secret-token" not in repr(raised.value.detail)
 
     validate.assert_not_called()
     lookup.assert_not_called()

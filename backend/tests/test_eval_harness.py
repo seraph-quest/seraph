@@ -463,6 +463,21 @@ def test_run_runtime_evals_can_filter_specific_scenarios():
     ]
 
 
+def test_mcp_test_api_audit_runtime_eval_binds_authority_and_redacts_receipts():
+    summary = asyncio.run(run_runtime_evals(["mcp_test_api_audit"]))
+
+    assert summary.total == 1
+    assert summary.failed == 0, [
+        f"{result.name}: {result.error or result.details}"
+        for result in summary.results
+        if not result.passed
+    ]
+    details = summary.results[0].details
+    assert details["route_reached"] is True
+    assert details["authority_bound"] is True
+    assert details["receipts_redacted"] is True
+
+
 def test_run_runtime_evals_rejects_unknown_scenarios():
     with pytest.raises(ValueError, match="Unknown eval scenario"):
         asyncio.run(run_runtime_evals(["missing-scenario"]))

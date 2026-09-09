@@ -2276,6 +2276,8 @@ async def test_workflow_run_control_records_live_operator_recovery_control(clien
         run_fingerprint="control",
         arguments={"query": "seraph", "file_path": "notes/brief.md"},
         approval_context={"risk_level": "medium", "execution_boundaries": ["workspace_write"]},
+        owner_kind="user",
+        owner_principal_id="operator:test-bypass",
     )
     await workflow_state_repository.record_step_started(
         run_identity=run_identity,
@@ -2351,6 +2353,8 @@ async def test_workflow_run_control_refuses_blocked_live_lease_without_resume_pl
         run_fingerprint="lease-blocked",
         arguments={"query": "seraph", "file_path": "notes/brief.md"},
         approval_context={"risk_level": "medium", "execution_boundaries": ["workspace_write"]},
+        owner_kind="user",
+        owner_principal_id="operator:test-bypass",
     )
     await workflow_state_repository.record_step_started(
         run_identity=run_identity,
@@ -4651,6 +4655,8 @@ class TestWorkflowApi:
             "thread_id": "session-1",
             "pending_approvals": [],
             "replay_block_reason": None,
+            "owner_kind": "user",
+            "owner_principal_id": operator.principal.principal_id,
         }
 
         def observe(label: str):
@@ -5024,6 +5030,8 @@ class TestWorkflowApi:
             "pending_approvals": [],
             "replay_allowed": True,
             "replay_block_reason": None,
+            "owner_kind": "user",
+            "owner_principal_id": operator.principal.principal_id,
         }
         with (
             patch("src.api.workflows._begin_rest_revocation_watch", return_value=None),
@@ -5043,7 +5051,7 @@ class TestWorkflowApi:
                 "src.api.workflows.workflow_state_repository.record_v2_operator_recovery_control",
                 new_callable=AsyncMock,
                 return_value={"receipt": {"status": "recorded"}},
-            ),
+            ) as control,
             patch(
                 "src.api.workflows.workflow_state_repository.record_v2_transition",
                 new_callable=AsyncMock,
@@ -5066,8 +5074,256 @@ class TestWorkflowApi:
         assert audit_call["details"]["detail"] == "workflow_transition_unavailable"
         assert "run_identity" not in audit_call["details"]
         assert "/tmp/private-output.txt" not in str(audit_call["details"])
+        control.assert_not_awaited()
         assert get_current_session_id() is None
         assert get_current_trust_principal() is None
+
+    @pytest.mark.asyncio
+    async def test_workflow_control_binds_owner_revision_and_records_control_after_transition(self):
+        from src.api.workflows import WorkflowRunControlRequest, control_workflow_run
+
+        operator = _test_bypass_operator()
+        run_identity = "session-1:workflow_example:revision-bound"
+        run = {
+            "run_identity": run_identity,
+            "workflow_name": "example",
+            "tool_name": "workflow_example",
+            "session_id": "session-1",
+            "pending_approvals": [],
+            "replay_allowed": True,
+            "replay_block_reason": None,
+            "owner_kind": "user",
+            "owner_principal_id": operator.principal.principal_id,
+        }
+        events: list[str] = []
+
+        async def record_transition(**_kwargs):
+            events.append("transition")
+            return {"receipt": {"status": "recorded"}}
+
+        async def record_control(**_kwargs):
+            events.append("control")
+            return {"receipt": {"status": "recorded"}}
+
+        with (
+            patch("src.api.workflows._begin_rest_revocation_watch", return_value=None),
+            patch("src.api.workflows._find_workflow_run_for_control", new_callable=AsyncMock, return_value=run),
+            patch("src.api.workflows._workflow_resume_plan", return_value={"requires_manual_execution": True}),
+            patch(
+                "src.api.workflows.workflow_state_repository.acquire_or_renew_v2_lease",
+                new_callable=AsyncMock,
+                return_value={"receipt": {"status": "acquired"}, "orchestration_v2": {"revision": 7}},
+            ),
+            patch(
+                "src.api.workflows.workflow_state_repository.build_v2_recovery_plan",
+                new_callable=AsyncMock,
+                return_value={"receipt": {"status": "ready"}},
+            ),
+            patch(
+                "src.api.workflows.workflow_state_repository.record_v2_transition",
+                new_callable=AsyncMock,
+                side_effect=record_transition,
+            ) as transition,
+            patch(
+                "src.api.workflows.workflow_state_repository.record_v2_operator_recovery_control",
+                new_callable=AsyncMock,
+                side_effect=record_control,
+            ),
+            patch("src.api.workflows.audit_repository.log_event", new_callable=AsyncMock),
+        ):
+            payload = await control_workflow_run(
+                run_identity,
+                WorkflowRunControlRequest(action="retry", step_id="checkpoint-1"),
+                _workflow_mutator_request(operator, "/api/workflows/runs/control"),
+            )
+
+        assert payload["status"] == "recorded"
+        assert transition.await_args.kwargs["expected_revision"] == 7
+        assert events == ["transition", "control"]
+
+    @pytest.mark.asyncio
+    async def test_workflow_control_refuses_durable_owner_mismatch_before_lease(self):
+        from src.api.workflows import WorkflowRunControlRequest, control_workflow_run
+
+        operator = _test_bypass_operator()
+        run = {
+            "run_identity": "session-1:workflow_example:owner-mismatch",
+            "workflow_name": "example",
+            "tool_name": "workflow_example",
+            "session_id": "session-1",
+            "pending_approvals": [],
+            "replay_allowed": True,
+            "replay_block_reason": None,
+            "owner_kind": "user",
+            "owner_principal_id": "operator:another",
+        }
+        with (
+            patch("src.api.workflows._begin_rest_revocation_watch", return_value=None),
+            patch("src.api.workflows._find_workflow_run_for_control", new_callable=AsyncMock, return_value=run),
+            patch("src.api.workflows.workflow_state_repository.acquire_or_renew_v2_lease", new_callable=AsyncMock) as lease,
+            patch("src.api.workflows.workflow_state_repository.record_v2_operator_recovery_control", new_callable=AsyncMock) as control,
+            patch("src.api.workflows.audit_repository.log_event", new_callable=AsyncMock) as audit,
+        ):
+            with pytest.raises(HTTPException) as raised:
+                await control_workflow_run(
+                    run["run_identity"],
+                    WorkflowRunControlRequest(action="retry"),
+                    _workflow_mutator_request(operator, "/api/workflows/runs/control"),
+                )
+
+        assert raised.value.status_code == 403
+        assert raised.value.detail == "workflow_owner_mismatch"
+        lease.assert_not_awaited()
+        control.assert_not_awaited()
+        assert audit.await_args.kwargs["details"]["detail"] == "workflow_owner_mismatch"
+
+    @pytest.mark.asyncio
+    async def test_workflow_resume_plan_refuses_durable_owner_mismatch_before_metadata(self):
+        from src.api.workflows import WorkflowResumePlanRequest, build_workflow_resume_plan
+
+        operator = _test_bypass_operator()
+        run = {
+            "run_identity": "session-1:workflow_example:resume-owner-mismatch",
+            "workflow_name": "example",
+            "tool_name": "workflow_example",
+            "session_id": "session-1",
+            "owner_kind": "user",
+            "owner_principal_id": "operator:another",
+            "replay_allowed": True,
+            "replay_block_reason": None,
+        }
+        with (
+            patch("src.api.workflows._begin_rest_revocation_watch", return_value=None),
+            patch("src.api.workflows._find_workflow_run_for_control", new_callable=AsyncMock, return_value=run),
+            patch("src.api.workflows._workflow_resume_plan") as resume_plan,
+            patch("src.api.workflows.audit_repository.log_event", new_callable=AsyncMock) as audit,
+        ):
+            with pytest.raises(HTTPException) as raised:
+                await build_workflow_resume_plan(
+                    run["run_identity"],
+                    _workflow_mutator_request(operator, "/api/workflows/runs/resume-plan"),
+                    WorkflowResumePlanRequest(step_id="save"),
+                )
+
+        assert raised.value.status_code == 403
+        assert raised.value.detail == "workflow_owner_mismatch"
+        resume_plan.assert_not_called()
+        assert audit.await_args.kwargs["details"]["detail"] == "workflow_owner_mismatch"
+
+    @pytest.mark.asyncio
+    async def test_workflow_recovery_denies_ownerless_and_service_rows(self):
+        from src.api.workflows import (
+            WorkflowResumePlanRequest,
+            WorkflowRunControlRequest,
+            build_workflow_resume_plan,
+            control_workflow_run,
+        )
+
+        operator = _test_bypass_operator()
+        for owner_fields in ({}, {"owner_kind": "legacy"}, {
+            "owner_kind": "service",
+            "owner_principal_id": "service:scheduled-workflow",
+        }):
+            run = {
+                "run_identity": "session-1:workflow_example:unbound-recovery",
+                "workflow_name": "example",
+                "tool_name": "workflow_example",
+                "session_id": "session-1",
+                "replay_allowed": True,
+                "replay_block_reason": None,
+                **owner_fields,
+            }
+            with (
+                patch("src.api.workflows._begin_rest_revocation_watch", return_value=None),
+                patch("src.api.workflows._find_workflow_run_for_control", new_callable=AsyncMock, return_value=run),
+                patch("src.api.workflows._workflow_resume_plan") as resume_plan,
+                patch("src.api.workflows.workflow_state_repository.acquire_or_renew_v2_lease", new_callable=AsyncMock) as lease,
+                patch("src.api.workflows.audit_repository.log_event", new_callable=AsyncMock) as audit,
+            ):
+                with pytest.raises(HTTPException) as resume_error:
+                    await build_workflow_resume_plan(
+                        run["run_identity"],
+                        _workflow_mutator_request(operator, "/api/workflows/runs/resume-plan"),
+                        WorkflowResumePlanRequest(),
+                    )
+                with pytest.raises(HTTPException) as control_error:
+                    await control_workflow_run(
+                        run["run_identity"],
+                        WorkflowRunControlRequest(action="retry"),
+                        _workflow_mutator_request(operator, "/api/workflows/runs/control"),
+                    )
+
+            assert resume_error.value.status_code == 403
+            assert control_error.value.status_code == 403
+            assert resume_error.value.detail == "workflow_owner_mismatch"
+            assert control_error.value.detail == "workflow_owner_mismatch"
+            resume_plan.assert_not_called()
+            lease.assert_not_awaited()
+            assert audit.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_workflow_control_redacts_distinct_step_ids_with_stable_digests(self):
+        from src.api.workflows import WorkflowRunControlRequest, control_workflow_run
+
+        operator = _test_bypass_operator()
+        step_ids = ["/tmp/private-step-one", "checkpoint-secret-token"]
+        transition_keys: list[str] = []
+        run = {
+            "workflow_name": "example",
+            "tool_name": "workflow_example",
+            "session_id": "session-1",
+            "pending_approvals": [],
+            "replay_allowed": True,
+            "replay_block_reason": None,
+            "owner_kind": "user",
+            "owner_principal_id": operator.principal.principal_id,
+        }
+
+        async def record_transition(**kwargs):
+            transition_keys.append(kwargs["transition_key"])
+            return {"receipt": {"status": "recorded"}}
+
+        with (
+            patch("src.api.workflows._begin_rest_revocation_watch", return_value=None),
+            patch(
+                "src.api.workflows._find_workflow_run_for_control",
+                new_callable=AsyncMock,
+                side_effect=lambda identity: {**run, "run_identity": identity},
+            ),
+            patch("src.api.workflows._workflow_resume_plan", return_value={"requires_manual_execution": True}),
+            patch(
+                "src.api.workflows.workflow_state_repository.acquire_or_renew_v2_lease",
+                new_callable=AsyncMock,
+                return_value={"receipt": {"status": "acquired"}, "orchestration_v2": {"revision": 1}},
+            ),
+            patch(
+                "src.api.workflows.workflow_state_repository.build_v2_recovery_plan",
+                new_callable=AsyncMock,
+                return_value={"receipt": {"status": "ready"}},
+            ),
+            patch("src.api.workflows.workflow_state_repository.record_v2_transition", side_effect=record_transition),
+            patch(
+                "src.api.workflows.workflow_state_repository.record_v2_operator_recovery_control",
+                new_callable=AsyncMock,
+                return_value={"receipt": {"status": "recorded"}},
+            ),
+            patch("src.api.workflows.audit_repository.log_event", new_callable=AsyncMock) as audit,
+        ):
+            for index, step_id in enumerate(step_ids):
+                await control_workflow_run(
+                    f"session-1:workflow_example:redacted-{index}",
+                    WorkflowRunControlRequest(action="retry", step_id=step_id),
+                    _workflow_mutator_request(operator, "/api/workflows/runs/control"),
+                )
+
+        assert len(transition_keys) == 2
+        assert transition_keys[0] != transition_keys[1]
+        assert all(step_id not in key for key, step_id in zip(transition_keys, step_ids, strict=True))
+        assert all("redacted_workflow_step_" in key for key in transition_keys)
+        assert all(
+            step_id not in str(call.kwargs["details"])
+            for call, step_id in zip(audit.await_args_list, step_ids, strict=True)
+        )
 
     @pytest.mark.asyncio
     async def test_workflow_control_enforces_every_replay_policy_block_before_transition(self):
@@ -5095,6 +5351,8 @@ class TestWorkflowApi:
                 "pending_approvals": [],
                 "replay_allowed": False,
                 "replay_block_reason": reason,
+                "owner_kind": "user",
+                "owner_principal_id": operator.principal.principal_id,
             }
             with (
                 patch("src.api.workflows._begin_rest_revocation_watch", return_value=None),
@@ -5175,6 +5433,8 @@ class TestWorkflowApi:
                 "pending_approvals": [],
                 "replay_allowed": True,
                 "replay_block_reason": None,
+                "owner_kind": "user",
+                "owner_principal_id": operator.principal.principal_id,
             }
             find_run.return_value = run
             with (

@@ -16,7 +16,7 @@ from smolagents import Tool
 from sqlmodel import col, select
 
 from src.audit.formatting import format_tool_call_summary, redact_for_audit
-from src.approval.runtime import get_current_session_id
+from src.approval.runtime import get_current_session_id, get_current_trust_principal
 from src.db.engine import get_session
 from src.db.models import AuditEvent
 from src.extensions.governance import build_governance_status
@@ -86,6 +86,29 @@ def _run_async(coro):
     if "value" in result:
         return result["value"]
     return None
+
+
+def _workflow_durable_owner_fields() -> dict[str, str]:
+    """Carry the authenticated execution principal into durable workflow state."""
+    principal = get_current_trust_principal()
+    if principal is None or not principal.authenticated or principal.revoked:
+        return {}
+    principal_id = str(principal.principal_id or "").strip()
+    principal_type = getattr(principal.principal_type, "value", principal.principal_type)
+    if not principal_id:
+        return {}
+    if str(principal_type or "").strip().lower() == "operator":
+        return {
+            "owner_kind": "user",
+            "owner_principal_id": principal_id,
+        }
+    if str(principal_type or "").strip().lower() == "service":
+        return {
+            "owner_kind": "service",
+            "owner_principal_id": principal_id,
+            "service_id": principal_id,
+        }
+    return {}
 
 def _run_durable_state_write(coro) -> Any | None:
     try:
@@ -905,6 +928,7 @@ class WorkflowTool(Tool):
         canonical_step_tools = [canonical_tool_name(step.tool) for step in self.workflow.steps]
         checkpoint_context: dict[str, dict[str, Any]] = {}
         start_index = 0
+        durable_owner_fields = _workflow_durable_owner_fields()
         _run_required_durable_state_write(workflow_state_repository.create_run(
             run_identity=durable_run_identity,
             workflow_name=self.workflow.name,
@@ -917,6 +941,7 @@ class WorkflowTool(Tool):
             root_run_identity=root_run_identity,
             branch_kind=control_inputs.get("_seraph_branch_kind"),
             branch_depth=int(control_inputs.get("_seraph_branch_depth") or 0),
+            **durable_owner_fields,
         ), phase="workflow_start")
         if control_inputs.get("_seraph_resume_from_step"):
             try:

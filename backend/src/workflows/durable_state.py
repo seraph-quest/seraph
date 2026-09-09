@@ -512,6 +512,9 @@ class WorkflowStateRepository:
         root_run_identity: str | None = None,
         branch_kind: str | None = None,
         branch_depth: int = 0,
+        owner_kind: str = "legacy",
+        owner_principal_id: str | None = None,
+        service_id: str | None = None,
     ) -> dict[str, Any]:
         now = _utc_now()
         async with get_session() as db:
@@ -533,6 +536,17 @@ class WorkflowStateRepository:
             run.approval_context_json = _dumps(approval_context)
             run.branch_kind = branch_kind
             run.branch_depth = int(branch_depth or 0)
+            run.owner_kind = str(owner_kind or "legacy").strip().lower() or "legacy"
+            run.owner_principal_id = (
+                str(owner_principal_id).strip()
+                if owner_principal_id is not None and str(owner_principal_id).strip()
+                else None
+            )
+            run.service_id = (
+                str(service_id).strip()
+                if service_id is not None and str(service_id).strip()
+                else None
+            )
             run.heartbeat_at = now
             run.updated_at = now
             if existing is None:

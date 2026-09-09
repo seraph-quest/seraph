@@ -22,7 +22,7 @@ from src.extensions.capability_contributions import parse_prompt_pack_definition
 from src.approval.runtime import get_current_session_id, get_current_trust_principal
 from src.auth.cancellation import assert_runtime_not_revoked
 from src.extensions.manifest import load_extension_manifest
-from src.extensions.layout import expected_layout_prefixes
+from src.extensions.layout import MANIFEST_FILENAMES, expected_layout_prefixes
 from src.extensions.registry import ExtensionRegistry, default_manifest_roots_for_workspace
 from src.extensions.workspace_package import workspace_capability_package_root
 from src.evals.benchmark_catalog import benchmark_suite_names
@@ -120,7 +120,7 @@ def _check_evolution_boundary(authority_check: EvolutionAuthorityCheck | None = 
 
 
 def validate_evolution_file_name(file_name: str) -> str:
-    """Allow only a single managed-package filename at the engine boundary."""
+    """Allow one canonical, case-insensitive managed-package filename."""
     candidate = str(file_name or "").strip()
     windows_path = PureWindowsPath(candidate)
     if (
@@ -135,7 +135,7 @@ def validate_evolution_file_name(file_name: str) -> str:
         or Path(candidate).name != candidate
     ):
         raise ValueError(EVOLUTION_FILE_NAME_ERROR)
-    return candidate
+    return candidate.casefold()
 
 
 def _candidate_file_name_for_target(
@@ -177,6 +177,7 @@ def _contribution_type_for_target(target_type: EvolutionTargetType) -> str:
 
 
 def _candidate_path(target_type: EvolutionTargetType, file_name: str) -> Path:
+    file_name = validate_evolution_file_name(file_name)
     package_root = workspace_capability_package_root()
     contribution_type = _contribution_type_for_target(target_type)
     path = package_root / expected_layout_prefixes(contribution_type)[0] / file_name
@@ -184,6 +185,7 @@ def _candidate_path(target_type: EvolutionTargetType, file_name: str) -> Path:
 
 
 def _receipt_path(target_type: EvolutionTargetType, file_name: str) -> Path:
+    file_name = validate_evolution_file_name(file_name)
     package_root = workspace_capability_package_root()
     path = package_root / "evolution" / "receipts" / target_type / f"{Path(file_name).stem}.json"
     return _validate_evolution_path_containment(path)
@@ -196,6 +198,19 @@ def _evolution_lock_path(target_type: EvolutionTargetType, file_name: str) -> Pa
     return _validate_evolution_path_containment(path)
 
 
+def _case_insensitive_path_exists(path: Path) -> bool:
+    """Return whether a destination exists under the managed name identity."""
+    try:
+        if path.exists():
+            return True
+        if not path.parent.is_dir():
+            return False
+        normalized_name = path.name.casefold()
+        return any(item.name.casefold() == normalized_name for item in path.parent.iterdir())
+    except (OSError, RuntimeError) as exc:
+        raise ValueError(EVOLUTION_FILE_NAME_ERROR) from exc
+
+
 def _assert_review_candidate_destination_available(
     target_type: EvolutionTargetType,
     *,
@@ -206,20 +221,25 @@ def _assert_review_candidate_destination_available(
     candidate_path = _candidate_path(target_type, file_name)
     receipt_path = _receipt_path(target_type, file_name)
     package_root = workspace_capability_package_root().resolve()
-    manifest_path = package_root / "manifest.yaml"
     manifest_declares_candidate = False
-    if manifest_path.is_file():
+    relative_candidate_path = candidate_path.resolve().relative_to(package_root).as_posix().casefold()
+    for manifest_name in MANIFEST_FILENAMES:
+        manifest_path = package_root / manifest_name
+        if not manifest_path.is_file():
+            continue
         try:
             manifest = load_extension_manifest(manifest_path)
         except ValueError as exc:
             raise ValueError(EVOLUTION_FILE_NAME_ERROR) from exc
-        relative_candidate_path = candidate_path.resolve().relative_to(package_root).as_posix()
         declared_paths = getattr(manifest.contributes, _contribution_type_for_target(target_type), ())
-        manifest_declares_candidate = relative_candidate_path in declared_paths
+        manifest_declares_candidate = manifest_declares_candidate or any(
+            str(declared_path).casefold() == relative_candidate_path
+            for declared_path in declared_paths
+        )
     if (
         candidate_path.resolve() == source_path.resolve()
-        or candidate_path.exists()
-        or receipt_path.exists()
+        or _case_insensitive_path_exists(candidate_path)
+        or _case_insensitive_path_exists(receipt_path)
         or manifest_declares_candidate
     ):
         raise ValueError(EVOLUTION_FILE_NAME_ERROR)
@@ -1253,6 +1273,8 @@ def create_evolution_proposal(
             file_name=candidate_file_name,
         )
         _check_evolution_boundary(authority_check)
+        source_digest_before_generation = _sha256_bytes(resolved_source.read_bytes())
+        _check_evolution_boundary(authority_check)
         candidate_name, candidate_content = generate_candidate_content(
             target_type,
             source_path=str(resolved_source),
@@ -1270,9 +1292,17 @@ def create_evolution_proposal(
             proposal_id=proposal_id,
         )
         _check_evolution_boundary(authority_check)
+        if receipt.source_content_digest and receipt.source_content_digest != source_digest_before_generation:
+            raise ValueError("source content changed during evolution proposal")
         saved_path = None
         receipt_path = None
         if not receipt.blocked and receipt.score >= 0.7:
+            _check_evolution_boundary(authority_check)
+            if receipt.source_content_digest:
+                current_source_digest = _sha256_bytes(resolved_source.read_bytes())
+                if current_source_digest != receipt.source_content_digest:
+                    raise ValueError("source content changed during evolution proposal")
+            _check_evolution_boundary(authority_check)
             snapshot = _evolution_artifact_snapshot(target_type, candidate_file_name=candidate_file_name)
             try:
                 _check_evolution_boundary(authority_check)

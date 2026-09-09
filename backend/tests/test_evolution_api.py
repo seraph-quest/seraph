@@ -764,6 +764,52 @@ def test_evolution_engine_serializes_distinct_sources_for_same_candidate_destina
     assert str(failures[0]) == EVOLUTION_FILE_NAME_ERROR
 
 
+def test_evolution_engine_normalizes_case_variant_destination_identity(tmp_path):
+    from src.evolution.engine import (
+        _assert_review_candidate_destination_available,
+        _candidate_file_name_for_target,
+        _candidate_path,
+        _evolution_lock_path,
+        _receipt_path,
+        EVOLUTION_FILE_NAME_ERROR,
+    )
+
+    source_path = tmp_path / "review.md"
+    source_path.write_text("# Baseline\n", encoding="utf-8")
+    with patch("src.evolution.engine.settings.workspace_dir", str(tmp_path)):
+        canonical_name = _candidate_file_name_for_target(
+            "prompt_pack",
+            source_path=source_path,
+            requested_file_name="Review-Review-Candidate.MD",
+        )
+        assert canonical_name == "review-review-candidate.md"
+        assert _candidate_path("prompt_pack", "REVIEW-REVIEW-CANDIDATE.MD") == _candidate_path(
+            "prompt_pack", canonical_name
+        )
+        assert _receipt_path("prompt_pack", "REVIEW-REVIEW-CANDIDATE.MD") == _receipt_path(
+            "prompt_pack", canonical_name
+        )
+        assert _evolution_lock_path("prompt_pack", "REVIEW-REVIEW-CANDIDATE.MD") == _evolution_lock_path(
+            "prompt_pack", canonical_name
+        )
+
+        case_variant_path = (
+            tmp_path
+            / "extensions"
+            / "workspace-capabilities"
+            / "prompts"
+            / "Review-Review-Candidate.MD"
+        )
+        case_variant_path.parent.mkdir(parents=True, exist_ok=True)
+        case_variant_path.write_text("existing candidate\n", encoding="utf-8")
+        with pytest.raises(ValueError, match=EVOLUTION_FILE_NAME_ERROR):
+            _assert_review_candidate_destination_available(
+                "prompt_pack",
+                source_path=source_path,
+                file_name=canonical_name,
+            )
+
+
 def test_evolution_engine_serializes_destination_across_processes(tmp_path):
     context = multiprocessing.get_context("spawn")
     ready = context.Event()
@@ -844,6 +890,104 @@ def test_evolution_engine_rejects_manifest_declared_candidate_before_generation(
 
     assert not candidate_path.exists()
     assert (package_root / "manifest.yaml").read_text(encoding="utf-8") == manifest_text
+
+
+def test_evolution_engine_rejects_manifest_yml_declared_candidate_before_generation(tmp_path):
+    from src.evolution.engine import EVOLUTION_FILE_NAME_ERROR, create_evolution_proposal
+
+    operator = test_bypass_operator()
+    source_path = tmp_path / "review.md"
+    source_path.write_text("# Baseline\n", encoding="utf-8")
+    package_root = tmp_path / "extensions" / "workspace-capabilities"
+    _write_workspace_extension_manifest(
+        package_root,
+        contribution_type="prompt_packs",
+        relative_path="prompts/review-review-candidate.md",
+    )
+    manifest_yaml = package_root / "manifest.yaml"
+    manifest_yml = package_root / "manifest.yml"
+    manifest_yaml.rename(manifest_yml)
+    manifest_text = manifest_yml.read_text(encoding="utf-8")
+    candidate_path = package_root / "prompts" / "review-review-candidate.md"
+    tokens = set_runtime_context(operator.session_id, "safe", trust_principal=operator.principal)
+    try:
+        with (
+            patch("src.evolution.engine.settings.workspace_dir", str(tmp_path)),
+            patch("src.evolution.engine._resolve_registered_target_path", return_value=source_path),
+            patch("src.evolution.engine.generate_candidate_content") as generate,
+        ):
+            with pytest.raises(ValueError, match=EVOLUTION_FILE_NAME_ERROR):
+                create_evolution_proposal(
+                    "prompt_pack",
+                    source_path=str(source_path),
+                    file_name="REVIEW-REVIEW-CANDIDATE.MD",
+                )
+        generate.assert_not_called()
+    finally:
+        reset_runtime_context(tokens)
+
+    assert not candidate_path.exists()
+    assert manifest_yml.read_text(encoding="utf-8") == manifest_text
+
+
+def test_evolution_engine_rechecks_source_digest_before_saving_candidate(tmp_path):
+    from src.evolution.engine import EvolutionReceipt, create_evolution_proposal
+
+    operator = test_bypass_operator()
+    source_path = tmp_path / "review.md"
+    source_path.write_text("# Baseline\n", encoding="utf-8")
+    source_digest = hashlib.sha256(source_path.read_bytes()).hexdigest()
+    receipt = EvolutionReceipt(
+        target_type="prompt_pack",
+        source_path=str(source_path),
+        source_name="Review",
+        candidate_name="Review Review Candidate",
+        candidate_file_name="review-review-candidate.md",
+        valid=True,
+        blocked=False,
+        score=0.8,
+        quality_state="guarded",
+        objective="improve review",
+        observations=(),
+        constraints=(),
+        evals=(),
+        change_summary=("summary",),
+        review_risks=("risk",),
+        benchmark_gate={},
+        pr_draft={},
+        source_content_digest=source_digest,
+    )
+
+    def generate_candidate(*_args, **_kwargs):
+        source_path.write_text("# Mutated baseline\n", encoding="utf-8")
+        return "Review Review Candidate", "# Candidate\n"
+
+    operator_tokens = set_runtime_context(operator.session_id, "safe", trust_principal=operator.principal)
+    try:
+        with (
+            patch("src.evolution.engine.settings.workspace_dir", str(tmp_path)),
+            patch("src.evolution.engine._resolve_registered_target_path", return_value=source_path),
+            patch("src.evolution.engine.generate_candidate_content", side_effect=generate_candidate),
+            patch("src.evolution.engine.evaluate_candidate", return_value=receipt),
+            patch("src.evolution.engine._save_candidate") as save_candidate,
+        ):
+            with pytest.raises(ValueError, match="source content changed"):
+                create_evolution_proposal(
+                    "prompt_pack",
+                    source_path=str(source_path),
+                    file_name="review-review-candidate.md",
+                )
+        save_candidate.assert_not_called()
+    finally:
+        reset_runtime_context(operator_tokens)
+
+    assert not (
+        tmp_path
+        / "extensions"
+        / "workspace-capabilities"
+        / "prompts"
+        / "review-review-candidate.md"
+    ).exists()
 
 
 def test_evolution_engine_keeps_saved_candidate_unregistered_until_promotion(tmp_path):
@@ -1233,6 +1377,75 @@ def test_evolution_benchmark_readback_redacts_legacy_and_tampered_receipt_paths(
     assert current["receipt_handle"] == "evolution/receipts/prompt_pack/current.json"
     assert all(not Path(item[field]).is_absolute() for item in receipts for field in ("saved_candidate_path", "receipt_path"))
     assert "/private/operator" not in repr(receipts)
+
+
+def test_evolution_benchmark_readback_tolerates_tampered_types_and_file_races(tmp_path, monkeypatch):
+    from src.evolution.benchmark import _recent_evolution_receipts
+
+    package_root = tmp_path / "extensions" / "workspace-capabilities"
+    receipts_dir = package_root / "evolution" / "receipts"
+    receipts_dir.mkdir(parents=True)
+    (receipts_dir / "valid.json").write_text(
+        json.dumps(
+            {
+                "candidate_name": "Valid Candidate",
+                "target_type": "prompt_pack",
+                "score": "0.75",
+                "benchmark_gate": {"rollback_ready": True},
+            }
+        ),
+        encoding="utf-8",
+    )
+    (receipts_dir / "malformed.json").write_text(
+        json.dumps(
+            {
+                "candidate_name": {"unexpected": "mapping"},
+                "target_type": ["prompt_pack"],
+                "score": {"unexpected": "mapping"},
+                "benchmark_gate": {
+                    "rollback_ready": {"unexpected": "mapping"},
+                    "blocked_constraints": {"unexpected": "mapping"},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    (receipts_dir / "non-mapping.json").write_text("[\"tampered\"]", encoding="utf-8")
+    (receipts_dir / "stat-race.json").write_text("{}", encoding="utf-8")
+    (receipts_dir / "read-race.json").write_text("{}", encoding="utf-8")
+
+    original_stat = Path.stat
+    original_read_text = Path.read_text
+
+    def raced_stat(path, *args, **kwargs):
+        if path.name == "stat-race.json":
+            raise FileNotFoundError(path)
+        return original_stat(path, *args, **kwargs)
+
+    def raced_read_text(path, *args, **kwargs):
+        if path.name == "read-race.json":
+            raise FileNotFoundError(path)
+        return original_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", raced_stat)
+    monkeypatch.setattr(Path, "read_text", raced_read_text)
+    with patch(
+        "src.evolution.benchmark.workspace_capability_package_root",
+        return_value=package_root,
+    ):
+        receipts = _recent_evolution_receipts(limit=10)
+
+    by_id = {item["id"]: item for item in receipts}
+    assert {"valid", "malformed"} <= set(by_id)
+    assert "non-mapping" not in by_id
+    assert "stat-race" not in by_id
+    assert "read-race" not in by_id
+    assert by_id["valid"]["score"] == 0.75
+    assert by_id["malformed"]["candidate_name"] == "malformed"
+    assert by_id["malformed"]["target_type"] == "unknown"
+    assert by_id["malformed"]["score"] == 0.0
+    assert by_id["malformed"]["rollback_ready"] is False
+    assert by_id["malformed"]["blocked_constraints"] == []
 
 
 @pytest.mark.asyncio

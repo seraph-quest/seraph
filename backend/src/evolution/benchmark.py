@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 import json
+import math
 from typing import Any
 
 from src.extensions.workspace_package import workspace_capability_package_root
@@ -99,22 +100,71 @@ def governed_improvement_benchmark_policy_payload() -> dict[str, Any]:
     }
 
 
+def _safe_receipt_score(value: Any) -> float:
+    if isinstance(value, bool):
+        return 0.0
+    try:
+        score = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return 0.0
+    return score if math.isfinite(score) else 0.0
+
+
+def _safe_receipt_bool(value: Any) -> bool:
+    return value if isinstance(value, bool) else False
+
+
+def _safe_receipt_text(value: Any, default: str = "") -> str:
+    return value if isinstance(value, str) else default
+
+
+def _safe_receipt_reference(value: Any, *, package_root) -> str:
+    from src.evolution.engine import _safe_artifact_reference
+
+    if not value:
+        return ""
+    try:
+        return _safe_artifact_reference(value, package_root=package_root)
+    except Exception:
+        return "artifact"
+
+
 def _recent_evolution_receipts(limit: int = 6) -> list[dict[str, Any]]:
-    package_root = workspace_capability_package_root()
-    receipts_dir = package_root / "evolution" / "receipts"
-    if not receipts_dir.exists():
+    try:
+        safe_limit = max(0, int(limit))
+    except (TypeError, ValueError, OverflowError):
+        safe_limit = 0
+    if safe_limit == 0:
         return []
 
-    from src.evolution.engine import _safe_artifact_reference
+    try:
+        package_root = workspace_capability_package_root()
+        receipts_dir = package_root / "evolution" / "receipts"
+        if not receipts_dir.exists():
+            return []
+        paths = list(receipts_dir.rglob("*.json"))
+    except Exception:
+        return []
 
     receipts: list[dict[str, Any]] = []
     # Receipts are partitioned by target type so identically named candidates
     # cannot overwrite each other's durable evidence.
-    files = sorted(receipts_dir.rglob("*.json"), key=lambda path: path.stat().st_mtime, reverse=True)
-    for path in files[:limit]:
+    files: list[tuple[float, Any]] = []
+    for path in paths:
+        try:
+            modified_at = float(path.stat().st_mtime)
+            if not math.isfinite(modified_at):
+                continue
+            files.append((modified_at, path))
+        except Exception:
+            continue
+    files.sort(key=lambda item: item[0], reverse=True)
+    for modified_at, path in files[:safe_limit]:
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+        except Exception:
+            continue
+        if not isinstance(payload, dict):
             continue
         gate = payload.get("benchmark_gate")
         if not isinstance(gate, dict):
@@ -123,14 +173,14 @@ def _recent_evolution_receipts(limit: int = 6) -> list[dict[str, Any]]:
         if not isinstance(lineage, dict):
             lineage = {}
         blocked_constraints = gate.get("blocked_constraints")
-        saved_candidate_reference = _safe_artifact_reference(
+        saved_candidate_reference = _safe_receipt_reference(
             gate.get("saved_candidate_path")
             or payload.get("saved_path")
             or lineage.get("candidate_handle")
             or payload.get("candidate_handle"),
             package_root=package_root,
         )
-        receipt_reference = _safe_artifact_reference(
+        receipt_reference = _safe_receipt_reference(
             gate.get("receipt_path")
             or payload.get("receipt_path")
             or lineage.get("receipt_handle")
@@ -138,38 +188,46 @@ def _recent_evolution_receipts(limit: int = 6) -> list[dict[str, Any]]:
             or str(path),
             package_root=package_root,
         )
+        candidate_handle = _safe_receipt_reference(
+            lineage.get("candidate_handle") or payload.get("candidate_handle") or saved_candidate_reference,
+            package_root=package_root,
+        )
+        receipt_handle = _safe_receipt_reference(
+            lineage.get("receipt_handle") or payload.get("receipt_handle") or receipt_reference,
+            package_root=package_root,
+        )
+        try:
+            updated_at = datetime.fromtimestamp(modified_at, tz=timezone.utc).isoformat()
+        except (OSError, OverflowError, TypeError, ValueError):
+            updated_at = ""
         receipts.append(
             {
                 "id": path.stem,
-                "proposal_id": str(payload.get("proposal_id") or lineage.get("proposal_id") or ""),
-                "candidate_name": str(payload.get("candidate_name") or path.stem),
-                "target_type": str(payload.get("target_type") or "unknown"),
-                "source_content_digest": str(
-                    payload.get("source_content_digest") or lineage.get("source_content_digest") or ""
+                "proposal_id": _safe_receipt_text(
+                    payload.get("proposal_id") or lineage.get("proposal_id")
                 ),
-                "source_version": str(
-                    payload.get("source_version") or lineage.get("source_version") or ""
+                "candidate_name": _safe_receipt_text(payload.get("candidate_name"), path.stem),
+                "target_type": _safe_receipt_text(payload.get("target_type"), "unknown"),
+                "source_content_digest": _safe_receipt_text(
+                    payload.get("source_content_digest") or lineage.get("source_content_digest")
                 ),
-                "candidate_content_digest": str(
-                    payload.get("candidate_content_digest") or lineage.get("candidate_content_digest") or ""
+                "source_version": _safe_receipt_text(
+                    payload.get("source_version") or lineage.get("source_version")
                 ),
-                "candidate_artifact_digest": str(
-                    payload.get("candidate_artifact_digest") or lineage.get("candidate_artifact_digest") or ""
+                "candidate_content_digest": _safe_receipt_text(
+                    payload.get("candidate_content_digest") or lineage.get("candidate_content_digest")
                 ),
-                "candidate_handle": _safe_artifact_reference(
-                    lineage.get("candidate_handle") or payload.get("candidate_handle") or saved_candidate_reference,
-                    package_root=package_root,
+                "candidate_artifact_digest": _safe_receipt_text(
+                    payload.get("candidate_artifact_digest") or lineage.get("candidate_artifact_digest")
                 ),
-                "receipt_handle": _safe_artifact_reference(
-                    lineage.get("receipt_handle") or payload.get("receipt_handle") or receipt_reference,
-                    package_root=package_root,
-                ),
-                "quality_state": str(payload.get("quality_state") or "unknown"),
-                "score": float(payload.get("score") or 0.0),
-                "rollout_state": str(gate.get("rollout_state") or "unknown"),
-                "acceptance_state": str(gate.get("acceptance_state") or "unknown"),
-                "diversity_guard_state": str(gate.get("diversity_guard_state") or "unknown"),
-                "rollback_ready": bool(gate.get("rollback_ready")),
+                "candidate_handle": candidate_handle,
+                "receipt_handle": receipt_handle,
+                "quality_state": _safe_receipt_text(payload.get("quality_state"), "unknown"),
+                "score": _safe_receipt_score(payload.get("score")),
+                "rollout_state": _safe_receipt_text(gate.get("rollout_state"), "unknown"),
+                "acceptance_state": _safe_receipt_text(gate.get("acceptance_state"), "unknown"),
+                "diversity_guard_state": _safe_receipt_text(gate.get("diversity_guard_state"), "unknown"),
+                "rollback_ready": _safe_receipt_bool(gate.get("rollback_ready")),
                 "blocked_constraints": [
                     str(item)
                     for item in blocked_constraints
@@ -179,7 +237,7 @@ def _recent_evolution_receipts(limit: int = 6) -> list[dict[str, Any]]:
                 else [],
                 "saved_candidate_path": saved_candidate_reference,
                 "receipt_path": receipt_reference,
-                "updated_at": datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc).isoformat(),
+                "updated_at": updated_at,
             }
         )
     return receipts

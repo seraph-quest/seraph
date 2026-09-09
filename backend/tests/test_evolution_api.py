@@ -569,9 +569,93 @@ async def test_evolution_thread_cancellation_waits_for_sync_worker_completion():
         worker = asyncio.create_task(_run_evolution_thread_cancel_safe(persist_receipt))
         await started.wait()
         worker.cancel()
-        with pytest.raises(asyncio.CancelledError):
+        with pytest.raises(asyncio.CancelledError) as cancellation:
             await worker
+    assert cancellation.value.result == "receipt-written"
     assert finished.is_set()
+
+
+@pytest.mark.asyncio
+async def test_evolution_proposal_cleans_persisted_artifacts_after_worker_cancellation(tmp_path):
+    from src.api.evolution import EvolutionProposalRequest, create_governed_evolution_proposal
+
+    operator = test_bypass_operator()
+    package_root = tmp_path / "extensions" / "workspace-capabilities"
+    candidate_path = package_root / "prompts" / "review-candidate.md"
+    receipt_path = package_root / "evolution" / "receipts" / "prompt_pack" / "review-candidate.json"
+    candidate_content = "# Candidate\n"
+    candidate_digest = hashlib.sha256(candidate_content.encode("utf-8")).hexdigest()
+    lineage = {
+        "proposal_id": "proposal-cancelled",
+        "source_content_digest": "a" * 64,
+        "source_version": "a" * 64,
+        "candidate_content_digest": candidate_digest,
+        "candidate_artifact_digest": candidate_digest,
+        "candidate_handle": "prompts/review-candidate.md",
+        "receipt_handle": "evolution/receipts/prompt_pack/review-candidate.json",
+    }
+    receipt_payload = {
+        "target_type": "prompt_pack",
+        "candidate_file_name": "review-candidate.md",
+        "saved_path": str(candidate_path),
+        "receipt_path": str(receipt_path),
+        **lineage,
+        "lineage": lineage,
+    }
+    proposal = {"status": "saved", "receipt": receipt_payload}
+    persisted = threading.Event()
+    release = threading.Event()
+
+    def persist_then_wait(*_args, **_kwargs):
+        candidate_path.parent.mkdir(parents=True, exist_ok=True)
+        receipt_path.parent.mkdir(parents=True, exist_ok=True)
+        candidate_path.write_text(candidate_content, encoding="utf-8")
+        receipt_path.write_text(json.dumps(receipt_payload), encoding="utf-8")
+        persisted.set()
+        if not release.wait(timeout=5):
+            raise RuntimeError("timed out waiting for cancellation test release")
+        return proposal
+
+    watch = object()
+    with (
+        patch("src.api.evolution.settings.workspace_dir", str(tmp_path)),
+        patch("src.evolution.engine.settings.workspace_dir", str(tmp_path)),
+        patch("src.extensions.workspace_package.settings.workspace_dir", str(tmp_path)),
+        patch("src.api.evolution.context_manager.get_context", return_value=SimpleNamespace(approval_mode="safe")),
+        patch("src.api.evolution._begin_rest_revocation_watch", return_value=watch),
+        patch("src.api.evolution._end_rest_revocation_watch", new_callable=AsyncMock) as end,
+        patch("src.api.evolution._ensure_rest_authorized", new_callable=AsyncMock),
+        patch("src.api.evolution._ensure_evolution_managers_loaded"),
+        patch("src.api.evolution.create_evolution_proposal", side_effect=persist_then_wait),
+        patch("src.api.evolution.log_integration_event", new_callable=AsyncMock) as audit,
+    ):
+        task = asyncio.create_task(
+            create_governed_evolution_proposal(
+                EvolutionProposalRequest(
+                    target_type="prompt_pack",
+                    source_path="/tmp/source.md",
+                    file_name="review-candidate.md",
+                ),
+                _evolution_request(operator),
+            )
+        )
+        for _ in range(500):
+            if persisted.is_set():
+                break
+            await asyncio.sleep(0.01)
+        assert persisted.is_set()
+        task.cancel()
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    assert not candidate_path.exists()
+    assert not receipt_path.exists()
+    assert not (package_root / "evolution" / "receipts" / "recovery").exists()
+    audit.assert_not_awaited()
+    end.assert_awaited_once_with(watch)
+    assert get_current_session_id() is None
+    assert get_current_trust_principal() is None
 
 
 def test_evolution_engine_always_runs_builtin_revocation_fence_with_callback():
@@ -2129,3 +2213,69 @@ async def test_evolution_persistence_failure_returns_and_audits_safe_lineage_rec
     audit_details = audit.call_args.kwargs["details"]
     assert audit_details["lineage"]["proposal_id"] == "proposal-candidate"
     assert audit_details["receipt"]["candidate_artifact_digest"] == "b" * 64
+
+
+@pytest.mark.asyncio
+async def test_evolution_persistence_failure_writes_durable_recovery_marker(tmp_path):
+    from src.api.evolution import EvolutionProposalRequest, create_governed_evolution_proposal
+    from src.evolution.engine import EvolutionPersistenceError
+
+    operator = test_bypass_operator()
+    package_root = tmp_path / "extensions" / "workspace-capabilities"
+    candidate_name = "candidate-review-candidate.md"
+    lineage = {
+        "proposal_id": "proposal-recovery",
+        "source_content_digest": "a" * 64,
+        "source_version": "a" * 64,
+        "candidate_content_digest": "b" * 64,
+        "candidate_artifact_digest": "b" * 64,
+        "candidate_handle": f"prompts/{candidate_name}",
+        "receipt_handle": f"evolution/receipts/prompt_pack/{Path(candidate_name).stem}.json",
+    }
+    error = EvolutionPersistenceError(
+        "candidate receipt write failed",
+        lineage=lineage,
+        artifacts_written=True,
+        rollback_failed=True,
+        target_type="prompt_pack",
+        candidate_file_name=candidate_name,
+    )
+    watch = object()
+    with (
+        patch("src.api.evolution.settings.workspace_dir", str(tmp_path)),
+        patch("src.evolution.engine.settings.workspace_dir", str(tmp_path)),
+        patch("src.extensions.workspace_package.settings.workspace_dir", str(tmp_path)),
+        patch("src.api.evolution.context_manager.get_context", return_value=SimpleNamespace(approval_mode="safe")),
+        patch("src.api.evolution._begin_rest_revocation_watch", return_value=watch),
+        patch("src.api.evolution._end_rest_revocation_watch", new_callable=AsyncMock),
+        patch("src.api.evolution._ensure_rest_authorized", new_callable=AsyncMock),
+        patch("src.api.evolution._run_evolution_thread_cancel_safe", side_effect=_run_evolution_inline),
+        patch("src.api.evolution._ensure_evolution_managers_loaded"),
+        patch("src.api.evolution.create_evolution_proposal", side_effect=error),
+        patch("src.api.evolution.log_integration_event", new_callable=AsyncMock, return_value=True),
+    ):
+        with pytest.raises(HTTPException) as raised:
+            await create_governed_evolution_proposal(
+                EvolutionProposalRequest(
+                    target_type="prompt_pack",
+                    source_path="/private/operator/source.md",
+                ),
+                _evolution_request(operator),
+            )
+
+    assert raised.value.status_code == 500
+    recovery_dir = package_root / "evolution" / "receipts" / "recovery"
+    recovery_files = list(recovery_dir.glob("*.json"))
+    assert len(recovery_files) == 1
+    recovery = json.loads(recovery_files[0].read_text(encoding="utf-8"))
+    assert recovery["status"] == "recovery_required"
+    assert recovery["reason"] == "post_persist_rollback_required"
+    assert recovery["target_type"] == "prompt_pack"
+    assert recovery["candidate_file_name"] == candidate_name
+    assert recovery["proposal_id"] == "proposal-recovery"
+    assert recovery["candidate_handle"] == f"prompts/{candidate_name}"
+    assert recovery["receipt_handle"] == lineage["receipt_handle"]
+    assert str(package_root) not in repr(recovery)
+    assert raised.value.detail["audit_receipt"]["recovery_receipt_handle"].startswith(
+        "evolution/receipts/recovery/"
+    )

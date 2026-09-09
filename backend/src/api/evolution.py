@@ -212,14 +212,30 @@ async def _run_evolution_thread_cancel_safe(func, *args, **kwargs):
     worker = asyncio.create_task(asyncio.to_thread(func, *args, **kwargs))
     try:
         return await asyncio.shield(worker)
-    except asyncio.CancelledError:
+    except asyncio.CancelledError as cancellation:
+        print("DBG cancel", getattr(func, "__name__", func), flush=True)
+        # A direct await here can remain pending while the task is in its
+        # cancelling state even after the executor callback has completed.
+        # Polling lets the event loop deliver that callback before reading the
+        # result, while still keeping the worker joined to this request.
+        while not worker.done():
+            await asyncio.sleep(0.01)
+        print("DBG done", getattr(func, "__name__", func), flush=True)
         try:
-            await worker
+            result = worker.result()
         except (Exception, asyncio.CancelledError):
             # The caller is already being cancelled. The engine owns rollback
             # for worker failures; do not leave a detached write in flight.
-            pass
-        raise
+            raise cancellation
+        raise _EvolutionWorkerCancelled(result) from cancellation
+
+
+class _EvolutionWorkerCancelled(asyncio.CancelledError):
+    """Cancellation carrying a completed worker result for artifact cleanup."""
+
+    def __init__(self, result) -> None:
+        super().__init__()
+        self.result = result
 
 
 def _has_persisted_evolution_proposal(proposal) -> bool:
@@ -239,20 +255,24 @@ def _has_persisted_evolution_proposal(proposal) -> bool:
 async def _rollback_or_record_evolution_recovery(proposal) -> tuple[bool, str]:
     """Clean post-persist artifacts without consulting the revoked session."""
     try:
+        print("DBG rbstart", flush=True)
         rolled_back = await _run_evolution_thread_cancel_safe(
             rollback_evolution_proposal,
             proposal,
         )
     except Exception:
+        print("DBG rbexception", flush=True)
         rolled_back = False
     if rolled_back:
         return True, ""
     try:
+        print("DBG recstart", flush=True)
         recovery_handle = await _run_evolution_thread_cancel_safe(
             write_evolution_recovery_receipt,
             proposal,
         )
     except Exception:
+        print("DBG recexception", flush=True)
         recovery_handle = ""
     return False, str(recovery_handle or "")
 
@@ -447,17 +467,52 @@ def _evolution_degraded_audit_receipt(
     return receipt
 
 
-def _evolution_persistence_error_receipt(operator, error: BaseException) -> dict[str, object]:
+def _evolution_persistence_error_receipt(
+    operator,
+    error: BaseException,
+    *,
+    recovery_handle: str = "",
+) -> dict[str, object]:
     lineage = getattr(error, "evolution_lineage", None)
     rollback_failed = bool(getattr(error, "rollback_failed", False))
     artifacts_written = bool(getattr(error, "artifacts_written", False))
-    return _evolution_degraded_audit_receipt(
+    receipt = _evolution_degraded_audit_receipt(
         operator,
         reason="artifact_persistence_failed",
         lineage=lineage if isinstance(lineage, dict) else None,
         artifact_state="written" if artifacts_written else "not_written",
         rollback_state="failed" if rollback_failed else "rolled_back",
     )
+    if recovery_handle:
+        receipt["recovery_receipt_handle"] = _safe_audit_handle(recovery_handle)
+    return receipt
+
+
+def _evolution_recovery_proposal_from_error(error: BaseException) -> dict[str, object]:
+    """Build a redacted recovery input from an engine persistence failure."""
+    raw_lineage = getattr(error, "evolution_lineage", None)
+    lineage = dict(raw_lineage) if isinstance(raw_lineage, dict) else {}
+    receipt: dict[str, object] = {**lineage, "lineage": lineage}
+    target_type = getattr(error, "target_type", None)
+    candidate_file_name = getattr(error, "candidate_file_name", None)
+    if isinstance(target_type, str):
+        receipt["target_type"] = target_type
+    if isinstance(candidate_file_name, str):
+        receipt["candidate_file_name"] = candidate_file_name
+    return {"status": "saved", "receipt": receipt}
+
+
+async def _record_evolution_persistence_recovery(error: BaseException) -> str:
+    """Persist a durable recovery marker without requiring live authority."""
+    proposal = _evolution_recovery_proposal_from_error(error)
+    try:
+        recovery_handle = await _run_evolution_thread_cancel_safe(
+            write_evolution_recovery_receipt,
+            proposal,
+        )
+    except Exception:
+        return ""
+    return str(recovery_handle or "")
 
 
 async def _audit_evolution_event(operator, req: EvolutionProposalRequest, *, outcome: str, receipt=None) -> bool:
@@ -666,6 +721,7 @@ async def create_governed_evolution_proposal(req: EvolutionProposalRequest, requ
     revocation_scope = None
     proposal = None
     recovery_exception_raised = False
+    cancellation_seen = False
     try:
         revocation_scope = _begin_rest_revocation_watch(request)
         await _ensure_evolution_authorized(request, revocation_scope)
@@ -688,6 +744,7 @@ async def create_governed_evolution_proposal(req: EvolutionProposalRequest, requ
                 authority_check=assert_runtime_not_revoked,
             )
         except EvolutionPersistenceError as exc:
+            recovery_handle = await _record_evolution_persistence_recovery(exc)
             await _ensure_evolution_authorized(request, revocation_scope)
             lineage = _evolution_receipt_lineage(
                 {"lineage": getattr(exc, "evolution_lineage", {})}
@@ -702,7 +759,11 @@ async def create_governed_evolution_proposal(req: EvolutionProposalRequest, requ
                     "rollback_state": "failed" if exc.rollback_failed else "rolled_back",
                 },
             )
-            audit_receipt = _evolution_persistence_error_receipt(operator, exc)
+            audit_receipt = _evolution_persistence_error_receipt(
+                operator,
+                exc,
+                recovery_handle=recovery_handle,
+            )
             status_code = 500 if audit_ok else 503
             raise HTTPException(
                 status_code=status_code,
@@ -724,6 +785,21 @@ async def create_governed_evolution_proposal(req: EvolutionProposalRequest, requ
                     message=_redact_evolution_value_error(exc),
                 ),
             ) from exc
+        except asyncio.CancelledError as cancellation:
+            cancellation_seen = True
+            persisted_proposal = getattr(cancellation, "result", None)
+            if _has_persisted_evolution_proposal(persisted_proposal):
+                proposal = persisted_proposal
+                rolled_back, recovery_handle = await _rollback_or_record_evolution_recovery(proposal)
+                proposal = None
+                if not rolled_back:
+                    recovery_exception_raised = True
+                    raise _evolution_recovery_required_exception(
+                        operator,
+                        persisted_proposal,
+                        recovery_handle=recovery_handle,
+                    ) from cancellation
+            raise
 
         # Proposals are persisted as unregistered review candidates.  Do not
         # reload active managers here: promotion is a separate, approval-gated
@@ -767,7 +843,26 @@ async def create_governed_evolution_proposal(req: EvolutionProposalRequest, requ
         return proposal
     except HTTPException:
         raise
+    except asyncio.CancelledError:
+        cancellation_seen = True
+        if _has_persisted_evolution_proposal(proposal):
+            persisted_proposal = proposal
+            proposal = None
+            rolled_back, recovery_handle = await _rollback_or_record_evolution_recovery(
+                persisted_proposal
+            )
+            if not rolled_back:
+                recovery_exception_raised = True
+                raise _evolution_recovery_required_exception(
+                    operator,
+                    persisted_proposal,
+                    recovery_handle=recovery_handle,
+                )
+        raise
     except (RuntimeRevokedError, AuthFailure) as exc:
+        recovery_handle = ""
+        if getattr(exc, "artifacts_written", False) and getattr(exc, "rollback_failed", False):
+            recovery_handle = await _record_evolution_persistence_recovery(exc)
         if _has_persisted_evolution_proposal(proposal):
             persisted_proposal = proposal
             proposal = None
@@ -787,12 +882,17 @@ async def create_governed_evolution_proposal(req: EvolutionProposalRequest, requ
             "message": "Operator session was revoked.",
         }
         if isinstance(lineage, dict) and lineage:
-            detail["audit_receipt"] = _evolution_persistence_error_receipt(operator, exc)
+            detail["audit_receipt"] = _evolution_persistence_error_receipt(
+                operator,
+                exc,
+                recovery_handle=recovery_handle,
+            )
         raise HTTPException(
             status_code=401,
             detail=detail,
         ) from exc
     except EvolutionPersistenceError as exc:
+        recovery_handle = await _record_evolution_persistence_recovery(exc)
         await _ensure_evolution_authorized(request, revocation_scope)
         audit_ok = await _audit_evolution_event(
             operator,
@@ -800,7 +900,11 @@ async def create_governed_evolution_proposal(req: EvolutionProposalRequest, requ
             outcome="failed",
             receipt={"lineage": getattr(exc, "evolution_lineage", {})},
         )
-        audit_receipt = _evolution_persistence_error_receipt(operator, exc)
+        audit_receipt = _evolution_persistence_error_receipt(
+            operator,
+            exc,
+            recovery_handle=recovery_handle,
+        )
         status_code = 500 if audit_ok else 503
         raise HTTPException(
             status_code=status_code,
@@ -841,5 +945,5 @@ async def create_governed_evolution_proposal(req: EvolutionProposalRequest, requ
             tokens,
             operator=operator,
             persisted_proposal=proposal,
-            skip_final_authorization=recovery_exception_raised,
+            skip_final_authorization=recovery_exception_raised or cancellation_seen,
         )

@@ -53,11 +53,15 @@ class EvolutionPersistenceError(ValueError):
         lineage: dict[str, str],
         artifacts_written: bool,
         rollback_failed: bool,
+        target_type: EvolutionTargetType | None = None,
+        candidate_file_name: str | None = None,
     ) -> None:
         super().__init__(message)
         self.evolution_lineage = dict(lineage)
         self.artifacts_written = bool(artifacts_written)
         self.rollback_failed = bool(rollback_failed)
+        self.target_type = target_type
+        self.candidate_file_name = candidate_file_name
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _CANDIDATE_SUFFIX = "-review-candidate"
@@ -1373,6 +1377,14 @@ def write_evolution_recovery_receipt(proposal: dict[str, Any]) -> str | None:
         "lineage": lineage,
         "recovery_receipt_handle": recovery_handle,
     }
+    candidate_file_name = raw_receipt.get("candidate_file_name")
+    if isinstance(candidate_file_name, str):
+        try:
+            candidate_file_name = validate_evolution_file_name(candidate_file_name)
+            if is_evolution_candidate_file_name(candidate_file_name):
+                payload["candidate_file_name"] = candidate_file_name
+        except ValueError:
+            pass
     descriptor = os.open(
         recovery_path,
         os.O_WRONLY | os.O_CREAT | os.O_EXCL,
@@ -1629,6 +1641,8 @@ def create_evolution_proposal(
                     setattr(exc, "evolution_lineage", lineage)
                     setattr(exc, "artifacts_written", bool(artifact_written or saved_path or receipt_path))
                     setattr(exc, "rollback_failed", rollback_error is not None)
+                    setattr(exc, "target_type", target_type)
+                    setattr(exc, "candidate_file_name", candidate_file_name)
                     if isinstance(exc, RuntimeRevokedError):
                         raise
                     raise EvolutionPersistenceError(
@@ -1636,6 +1650,8 @@ def create_evolution_proposal(
                         lineage=lineage,
                         artifacts_written=bool(artifact_written or saved_path or receipt_path),
                         rollback_failed=rollback_error is not None,
+                        target_type=target_type,
+                        candidate_file_name=candidate_file_name,
                     ) from (rollback_error or exc)
                 if rollback_error is not None:
                     raise rollback_error from exc

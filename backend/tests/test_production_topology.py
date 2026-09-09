@@ -144,36 +144,41 @@ def test_managed_local_ports_bind_loopback_and_production_env_uses_prod_paths():
     assert '--host 127.0.0.1 --port "$6"' in manage
     assert '--host 127.0.0.1 --port "$4"' in manage
     assert '--host 0.0.0.0' not in manage
-    assert 'WORKSPACE_DIR="$LOCAL_WORKSPACE_DIR" python3 "$SCRIPT_DIR/backend/production_preflight.py" --format text' in manage
-    assert 'echo "CPU-host preflight:"' in manage
+    assert "reject_prod_local_stack" in manage
+    assert "production authentication requires HTTPS" in manage
+    assert 'exit "$LOCAL_EXIT_STATUS"' in manage
     assert "HOST_DATA_ROOT_PROD=./docker-data/prod" in env
     assert "BACKEND_DATA_PATH_PROD=${HOST_DATA_ROOT_PROD}/backend/data" in env
     assert "BACKEND_LOGS_PATH_PROD=${HOST_DATA_ROOT_PROD}/backend/logs" in env
     assert "LOCAL_LLM_API_BASE=" in env
     assert "SERAPH_VLM_BASE_URL=" in env
     assert "SERAPH_VLM_BACKEND_URL=" in env
+    assert "OPERATOR_AUTH_COOKIE_SECURE=true" in env
+    assert "OPERATOR_AUTH_ALLOWED_ORIGINS=https://localhost" in env
 
 
-def test_prod_local_preflight_receives_resolved_workspace(tmp_path):
-    captured = tmp_path / "captured-workspace"
+def test_prod_local_up_rejects_plain_http_before_start(tmp_path):
+    started = tmp_path / "started"
     script = "\n".join(
         (
             "set -u",
             "export SERAPH_MANAGE_SOURCE_ONLY=true",
             f"source {shlex.quote(str(ROOT / 'manage.sh'))}",
+            "PROG_NAME=./manage.sh",
             "ENV=prod",
             f"LOCAL_WORKSPACE_DIR={shlex.quote(str(tmp_path / 'resolved-workspace'))}",
             f"PID_DIR={shlex.quote(str(tmp_path / 'pids'))}",
             f"LOG_DIR={shlex.quote(str(tmp_path / 'logs'))}",
-            f"python3() {{ printf '%s' \"$WORKSPACE_DIR\" > {shlex.quote(str(captured))}; }}",
-            "start_local_backend() { return 1; }",
-            "local_up || true",
+            f"start_local_backend() {{ printf started > {shlex.quote(str(started))}; return 0; }}",
+            "local_up",
         )
     )
     result = subprocess.run(["bash", "-c", script], text=True, capture_output=True, check=False)
 
-    assert result.returncode == 0
-    assert captured.read_text() == str(tmp_path / "resolved-workspace")
+    assert result.returncode == 1
+    assert "production authentication requires HTTPS" in result.stderr
+    assert "Use './manage.sh -e prod up -d'" in result.stderr
+    assert not started.exists()
 
 
 def test_preflight_script_is_dependency_free_and_does_not_open_provider_sockets():

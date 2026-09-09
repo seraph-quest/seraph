@@ -15,7 +15,7 @@
 #   ./manage.sh -e [dev|prod] down      - Stop Docker services + daemon.
 #   ./manage.sh -e [dev|prod] logs      - View Docker logs.
 #   ./manage.sh -e [dev|prod] build     - Build or rebuild Docker services.
-#   ./manage.sh -e [dev|prod] local up|down|status|logs|run - Manage the direct local frontend/backend stack.
+#   ./manage.sh -e dev local up|down|status|logs|run - Manage the direct local frontend/backend stack.
 #   ./manage.sh -e [dev|prod] daemon start|stop|status|logs - Manage screen daemon.
 #   ./manage.sh -e [dev|prod] proxy start|stop|status|logs  - Manage stdio MCP proxy.
 #
@@ -63,7 +63,7 @@ function display_help() {
     echo "          Also stops daemon if running."
     echo "  logs    Follow log output (e.g., 'logs -f backend')."
     echo "  build   Build or rebuild services."
-    echo "  local   Manage the direct local frontend/backend stack: up, down, status, logs, run."
+    echo "  local   Manage the direct local frontend/backend stack (dev only): up, down, status, logs, run."
     echo "  daemon  Manage screen daemon: start, stop, status, logs."
     echo "  proxy   Manage stdio-to-HTTP MCP proxy: start, stop, status, logs."
     echo
@@ -611,6 +611,15 @@ function local_frontend_is_running() {
     pid_is_running "$LOCAL_FRONTEND_PID_FILE"
 }
 
+function reject_prod_local_stack() {
+    if [ "$ENV" = "prod" ]; then
+        echo "Error: '$PROG_NAME -e prod local' is unsupported: production authentication requires HTTPS, while the managed local stack is plain HTTP." >&2
+        echo "Use '$PROG_NAME -e prod up -d' behind a configured HTTPS ingress after the production preflight passes." >&2
+        return 1
+    fi
+    return 0
+}
+
 function start_local_backend() {
     if local_backend_is_running; then
         local pid
@@ -668,14 +677,10 @@ function start_local_frontend() {
 }
 
 function local_up() {
-    ensure_runtime_dirs
-    if [ "$ENV" = "prod" ]; then
-        echo "Running CPU-host production preflight..."
-        if ! WORKSPACE_DIR="$LOCAL_WORKSPACE_DIR" python3 "$SCRIPT_DIR/backend/production_preflight.py" --format text; then
-            echo "Local production stack blocked: CPU-host preflight requires operator auth and a usable workspace." >&2
-            return 1
-        fi
+    if ! reject_prod_local_stack; then
+        return 1
     fi
+    ensure_runtime_dirs
     if ! start_local_backend; then
         echo "Local stack failed: backend did not start cleanly." >&2
         return 1
@@ -708,15 +713,14 @@ function local_down() {
 }
 
 function local_status() {
+    if ! reject_prod_local_stack; then
+        return 1
+    fi
     echo "Environment: $ENV"
     echo "Env file: $ENV_FILE"
     echo "Default model: ${DEFAULT_MODEL:-openrouter/anthropic/claude-sonnet-4}"
     echo "Workspace dir: $LOCAL_WORKSPACE_DIR"
     echo "LLM log dir: $LOCAL_LLM_LOG_DIR"
-    if [ "$ENV" = "prod" ]; then
-        echo "CPU-host preflight:"
-        WORKSPACE_DIR="$LOCAL_WORKSPACE_DIR" python3 "$SCRIPT_DIR/backend/production_preflight.py" --format text || true
-    fi
     print_local_service_status "Local backend" "$LOCAL_BACKEND_PID_FILE" "$LOCAL_BACKEND_PORT" backend
     print_local_service_status "Local frontend" "$LOCAL_FRONTEND_PID_FILE" "$LOCAL_FRONTEND_PORT" frontend
     if daemon_is_running; then
@@ -856,28 +860,29 @@ fi
 
 if [ "$COMMAND" = "local" ]; then
     LOCAL_SUB="${1:-}"
+    LOCAL_EXIT_STATUS=0
     case "$LOCAL_SUB" in
         up)
-            local_up
+            local_up || LOCAL_EXIT_STATUS=$?
             ;;
         run)
-            local_run
+            local_run || LOCAL_EXIT_STATUS=$?
             ;;
         down)
-            local_down
+            local_down || LOCAL_EXIT_STATUS=$?
             ;;
         status)
-            local_status
+            local_status || LOCAL_EXIT_STATUS=$?
             ;;
         logs)
             shift || true
-            local_logs "${1:-all}"
+            local_logs "${1:-all}" || LOCAL_EXIT_STATUS=$?
             ;;
         *)
             error_exit "Unknown local subcommand '$LOCAL_SUB'. Use: up, down, status, logs, run"
             ;;
     esac
-    exit 0
+    exit "$LOCAL_EXIT_STATUS"
 fi
 
 # Handle proxy subcommand

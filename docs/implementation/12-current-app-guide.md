@@ -36,15 +36,18 @@ VLM wrapper are retained only for historical diagnostics; they are not active
 runtime prerequisites.
 
 The production compose path keeps the backend on a private Docker network and
-does not publish its API port. Run the local operator stack through the managed
-loopback path when a local browser is needed:
+does not publish its API port. The managed direct local stack is a development
+HTTP surface only; do not run `./manage.sh -e prod local up` or use it as a
+production browser path because the production auth cookie is secure and
+requires HTTPS. The production command is the private compose path:
 
 ```bash
-./manage.sh -e prod local up
-./manage.sh -e prod local status
+python3 backend/production_preflight.py --env-file .env.prod --format json
+./manage.sh -e prod up -d
 ```
 
-This slice does not provide a public HTTPS ingress or claim a live host
+Expose the authenticated API and browser through a deployment-specific HTTPS
+ingress. This slice does not provide that ingress or claim a live host
 acceptance receipt; those deployment and identity edges remain separate work.
 
 The CPU-host preflight reports core/auth/workspace readiness separately from

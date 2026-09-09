@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import os
 from pathlib import Path
@@ -9,14 +10,20 @@ import re
 from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from config.settings import settings
 from src.approval.runtime import reset_runtime_context, set_runtime_context
 from src.api.capabilities import _require_authenticated_capability_operator
+from src.api.chat import (
+    _begin_rest_revocation_watch,
+    _end_rest_revocation_watch,
+    _ensure_rest_authorized,
+)
 from src.audit.runtime import log_integration_event
-from src.auth.cancellation import assert_runtime_not_revoked
-from src.auth.service import bind_operator_principal
+from src.auth.cancellation import RuntimeRevokedError, assert_runtime_not_revoked
+from src.auth.service import AuthFailure, bind_operator_principal
 from src.evolution.engine import create_evolution_proposal, evaluate_candidate, list_evolution_targets
 from src.extensions.registry import default_manifest_roots_for_workspace
 from src.observer.manager import context_manager
@@ -60,7 +67,7 @@ def _safe_file_name(file_name: str | None, *, target_type: EvolutionTargetType, 
         or normalized.startswith("..")
         or os.path.basename(normalized) != normalized
     ):
-        raise HTTPException(status_code=400, detail="Candidate file name must stay within the managed workspace package")
+        raise ValueError("candidate file name rejected")
     stem, ext = os.path.splitext(normalized)
     safe_stem = _FILE_NAME_RE.sub("-", stem).strip("-_.") or Path(source_path).stem
     return f"{safe_stem}{ext or _DEFAULT_EXTENSIONS[target_type]}"
@@ -102,7 +109,70 @@ def _bind_evolution_operator(request: Request):
         context_manager.get_context().approval_mode,
         trust_principal=bind_operator_principal(operator, session_id),
     )
-    return tokens
+    return operator, tokens
+
+
+async def _ensure_evolution_authorized(request: Request, revocation_scope) -> None:
+    """Fence one stage with the shared REST watcher and current-session check."""
+    try:
+        if revocation_scope is None:
+            assert_runtime_not_revoked()
+        else:
+            await _ensure_rest_authorized(request, revocation_scope)
+    except (RuntimeRevokedError, AuthFailure) as exc:
+        raise HTTPException(
+            status_code=401,
+            detail={"code": "session_revoked", "message": "Operator session was revoked."},
+        ) from exc
+
+
+def _reload_evolution_managers_with_authority() -> None:
+    """Reload each manager only while the bound operator remains usable."""
+    assert_runtime_not_revoked()
+    skill_manager.reload()
+    assert_runtime_not_revoked()
+    runbook_manager.reload()
+    assert_runtime_not_revoked()
+    starter_pack_manager.reload()
+    assert_runtime_not_revoked()
+
+
+def _evolution_failure_detail(code: str, *, audit_receipt: dict[str, object] | None = None) -> dict[str, object]:
+    detail: dict[str, object] = {
+        "code": code,
+        "message": "Evolution operation failed; inspect the authenticated operator receipt.",
+    }
+    if audit_receipt is not None:
+        detail["audit_receipt"] = audit_receipt
+    return detail
+
+
+def _evolution_degraded_audit_receipt(operator) -> dict[str, object]:
+    session_id = str(operator.session_id)
+    return {
+        "status": "degraded",
+        "reason": "audit_persistence_failed",
+        "principal_id": str(operator.principal.principal_id),
+        "session_id_digest": hashlib.sha256(session_id.encode("utf-8")).hexdigest(),
+    }
+
+
+async def _audit_evolution_event(operator, req: EvolutionProposalRequest, *, outcome: str, receipt=None) -> bool:
+    """Persist metadata-only evolution lineage and report explicit degradation."""
+    try:
+        result = await log_integration_event(
+            integration_type="self_evolution",
+            name=req.target_type,
+            outcome=outcome,
+            session_id=operator.session_id,
+            actor=operator.principal.principal_id,
+            principal_id=operator.principal.principal_id,
+            policy_mode="authenticated_operator",
+            details=_evolution_audit_details(req, outcome=outcome, receipt=receipt),
+        )
+    except Exception:
+        return False
+    return result is not False
 
 
 def _evolution_audit_details(
@@ -124,6 +194,7 @@ def _evolution_audit_details(
     }
     if receipt is None:
         return details
+    benchmark_gate = receipt.get("benchmark_gate")
     details["receipt"] = {
         "valid": bool(receipt.get("valid")),
         "blocked": bool(receipt.get("blocked")),
@@ -139,7 +210,7 @@ def _evolution_audit_details(
             if isinstance(item, dict)
         ],
         "benchmark_gate": {
-            key: receipt.get("benchmark_gate", {}).get(key)
+            key: benchmark_gate.get(key)
             for key in (
                 "rollout_state",
                 "regression_gate",
@@ -150,7 +221,7 @@ def _evolution_audit_details(
                 "rollback_ready",
                 "safety_receipt_state",
             )
-            if isinstance(receipt.get("benchmark_gate"), dict)
+            if isinstance(benchmark_gate, dict)
         },
         "saved": bool(receipt.get("saved_path")),
         "receipt_written": bool(receipt.get("receipt_path")),
@@ -166,74 +237,169 @@ async def evolution_targets():
 
 @router.post("/evolution/validate")
 async def validate_evolution_candidate(req: EvolutionValidationRequest, request: Request):
-    tokens = _bind_evolution_operator(request)
     try:
-        assert_runtime_not_revoked()
-        _ensure_evolution_managers_loaded()
-        assert_runtime_not_revoked()
+        operator, tokens = _bind_evolution_operator(request)
+    except (RuntimeRevokedError, AuthFailure) as exc:
+        raise HTTPException(
+            status_code=401,
+            detail={"code": "session_revoked", "message": "Operator session was revoked."},
+        ) from exc
+    revocation_scope = None
+    try:
+        revocation_scope = _begin_rest_revocation_watch(request)
+        await _ensure_evolution_authorized(request, revocation_scope)
+        await asyncio.to_thread(_ensure_evolution_managers_loaded)
+        await _ensure_evolution_authorized(request, revocation_scope)
+        candidate_file_name = _safe_file_name(
+            req.file_name,
+            target_type=req.target_type,
+            source_path=req.source_path,
+        )
+        await _ensure_evolution_authorized(request, revocation_scope)
         try:
-            receipt = evaluate_candidate(
+            receipt = await asyncio.to_thread(
+                evaluate_candidate,
                 req.target_type,
                 source_path=req.source_path,
                 candidate_content=req.candidate_content,
                 objective=req.objective,
                 observations=req.observations,
-                candidate_file_name=_safe_file_name(
-                    req.file_name,
-                    target_type=req.target_type,
-                    source_path=req.source_path,
-                ),
+                candidate_file_name=candidate_file_name,
             )
         except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
+            await _ensure_evolution_authorized(request, revocation_scope)
+            audit_ok = await _audit_evolution_event(operator, req, outcome="failed")
+            audit_receipt = None if audit_ok else _evolution_degraded_audit_receipt(operator)
+            status_code = 400 if audit_ok else 503
+            raise HTTPException(
+                status_code=status_code,
+                detail=_evolution_failure_detail("evolution_candidate_invalid", audit_receipt=audit_receipt),
+            ) from exc
+        await _ensure_evolution_authorized(request, revocation_scope)
         return {"receipt": receipt.to_dict()}
+    except HTTPException:
+        raise
+    except (RuntimeRevokedError, AuthFailure) as exc:
+        raise HTTPException(
+            status_code=401,
+            detail={"code": "session_revoked", "message": "Operator session was revoked."},
+        ) from exc
+    except ValueError as exc:
+        await _ensure_evolution_authorized(request, revocation_scope)
+        audit_ok = await _audit_evolution_event(operator, req, outcome="failed")
+        audit_receipt = None if audit_ok else _evolution_degraded_audit_receipt(operator)
+        status_code = 400 if audit_ok else 503
+        raise HTTPException(
+            status_code=status_code,
+            detail=_evolution_failure_detail("evolution_candidate_invalid", audit_receipt=audit_receipt),
+        ) from exc
+    except Exception as exc:
+        await _ensure_evolution_authorized(request, revocation_scope)
+        audit_ok = await _audit_evolution_event(operator, req, outcome="failed")
+        audit_receipt = None if audit_ok else _evolution_degraded_audit_receipt(operator)
+        status_code = 500 if audit_ok else 503
+        raise HTTPException(
+            status_code=status_code,
+            detail=_evolution_failure_detail("evolution_operation_failed", audit_receipt=audit_receipt),
+        ) from exc
     finally:
-        reset_runtime_context(tokens)
+        try:
+            await _end_rest_revocation_watch(revocation_scope)
+        finally:
+            reset_runtime_context(tokens)
 
 
 @router.post("/evolution/proposals")
 async def create_governed_evolution_proposal(req: EvolutionProposalRequest, request: Request):
-    tokens = _bind_evolution_operator(request)
     try:
-        assert_runtime_not_revoked()
-        _ensure_evolution_managers_loaded()
-        assert_runtime_not_revoked()
+        operator, tokens = _bind_evolution_operator(request)
+    except (RuntimeRevokedError, AuthFailure) as exc:
+        raise HTTPException(
+            status_code=401,
+            detail={"code": "session_revoked", "message": "Operator session was revoked."},
+        ) from exc
+    revocation_scope = None
+    try:
+        revocation_scope = _begin_rest_revocation_watch(request)
+        await _ensure_evolution_authorized(request, revocation_scope)
+        await asyncio.to_thread(_ensure_evolution_managers_loaded)
+        await _ensure_evolution_authorized(request, revocation_scope)
+        candidate_file_name = _safe_file_name(
+            req.file_name,
+            target_type=req.target_type,
+            source_path=req.source_path,
+        )
+        await _ensure_evolution_authorized(request, revocation_scope)
         try:
-            proposal = create_evolution_proposal(
+            proposal = await asyncio.to_thread(
+                create_evolution_proposal,
                 req.target_type,
                 source_path=req.source_path,
                 objective=req.objective,
                 observations=req.observations,
-                file_name=_safe_file_name(
-                    req.file_name,
-                    target_type=req.target_type,
-                    source_path=req.source_path,
-                ),
+                file_name=candidate_file_name,
+                authority_check=assert_runtime_not_revoked,
             )
         except ValueError as exc:
-            assert_runtime_not_revoked()
-            await log_integration_event(
-                integration_type="self_evolution",
-                name=req.target_type,
-                outcome="failed",
-                details=_evolution_audit_details(req, outcome="failed"),
-            )
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
+            await _ensure_evolution_authorized(request, revocation_scope)
+            audit_ok = await _audit_evolution_event(operator, req, outcome="failed")
+            audit_receipt = None if audit_ok else _evolution_degraded_audit_receipt(operator)
+            status_code = 400 if audit_ok else 503
+            raise HTTPException(
+                status_code=status_code,
+                detail=_evolution_failure_detail("evolution_candidate_invalid", audit_receipt=audit_receipt),
+            ) from exc
 
         if proposal["status"] == "saved":
-            assert_runtime_not_revoked()
-            skill_manager.reload()
-            runbook_manager.reload()
-            starter_pack_manager.reload()
+            await _ensure_evolution_authorized(request, revocation_scope)
+            await asyncio.to_thread(_reload_evolution_managers_with_authority)
 
-        assert_runtime_not_revoked()
+        await _ensure_evolution_authorized(request, revocation_scope)
         outcome = "succeeded" if proposal["status"] == "saved" else "blocked"
-        await log_integration_event(
-            integration_type="self_evolution",
-            name=req.target_type,
+        audit_ok = await _audit_evolution_event(
+            operator,
+            req,
             outcome=outcome,
-            details=_evolution_audit_details(req, outcome=outcome, receipt=proposal.get("receipt")),
+            receipt=proposal.get("receipt"),
         )
+        if not audit_ok:
+            return JSONResponse(
+                status_code=503,
+                content={
+                    "status": "degraded",
+                    "code": "audit_persistence_failed",
+                    "message": "Evolution completed but its authenticated audit receipt could not be persisted.",
+                    "audit_receipt": _evolution_degraded_audit_receipt(operator),
+                },
+            )
         return proposal
+    except HTTPException:
+        raise
+    except (RuntimeRevokedError, AuthFailure) as exc:
+        raise HTTPException(
+            status_code=401,
+            detail={"code": "session_revoked", "message": "Operator session was revoked."},
+        ) from exc
+    except ValueError as exc:
+        await _ensure_evolution_authorized(request, revocation_scope)
+        audit_ok = await _audit_evolution_event(operator, req, outcome="failed")
+        audit_receipt = None if audit_ok else _evolution_degraded_audit_receipt(operator)
+        status_code = 400 if audit_ok else 503
+        raise HTTPException(
+            status_code=status_code,
+            detail=_evolution_failure_detail("evolution_candidate_invalid", audit_receipt=audit_receipt),
+        ) from exc
+    except Exception as exc:
+        await _ensure_evolution_authorized(request, revocation_scope)
+        audit_ok = await _audit_evolution_event(operator, req, outcome="failed")
+        audit_receipt = None if audit_ok else _evolution_degraded_audit_receipt(operator)
+        status_code = 500 if audit_ok else 503
+        raise HTTPException(
+            status_code=status_code,
+            detail=_evolution_failure_detail("evolution_operation_failed", audit_receipt=audit_receipt),
+        ) from exc
     finally:
-        reset_runtime_context(tokens)
+        try:
+            await _end_rest_revocation_watch(revocation_scope)
+        finally:
+            reset_runtime_context(tokens)

@@ -7,13 +7,16 @@ from datetime import datetime, timezone
 import json
 from pathlib import Path
 import re
-from typing import Any, Literal
+from typing import Any, Callable, Literal
 
 import yaml
 
 from config.settings import settings
 from src.extensions.capability_contributions import parse_prompt_pack_definition
+from src.approval.runtime import get_current_session_id, get_current_trust_principal
+from src.auth.cancellation import assert_runtime_not_revoked
 from src.extensions.manifest import load_extension_manifest
+from src.extensions.layout import expected_layout_prefixes
 from src.extensions.registry import ExtensionRegistry, default_manifest_roots_for_workspace
 from src.extensions.workspace_package import save_workspace_contribution, workspace_capability_package_root
 from src.evals.benchmark_catalog import benchmark_suite_names
@@ -24,8 +27,10 @@ from src.skills.loader import Skill, parse_skill_content
 from src.skills.manager import skill_manager
 from src.starter_packs.loader import StarterPack, parse_starter_pack_payload
 from src.starter_packs.manager import starter_pack_manager
+from src.security.trust_contract import AuthorityGrant, PrincipalType, TrustPrincipal
 
 EvolutionTargetType = Literal["skill", "runbook", "starter_pack", "prompt_pack"]
+EvolutionAuthorityCheck = Callable[[], None]
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _CANDIDATE_SUFFIX = "-review-candidate"
@@ -60,6 +65,43 @@ _PREFERENCE_COLLAPSE_TOKENS = (
     "one-size-fits-all",
     "regardless of user preference",
 )
+
+
+def require_evolution_operator_authority() -> TrustPrincipal:
+    """Require a live human operator for declarative evolution.
+
+    Service and scheduled principals are deliberately denied. Evolution can
+    change the future capability surface, so it remains a human operator and
+    review-gated operation even when the candidate itself is declarative.
+    """
+    principal = get_current_trust_principal()
+    session_id = str(get_current_session_id() or "").strip()
+    principal_id = str(getattr(principal, "principal_id", "") or "").strip()
+    principal_session_id = str(getattr(principal, "session_id", "") or "").strip()
+    principal_type = getattr(getattr(principal, "principal_type", None), "value", None) or str(
+        getattr(principal, "principal_type", "") or ""
+    ).strip()
+    grants = {
+        str(getattr(grant, "value", grant))
+        for grant in getattr(principal, "grants", ())
+    }
+    if (
+        principal is None
+        or principal_type != PrincipalType.OPERATOR.value
+        or not bool(getattr(principal, "authenticated", False))
+        or bool(getattr(principal, "revoked", False))
+        or not principal_id
+        or not session_id
+        or principal_session_id != session_id
+        or AuthorityGrant.CAPABILITY_EXECUTE.value not in grants
+    ):
+        raise PermissionError("governed evolution requires an authenticated operator capability principal")
+    return principal
+
+
+def _check_evolution_boundary(authority_check: EvolutionAuthorityCheck | None = None) -> None:
+    require_evolution_operator_authority()
+    (authority_check or assert_runtime_not_revoked)()
 
 
 @dataclass(frozen=True)
@@ -685,12 +727,120 @@ def _benchmark_gate_payload(
     }
 
 
+def _safe_receipt_payload(receipt: EvolutionReceipt) -> dict[str, Any]:
+    """Return a metadata-only durable receipt.
+
+    The operator response retains the existing detailed validation contract,
+    while the durable receipt and benchmark readback must not become a second
+    copy of arbitrary candidate input, objectives, observations, or paths.
+    """
+    payload = receipt.to_dict()
+    benchmark_gate = payload.get("benchmark_gate")
+    safe_gate = {
+        key: benchmark_gate[key]
+        for key in (
+            "rollout_state",
+            "regression_gate",
+            "acceptance_state",
+            "diversity_guard_state",
+            "preference_signal_count",
+            "requires_human_review",
+            "canary_required",
+            "rollback_ready_required",
+            "rollback_ready",
+            "safety_receipt_state",
+            "adoption_policy",
+            "rollback_policy",
+            "required_benchmark_suites",
+            "blocked_constraints",
+            "proof_contract",
+            "receipt_surfaces",
+        )
+        if isinstance(benchmark_gate, dict) and key in benchmark_gate
+    }
+    return {
+        "target_type": receipt.target_type,
+        "source_name_digest": _digest_metadata(receipt.source_name),
+        # Candidate names are generated from the registered baseline asset;
+        # strip control characters before retaining this stable receipt label.
+        "candidate_name": re.sub(r"[\x00-\x1f\x7f]", "-", str(receipt.candidate_name))[:160],
+        "candidate_name_digest": _digest_metadata(receipt.candidate_name),
+        "candidate_file_name_digest": _digest_metadata(receipt.candidate_file_name),
+        "source_path_digest": _digest_metadata(receipt.source_path),
+        "valid": bool(receipt.valid),
+        "blocked": bool(receipt.blocked),
+        "score": receipt.score,
+        "quality_state": receipt.quality_state,
+        "constraints": [
+            {
+                "name": item.get("name"),
+                "status": item.get("status"),
+                "blocked": bool(item.get("blocked")),
+            }
+            for item in payload.get("constraints", [])
+            if isinstance(item, dict)
+        ],
+        "evals": [
+            {
+                "name": item.get("name"),
+                "passed": bool(item.get("passed")),
+                "score": item.get("score"),
+            }
+            for item in payload.get("evals", [])
+            if isinstance(item, dict)
+        ],
+        "change_summary": ["Candidate content withheld from the durable receipt."],
+        "review_risks": ["Human review remains required before promotion."],
+        "benchmark_gate": safe_gate,
+        "pr_draft": {
+            "title": "Governed evolution review candidate",
+            "body": "Candidate content and operator-provided rationale are withheld from this receipt.",
+        },
+    }
+
+
+def _digest_metadata(value: object) -> str:
+    import hashlib
+
+    return hashlib.sha256(str(value).encode("utf-8")).hexdigest()
+
+
 def _write_receipt(candidate_file_name: str, receipt: EvolutionReceipt) -> str:
     receipts_dir = workspace_capability_package_root() / "evolution" / "receipts"
     receipts_dir.mkdir(parents=True, exist_ok=True)
     target = receipts_dir / f"{Path(candidate_file_name).stem}.json"
-    target.write_text(json.dumps(receipt.to_dict(), indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    target.write_text(json.dumps(_safe_receipt_payload(receipt), indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return str(target)
+
+
+def _evolution_artifact_snapshot(
+    target_type: EvolutionTargetType,
+    *,
+    candidate_file_name: str,
+) -> tuple[tuple[Path, bool, bytes | None], ...]:
+    package_root = workspace_capability_package_root()
+    contribution_type = {
+        "skill": "skills",
+        "runbook": "runbooks",
+        "starter_pack": "starter_packs",
+        "prompt_pack": "prompt_packs",
+    }[target_type]
+    candidate_path = package_root / expected_layout_prefixes(contribution_type)[0] / candidate_file_name
+    receipt_path = package_root / "evolution" / "receipts" / f"{Path(candidate_file_name).stem}.json"
+    manifest_path = package_root / "manifest.yaml"
+    snapshot: list[tuple[Path, bool, bytes | None]] = []
+    for path in (candidate_path, receipt_path, manifest_path):
+        snapshot.append((path, path.exists(), path.read_bytes() if path.exists() else None))
+    return tuple(snapshot)
+
+
+def _restore_evolution_artifacts(snapshot: tuple[tuple[Path, bool, bytes | None], ...]) -> None:
+    for path, existed, content in snapshot:
+        if existed:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(content or b"")
+        else:
+            path.unlink(missing_ok=True)
 
 
 def _save_candidate(target_type: EvolutionTargetType, *, file_name: str, content: str) -> str:
@@ -712,6 +862,7 @@ def evaluate_candidate(
     observations: list[str] | None = None,
     candidate_file_name: str | None = None,
 ) -> EvolutionReceipt:
+    _check_evolution_boundary()
     resolved_source = _resolve_registered_target_path(target_type, source_path)
     base_content = resolved_source.read_text(encoding="utf-8")
     objective_text = str(objective or "").strip()
@@ -802,14 +953,18 @@ def create_evolution_proposal(
     objective: str = "",
     observations: list[str] | None = None,
     file_name: str | None = None,
+    authority_check: EvolutionAuthorityCheck | None = None,
 ) -> dict[str, Any]:
+    _check_evolution_boundary(authority_check)
     resolved_source = _resolve_registered_target_path(target_type, source_path)
+    _check_evolution_boundary(authority_check)
     candidate_name, candidate_content = generate_candidate_content(
         target_type,
         source_path=str(resolved_source),
         objective=objective,
         observations=observations,
     )
+    _check_evolution_boundary(authority_check)
     candidate_file_name = file_name or _default_candidate_file_name(resolved_source)
     receipt = evaluate_candidate(
         target_type,
@@ -819,19 +974,30 @@ def create_evolution_proposal(
         observations=observations,
         candidate_file_name=candidate_file_name,
     )
+    _check_evolution_boundary(authority_check)
     saved_path = None
     receipt_path = None
     if not receipt.blocked and receipt.score >= 0.7:
-        saved_path = _save_candidate(target_type, file_name=candidate_file_name, content=candidate_content)
-        receipt = replace(receipt, saved_path=saved_path)
-        receipt_path = _write_receipt(candidate_file_name, receipt)
-        updated_gate = dict(receipt.benchmark_gate)
-        updated_gate["rollback_ready"] = True
-        updated_gate["safety_receipt_state"] = "candidate_and_receipt_written"
-        updated_gate["saved_candidate_path"] = saved_path
-        updated_gate["receipt_path"] = receipt_path
-        receipt = replace(receipt, benchmark_gate=updated_gate, receipt_path=receipt_path)
-        _write_receipt(candidate_file_name, receipt)
+        snapshot = _evolution_artifact_snapshot(target_type, candidate_file_name=candidate_file_name)
+        try:
+            _check_evolution_boundary(authority_check)
+            saved_path = _save_candidate(target_type, file_name=candidate_file_name, content=candidate_content)
+            _check_evolution_boundary(authority_check)
+            receipt_path = str(
+                workspace_capability_package_root() / "evolution" / "receipts" / f"{Path(candidate_file_name).stem}.json"
+            )
+            updated_gate = dict(receipt.benchmark_gate)
+            updated_gate["rollback_ready"] = True
+            updated_gate["safety_receipt_state"] = "candidate_and_receipt_written"
+            updated_gate["saved_candidate_path"] = saved_path
+            updated_gate["receipt_path"] = receipt_path
+            receipt = replace(receipt, saved_path=saved_path, benchmark_gate=updated_gate, receipt_path=receipt_path)
+            _check_evolution_boundary(authority_check)
+            _write_receipt(candidate_file_name, receipt)
+            _check_evolution_boundary(authority_check)
+        except Exception:
+            _restore_evolution_artifacts(snapshot)
+            raise
     return {
         "status": "saved" if saved_path else "blocked",
         "candidate_name": candidate_name,

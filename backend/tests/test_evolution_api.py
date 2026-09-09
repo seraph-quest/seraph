@@ -10,11 +10,16 @@ from fastapi import HTTPException
 import pytest
 from starlette.requests import Request
 
-from src.approval.runtime import get_current_session_id, get_current_trust_principal
+from src.approval.runtime import (
+    get_current_session_id,
+    get_current_trust_principal,
+    reset_runtime_context,
+    set_runtime_context,
+)
 from src.auth.cancellation import RuntimeRevokedError
 from src.auth.service import test_bypass_operator
 from src.runbooks.manager import runbook_manager
-from src.security.trust_contract import PrincipalType
+from src.security.trust_contract import AuthorityGrant, PrincipalType, TrustPrincipal
 from src.skills.manager import skill_manager
 from src.starter_packs.manager import starter_pack_manager
 
@@ -178,6 +183,7 @@ async def test_evolution_routes_bind_exact_operator_context_and_reset_after_audi
 
     operator = test_bypass_operator()
     observed: list[tuple[str, object]] = []
+    audit_calls: list[dict[str, object]] = []
 
     def observe(label: str):
         observed.append((label, get_current_trust_principal()))
@@ -199,6 +205,7 @@ async def test_evolution_routes_bind_exact_operator_context_and_reset_after_audi
     }
 
     async def audit_event(**kwargs):
+        audit_calls.append(kwargs)
         observe(str(kwargs.get("outcome") or "audit"))
         assert "candidate secret" not in repr(kwargs)
 
@@ -254,6 +261,65 @@ async def test_evolution_routes_bind_exact_operator_context_and_reset_after_audi
         and principal.session_id == operator.session_id
         for _label, principal in observed
     )
+    assert audit_calls
+    assert all(
+        call["session_id"] == operator.session_id
+        and call["actor"] == operator.principal.principal_id
+        and call["principal_id"] == operator.principal.principal_id
+        and call["policy_mode"] == "authenticated_operator"
+        for call in audit_calls
+    )
+    assert get_current_session_id() is None
+    assert get_current_trust_principal() is None
+
+
+@pytest.mark.asyncio
+async def test_evolution_mutators_install_rest_watch_and_recheck_before_each_stage():
+    from src.api.evolution import EvolutionProposalRequest, EvolutionValidationRequest
+    from src.api.evolution import create_governed_evolution_proposal, validate_evolution_candidate
+
+    operator = test_bypass_operator()
+    watch = object()
+    receipt = SimpleNamespace(
+        to_dict=lambda: {
+            "valid": True,
+            "blocked": False,
+            "score": 0.8,
+            "quality_state": "guarded",
+            "constraints": [],
+            "benchmark_gate": {},
+        }
+    )
+    proposal = {"status": "saved", "receipt": receipt.to_dict()}
+    with (
+        patch("src.api.evolution.context_manager.get_context", return_value=SimpleNamespace(approval_mode="safe")),
+        patch("src.api.evolution._begin_rest_revocation_watch", return_value=watch) as begin,
+        patch("src.api.evolution._end_rest_revocation_watch", new_callable=AsyncMock) as end,
+        patch("src.api.evolution._ensure_rest_authorized", new_callable=AsyncMock) as recheck,
+        patch("src.api.evolution._ensure_evolution_managers_loaded"),
+        patch("src.api.evolution.evaluate_candidate", return_value=receipt),
+        patch("src.api.evolution.create_evolution_proposal", return_value=proposal),
+        patch("src.api.evolution.skill_manager.reload"),
+        patch("src.api.evolution.runbook_manager.reload"),
+        patch("src.api.evolution.starter_pack_manager.reload"),
+        patch("src.api.evolution.log_integration_event", new_callable=AsyncMock),
+    ):
+        await validate_evolution_candidate(
+            EvolutionValidationRequest(
+                target_type="prompt_pack",
+                source_path="/tmp/source.md",
+                candidate_content="# Candidate",
+            ),
+            _evolution_request(operator),
+        )
+        await create_governed_evolution_proposal(
+            EvolutionProposalRequest(target_type="prompt_pack", source_path="/tmp/source.md"),
+            _evolution_request(operator),
+        )
+
+    assert begin.call_count == 2
+    assert end.await_count == 2
+    assert recheck.await_count == 9
     assert get_current_session_id() is None
     assert get_current_trust_principal() is None
 
@@ -271,15 +337,166 @@ async def test_evolution_proposal_rechecks_revocation_before_creation_and_resets
         patch("src.api.evolution.create_evolution_proposal") as create,
         patch("src.api.evolution.log_integration_event", new_callable=AsyncMock) as audit,
     ):
-        with pytest.raises(RuntimeRevokedError):
+        with pytest.raises(HTTPException) as error:
             await create_governed_evolution_proposal(
                 EvolutionProposalRequest(target_type="prompt_pack", source_path="/tmp/source.md"),
                 _evolution_request(operator),
             )
+        assert error.value.status_code == 401
 
     ensure.assert_called_once()
     create.assert_not_called()
     audit.assert_not_awaited()
+    assert get_current_session_id() is None
+    assert get_current_trust_principal() is None
+
+
+def test_self_evolution_tool_denies_direct_call_without_human_operator_context():
+    from src.tools.self_evolution_tool import propose_capability_evolution
+
+    operator = test_bypass_operator()
+    invalid_principals = (
+        None,
+        TrustPrincipal(
+            principal_id="service:scheduled-workflow",
+            principal_type=PrincipalType.SERVICE,
+            grants=(AuthorityGrant.CAPABILITY_EXECUTE,),
+            session_id=operator.session_id,
+        ),
+        replace(operator.principal, grants=()),
+        replace(operator.principal, session_id="other-session"),
+        replace(operator.principal, revoked=True),
+    )
+    with patch("src.tools.self_evolution_tool.create_evolution_proposal") as create:
+        for principal in invalid_principals:
+            tokens = set_runtime_context(
+                operator.session_id,
+                "safe",
+                trust_principal=principal,
+            )
+            try:
+                with pytest.raises(PermissionError):
+                    propose_capability_evolution.forward(
+                        "prompt_pack",
+                        "/workspace/review.md",
+                        "improve receipts",
+                        "one observation",
+                    )
+            finally:
+                reset_runtime_context(tokens)
+    create.assert_not_called()
+    assert get_current_session_id() is None
+    assert get_current_trust_principal() is None
+
+
+def test_self_evolution_tool_binds_existing_operator_and_withholds_freeform_receipt_fields():
+    from src.tools.self_evolution_tool import propose_capability_evolution
+
+    operator = test_bypass_operator()
+    tokens = set_runtime_context(
+        operator.session_id,
+        "safe",
+        trust_principal=operator.principal,
+    )
+    proposal = {
+        "status": "saved",
+        "candidate_name": "candidate secret",
+        "candidate_content": "candidate secret",
+        "receipt": {
+            "score": 0.8,
+            "quality_state": "guarded",
+            "constraints": [{"name": "scope", "status": "pass", "blocked": False, "summary": "secret"}],
+            "saved_path": "/private/candidate.md",
+            "receipt_path": "/private/receipt.json",
+        },
+    }
+    try:
+        with patch(
+            "src.tools.self_evolution_tool.create_evolution_proposal",
+            return_value=proposal,
+        ) as create:
+            result = propose_capability_evolution.forward(
+                "prompt_pack",
+                "/workspace/review.md",
+                "secret objective",
+                "secret observation",
+            )
+        assert "candidate secret" not in result
+        assert "/private" not in result
+        create.assert_called_once()
+        assert create.call_args.kwargs["authority_check"] is not None
+    finally:
+        reset_runtime_context(tokens)
+    assert get_current_session_id() is None
+    assert get_current_trust_principal() is None
+
+
+def test_evolution_engine_rolls_back_partial_candidate_and_receipt_on_revocation(tmp_path):
+    from src.evolution.engine import EvolutionReceipt, create_evolution_proposal
+
+    operator = test_bypass_operator()
+    source_path = tmp_path / "review.md"
+    source_path.write_text("# Baseline\n", encoding="utf-8")
+    receipt = EvolutionReceipt(
+        target_type="prompt_pack",
+        source_path=str(source_path),
+        source_name="Review",
+        candidate_name="Review Candidate",
+        candidate_file_name="review-candidate.md",
+        valid=True,
+        blocked=False,
+        score=0.8,
+        quality_state="guarded",
+        objective="secret objective",
+        observations=("secret observation",),
+        constraints=(),
+        evals=(),
+        change_summary=("summary",),
+        review_risks=("risk",),
+        benchmark_gate={},
+        pr_draft={},
+    )
+    candidate_path = tmp_path / "extensions" / "workspace-capabilities" / "prompts" / "review-candidate.md"
+    receipt_path = tmp_path / "extensions" / "workspace-capabilities" / "evolution" / "receipts" / "review-candidate.json"
+
+    def write_candidate(*_args, **_kwargs):
+        candidate_path.parent.mkdir(parents=True, exist_ok=True)
+        candidate_path.write_text("candidate secret", encoding="utf-8")
+        return str(candidate_path)
+
+    def write_partial_receipt(*_args, **_kwargs):
+        receipt_path.parent.mkdir(parents=True, exist_ok=True)
+        receipt_path.write_text("partial secret receipt", encoding="utf-8")
+        raise RuntimeRevokedError("operator session was revoked")
+
+    tokens = set_runtime_context(
+        operator.session_id,
+        "safe",
+        trust_principal=operator.principal,
+    )
+    try:
+        with (
+            patch("src.evolution.engine.settings.workspace_dir", str(tmp_path)),
+            patch("src.evolution.engine._resolve_registered_target_path", return_value=source_path),
+            patch("src.evolution.engine.generate_candidate_content", return_value=("Review Candidate", "candidate secret")),
+            patch("src.evolution.engine.evaluate_candidate", return_value=receipt),
+            patch("src.evolution.engine._save_candidate", side_effect=write_candidate),
+            patch("src.evolution.engine._write_receipt", side_effect=write_partial_receipt),
+        ):
+            with pytest.raises(RuntimeRevokedError):
+                create_evolution_proposal(
+                    "prompt_pack",
+                    source_path=str(source_path),
+                    objective="secret objective",
+                    observations=["secret observation"],
+                    file_name="review-candidate.md",
+                )
+    finally:
+        reset_runtime_context(tokens)
+
+    assert not candidate_path.exists()
+    assert not receipt_path.exists()
+    assert not (tmp_path / "extensions" / "workspace-capabilities" / "manifest.yaml").exists()
     assert get_current_session_id() is None
     assert get_current_trust_principal() is None
 
@@ -324,6 +541,14 @@ async def test_evolution_proposal_saves_skill_review_candidate(client, tmp_path,
     assert "governed_improvement" in payload["receipt"]["benchmark_gate"]["required_benchmark_suites"]
     assert "Required tool scope is unchanged." in payload["receipt"]["change_summary"]
     assert payload["receipt"]["review_risks"]
+    stored_receipt_path = Path(payload["receipt"]["receipt_path"])
+    stored_receipt_text = stored_receipt_path.read_text(encoding="utf-8")
+    stored_receipt = json.loads(stored_receipt_text)
+    assert str(source_path) not in stored_receipt_text
+    assert "make review output crisper" not in stored_receipt_text
+    assert "The current skill does not state the review goal clearly." not in stored_receipt_text
+    assert stored_receipt["candidate_name"] == "Web Briefing Review Candidate"
+    assert "candidate secret" not in stored_receipt_text
 
 
 @pytest.mark.asyncio

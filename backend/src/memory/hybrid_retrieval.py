@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from sqlalchemy import func, or_
+from sqlalchemy.exc import SQLAlchemyError
 from sqlmodel import col, select
 
 from src.db.engine import get_session
@@ -272,6 +273,24 @@ async def retrieve_hybrid_memory(
     if not normalized_query:
         return HybridMemoryRetrievalResult(context="", buckets={}, degraded=False, hits=())
 
+    try:
+        tombstone_reconciliation = await memory_repository.reconcile_memory_tombstones()
+    except SQLAlchemyError:
+        # A failed local authority check must not fall through to a possibly
+        # stale derived index.  Keep the outage explicit and return no memory.
+        return HybridMemoryRetrievalResult(
+            context="",
+            buckets={},
+            degraded=True,
+            hits=(),
+            diagnostics=(
+                {
+                    "reason": "canonical_tombstone_reconciliation_unavailable",
+                    "status": "degraded_no_learning",
+                },
+            ),
+        )
+
     terms = _query_terms(normalized_query)
     project_entities = await memory_repository.find_entities_by_names(
         names=active_projects,
@@ -483,4 +502,13 @@ async def retrieve_hybrid_memory(
 
     deduped_hits = _dedupe_hits(combined_hits)
     ranked_hits, diagnostics = _apply_contradiction_aware_ranking(deduped_hits)
-    return _render_result(ranked_hits, limit=limit, degraded=vector_degraded, diagnostics=diagnostics)
+    diagnostics = (
+        *diagnostics,
+        {"tombstone_reconciliation": tombstone_reconciliation},
+    )
+    return _render_result(
+        ranked_hits,
+        limit=limit,
+        degraded=vector_degraded or tombstone_reconciliation.get("status") == "degraded",
+        diagnostics=diagnostics,
+    )

@@ -21,6 +21,7 @@ from src.memory.repository import (
     _canonical_memory_deletion_marker,
     memory_repository,
 )
+from src.memory.snapshots import invalidate_bounded_guardian_snapshot_cache
 from src.memory.types import kind_to_category, normalize_memory_kind
 
 
@@ -1139,14 +1140,10 @@ async def apply_memory_live_control_action(
     elif normalized_action == "propagate_delete_export":
         if not memory_id:
             raise ValueError("memory_id is required for propagate_delete_export")
-        memory = await memory_repository.update_memory_control_metadata(
+        tombstone_result = await memory_repository.mark_memory_tombstoned(
             memory_id,
-            status=MemoryStatus.archived,
-            content=_CANONICAL_MEMORY_DELETE_CONTENT,
-            summary=_CANONICAL_MEMORY_DELETE_CONTENT,
-            confidence=0.0,
-            importance=0.0,
-            reinforcement=0.0,
+            actor=actor,
+            reason=reason,
             metadata_updates={
                 **_operator_metadata(
                     action="propagate_delete_export",
@@ -1162,6 +1159,17 @@ async def apply_memory_live_control_action(
                 "archived_at": now.isoformat(),
             },
         )
+        memory = tombstone_result.memory
+        result["tombstone"] = {
+            "id": tombstone_result.tombstone.id,
+            "memory_id": tombstone_result.tombstone.memory_id,
+            "actor": tombstone_result.tombstone.actor,
+            "reason": tombstone_result.tombstone.reason,
+            "created_at": tombstone_result.tombstone.created_at.isoformat(),
+            "created": tombstone_result.created,
+            "state": _CANONICAL_MEMORY_REDACTED_STATE,
+        }
+        invalidate_bounded_guardian_snapshot_cache()
         changed_memory = True
     elif normalized_action in {"quarantine_provider", "reinstate_provider"}:
         normalized_provider = str(provider_name or "").strip()

@@ -29,6 +29,7 @@ from sqlalchemy.pool import StaticPool
 from smolagents import ActionStep, FinalAnswerStep, Tool, ToolCall
 from smolagents.monitoring import Timing
 from sqlmodel import SQLModel
+from starlette.requests import Request
 from starlette.testclient import TestClient
 
 from config.settings import settings
@@ -795,7 +796,8 @@ from src.workflows.post_dx_live_durable_orchestration import (
 )
 from src.evolution.engine import evolution_benchmark_gate_policy
 from src.approval.exceptions import ApprovalRequired
-from src.approval.runtime import reset_runtime_context, set_runtime_context
+from src.approval.runtime import get_current_trust_principal, reset_runtime_context, set_runtime_context
+from src.auth.service import test_bypass_operator
 from src.security.trust_contract import AuthorityGrant, EgressClass, PrincipalType, TrustPrincipal
 from src.model_fabric.configuration import WorkloadPolicy
 from src.agent.session import SessionManager, session_manager
@@ -25496,9 +25498,15 @@ async def _eval_mcp_test_api_audit() -> dict[str, Any]:
 async def _eval_skills_api_audit() -> dict[str, Any]:
     mock_log_event = AsyncMock()
     mock_skill_manager = MagicMock()
-    mock_skill_manager.disable.return_value = True
-    mock_skill_manager.enable.return_value = False
-    mock_skill_manager.reload.return_value = [
+    observed_principals: list[TrustPrincipal | None] = []
+
+    def observe_manager_call(result):
+        observed_principals.append(get_current_trust_principal())
+        return result
+
+    mock_skill_manager.disable.side_effect = lambda _name: observe_manager_call(True)
+    mock_skill_manager.enable.side_effect = lambda _name: observe_manager_call(False)
+    mock_skill_manager.reload.side_effect = lambda: observe_manager_call([
         {
             "name": "test-skill",
             "description": "A test skill",
@@ -25515,20 +25523,44 @@ async def _eval_skills_api_audit() -> dict[str, Any]:
             "enabled": True,
             "file_path": "/tmp/skills/simple-skill.md",
         },
-    ]
+    ])
 
     with (
+        patch.object(settings, "deployment_environment", "test"),
+        patch.object(settings, "operator_auth_allow_unauthenticated_tests", True),
         patch("src.api.skills.skill_manager", mock_skill_manager),
         patch.object(audit_repository, "log_event", mock_log_event),
     ):
-        updated = await update_skill_api("test-skill", UpdateSkillRequest(enabled=False))
+        operator = test_bypass_operator()
+
+        def build_request(path: str, method: str) -> Request:
+            return Request(
+                {
+                    "type": "http",
+                    "method": method,
+                    "path": path,
+                    "headers": [],
+                    "query_string": b"",
+                    "state": {"operator": operator},
+                }
+            )
+
+        updated = await update_skill_api(
+            "test-skill",
+            UpdateSkillRequest(enabled=False),
+            build_request("/api/skills/test-skill", "PUT"),
+        )
         try:
-            await update_skill_api("missing-skill", UpdateSkillRequest(enabled=True))
+            await update_skill_api(
+                "missing-skill",
+                UpdateSkillRequest(enabled=True),
+                build_request("/api/skills/missing-skill", "PUT"),
+            )
         except HTTPException as exc:
             missing_status_code = exc.status_code
         else:  # pragma: no cover - defensive guard
             raise AssertionError("Expected missing skill update to raise HTTPException")
-        reloaded = await reload_skill_api()
+        reloaded = await reload_skill_api(build_request("/api/skills/reload", "POST"))
 
     updated_event = _find_audit_call(
         mock_log_event,
@@ -25545,6 +25577,18 @@ async def _eval_skills_api_audit() -> dict[str, Any]:
         event_type="integration_succeeded",
         tool_name="skills:reload",
     )
+    authority_bound = (
+        len(observed_principals) == 3
+        and all(
+            principal is not None
+            and principal.principal_id == operator.principal.principal_id
+            and principal.principal_type is PrincipalType.OPERATOR
+            and principal.session_id == operator.session_id
+            and AuthorityGrant.CAPABILITY_EXECUTE.value
+            in {str(getattr(grant, "value", grant)) for grant in principal.grants}
+            for principal in observed_principals
+        )
+    )
     return {
         "updated_status": updated["status"],
         "updated_enabled": updated_event["details"]["enabled"],
@@ -25553,6 +25597,9 @@ async def _eval_skills_api_audit() -> dict[str, Any]:
         "reload_count": reloaded["count"],
         "reload_enabled_count": reloaded_event["details"]["enabled_count"],
         "reload_skill_names": reloaded_event["details"]["skill_names"],
+        "route_reached": len(observed_principals) == 3,
+        "authority_bound": authority_bound,
+        "context_reset": get_current_trust_principal() is None,
     }
 
 

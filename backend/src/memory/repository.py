@@ -1258,6 +1258,28 @@ class MemoryRepository:
                     created_at=deletion_time,
                 )
                 db.add(tombstone)
+                try:
+                    # The process-local lock covers the normal path.  Keep a
+                    # database-level retry as well for two workers with
+                    # separate repository instances racing on the unique key.
+                    await db.flush()
+                except IntegrityError:
+                    await db.rollback()
+                    tombstone = (
+                        await db.execute(
+                            select(MemoryTombstone).where(
+                                MemoryTombstone.memory_id == normalized_memory_id
+                            )
+                        )
+                    ).scalars().first()
+                    memory = (
+                        await db.execute(
+                            select(Memory).where(Memory.id == normalized_memory_id)
+                        )
+                    ).scalars().first()
+                    if tombstone is None or memory is None:
+                        raise
+                    created = False
             updates = dict(metadata_updates or {})
             try:
                 metadata = json.loads(memory.metadata_json or "{}")

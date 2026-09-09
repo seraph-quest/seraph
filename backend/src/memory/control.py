@@ -21,6 +21,7 @@ from src.memory.repository import (
     _canonical_memory_deletion_marker,
     memory_repository,
 )
+from src.memory.snapshots import invalidate_bounded_guardian_snapshot_cache
 from src.memory.types import kind_to_category, normalize_memory_kind
 
 
@@ -424,6 +425,15 @@ async def correct_memory(
             extra={"pinned": False},
         ),
     }
+    superseded_metadata_updates = {
+        "superseded_reason": "operator_correction",
+        "operator_control": {
+            "last_action": "superseded_by_operator_correction",
+            "last_actor": actor,
+            "last_reason": str(reason or "").strip(),
+            "last_action_at": now.isoformat(),
+        },
+    }
 
     created = await memory_repository.create_memory(
         content=normalized_content,
@@ -438,6 +448,8 @@ async def correct_memory(
         reinforcement=1.5,
         metadata=metadata_updates,
         last_confirmed_at=now,
+        supersedes_memory_id=corrects_memory_id,
+        supersedes_metadata=superseded_metadata_updates if corrects_memory_id else None,
     )
     memory = await memory_repository.get_memory(created.memory_id)
     if memory is None:  # pragma: no cover - defensive, create_memory already flushed
@@ -445,20 +457,9 @@ async def correct_memory(
 
     corrected_memory = None
     if corrects_memory_id:
-        corrected_memory = await memory_repository.update_memory_control_metadata(
-            corrects_memory_id,
-            status=MemoryStatus.superseded,
-            metadata_updates={
-                "superseded_reason": "operator_correction",
-                "superseded_by_memory_id": memory.id,
-                "operator_control": {
-                    "last_action": "superseded_by_operator_correction",
-                    "last_actor": actor,
-                    "last_reason": str(reason or "").strip(),
-                    "last_action_at": now.isoformat(),
-                },
-            },
-        )
+        corrected_memory = await memory_repository.get_memory(corrects_memory_id)
+        if corrected_memory is None:  # pragma: no cover - atomic target update
+            raise ValueError(f"Unknown memory id: {corrects_memory_id}")
         await memory_repository.create_edge(
             from_memory_id=memory.id,
             to_memory_id=corrected_memory.id,
@@ -908,21 +909,36 @@ async def get_memory_live_controls_snapshot(
     provider_inventory = _apply_provider_quarantine_overlay(list_memory_provider_inventory())
     fetch_limit = bounded_limit if not owner_session_id else min(bounded_limit * 10, 200)
     try:
-        active = _scope_memories_to_owner(
-            await memory_repository.list_memories(status=MemoryStatus.active, limit=fetch_limit),
-            owner_session_id,
-        )[:bounded_limit]
-        superseded = _scope_memories_to_owner(
-            await memory_repository.list_memories(status=MemoryStatus.superseded, limit=fetch_limit),
-            owner_session_id,
-        )[:bounded_limit]
-        archived = _scope_memories_to_owner(
-            await memory_repository.list_memories(status=MemoryStatus.archived, limit=fetch_limit),
-            owner_session_id,
-        )[:bounded_limit]
-        receipts = await list_memory_audit_receipts(limit=bounded_limit)
-        reconciliation = await summarize_memory_reconciliation_state(limit=min(bounded_limit, 10))
-        operator_status = "guardian_memory_live_controls_visible"
+        tombstone_reconciliation = await memory_repository.reconcile_memory_tombstones()
+        if tombstone_reconciliation.get("status") != "ready":
+            active = []
+            superseded = []
+            archived = []
+            receipts = {"events": []}
+            reconciliation = {
+                "summary": {
+                    "status": "degraded_no_learning",
+                    "reason": "canonical tombstone reconciliation requires repair",
+                },
+                "tombstone_reconciliation": tombstone_reconciliation,
+            }
+            operator_status = "guardian_memory_live_controls_degraded"
+        else:
+            active = _scope_memories_to_owner(
+                await memory_repository.list_memories(status=MemoryStatus.active, limit=fetch_limit),
+                owner_session_id,
+            )[:bounded_limit]
+            superseded = _scope_memories_to_owner(
+                await memory_repository.list_memories(status=MemoryStatus.superseded, limit=fetch_limit),
+                owner_session_id,
+            )[:bounded_limit]
+            archived = _scope_memories_to_owner(
+                await memory_repository.list_memories(status=MemoryStatus.archived, limit=fetch_limit),
+                owner_session_id,
+            )[:bounded_limit]
+            receipts = await list_memory_audit_receipts(limit=bounded_limit)
+            reconciliation = await summarize_memory_reconciliation_state(limit=min(bounded_limit, 10))
+            operator_status = "guardian_memory_live_controls_visible"
     except SQLAlchemyError:
         active = []
         superseded = []
@@ -1139,14 +1155,10 @@ async def apply_memory_live_control_action(
     elif normalized_action == "propagate_delete_export":
         if not memory_id:
             raise ValueError("memory_id is required for propagate_delete_export")
-        memory = await memory_repository.update_memory_control_metadata(
+        tombstone_result = await memory_repository.mark_memory_tombstoned(
             memory_id,
-            status=MemoryStatus.archived,
-            content=_CANONICAL_MEMORY_DELETE_CONTENT,
-            summary=_CANONICAL_MEMORY_DELETE_CONTENT,
-            confidence=0.0,
-            importance=0.0,
-            reinforcement=0.0,
+            actor=actor,
+            reason=reason,
             metadata_updates={
                 **_operator_metadata(
                     action="propagate_delete_export",
@@ -1162,6 +1174,17 @@ async def apply_memory_live_control_action(
                 "archived_at": now.isoformat(),
             },
         )
+        memory = tombstone_result.memory
+        result["tombstone"] = {
+            "id": tombstone_result.tombstone.id,
+            "memory_id": tombstone_result.tombstone.memory_id,
+            "actor": tombstone_result.tombstone.actor,
+            "reason": tombstone_result.tombstone.reason,
+            "created_at": tombstone_result.tombstone.created_at.isoformat(),
+            "created": tombstone_result.created,
+            "state": _CANONICAL_MEMORY_REDACTED_STATE,
+        }
+        invalidate_bounded_guardian_snapshot_cache()
         changed_memory = True
     elif normalized_action in {"quarantine_provider", "reinstate_provider"}:
         normalized_provider = str(provider_name or "").strip()

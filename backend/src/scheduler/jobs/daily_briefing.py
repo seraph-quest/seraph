@@ -7,6 +7,7 @@ from time import perf_counter
 from config.settings import settings
 from src.audit.runtime import log_background_task_event, log_scheduler_job_event
 from src.llm_runtime import completion_with_fallback
+from src.memory.hybrid_retrieval import retrieve_hybrid_memory
 from src.model_fabric.caller_context import build_canonical_inference_context
 from src.models.schemas import WSResponse
 
@@ -42,30 +43,28 @@ Be concise. No preamble. Just the briefing text."""
 
 
 async def _get_relevant_memories() -> tuple[str, bool]:
-    """Fetch memory context for the briefing while preserving fail-open behavior."""
-    from src.memory.vector_store import search_with_status
+    """Fetch canonical, tombstone-filtered memory context for the briefing."""
 
-    results, degraded = await asyncio.to_thread(
-        search_with_status,
-        "daily priorities and routines",
-        top_k=3,
+    retrieval = await retrieve_hybrid_memory(
+        query="daily priorities and routines",
+        limit=3,
     )
-    if not results:
-        if degraded:
-            await log_background_task_event(
-                task_name="daily_briefing_inputs",
-                outcome="degraded",
-                details={
-                    "source": "relevant_memories",
-                    "fallback_value": "No relevant memories yet.",
-                    "error": "vector_store_search_failed",
-                },
-            )
-            return "No relevant memories yet.", True
-        return "No relevant memories yet.", False
-
-    lines = [f"- [{result['category']}] {result['text']}" for result in results]
-    return "\n".join(lines), False
+    if retrieval.context:
+        return retrieval.context, retrieval.degraded
+    if retrieval.degraded:
+        reason = "canonical_memory_read_unavailable"
+        if retrieval.diagnostics:
+            reason = str(retrieval.diagnostics[0].get("reason") or reason)
+        await log_background_task_event(
+            task_name="daily_briefing_inputs",
+            outcome="degraded",
+            details={
+                "source": "relevant_memories",
+                "fallback_value": "No relevant memories yet.",
+                "error": reason,
+            },
+        )
+    return "No relevant memories yet.", retrieval.degraded
 
 
 async def run_daily_briefing() -> None:

@@ -1,3 +1,4 @@
+import asyncio
 import json
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -5,6 +6,7 @@ from unittest.mock import patch
 
 import pytest
 from sqlalchemy.exc import IntegrityError
+from sqlmodel import select
 
 from src.db.models import (
     Memory,
@@ -14,8 +16,11 @@ from src.db.models import (
     MemorySnapshotKind,
     MemorySource,
     MemoryStatus,
+    MemoryTombstone,
 )
 from src.memory.repository import memory_repository
+from src.memory.retrieval_planner import plan_memory_retrieval
+from src.memory.snapshots import render_bounded_guardian_snapshot
 
 
 _SCOPED_LEARNING_SCOPE = {
@@ -228,6 +233,39 @@ async def test_create_edge_dedupes_identical_relationship(async_db):
 
     assert second_edge.id == first_edge.id
     assert len(edges) == 1
+
+
+@pytest.mark.asyncio
+async def test_edges_reject_and_hide_tombstoned_endpoints(async_db):
+    first = await memory_repository.create_memory(
+        content="Canonical edge source.",
+        kind=MemoryKind.fact,
+    )
+    second = await memory_repository.create_memory(
+        content="Canonical edge target.",
+        kind=MemoryKind.fact,
+    )
+    await memory_repository.create_edge(
+        from_memory_id=first.memory_id,
+        to_memory_id=second.memory_id,
+        edge_type=MemoryEdgeType.related,
+    )
+
+    await memory_repository.mark_memory_tombstoned(
+        first.memory_id,
+        actor="test-operator",
+    )
+
+    assert await memory_repository.list_edges(
+        from_memory_id=first.memory_id,
+        to_memory_id=second.memory_id,
+    ) == []
+    with pytest.raises(ValueError, match="canonical memories"):
+        await memory_repository.create_edge(
+            from_memory_id=first.memory_id,
+            to_memory_id=second.memory_id,
+            edge_type=MemoryEdgeType.related,
+        )
 
 
 @pytest.mark.asyncio
@@ -783,6 +821,8 @@ async def test_sync_scoped_memory_integrity_error_recovery_preserves_tombstone()
                 return _Result(first=None)
             if self.execute_calls == 2:
                 return _Result(all_rows=[])
+            if self.execute_calls == 3:
+                return _Result(first=None)
             return _Result(first=tombstone)
 
         def add(self, _memory):
@@ -818,7 +858,7 @@ async def test_sync_scoped_memory_integrity_error_recovery_preserves_tombstone()
     assert result is None
     assert db.flush_calls == 1
     assert db.rollback_calls == 1
-    assert db.execute_calls == 3
+    assert db.execute_calls == 4
     assert {
         field: getattr(tombstone, field)
         for field in snapshot
@@ -1132,3 +1172,170 @@ async def test_find_merge_candidate_does_not_merge_unlinked_input_into_linked_me
     )
 
     assert candidate is None
+
+
+@pytest.mark.asyncio
+async def test_tombstone_reconcile_redacts_restored_row_before_local_reindex(async_db):
+    created = await memory_repository.create_memory(
+        content="Private restore poison must never return.",
+        summary="Private restore poison",
+        kind=MemoryKind.fact,
+        source_session_id="owner-session",
+    )
+    first = await memory_repository.mark_memory_tombstoned(
+        created.memory_id,
+        actor="operator-1",
+        reason="user deletion",
+        metadata_updates={
+            "operator_control": {
+                "last_action": "propagate_delete_export",
+                "delete_export_state": "canonical_memory_redacted",
+            },
+        },
+    )
+    second = await memory_repository.mark_memory_tombstoned(
+        created.memory_id,
+        actor="operator-2",
+        reason="retry must be idempotent",
+    )
+
+    assert first.created is True
+    assert second.created is False
+    assert second.tombstone.actor == "operator-1"
+    assert second.tombstone.reason == "user deletion"
+    assert "content" not in MemoryTombstone.__table__.columns
+    with pytest.raises(ValueError, match="cannot reactivate canonical memory"):
+        await memory_repository.update_memory_control_metadata(
+            created.memory_id,
+            status=MemoryStatus.active,
+        )
+
+    # Simulate a stale backup restoring the row while the local deletion
+    # ledger remains durable.
+    async with async_db() as db:
+        await db.execute(
+            Memory.__table__.update()
+            .where(Memory.id == created.memory_id)
+            .values(
+                content="Private restore poison must never return.",
+                summary="Private restore poison",
+                status=MemoryStatus.active,
+                confidence=0.9,
+                importance=0.9,
+                reinforcement=1.0,
+                metadata_json='{"provenance": {"kind": "stale_backup"}}',
+            )
+        )
+
+    receipt = await memory_repository.reconcile_memory_tombstones()
+    assert receipt == {
+        "schema_version": "guardian.memory_tombstone.v1",
+        "status": "ready",
+        "checked_count": 1,
+        "reapplied_count": 1,
+        "missing_memory_count": 0,
+    }
+    restored = await memory_repository.get_memory(created.memory_id)
+    assert restored is not None
+    assert restored.status is MemoryStatus.archived
+    assert restored.content == "[delete/export propagated by operator]"
+    assert restored.summary == "[delete/export propagated by operator]"
+    assert json.loads(restored.metadata_json or "{}")["canonical_tombstone_id"] == second.tombstone.id
+
+    reindex_rows = await memory_repository.list_memories_for_reindex()
+    assert all(memory.id != created.memory_id for memory in reindex_rows)
+    tombstone = await memory_repository.get_memory_tombstone(created.memory_id)
+    assert tombstone is not None
+    assert tombstone.memory_id == created.memory_id
+
+
+@pytest.mark.asyncio
+async def test_concurrent_tombstone_requests_share_one_authoritative_row(async_db):
+    created = await memory_repository.create_memory(
+        content="Concurrent delete target.",
+        kind=MemoryKind.fact,
+    )
+    results = await asyncio.gather(
+        *(
+            memory_repository.mark_memory_tombstoned(
+                created.memory_id,
+                actor=f"operator-{index}",
+                reason=f"concurrent-{index}",
+            )
+            for index in range(2)
+        )
+    )
+
+    assert sorted(result.created for result in results) == [False, True]
+    assert len({result.tombstone.id for result in results}) == 1
+    stored = await memory_repository.get_memory_tombstone(created.memory_id)
+    assert stored is not None
+    assert stored.actor == "operator-0"
+    assert stored.reason == "concurrent-0"
+
+
+@pytest.mark.asyncio
+async def test_restored_tombstone_blocks_planner_mutations_and_source_payloads(async_db):
+    created = await memory_repository.create_memory(
+        content="Private restore poison must never influence a plan.",
+        summary="Private restore poison",
+        kind=MemoryKind.preference,
+        source_session_id="private-session",
+        source_message_id="private-message",
+        source_snippet="The erased private preference payload.",
+    )
+    await memory_repository.mark_memory_tombstoned(
+        created.memory_id,
+        actor="operator",
+        reason="privacy request",
+    )
+
+    async with async_db() as db:
+        await db.execute(
+            Memory.__table__.update()
+            .where(Memory.id == created.memory_id)
+            .values(
+                content="Private restore poison must never influence a plan.",
+                summary="Private restore poison",
+                status=MemoryStatus.active,
+                metadata_json="{}",
+            )
+        )
+        await db.execute(
+            MemorySource.__table__.update()
+            .where(MemorySource.memory_id == created.memory_id)
+            .values(snippet="Restored private source payload.")
+        )
+
+    sources = await memory_repository.list_sources(memory_id=created.memory_id)
+    assert sources[0].snippet is None
+
+    plan = await plan_memory_retrieval(query="")
+    assert "Private restore poison" not in plan.semantic_context
+    assert plan.degraded is False
+
+    snapshot, _source_hash = await render_bounded_guardian_snapshot(
+        soul_context="## Identity\n- Operator\n",
+    )
+    assert "Private restore poison" not in snapshot
+
+    with pytest.raises(ValueError, match="cannot reactivate canonical memory"):
+        await memory_repository.update_memory_control_metadata(
+            created.memory_id,
+            status=MemoryStatus.active,
+        )
+    with pytest.raises(ValueError, match="cannot merge canonical memory"):
+        await memory_repository.merge_memory(
+            created.memory_id,
+            summary="A revived private preference",
+        )
+
+    await memory_repository.reconcile_memory_tombstones()
+    async with async_db() as db:
+        source = (
+            await db.execute(
+                select(MemorySource).where(MemorySource.memory_id == created.memory_id)
+            )
+        ).scalars().first()
+        assert source is not None
+        assert source.snippet is None

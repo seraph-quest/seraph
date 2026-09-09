@@ -1087,7 +1087,11 @@ describe("CockpitView", () => {
     fetchMock.mockImplementation((input: RequestInfo | URL) => {
       const url = String(input);
       if (url.includes("/api/workflows/runs/") && url.includes("/control")) {
-        return Promise.resolve(mockResponse({ detail: "approval_context_changed" }, false, 409));
+        return Promise.resolve(mockResponse(
+          { detail: { code: "session_revoked", message: "Operator session was revoked during workflow control." } },
+          false,
+          401,
+        ));
       }
       if (url.includes("/api/sessions")) return Promise.resolve(mockResponse([{ id: "session-2", title: "Atlas thread" }]));
       if (url.includes("/api/goals/tree")) return Promise.resolve(mockResponse([]));
@@ -1201,7 +1205,7 @@ describe("CockpitView", () => {
       ),
     );
     await waitFor(() =>
-      expect(screen.getByText("Live recovery control refused web-brief-to-file: approval_context_changed")).toBeInTheDocument(),
+      expect(screen.getByText("Live recovery control refused web-brief-to-file: Operator session was revoked during workflow control.")).toBeInTheDocument(),
     );
     expect(screen.queryByDisplayValue('Retry step "write_file" for workflow "web-brief-to-file".')).not.toBeInTheDocument();
   });

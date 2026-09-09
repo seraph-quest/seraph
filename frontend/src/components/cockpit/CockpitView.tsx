@@ -8284,9 +8284,18 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       );
       const payload = await response.json().catch(() => null);
       if (!response.ok) {
-        const detail = payload && typeof payload === "object" && "detail" in payload
-          ? String((payload as { detail?: unknown }).detail)
-          : `Could not build a live recovery plan for ${label}`;
+        const rawDetail = payload && typeof payload === "object" && "detail" in payload
+          ? (payload as { detail?: unknown }).detail
+          : null;
+        const detail = rawDetail && typeof rawDetail === "object" && !Array.isArray(rawDetail)
+          ? String(
+            (rawDetail as { message?: unknown; code?: unknown }).message
+              ?? (rawDetail as { code?: unknown }).code
+              ?? `Could not build a live recovery plan for ${label}`,
+          )
+          : typeof rawDetail === "string"
+            ? rawDetail
+            : `Could not build a live recovery plan for ${label}`;
         setOperatorStatus(`Live recovery control refused ${label}: ${detail}`);
         return;
       }

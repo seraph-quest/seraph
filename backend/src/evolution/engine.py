@@ -736,6 +736,8 @@ def _safe_receipt_payload(receipt: EvolutionReceipt) -> dict[str, Any]:
     """
     payload = receipt.to_dict()
     benchmark_gate = payload.get("benchmark_gate")
+    saved_path_reference = _safe_artifact_reference(receipt.saved_path)
+    receipt_path_reference = _safe_artifact_reference(receipt.receipt_path)
     safe_gate = {
         key: benchmark_gate[key]
         for key in (
@@ -758,6 +760,10 @@ def _safe_receipt_payload(receipt: EvolutionReceipt) -> dict[str, Any]:
         )
         if isinstance(benchmark_gate, dict) and key in benchmark_gate
     }
+    if saved_path_reference:
+        safe_gate["saved_candidate_path"] = saved_path_reference
+    if receipt_path_reference:
+        safe_gate["receipt_path"] = receipt_path_reference
     return {
         "target_type": receipt.target_type,
         "source_name_digest": _digest_metadata(receipt.source_name),
@@ -767,6 +773,8 @@ def _safe_receipt_payload(receipt: EvolutionReceipt) -> dict[str, Any]:
         "candidate_name_digest": _digest_metadata(receipt.candidate_name),
         "candidate_file_name_digest": _digest_metadata(receipt.candidate_file_name),
         "source_path_digest": _digest_metadata(receipt.source_path),
+        "saved_path": saved_path_reference,
+        "receipt_path": receipt_path_reference,
         "valid": bool(receipt.valid),
         "blocked": bool(receipt.blocked),
         "score": receipt.score,
@@ -803,6 +811,17 @@ def _digest_metadata(value: object) -> str:
     import hashlib
 
     return hashlib.sha256(str(value).encode("utf-8")).hexdigest()
+
+
+def _safe_artifact_reference(value: str | None) -> str:
+    """Return a package-relative artifact handle without host path details."""
+    if not value:
+        return ""
+    package_root = workspace_capability_package_root().resolve()
+    try:
+        return Path(value).resolve().relative_to(package_root).as_posix()
+    except ValueError:
+        return "artifact"
 
 
 def _write_receipt(candidate_file_name: str, receipt: EvolutionReceipt) -> str:

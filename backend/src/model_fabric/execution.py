@@ -240,7 +240,6 @@ async def execute_streaming(
                 )
 
         admission_error_receipt = None
-        admission_succeeded = False
         try:
             async for delta in gpu_admission_broker.stream(
                 admission_request,
@@ -248,7 +247,6 @@ async def execute_streaming(
                 now=now,
             ):
                 yield delta
-            admission_succeeded = True
         except Exception as error:
             admission_error_receipt = getattr(error, "receipt", None)
             if isinstance(error, GpuAdmissionError) and not admission_callback_started:
@@ -286,7 +284,11 @@ async def execute_streaming(
             await _persist_bound_admission_receipt(
                 admission_request.operation_id,
                 receipt=admission_error_receipt,
-                readback=admission_succeeded,
+                # A provider exception can be raised after the broker has
+                # already finalized a failed/uncertain operation. Read back
+                # the broker state on every exit; a pre-admission rejection
+                # simply has no operation to read.
+                readback=True,
             )
         if aggregate is not None:
             await aggregate.finalize(
@@ -366,10 +368,8 @@ async def run_preflighted_adapter(
         return result
 
     admission_error_receipt = None
-    admission_succeeded = False
     try:
         result = await gpu_admission_broker.execute(admission_request, admitted_adapter)
-        admission_succeeded = True
         return result
     except GpuAdmissionError as error:
         admission_error_receipt = getattr(error, "receipt", None)
@@ -392,7 +392,7 @@ async def run_preflighted_adapter(
         await _persist_bound_admission_receipt(
             admission_request.operation_id,
             receipt=admission_error_receipt,
-            readback=admission_succeeded,
+            readback=True,
         )
 
 
@@ -511,7 +511,7 @@ def execute_sync_adapter(
                 )
             )
             _require_persisted_receipt(persistence)
-        persist_admission_receipt(getattr(error, "receipt", None))
+        persist_admission_receipt(getattr(error, "receipt", None), readback=True)
         raise
     except BaseException:
         if callback_started and attempt_completed:
@@ -525,7 +525,7 @@ def execute_sync_adapter(
                 )
             )
             _require_persisted_receipt(persistence)
-        persist_admission_receipt()
+        persist_admission_receipt(readback=True)
         raise
 
     persistence = _run_awaitable_sync(session.finalize(outcome="succeeded"))

@@ -3125,6 +3125,7 @@ def _execute_sync_with_gpu_admission(
         _persist_bound_sync_admission_receipt(
             operation_id,
             receipt=getattr(error, "receipt", None),
+            readback=True,
         )
         # A post-callback deadline is an uncertain provider result, not a
         # zero-attempt admission denial.  Its blocked receipt keeps the active
@@ -3149,6 +3150,13 @@ def _execute_sync_with_gpu_admission(
                 "gpu_admission_identity_conflict",
             ),
         )
+        raise
+    except BaseException:
+        # The broker can finalize a failed operation before the provider
+        # exception escapes. Read back that terminal/uncertain receipt so a
+        # durable caller never loses the provider outcome just because the
+        # exception was not an admission error subtype.
+        _persist_bound_sync_admission_receipt(operation_id, readback=True)
         raise
     _persist_bound_sync_admission_receipt(operation_id, readback=True)
     return result

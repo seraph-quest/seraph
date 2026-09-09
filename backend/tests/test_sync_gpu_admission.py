@@ -232,6 +232,39 @@ def test_bound_sync_uncertain_receipt_is_adopted_before_error_escapes():
     assert current_remote_inference_receipt_binding() is None
 
 
+def test_bound_sync_provider_error_reads_back_terminal_receipt():
+    broker = RemoteInferenceAdmissionBroker()
+    repository = _RecordingReceiptRepository()
+    token = set_remote_inference_receipt_binding(
+        RemoteInferenceReceiptBinding(
+            repository=repository,
+            owner="scheduler:strategist_tick",
+            fencing_token=9,
+        )
+    )
+
+    def failing_provider() -> str:
+        raise RuntimeError("provider failure")
+
+    try:
+        with patch("src.llm_runtime.gpu_admission_broker", broker):
+            with pytest.raises(RuntimeError, match="provider failure"):
+                _execute_sync_with_gpu_admission(
+                    context=_canonical_context(request_id="sync-durable-failure"),
+                    decision=SimpleNamespace(
+                        selected=SimpleNamespace(profile=SimpleNamespace(provider_kind="local"))
+                    ),
+                    operation_id="attempt-sync-durable-failure",
+                    operation=failing_provider,
+                )
+    finally:
+        reset_remote_inference_receipt_binding(token)
+
+    assert len(repository.calls) == 1
+    assert repository.calls[0]["payload"]["status"] == "failed"
+    assert repository.calls[0]["payload"]["operation_id"] == "attempt-sync-durable-failure"
+
+
 @pytest.mark.parametrize("terminal", ["cancelled", "expired"])
 def test_execute_sync_terminal_admission_never_invokes_provider(terminal: str):
     clock = _Clock()

@@ -360,6 +360,12 @@ def _deadline_identity(value: datetime | str | None) -> str | None:
     return parsed.isoformat() if parsed else None
 
 
+def _deadline_expired(run: WorkflowRunState, *, now: datetime | None = None) -> bool:
+    """Return whether a persisted job deadline has passed."""
+    deadline = _as_utc(getattr(run, "deadline_at", None))
+    return deadline is not None and deadline <= (now or _utc_now())
+
+
 def _normalized_json_list(raw: str | None) -> str:
     parsed = _json_load(raw, None)
     if not isinstance(parsed, list):
@@ -583,6 +589,23 @@ def _serialize(run: WorkflowRunState, *, receipt: dict[str, Any] | None = None) 
     return payload
 
 
+def _deduped_admission(existing: WorkflowRunState, *, binding: str) -> dict[str, Any]:
+    """Return the canonical row for a repeated admission attempt.
+
+    The unique index is the final race authority.  Both the read-before-insert
+    path and the insert-conflict path must return the same operator receipt.
+    """
+    receipt = {
+        "kind": "job_admission",
+        "status": "deduped",
+        "job_id": existing.run_identity,
+        "idempotency_binding": binding,
+        "terminal_noop": existing.status in DURABLE_JOB_TERMINAL_STATUSES,
+        "operator_visible": True,
+    }
+    return _serialize(existing, receipt=receipt)
+
+
 @dataclass(frozen=True, slots=True)
 class DurableJobIdentity:
     """Stable identity fields used for idempotent admission."""
@@ -699,16 +722,8 @@ class DurableJobRepository:
                         "idempotency binding conflicts on immutable fields: "
                         + ", ".join(conflicts)
                     )
-                receipt = {
-                    "kind": "job_admission",
-                    "status": "deduped",
-                    "job_id": existing.run_identity,
-                    "idempotency_binding": binding,
-                    "terminal_noop": existing.status in DURABLE_JOB_TERMINAL_STATUSES,
-                    "operator_visible": True,
-                }
                 db.expunge(existing)
-                return _serialize(existing, receipt=receipt)
+                return _deduped_admission(existing, binding=binding)
 
             by_id = (
                 await db.execute(select(WorkflowRunState).where(WorkflowRunState.run_identity == identity.job_id))
@@ -759,7 +774,47 @@ class DurableJobRepository:
             try:
                 await db.flush()
             except IntegrityError as exc:
-                raise DurableJobIdempotencyConflict("concurrent admission claimed the idempotency binding") from exc
+                # The unique binding is the authoritative concurrent-admission
+                # fence.  Re-read after rollback so the losing invocation is
+                # idempotent when it supplied the same immutable contract, yet
+                # still rejects a conflicting job or identity collision.
+                await db.rollback()
+                existing = (
+                    await db.execute(
+                        select(WorkflowRunState).where(
+                            WorkflowRunState.idempotency_binding == binding
+                        )
+                    )
+                ).scalars().first()
+                if existing is not None:
+                    conflicts = _admission_conflicts(
+                        existing,
+                        spec=spec,
+                        input_digest=input_digest,
+                        authority_digest=authority_digest,
+                        deadline=deadline,
+                    )
+                    if conflicts:
+                        raise DurableJobIdempotencyConflict(
+                            "idempotency binding conflicts on immutable fields: "
+                            + ", ".join(conflicts)
+                        ) from exc
+                    db.expunge(existing)
+                    return _deduped_admission(existing, binding=binding)
+                by_id = (
+                    await db.execute(
+                        select(WorkflowRunState).where(
+                            WorkflowRunState.run_identity == identity.job_id
+                        )
+                    )
+                ).scalars().first()
+                if by_id is not None:
+                    raise DurableJobIdempotencyConflict(
+                        "job_id already belongs to a different invocation"
+                    ) from exc
+                raise DurableJobIdempotencyConflict(
+                    "concurrent admission failed before a durable row was visible"
+                ) from exc
             db.expunge(run)
             receipt = {
                 "kind": "job_admission",
@@ -1601,6 +1656,10 @@ class DurableJobRepository:
                 owner_principal_id=owner_principal_id,
                 service_id=service_id,
             )
+            if int(run.attempt_count or 0) >= int(run.max_attempts or 1):
+                raise DurableJobTransitionError("attempt budget exhausted")
+            if _deadline_expired(run):
+                raise DurableJobTransitionError("job deadline has expired")
             existing_effects = _json_load(run.effect_receipts_json, [])
             if not isinstance(existing_effects, list):
                 existing_effects = []
@@ -1678,9 +1737,13 @@ class DurableJobRepository:
         receipt_effect_type = _text(receipt_payload.get("effect_type"))
         async with self._session() as db:
             run = await self._fetch(db, job_id)
-            if run.status not in UNCERTAIN_EXTERNAL_EFFECT_STATUSES:
+            effects = _json_load(run.effect_receipts_json, [])
+            if not isinstance(effects, list):
+                effects = []
+            can_reconcile_failed = run.status == "failed" and _job_has_unsafe_effects(effects)
+            if run.status not in UNCERTAIN_EXTERNAL_EFFECT_STATUSES and not can_reconcile_failed:
                 raise DurableJobTransitionError(
-                    f"only uncertain jobs may be reconciled (current={run.status})"
+                    f"only uncertain jobs or failed jobs with unresolved effects may be reconciled (current={run.status})"
                 )
             _validate_retry_actor(
                 run,
@@ -1691,9 +1754,6 @@ class DurableJobRepository:
             current_revision = _revision(run)
             if expected_revision is not None and int(expected_revision) != current_revision:
                 raise DurableJobLeaseError("durable job revision is stale")
-            effects = _json_load(run.effect_receipts_json, [])
-            if not isinstance(effects, list):
-                effects = []
             resolved_effects: list[Any] = []
             matched_effect = False
             for item in effects:

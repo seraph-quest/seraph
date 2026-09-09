@@ -456,6 +456,121 @@ async def test_admission_is_idempotent_and_lifecycle_records_safe_receipts(async
 
 
 @pytest.mark.asyncio
+async def test_failed_unresolved_effect_can_be_reconciled_before_retry(async_db):
+    admitted = await durable_job_repository.admit_job(
+        replace(
+            _spec(job_id="job-743-failed-effect", dedupe_key="candidate-failed-effect"),
+            max_attempts=2,
+        )
+    )
+    await durable_job_repository.queue_job(admitted["job_id"])
+    claimed = await durable_job_repository.claim_job(admitted["job_id"], owner="runner-failed-effect")
+    effect = await durable_job_repository.record_effect(
+        admitted["job_id"],
+        effect_type="destination_write",
+        target_path="controlled-ledger",
+        status="intent",
+        details={"payload_digest": "payload-digest"},
+        owner="runner-failed-effect",
+        fencing_token=claimed["lease"]["fencing_token"],
+    )
+    await durable_job_repository.transition_job(
+        admitted["job_id"],
+        "failed",
+        owner="runner-failed-effect",
+        fencing_token=claimed["lease"]["fencing_token"],
+        reason="dispatch_timeout",
+    )
+
+    receipt = {
+        "effect_id": effect["receipt"]["effect_id"],
+        "effect_type": "destination_write",
+        "status": "read_back",
+        "outcome": "absent",
+    }
+    with pytest.raises(DurableJobTransitionError, match="unknown external effect"):
+        await durable_job_repository.retry_job(
+            admitted["job_id"],
+            owner_kind="service",
+            owner_principal_id="service:strategist",
+            service_id="service:strategist",
+            reconciliation_receipt=receipt,
+        )
+
+    reconciled = await durable_job_repository.reconcile_external_effect(
+        admitted["job_id"],
+        owner_kind="service",
+        owner_principal_id="service:strategist",
+        service_id="service:strategist",
+        reconciliation_receipt=receipt,
+    )
+    assert reconciled["status"] == "failed"
+    assert reconciled["receipt"]["from"] == "failed"
+    retried = await durable_job_repository.retry_job(
+        admitted["job_id"],
+        owner_kind="service",
+        owner_principal_id="service:strategist",
+        service_id="service:strategist",
+        reconciliation_receipt=receipt,
+        expected_revision=reconciled["revision"],
+    )
+    assert retried["status"] == "queued"
+
+
+@pytest.mark.asyncio
+async def test_retry_rejects_expired_deadline_and_exhausted_attempt_budget(async_db):
+    expired = await durable_job_repository.admit_job(
+        replace(
+            _spec(job_id="job-743-expired-retry", dedupe_key="candidate-expired-retry"),
+            deadline_at=datetime.now(timezone.utc) - timedelta(seconds=1),
+        )
+    )
+    assert expired["status"] == "failed"
+    with pytest.raises(DurableJobTransitionError, match="deadline"):
+        await durable_job_repository.retry_job(
+            expired["job_id"],
+            owner_kind="service",
+            owner_principal_id="service:strategist",
+            service_id="service:strategist",
+            reconciliation_receipt={
+                "effect_id": "expired-effect",
+                "effect_type": "destination_write",
+                "status": "read_back",
+                "outcome": "absent",
+            },
+        )
+
+    exhausted = await durable_job_repository.admit_job(
+        replace(
+            _spec(job_id="job-743-exhausted-retry", dedupe_key="candidate-exhausted-retry"),
+            max_attempts=1,
+        )
+    )
+    await durable_job_repository.queue_job(exhausted["job_id"])
+    claimed = await durable_job_repository.claim_job(exhausted["job_id"], owner="runner-exhausted")
+    await durable_job_repository.transition_job(
+        exhausted["job_id"],
+        "failed",
+        owner="runner-exhausted",
+        fencing_token=claimed["lease"]["fencing_token"],
+        reason="controlled_failure",
+    )
+    with pytest.raises(DurableJobTransitionError, match="attempt budget"):
+        await durable_job_repository.retry_job(
+            exhausted["job_id"],
+            owner_kind="service",
+            owner_principal_id="service:strategist",
+            service_id="service:strategist",
+            reconciliation_receipt={
+                "effect_id": "exhausted-effect",
+                "effect_type": "destination_write",
+                "status": "read_back",
+                "outcome": "absent",
+            },
+        )
+
+
+@pytest.mark.asyncio
 async def test_child_admission_requires_the_current_parent_fence(async_db):
     parent = await durable_job_repository.admit_job(
         _spec(job_id="parent-strategist", dedupe_key="parent-strategist")

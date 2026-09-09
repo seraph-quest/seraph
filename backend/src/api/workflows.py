@@ -24,6 +24,7 @@ from src.approval.repository import approval_repository
 from src.approval.runtime import reset_runtime_context, set_runtime_context
 from src.audit.repository import audit_repository
 from src.audit.runtime import log_integration_event
+from src.auth.cancellation import assert_runtime_not_revoked
 from src.auth.service import bind_operator_principal
 from src.db.engine import get_session
 from src.db.models import AuditEvent
@@ -35,7 +36,7 @@ from src.extensions.workspace_package import save_workspace_contribution
 from src.tools.policy import get_current_tool_policy_mode
 from src.workflows.loader import parse_workflow_content
 from src.workflows.manager import approval_context_requires_tracked_lineage, workflow_manager
-from src.workflows.durable_state import workflow_state_repository
+from src.workflows.durable_state import _safe_operator_recovery_target, workflow_state_repository
 from src.workflows.run_identity import build_workflow_run_identity, parse_workflow_run_identity
 
 router = APIRouter()
@@ -953,7 +954,10 @@ def _workflow_resume_plan(
 
 
 async def _find_workflow_run_for_control(run_identity: str) -> dict[str, Any] | None:
-    runs = await _list_workflow_runs(limit=100, session_id=None)
+    # Scope the projection and pending-approval lookup to the run's
+    # server-generated conversation session before inspecting any durable state.
+    session_id, _tool_name, _run_fingerprint, _run_discriminator = _parse_run_identity(run_identity)
+    runs = await _list_workflow_runs(limit=100, session_id=session_id)
     run = next((item for item in runs if item.get("run_identity") == run_identity), None)
     if run is not None:
         return run
@@ -2110,42 +2114,64 @@ async def save_workflow_draft(req: WorkflowDraftRequest, request: Request):
 
 
 @router.put("/workflows/{name}")
-async def update_workflow(name: str, req: UpdateWorkflowRequest):
-    ok = workflow_manager.enable(name) if req.enabled else workflow_manager.disable(name)
-    if not ok:
+async def update_workflow(name: str, req: UpdateWorkflowRequest, request: Request):
+    operator = _require_authenticated_capability_operator(request)
+    active_session_id = operator.session_id
+    tokens = set_runtime_context(
+        active_session_id,
+        context_manager.get_context().approval_mode,
+        trust_principal=bind_operator_principal(operator, active_session_id),
+    )
+    try:
+        assert_runtime_not_revoked()
+        ok = workflow_manager.enable(name) if req.enabled else workflow_manager.disable(name)
+        if not ok:
+            await log_integration_event(
+                integration_type="workflow",
+                name=name,
+                outcome="failed",
+                details={
+                    "status": "not_found",
+                    "enabled": req.enabled,
+                },
+            )
+            raise HTTPException(status_code=404, detail=f"Workflow '{name}' not found")
         await log_integration_event(
             integration_type="workflow",
             name=name,
-            outcome="failed",
-            details={
-                "status": "not_found",
-                "enabled": req.enabled,
-            },
+            outcome="succeeded",
+            details={"enabled": req.enabled},
         )
-        raise HTTPException(status_code=404, detail=f"Workflow '{name}' not found")
-    await log_integration_event(
-        integration_type="workflow",
-        name=name,
-        outcome="succeeded",
-        details={"enabled": req.enabled},
-    )
-    return {"status": "updated", "name": name, "enabled": req.enabled}
+        return {"status": "updated", "name": name, "enabled": req.enabled}
+    finally:
+        reset_runtime_context(tokens)
 
 
 @router.post("/workflows/reload")
-async def reload_workflows():
-    workflows = workflow_manager.reload()
-    await log_integration_event(
-        integration_type="workflows",
-        name="reload",
-        outcome="succeeded",
-        details={
-            "count": len(workflows),
-            "enabled_count": sum(1 for workflow in workflows if workflow.get("enabled", False)),
-            "workflow_names": [workflow["name"] for workflow in workflows],
-        },
+async def reload_workflows(request: Request):
+    operator = _require_authenticated_capability_operator(request)
+    active_session_id = operator.session_id
+    tokens = set_runtime_context(
+        active_session_id,
+        context_manager.get_context().approval_mode,
+        trust_principal=bind_operator_principal(operator, active_session_id),
     )
-    return {"status": "reloaded", "count": len(workflows), "workflows": workflows}
+    try:
+        assert_runtime_not_revoked()
+        workflows = workflow_manager.reload()
+        await log_integration_event(
+            integration_type="workflows",
+            name="reload",
+            outcome="succeeded",
+            details={
+                "count": len(workflows),
+                "enabled_count": sum(1 for workflow in workflows if workflow.get("enabled", False)),
+                "workflow_names": [workflow["name"] for workflow in workflows],
+            },
+        )
+        return {"status": "reloaded", "count": len(workflows), "workflows": workflows}
+    finally:
+        reset_runtime_context(tokens)
 
 
 @router.get("/workflows/runs")
@@ -2159,220 +2185,260 @@ async def list_workflow_runs(
 @router.post("/workflows/runs/{run_identity:path}/resume-plan")
 async def build_workflow_resume_plan(
     run_identity: str,
+    request: Request,
     req: WorkflowResumePlanRequest | None = None,
 ):
-    run = await _find_workflow_run_for_control(run_identity)
-    if run is None:
-        raise HTTPException(status_code=404, detail=f"Workflow run '{run_identity}' not found")
-    if str(run.get("replay_block_reason") or "") in {"approval_context_changed", "approval_context_missing"}:
-        raise HTTPException(
-            status_code=409,
-            detail=(
-                f"Workflow run '{run_identity}' cannot resume because its trust boundary "
-                "changed after the original run. Start a fresh run instead."
-                if str(run.get("replay_block_reason") or "") == "approval_context_changed"
-                else (
-                    f"Workflow run '{run_identity}' cannot resume because it predates trust-boundary "
-                    "tracking for the current privileged workflow surface. Start a fresh run instead."
-                )
-            ),
-        )
-    resume_plan = _workflow_resume_plan(
-        run,
-        approvals=list(run.get("pending_approvals", [])),
-        requested_step_id=req.step_id if req is not None else None,
+    operator = _require_authenticated_capability_operator(request)
+    active_session_id = operator.session_id
+    tokens = set_runtime_context(
+        active_session_id,
+        context_manager.get_context().approval_mode,
+        trust_principal=bind_operator_principal(operator, active_session_id),
     )
-    return {
-        "run_identity": run_identity,
-        "workflow_name": run["workflow_name"],
-        "resume_plan": resume_plan,
-    }
+    try:
+        assert_runtime_not_revoked()
+        run = await _find_workflow_run_for_control(run_identity)
+        if run is None:
+            raise HTTPException(status_code=404, detail=f"Workflow run '{run_identity}' not found")
+        if str(run.get("replay_block_reason") or "") in {"approval_context_changed", "approval_context_missing"}:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"Workflow run '{run_identity}' cannot resume because its trust boundary "
+                    "changed after the original run. Start a fresh run instead."
+                    if str(run.get("replay_block_reason") or "") == "approval_context_changed"
+                    else (
+                        f"Workflow run '{run_identity}' cannot resume because it predates trust-boundary "
+                        "tracking for the current privileged workflow surface. Start a fresh run instead."
+                    )
+                ),
+            )
+        resume_plan = _workflow_resume_plan(
+            run,
+            approvals=list(run.get("pending_approvals", [])),
+            requested_step_id=req.step_id if req is not None else None,
+        )
+        return {
+            "run_identity": run_identity,
+            "workflow_name": run["workflow_name"],
+            "resume_plan": resume_plan,
+        }
+    finally:
+        reset_runtime_context(tokens)
 
 
 @router.post("/workflows/runs/{run_identity:path}/control")
 async def control_workflow_run(
     run_identity: str,
     req: WorkflowRunControlRequest,
+    request: Request,
 ):
-    run = await _find_workflow_run_for_control(run_identity)
-    if run is None:
-        raise HTTPException(status_code=404, detail=f"Workflow run '{run_identity}' not found")
-    if str(run.get("replay_block_reason") or "") in {"approval_context_changed", "approval_context_missing"}:
-        raise HTTPException(
-            status_code=409,
-            detail=(
-                "Workflow trust boundary changed; start a fresh run instead of applying a live control."
-                if str(run.get("replay_block_reason") or "") == "approval_context_changed"
-                else "Workflow predates trust-boundary tracking; start a fresh run instead of applying a live control."
-            ),
+    operator = _require_authenticated_capability_operator(request)
+    active_session_id = operator.session_id
+    tokens = set_runtime_context(
+        active_session_id,
+        context_manager.get_context().approval_mode,
+        trust_principal=bind_operator_principal(operator, active_session_id),
+    )
+    try:
+        assert_runtime_not_revoked()
+        action = req.action.strip().lower().replace("-", "_")
+        allowed_actions = {
+            "pause",
+            "resume",
+            "retry",
+            "repair",
+            "branch",
+            "compare",
+            "revoke",
+            "quarantine",
+            "handoff",
+            "rollback",
+            "audit",
+            "replay",
+            "runbook",
+        }
+        if action not in allowed_actions:
+            raise HTTPException(status_code=422, detail=f"Unsupported workflow control action '{req.action}'")
+
+        run = await _find_workflow_run_for_control(run_identity)
+        if run is None:
+            raise HTTPException(status_code=404, detail=f"Workflow run '{run_identity}' not found")
+        if str(run.get("replay_block_reason") or "") in {"approval_context_changed", "approval_context_missing"}:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "Workflow trust boundary changed; start a fresh run instead of applying a live control."
+                    if str(run.get("replay_block_reason") or "") == "approval_context_changed"
+                    else (
+                        "Workflow predates trust-boundary tracking; start a fresh run "
+                        "instead of applying a live control."
+                    )
+                ),
+            )
+
+        owner = "cockpit"
+        target = str(req.target or req.step_id or run.get("workflow_name") or run_identity).strip()
+        operator_context = {
+            **(req.operator_context or {}),
+            "workflow_name": run.get("workflow_name"),
+            "thread_id": run.get("thread_id"),
+            "session_id": run.get("session_id"),
+            "operator_session_id": active_session_id,
+            "operator_principal_id": operator.principal.principal_id,
+            "requested_owner": req.owner,
+            "requested_step_id": req.step_id,
+        }
+
+        lease_result = None
+        recovery_result = None
+        transition_result = None
+        resume_plan = None
+
+        async def log_refusal(
+            *,
+            status_code: int,
+            detail: str,
+            lease: dict[str, Any] | None = None,
+            recovery: dict[str, Any] | None = None,
+            transition: dict[str, Any] | None = None,
+        ) -> None:
+            assert_runtime_not_revoked()
+            safe_target = _safe_operator_recovery_target(target)
+            await audit_repository.log_event(
+                session_id=run.get("session_id") if isinstance(run.get("session_id"), str) else None,
+                actor="operator",
+                event_type="workflow_control_refused",
+                tool_name=run.get("tool_name") if isinstance(run.get("tool_name"), str) else "workflow",
+                risk_level=str(run.get("risk_level") or "medium"),
+                policy_mode=get_current_tool_policy_mode(),
+                summary=f"Operator {action} refused for workflow {run.get('workflow_name') or run_identity}",
+                details={
+                    "run_identity": run_identity,
+                    "workflow_name": run.get("workflow_name"),
+                    "action": action,
+                    "target": safe_target["target"],
+                    "target_digest": safe_target["target_digest"],
+                    "step_id": req.step_id,
+                    "status_code": status_code,
+                    "detail": detail,
+                    "external_action_allowed": False,
+                    "lease_receipt": lease.get("receipt") if isinstance(lease, dict) else None,
+                    "recovery_receipt": recovery.get("receipt") if isinstance(recovery, dict) else None,
+                    "transition_receipt": transition.get("receipt") if isinstance(transition, dict) else None,
+                },
+            )
+
+        if action in {"resume", "retry", "repair", "branch", "replay"}:
+            try:
+                resume_plan = _workflow_resume_plan(
+                    run,
+                    approvals=list(run.get("pending_approvals", [])),
+                    requested_step_id=req.step_id,
+                )
+            except HTTPException as exc:
+                detail = str(exc.detail)
+                await log_refusal(status_code=exc.status_code, detail=detail)
+                raise
+
+            assert_runtime_not_revoked()
+            lease_result = await workflow_state_repository.acquire_or_renew_v2_lease(
+                run_identity=run_identity,
+                owner=owner,
+            )
+            if lease_result is None:
+                raise HTTPException(status_code=404, detail=f"Workflow run '{run_identity}' is not persisted yet")
+            lease_receipt = lease_result.get("receipt") if isinstance(lease_result, dict) else None
+            if isinstance(lease_receipt, dict) and lease_receipt.get("status") == "blocked":
+                detail = str(lease_receipt.get("blocked_reason") or "workflow control lease is blocked")
+                await log_refusal(status_code=423, detail=detail, lease=lease_result)
+                raise HTTPException(status_code=423, detail=detail)
+
+            assert_runtime_not_revoked()
+            recovery_result = await workflow_state_repository.build_v2_recovery_plan(
+                run_identity=run_identity,
+                owner=owner,
+                approval_context=run.get("current_approval_context") or run.get("approval_context"),
+            )
+            if recovery_result is None:
+                raise HTTPException(status_code=404, detail=f"Workflow run '{run_identity}' is not persisted yet")
+            recovery_receipt = recovery_result.get("receipt") if isinstance(recovery_result, dict) else None
+            if isinstance(recovery_receipt, dict) and recovery_receipt.get("status") == "blocked":
+                detail = str(recovery_receipt.get("blocked_reason") or "workflow recovery is blocked")
+                await log_refusal(status_code=409, detail=detail, lease=lease_result, recovery=recovery_result)
+                raise HTTPException(status_code=409, detail=detail)
+
+        assert_runtime_not_revoked()
+        control_result = await workflow_state_repository.record_v2_operator_recovery_control(
+            run_identity=run_identity,
+            action=action,
+            target=target,
+            operator_context=operator_context,
+            enabled=True,
         )
+        if control_result is None:
+            raise HTTPException(status_code=404, detail=f"Workflow run '{run_identity}' is not persisted yet")
 
-    action = req.action.strip().lower().replace("-", "_")
-    allowed_actions = {
-        "pause",
-        "resume",
-        "retry",
-        "repair",
-        "branch",
-        "compare",
-        "revoke",
-        "quarantine",
-        "handoff",
-        "rollback",
-        "audit",
-        "replay",
-        "runbook",
-    }
-    if action not in allowed_actions:
-        raise HTTPException(status_code=422, detail=f"Unsupported workflow control action '{req.action}'")
+        if action in {"resume", "retry", "repair", "branch", "replay"}:
+            assert_runtime_not_revoked()
+            transition_result = await workflow_state_repository.record_v2_transition(
+                run_identity=run_identity,
+                transition_key=f"operator:{action}:{req.step_id or 'run'}",
+                transition_type=action,
+                owner=owner,
+                step_id=req.step_id,
+            )
+            transition_receipt = transition_result.get("receipt") if isinstance(transition_result, dict) else None
+            if isinstance(transition_receipt, dict) and transition_receipt.get("status") == "blocked":
+                detail = str(transition_receipt.get("blocked_reason") or "workflow transition is blocked")
+                await log_refusal(
+                    status_code=409,
+                    detail=detail,
+                    lease=lease_result,
+                    recovery=recovery_result,
+                    transition=transition_result,
+                )
+                raise HTTPException(status_code=409, detail=detail)
 
-    owner = "cockpit"
-    target = str(req.target or req.step_id or run.get("workflow_name") or run_identity).strip()
-    operator_context = {
-        **(req.operator_context or {}),
-        "workflow_name": run.get("workflow_name"),
-        "thread_id": run.get("thread_id"),
-        "session_id": run.get("session_id"),
-        "requested_owner": req.owner,
-        "requested_step_id": req.step_id,
-    }
-
-    lease_result = None
-    recovery_result = None
-    transition_result = None
-    resume_plan = None
-
-    async def log_refusal(
-        *,
-        status_code: int,
-        detail: str,
-        lease: dict[str, Any] | None = None,
-        recovery: dict[str, Any] | None = None,
-        transition: dict[str, Any] | None = None,
-    ) -> None:
+        safe_target = _safe_operator_recovery_target(target)
+        assert_runtime_not_revoked()
         await audit_repository.log_event(
             session_id=run.get("session_id") if isinstance(run.get("session_id"), str) else None,
             actor="operator",
-            event_type="workflow_control_refused",
+            event_type="workflow_control",
             tool_name=run.get("tool_name") if isinstance(run.get("tool_name"), str) else "workflow",
             risk_level=str(run.get("risk_level") or "medium"),
             policy_mode=get_current_tool_policy_mode(),
-            summary=f"Operator {action} refused for workflow {run.get('workflow_name') or run_identity}",
+            summary=f"Operator requested {action} for workflow {run.get('workflow_name') or run_identity}",
             details={
                 "run_identity": run_identity,
                 "workflow_name": run.get("workflow_name"),
                 "action": action,
-                "target": target,
+                "target": safe_target["target"],
+                "target_digest": safe_target["target_digest"],
                 "step_id": req.step_id,
-                "status_code": status_code,
-                "detail": detail,
                 "external_action_allowed": False,
-                "lease_receipt": lease.get("receipt") if isinstance(lease, dict) else None,
-                "recovery_receipt": recovery.get("receipt") if isinstance(recovery, dict) else None,
-                "transition_receipt": transition.get("receipt") if isinstance(transition, dict) else None,
+                "control_receipt": control_result.get("receipt"),
+                "lease_receipt": lease_result.get("receipt") if isinstance(lease_result, dict) else None,
+                "recovery_receipt": recovery_result.get("receipt") if isinstance(recovery_result, dict) else None,
+                "transition_receipt": transition_result.get("receipt") if isinstance(transition_result, dict) else None,
             },
         )
 
-    if action in {"resume", "retry", "repair", "branch", "replay"}:
-        try:
-            resume_plan = _workflow_resume_plan(
-                run,
-                approvals=list(run.get("pending_approvals", [])),
-                requested_step_id=req.step_id,
-            )
-        except HTTPException as exc:
-            detail = str(exc.detail)
-            await log_refusal(status_code=exc.status_code, detail=detail)
-            raise
-
-        lease_result = await workflow_state_repository.acquire_or_renew_v2_lease(
-            run_identity=run_identity,
-            owner=owner,
-        )
-        if lease_result is None:
-            raise HTTPException(status_code=404, detail=f"Workflow run '{run_identity}' is not persisted yet")
-        lease_receipt = lease_result.get("receipt") if isinstance(lease_result, dict) else None
-        if isinstance(lease_receipt, dict) and lease_receipt.get("status") == "blocked":
-            detail = str(lease_receipt.get("blocked_reason") or "workflow control lease is blocked")
-            await log_refusal(status_code=423, detail=detail, lease=lease_result)
-            raise HTTPException(status_code=423, detail=detail)
-
-        recovery_result = await workflow_state_repository.build_v2_recovery_plan(
-            run_identity=run_identity,
-            owner=owner,
-            approval_context=run.get("current_approval_context") or run.get("approval_context"),
-        )
-        if recovery_result is None:
-            raise HTTPException(status_code=404, detail=f"Workflow run '{run_identity}' is not persisted yet")
-        recovery_receipt = recovery_result.get("receipt") if isinstance(recovery_result, dict) else None
-        if isinstance(recovery_receipt, dict) and recovery_receipt.get("status") == "blocked":
-            detail = str(recovery_receipt.get("blocked_reason") or "workflow recovery is blocked")
-            await log_refusal(status_code=409, detail=detail, lease=lease_result, recovery=recovery_result)
-            raise HTTPException(status_code=409, detail=detail)
-
-    control_result = await workflow_state_repository.record_v2_operator_recovery_control(
-        run_identity=run_identity,
-        action=action,
-        target=target,
-        operator_context=operator_context,
-        enabled=True,
-    )
-    if control_result is None:
-        raise HTTPException(status_code=404, detail=f"Workflow run '{run_identity}' is not persisted yet")
-
-    if action in {"resume", "retry", "repair", "branch", "replay"}:
-        transition_result = await workflow_state_repository.record_v2_transition(
-            run_identity=run_identity,
-            transition_key=f"operator:{action}:{req.step_id or 'run'}",
-            transition_type=action,
-            owner=owner,
-            step_id=req.step_id,
-        )
-        transition_receipt = transition_result.get("receipt") if isinstance(transition_result, dict) else None
-        if isinstance(transition_receipt, dict) and transition_receipt.get("status") == "blocked":
-            detail = str(transition_receipt.get("blocked_reason") or "workflow transition is blocked")
-            await log_refusal(
-                status_code=409,
-                detail=detail,
-                lease=lease_result,
-                recovery=recovery_result,
-                transition=transition_result,
-            )
-            raise HTTPException(status_code=409, detail=detail)
-
-    await audit_repository.log_event(
-        session_id=run.get("session_id") if isinstance(run.get("session_id"), str) else None,
-        actor="operator",
-        event_type="workflow_control",
-        tool_name=run.get("tool_name") if isinstance(run.get("tool_name"), str) else "workflow",
-        risk_level=str(run.get("risk_level") or "medium"),
-        policy_mode=get_current_tool_policy_mode(),
-        summary=f"Operator requested {action} for workflow {run.get('workflow_name') or run_identity}",
-        details={
+        assert_runtime_not_revoked()
+        refreshed_run = await _find_workflow_run_for_control(run_identity)
+        return {
             "run_identity": run_identity,
             "workflow_name": run.get("workflow_name"),
             "action": action,
-            "target": target,
-            "step_id": req.step_id,
+            "status": "recorded",
             "external_action_allowed": False,
             "control_receipt": control_result.get("receipt"),
             "lease_receipt": lease_result.get("receipt") if isinstance(lease_result, dict) else None,
             "recovery_receipt": recovery_result.get("receipt") if isinstance(recovery_result, dict) else None,
             "transition_receipt": transition_result.get("receipt") if isinstance(transition_result, dict) else None,
-        },
-    )
-
-    refreshed_run = await _find_workflow_run_for_control(run_identity)
-    return {
-        "run_identity": run_identity,
-        "workflow_name": run.get("workflow_name"),
-        "action": action,
-        "status": "recorded",
-        "external_action_allowed": False,
-        "control_receipt": control_result.get("receipt"),
-        "lease_receipt": lease_result.get("receipt") if isinstance(lease_result, dict) else None,
-        "recovery_receipt": recovery_result.get("receipt") if isinstance(recovery_result, dict) else None,
-        "transition_receipt": transition_result.get("receipt") if isinstance(transition_result, dict) else None,
-        "resume_plan": resume_plan,
-        "run": refreshed_run or run,
-    }
+            "resume_plan": resume_plan,
+            "run": refreshed_run or run,
+        }
+    finally:
+        reset_runtime_context(tokens)

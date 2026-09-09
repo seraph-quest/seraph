@@ -180,6 +180,21 @@ async def log_integration_event(
     """
     summary = f"{integration_type.replace('_', ' ').capitalize()} {name} {outcome.replace('_', ' ')}"
     try:
+        event_details: dict[str, Any] = {
+            "integration_type": integration_type,
+            "name": name,
+            **(details or {}),
+        }
+        if session_id or principal_id:
+            existing_lineage = event_details.get("lineage")
+            lineage = dict(existing_lineage) if isinstance(existing_lineage, dict) else {}
+            lineage.update(
+                {
+                    "principal_id": principal_id or actor,
+                    "session_id": session_id,
+                }
+            )
+            event_details["lineage"] = lineage
         await audit_repository.log_event(
             session_id=session_id,
             actor=actor,
@@ -188,21 +203,7 @@ async def log_integration_event(
             risk_level="low",
             policy_mode=policy_mode,
             summary=summary,
-            details={
-                "integration_type": integration_type,
-                "name": name,
-                **(details or {}),
-                **(
-                    {
-                        "lineage": {
-                            "principal_id": principal_id or actor,
-                            "session_id": session_id,
-                        }
-                    }
-                    if session_id or principal_id
-                    else {}
-                ),
-            },
+            details=event_details,
         )
         return True
     except Exception:

@@ -1968,6 +1968,53 @@ def test_workspace_contribution_save_rejects_reserved_evolution_candidate_name(t
     assert not (tmp_path / "extensions" / "workspace-capabilities").exists()
 
 
+@pytest.mark.parametrize(
+    "file_name",
+    (
+        "./ReviewReview-Candidate.MD",
+        "../ReviewReview-Candidate.MD",
+        "nested/ReviewReview-Candidate.MD",
+        r".\ReviewReview-Candidate.MD",
+    ),
+)
+def test_workspace_contribution_save_rejects_candidate_path_alias_before_manifest_write(tmp_path, file_name):
+    from src.extensions.workspace_package import WORKSPACE_FILE_NAME_ERROR, save_workspace_contribution
+
+    with pytest.raises(ValueError, match=WORKSPACE_FILE_NAME_ERROR):
+        save_workspace_contribution(
+            "skills",
+            file_name=file_name,
+            content="candidate content",
+            workspace_dir=str(tmp_path),
+        )
+
+    assert not (tmp_path / "extensions" / "workspace-capabilities").exists()
+
+
+def test_workspace_contribution_save_rejects_case_variant_before_manifest_write(tmp_path):
+    from src.extensions.workspace_package import WORKSPACE_FILE_NAME_ERROR, save_workspace_contribution
+
+    content = "---\nname: Stable\ndescription: Stable skill\n---\n\nUse stable.\n"
+    save_workspace_contribution(
+        "skills",
+        file_name="Stable.md",
+        content=content,
+        workspace_dir=str(tmp_path),
+    )
+
+    with pytest.raises(ValueError, match=WORKSPACE_FILE_NAME_ERROR):
+        save_workspace_contribution(
+            "skills",
+            file_name="stable.MD",
+            content=content,
+            workspace_dir=str(tmp_path),
+        )
+
+    manifest = (tmp_path / "extensions" / "workspace-capabilities" / "manifest.yaml").read_text(encoding="utf-8")
+    assert manifest.count("skills/Stable.md") == 1
+    assert "skills/stable.MD" not in manifest
+
+
 def test_evolution_audit_details_preserve_only_bounded_lineage(tmp_path):
     from src.api.evolution import EvolutionProposalRequest, _evolution_audit_details
 

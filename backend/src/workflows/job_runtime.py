@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -94,6 +95,20 @@ REMOTE_INFERENCE_EFFECT_STATUSES = {
     "expired": "failed",
     "rejected": "failed",
 }
+RECONCILIATION_RECEIPT_STATUSES = frozenset({"read_back", "settled", "reconciled"})
+RECONCILIATION_RECEIPT_FIELDS = (
+    "schema_version",
+    "effect_id",
+    "effect_type",
+    "target_path",
+    "status",
+    "outcome",
+    "actual_cost_microusd",
+    "readback_digest",
+    "provider_operation_id",
+    "observed_at",
+    "operator_id",
+)
 REMOTE_INFERENCE_RECEIPT_FIELDS = (
     "schema_version",
     "operation_id",
@@ -256,8 +271,20 @@ def _safe_structure(value: Any, *, max_depth: int = 3) -> Any:
         result: dict[str, Any] = {}
         for key, item in value.items():
             key_text = str(key)
-            lowered = key_text.lower()
-            if any(marker in lowered for marker in ("secret", "token", "password", "credential", "api_key", "private_key")):
+            normalized_key = re.sub(r"[^a-z0-9]", "", key_text.lower())
+            if any(
+                marker in normalized_key
+                for marker in (
+                    "secret",
+                    "token",
+                    "password",
+                    "credential",
+                    "apikey",
+                    "privatekey",
+                    "authorization",
+                    "authheader",
+                )
+            ) or normalized_key in {"originalerror", "errordetail", "traceback"}:
                 result[key_text] = "[redacted]"
             else:
                 result[key_text] = _safe_structure(item, max_depth=max_depth - 1)
@@ -404,20 +431,52 @@ def _admission_conflicts(
 
 
 def _canonical_reconciliation_receipt(value: Any) -> tuple[str, str]:
-    """Return a redacted canonical receipt and digest, rejecting empty input."""
-    if isinstance(value, Mapping):
-        if not value:
-            raise ValueError("reconciliation_receipt must be nonempty")
-        safe = _safe_structure(dict(value))
-    elif isinstance(value, str) and value.strip():
-        # Opaque external receipt identifiers are represented by a digest so a
-        # secret-bearing token cannot be copied into the durable row.
-        safe = {"opaque_receipt_digest": _digest(value.strip())}
-    else:
-        raise ValueError("reconciliation_receipt must be a nonempty mapping or string")
+    """Return a typed, redacted receipt for one externally observed effect.
+
+    A generic acknowledgement is not enough to clear a restart liability. The
+    receipt must identify the exact effect and use a definitive readback or
+    settlement status.  Unknown provider tokens are represented by digests or
+    the allowlisted structural fields below, never copied into durable state.
+    """
+    if not isinstance(value, Mapping) or not value:
+        raise ValueError("reconciliation_receipt must be a nonempty mapping")
+    raw = dict(value)
+    effect_id = _text(raw.get("effect_id"))
+    if not effect_id:
+        raise ValueError("reconciliation_receipt requires effect_id")
+    status = _text(raw.get("status"))
+    if status not in RECONCILIATION_RECEIPT_STATUSES:
+        raise ValueError(
+            "reconciliation_receipt status must be read_back, settled, or reconciled"
+        )
+    effect_type = _text(raw.get("effect_type"))
+    if not effect_type:
+        raise ValueError("reconciliation_receipt requires effect_type")
+    outcome = _text(raw.get("outcome"))
+    readback_digest = _text(raw.get("readback_digest"))
+    if status in {"read_back", "reconciled"} and not outcome and not readback_digest:
+        raise ValueError("read_back reconciliation requires outcome or readback_digest")
+    actual_cost = raw.get("actual_cost_microusd")
+    if actual_cost is not None:
+        try:
+            actual_cost = int(actual_cost)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("actual_cost_microusd must be a nonnegative integer") from exc
+        if actual_cost < 0:
+            raise ValueError("actual_cost_microusd must be a nonnegative integer")
+    if status == "settled" and actual_cost is None:
+        raise ValueError("settled reconciliation requires actual_cost_microusd")
+    safe = _safe_structure(
+        {
+            field_name: raw[field_name]
+            for field_name in RECONCILIATION_RECEIPT_FIELDS
+            if field_name in raw
+        }
+    )
+    safe.update({"effect_id": effect_id, "effect_type": effect_type, "status": status})
+    if actual_cost is not None:
+        safe["actual_cost_microusd"] = actual_cost
     canonical = _canonical(safe)
-    if canonical in {"{}", "null", "\"\""}:
-        raise ValueError("reconciliation_receipt must be nonempty")
     return canonical, _digest(safe)
 
 
@@ -813,7 +872,12 @@ class DurableJobRepository:
             conditions = [WorkflowRunState.run_identity == job_id, WorkflowRunState.status == current]
             conditions.append(WorkflowRunState.revision == current_revision)
             if owner is not None:
-                conditions.append(WorkflowRunState.lease_owner == owner)
+                conditions.extend(
+                    (
+                        WorkflowRunState.lease_owner == owner,
+                        WorkflowRunState.lease_expires_at > now,
+                    )
+                )
             if fencing_token is not None:
                 conditions.append(WorkflowRunState.fencing_token == fencing_token)
             elif expected_fencing_token is not None:
@@ -1225,6 +1289,7 @@ class DurableJobRepository:
                     WorkflowRunState.revision == current_revision,
                     WorkflowRunState.fencing_token == fencing_token,
                     WorkflowRunState.lease_owner == owner,
+                    WorkflowRunState.lease_expires_at > now,
                 )
                 .values(
                     checkpoint_receipts_json=_canonical(existing[-50:]),
@@ -1304,7 +1369,13 @@ class DurableJobRepository:
                 WorkflowRunState.revision == current_revision,
             ]
             if owner is not None:
-                conditions.extend((WorkflowRunState.lease_owner == owner, WorkflowRunState.fencing_token == fencing_token))
+                conditions.extend(
+                    (
+                        WorkflowRunState.lease_owner == owner,
+                        WorkflowRunState.fencing_token == fencing_token,
+                        WorkflowRunState.lease_expires_at > now,
+                    )
+                )
             else:
                 conditions.extend((WorkflowRunState.lease_owner.is_(None), WorkflowRunState.lease_expires_at.is_(None)))
             result_update = await db.execute(
@@ -1407,7 +1478,13 @@ class DurableJobRepository:
                 WorkflowRunState.revision == current_revision,
             ]
             if owner is not None:
-                conditions.extend((WorkflowRunState.lease_owner == owner, WorkflowRunState.fencing_token == fencing_token))
+                conditions.extend(
+                    (
+                        WorkflowRunState.lease_owner == owner,
+                        WorkflowRunState.fencing_token == fencing_token,
+                        WorkflowRunState.lease_expires_at > now,
+                    )
+                )
             else:
                 conditions.extend((WorkflowRunState.lease_owner.is_(None), WorkflowRunState.lease_expires_at.is_(None)))
             result_update = await db.execute(
@@ -1596,6 +1673,9 @@ class DurableJobRepository:
         if target_status not in {"failed", "blocked", "cancelled"}:
             raise DurableJobTransitionError("reconciliation target must be failed, blocked, or cancelled")
         canonical_receipt, receipt_digest = _canonical_reconciliation_receipt(reconciliation_receipt)
+        receipt_payload = _json_load(canonical_receipt, {})
+        receipt_effect_id = _text(receipt_payload.get("effect_id"))
+        receipt_effect_type = _text(receipt_payload.get("effect_type"))
         async with self._session() as db:
             run = await self._fetch(db, job_id)
             if run.status not in UNCERTAIN_EXTERNAL_EFFECT_STATUSES:
@@ -1615,12 +1695,15 @@ class DurableJobRepository:
             if not isinstance(effects, list):
                 effects = []
             resolved_effects: list[Any] = []
+            matched_effect = False
             for item in effects:
-                if isinstance(item, dict) and _text(item.get("status")) in {
-                    "unknown",
-                    "intent",
-                    "dispatched",
-                }:
+                if (
+                    isinstance(item, dict)
+                    and _text(item.get("effect_id")) == receipt_effect_id
+                    and _text(item.get("effect_type")) == receipt_effect_type
+                    and _text(item.get("status")) in {"unknown", "intent", "dispatched"}
+                ):
+                    matched_effect = True
                     item = {
                         **item,
                         "reconciled": True,
@@ -1628,6 +1711,10 @@ class DurableJobRepository:
                         "reconciliation_receipt_digest": receipt_digest,
                     }
                 resolved_effects.append(item)
+            if not matched_effect:
+                raise DurableJobTransitionError(
+                    "reconciliation_receipt must identify one unresolved effect in the durable ledger"
+                )
             resolved_effects.append(
                 {
                     "kind": "reconciliation",
@@ -1770,6 +1857,7 @@ __all__ = [
     "DURABLE_JOB_STATUSES",
     "DURABLE_JOB_TRANSITIONS",
     "DURABLE_JOB_TERMINAL_STATUSES",
+    "RECONCILIATION_RECEIPT_STATUSES",
     "UNCERTAIN_EXTERNAL_EFFECT_STATUSES",
     "REMOTE_INFERENCE_RECEIPT_STATUSES",
     "REMOTE_INFERENCE_EFFECT_STATUSES",

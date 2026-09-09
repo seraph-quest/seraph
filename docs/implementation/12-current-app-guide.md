@@ -227,11 +227,13 @@ provider cost reservation/reconciliation; those limits remain tracked by
 The typed durable job contract persists a monotonic row revision alongside its
 owner fencing token. Claim, heartbeat, expired-lease transfer, and terminal
 transitions are compare-and-swap writes against the expected state, revision,
-and fence. Restart recovery marks work with an unresolved effect or provider
-cost as `unknown_external_effect` or `cost_liability`; an operator must record
-the destination or cost readback before the job can be requeued. This branch
-local slice remains Partial until its tracked review and integration receipts
-land on `develop`.
+and fence. Lease-bound receipt and transition writes also check the expiry in
+the database update predicate. Startup recovery runs before scheduler
+registration and marks work with an unresolved effect or provider cost as
+`unknown_external_effect` or `cost_liability`; an operator must record a typed
+effect-specific destination readback or cost settlement before the job can be
+requeued. This branch-local slice remains Partial until its tracked review and
+integration receipts land on `develop`.
 
 ## Failure And Recovery
 

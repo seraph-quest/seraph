@@ -28,6 +28,7 @@ from src.workflows.job_runtime import (
     _canonical_remote_inference_receipt,
     _digest,
     _safe_inputs_digest,
+    _safe_structure,
     _validate_admission_authority,
     _validate_retry_actor,
     durable_job_repository,
@@ -203,7 +204,13 @@ def test_retry_requires_owner_identity_and_canonical_reconciliation_receipt():
     with pytest.raises(ValueError):
         _canonical_reconciliation_receipt(None)
     canonical, digest = _canonical_reconciliation_receipt(
-        {"status": "read_back", "secret_token": "must-not-persist"}
+        {
+            "effect_id": "effect-1",
+            "effect_type": "destination_write",
+            "status": "read_back",
+            "outcome": "absent",
+            "secret_token": "must-not-persist",
+        }
     )
     assert digest
     assert "must-not-persist" not in canonical
@@ -234,6 +241,27 @@ def test_remote_admission_receipts_are_allowlisted_and_redacted():
         _canonical_remote_inference_receipt(
             {"operation_id": "operation-1", "job_id": "job-1", "owner_id": "service:strategist", "status": "unknown"}
         )
+
+
+def test_durable_receipts_redact_secret_key_variants_and_error_payloads():
+    safe = _safe_structure(
+        {
+            "details": {
+                "api-key": "secret-api-key",
+                "apikey": "secret-apikey",
+                "x-api-key": "secret-x-api-key",
+                "Authorization": "Bearer secret-authorization",
+                "original_error": "provider response included secret-original-error",
+                "safe_reason": "provider_timeout",
+            }
+        }
+    )
+    assert safe["details"]["api-key"] == "[redacted]"
+    assert safe["details"]["apikey"] == "[redacted]"
+    assert safe["details"]["x-api-key"] == "[redacted]"
+    assert safe["details"]["Authorization"] == "[redacted]"
+    assert safe["details"]["original_error"] == "[redacted]"
+    assert safe["details"]["safe_reason"] == "provider_timeout"
 
 
 @pytest.mark.asyncio
@@ -415,6 +443,7 @@ async def test_admission_is_idempotent_and_lifecycle_records_safe_receipts(async
         reconciled=True,
         reconciliation_receipt={
             "effect_id": "destination-write-1",
+            "effect_type": "destination_write",
             "status": "read_back",
             "readback_digest": "digest-1",
         },
@@ -637,7 +666,12 @@ async def test_restart_recovery_keeps_unknown_effect_and_cost_liability_out_of_r
             owner_kind="service",
             owner_principal_id="service:strategist",
             service_id="service:strategist",
-            reconciliation_receipt={"status": "not_read_back"},
+            reconciliation_receipt={
+                "effect_id": "missing-effect",
+                "effect_type": "destination_write",
+                "status": "read_back",
+                "outcome": "absent",
+            },
         )
 
     reconciled = await durable_job_repository.reconcile_external_effect(
@@ -645,14 +679,28 @@ async def test_restart_recovery_keeps_unknown_effect_and_cost_liability_out_of_r
         owner_kind="service",
         owner_principal_id="service:strategist",
         service_id="service:strategist",
-        reconciliation_receipt={"status": "read_back", "effect": "absent"},
+        reconciliation_receipt={
+            "effect_id": next(
+                item["effect_id"]
+                for item in recovered_job["effects"]
+                if item.get("status") == "intent"
+            ),
+            "effect_type": "destination_write",
+            "status": "read_back",
+            "outcome": "absent",
+        },
     )
     retried = await durable_job_repository.retry_job(
         admitted["job_id"],
         owner_kind="service",
         owner_principal_id="service:strategist",
         service_id="service:strategist",
-        reconciliation_receipt={"status": "read_back", "effect": "absent"},
+        reconciliation_receipt={
+            "effect_id": "missing-after-reconcile",
+            "effect_type": "destination_write",
+            "status": "read_back",
+            "outcome": "absent",
+        },
         expected_revision=reconciled["revision"],
     )
     assert retried["status"] == "queued"
@@ -683,5 +731,10 @@ async def test_restart_recovery_keeps_unknown_effect_and_cost_liability_out_of_r
             owner_kind="service",
             owner_principal_id="service:strategist",
             service_id="service:strategist",
-            reconciliation_receipt={"status": "unknown"},
+            reconciliation_receipt={
+                "effect_id": "cost-effect",
+                "effect_type": "remote_inference_admission",
+                "status": "settled",
+                "actual_cost_microusd": 0,
+            },
         )

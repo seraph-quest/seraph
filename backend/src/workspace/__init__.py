@@ -51,9 +51,15 @@ from src.workspace.production import (
     ProductionWorkspaceConfigurationError,
     ProductionWorkspaceError,
     ProductionWorkspaceMountError,
+    ProductionWorkspaceReconciliationError,
     maintenance_fence,
+    lifecycle_receipt_path,
+    read_lifecycle_receipt,
+    reconcile_production_restore,
     resolve_production_workspace,
+    runtime_workspace_owner,
     validate_container_workspace_mount,
+    write_lifecycle_receipt,
 )
 
 __all__ = [
@@ -103,7 +109,13 @@ __all__ = [
     "ProductionWorkspaceConfigurationError",
     "ProductionWorkspaceError",
     "ProductionWorkspaceMountError",
+    "ProductionWorkspaceReconciliationError",
     "maintenance_fence",
+    "lifecycle_receipt_path",
+    "read_lifecycle_receipt",
+    "reconcile_production_restore",
     "resolve_production_workspace",
+    "runtime_workspace_owner",
     "validate_container_workspace_mount",
+    "write_lifecycle_receipt",
 ]

@@ -28,6 +28,8 @@
 #   ./manage.sh -e prod down            - Stop everything.
 #   ./manage.sh -e prod backup          - Create a verified workspace archive.
 #   ./manage.sh -e prod restore --archive <archive> --confirm
+#   ./manage.sh -e prod status          - Show the durable lifecycle result.
+#   ./manage.sh -e prod rollback --restore-id <id> --confirm
 #
 # ==============================================================================
 
@@ -84,6 +86,8 @@ function display_help() {
     echo "  $PROG_NAME -e dev proxy logs"
     echo "  $PROG_NAME -e prod backup"
     echo "  $PROG_NAME -e prod restore --archive <archive> --confirm"
+    echo "  $PROG_NAME -e prod status"
+    echo "  $PROG_NAME -e prod rollback --restore-id <id> --confirm"
 }
 
 function error_exit() {
@@ -907,7 +911,7 @@ if [ "$COMMAND" = "local" ]; then
     exit "$LOCAL_EXIT_STATUS"
 fi
 
-if [ "$COMMAND" = "backup" ] || [ "$COMMAND" = "restore" ]; then
+if [ "$COMMAND" = "backup" ] || [ "$COMMAND" = "restore" ] || [ "$COMMAND" = "status" ] || [ "$COMMAND" = "rollback" ]; then
     production_workspace_lifecycle "$COMMAND" "$@"
     exit $?
 fi

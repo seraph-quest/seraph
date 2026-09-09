@@ -62,6 +62,14 @@ def test_production_core_requires_exactly_one_server_side_auth_credential(tmp_pa
     report = build_preflight_report(both)
     assert report["core"]["status"] == "invalid"
 
+    malformed = _production_env(tmp_path)
+    malformed["OPERATOR_AUTH_SECRET"] = ""
+    malformed["OPERATOR_AUTH_SECRET_HASH"] = "x"
+    report = build_preflight_report(malformed)
+    assert report["core"]["status"] == "invalid"
+    auth_check = next(check for check in report["core"]["checks"] if check["name"] == "operator_auth")
+    assert auth_check["detail"] == "operator PBKDF2 hash has invalid shape"
+
 
 def test_complete_openrouter_config_remains_unverified_without_live_probe(tmp_path):
     env = _production_env(tmp_path)
@@ -136,6 +144,17 @@ def test_production_compose_keeps_backend_private_and_has_no_gpu_or_vlm_gate():
     assert "LOCAL_LLM_API_BASE: \"\"" in compose
     assert "SERAPH_VLM_BASE_URL: \"\"" in compose
     assert 'SERAPH_PRODUCTION_MOUNT_CHECK: "true"' in compose
+
+
+def test_production_mount_preflight_fails_closed_without_mountinfo(tmp_path):
+    env = _production_env(tmp_path)
+    env["WORKSPACE_DIR"] = "/app/data"
+    env["SERAPH_PRODUCTION_MOUNT_CHECK"] = "true"
+    report = build_preflight_report(env)
+    mount_check = next(
+        check for check in report["core"]["checks"] if check["name"] == "canonical_workspace_mount"
+    )
+    assert mount_check["status"] == "invalid"
 
 
 def test_managed_local_ports_bind_loopback_and_production_env_uses_prod_paths():

@@ -15,6 +15,8 @@ from src.workspace import (
     ProductionWorkspaceError,
     ProductionWorkspaceMountError,
     maintenance_fence,
+    read_lifecycle_receipt,
+    runtime_workspace_owner,
     resolve_production_workspace,
     validate_container_workspace_mount,
 )
@@ -83,8 +85,13 @@ def test_production_resolution_rejects_missing_or_duplicate_owner(tmp_path):
 def test_container_mount_requires_exact_app_data_and_safe_directory(tmp_path):
     mount = tmp_path / "mounted"
     mount.mkdir()
+    mountinfo = tmp_path / "mountinfo"
+    mountinfo.write_text(
+        "1 2 0:3 / /app/data rw,nosuid,nodev - ext4 /dev/test rw\n",
+        encoding="utf-8",
+    )
     assert validate_container_workspace_mount(
-        {"WORKSPACE_DIR": "/app/data"}, mounted_root=mount
+        {"WORKSPACE_DIR": "/app/data"}, mounted_root=mount, mountinfo=mountinfo
     )["canonical_mount"] is True
 
     with pytest.raises(ProductionWorkspaceMountError):
@@ -93,7 +100,14 @@ def test_container_mount_requires_exact_app_data_and_safe_directory(tmp_path):
     link = tmp_path / "mount-link"
     link.symlink_to(mount, target_is_directory=True)
     with pytest.raises(ProductionWorkspaceMountError):
-        validate_container_workspace_mount({"WORKSPACE_DIR": "/app/data"}, mounted_root=link)
+        validate_container_workspace_mount(
+            {"WORKSPACE_DIR": "/app/data"}, mounted_root=link, mountinfo=mountinfo
+        )
+
+    with pytest.raises(ProductionWorkspaceMountError):
+        validate_container_workspace_mount(
+            {"WORKSPACE_DIR": "/app/data"}, mounted_root=mount, mountinfo=tmp_path / "missing"
+        )
 
 
 def test_maintenance_fence_rejects_duplicate_owner(tmp_path):
@@ -103,6 +117,17 @@ def test_maintenance_fence_rejects_duplicate_owner(tmp_path):
         with pytest.raises(DuplicateWorkspaceOwnerError):
             with maintenance_fence(workspace):
                 pass
+
+
+def test_runtime_owner_blocks_maintenance_until_backend_releases_bind(tmp_path):
+    root = _workspace(tmp_path)
+    workspace = resolve_production_workspace(_env(root), base_dir=tmp_path)
+    with runtime_workspace_owner(root):
+        with pytest.raises(DuplicateWorkspaceOwnerError):
+            with maintenance_fence(workspace):
+                pass
+    with maintenance_fence(workspace):
+        pass
 
 
 def test_managed_cli_backup_restore_is_redacted_and_staged(tmp_path):
@@ -140,6 +165,98 @@ def test_managed_cli_backup_restore_is_redacted_and_staged(tmp_path):
     assert restore.returncode == 0, restore.stderr
     assert json.loads(restore.stdout)["status"] == "restored"
     assert (root / "soul.md").read_text(encoding="utf-8") == "canonical\n"
+
+
+def test_managed_restore_invalidates_authority_sessions_and_optional_tokens(tmp_path):
+    root = _workspace(tmp_path)
+    (root / "google_calendar_token.json").write_text("OPTIONAL-TOKEN\n", encoding="utf-8")
+    with sqlite3.connect(root / "seraph.db") as database:
+        database.execute(
+            "CREATE TABLE operator_sessions (id TEXT PRIMARY KEY, revoked_at TEXT)"
+        )
+        database.execute("INSERT INTO operator_sessions VALUES ('session-1', NULL)")
+        database.execute(
+            "CREATE TABLE production_workflow_authority_states "
+            "(id TEXT PRIMARY KEY, workflow_phase TEXT, safe_replay_decision TEXT, "
+            "blocked_replay_reason TEXT)"
+        )
+        database.execute(
+            "INSERT INTO production_workflow_authority_states VALUES "
+            "('run-1', 'running', 'unsafe', NULL)"
+        )
+    environment = os.environ.copy()
+    environment.update(_env(root))
+    environment["PYTHONPATH"] = str(ROOT / "backend")
+    backup = subprocess.run(
+        [sys.executable, str(CLI), "--base-dir", str(tmp_path), "backup", "--archive", "auth.zip"],
+        env=environment,
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert backup.returncode == 0, backup.stderr
+    archive = Path(json.loads(backup.stdout)["archive_path"])
+    restore = subprocess.run(
+        [sys.executable, str(CLI), "--base-dir", str(tmp_path), "restore", "--archive", str(archive), "--confirm"],
+        env=environment,
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert restore.returncode == 0, restore.stderr
+    receipt = json.loads(restore.stdout)
+    reconciliation = receipt["stage_receipt"]["restore_reconciliation"]
+    assert reconciliation["status"] == "ready"
+    assert reconciliation["authority_invalidation"]["operator_sessions_invalidated"] == 1
+    assert reconciliation["authority_invalidation"]["workflow_authority_rows_blocked"] == 1
+    assert reconciliation["token_invalidation"]["optional_credentials_invalidated"] == [
+        "google_calendar_token.json"
+    ]
+    with sqlite3.connect(root / "seraph.db") as database:
+        assert database.execute(
+            "SELECT revoked_at FROM operator_sessions WHERE id = 'session-1'"
+        ).fetchone()[0]
+        assert database.execute(
+            "SELECT workflow_phase, safe_replay_decision, blocked_replay_reason "
+            "FROM production_workflow_authority_states WHERE id = 'run-1'"
+        ).fetchone() == (
+            "blocked",
+            "unsafe",
+            "workspace_restore_requires_reconciliation",
+        )
+    assert not (root / "google_calendar_token.json").exists()
+
+
+def test_managed_restore_blocks_when_a_stored_derived_index_needs_rebuild(tmp_path):
+    root = _workspace(tmp_path)
+    (root / "lance").mkdir()
+    (root / "lance" / "index.bin").write_bytes(b"derived-index")
+    environment = os.environ.copy()
+    environment.update(_env(root))
+    environment["PYTHONPATH"] = str(ROOT / "backend")
+    backup = subprocess.run(
+        [sys.executable, str(CLI), "--base-dir", str(tmp_path), "backup", "--archive", "derived.zip"],
+        env=environment,
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert backup.returncode == 0, backup.stderr
+    archive = json.loads(backup.stdout)["archive_path"]
+    restore = subprocess.run(
+        [sys.executable, str(CLI), "--base-dir", str(tmp_path), "restore", "--archive", archive, "--confirm"],
+        env=environment,
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert restore.returncode == 78
+    assert json.loads(restore.stdout)["reason_code"] == "production_workspace_reconciliation_required"
+    assert (root / "lance" / "index.bin").read_bytes() == b"derived-index"
 
 
 def test_manage_prod_commands_use_host_bind_and_never_start_compose(tmp_path):
@@ -204,6 +321,88 @@ def test_managed_cli_restore_rejects_corrupt_archive_and_confirmation_gap(tmp_pa
     )
     assert blocked.returncode == 78
     assert json.loads(blocked.stdout)["reason_code"] == "invalid_workspace_archive"
+
+
+def test_managed_status_and_rollback_are_durable_and_operator_visible(tmp_path):
+    root = _workspace(tmp_path)
+    environment = os.environ.copy()
+    environment.update(_env(root))
+    environment["PYTHONPATH"] = str(ROOT / "backend")
+    backup = subprocess.run(
+        [sys.executable, str(CLI), "--base-dir", str(tmp_path), "backup", "--archive", "status.zip"],
+        env=environment,
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert backup.returncode == 0, backup.stderr
+    status = subprocess.run(
+        [sys.executable, str(CLI), "--base-dir", str(tmp_path), "status"],
+        env=environment,
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert status.returncode == 0, status.stderr
+    status_receipt = json.loads(status.stdout)
+    assert status_receipt["last_result"]["operation"] == "backup"
+    assert status_receipt["rollback_available"] is False
+
+    archive = Path(json.loads(backup.stdout)["archive_path"])
+    (root / "soul.md").write_text("before-restore\n", encoding="utf-8")
+    restored = subprocess.run(
+        [sys.executable, str(CLI), "--base-dir", str(tmp_path), "restore", "--archive", str(archive), "--confirm"],
+        env=environment,
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert restored.returncode == 0, restored.stderr
+    restore_id = json.loads(restored.stdout)["restore_id"]
+    assert (root / "soul.md").read_text(encoding="utf-8") == "canonical\n"
+    rollback = subprocess.run(
+        [
+            sys.executable,
+            str(CLI),
+            "--base-dir",
+            str(tmp_path),
+            "rollback",
+            "--restore-id",
+            restore_id,
+            "--confirm",
+        ],
+        env=environment,
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert rollback.returncode == 0, rollback.stderr
+    assert json.loads(rollback.stdout)["status"] == "rolled_back"
+    assert (root / "soul.md").read_text(encoding="utf-8") == "before-restore\n"
+    durable = read_lifecycle_receipt(resolve_production_workspace(_env(root), base_dir=tmp_path))
+    assert durable is not None
+    assert durable["operation"] == "rollback"
+
+
+def test_managed_restore_rejects_relative_archive_escape(tmp_path):
+    root = _workspace(tmp_path)
+    environment = os.environ.copy()
+    environment.update(_env(root))
+    environment["PYTHONPATH"] = str(ROOT / "backend")
+    blocked = subprocess.run(
+        [sys.executable, str(CLI), "--base-dir", str(tmp_path), "restore", "--archive", "../outside.zip", "--confirm"],
+        env=environment,
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert blocked.returncode == 78
+    assert blocked.stdout
 
 
 def test_managed_cli_blocks_unknown_entries_and_missing_secret(tmp_path):

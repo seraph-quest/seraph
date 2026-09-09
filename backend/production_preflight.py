@@ -16,6 +16,8 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 import argparse
+import base64
+import binascii
 import json
 import os
 from pathlib import Path
@@ -55,6 +57,21 @@ def _secret_configured(value: str) -> bool:
     return bool(value) and value.lower() not in PLACEHOLDER_SECRETS and not value.lower().startswith("your-")
 
 
+def _pbkdf2_hash_shape_valid(value: str) -> bool:
+    """Match the exact encoded shape consumed by ``src.auth.service``."""
+    if not value or not _secret_configured(value):
+        return False
+    parts = value.split("$")
+    if len(parts) != 4 or parts[0] != "pbkdf2_sha256" or parts[1] != "600000":
+        return False
+    try:
+        salt = base64.b64decode(parts[2].encode("ascii"), altchars=b"-_", validate=True)
+        digest = base64.b64decode(parts[3].encode("ascii"), altchars=b"-_", validate=True)
+    except (UnicodeEncodeError, ValueError, binascii.Error):
+        return False
+    return len(salt) == 16 and len(digest) == 32
+
+
 def _csv(value: str) -> list[str]:
     return [item.strip() for item in value.split(",") if item.strip()]
 
@@ -67,7 +84,11 @@ def _bool(value: str, *, default: bool) -> bool:
 
 def _auth_check(env: Mapping[str, str], *, production: bool) -> Check:
     raw_secret = _secret_configured(_value(env, "OPERATOR_AUTH_SECRET"))
-    hashed_secret = _secret_configured(_value(env, "OPERATOR_AUTH_SECRET_HASH"))
+    encoded_hash = _value(env, "OPERATOR_AUTH_SECRET_HASH")
+    hash_present = _secret_configured(encoded_hash)
+    if hash_present and not _pbkdf2_hash_shape_valid(encoded_hash):
+        return Check("operator_auth", "invalid", "operator PBKDF2 hash has invalid shape")
+    hashed_secret = _pbkdf2_hash_shape_valid(encoded_hash)
     configured = int(raw_secret) + int(hashed_secret)
     if not production:
         return Check("operator_auth", "not_required", "development/test auth policy owns this environment")

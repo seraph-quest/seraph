@@ -68,12 +68,19 @@ missing, symlinked, or ambiguous roots:
 
 Archives and restore staging are derived siblings of the host bind and are not
 active workspace roots. Archives contain checksummed canonical files and
-redacted secret metadata; recovery preserves the active secret material and
-does not serialize secret values. The current slice proves deterministic local
-inventory, archive validation, staged promotion, rollback journaling, and a
-process-wide maintenance fence without starting inference. Migration fencing,
-retention/disk-pressure drills, derived-index rebuild, session invalidation, and
-live operator receipts remain partial #742 acceptance work.
+redacted secret metadata; recovery preserves the required vault key but drops
+optional integration tokens. The production preflight requires dedicated
+`/app/data` mount evidence from `/proc/self/mountinfo`, and the backend holds
+the same bind-local owner lock for its lifetime so backup and restore fail
+closed while writers or the scheduler are active. Restore resets only empty
+declared derived directories; a stored derived index that has no bounded
+rebuild hook blocks promotion. Staged operator sessions and durable workflow
+authority rows are revoked or blocked before promotion. The current slice
+proves deterministic local inventory, archive validation, staged promotion,
+rollback journaling, durable status receipts, and provider-independent
+maintenance. Migration fencing beyond the backend owner lease,
+retention/disk-pressure drills, and live operator receipts remain partial #742
+acceptance work.
 
 ## Historical develop topology
 

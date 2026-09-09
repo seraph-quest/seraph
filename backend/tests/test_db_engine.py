@@ -2,6 +2,7 @@ from sqlalchemy import event
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker
 
+from config.settings import settings
 from src.db.engine import (
     _configure_sqlite_connection,
     _ensure_legacy_columns,
@@ -101,6 +102,82 @@ async def test_ensure_legacy_columns_adds_session_owner_principal_id(tmp_path):
             assert "owner_principal_id" in columns
             assert "ix_sessions_owner_principal_id" in indexes
             assert owner == (None,)
+    finally:
+        await engine.dispose()
+
+
+async def test_ensure_legacy_columns_claims_only_transcript_sessions_for_single_operator(
+    tmp_path,
+    monkeypatch,
+):
+    db_path = tmp_path / "legacy-conversations.db"
+    engine = create_async_engine(f"sqlite+aiosqlite:///{db_path}")
+    event.listen(engine.sync_engine, "connect", _configure_sqlite_connection)
+    monkeypatch.setattr(settings, "operator_auth_secret", "configured-secret")
+    monkeypatch.setattr(settings, "operator_auth_secret_hash", "")
+
+    try:
+        async with engine.begin() as conn:
+            await conn.exec_driver_sql(
+                """
+                CREATE TABLE sessions (
+                    id VARCHAR PRIMARY KEY,
+                    title VARCHAR,
+                    created_at DATETIME,
+                    updated_at DATETIME
+                )
+                """
+            )
+            await conn.exec_driver_sql(
+                """
+                CREATE TABLE messages (
+                    id VARCHAR PRIMARY KEY,
+                    session_id VARCHAR,
+                    role VARCHAR,
+                    content VARCHAR
+                )
+                """
+            )
+            await conn.exec_driver_sql(
+                """
+                INSERT INTO sessions (id, title)
+                VALUES
+                    ('legacy-conversation', 'Legacy cockpit'),
+                    ('service-placeholder', 'Job reference'),
+                    ('other-owner', 'Other operator')
+                """
+            )
+            await conn.exec_driver_sql(
+                """
+                INSERT INTO messages (id, session_id, role, content)
+                VALUES
+                    ('message-1', 'legacy-conversation', 'user', 'Continue our work'),
+                    ('message-2', 'service-placeholder', 'step', 'scheduled work'),
+                    ('message-3', 'other-owner', 'assistant', 'Already claimed')
+                """
+            )
+            await conn.exec_driver_sql(
+                "ALTER TABLE sessions ADD COLUMN owner_principal_id VARCHAR"
+            )
+            await conn.exec_driver_sql(
+                "UPDATE sessions SET owner_principal_id = 'operator:other' "
+                "WHERE id = 'other-owner'"
+            )
+
+            await _ensure_legacy_columns(conn)
+            await _ensure_legacy_columns(conn)
+
+            owners = (
+                await conn.exec_driver_sql(
+                    "SELECT id, owner_principal_id FROM sessions ORDER BY id"
+                )
+            ).fetchall()
+
+        assert owners == [
+            ("legacy-conversation", "operator:single"),
+            ("other-owner", "operator:other"),
+            ("service-placeholder", None),
+        ]
     finally:
         await engine.dispose()
 

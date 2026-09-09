@@ -7,7 +7,7 @@ import pytest
 pytestmark = pytest.mark.usefixtures("mocked_canonical_inference_context")
 
 from config.settings import settings
-from src.agent.session import SessionManager
+from src.agent.session import SessionManager, SessionOwnerMismatchError
 from src.audit.repository import audit_repository
 from src.scheduler.scheduled_jobs import scheduled_job_repository
 from src.security.trust_contract import canonical_digest
@@ -32,6 +32,31 @@ class TestGetOrCreate:
         s1 = await sm.get_or_create("s1")
         s2 = await sm.get_or_create("s1")
         assert s1.id == s2.id
+
+    async def test_authenticated_owner_claims_existing_ownerless_session(self, async_db, sm):
+        await sm.get_or_create("legacy-conversation")
+
+        claimed = await sm.get_or_create(
+            "legacy-conversation",
+            owner_principal_id="operator:single",
+        )
+
+        assert claimed.owner_principal_id == "operator:single"
+        persisted = await sm.get("legacy-conversation")
+        assert persisted is not None
+        assert persisted.owner_principal_id == "operator:single"
+
+    async def test_authenticated_owner_cannot_claim_other_owned_session(self, async_db, sm):
+        await sm.get_or_create(
+            "owned-by-other",
+            owner_principal_id="operator:other",
+        )
+
+        with pytest.raises(SessionOwnerMismatchError):
+            await sm.get_or_create(
+                "owned-by-other",
+                owner_principal_id="operator:single",
+            )
 
     async def test_creates_when_id_not_found(self, async_db, sm):
         session = await sm.get_or_create("new-id")

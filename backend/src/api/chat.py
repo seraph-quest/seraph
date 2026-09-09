@@ -22,7 +22,7 @@ from config.settings import settings
 from src.agent.direct_chat import run_direct_local_chat, should_use_direct_local_chat
 from src.agent.factory import build_agent
 from src.agent.onboarding import create_onboarding_agent
-from src.agent.session import session_manager
+from src.agent.session import SessionOwnerMismatchError, session_manager
 from src.audit.runtime import log_agent_run_event
 from src.audit.repository import audit_repository
 from src.api.profile import get_or_create_profile, mark_onboarding_complete
@@ -227,10 +227,19 @@ async def chat(request: ChatRequest, http_request: HttpRequest):
             status_code=exc.status_code,
             detail={"code": exc.code, "message": exc.message},
         ) from exc
-    session = await session_manager.get_or_create(
-        request.session_id,
-        owner_principal_id=operator.principal.principal_id,
-    )
+    try:
+        session = await session_manager.get_or_create(
+            request.session_id,
+            owner_principal_id=operator.principal.principal_id,
+        )
+    except SessionOwnerMismatchError as exc:
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "code": "chat_session_owner_forbidden",
+                "session_id": exc.session_id,
+            },
+        ) from exc
     try:
         chat_principal = _bind_chat_principal(
             session.id,

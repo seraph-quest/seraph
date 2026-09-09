@@ -1219,6 +1219,113 @@ async def test_authenticated_chat_ingress_binds_browser_provider_and_read_owner(
 
 
 @pytest.mark.asyncio
+async def test_authenticated_chat_claims_legacy_conversation_for_browser_restart(
+    client,
+    monkeypatch,
+):
+    origin = "http://localhost:3001"
+    monkeypatch.setattr(settings, "operator_auth_secret", "correct horse battery staple")
+    monkeypatch.setattr(settings, "operator_auth_secret_hash", "")
+    monkeypatch.setattr(settings, "operator_auth_allowed_hosts", "test,localhost,127.0.0.1")
+    monkeypatch.setattr(settings, "operator_auth_allowed_origins", origin)
+    monkeypatch.setattr(settings, "operator_auth_cookie_secure", False)
+
+    login_response = await client.post(
+        "/api/auth/login",
+        json={"password": "correct horse battery staple"},
+        headers={"origin": origin},
+    )
+    assert login_response.status_code == 200
+
+    legacy_id = "legacy-cockpit-conversation"
+    await session_manager.get_or_create(legacy_id)
+    await session_manager.add_message(legacy_id, "user", "Previous cockpit turn")
+    await session_manager.add_message(legacy_id, "assistant", "Previous cockpit reply")
+    legacy_before_claim = await session_manager.get(legacy_id)
+    assert legacy_before_claim is not None
+    assert legacy_before_claim.owner_principal_id is None
+
+    agent = MagicMock()
+    agent.run.return_value = "continued conversation"
+    with patch(
+        "src.api.chat.create_onboarding_agent",
+        return_value=agent,
+    ):
+        chat_response = await client.post(
+            "/api/chat",
+            json={"session_id": legacy_id, "message": "Check the website from the previous turn"},
+            headers={"origin": origin},
+        )
+
+    assert chat_response.status_code == 200
+    claimed = await session_manager.get(legacy_id)
+    assert claimed is not None
+    assert claimed.owner_principal_id == "operator:single"
+
+    provider_response = await client.get(
+        "/api/browser/providers",
+        params={"owner_session_id": legacy_id},
+    )
+    assert provider_response.status_code == 200
+
+    with patch("src.api.browser.browse_webpage", return_value="legacy page body"):
+        open_response = await client.post(
+            "/api/browser/sessions",
+            json={
+                "owner_session_id": legacy_id,
+                "url": "https://example.test/legacy",
+            },
+            headers={"origin": origin},
+        )
+    assert open_response.status_code == 200
+    browser_session = open_response.json()["session"]
+
+    read_response = await client.get(
+        f"/api/browser/sessions/{browser_session['session_id']}",
+        params={"owner_session_id": legacy_id},
+    )
+    assert read_response.status_code == 200
+
+    control_response = await client.post(
+        f"/api/browser/sessions/{browser_session['session_id']}/control",
+        json={"owner_session_id": legacy_id, "action": "close"},
+        headers={"origin": origin},
+    )
+    assert control_response.status_code == 200
+    assert control_response.json()["session"]["status"] == "closed"
+
+
+@pytest.mark.asyncio
+async def test_authenticated_chat_cannot_claim_other_owned_conversation(client, monkeypatch):
+    origin = "http://localhost:3001"
+    monkeypatch.setattr(settings, "operator_auth_secret", "correct horse battery staple")
+    monkeypatch.setattr(settings, "operator_auth_secret_hash", "")
+    monkeypatch.setattr(settings, "operator_auth_allowed_hosts", "test,localhost,127.0.0.1")
+    monkeypatch.setattr(settings, "operator_auth_allowed_origins", origin)
+    monkeypatch.setattr(settings, "operator_auth_cookie_secure", False)
+
+    login_response = await client.post(
+        "/api/auth/login",
+        json={"password": "correct horse battery staple"},
+        headers={"origin": origin},
+    )
+    assert login_response.status_code == 200
+
+    foreign_id = "other-operator-conversation"
+    await session_manager.get_or_create(foreign_id, owner_principal_id="operator:other")
+    with patch("src.api.chat.create_onboarding_agent") as create_agent:
+        response = await client.post(
+            "/api/chat",
+            json={"session_id": foreign_id, "message": "Try to claim this"},
+            headers={"origin": origin},
+        )
+
+    assert response.status_code == 403
+    assert response.json()["detail"]["code"] == "chat_session_owner_forbidden"
+    create_agent.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_browser_session_journal_survives_reload_without_raw_content(client, tmp_path):
     workspace = tmp_path / "workspace"
     workspace.mkdir()

@@ -64,6 +64,8 @@ _LEGACY_WORKFLOW_STATUS_MAP = {
     "pending": "accepted",
 }
 
+_SINGLE_OPERATOR_PRINCIPAL_ID = "operator:single"
+
 
 def _map_legacy_workflow_status(status: str | None) -> tuple[str, str | None]:
     """Map a legacy workflow status into the bounded durable state machine."""
@@ -241,6 +243,29 @@ async def _ensure_legacy_columns(conn) -> None:
             "CREATE INDEX IF NOT EXISTS ix_sessions_owner_principal_id "
             "ON sessions (owner_principal_id)"
         )
+        # Prior to the owner column, sessions represented cockpit conversations
+        # and service-bound placeholder references alike.  Only rows with a
+        # persisted user/assistant transcript are provably conversations, so
+        # claim those legacy rows for the canonical single operator.  Empty
+        # placeholders created by service/job references remain ownerless and
+        # therefore fail closed until an authenticated chat ingress explicitly
+        # binds them.
+        message_columns = await _table_columns("messages")
+        if (
+            message_columns
+            and {"session_id", "role"}.issubset(message_columns)
+            and bool(settings.operator_auth_secret or settings.operator_auth_secret_hash)
+        ):
+            await conn.exec_driver_sql(
+                "UPDATE sessions SET owner_principal_id = "
+                ":owner_principal_id "
+                "WHERE owner_principal_id IS NULL AND EXISTS ("
+                "SELECT 1 FROM messages "
+                "WHERE messages.session_id = sessions.id "
+                "AND messages.role IN ('user', 'assistant')"
+                ")",
+                {"owner_principal_id": _SINGLE_OPERATOR_PRINCIPAL_ID},
+            )
 
     proof_columns = await _add_missing_columns(
         "model_capability_proofs",

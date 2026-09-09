@@ -6,7 +6,7 @@ import uuid
 from datetime import datetime, timezone
 from time import perf_counter
 
-from sqlalchemy import func, or_, text
+from sqlalchemy import func, or_, text, update
 from sqlalchemy.exc import SQLAlchemyError
 from sqlmodel import select, col
 
@@ -33,6 +33,14 @@ from src.memory.flush import flush_session_memory
 from src.tools.process_tools import process_runtime_manager
 
 logger = logging.getLogger(__name__)
+
+
+class SessionOwnerMismatchError(Exception):
+    """Raised when a caller attempts to claim an already-owned session."""
+
+    def __init__(self, session_id: str):
+        self.session_id = session_id
+        super().__init__(f"session {session_id!r} is owned by another principal")
 
 
 def _escape_like(value: str) -> str:
@@ -102,18 +110,42 @@ class SessionManager:
         *,
         owner_principal_id: str | None = None,
     ) -> Session:
+        normalized_owner_principal_id = str(owner_principal_id or "").strip() or None
         async with get_session() as db:
             if session_id:
                 result = await db.execute(select(Session).where(Session.id == session_id))
                 session = result.scalars().first()
                 if session:
+                    existing_owner_principal_id = str(session.owner_principal_id or "").strip() or None
+                    if normalized_owner_principal_id:
+                        if existing_owner_principal_id is None:
+                            claimed = await db.execute(
+                                update(Session)
+                                .where(
+                                    Session.id == session.id,
+                                    Session.owner_principal_id.is_(None),
+                                )
+                                .values(owner_principal_id=normalized_owner_principal_id)
+                            )
+                            await db.flush()
+                            if claimed.rowcount != 1:
+                                await db.refresh(session)
+                                existing_owner_principal_id = (
+                                    str(session.owner_principal_id or "").strip() or None
+                                )
+                                if existing_owner_principal_id != normalized_owner_principal_id:
+                                    raise SessionOwnerMismatchError(session.id)
+                            else:
+                                session.owner_principal_id = normalized_owner_principal_id
+                        elif existing_owner_principal_id != normalized_owner_principal_id:
+                            raise SessionOwnerMismatchError(session.id)
                     db.expunge(session)
                     return session
 
             new_id = session_id or uuid.uuid4().hex
             session = Session(
                 id=new_id,
-                owner_principal_id=str(owner_principal_id or "").strip() or None,
+                owner_principal_id=normalized_owner_principal_id,
                 title="New Conversation",
             )
             db.add(session)

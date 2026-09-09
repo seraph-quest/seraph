@@ -18,7 +18,7 @@ from src.agent.exceptions import ClarificationRequired
 from src.agent.direct_chat import run_direct_local_chat, should_use_direct_local_chat, stream_direct_local_chat
 from src.agent.factory import build_agent
 from src.agent.onboarding import create_onboarding_agent
-from src.agent.session import session_manager
+from src.agent.session import SessionOwnerMismatchError, session_manager
 from src.audit.formatting import format_tool_call_summary
 from src.audit.runtime import log_agent_run_event
 from src.audit.repository import audit_repository
@@ -303,10 +303,23 @@ async def websocket_chat(websocket: WebSocket):
                 )
                 continue
 
-            session = await session_manager.get_or_create(
-                ws_msg.session_id,
-                owner_principal_id=operator.principal.principal_id,
-            )
+            try:
+                session = await session_manager.get_or_create(
+                    ws_msg.session_id,
+                    owner_principal_id=operator.principal.principal_id,
+                )
+            except SessionOwnerMismatchError as exc:
+                active_turn_session_id = exc.session_id
+                active_turn_completed = True
+                await websocket.send_text(
+                    WSResponse(
+                        type="error",
+                        content="This conversation belongs to another operator.",
+                        session_id=exc.session_id,
+                        seq=_next_seq(),
+                    ).model_dump_json()
+                )
+                continue
             try:
                 chat_principal = _bind_chat_principal(
                     session.id,

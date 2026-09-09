@@ -14602,63 +14602,65 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
             onClose={() => closeWindowPane("guardian_state_pane")}
           >
             <section className="cockpit-panel cockpit-panel--embedded">
-              <OutcomeCockpitPanel
-                goal={outcomeGoal}
-                work={outcomeWork}
-                approval={outcomeApprovalSummary}
-                route={outcomeRoute}
-                evidence={outcomeEvidence}
-                result={outcomeResult}
-                workLoadState={workflowLoadState === "failed"
-                  ? "degraded"
-                  : workflowLoadState === "idle"
-                    ? "partial_metadata"
-                    : workflowLoadState === "loaded"
-                      ? "active"
-                      : workflowLoadState}
-                approvalLoadState={approvalLoadState}
-                onOpenPriorities={() => setQuestPanelOpen(true)}
-                onLoadWork={() => void loadWorkflowRuns()}
-                onInspectWork={() => inspectWorkflowRun(outcomeWorkflow)}
-                onOpenThread={() => {
-                  const threadId = outcomeApproval?.thread_id ?? outcomeApproval?.session_id ?? outcomeWorkflow?.threadId ?? outcomeWorkflow?.sessionId;
-                  if (threadId) void openThread(threadId);
-                }}
-                onApprove={() => {
-                  if (outcomeApproval && approvalActionAllowed(outcomeApproval)) {
-                    void handleApprovalDecision(outcomeApproval, "approve");
-                  }
-                }}
-                onDeny={() => {
-                  if (outcomeApproval && approvalActionAllowed(outcomeApproval)) {
-                    void handleApprovalDecision(outcomeApproval, "deny");
-                  }
-                }}
-                onInspectEvidence={() => inspectOperatorEvidenceEntry(artifactEvidenceEntry)}
-                onInspectOutcome={() => setQuestPanelOpen(true)}
-                onContinue={() => continueWorkflowRun(outcomeWorkflow)}
-                onRetry={() => {
-                  if (outcomeWorkflow?.retryFromStepDraft) {
-                    void queueLiveWorkflowResumePlan(outcomeWorkflow, {
-                      action: "retry",
-                      stepId: outcomeFailedStep?.id ?? outcomeWorkflow.resumeFromStep,
-                      fallbackDraft: outcomeWorkflow.retryFromStepDraft,
-                      label: outcomeWorkflow.workflowName,
-                    });
-                  }
-                }}
-                onBranch={() => {
-                  if (outcomeWorkflow && outcomeCheckpoint) {
-                    void queueLiveWorkflowResumePlan(outcomeWorkflow, {
-                      action: "branch",
-                      stepId: outcomeCheckpoint.stepId,
-                      actionHandle: outcomeCheckpoint.actionHandle,
-                      fallbackDraft: outcomeCheckpoint.draft,
-                      label: outcomeWorkflow.workflowName,
-                    });
-                  }
-                }}
-              />
+              {currentGoal ? (
+                <OutcomeCockpitPanel
+                  goal={outcomeGoal}
+                  work={outcomeWork}
+                  approval={outcomeApprovalSummary}
+                  route={outcomeRoute}
+                  evidence={outcomeEvidence}
+                  result={outcomeResult}
+                  workLoadState={workflowLoadState === "failed"
+                    ? "degraded"
+                    : workflowLoadState === "idle"
+                      ? "partial_metadata"
+                      : workflowLoadState === "loaded"
+                        ? "active"
+                        : workflowLoadState}
+                  approvalLoadState={approvalLoadState}
+                  onOpenPriorities={() => setQuestPanelOpen(true)}
+                  onLoadWork={() => void loadWorkflowRuns()}
+                  onInspectWork={() => inspectWorkflowRun(outcomeWorkflow)}
+                  onOpenThread={() => {
+                    const threadId = outcomeApproval?.thread_id ?? outcomeApproval?.session_id ?? outcomeWorkflow?.threadId ?? outcomeWorkflow?.sessionId;
+                    if (threadId) void openThread(threadId);
+                  }}
+                  onApprove={() => {
+                    if (outcomeApproval && approvalActionAllowed(outcomeApproval)) {
+                      void handleApprovalDecision(outcomeApproval, "approve");
+                    }
+                  }}
+                  onDeny={() => {
+                    if (outcomeApproval && approvalActionAllowed(outcomeApproval)) {
+                      void handleApprovalDecision(outcomeApproval, "deny");
+                    }
+                  }}
+                  onInspectEvidence={() => inspectOperatorEvidenceEntry(artifactEvidenceEntry)}
+                  onInspectOutcome={() => setQuestPanelOpen(true)}
+                  onContinue={() => continueWorkflowRun(outcomeWorkflow)}
+                  onRetry={() => {
+                    if (outcomeWorkflow?.retryFromStepDraft) {
+                      void queueLiveWorkflowResumePlan(outcomeWorkflow, {
+                        action: "retry",
+                        stepId: outcomeFailedStep?.id ?? outcomeWorkflow.resumeFromStep,
+                        fallbackDraft: outcomeWorkflow.retryFromStepDraft,
+                        label: outcomeWorkflow.workflowName,
+                      });
+                    }
+                  }}
+                  onBranch={() => {
+                    if (outcomeWorkflow && outcomeCheckpoint) {
+                      void queueLiveWorkflowResumePlan(outcomeWorkflow, {
+                        action: "branch",
+                        stepId: outcomeCheckpoint.stepId,
+                        actionHandle: outcomeCheckpoint.actionHandle,
+                        fallbackDraft: outcomeCheckpoint.draft,
+                        label: outcomeWorkflow.workflowName,
+                      });
+                    }
+                  }}
+                />
+              ) : null}
               <div className="cockpit-operator-row">
                 <span className="cockpit-key">proof controls</span>
                 <span className="cockpit-operator-link">{renderDeepLoadState("benchmark")} · {renderDeepLoadState("m8")}</span>

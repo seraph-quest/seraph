@@ -6624,6 +6624,7 @@ describe("CockpitView", () => {
     await loadAllDeepPanes();
 
     expect(await screen.findByRole("button", { name: "Approve" }, { timeout: 5000 })).toBeInTheDocument();
+    expect(screen.getAllByRole("button", { name: "Approve" })).toHaveLength(1);
     expect(screen.getByRole("button", { name: "Deny" })).toBeInTheDocument();
     fireEvent.click(await screen.findByRole("button", { name: "Continue" }, { timeout: 5000 }));
 

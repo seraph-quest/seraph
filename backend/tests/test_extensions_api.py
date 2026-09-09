@@ -1,16 +1,200 @@
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from fastapi import HTTPException
 import pytest
+from starlette.requests import Request
 
 from config.settings import settings
+from src.approval.runtime import get_current_session_id, get_current_trust_principal
+from src.auth.service import test_bypass_operator as _test_bypass_operator
 from src.extensions.registry import default_manifest_roots_for_workspace
 from src.runbooks.manager import runbook_manager
 from src.skills.manager import skill_manager
 from src.starter_packs.manager import starter_pack_manager
 from src.tools.mcp_manager import mcp_manager
 from src.workflows.manager import workflow_manager
+from src.security.trust_contract import PrincipalType
+
+
+def _extension_mutator_request(operator, path: str):
+    return Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": path,
+            "headers": [],
+            "query_string": b"",
+            "state": {"operator": operator},
+        }
+    )
+
+
+@pytest.mark.asyncio
+async def test_extension_mutators_deny_invalid_operator_before_side_effects():
+    from src.api.extensions import (
+        ExtensionConnectorTestRequest,
+        ExtensionConnectorToggleRequest,
+        ExtensionSourceSaveRequest,
+        save_extension_package_source,
+        set_extension_package_connector_enabled,
+        test_extension_package_connector,
+    )
+
+    operator = _test_bypass_operator()
+    invalid_operators = (
+        None,
+        object(),
+        replace(operator, principal=replace(operator.principal, authenticated=False)),
+        replace(operator, principal=replace(operator.principal, revoked=True)),
+        replace(operator, principal=replace(operator.principal, session_id="other-session")),
+        replace(operator, principal=replace(operator.principal, principal_type=PrincipalType.SERVICE)),
+        replace(operator, principal=replace(operator.principal, grants=())),
+    )
+
+    with (
+        patch("src.api.extensions.get_extension_connector") as get_connector,
+        patch("src.api.extensions.get_extension") as get_extension,
+        patch("src.api.extensions.get_extension_source") as get_source,
+        patch("src.api.extensions.set_extension_connector_enabled") as set_enabled,
+        patch("src.api.extensions.save_extension_source") as save_source,
+        patch("src.api.extensions._log_extension_lifecycle_event", new_callable=AsyncMock) as audit,
+        patch("src.api.extensions.context_manager.get_context") as get_context,
+    ):
+        for invalid_operator in invalid_operators:
+            with pytest.raises(HTTPException) as test_error:
+                await test_extension_package_connector(
+                    "seraph.example",
+                    ExtensionConnectorTestRequest(reference="connectors/example.yaml"),
+                    _extension_mutator_request(invalid_operator, "/api/extensions/seraph.example/connectors/test"),
+                )
+            assert test_error.value.status_code == 401
+            assert test_error.value.detail == {"code": "authentication_required"}
+
+            with pytest.raises(HTTPException) as toggle_error:
+                await set_extension_package_connector_enabled(
+                    "seraph.example",
+                    ExtensionConnectorToggleRequest(reference="connectors/example.yaml", enabled=True),
+                    _extension_mutator_request(invalid_operator, "/api/extensions/seraph.example/connectors/enabled"),
+                )
+            assert toggle_error.value.status_code == 401
+            assert toggle_error.value.detail == {"code": "authentication_required"}
+
+            with pytest.raises(HTTPException) as source_error:
+                await save_extension_package_source(
+                    "seraph.example",
+                    ExtensionSourceSaveRequest(reference="workflows/example.md", content="secret-value"),
+                    _extension_mutator_request(invalid_operator, "/api/extensions/seraph.example/source"),
+                )
+            assert source_error.value.status_code == 401
+            assert source_error.value.detail == {"code": "authentication_required"}
+
+    get_connector.assert_not_called()
+    get_extension.assert_not_called()
+    get_source.assert_not_called()
+    set_enabled.assert_not_called()
+    save_source.assert_not_called()
+    audit.assert_not_awaited()
+    get_context.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_extension_mutators_bind_operator_context_and_redact_source_receipt():
+    from src.api.extensions import (
+        ExtensionConnectorTestRequest,
+        ExtensionConnectorToggleRequest,
+        ExtensionSourceSaveRequest,
+        save_extension_package_source,
+        set_extension_package_connector_enabled,
+        test_extension_package_connector,
+    )
+
+    operator = _test_bypass_operator()
+    observed: list[tuple[str, object]] = []
+    audit_details: list[dict[str, object]] = []
+
+    def observe(label: str):
+        observed.append((label, get_current_trust_principal()))
+
+    async def record_audit(**kwargs):
+        observe(str(kwargs.get("outcome") or "audit"))
+        details = kwargs.get("details")
+        if isinstance(details, dict):
+            audit_details.append(details)
+
+    connector = {
+        "extension_id": "seraph.example",
+        "reference": "connectors/example.yaml",
+        "name": "example",
+        "type": "observer_definitions",
+        "status": "ready",
+        "health": {"state": "ready", "ready": True, "summary": "ready"},
+    }
+    extension = {
+        "id": "seraph.example",
+        "status": "ready",
+        "contributions": [connector],
+    }
+    source_preview = {
+        "extension": extension,
+        "reference": "workflows/example.md",
+        "content": "old content",
+        "validation": {"valid": True},
+    }
+    with (
+        patch("src.api.extensions.context_manager.get_context", return_value=SimpleNamespace(approval_mode="high_risk")),
+        patch(
+            "src.api.extensions.get_extension_connector",
+            side_effect=lambda *_args, **_kwargs: (observe("test_lookup") or connector),
+        ),
+        patch("src.api.extensions.get_extension", side_effect=lambda *_args, **_kwargs: (observe("toggle_lookup") or extension)),
+        patch("src.api.extensions.get_extension_source", side_effect=lambda *_args, **_kwargs: (observe("source_lookup") or source_preview)),
+        patch("src.api.extensions.set_extension_connector_enabled", side_effect=lambda *_args, **_kwargs: (observe("toggle_write") or {"extension": extension, "changed": connector})),
+        patch("src.api.extensions.save_extension_source", side_effect=lambda *_args, **_kwargs: (observe("source_write") or {"extension": extension, "content": "secret-value"})),
+        patch("src.api.extensions.log_integration_event", new_callable=AsyncMock, side_effect=record_audit),
+    ):
+        test_payload = await test_extension_package_connector(
+            "seraph.example",
+            ExtensionConnectorTestRequest(reference="connectors/example.yaml"),
+            _extension_mutator_request(operator, "/api/extensions/seraph.example/connectors/test"),
+        )
+        toggle_payload = await set_extension_package_connector_enabled(
+            "seraph.example",
+            ExtensionConnectorToggleRequest(reference="connectors/example.yaml", enabled=True),
+            _extension_mutator_request(operator, "/api/extensions/seraph.example/connectors/enabled"),
+        )
+        source_payload = await save_extension_package_source(
+            "seraph.example",
+            ExtensionSourceSaveRequest(reference="workflows/example.md", content="secret-value"),
+            _extension_mutator_request(operator, "/api/extensions/seraph.example/source"),
+        )
+
+    assert test_payload["status"] == "ready"
+    assert toggle_payload["status"] == "enabled"
+    assert source_payload["extension"]["id"] == "seraph.example"
+    assert [label for label, _principal in observed] == [
+        "test_lookup",
+        "succeeded",
+        "toggle_lookup",
+        "toggle_write",
+        "succeeded",
+        "source_lookup",
+        "source_write",
+        "succeeded",
+    ]
+    assert all(
+        principal is not None
+        and principal.principal_id == operator.principal.principal_id
+        and principal.principal_type is PrincipalType.OPERATOR
+        and principal.session_id == operator.session_id
+        for _label, principal in observed
+    )
+    assert audit_details
+    assert "secret-value" not in repr(audit_details)
+    assert get_current_session_id() is None
+    assert get_current_trust_principal() is None
 
 
 def _write_installable_extension(

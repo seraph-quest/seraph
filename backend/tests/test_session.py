@@ -1,13 +1,15 @@
 """Tests for the async DB-backed SessionManager (src/agent/session.py)."""
 
+from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from sqlalchemy.exc import IntegrityError
 
 pytestmark = pytest.mark.usefixtures("mocked_canonical_inference_context")
 
 from config.settings import settings
-from src.agent.session import SessionManager
+from src.agent.session import SessionManager, SessionOwnerMismatchError
 from src.audit.repository import audit_repository
 from src.scheduler.scheduled_jobs import scheduled_job_repository
 from src.security.trust_contract import canonical_digest
@@ -33,9 +35,102 @@ class TestGetOrCreate:
         s2 = await sm.get_or_create("s1")
         assert s1.id == s2.id
 
+    async def test_authenticated_owner_claims_existing_ownerless_session(self, async_db, sm):
+        await sm.get_or_create("legacy-conversation")
+
+        claimed = await sm.get_or_create(
+            "legacy-conversation",
+            owner_principal_id="operator:single",
+        )
+
+        assert claimed.owner_principal_id == "operator:single"
+        persisted = await sm.get("legacy-conversation")
+        assert persisted is not None
+        assert persisted.owner_principal_id == "operator:single"
+
+    async def test_authenticated_owner_cannot_claim_other_owned_session(self, async_db, sm):
+        await sm.get_or_create(
+            "owned-by-other",
+            owner_principal_id="operator:other",
+        )
+
+        with pytest.raises(SessionOwnerMismatchError):
+            await sm.get_or_create(
+                "owned-by-other",
+                owner_principal_id="operator:single",
+            )
+
     async def test_creates_when_id_not_found(self, async_db, sm):
         session = await sm.get_or_create("new-id")
         assert session.id == "new-id"
+
+    @pytest.mark.parametrize("session_id", ["", " \t "])
+    async def test_rejects_blank_explicit_session_id(self, async_db, sm, session_id):
+        with pytest.raises(ValueError, match="session_id must not be blank"):
+            await sm.get_or_create(session_id)
+
+    @pytest.mark.parametrize("owner_principal_id", ["", " \t "])
+    async def test_rejects_blank_owner_principal_id(self, async_db, sm, owner_principal_id):
+        with pytest.raises(ValueError, match="owner_principal_id must not be blank"):
+            await sm.get_or_create("valid-session", owner_principal_id=owner_principal_id)
+
+    async def test_explicit_id_integrity_race_rereads_existing_owner(self, sm):
+        from src.db.models import Session
+
+        existing = Session(
+            id="raced-session",
+            owner_principal_id="operator:single",
+            title="Existing conversation",
+        )
+
+        class _Result:
+            def __init__(self, session):
+                self.session = session
+
+            def scalars(self):
+                return self
+
+            def first(self):
+                return self.session
+
+        class _Db:
+            def __init__(self):
+                self.flush_calls = 0
+                self.execute_calls = 0
+
+            def add(self, _session):
+                return None
+
+            async def flush(self):
+                self.flush_calls += 1
+                if self.flush_calls == 1:
+                    raise IntegrityError("duplicate session", {}, Exception("duplicate"))
+
+            async def rollback(self):
+                return None
+
+            async def execute(self, _statement):
+                self.execute_calls += 1
+                return _Result(None if self.execute_calls == 1 else existing)
+
+            def expunge(self, _session):
+                return None
+
+        db = _Db()
+
+        @asynccontextmanager
+        async def _get_session():
+            yield db
+
+        with patch("src.agent.session.get_session", _get_session):
+            result = await sm.get_or_create(
+                "raced-session",
+                owner_principal_id="operator:single",
+            )
+
+        assert result is existing
+        assert db.flush_calls == 1
+        assert db.execute_calls == 2
 
 
 class TestGet:

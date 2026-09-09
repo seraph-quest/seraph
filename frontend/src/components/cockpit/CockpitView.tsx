@@ -7089,7 +7089,9 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       () => fetchCockpitJson(`${API_URL}/api/approvals/pending?limit=8`, 5000, isCancelled),
       () => fetchCockpitJson(`${API_URL}/api/capabilities/overview`, 5000, isCancelled),
       () => fetchCockpitJson(`${API_URL}/api/extensions`, 5000, isCancelled),
-      () => fetchCockpitJson(`${API_URL}/api/browser/providers`, 5000, isCancelled),
+      () => sessionId
+        ? fetchCockpitJson(`${API_URL}/api/browser/providers?owner_session_id=${encodeURIComponent(sessionId)}`, 5000, isCancelled)
+        : Promise.resolve({ ok: false, payload: null }),
       () => sessionId
         ? fetchCockpitJson(`${API_URL}/api/operator/browser-computer-use-control?owner_session_id=${encodeURIComponent(sessionId)}`, 5000, isCancelled)
         : Promise.resolve({ ok: true, payload: { sessions: [] } }),

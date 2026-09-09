@@ -555,6 +555,10 @@ describe("CockpitView", () => {
     await waitFor(() =>
       expect(browserControls).toHaveTextContent(/1 providers · 1 sessions · 1 journaled · 1 degraded · no quarantine/i),
     );
+    expect(fetchMock).toHaveBeenCalledWith(
+      expect.stringContaining("/api/browser/providers?owner_session_id=session-1"),
+      expect.anything(),
+    );
     expect(browserControls).toHaveTextContent(/remote-cdp · remote cdp · staged local fallback · local fallback/i);
     expect(browserControls).toHaveTextContent(/degraded fallback labeled · silent fallback blocked/i);
     expect(browserControls).toHaveTextContent(/boundaries: profile · cookie · credential · download · upload · network/i);

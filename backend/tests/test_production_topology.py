@@ -177,8 +177,8 @@ def test_managed_local_ports_bind_loopback_and_production_env_uses_prod_paths():
     assert "production authentication requires HTTPS" in manage
     assert 'exit "$LOCAL_EXIT_STATUS"' in manage
     assert "HOST_DATA_ROOT_PROD=/srv/seraph/docker-data/prod" in env
-    assert "BACKEND_DATA_PATH_PROD=${HOST_DATA_ROOT_PROD}/backend/data" in env
-    assert "BACKEND_LOGS_PATH_PROD=${HOST_DATA_ROOT_PROD}/backend/logs" in env
+    assert "BACKEND_DATA_PATH_PROD=/srv/seraph/docker-data/prod/backend/data" in env
+    assert "BACKEND_LOGS_PATH_PROD=/srv/seraph/docker-data/prod/backend/logs" in env
     assert "SERAPH_PRODUCTION_MOUNT_CHECK=false" in env
     assert "SERAPH_PRODUCTION_BIND_IDENTITY=" in env
     assert "LOCAL_LLM_API_BASE=" in env

@@ -29,6 +29,7 @@
 #   ./manage.sh -e prod backup          - Create a verified workspace archive.
 #   ./manage.sh -e prod restore --archive <archive> --confirm
 #   ./manage.sh -e prod status          - Show the durable lifecycle result.
+#   ./manage.sh -e prod identity        - Print the redacted host bind identity.
 #   ./manage.sh -e prod rollback --restore-id <id> --confirm
 #
 # ==============================================================================

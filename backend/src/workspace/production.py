@@ -141,7 +141,10 @@ def _bind_identity_digest(configured_path: Path, observed_root: Path) -> str:
         metadata = os.stat(observed_root, follow_symlinks=False)
     except OSError as exc:
         raise ProductionWorkspaceMountError("production bind identity stat is unavailable") from exc
-    normalized = str(configured_path.expanduser().absolute())
+    try:
+        normalized = str(configured_path.expanduser().resolve(strict=False))
+    except OSError as exc:
+        raise ProductionWorkspaceMountError("production bind path identity is unresolved") from exc
     material = f"{normalized}\x00{metadata.st_dev}:{metadata.st_ino}"
     return hashlib.sha256(material.encode("utf-8")).hexdigest()[:24]
 

@@ -412,10 +412,9 @@ async def create_governed_evolution_proposal(req: EvolutionProposalRequest, requ
                 ),
             ) from exc
 
-        if proposal["status"] == "saved":
-            await _ensure_evolution_authorized(request, revocation_scope)
-            await _run_evolution_thread_cancel_safe(_reload_evolution_managers_with_authority)
-
+        # Proposals are persisted as unregistered review candidates.  Do not
+        # reload active managers here: promotion is a separate, approval-gated
+        # operation and a proposal must never alter live agent instructions.
         await _ensure_evolution_authorized(request, revocation_scope)
         outcome = "succeeded" if proposal["status"] == "saved" else "blocked"
         audit_ok = await _audit_evolution_event(

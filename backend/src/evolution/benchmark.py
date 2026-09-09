@@ -105,7 +105,9 @@ def _recent_evolution_receipts(limit: int = 6) -> list[dict[str, Any]]:
         return []
 
     receipts: list[dict[str, Any]] = []
-    files = sorted(receipts_dir.glob("*.json"), key=lambda path: path.stat().st_mtime, reverse=True)
+    # Receipts are partitioned by target type so identically named candidates
+    # cannot overwrite each other's durable evidence.
+    files = sorted(receipts_dir.rglob("*.json"), key=lambda path: path.stat().st_mtime, reverse=True)
     for path in files[:limit]:
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))

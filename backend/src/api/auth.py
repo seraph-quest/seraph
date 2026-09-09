@@ -86,7 +86,15 @@ async def login(payload: LoginRequest, response: Response, request: Request):
 async def session(request: Request):
     _require_configured()
     operator = request.state.operator
-    return {"authenticated": True, "principal_id": operator.principal.principal_id, "idle_expires_at": operator.idle_expires_at, "absolute_expires_at": operator.absolute_expires_at}
+    return {
+        "authenticated": True,
+        "principal_id": operator.principal.principal_id,
+        # This is an opaque revocable browser-session identifier.  The bearer
+        # token itself is never returned to the frontend.
+        "session_id": operator.session_id,
+        "idle_expires_at": operator.idle_expires_at,
+        "absolute_expires_at": operator.absolute_expires_at,
+    }
 
 
 @router.post("/refresh")

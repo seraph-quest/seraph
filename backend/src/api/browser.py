@@ -63,12 +63,13 @@ def _metadata_only_session_payload(payload: dict[str, object] | None) -> dict[st
     return metadata
 
 
-def _bind_browser_operator(request: Request, owner_session_id: str):
-    """Bind one browser mutation to the authenticated operator session."""
+def _bind_browser_operator(request: Request, owner_session_id: str | None):
+    """Bind one browser request to the authenticated operator session."""
 
     operator = _require_authenticated_capability_operator(request)
     active_session_id = operator.session_id
-    if str(owner_session_id or "").strip() != active_session_id:
+    requested_session_id = str(owner_session_id or "").strip()
+    if requested_session_id and requested_session_id != active_session_id:
         raise HTTPException(
             status_code=403,
             detail={"code": "browser_owner_session_mismatch"},
@@ -81,8 +82,7 @@ def _bind_browser_operator(request: Request, owner_session_id: str):
     return active_session_id, tokens
 
 
-@router.get("/browser/providers")
-async def list_browser_providers():
+def _browser_provider_inventory_payload() -> dict[str, object]:
     state_payload = load_extension_state_payload()
     state_by_id = state_payload.get("extensions")
     snapshot = ExtensionRegistry(
@@ -125,17 +125,43 @@ async def list_browser_providers():
     }
 
 
+@router.get("/browser/providers")
+async def list_browser_providers(
+    http_request: Request,
+    owner_session_id: str | None = Query(default=None, min_length=1),
+):
+    _bound_owner_session_id, tokens = _bind_browser_operator(http_request, owner_session_id)
+    try:
+        assert_runtime_not_revoked()
+        payload = _browser_provider_inventory_payload()
+        assert_runtime_not_revoked()
+        return payload
+    finally:
+        reset_runtime_context(tokens)
+
+
 async def _browser_provider_payload() -> dict[str, object]:
-    return await list_browser_providers()
+    return _browser_provider_inventory_payload()
 
 
 @router.get("/browser/sessions")
-async def list_browser_sessions(owner_session_id: str = Query(..., min_length=1)):
-    return {
-        "owner_session_id": owner_session_id,
-        "sessions": browser_session_runtime.list_sessions(owner_session_id=owner_session_id),
-        "journal": browser_session_runtime.list_journal(owner_session_id=owner_session_id),
-    }
+async def list_browser_sessions(
+    http_request: Request,
+    owner_session_id: str = Query(..., min_length=1),
+):
+    bound_owner_session_id, tokens = _bind_browser_operator(http_request, owner_session_id)
+    try:
+        assert_runtime_not_revoked()
+        sessions = browser_session_runtime.list_sessions(owner_session_id=bound_owner_session_id)
+        journal = browser_session_runtime.list_journal(owner_session_id=bound_owner_session_id)
+        assert_runtime_not_revoked()
+        return {
+            "owner_session_id": bound_owner_session_id,
+            "sessions": sessions,
+            "journal": journal,
+        }
+    finally:
+        reset_runtime_context(tokens)
 
 
 @router.post("/browser/sessions")
@@ -164,11 +190,25 @@ async def open_browser_session(request: BrowserSessionOpenRequest, http_request:
 
 
 @router.get("/browser/sessions/{session_id}")
-async def get_browser_session(session_id: str, owner_session_id: str = Query(..., min_length=1)):
-    payload = browser_session_runtime.get_session(session_id, owner_session_id=owner_session_id)
-    if payload is None:
-        raise HTTPException(status_code=404, detail="browser_session_not_found")
-    return {"session": _metadata_only_session_payload(payload)}
+async def get_browser_session(
+    session_id: str,
+    http_request: Request,
+    owner_session_id: str = Query(..., min_length=1),
+):
+    bound_owner_session_id, tokens = _bind_browser_operator(http_request, owner_session_id)
+    try:
+        assert_runtime_not_revoked()
+        payload = browser_session_runtime.get_session(
+            session_id,
+            owner_session_id=bound_owner_session_id,
+        )
+        if payload is None:
+            raise HTTPException(status_code=404, detail="browser_session_not_found")
+        metadata = _metadata_only_session_payload(payload)
+        assert_runtime_not_revoked()
+        return {"session": metadata}
+    finally:
+        reset_runtime_context(tokens)
 
 
 @router.post("/browser/sessions/{session_id}/snapshot")
@@ -205,26 +245,47 @@ async def snapshot_browser_session(
 @router.get("/browser/sessions/{session_id}/journal")
 async def get_browser_session_journal(
     session_id: str,
+    http_request: Request,
     owner_session_id: str = Query(..., min_length=1),
 ):
-    if browser_session_runtime.get_session(session_id, owner_session_id=owner_session_id) is None:
-        raise HTTPException(status_code=404, detail="browser_session_not_found")
-    return {
-        "owner_session_id": owner_session_id,
-        "session_id": session_id,
-        "journal": browser_session_runtime.list_journal(
-            owner_session_id=owner_session_id,
+    bound_owner_session_id, tokens = _bind_browser_operator(http_request, owner_session_id)
+    try:
+        assert_runtime_not_revoked()
+        if browser_session_runtime.get_session(
+            session_id,
+            owner_session_id=bound_owner_session_id,
+        ) is None:
+            raise HTTPException(status_code=404, detail="browser_session_not_found")
+        journal = browser_session_runtime.list_journal(
+            owner_session_id=bound_owner_session_id,
             session_id=session_id,
-        ),
-    }
+        )
+        assert_runtime_not_revoked()
+        return {
+            "owner_session_id": bound_owner_session_id,
+            "session_id": session_id,
+            "journal": journal,
+        }
+    finally:
+        reset_runtime_context(tokens)
 
 
 @router.get("/browser/refs/{ref:path}")
-async def read_browser_ref(ref: str, owner_session_id: str = Query(..., min_length=1)):
-    payload = browser_session_runtime.read_ref(ref, owner_session_id=owner_session_id)
-    if payload is None:
-        raise HTTPException(status_code=404, detail="browser_ref_not_found")
-    return {"ref": payload}
+async def read_browser_ref(
+    ref: str,
+    http_request: Request,
+    owner_session_id: str = Query(..., min_length=1),
+):
+    bound_owner_session_id, tokens = _bind_browser_operator(http_request, owner_session_id)
+    try:
+        assert_runtime_not_revoked()
+        payload = browser_session_runtime.read_ref(ref, owner_session_id=bound_owner_session_id)
+        if payload is None:
+            raise HTTPException(status_code=404, detail="browser_ref_not_found")
+        assert_runtime_not_revoked()
+        return {"ref": payload}
+    finally:
+        reset_runtime_context(tokens)
 
 
 @router.post("/browser/sessions/{session_id}/control")
@@ -320,21 +381,32 @@ async def close_browser_session(
 
 
 @router.get("/operator/browser-computer-use-control")
-async def browser_computer_use_control(owner_session_id: str = Query(..., min_length=1)):
-    provider_payload = await _browser_provider_payload()
-    return {
-        "owner_session_id": owner_session_id,
-        "providers": provider_payload["providers"],
-        "sessions": browser_session_runtime.list_sessions(owner_session_id=owner_session_id),
-        "journal": browser_session_runtime.list_journal(owner_session_id=owner_session_id),
-        "blocked_claims": [
-            "safe_browser_automation",
-            "safe_autonomous_computer_use",
-            "full_browser_parity",
-            "arbitrary_credentialed_browsing_safety",
-            "production_browser_automation_readiness",
-        ],
-    }
+async def browser_computer_use_control(
+    http_request: Request,
+    owner_session_id: str = Query(..., min_length=1),
+):
+    bound_owner_session_id, tokens = _bind_browser_operator(http_request, owner_session_id)
+    try:
+        assert_runtime_not_revoked()
+        provider_payload = await _browser_provider_payload()
+        sessions = browser_session_runtime.list_sessions(owner_session_id=bound_owner_session_id)
+        journal = browser_session_runtime.list_journal(owner_session_id=bound_owner_session_id)
+        assert_runtime_not_revoked()
+        return {
+            "owner_session_id": bound_owner_session_id,
+            "providers": provider_payload["providers"],
+            "sessions": sessions,
+            "journal": journal,
+            "blocked_claims": [
+                "safe_browser_automation",
+                "safe_autonomous_computer_use",
+                "full_browser_parity",
+                "arbitrary_credentialed_browsing_safety",
+                "production_browser_automation_readiness",
+            ],
+        }
+    finally:
+        reset_runtime_context(tokens)
 
 
 @router.post("/operator/browser-computer-use-control/actions")

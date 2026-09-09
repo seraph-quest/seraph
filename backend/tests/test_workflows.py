@@ -5,10 +5,13 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from fastapi import HTTPException
 import pytest
+from starlette.requests import Request
 
 from src.approval.repository import fingerprint_tool_call
 from src.extensions.governance import governance_signature_value
@@ -23,7 +26,13 @@ from src.workflows.manager import (
     workflow_manager,
 )
 from src.approval.exceptions import ApprovalRequired
-from src.approval.runtime import reset_runtime_context, set_runtime_context
+from src.approval.runtime import (
+    get_current_session_id,
+    get_current_trust_principal,
+    reset_runtime_context,
+    set_runtime_context,
+)
+from src.auth.service import test_bypass_operator as _test_bypass_operator
 from src.security.trust_contract import AuthorityGrant, PrincipalType, TrustPrincipal
 from src.agent.factory import get_tools
 from src.agent.session import SessionManager
@@ -319,6 +328,19 @@ def invalid_workflows_dir(tmp_path):
         "Underdeclared.\n"
     )
     return str(d)
+
+
+def _workflow_draft_save_request(operator):
+    return Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/api/workflows/save",
+            "headers": [],
+            "query_string": b"",
+            "state": {"operator": operator},
+        }
+    )
 
 
 class TestWorkflowLoader:
@@ -4517,6 +4539,148 @@ class TestWorkflowApi:
         assert payload["status"] == "reloaded"
         assert payload["count"] == 2
         mock_log.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_save_workflow_draft_denies_invalid_middleware_authority_before_side_effects(self):
+        from src.api.workflows import WorkflowDraftRequest, save_workflow_draft
+
+        operator = _test_bypass_operator()
+        invalid_operators = (
+            None,
+            object(),
+            replace(operator, principal=replace(operator.principal, principal_type=PrincipalType.SERVICE)),
+            replace(operator, principal=replace(operator.principal, authenticated=False)),
+            replace(operator, principal=replace(operator.principal, revoked=True)),
+            replace(operator, principal=replace(operator.principal, session_id="other-session")),
+            replace(operator, principal=replace(operator.principal, grants=())),
+        )
+        with (
+            patch("src.api.workflows._validate_workflow_content") as validate,
+            patch("src.api.workflows.save_workspace_contribution") as save,
+            patch("src.api.workflows.workflow_manager.reload") as reload_workflows,
+            patch("src.api.workflows.log_integration_event", new_callable=AsyncMock) as log,
+        ):
+            for invalid_operator in invalid_operators:
+                with pytest.raises(HTTPException) as raised:
+                    await save_workflow_draft(
+                        WorkflowDraftRequest(content="invalid"),
+                        _workflow_draft_save_request(invalid_operator),
+                    )
+                assert raised.value.status_code == 401
+                assert raised.value.detail == {"code": "authentication_required"}
+
+        validate.assert_not_called()
+        save.assert_not_called()
+        reload_workflows.assert_not_called()
+        log.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_save_workflow_draft_binds_operator_for_full_route_and_resets_context(self):
+        from src.api.workflows import WorkflowDraftRequest, save_workflow_draft
+
+        operator = _test_bypass_operator()
+        observed: list[tuple[str, object]] = []
+        validation = {
+            "valid": True,
+            "errors": [],
+            "workflow": {
+                "name": "Bound Save",
+                "description": "",
+                "requires_tools": [],
+                "requires_skills": [],
+            },
+        }
+        validation_calls = 0
+
+        def observe(label: str):
+            observed.append((label, get_current_trust_principal()))
+
+        def validate_content(_content: str, *, path: str):
+            nonlocal validation_calls
+            validation_calls += 1
+            observe("validation" if validation_calls == 1 else "response_validation")
+            return validation
+
+        with (
+            patch("src.api.workflows._validate_workflow_content", side_effect=validate_content),
+            patch(
+                "src.api.workflows._ensure_workflow_manager_workspace_extensions_loaded",
+                side_effect=lambda: observe("workspace_extensions"),
+            ),
+            patch(
+                "src.api.workflows.save_workspace_contribution",
+                side_effect=lambda *_args, **_kwargs: (
+                    observe("workspace_write")
+                    or "/tmp/workspace-capabilities/workflows/bound-save.md"
+                ),
+            ),
+            patch(
+                "src.api.workflows.workflow_manager.reload",
+                side_effect=lambda: (observe("reload") or []),
+            ),
+            patch(
+                "src.api.workflows.log_integration_event",
+                new_callable=AsyncMock,
+                side_effect=lambda **_kwargs: observe("audit"),
+            ) as log,
+        ):
+            payload = await save_workflow_draft(
+                WorkflowDraftRequest(content="draft"),
+                _workflow_draft_save_request(operator),
+            )
+
+        assert payload["status"] == "saved"
+        assert [label for label, _principal in observed] == [
+            "validation",
+            "workspace_extensions",
+            "workspace_write",
+            "reload",
+            "audit",
+            "response_validation",
+        ]
+        assert all(
+            principal is not None
+            and principal.principal_id == operator.principal.principal_id
+            and principal.principal_type is PrincipalType.OPERATOR
+            and principal.session_id == operator.session_id
+            for _label, principal in observed
+        )
+        log.assert_awaited_once()
+        assert get_current_session_id() is None
+        assert get_current_trust_principal() is None
+
+    @pytest.mark.asyncio
+    async def test_save_workflow_draft_resets_operator_context_when_validation_raises(self):
+        from src.api.workflows import WorkflowDraftRequest, save_workflow_draft
+
+        operator = _test_bypass_operator()
+        observed: list[object] = []
+
+        def fail_validation(_content: str, *, path: str):
+            observed.append(get_current_trust_principal())
+            raise RuntimeError("validation failed")
+
+        with (
+            patch("src.api.workflows._validate_workflow_content", side_effect=fail_validation),
+            patch("src.api.workflows.save_workspace_contribution") as save,
+            patch("src.api.workflows.workflow_manager.reload") as reload_workflows,
+            patch("src.api.workflows.log_integration_event", new_callable=AsyncMock) as log,
+        ):
+            with pytest.raises(RuntimeError, match="validation failed"):
+                await save_workflow_draft(
+                    WorkflowDraftRequest(content="draft"),
+                    _workflow_draft_save_request(operator),
+                )
+
+        assert len(observed) == 1
+        assert observed[0] is not None
+        assert observed[0].principal_id == operator.principal.principal_id
+        assert observed[0].session_id == operator.session_id
+        save.assert_not_called()
+        reload_workflows.assert_not_called()
+        log.assert_not_called()
+        assert get_current_session_id() is None
+        assert get_current_trust_principal() is None
 
     @pytest.mark.asyncio
     async def test_save_workflow_draft_rejects_path_traversal(self, client):

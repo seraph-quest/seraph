@@ -1,10 +1,39 @@
 """Tests for MCP API endpoints (src/api/mcp.py)."""
 
+from dataclasses import replace
 from unittest.mock import MagicMock, patch
 
+from fastapi import HTTPException
 import pytest
+from starlette.requests import Request
 
+from src.approval.runtime import get_current_session_id, get_current_trust_principal
 from src.audit.repository import audit_repository
+from src.auth.service import test_bypass_operator as _test_bypass_operator
+from src.security.trust_contract import PrincipalType
+
+
+def _mcp_request(operator) -> Request:
+    return Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/api/mcp/servers",
+            "headers": [],
+            "query_string": b"",
+            "state": {"operator": operator},
+        }
+    )
+
+
+def _invalid_mcp_operators(operator):
+    return (
+        None,
+        replace(operator, principal=replace(operator.principal, revoked=True)),
+        replace(operator, principal=replace(operator.principal, session_id="other-session")),
+        replace(operator, principal=replace(operator.principal, principal_type=PrincipalType.SERVICE)),
+        replace(operator, principal=replace(operator.principal, grants=())),
+    )
 
 
 @pytest.mark.asyncio
@@ -142,6 +171,85 @@ async def test_validate_server_degrades_when_credential_inspection_fails(client)
     assert data["valid"] is False
     assert data["status"] == "invalid"
     assert "Credential inspection failed: vault unavailable" in data["issues"]
+
+
+@pytest.mark.asyncio
+async def test_add_server_denies_invalid_operator_before_manager_mutation():
+    from src.api.mcp import AddServerRequest, add_server
+
+    operator = _test_bypass_operator()
+    request_body = AddServerRequest(name="gh", url="https://example.com/mcp")
+    with patch("src.api.mcp.mcp_manager") as mock_mgr:
+        mock_mgr._config = {}
+        for invalid_operator in _invalid_mcp_operators(operator):
+            with pytest.raises(HTTPException) as raised:
+                await add_server(request_body, _mcp_request(invalid_operator))
+            assert raised.value.status_code == 401
+            assert raised.value.detail == {"code": "authentication_required"}
+
+        mock_mgr.add_server.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_add_server_binds_operator_and_resets_context_on_success_and_failure():
+    from src.api.mcp import AddServerRequest, add_server
+
+    operator = _test_bypass_operator()
+    request = _mcp_request(operator)
+    request_body = AddServerRequest(name="gh", url="https://example.com/mcp")
+    before_session = get_current_session_id()
+    before_principal = get_current_trust_principal()
+    observed: list[object] = []
+
+    def observe_add(**_kwargs):
+        observed.append(get_current_trust_principal())
+
+    with patch("src.api.mcp.mcp_manager") as mock_mgr:
+        mock_mgr._config = {}
+        mock_mgr.add_server.side_effect = observe_add
+        response = await add_server(request_body, request)
+
+        assert response == {"status": "created", "name": "gh"}
+        assert observed[-1] is not None
+        assert observed[-1].principal_id == operator.principal.principal_id
+        assert observed[-1].principal_type is PrincipalType.OPERATOR
+        assert observed[-1].session_id == operator.session_id
+        assert get_current_session_id() == before_session
+        assert get_current_trust_principal() == before_principal
+
+        mock_mgr.add_server.side_effect = RuntimeError("manager unavailable")
+        with pytest.raises(RuntimeError, match="manager unavailable"):
+            await add_server(request_body, request)
+
+    assert observed[-1] is not None
+    assert observed[-1].session_id == operator.session_id
+    assert get_current_session_id() == before_session
+    assert get_current_trust_principal() == before_principal
+
+
+@pytest.mark.asyncio
+async def test_test_server_denies_invalid_operator_before_credentials_or_external_dispatch():
+    from src.api.mcp import test_server
+
+    operator = _test_bypass_operator()
+    with (
+        patch("src.api.mcp.mcp_manager") as mock_mgr,
+        patch("smolagents.MCPClient") as mock_client,
+    ):
+        mock_mgr._config = {
+            "gh": {
+                "url": "https://example.com/mcp",
+                "headers": {"Authorization": "Bearer ${GITHUB_TOKEN}"},
+            }
+        }
+        for invalid_operator in _invalid_mcp_operators(operator):
+            with pytest.raises(HTTPException) as raised:
+                await test_server("gh", _mcp_request(invalid_operator))
+            assert raised.value.status_code == 401
+            assert raised.value.detail == {"code": "authentication_required"}
+
+        mock_mgr.resolve_headers.assert_not_called()
+        mock_client.assert_not_called()
 
 
 @pytest.mark.asyncio

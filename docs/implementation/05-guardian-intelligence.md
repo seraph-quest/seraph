@@ -200,6 +200,26 @@ This deterministic boundary does not implement the remaining #753 Gate A
 corpus/metrics artifact, canonical delete/export/rebuild ledger, remote
 provider deletion, or later #745 behavioral usefulness proof.
 
+The branch-local live-control rollback guard now treats canonical delete/export
+redaction as terminal: records marked with the operator delete/export archive
+reason, the canonical redaction state, or the equivalent propagated redaction
+marker remain archived and content-free, and rollback fails before any memory
+or audit mutation. Ordinary archived or superseded records remain rollbackable.
+This proves the local no-recall boundary only; advisory-provider remote
+deletion remains asynchronous and receipt-bound, with pending or failed
+propagation still requiring bounded retry and operator-visible reconciliation.
+The scoped learning/provider ingress path also suppresses non-empty echoes when
+an existing canonical tombstone is found, before it can change content,
+metadata, scope, timestamps, or source state. Malformed metadata on a matched
+archived or superseded row is treated as suppressed when deletion cannot be
+disproved; active malformed rows remain writable. External provider deletion
+and restart/restore tombstone-ledger reconciliation remain deferred gaps. The
+scoped write uses an `updated_at`/status/metadata compare-and-swap and
+reconciles a competing write before retrying, so a delete/export commit wins
+the interleaving.
+The separate review-outcome and pin reactivation paths are unchanged and remain
+deferred follow-up scope for the broader deletion ledger.
+
 ## Memory Upgrade Program Record
 
 The upgraded memory system is now complete through Batches A, B, and C.

@@ -172,6 +172,34 @@ def _require_capability_authority(
         )
 
 
+def require_capability_authority(
+    *,
+    session_id: str | None,
+    principal: TrustPrincipal | None,
+    tool_name: str,
+    arguments: dict[str, Any],
+) -> None:
+    """Apply the shared capability boundary to a non-Tool execution adapter.
+
+    Some public or scheduled adapters return structured data rather than a
+    smolagents ``Tool`` instance.  They still need the exact same fail-closed
+    authority decision before reaching an external or stateful implementation.
+    The arguments are used only for the canonical digest; denial messages stay
+    content-free.
+    """
+    assert_runtime_not_revoked()
+    _require_capability_authority(
+        session_id=session_id,
+        principal=principal,
+        tool_name=tool_name,
+        arguments=arguments,
+    )
+    # A revocation guard may change while the trust decision is being made;
+    # mirror AuthorityTool's final check before the adapter crosses its
+    # external or stateful execution boundary.
+    assert_runtime_not_revoked()
+
+
 class AuthorityTool(Tool):
     """Require the shared capability decision without creating an approval."""
 

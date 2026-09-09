@@ -5700,6 +5700,7 @@ interface WorkflowCheckpointHistoryEntry {
   sourceWorkflow: WorkflowRunRecord;
   scopeLabel: string;
   draft: string;
+  actionHandle?: Record<string, unknown>;
 }
 
 interface WorkflowLineageEventEntry {
@@ -5836,6 +5837,13 @@ function normalizeWorkflowRun(value: Record<string, unknown>): WorkflowRunRecord
       return entries;
     }, [])
     : undefined;
+  const resumePlanRecord = value.resume_plan && typeof value.resume_plan === "object" && !Array.isArray(value.resume_plan)
+    ? value.resume_plan as Record<string, unknown>
+    : null;
+  const actionHandleValue = value.action_handle ?? resumePlanRecord?.action_handle;
+  const actionHandle = actionHandleValue && typeof actionHandleValue === "object" && !Array.isArray(actionHandleValue)
+    ? actionHandleValue as Record<string, unknown>
+    : null;
 
   return {
     id: String(value.id ?? ""),
@@ -5938,9 +5946,10 @@ function normalizeWorkflowRun(value: Record<string, unknown>): WorkflowRunRecord
         )
       : undefined,
     resumePlan:
-      value.resume_plan && typeof value.resume_plan === "object" && !Array.isArray(value.resume_plan)
-        ? (value.resume_plan as Record<string, unknown>)
+      resumePlanRecord
+        ? resumePlanRecord
         : null,
+    actionHandle,
     timeline: normalizedTimeline,
   };
 }
@@ -8102,6 +8111,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
           sourceWorkflow: entry,
           scopeLabel,
           draft: action.draft,
+          actionHandle: action.actionHandle,
         });
       });
       if (entry.retryFromStepDraft) {
@@ -8119,6 +8129,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
             sourceWorkflow: entry,
             scopeLabel,
             draft: entry.retryFromStepDraft,
+            actionHandle: entry.actionHandle,
           });
         }
       }
@@ -8243,6 +8254,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     options: {
       action?: string;
       stepId?: string | null;
+      actionHandle?: Record<string, unknown> | null;
       fallbackDraft?: string | null;
       fallbackThreadId?: string | null;
       label?: string;
@@ -8267,6 +8279,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     setOperatorStatus(`Checking live recovery plan for ${label}...`);
     try {
       const action = options.action ?? "resume";
+      const actionHandle = options.actionHandle ?? resolved.actionHandle;
       const response = await fetch(
         `${API_URL}/api/workflows/runs/${encodeURIComponent(resolved.runIdentity)}/control`,
         {
@@ -8275,6 +8288,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
           body: JSON.stringify({
             action,
             step_id: options.stepId ?? undefined,
+            action_handle: actionHandle && actionHandle.action === action ? actionHandle : undefined,
             target: options.stepId ?? resolved.workflowName,
             owner: "cockpit",
             operator_context: {
@@ -8309,15 +8323,22 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       const planRecord = plan && typeof plan === "object" && !Array.isArray(plan)
         ? plan as Record<string, unknown>
         : null;
+      const returnedActionHandle = planRecord?.action_handle && typeof planRecord.action_handle === "object" && !Array.isArray(planRecord.action_handle)
+        ? planRecord.action_handle as Record<string, unknown>
+        : null;
       const draft = typeof planRecord?.draft === "string" && planRecord.draft.trim()
         ? planRecord.draft
         : (
-          typeof planRecord?.continue_message === "string" && planRecord.continue_message.trim()
+          !returnedActionHandle && typeof planRecord?.continue_message === "string" && planRecord.continue_message.trim()
             ? planRecord.continue_message
-            : fallbackDraft
+            : returnedActionHandle ? null : fallbackDraft
         );
       if (!draft) {
-        setOperatorStatus(`No recovery draft is available for ${label}`);
+        setOperatorStatus(
+          returnedActionHandle
+            ? `Live recovery control recorded for ${label}`
+            : `No recovery draft is available for ${label}`,
+        );
         return;
       }
       const threadId = options.fallbackThreadId ?? resolved.threadId ?? resolved.sessionId;
@@ -8364,6 +8385,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
         onClick={() => void queueLiveWorkflowResumePlan(workflow, {
           action: action.kind === "retry_failed_step" ? "retry" : "branch",
           stepId: action.stepId,
+          actionHandle: action.actionHandle,
           fallbackDraft: action.draft,
           label: `${scopeLabel} ${workflow.workflowName}`,
         })}
@@ -12241,6 +12263,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                         onClick={() => void queueLiveWorkflowResumePlan(selectedWorkflow, {
                           action: action.kind === "retry_failed_step" ? "retry" : "branch",
                           stepId: action.stepId,
+                          actionHandle: action.actionHandle,
                           fallbackDraft: action.draft,
                           label: selectedWorkflow.workflowName,
                         })}
@@ -13009,6 +13032,9 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
 	                        onClick={() => void queueLiveWorkflowResumePlan(selectedWorkflow, {
 	                          action: "retry",
 	                          stepId: checkpointStepId,
+                          actionHandle: selectedWorkflowCheckpointActions.find(
+                            (action) => action.stepId === checkpointStepId,
+                          )?.actionHandle,
 	                          fallbackDraft: checkpointDraft,
 	                          label: selectedWorkflowName,
 	                        })}
@@ -13120,9 +13146,10 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
 	                    className="cockpit-feedback-button"
 	                    aria-label={`${entry.actionLabel} from ${entry.scopeLabel} for checkpoint history ${entry.stepId}`}
 	                    onClick={() => void queueLiveWorkflowResumePlan(entry.sourceWorkflow, {
-	                      action: entry.kind === "retry_failed_step" ? "retry" : "branch",
-	                      stepId: entry.stepId,
-	                      fallbackDraft: entry.draft,
+                      action: entry.kind === "retry_failed_step" ? "retry" : "branch",
+                      stepId: entry.stepId,
+                      actionHandle: entry.actionHandle,
+                      fallbackDraft: entry.draft,
 	                      label: `${entry.scopeLabel} ${entry.sourceWorkflow.workflowName}`,
 	                    })}
 	                  >

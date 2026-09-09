@@ -64,6 +64,7 @@ class WorkflowRunControlRequest(BaseModel):
     step_id: str | None = None
     owner: str | None = None
     operator_context: dict[str, Any] | None = None
+    action_handle: dict[str, Any] | None = None
 
 
 class WorkflowDraftRequest(BaseModel):
@@ -132,6 +133,8 @@ _WORKFLOW_SAFE_REFUSAL_CODES = _WORKFLOW_REPLAY_BLOCK_REASONS | {
     "transition_binding_missing",
     "transition_owner_mismatch",
     "workflow_control_fence_blocked",
+    "workflow_action_handle_invalid",
+    "workflow_action_handle_mismatch",
 }
 _WORKFLOW_SAFE_TOKEN_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
 
@@ -184,6 +187,14 @@ def _workflow_requested_step_id(run: dict[str, Any], value: Any) -> str | None:
             step_id = str(step.get("id") or "").strip()
             if step_id and step_id not in candidates:
                 candidates.append(step_id)
+    for field_name in ("resume_from_step", "last_completed_step_id"):
+        step_id = str(run.get(field_name) or "").strip()
+        if step_id and step_id not in candidates:
+            candidates.append(step_id)
+    for step_id_value in run.get("continued_error_steps") or []:
+        step_id = str(step_id_value or "").strip()
+        if step_id and step_id not in candidates:
+            candidates.append(step_id)
     if requested in candidates:
         return requested
     if requested.startswith("redacted_workflow_step_"):
@@ -191,6 +202,34 @@ def _workflow_requested_step_id(run: dict[str, Any], value: Any) -> str | None:
         if len(matches) == 1:
             return matches[0]
     return requested
+
+
+def _validate_workflow_action_handle(
+    handle: Any,
+    *,
+    run: dict[str, Any],
+    run_identity: str,
+    action: str,
+) -> str | None:
+    """Validate a safe cockpit handle before resolving it to trusted state."""
+    if not isinstance(handle, dict):
+        raise HTTPException(status_code=422, detail="workflow_action_handle_invalid")
+    if handle.get("kind") != "workflow_control" or handle.get("requires_live_control") is not True:
+        raise HTTPException(status_code=422, detail="workflow_action_handle_invalid")
+    handle_action = _safe_workflow_action(handle.get("action"))
+    if handle_action != action:
+        raise HTTPException(status_code=409, detail="workflow_action_handle_mismatch")
+    handle_run_identity = str(handle.get("run_identity") or "").strip()
+    if handle_run_identity not in {run_identity, _safe_workflow_identity(run_identity)}:
+        raise HTTPException(status_code=409, detail="workflow_action_handle_mismatch")
+    expected_thread = _safe_workflow_token(run.get("thread_id") or run.get("session_id"), fallback="")
+    handle_thread = str(handle.get("thread_id") or "").strip()
+    if handle_thread and expected_thread and handle_thread != expected_thread:
+        raise HTTPException(status_code=409, detail="workflow_action_handle_mismatch")
+    handle_step = str(handle.get("step_id") or "").strip()
+    if handle_step and not handle_step.startswith("redacted_workflow_step_"):
+        raise HTTPException(status_code=422, detail="workflow_action_handle_invalid")
+    return _workflow_requested_step_id(run, handle_step) if handle_step else None
 
 
 def _workflow_operator_owner(principal_id: str, session_id: str) -> str:
@@ -447,6 +486,8 @@ def _safe_workflow_resume_plan(value: Any) -> dict[str, Any] | None:
                     action=(
                         "retry"
                         if str(candidate.get("kind") or "") == "retry_failed_step"
+                        else "branch"
+                        if str(candidate.get("kind") or "") in {"branch", "branch_from_checkpoint"}
                         else "resume"
                     ),
                     step_id=candidate.get("step_id"),
@@ -537,7 +578,13 @@ def _safe_workflow_run_projection(value: Any) -> dict[str, Any] | None:
                 "resume_draft": None,
                 "action_handle": _safe_workflow_action_handle(
                     value,
-                    action=("retry" if str(candidate.get("kind") or "") == "retry_failed_step" else "resume"),
+                    action=(
+                        "retry"
+                        if str(candidate.get("kind") or "") == "retry_failed_step"
+                        else "branch"
+                        if str(candidate.get("kind") or "") in {"branch", "branch_from_checkpoint"}
+                        else "resume"
+                    ),
                     step_id=candidate.get("step_id"),
                 ),
             }]
@@ -2900,11 +2947,15 @@ async def build_workflow_resume_plan(
             )
             await _workflow_session_fence(request, revocation_scope)
             raise HTTPException(status_code=409, detail=detail)
+        requested_step_id = _workflow_requested_step_id(
+            run,
+            req.step_id if req is not None else None,
+        )
         try:
             resume_plan = _workflow_resume_plan(
                 run,
                 approvals=list(run.get("pending_approvals", [])),
-                requested_step_id=req.step_id if req is not None else None,
+                requested_step_id=requested_step_id,
             )
         except HTTPException as exc:
             if exc.status_code == 404:
@@ -3083,6 +3134,13 @@ async def control_workflow_run(
                     "target": safe_target["target"],
                     "target_digest": safe_target["target_digest"],
                     "step_id": safe_step_id,
+                    "action_handle_digest": (
+                        _workflow_identity_digest(
+                            json.dumps(req.action_handle, sort_keys=True, separators=(",", ":"))
+                        )
+                        if req.action_handle is not None
+                        else None
+                    ),
                     "status_code": status_code,
                     "detail": _safe_workflow_refusal_detail(detail),
                     "external_action_allowed": False,
@@ -3105,6 +3163,31 @@ async def control_workflow_run(
         ):
             await log_refusal(status_code=403, detail="workflow_owner_mismatch")
             raise HTTPException(status_code=403, detail="workflow_owner_mismatch")
+
+        # The cockpit only receives opaque action handles. Resolve the handle
+        # against this authenticated run before changing its durable fence;
+        # client supplied parent metadata is never authority.
+        if req.action_handle is not None:
+            try:
+                handle_step_id = _validate_workflow_action_handle(
+                    req.action_handle,
+                    run=run,
+                    run_identity=run_identity,
+                    action=action,
+                )
+            except HTTPException as exc:
+                detail = str(exc.detail or "workflow_action_handle_invalid")
+                await log_refusal(status_code=exc.status_code, detail=detail)
+                raise
+            explicit_step_id = _workflow_requested_step_id(run, req.step_id)
+            if explicit_step_id and handle_step_id and explicit_step_id != handle_step_id:
+                detail = "workflow_action_handle_mismatch"
+                await log_refusal(status_code=409, detail=detail)
+                raise HTTPException(status_code=409, detail=detail)
+            if handle_step_id:
+                requested_step_id = handle_step_id
+                safe_step_id = _safe_workflow_step_id(handle_step_id)
+                operator_context["requested_step_id"] = safe_step_id
 
         replay_block_reason = str(run.get("replay_block_reason") or "") or None
         if replay_block_reason in {"approval_context_changed", "approval_context_missing"}:
@@ -3373,6 +3456,13 @@ async def control_workflow_run(
                 "target": safe_target["target"],
                 "target_digest": safe_target["target_digest"],
                 "step_id": safe_step_id,
+                "action_handle_digest": (
+                    _workflow_identity_digest(
+                        json.dumps(req.action_handle, sort_keys=True, separators=(",", ":"))
+                    )
+                    if req.action_handle is not None
+                    else None
+                ),
                 "external_action_allowed": False,
                 "control_receipt": _safe_workflow_receipt(control_result.get("receipt")),
                 "lease_receipt": _safe_workflow_receipt(lease_result.get("receipt"))

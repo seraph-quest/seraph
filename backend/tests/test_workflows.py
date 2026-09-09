@@ -6699,6 +6699,40 @@ async def test_workflow_resume_plan_response_is_safe_and_failure_is_durable_rece
 
 
 @pytest.mark.asyncio
+async def test_workflow_resume_plan_resolves_redacted_step_handle_before_planning():
+    from src.api.workflows import (
+        WorkflowResumePlanRequest,
+        _safe_workflow_step_id,
+        build_workflow_resume_plan,
+    )
+
+    operator = _test_bypass_operator()
+    run_identity = "session-owner:workflow_example:resume-handle"
+    run = {
+        "run_identity": run_identity,
+        "workflow_name": "example",
+        "session_id": "session-owner",
+        "owner_kind": "user",
+        "owner_principal_id": operator.principal.principal_id,
+        "replay_allowed": True,
+        "checkpoint_candidates": [{"step_id": "private/checkpoint"}],
+    }
+    with (
+        patch("src.api.workflows._begin_rest_revocation_watch", return_value=None),
+        patch("src.api.workflows._find_workflow_run_for_control", new_callable=AsyncMock, return_value=run),
+        patch("src.api.workflows._workflow_resume_plan", return_value={"requires_manual_execution": True}) as resume_plan,
+        patch("src.api.workflows._record_workflow_route_receipt", new_callable=AsyncMock),
+    ):
+        await build_workflow_resume_plan(
+            run_identity,
+            _workflow_mutator_request(operator, "/api/workflows/runs/resume-plan"),
+            WorkflowResumePlanRequest(step_id=_safe_workflow_step_id("private/checkpoint")),
+        )
+
+    assert resume_plan.call_args.kwargs["requested_step_id"] == "private/checkpoint"
+
+
+@pytest.mark.asyncio
 async def test_workflow_control_uses_run_session_raw_step_and_post_transition_fence():
     """The route handle must be consumable by chat recovery under one fence."""
     from src.api.workflows import (
@@ -6808,7 +6842,17 @@ async def test_workflow_control_uses_run_session_raw_step_and_post_transition_fe
             run_identity,
             WorkflowRunControlRequest(
                 action="retry",
-                step_id=_safe_workflow_step_id(raw_step_id),
+                action_handle={
+                    "kind": "workflow_control",
+                    "action": "retry",
+                    "run_identity": run_identity,
+                    "step_id": _safe_workflow_step_id(raw_step_id),
+                    "thread_id": "session-owner",
+                    "requires_live_control": True,
+                    "parent_revision": 7,
+                    "parent_revision_digest": "ignored-client-descriptor",
+                    "parent_lease_id_digest": "ignored-client-descriptor",
+                },
             ),
             _workflow_mutator_request(operator, "/api/workflows/runs/control"),
         )

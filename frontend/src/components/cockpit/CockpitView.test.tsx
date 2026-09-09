@@ -1159,6 +1159,14 @@ describe("CockpitView", () => {
               run_identity: "root-1",
               root_run_identity: "root-1",
               checkpoint_context_available: true,
+              action_handle: {
+                kind: "workflow_control",
+                action: "retry",
+                run_identity: "root-1",
+                step_id: "redacted_workflow_step_1234567890abcdef",
+                thread_id: "session-2",
+                requires_live_control: true,
+              },
             },
           ],
         }));
@@ -1200,7 +1208,7 @@ describe("CockpitView", () => {
         expect.stringContaining("/api/workflows/runs/root-1/control"),
         expect.objectContaining({
           method: "POST",
-          body: expect.stringContaining('"action":"retry"'),
+          body: expect.stringContaining('"action_handle":{"kind":"workflow_control"'),
         }),
       ),
     );

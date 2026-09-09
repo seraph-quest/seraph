@@ -15,7 +15,12 @@ from src.guardian.learning_evidence import (
     neutral_axis_evidence,
     ordered_learning_axes,
 )
-from src.guardian.state import GuardianState, GuardianStateConfidence, build_guardian_state
+from src.guardian.state import (
+    GuardianState,
+    GuardianStateConfidence,
+    _memory_benchmark_diagnostic_lines,
+    build_guardian_state,
+)
 from src.guardian.world_model import GuardianWorldModel, build_guardian_world_model
 from src.memory.procedural import sync_learning_signal_memories
 from src.memory.procedural_guidance import ProceduralMemoryGuidance
@@ -108,6 +113,33 @@ def _axis_evidence_tuple(
         evidence_by_axis.get(item_axis, neutral_axis_evidence(item_axis, source=source))
         for item_axis in ordered_learning_axes()
     )
+
+
+def test_memory_benchmark_diagnostics_report_canonical_and_legacy_suppression_counts():
+    canonical = {
+        "ranking_policy": "canonical_first_provider_conflict_suppression",
+        "canonical_provider_conflict_suppressed_count": 2,
+        "suppression_reasons": ["canonical_memory_conflict"],
+        "authority_boundary": "provider_evidence_remains_advisory",
+    }
+    legacy = {
+        "ranking_policy": "contradiction_aware_active_only",
+        "suppressed_contradiction_count": 3,
+        "status_filter": "active_only",
+        "suppression_reasons": ["lower_ranked_contradiction"],
+    }
+
+    lines = _memory_benchmark_diagnostic_lines((canonical, legacy))
+
+    assert lines == (
+        "ranking=canonical_first_provider_conflict_suppression, contradictions_suppressed=2, "
+        "reasons=canonical_memory_conflict",
+        "ranking=contradiction_aware_active_only, contradictions_suppressed=3, "
+        "status_filter=active_only, reasons=lower_ranked_contradiction",
+    )
+    assert "provider_evidence_remains_advisory" not in lines[0]
+    assert "Atlas launch is on track" not in " ".join(lines)
+    assert canonical["authority_boundary"] == "provider_evidence_remains_advisory"
 
 
 @pytest.mark.asyncio

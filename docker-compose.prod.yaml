@@ -30,6 +30,7 @@ services:
     environment:
       DEPLOYMENT_ENVIRONMENT: production
       WORKSPACE_DIR: /app/data
+      SERAPH_PRODUCTION_MOUNT_CHECK: "true"
       LLM_LOG_DIR: /app/logs
       LLM_API_BASE: https://openrouter.ai/api/v1
       OPENROUTER_PROVIDER_ONLY: "true"

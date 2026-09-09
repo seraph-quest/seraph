@@ -135,6 +135,7 @@ def test_production_compose_keeps_backend_private_and_has_no_gpu_or_vlm_gate():
     assert "8001" not in compose
     assert "LOCAL_LLM_API_BASE: \"\"" in compose
     assert "SERAPH_VLM_BASE_URL: \"\"" in compose
+    assert 'SERAPH_PRODUCTION_MOUNT_CHECK: "true"' in compose
 
 
 def test_managed_local_ports_bind_loopback_and_production_env_uses_prod_paths():

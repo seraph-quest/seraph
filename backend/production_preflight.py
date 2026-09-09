@@ -22,6 +22,11 @@ from pathlib import Path
 from typing import Mapping, Sequence
 from urllib.parse import urlsplit
 
+from src.workspace.production import (
+    ProductionWorkspaceMountError,
+    validate_container_workspace_mount,
+)
+
 
 SCHEMA = "seraph.cpu-host-preflight.v1"
 OPENROUTER_API_BASE = "https://openrouter.ai/api/v1"
@@ -93,6 +98,19 @@ def _workspace_check(env: Mapping[str, str]) -> Check:
         return Check("canonical_workspace", "unavailable", f"workspace check failed: {exc}")
 
 
+def _production_mount_check(env: Mapping[str, str]) -> Check:
+    """Verify the Compose backend sees the one canonical container mount."""
+    try:
+        validate_container_workspace_mount(env)
+    except ProductionWorkspaceMountError as exc:
+        return Check("canonical_workspace_mount", "invalid", exc.reason_code)
+    return Check(
+        "canonical_workspace_mount",
+        "ready",
+        "production workspace is mounted at /app/data",
+    )
+
+
 def _inference_receipt(env: Mapping[str, str]) -> dict[str, object]:
     reasons: list[str] = []
     api_base = _value(env, "LLM_API_BASE") or OPENROUTER_API_BASE
@@ -154,6 +172,8 @@ def build_preflight_report(env: Mapping[str, str] | None = None) -> dict[str, ob
     values = env if env is not None else os.environ
     production = _value(values, "DEPLOYMENT_ENVIRONMENT").lower() in {"prod", "production"}
     checks = [_auth_check(values, production=production), _workspace_check(values)]
+    if production and _bool(_value(values, "SERAPH_PRODUCTION_MOUNT_CHECK"), default=False):
+        checks.append(_production_mount_check(values))
     core_status = "ready"
     if any(check.status == "invalid" for check in checks):
         core_status = "invalid"

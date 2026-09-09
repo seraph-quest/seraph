@@ -56,6 +56,25 @@ CUDA, model weights, a local model server, or the VLM wrapper. Missing
 OpenRouter credentials or policy are visible as `configuration_required`; no
 local fallback is selected.
 
+The production backend's canonical workspace is the host path configured by
+`BACKEND_DATA_PATH_PROD`, mounted only as `WORKSPACE_DIR=/app/data`. The managed
+maintenance commands resolve that bind before doing any work and fail closed on
+missing, symlinked, or ambiguous roots:
+
+```bash
+./manage.sh -e prod backup
+./manage.sh -e prod restore --archive <archive> --confirm
+```
+
+Archives and restore staging are derived siblings of the host bind and are not
+active workspace roots. Archives contain checksummed canonical files and
+redacted secret metadata; recovery preserves the active secret material and
+does not serialize secret values. The current slice proves deterministic local
+inventory, archive validation, staged promotion, rollback journaling, and a
+process-wide maintenance fence without starting inference. Migration fencing,
+retention/disk-pressure drills, derived-index rebuild, session invalidation, and
+live operator receipts remain partial #742 acceptance work.
+
 ## Historical develop topology
 
 The following topology describes the pre-#775 `develop` baseline and remains

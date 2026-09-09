@@ -26,6 +26,8 @@
 #   ./manage.sh -e dev proxy start      - Start stdio-to-HTTP MCP proxy.
 #   ./manage.sh -e dev proxy logs       - Tail proxy log file.
 #   ./manage.sh -e prod down            - Stop everything.
+#   ./manage.sh -e prod backup          - Create a verified workspace archive.
+#   ./manage.sh -e prod restore --archive <archive> --confirm
 #
 # ==============================================================================
 
@@ -80,6 +82,8 @@ function display_help() {
     echo "  $PROG_NAME -e dev proxy start"
     echo "  $PROG_NAME -e dev proxy status"
     echo "  $PROG_NAME -e dev proxy logs"
+    echo "  $PROG_NAME -e prod backup"
+    echo "  $PROG_NAME -e prod restore --archive <archive> --confirm"
 }
 
 function error_exit() {
@@ -602,6 +606,24 @@ function proxy_logs() {
     tail -f "$PROXY_LOG_FILE"
 }
 
+# --- Production workspace lifecycle ---
+function production_workspace_lifecycle() {
+    local lifecycle_command="$1"
+    shift
+    if [ "$ENV" != "prod" ]; then
+        echo "Error: workspace backup and restore are production-only commands." >&2
+        return 1
+    fi
+
+    # The dependency-free CLI resolves BACKEND_DATA_PATH_PROD on the host,
+    # verifies the one canonical owner, and keeps backup/restore sidecars next
+    # to that bind. It deliberately does not start Docker or contact a
+    # provider.
+    PYTHONPATH="$SCRIPT_DIR/backend${PYTHONPATH:+:$PYTHONPATH}" \
+        python3 "$SCRIPT_DIR/backend/workspace_cli.py" \
+        --base-dir "$SCRIPT_DIR" "$lifecycle_command" "$@"
+}
+
 # --- Local Stack Functions ---
 function local_backend_is_running() {
     pid_is_running "$LOCAL_BACKEND_PID_FILE"
@@ -883,6 +905,11 @@ if [ "$COMMAND" = "local" ]; then
             ;;
     esac
     exit "$LOCAL_EXIT_STATUS"
+fi
+
+if [ "$COMMAND" = "backup" ] || [ "$COMMAND" = "restore" ]; then
+    production_workspace_lifecycle "$COMMAND" "$@"
+    exit $?
 fi
 
 # Handle proxy subcommand

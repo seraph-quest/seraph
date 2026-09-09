@@ -42,6 +42,19 @@ from src.workspace.lifecycle import (
     workspace_backup_dir,
     workspace_restore_staging_dir,
 )
+from src.workspace.production import (
+    CANONICAL_CONTAINER_WORKSPACE,
+    PRODUCTION_BIND_ENV,
+    WORKSPACE_ENV,
+    DuplicateWorkspaceOwnerError,
+    ProductionWorkspace,
+    ProductionWorkspaceConfigurationError,
+    ProductionWorkspaceError,
+    ProductionWorkspaceMountError,
+    maintenance_fence,
+    resolve_production_workspace,
+    validate_container_workspace_mount,
+)
 
 __all__ = [
     "AmbiguousWorkspaceRootsError",
@@ -82,4 +95,15 @@ __all__ = [
     "rollback_workspace",
     "workspace_backup_dir",
     "workspace_restore_staging_dir",
+    "CANONICAL_CONTAINER_WORKSPACE",
+    "PRODUCTION_BIND_ENV",
+    "WORKSPACE_ENV",
+    "DuplicateWorkspaceOwnerError",
+    "ProductionWorkspace",
+    "ProductionWorkspaceConfigurationError",
+    "ProductionWorkspaceError",
+    "ProductionWorkspaceMountError",
+    "maintenance_fence",
+    "resolve_production_workspace",
+    "validate_container_workspace_mount",
 ]

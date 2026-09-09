@@ -12,6 +12,7 @@ from fastapi import HTTPException
 from starlette.requests import Request
 
 from config.settings import settings
+from src.agent.session import session_manager
 from src.approval.runtime import (
     get_current_session_id,
     get_current_trust_principal,
@@ -1034,6 +1035,109 @@ async def test_browser_session_rest_surface_is_owner_scoped_and_provenanced(clie
     assert ref_payload["content_available"] is True
     assert ref_payload["artifact_provenance"]["raw_artifact_body_exposed"] is True
     assert ref_payload["artifact_provenance"]["safe_receipt"]["raw_artifact_body_exposed"] is True
+
+
+@pytest.mark.asyncio
+async def test_authenticated_browser_rest_requires_persisted_conversation_owner(
+    client,
+    monkeypatch,
+):
+    origin = "http://localhost:3001"
+    monkeypatch.setattr(settings, "operator_auth_secret", "correct horse battery staple")
+    monkeypatch.setattr(settings, "operator_auth_secret_hash", "")
+    monkeypatch.setattr(settings, "operator_auth_allowed_hosts", "test,localhost,127.0.0.1")
+    monkeypatch.setattr(settings, "operator_auth_allowed_origins", origin)
+    monkeypatch.setattr(settings, "operator_auth_cookie_secure", False)
+
+    login_response = await client.post(
+        "/api/auth/login",
+        json={"password": "correct horse battery staple"},
+        headers={"origin": origin},
+    )
+    assert login_response.status_code == 200
+    assert client.cookies.get(settings.operator_auth_cookie_name)
+
+    owned_conversation = "owned-conversation"
+    unowned_conversation = "unowned-conversation"
+    await session_manager.get_or_create(
+        owned_conversation,
+        owner_principal_id="operator:single",
+    )
+    await session_manager.get_or_create(unowned_conversation)
+
+    with patch("src.api.browser.browse_webpage", return_value="owned page body"):
+        open_response = await client.post(
+            "/api/browser/sessions",
+            json={
+                "owner_session_id": owned_conversation,
+                "url": "https://example.test/owned",
+            },
+            headers={"origin": origin},
+        )
+    assert open_response.status_code == 200
+    browser_session = open_response.json()["session"]
+    browser_session_id = browser_session["session_id"]
+    latest_ref = browser_session["latest_ref"]
+
+    owned_read = await client.get(
+        f"/api/browser/sessions/{browser_session_id}",
+        params={"owner_session_id": owned_conversation},
+    )
+    assert owned_read.status_code == 200
+    assert owned_read.json()["session"]["owner_session_id"] == owned_conversation
+
+    owned_ref = await client.get(
+        f"/api/browser/refs/{latest_ref}",
+        params={"owner_session_id": owned_conversation},
+    )
+    assert owned_ref.status_code == 200
+    assert owned_ref.json()["ref"]["content"] == "owned page body"
+
+    cross_read = await client.get(
+        f"/api/browser/sessions/{browser_session_id}",
+        params={"owner_session_id": unowned_conversation},
+    )
+    assert cross_read.status_code == 403
+    assert cross_read.json()["detail"]["code"] == "browser_owner_session_forbidden"
+    assert browser_session_id not in cross_read.text
+
+    cross_ref = await client.get(
+        f"/api/browser/refs/{latest_ref}",
+        params={"owner_session_id": unowned_conversation},
+    )
+    assert cross_ref.status_code == 403
+    assert cross_ref.json()["detail"]["code"] == "browser_owner_session_forbidden"
+    assert latest_ref not in cross_ref.text
+
+    cross_control = await client.post(
+        f"/api/browser/sessions/{browser_session_id}/control",
+        json={
+            "owner_session_id": unowned_conversation,
+            "action": "close",
+        },
+        headers={"origin": origin},
+    )
+    assert cross_control.status_code == 403
+    assert cross_control.json()["detail"]["code"] == "browser_owner_session_forbidden"
+    assert browser_session_id not in cross_control.text
+
+    still_owned = await client.get(
+        f"/api/browser/sessions/{browser_session_id}",
+        params={"owner_session_id": owned_conversation},
+    )
+    assert still_owned.status_code == 200
+    assert still_owned.json()["session"]["status"] == "open"
+
+    owned_control = await client.post(
+        f"/api/browser/sessions/{browser_session_id}/control",
+        json={
+            "owner_session_id": owned_conversation,
+            "action": "close",
+        },
+        headers={"origin": origin},
+    )
+    assert owned_control.status_code == 200
+    assert owned_control.json()["session"]["status"] == "closed"
 
 
 @pytest.mark.asyncio

@@ -232,6 +232,16 @@ async def _ensure_legacy_columns(conn) -> None:
                 columns.add(column)
         return columns
 
+    session_columns = await _add_missing_columns(
+        "sessions",
+        {"owner_principal_id": "VARCHAR"},
+    )
+    if "owner_principal_id" in session_columns:
+        await conn.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_sessions_owner_principal_id "
+            "ON sessions (owner_principal_id)"
+        )
+
     proof_columns = await _add_missing_columns(
         "model_capability_proofs",
         {

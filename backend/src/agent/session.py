@@ -96,7 +96,12 @@ def _coerce_datetime(value: object) -> datetime | None:
 class SessionManager:
     """DB-backed session manager replacing the old in-memory dict."""
 
-    async def get_or_create(self, session_id: str | None = None) -> Session:
+    async def get_or_create(
+        self,
+        session_id: str | None = None,
+        *,
+        owner_principal_id: str | None = None,
+    ) -> Session:
         async with get_session() as db:
             if session_id:
                 result = await db.execute(select(Session).where(Session.id == session_id))
@@ -106,7 +111,11 @@ class SessionManager:
                     return session
 
             new_id = session_id or uuid.uuid4().hex
-            session = Session(id=new_id, title="New Conversation")
+            session = Session(
+                id=new_id,
+                owner_principal_id=str(owner_principal_id or "").strip() or None,
+                title="New Conversation",
+            )
             db.add(session)
             await db.flush()
             db.expunge(session)

@@ -53,6 +53,58 @@ async def test_ensure_legacy_columns_backfills_kind_from_category(tmp_path):
         await engine.dispose()
 
 
+async def test_ensure_legacy_columns_adds_session_owner_principal_id(tmp_path):
+    db_path = tmp_path / "legacy-sessions.db"
+    engine = create_async_engine(f"sqlite+aiosqlite:///{db_path}")
+    event.listen(engine.sync_engine, "connect", _configure_sqlite_connection)
+
+    try:
+        async with engine.begin() as conn:
+            await conn.exec_driver_sql(
+                """
+                CREATE TABLE sessions (
+                    id VARCHAR PRIMARY KEY,
+                    title VARCHAR,
+                    created_at DATETIME,
+                    updated_at DATETIME
+                )
+                """
+            )
+            await conn.exec_driver_sql(
+                """
+                INSERT INTO sessions (id, title, created_at, updated_at)
+                VALUES ('legacy-session', 'Legacy', '2026-03-25T00:00:00Z', '2026-03-25T00:00:00Z')
+                """
+            )
+
+            await _ensure_legacy_columns(conn)
+            await _ensure_legacy_columns(conn)
+
+            columns = {
+                row[1]
+                for row in (
+                    await conn.exec_driver_sql("PRAGMA table_info(sessions)")
+                ).fetchall()
+            }
+            indexes = {
+                row[1]
+                for row in (
+                    await conn.exec_driver_sql("PRAGMA index_list(sessions)")
+                ).fetchall()
+            }
+            owner = (
+                await conn.exec_driver_sql(
+                    "SELECT owner_principal_id FROM sessions WHERE id = 'legacy-session'"
+                )
+            ).one()
+
+            assert "owner_principal_id" in columns
+            assert "ix_sessions_owner_principal_id" in indexes
+            assert owner == (None,)
+    finally:
+        await engine.dispose()
+
+
 async def test_ensure_legacy_columns_adds_guardian_intervention_active_project(tmp_path):
     db_path = tmp_path / "legacy-guardian-interventions.db"
     engine = create_async_engine(f"sqlite+aiosqlite:///{db_path}")

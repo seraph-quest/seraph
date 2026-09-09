@@ -303,7 +303,10 @@ async def websocket_chat(websocket: WebSocket):
                 )
                 continue
 
-            session = await session_manager.get_or_create(ws_msg.session_id)
+            session = await session_manager.get_or_create(
+                ws_msg.session_id,
+                owner_principal_id=operator.principal.principal_id,
+            )
             try:
                 chat_principal = _bind_chat_principal(
                     session.id,

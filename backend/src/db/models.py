@@ -107,6 +107,7 @@ class Session(SQLModel, table=True):
     __tablename__ = "sessions"
 
     id: str = Field(default_factory=_uuid, primary_key=True)
+    owner_principal_id: Optional[str] = Field(default=None, index=True)
     title: str = Field(default="New Conversation")
     created_at: datetime = Field(default_factory=_now)
     updated_at: datetime = Field(default_factory=_now)

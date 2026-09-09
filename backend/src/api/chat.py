@@ -227,7 +227,10 @@ async def chat(request: ChatRequest, http_request: HttpRequest):
             status_code=exc.status_code,
             detail={"code": exc.code, "message": exc.message},
         ) from exc
-    session = await session_manager.get_or_create(request.session_id)
+    session = await session_manager.get_or_create(
+        request.session_id,
+        owner_principal_id=operator.principal.principal_id,
+    )
     try:
         chat_principal = _bind_chat_principal(
             session.id,

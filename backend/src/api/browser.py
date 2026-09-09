@@ -11,11 +11,12 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
 from config.settings import settings
+from src.agent.session import session_manager
 from src.approval.runtime import get_current_session_id, reset_runtime_context, set_runtime_context
 from src.api.capabilities import _require_authenticated_capability_operator
 from src.api.chat import _begin_rest_revocation_watch, _end_rest_revocation_watch, _ensure_rest_authorized
 from src.auth.cancellation import RuntimeRevokedError, assert_runtime_not_revoked
-from src.auth.service import bind_operator_principal
+from src.auth.service import auth_enabled, bind_operator_principal
 from src.browser.sessions import browser_session_runtime
 from src.extensions.browser_providers import list_browser_provider_inventory
 from src.extensions.registry import ExtensionRegistry, default_manifest_roots_for_workspace
@@ -66,7 +67,7 @@ def _metadata_only_session_payload(payload: dict[str, object] | None) -> dict[st
     return metadata
 
 
-def _bind_browser_operator(request: Request, owner_session_id: str | None):
+async def _bind_browser_operator(request: Request, owner_session_id: str | None):
     """Bind browser authority to the authenticated operator's conversation.
 
     The authentication cookie session is the revocation handle for the
@@ -95,6 +96,16 @@ def _bind_browser_operator(request: Request, owner_session_id: str | None):
             detail={"code": "browser_owner_session_mismatch"},
         )
     canonical_owner_session_id = requested_session_id or active_runtime_session_id or None
+    if canonical_owner_session_id and not active_runtime_session_id and auth_enabled():
+        conversation = await session_manager.get(canonical_owner_session_id)
+        if (
+            conversation is None
+            or conversation.owner_principal_id != operator.principal.principal_id
+        ):
+            raise HTTPException(
+                status_code=403,
+                detail={"code": "browser_owner_session_forbidden"},
+            )
     context_session_id = canonical_owner_session_id or operator.session_id
     tokens = set_runtime_context(
         context_session_id,
@@ -104,10 +115,10 @@ def _bind_browser_operator(request: Request, owner_session_id: str | None):
     return canonical_owner_session_id, tokens
 
 
-def _bind_browser_read_operator(request: Request, owner_session_id: str | None):
+async def _bind_browser_read_operator(request: Request, owner_session_id: str | None):
     """Keep read routes on the same canonical authority path as mutators."""
 
-    return _bind_browser_operator(request, owner_session_id)
+    return await _bind_browser_operator(request, owner_session_id)
 
 
 @asynccontextmanager
@@ -117,7 +128,7 @@ async def _browser_request_authority(
 ) -> AsyncIterator[str | None]:
     """Authorize, watch, and clean up one browser request."""
 
-    bound_owner_session_id, tokens = _bind_browser_operator(request, owner_session_id)
+    bound_owner_session_id, tokens = await _bind_browser_operator(request, owner_session_id)
     revocation_scope = None
     try:
         revocation_scope = _begin_rest_revocation_watch(request)

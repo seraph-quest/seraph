@@ -13,6 +13,7 @@ from src.guardian.goal_conditioned_loop import (
     dispatch_goal_candidate,
     list_goal_loop_receipts,
     propose_goal_candidate,
+    _resolve_strategy_delta_provenance,
 )
 
 
@@ -179,6 +180,7 @@ async def test_success_requires_readback_and_receipt_redacts_inputs(async_db):
 
 async def test_correction_changes_later_choice_and_persists_provenance():
     from unittest.mock import AsyncMock, patch
+    from types import SimpleNamespace
 
     from src.db.models import Goal
     import src.guardian.goal_conditioned_loop as goal_loop
@@ -216,6 +218,7 @@ async def test_correction_changes_later_choice_and_persists_provenance():
             "target": {
                 "query": "new source",
                 "file_path": "briefs/new.md",
+                "priority": 0,
                 "strategy_delta_id": "delta-correction-1",
             }
         }
@@ -241,9 +244,22 @@ async def test_correction_changes_later_choice_and_persists_provenance():
         persisted.append(kwargs)
         return kwargs["details"]
 
+    delta = SimpleNamespace(
+        delta_id="delta-correction-1",
+        goal_id=goal.id,
+        scope="goal",
+        field_name="web_brief_target",
+        author_id="operator:test",
+        status="applied",
+        goal_revision_before=1,
+        goal_revision_after=2,
+        after=corrected_criterion.target,
+    )
+
     with (
         patch.object(goal_loop.goal_repository, "get", new=AsyncMock(side_effect=[goal, corrected_goal])),
         patch.object(goal_loop, "_existing_receipt", new=AsyncMock(return_value=None)),
+        patch.object(goal_loop, "get_strategy_delta", new=AsyncMock(return_value=delta)),
         patch.object(goal_loop, "_persist_receipt", new=persist),
     ):
         old_outcome = await dispatch_goal_candidate(old_candidate, adapter=adapter)
@@ -261,4 +277,120 @@ async def test_correction_changes_later_choice_and_persists_provenance():
         and item["details"]["candidate_id"] == new_candidate.candidate_id
     )
     assert later["strategy_delta_id"] == "delta-correction-1"
+    assert later["strategy_delta_provenance"] == "verified"
     assert later["decision_input_digest"] == new_outcome.decision_input_digest
+
+
+async def test_strategy_delta_provenance_requires_applied_goal_target_linkage():
+    from datetime import datetime, timezone
+    from unittest.mock import AsyncMock, patch
+
+    from src.db.models import Goal
+    from src.memory.control import StrategyDeltaReceipt
+
+    delta_id = "delta-correction-1"
+    target = {
+        "query": "new source",
+        "file_path": "briefs/new.md",
+        "priority": 0,
+        "strategy_delta_id": delta_id,
+    }
+    goal = Goal(
+        id="goal-correction",
+        title="Research a source",
+        revision=2,
+        success_criterion_json=GoalSuccessCriterion(
+            description="A readable source brief is present",
+            verifier_kind="artifact_readback",
+            target=target,
+        ).model_dump_json(),
+    )
+    candidate = build_goal_candidate_decision(
+        goal,
+        GoalCandidateRequest(
+            capability_id="workflow.web-brief-to-file",
+            inputs={"query": "new source", "file_path": "briefs/new.md"},
+            evidence_refs=[f"strategy-delta:{delta_id}"],
+        ),
+    )
+
+    def delta(**overrides):
+        values = {
+            "delta_id": delta_id,
+            "goal_id": goal.id,
+            "scope": "goal",
+            "field_name": "web_brief_target",
+            "before": {
+                "query": "old source",
+                "file_path": "briefs/old.md",
+                "priority": 0,
+            },
+            "after": target,
+            "source_event_id": "corr-1",
+            "author_id": "operator:test",
+            "evaluator_id": None,
+            "goal_revision_before": 1,
+            "goal_revision_after": 2,
+            "status": "applied",
+            "rollback_target_id": None,
+            "reason": "source correction",
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+        values.update(overrides)
+        return StrategyDeltaReceipt(**values)
+
+    async def resolve(value, candidate_value=candidate):
+        with patch(
+            "src.guardian.goal_conditioned_loop.get_strategy_delta",
+            new=AsyncMock(return_value=value),
+        ):
+            return await _resolve_strategy_delta_provenance(candidate=candidate_value, goal=goal)
+
+    assert await resolve(None) == (None, "unresolved")
+    assert await resolve(delta(goal_id="other-goal")) == (None, "unresolved")
+    assert await resolve(delta(goal_revision_after=3)) == (None, "unresolved")
+    assert await resolve(delta(author_id="")) == (None, "unresolved")
+    assert await resolve(delta()) == (delta_id, "verified")
+
+    wrong_inputs = candidate.model_copy(update={"inputs": {"query": "other source"}})
+    assert await resolve(delta(), wrong_inputs) == (
+        None,
+        "unresolved",
+    )
+
+    ambiguous = candidate.model_copy(
+        update={"evidence_refs": [f"strategy-delta:{delta_id}", "strategy-delta:other"]}
+    )
+    assert await resolve(delta(), ambiguous) == (
+        None,
+        "unresolved",
+    )
+
+
+def test_result_contract_exposes_verified_correction_receipt_fields():
+    from src.guardian.goal_snapshot_to_file import GoalSnapshotToFileResult
+
+    result = GoalSnapshotToFileResult(
+        goal_id="goal-correction",
+        goal_revision=2,
+        file_path="briefs/new.md",
+        execution_status="succeeded",
+        verification="passed",
+        decision_input_digest="a" * 64,
+        strategy_delta_id="delta-correction-1",
+        strategy_delta_provenance="verified",
+    )
+    assert result.model_dump()["strategy_delta_provenance"] == "verified"
+
+
+def test_legacy_receipt_ids_are_sanitized_without_verified_provenance():
+    from src.guardian.goal_conditioned_loop import _sanitize_strategy_delta_receipt
+
+    assert _sanitize_strategy_delta_receipt({"strategy_delta_id": "fabricated"}) == {
+        "strategy_delta_id": None,
+        "strategy_delta_provenance": "unresolved",
+    }
+    assert _sanitize_strategy_delta_receipt(
+        {"strategy_delta_id": "delta-1", "strategy_delta_provenance": "verified"}
+    )["strategy_delta_id"] == "delta-1"

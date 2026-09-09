@@ -202,6 +202,9 @@ async def test_web_brief_executes_public_source_workflow_and_reads_back_artifact
     assert result.source_read is True
     assert result.query_read_back is True
     assert result.artifact_ref == "art_web_brief"
+    assert result.decision_input_digest
+    assert result.strategy_delta_id is None
+    assert result.strategy_delta_provenance == "not_present"
     assert result.authority_receipt is not None
     assert result.authority_receipt["allowed"] is True
     assert result.authority_receipt["scope"]["egress_class"] == "cloud_allowed_redacted"

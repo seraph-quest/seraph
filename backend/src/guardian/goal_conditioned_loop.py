@@ -24,10 +24,12 @@ from src.goals.contracts import (
     GoalCandidateRequest,
     GoalExecutionResult,
     GoalOutcomeReceipt,
+    StrategyDeltaProvenance,
     normalized_evidence_refs,
     stable_candidate_key,
 )
 from src.goals.repository import deserialize_success_criterion, goal_repository
+from src.memory.control import get_strategy_delta
 
 logger = logging.getLogger(__name__)
 
@@ -69,22 +71,94 @@ def _safe_digest(value: object) -> str:
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
-def _strategy_delta_id_from_evidence(evidence_refs: list[str] | tuple[str, ...]) -> str | None:
-    """Return one explicit correction id, or ``None`` when provenance is ambiguous."""
+def _strategy_delta_ids_from_evidence(
+    evidence_refs: list[str] | tuple[str, ...],
+) -> tuple[tuple[str, ...], bool]:
+    """Extract bounded correction IDs and flag malformed correction evidence."""
 
-    delta_ids = {
-        ref.removeprefix("strategy-delta:").strip()
-        for ref in evidence_refs
-        if isinstance(ref, str) and ref.startswith("strategy-delta:")
-    }
-    delta_ids.discard("")
-    if len(delta_ids) != 1:
-        return None
-    value = next(iter(delta_ids))
-    return value if len(value) <= 128 else None
+    delta_ids: set[str] = set()
+    malformed = False
+    for ref in evidence_refs:
+        if not isinstance(ref, str) or not ref.startswith("strategy-delta:"):
+            continue
+        value = ref.removeprefix("strategy-delta:").strip()
+        if not value or len(value) > 128:
+            malformed = True
+            continue
+        delta_ids.add(value)
+    return tuple(sorted(delta_ids)), malformed
 
 
-def _candidate_receipt_details(decision: GoalCandidateDecision) -> dict[str, Any]:
+async def _resolve_strategy_delta_provenance(
+    *,
+    candidate: GoalCandidateDecision,
+    goal: Goal | None,
+    evidence_refs: list[str] | tuple[str, ...] | None = None,
+) -> tuple[str | None, StrategyDeltaProvenance]:
+    """Verify a correction receipt before exposing its ID as provenance.
+
+    Evidence references are caller data.  Only an applied, goal-owned delta
+    whose recorded target still matches the current goal can establish the
+    later choice's correction provenance.  Any ambiguity or storage failure
+    stays explicitly unresolved and never becomes a positive receipt claim.
+    """
+
+    refs = candidate.evidence_refs if evidence_refs is None else evidence_refs
+    delta_ids, malformed = _strategy_delta_ids_from_evidence(refs)
+    if not delta_ids and not malformed:
+        return None, "not_present"
+    if malformed or len(delta_ids) != 1 or goal is None:
+        return None, "unresolved"
+
+    delta_id = delta_ids[0]
+    try:
+        delta = await get_strategy_delta(delta_id)
+    except Exception:
+        logger.debug("Could not verify strategy delta provenance", exc_info=True)
+        return None, "unresolved"
+    if delta is None:
+        return None, "unresolved"
+
+    criterion = deserialize_success_criterion(goal)
+    target = criterion.target if criterion is not None else None
+    try:
+        current_revision = max(int(goal.revision or 1), 1)
+        revision_before = int(delta.goal_revision_before)
+        revision_after = int(delta.goal_revision_after) if delta.goal_revision_after is not None else None
+    except (TypeError, ValueError):
+        return None, "unresolved"
+
+    if not isinstance(target, dict) or not isinstance(delta.after, dict):
+        return None, "unresolved"
+    if (
+        delta.delta_id != delta_id
+        or delta.goal_id != candidate.goal_id
+        or candidate.capability_id != "workflow.web-brief-to-file"
+        or delta.scope != "goal"
+        or delta.field_name != "web_brief_target"
+        or not str(delta.author_id or "").strip()
+        or delta.status != "applied"
+        or revision_after is None
+        or revision_before >= revision_after
+        or revision_after > candidate.goal_revision
+        or current_revision != candidate.goal_revision
+        or target.get("strategy_delta_id") != delta_id
+        or target != delta.after
+        or any(
+            key in target and candidate.inputs.get(key) != target[key]
+            for key in ("query", "file_path")
+        )
+    ):
+        return None, "unresolved"
+    return delta_id, "verified"
+
+
+def _candidate_receipt_details(
+    decision: GoalCandidateDecision,
+    *,
+    strategy_delta_id: str | None,
+    strategy_delta_provenance: StrategyDeltaProvenance,
+) -> dict[str, Any]:
     """Return an inspectable receipt without persisting input values."""
 
     return {
@@ -103,7 +177,8 @@ def _candidate_receipt_details(decision: GoalCandidateDecision) -> dict[str, Any
         "capability_version": decision.capability_version,
         "input_keys": sorted(str(key) for key in decision.inputs),
         "input_digest": _safe_digest(decision.inputs),
-        "strategy_delta_id": _strategy_delta_id_from_evidence(decision.evidence_refs),
+        "strategy_delta_id": strategy_delta_id,
+        "strategy_delta_provenance": strategy_delta_provenance,
         "expected_outcome": _safe_text(decision.expected_outcome),
         "expires_at": decision.expires_at.isoformat() if decision.expires_at else None,
         "content_redacted": True,
@@ -119,6 +194,7 @@ def _outcome_receipt_details(receipt: GoalOutcomeReceipt) -> dict[str, Any]:
         "dedupe_key": receipt.dedupe_key,
         "decision_input_digest": receipt.decision_input_digest,
         "strategy_delta_id": receipt.strategy_delta_id,
+        "strategy_delta_provenance": receipt.strategy_delta_provenance,
         "goal_id": receipt.goal_id,
         "goal_revision": receipt.goal_revision,
         "execution_status": receipt.execution_status,
@@ -152,6 +228,7 @@ _SAFE_RECEIPT_FIELDS = frozenset(
         "input_digest",
         "decision_input_digest",
         "strategy_delta_id",
+        "strategy_delta_provenance",
         "expected_outcome",
         "expires_at",
         "execution_status",
@@ -173,6 +250,21 @@ def _redact_receipt_details(details: dict[str, Any]) -> dict[str, Any]:
         key: value if key in _SAFE_RECEIPT_FIELDS else redact_for_audit(value, key)
         for key, value in details.items()
     }
+
+
+def _sanitize_strategy_delta_receipt(details: dict[str, Any]) -> dict[str, Any]:
+    """Keep legacy audit rows from exposing an unverified correction ID."""
+
+    safe_details = dict(details)
+    delta_id = safe_details.get("strategy_delta_id")
+    provenance = safe_details.get("strategy_delta_provenance")
+    if provenance == "verified" and isinstance(delta_id, str) and delta_id.strip():
+        return safe_details
+    safe_details["strategy_delta_id"] = None
+    safe_details["strategy_delta_provenance"] = (
+        "not_present" if provenance is None and delta_id is None else "unresolved"
+    )
+    return safe_details
 
 
 async def _existing_receipt(*, event_type: str, dedupe_key: str) -> dict[str, Any] | None:
@@ -297,10 +389,18 @@ async def propose_goal_candidate(
     if goal is None:
         raise LookupError(f"Goal '{goal_id}' not found")
     decision = build_goal_candidate_decision(goal, request)
+    strategy_delta_id, strategy_delta_provenance = await _resolve_strategy_delta_provenance(
+        candidate=decision,
+        goal=goal,
+    )
     await _persist_receipt(
         event_type=_CANDIDATE_EVENT,
         summary=f"Goal candidate {decision.action.value} for {goal.id}",
-        details=_candidate_receipt_details(decision),
+        details=_candidate_receipt_details(
+            decision,
+            strategy_delta_id=strategy_delta_id,
+            strategy_delta_provenance=strategy_delta_provenance,
+        ),
     )
     if decision.action is not GoalCandidateAction.act:
         await _persist_no_learning(
@@ -309,6 +409,8 @@ async def propose_goal_candidate(
             verification="unknown",
             usefulness="unknown",
             reason=f"candidate_not_dispatched:{decision.reason}",
+            strategy_delta_id=strategy_delta_id,
+            strategy_delta_provenance=strategy_delta_provenance,
         )
     return decision
 
@@ -350,7 +452,11 @@ async def _persist_no_learning(
     reason: str,
     evidence_refs: tuple[str, ...] = (),
     artifact_ref: str | None = None,
+    strategy_delta_id: str | None = None,
+    strategy_delta_provenance: StrategyDeltaProvenance = "not_present",
 ) -> GoalOutcomeReceipt:
+    if strategy_delta_provenance != "verified":
+        strategy_delta_id = None
     receipt = GoalOutcomeReceipt(
         receipt_type="no_learning",
         outcome_id="nl_" + hashlib.sha256(
@@ -359,7 +465,8 @@ async def _persist_no_learning(
         candidate_id=candidate.candidate_id,
         dedupe_key=candidate.dedupe_key,
         decision_input_digest=_safe_digest(candidate.inputs),
-        strategy_delta_id=_strategy_delta_id_from_evidence(candidate.evidence_refs),
+        strategy_delta_id=strategy_delta_id,
+        strategy_delta_provenance=strategy_delta_provenance,
         goal_id=candidate.goal_id,
         goal_revision=candidate.goal_revision,
         execution_status=execution_status,  # type: ignore[arg-type]
@@ -400,6 +507,10 @@ async def dispatch_goal_candidate(
         return GoalOutcomeReceipt.model_validate(existing)
 
     goal = await goal_repository.get(candidate.goal_id)
+    strategy_delta_id, strategy_delta_provenance = await _resolve_strategy_delta_provenance(
+        candidate=candidate,
+        goal=goal,
+    )
     if goal is None:
         return await _persist_no_learning(
             candidate,
@@ -407,6 +518,8 @@ async def dispatch_goal_candidate(
             verification="unknown",
             usefulness="unknown",
             reason="goal_not_found",
+            strategy_delta_id=strategy_delta_id,
+            strategy_delta_provenance=strategy_delta_provenance,
         )
     current_revision = max(int(goal.revision or 1), 1)
     if _enum_value(goal.status) != "active":
@@ -416,6 +529,8 @@ async def dispatch_goal_candidate(
             verification="unknown",
             usefulness="unknown",
             reason="goal_not_active",
+            strategy_delta_id=strategy_delta_id,
+            strategy_delta_provenance=strategy_delta_provenance,
         )
     if current_revision != candidate.goal_revision:
         return await _persist_no_learning(
@@ -424,6 +539,8 @@ async def dispatch_goal_candidate(
             verification="unknown",
             usefulness="unknown",
             reason="stale_goal_revision",
+            strategy_delta_id=strategy_delta_id,
+            strategy_delta_provenance=strategy_delta_provenance,
         )
     if not candidate.dispatchable:
         return await _persist_no_learning(
@@ -432,6 +549,8 @@ async def dispatch_goal_candidate(
             verification="unknown",
             usefulness="unknown",
             reason=f"candidate_action_{candidate.action.value}",
+            strategy_delta_id=strategy_delta_id,
+            strategy_delta_provenance=strategy_delta_provenance,
         )
     if candidate.expires_at is not None:
         expiry = candidate.expires_at
@@ -444,6 +563,8 @@ async def dispatch_goal_candidate(
                 verification="unknown",
                 usefulness="unknown",
                 reason="candidate_expired",
+                strategy_delta_id=strategy_delta_id,
+                strategy_delta_provenance=strategy_delta_provenance,
             )
     if adapter is None:
         return await _persist_no_learning(
@@ -452,6 +573,8 @@ async def dispatch_goal_candidate(
             verification="unknown",
             usefulness="unknown",
             reason="execution_adapter_unavailable",
+            strategy_delta_id=strategy_delta_id,
+            strategy_delta_provenance=strategy_delta_provenance,
         )
 
     try:
@@ -471,6 +594,11 @@ async def dispatch_goal_candidate(
         *candidate.evidence_refs,
         *result.evidence_refs,
     )
+    strategy_delta_id, strategy_delta_provenance = await _resolve_strategy_delta_provenance(
+        candidate=candidate,
+        goal=goal,
+        evidence_refs=evidence_refs,
+    )
     verification = result.verification
     if verification == "passed":
         if criterion is None or not criterion.verifier_configured or not evidence_refs:
@@ -487,7 +615,8 @@ async def dispatch_goal_candidate(
         candidate_id=candidate.candidate_id,
         dedupe_key=candidate.dedupe_key,
         decision_input_digest=_safe_digest(candidate.inputs),
-        strategy_delta_id=_strategy_delta_id_from_evidence(candidate.evidence_refs),
+        strategy_delta_id=strategy_delta_id,
+        strategy_delta_provenance=strategy_delta_provenance,
         goal_id=candidate.goal_id,
         goal_revision=candidate.goal_revision,
         execution_status=result.execution_status,
@@ -513,6 +642,8 @@ async def dispatch_goal_candidate(
             reason=outcome.reason or "no_reliable_learning_evidence",
             evidence_refs=tuple(outcome.evidence_refs),
             artifact_ref=outcome.artifact_ref,
+            strategy_delta_id=outcome.strategy_delta_id,
+            strategy_delta_provenance=outcome.strategy_delta_provenance,
         )
     return outcome
 
@@ -539,6 +670,7 @@ async def list_goal_loop_receipts(
         details = event.get("details")
         if not isinstance(details, dict) or details.get("goal_id") != goal_id:
             continue
+        details = _sanitize_strategy_delta_receipt(details)
         receipts.append(
             {
                 "audit_event_id": event.get("id"),

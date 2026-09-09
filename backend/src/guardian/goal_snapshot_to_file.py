@@ -34,6 +34,7 @@ from src.goals.contracts import (
     GoalCandidateRequest,
     GoalExecutionResult,
     GoalOutcomeReceipt,
+    StrategyDeltaProvenance,
     normalized_evidence_refs,
     stable_candidate_key,
 )
@@ -242,6 +243,9 @@ class GoalSnapshotToFileResult(BaseModel):
     recovery_action: str | None = None
     durable_failure: dict[str, Any] | None = None
     authority_receipt: dict[str, Any] | None = None
+    decision_input_digest: str | None = None
+    strategy_delta_id: str | None = None
+    strategy_delta_provenance: StrategyDeltaProvenance = "not_present"
     evidence_refs: list[str] = Field(default_factory=list)
     reason: str = ""
 
@@ -2289,6 +2293,9 @@ class GoalSnapshotToFileService:
                 if isinstance(receipt.get("authority_receipt"), dict)
                 else None
             ),
+            decision_input_digest=outcome.decision_input_digest,
+            strategy_delta_id=outcome.strategy_delta_id,
+            strategy_delta_provenance=outcome.strategy_delta_provenance,
             evidence_refs=list(outcome.evidence_refs),
             reason=outcome.reason,
         )

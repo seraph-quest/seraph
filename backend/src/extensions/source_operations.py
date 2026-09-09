@@ -7,12 +7,13 @@ from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import urlparse
 
-from src.approval.runtime import get_current_session_id
+from src.approval.runtime import get_current_session_id, get_current_trust_principal
 from src.browser.sessions import browser_session_runtime
 from src.extensions.source_capabilities import list_source_capability_inventory
 from src.audit.runtime import log_integration_event_sync
 from src.tools.browser_tool import browse_webpage
 from src.tools.mcp_manager import mcp_manager
+from src.tools.approval import require_capability_authority
 from src.tools.web_search_tool import search_web_records
 
 
@@ -1867,6 +1868,25 @@ def collect_source_evidence_bundle(
     owner_session_id: str = "",
     max_results: int = 5,
 ) -> dict[str, Any]:
+    # This adapter is also called directly by the public capabilities API, so
+    # the factory's AuthorityTool wrapper cannot be its only trust boundary.
+    # Check the authenticated runtime principal before inventory lookup or any
+    # provider/MCP dispatch.  The shared helper keeps denial content-free.
+    require_capability_authority(
+        session_id=get_current_session_id(),
+        principal=get_current_trust_principal(),
+        tool_name="collect_source_evidence",
+        arguments={
+            "contract": contract,
+            "source": source,
+            "query": query,
+            "url": url,
+            "ref": ref,
+            "session_id": session_id,
+            "owner_session_id": owner_session_id,
+            "max_results": max_results,
+        },
+    )
     inventory = list_source_capability_inventory()
     adapter_inventory = list_source_adapter_inventory(inventory)
     adapters = adapter_inventory["adapters"]
@@ -1918,6 +1938,12 @@ def collect_source_evidence_bundle(
         response["warnings"].append(
             f"Source '{selected_adapter['name']}' does not currently define an executable route for '{contract}'."
         )
+        response["next_best_sources"] = list(selected_adapter.get("next_best_sources") or [])
+        return response
+
+    if bool(selected_operation.get("mutating")) or _is_mutating_contract(contract):
+        response["status"] = "failed"
+        response["warnings"].append("Source evidence collection does not execute mutating contracts.")
         response["next_best_sources"] = list(selected_adapter.get("next_best_sources") or [])
         return response
 

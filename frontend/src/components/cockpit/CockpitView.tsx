@@ -12,7 +12,7 @@ import { useChatStore } from "../../stores/chatStore";
 import { useQuestStore } from "../../stores/questStore";
 import { useCockpitLayoutStore } from "../../stores/cockpitLayoutStore";
 import { PANEL_MIN_SIZES, usePanelLayoutStore } from "../../stores/panelLayoutStore";
-import type { ChatMessage, ConnectionStatus, GoalInfo } from "../../types";
+import type { ChatMessage, ConnectionStatus, GoalInfo, GoalLoopReceipt } from "../../types";
 import {
   buildWorkflowDraft,
   workflowAcceptsArtifact,
@@ -1303,6 +1303,9 @@ interface PendingApproval {
   id: string;
   session_id?: string | null;
   thread_id?: string | null;
+  approval_conversation_id?: string | null;
+  approval_owner_principal_id?: string | null;
+  approval_owner_operator_session_id?: string | null;
   thread_label?: string | null;
   tool_name: string;
   risk_level: string;
@@ -6017,6 +6020,32 @@ function findCurrentGoal(goals: GoalInfo[]): GoalInfo | null {
     .find((goal) => rank(goal) < 2) ?? null;
 }
 
+function outcomeStateForReceipt(
+  receipt: GoalLoopReceipt | null,
+  criterionReady: boolean,
+  goalStatus?: string | null,
+): OutcomeCockpitState {
+  if (!receipt) {
+    const normalizedGoalStatus = goalStatus?.trim().toLowerCase();
+    return normalizedGoalStatus && ["completed", "complete", "done"].includes(normalizedGoalStatus)
+      ? "partial_metadata"
+      : criterionReady ? "active" : "partial_metadata";
+  }
+  const execution = receipt.execution_status?.trim().toLowerCase() ?? "unknown";
+  const verification = receipt.verification?.trim().toLowerCase() ?? "unknown";
+  if (execution === "failed" || verification === "failed") return "failed";
+  if (execution === "blocked") return "blocked";
+  if (["awaiting_approval", "pending_approval", "approval_required"].includes(execution)) {
+    return "awaiting_approval";
+  }
+  if (["succeeded", "success", "completed", "complete"].includes(execution)) {
+    if (verification === "passed") return criterionReady ? "recovered" : "partial_metadata";
+    return "partial_metadata";
+  }
+  if (verification === "failed") return "failed";
+  return execution === "running" || execution === "pending" ? "active" : "partial_metadata";
+}
+
 function buildWorkflowReplayDraft(workflow: WorkflowRunRecord): string {
   if (workflow.retryFromStepDraft) {
     return workflow.retryFromStepDraft;
@@ -6853,7 +6882,11 @@ function storeRuntimeReceipt(status: RuntimeStatus) {
   }
 }
 
-type CockpitFetchResult = { ok: boolean; payload: unknown | null };
+type CockpitFetchResult = { ok: boolean; payload: unknown | null; status?: number };
+type OperatorAuthState = {
+  status: "loading" | "authenticated" | "unauthorized" | "degraded";
+  principalId: string | null;
+};
 type DeepPaneLoadState = "idle" | "loading" | "loaded" | "stale" | "failed";
 type DeepPaneKey =
   | "presence"
@@ -6876,6 +6909,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   const [observerState, setObserverState] = useState<ObserverState | null>(null);
   const [auditEvents, setAuditEvents] = useState<CockpitAuditEvent[]>([]);
   const [pendingApprovals, setPendingApprovals] = useState<PendingApproval[]>([]);
+  const [operatorAuth, setOperatorAuth] = useState<OperatorAuthState>({ status: "loading", principalId: null });
   const [feedbackState, setFeedbackState] = useState<Record<string, string>>({});
   const [approvalState, setApprovalState] = useState<Record<string, string>>({});
   const [selectedInspector, setSelectedInspector] = useState<InspectorSelection | null>(null);
@@ -6927,6 +6961,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   const [activityFilter, setActivityFilter] = useState<ActivityLedgerFilter>("all");
   const activityLedgerScopeRef = useRef<string>("");
   const cockpitRefreshInFlightRef = useRef(false);
+  const goalLoopRequestKeyRef = useRef<string | null>(null);
   const [toolPolicyMode, setToolPolicyMode] = useState<ToolPolicyMode | "unknown">("unknown");
   const [mcpPolicyMode, setMcpPolicyMode] = useState<McpPolicyMode | "unknown">("unknown");
   const [approvalMode, setApprovalMode] = useState<ApprovalMode | "unknown">("unknown");
@@ -7014,6 +7049,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   const goalLoopGoalId = useQuestStore((s) => s.goalLoopGoalId);
   const goalLoopLoading = useQuestStore((s) => s.goalLoopLoading);
   const goalLoopError = useQuestStore((s) => s.goalLoopError);
+  const loadGoalLoop = useQuestStore((s) => s.loadGoalLoop);
   const refreshGoals = useQuestStore((s) => s.refresh);
 
   const handleResetWorkspace = useCallback(() => {
@@ -7101,15 +7137,15 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     try {
       const response = await fetch(url, { signal: controller.signal });
       if (isCancelled() || !response.ok) {
-        return { ok: false, payload: null };
+        return { ok: false, payload: null, status: response.status };
       }
       const payload = await response.json().catch(() => null);
       if (isCancelled()) {
         return { ok: false, payload: null };
       }
-      return { ok: true, payload };
+      return { ok: true, payload, status: response.status };
     } catch {
-      return { ok: false, payload: null };
+      return { ok: false, payload: null, status: 0 };
     } finally {
       window.clearTimeout(timeout);
     }
@@ -7136,6 +7172,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
 
   const refreshCockpit = useCallback(async (isCancelled: () => boolean = () => false) => {
     const [
+      authResult,
       runtimeStatusResult,
       observerResult,
       auditResult,
@@ -7148,6 +7185,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       mcpModeResult,
       approvalModeResult,
     ] = await fetchCockpitBatch([
+      () => fetchCockpitJson(`${API_URL}/api/auth/session`, 5000, isCancelled),
       () => fetchCockpitJson(`${API_URL}/api/runtime/status`, 5000, isCancelled),
       () => fetchCockpitJson(`${API_URL}/api/observer/state`, 5000, isCancelled),
       () => fetchCockpitJson(`${API_URL}/api/audit/events?limit=12`, 5000, isCancelled),
@@ -7166,6 +7204,16 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     ], isCancelled);
 
     if (isCancelled()) return;
+    const authPayload = authResult.ok && authResult.payload && typeof authResult.payload === "object"
+      ? authResult.payload as { authenticated?: unknown; principal_id?: unknown }
+      : null;
+    if (authPayload?.authenticated === true && typeof authPayload.principal_id === "string" && authPayload.principal_id.trim()) {
+      setOperatorAuth({ status: "authenticated", principalId: authPayload.principal_id.trim() });
+    } else if (authResult.status === 401 || authResult.status === 403) {
+      setOperatorAuth({ status: "unauthorized", principalId: null });
+    } else {
+      setOperatorAuth({ status: "degraded", principalId: null });
+    }
     const runtimeStatusPayload = runtimeStatusResult.ok
       ? normalizeRuntimeStatus(runtimeStatusResult.payload)
       : null;
@@ -9389,6 +9437,18 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     { label: "next action", value: m7NextActionLabel },
   ];
   const currentGoal = findCurrentGoal(goalTree);
+  useEffect(() => {
+    const goalId = currentGoal?.id ?? null;
+    const goalRevision = currentGoal?.revision ?? null;
+    if (!goalId) {
+      goalLoopRequestKeyRef.current = null;
+      return;
+    }
+    const requestKey = `${goalId}:${goalRevision ?? "unknown"}`;
+    if (goalLoopRequestKeyRef.current === requestKey) return;
+    goalLoopRequestKeyRef.current = requestKey;
+    void loadGoalLoop(goalId);
+  }, [currentGoal?.id, currentGoal?.revision, loadGoalLoop]);
   const currentGoalLoop = currentGoal && goalLoopGoalId === currentGoal.id ? goalLoop : null;
   const latestGoalReceipt = currentGoalLoop?.receipts?.[0] ?? null;
   const goalOutcomeState: OutcomeCockpitState = (() => {
@@ -9401,12 +9461,15 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       return goalLoopError.status === 502 ? "partial_metadata" : "failed";
     }
     if (!currentGoalLoop || currentGoalLoop.goal.revision !== (currentGoal.revision ?? currentGoalLoop.goal.revision)) return "partial_metadata";
+    if (
+      latestGoalReceipt?.goal_revision != null
+      && (
+        latestGoalReceipt.goal_revision !== currentGoalLoop.goal.revision
+        || latestGoalReceipt.goal_revision !== (currentGoal.revision ?? latestGoalReceipt.goal_revision)
+      )
+    ) return "stale";
     if (!currentGoalLoop.criterion) return "partial_metadata";
-    const execution = latestGoalReceipt?.execution_status?.toLowerCase();
-    if (execution === "failed") return "failed";
-    if (execution === "blocked") return "blocked";
-    if (["awaiting_approval", "pending_approval", "approval_required"].includes(execution ?? "")) return "awaiting_approval";
-    return "active";
+    return outcomeStateForReceipt(latestGoalReceipt, true, currentGoal.status);
   })();
   const workflowLoadState = deepPaneLoadState.workflows;
   const outcomeWorkflow = m7PrimaryWorkflow;
@@ -9429,10 +9492,20 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     : null;
   const outcomeApproval = pendingApprovals[0] ?? null;
   const outcomeApprovalActionState = outcomeApproval ? approvalState[outcomeApproval.id] ?? null : null;
+  const approvalOwnerPrincipalId = outcomeApproval?.approval_owner_principal_id?.trim() ?? "";
+  const approvalOwnerOperatorSessionId = outcomeApproval?.approval_owner_operator_session_id?.trim() ?? "";
+  const approvalAuthorityReady = Boolean(
+    outcomeApproval
+    && operatorAuth.status === "authenticated"
+    && operatorAuth.principalId
+    && approvalOwnerPrincipalId
+    && approvalOwnerOperatorSessionId
+    && approvalOwnerPrincipalId === operatorAuth.principalId,
+  );
   const approvalOutcomeState: OutcomeCockpitState = (() => {
     if (!outcomeApproval) return "empty";
     const status = outcomeApproval.status.toLowerCase();
-    if (!sessionId || status === "unauthorized" || status === "forbidden") return "unauthorized";
+    if (!approvalAuthorityReady || status === "unauthorized" || status === "forbidden") return "unauthorized";
     if (["expired", "stale", "revoked"].includes(status)) return "stale";
     if (status === "blocked") return "blocked";
     if (outcomeApprovalActionState?.toLowerCase().includes("fail")) return "failed";
@@ -9532,19 +9605,24 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       scope: outcomeApproval.lifecycle_boundaries ?? [],
       permissions: outcomeApproval.permissions ? Object.keys(outcomeApproval.permissions) : [],
       threadLabel: outcomeApproval.thread_label ?? outcomeApproval.thread_id ?? outcomeApproval.session_id ?? null,
-      authorized: Boolean(sessionId),
+      authorized: approvalAuthorityReady,
     }
     : null;
   const latestArtifact = [...artifacts].sort((left, right) => new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime())[0] ?? null;
+  const latestArtifactLineage = latestArtifact ? resolveArtifactLineage(latestArtifact) : null;
   const artifactEvidenceEntry = operatorEvidenceEntries.find((entry) => entry.artifact) ?? null;
   const outcomeEvidence: OutcomeEvidenceSummary = latestArtifact
     ? {
-      state: "active",
+      state: latestArtifactLineage?.ambiguous || !latestArtifactLineage?.sourceWorkflow ? "partial_metadata" : "active",
       label: latestArtifact.filePath,
       summary: latestArtifact.summary,
       source: latestArtifact.source,
       createdAt: latestArtifact.createdAt,
-      provenance: artifactEvidenceEntry?.detail ?? latestArtifact.source,
+      provenance: latestArtifactLineage?.ambiguous
+        ? "source ambiguous"
+        : latestArtifactLineage?.sourceWorkflow
+          ? artifactEvidenceEntry?.detail ?? latestArtifact.source
+          : "source unresolved",
       handle: latestArtifact.id,
     }
     : {
@@ -9557,15 +9635,11 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     };
   const outcomeExecution = latestGoalReceipt?.execution_status ?? "unknown";
   const outcomeVerification = latestGoalReceipt?.verification ?? "unknown";
-  const outcomeResultState: OutcomeCockpitState = !latestGoalReceipt
-    ? "partial_metadata"
-    : outcomeExecution.toLowerCase() === "failed"
-      ? "failed"
-      : outcomeExecution.toLowerCase() === "blocked"
-        ? "blocked"
-        : ["awaiting_approval", "pending_approval", "approval_required"].includes(outcomeExecution.toLowerCase())
-          ? "awaiting_approval"
-          : "active";
+  const outcomeResultState: OutcomeCockpitState = outcomeStateForReceipt(
+    latestGoalReceipt,
+    Boolean(currentGoalLoop?.criterion),
+    currentGoal?.status,
+  );
   const outcomeResult: OutcomeResultSummary = {
     state: outcomeResultState,
     label: latestGoalReceipt?.receipt_type ?? latestGoalReceipt?.event_type ?? "No outcome receipt",
@@ -14406,10 +14480,10 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                   if (threadId) void openThread(threadId);
                 }}
                 onApprove={() => {
-                  if (outcomeApproval) void handleApprovalDecision(outcomeApproval, "approve");
+                  if (outcomeApproval && approvalAuthorityReady) void handleApprovalDecision(outcomeApproval, "approve");
                 }}
                 onDeny={() => {
-                  if (outcomeApproval) void handleApprovalDecision(outcomeApproval, "deny");
+                  if (outcomeApproval && approvalAuthorityReady) void handleApprovalDecision(outcomeApproval, "deny");
                 }}
                 onInspectEvidence={() => inspectOperatorEvidenceEntry(artifactEvidenceEntry)}
                 onInspectOutcome={() => setQuestPanelOpen(true)}

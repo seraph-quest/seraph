@@ -131,6 +131,12 @@ const LOCKED_STATES: OutcomeCockpitState[] = [
   "blocked",
 ];
 
+const RECOVERY_LOCKED_STATES: OutcomeCockpitState[] = [
+  ...LOCKED_STATES,
+  "awaiting_approval",
+  "failed",
+];
+
 function formatState(value: OutcomeCockpitState): string {
   return value.replace(/_/g, " ").toUpperCase();
 }
@@ -249,7 +255,10 @@ export function OutcomeCockpitPanel({
   onBranch,
 }: OutcomeCockpitPanelProps) {
   const approvalLocked = actionLocked(approval?.state ?? "empty", approval?.authorized !== false);
-  const recoveryLocked = actionLocked(work?.state ?? workLoadState);
+  const recoveryLocked = !(
+    work?.state
+    && !RECOVERY_LOCKED_STATES.includes(work.state)
+  ) || !work;
   const workLoading = workLoadState === "loading";
   const workNeedsLoad = !work && ["partial_metadata", "stale", "degraded"].includes(workLoadState);
 

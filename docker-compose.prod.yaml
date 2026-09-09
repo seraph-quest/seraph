@@ -31,6 +31,10 @@ services:
       DEPLOYMENT_ENVIRONMENT: production
       WORKSPACE_DIR: /app/data
       SERAPH_PRODUCTION_MOUNT_CHECK: "true"
+      # Set this to the mount source shown by the host/container's
+      # /proc/self/mountinfo for /app/data.  Preflight fails closed when the
+      # configured identity is missing or does not match.
+      SERAPH_PRODUCTION_MOUNT_SOURCE: ${SERAPH_PRODUCTION_MOUNT_SOURCE:-}
       LLM_LOG_DIR: /app/logs
       LLM_API_BASE: https://openrouter.ai/api/v1
       OPENROUTER_PROVIDER_ONLY: "true"

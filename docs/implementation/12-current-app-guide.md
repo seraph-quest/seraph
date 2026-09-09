@@ -59,7 +59,10 @@ local fallback is selected.
 The production backend's canonical workspace is the host path configured by
 `BACKEND_DATA_PATH_PROD`, mounted only as `WORKSPACE_DIR=/app/data`. The managed
 maintenance commands resolve that bind before doing any work and fail closed on
-missing, symlinked, or ambiguous roots:
+missing, symlinked, or ambiguous roots. Container preflight also requires
+`SERAPH_PRODUCTION_MOUNT_SOURCE` to match the `/app/data` mount source reported
+by `/proc/self/mountinfo`; a writable directory or generic volume alone is not
+treated as proof of the configured host bind:
 
 ```bash
 ./manage.sh -e prod backup
@@ -70,7 +73,8 @@ Archives and restore staging are derived siblings of the host bind and are not
 active workspace roots. Archives contain checksummed canonical files and
 redacted secret metadata; recovery preserves the required vault key but drops
 optional integration tokens. The production preflight requires dedicated
-`/app/data` mount evidence from `/proc/self/mountinfo`, and the backend holds
+`/app/data` mount evidence from `/proc/self/mountinfo` plus that configured
+source identity match, and the backend holds
 the same bind-local owner lock for its lifetime so backup and restore fail
 closed while writers or the scheduler are active. Restore resets only empty
 declared derived directories; a stored derived index that has no bounded

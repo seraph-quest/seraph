@@ -146,12 +146,23 @@ def _validate_backup_destination(workspace, archive: Path | None) -> Path | None
 def _status_receipt(workspace) -> dict[str, Any]:
     last = read_lifecycle_receipt(workspace)
     active_root_present = workspace.host_root.is_dir() and not workspace.host_root.is_symlink()
+    last_status = str(last.get("status") or "").strip().lower() if isinstance(last, dict) else ""
+    if not active_root_present or last_status == "blocked":
+        status = "blocked"
+    elif last_status in {"created", "restored", "rolled_back", "ready"}:
+        status = "ready"
+    elif last is None:
+        status = "unknown"
+    else:
+        status = "unknown"
     return {
         "schema_version": "seraph.production-workspace-lifecycle.v1",
-        "status": "ready" if last is not None and active_root_present else "blocked" if not active_root_present else "unknown",
+        "status": status,
         "operator_status": (
             "production_workspace_lifecycle_active_root_missing"
             if not active_root_present
+            else "production_workspace_lifecycle_blocked"
+            if status == "blocked"
             else "production_workspace_lifecycle_last_result"
             if last is not None
             else "production_workspace_lifecycle_no_result"

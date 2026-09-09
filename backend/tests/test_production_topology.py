@@ -144,6 +144,7 @@ def test_production_compose_keeps_backend_private_and_has_no_gpu_or_vlm_gate():
     assert "LOCAL_LLM_API_BASE: \"\"" in compose
     assert "SERAPH_VLM_BASE_URL: \"\"" in compose
     assert 'SERAPH_PRODUCTION_MOUNT_CHECK: "true"' in compose
+    assert "SERAPH_PRODUCTION_MOUNT_SOURCE" in compose
 
 
 def test_production_mount_preflight_fails_closed_without_mountinfo(tmp_path):

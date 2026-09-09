@@ -30,6 +30,7 @@ from src.workspace.state_registry import WorkspaceStateError, canonical_workspac
 CANONICAL_CONTAINER_WORKSPACE = "/app/data"
 PRODUCTION_BIND_ENV = "BACKEND_DATA_PATH_PROD"
 WORKSPACE_ENV = "WORKSPACE_DIR"
+MOUNT_SOURCE_ENV = "SERAPH_PRODUCTION_MOUNT_SOURCE"
 MAINTENANCE_LOCK_NAME = ".seraph-workspace-maintenance.lock"
 MOUNTINFO_PATH = "/proc/self/mountinfo"
 MAX_LIFECYCLE_RECEIPT_BYTES = 64 * 1024
@@ -162,7 +163,11 @@ class ProductionWorkspace:
             "host_root_digest": self.identity_digest,
             "backup_location": "derived-sibling",
             "restore_staging_location": "derived-sibling",
-            "active_root_is_host_bind": True,
+            # Resolving the host path proves which directory the maintenance
+            # command owns; it does not prove what a container mounted at
+            # /app/data.  The preflight supplies that separate mount receipt.
+            "active_root_is_host_bind": False,
+            "host_bind_identity": "configured_path_digest_only",
             "sidecars_are_active_roots": False,
             "secret_values_included": False,
         }
@@ -241,7 +246,8 @@ def validate_container_workspace_mount(
     _assert_no_symlink_components(path, label="production /app/data mount")
     if not os.access(path, os.R_OK | os.W_OK | os.X_OK):
         raise ProductionWorkspaceMountError("production /app/data mount is not writable")
-    mount_receipt = _mountinfo_receipt(mountinfo)
+    expected_source = _env_value(values, MOUNT_SOURCE_ENV)
+    mount_receipt = _mountinfo_receipt(mountinfo, expected_source=expected_source)
     return {
         "schema_version": "seraph.production-workspace-mount.v1",
         "status": "ready",
@@ -269,7 +275,15 @@ def _decode_mountinfo_path(value: str) -> str:
     return "".join(decoded)
 
 
-def _mountinfo_receipt(mountinfo: str | os.PathLike[str] | None) -> dict[str, object]:
+def _mountinfo_receipt(
+    mountinfo: str | os.PathLike[str] | None,
+    *,
+    expected_source: str,
+) -> dict[str, object]:
+    if not expected_source:
+        raise ProductionWorkspaceMountError(
+            "production configured mount source identity is required"
+        )
     source = Path(mountinfo) if mountinfo is not None else Path(MOUNTINFO_PATH)
     try:
         raw = source.read_text(encoding="utf-8")
@@ -289,11 +303,15 @@ def _mountinfo_receipt(mountinfo: str | os.PathLike[str] | None) -> dict[str, ob
             # mountpoint in mountinfo; preserve only non-sensitive evidence.
             if filesystem == "overlay" or mount_source == "overlay":
                 continue
+            if _decode_mountinfo_path(mount_source) != expected_source:
+                continue
             return {
                 "source": "proc_mountinfo",
                 "mountpoint": CANONICAL_CONTAINER_WORKSPACE,
                 "filesystem": filesystem,
                 "mount_source_present": bool(mount_source),
+                "mount_source_identity_verified": True,
+                "mount_source_digest": hashlib.sha256(mount_source.encode("utf-8")).hexdigest()[:24],
             }
     raise ProductionWorkspaceMountError(
         "production /app/data has no dedicated bind mount evidence"
@@ -570,6 +588,7 @@ def maintenance_fence(workspace: ProductionWorkspace) -> Iterator[None]:
 
 __all__ = [
     "CANONICAL_CONTAINER_WORKSPACE",
+    "MOUNT_SOURCE_ENV",
     "PRODUCTION_BIND_ENV",
     "WORKSPACE_ENV",
     "DuplicateWorkspaceOwnerError",

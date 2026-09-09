@@ -44,6 +44,7 @@ from src.workspace.lifecycle import (
 )
 from src.workspace.production import (
     CANONICAL_CONTAINER_WORKSPACE,
+    MOUNT_SOURCE_ENV,
     PRODUCTION_BIND_ENV,
     WORKSPACE_ENV,
     DuplicateWorkspaceOwnerError,
@@ -102,6 +103,7 @@ __all__ = [
     "workspace_backup_dir",
     "workspace_restore_staging_dir",
     "CANONICAL_CONTAINER_WORKSPACE",
+    "MOUNT_SOURCE_ENV",
     "PRODUCTION_BIND_ENV",
     "WORKSPACE_ENV",
     "DuplicateWorkspaceOwnerError",

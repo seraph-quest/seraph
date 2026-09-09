@@ -58,7 +58,8 @@ def test_production_resolution_binds_only_the_configured_host_root(tmp_path):
     assert workspace.restore_staging_root == tmp_path / "production-data.restore-staging"
     receipt = workspace.receipt()
     assert receipt["canonical_container_mount"] == "/app/data"
-    assert receipt["active_root_is_host_bind"] is True
+    assert receipt["active_root_is_host_bind"] is False
+    assert receipt["host_bind_identity"] == "configured_path_digest_only"
     assert receipt["sidecars_are_active_roots"] is False
     assert str(root) not in json.dumps(receipt, sort_keys=True)
 
@@ -91,8 +92,28 @@ def test_container_mount_requires_exact_app_data_and_safe_directory(tmp_path):
         encoding="utf-8",
     )
     assert validate_container_workspace_mount(
-        {"WORKSPACE_DIR": "/app/data"}, mounted_root=mount, mountinfo=mountinfo
+        {
+            "WORKSPACE_DIR": "/app/data",
+            "SERAPH_PRODUCTION_MOUNT_SOURCE": "/dev/test",
+        },
+        mounted_root=mount,
+        mountinfo=mountinfo,
     )["canonical_mount"] is True
+
+    with pytest.raises(ProductionWorkspaceMountError, match="identity is required"):
+        validate_container_workspace_mount(
+            {"WORKSPACE_DIR": "/app/data"}, mounted_root=mount, mountinfo=mountinfo
+        )
+
+    with pytest.raises(ProductionWorkspaceMountError, match="dedicated bind mount evidence"):
+        validate_container_workspace_mount(
+            {
+                "WORKSPACE_DIR": "/app/data",
+                "SERAPH_PRODUCTION_MOUNT_SOURCE": "/dev/wrong",
+            },
+            mounted_root=mount,
+            mountinfo=mountinfo,
+        )
 
     with pytest.raises(ProductionWorkspaceMountError):
         validate_container_workspace_mount({"WORKSPACE_DIR": str(mount)}, mounted_root=mount)
@@ -101,7 +122,12 @@ def test_container_mount_requires_exact_app_data_and_safe_directory(tmp_path):
     link.symlink_to(mount, target_is_directory=True)
     with pytest.raises(ProductionWorkspaceMountError):
         validate_container_workspace_mount(
-            {"WORKSPACE_DIR": "/app/data"}, mounted_root=link, mountinfo=mountinfo
+            {
+                "WORKSPACE_DIR": "/app/data",
+                "SERAPH_PRODUCTION_MOUNT_SOURCE": "/dev/test",
+            },
+            mounted_root=link,
+            mountinfo=mountinfo,
         )
 
     with pytest.raises(ProductionWorkspaceMountError):
@@ -322,6 +348,17 @@ def test_managed_cli_restore_rejects_corrupt_archive_and_confirmation_gap(tmp_pa
     assert blocked.returncode == 78
     assert json.loads(blocked.stdout)["reason_code"] == "invalid_workspace_archive"
 
+    status_after_block = subprocess.run(
+        [sys.executable, str(CLI), "--base-dir", str(tmp_path), "status"],
+        env=environment,
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert status_after_block.returncode == 0
+    assert json.loads(status_after_block.stdout)["status"] == "blocked"
+
 
 def test_managed_status_and_rollback_are_durable_and_operator_visible(tmp_path):
     root = _workspace(tmp_path)
@@ -347,6 +384,7 @@ def test_managed_status_and_rollback_are_durable_and_operator_visible(tmp_path):
     )
     assert status.returncode == 0, status.stderr
     status_receipt = json.loads(status.stdout)
+    assert status_receipt["status"] == "ready"
     assert status_receipt["last_result"]["operation"] == "backup"
     assert status_receipt["rollback_available"] is False
 

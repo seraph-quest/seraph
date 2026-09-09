@@ -34,6 +34,7 @@ from .gpu_admission import (
     GpuAdmissionRequest,
     GpuAdmissionUncertainError,
     GpuPriority,
+    GPU_OWNER_REVOCATION_REASON,
     priority_for_inference_context,
 )
 
@@ -43,6 +44,7 @@ REMOTE_INFERENCE_RESOURCE_CLASS = "remote_inference"
 REMOTE_INFERENCE_DEFAULT_QUEUE = 64
 REMOTE_INFERENCE_DEFAULT_OWNER_OUTSTANDING = 16
 REMOTE_INFERENCE_OWNER_COST_UNKNOWN_REASON = "owner_cost_unknown"
+REMOTE_INFERENCE_OWNER_REVOCATION_REASON = GPU_OWNER_REVOCATION_REASON
 
 
 class RemoteInferenceReceiptRepository(Protocol):
@@ -137,6 +139,27 @@ class RemoteInferenceAdmissionBroker(GpuAdmissionBroker[Any]):
             fencing_token=fencing_token,
         )
 
+    async def cancel_owner(
+        self,
+        owner_id: str,
+        *,
+        reason_code: str = REMOTE_INFERENCE_OWNER_REVOCATION_REASON,
+    ) -> tuple[RemoteInferenceAdmissionReceipt, ...]:
+        """Revoke one owner's queued and active remote inference work.
+
+        Queued operations are terminally cancelled before a provider callback
+        can run.  An active operation is only marked for cooperative
+        cancellation; because this broker treats callback outcomes as
+        uncertain, its lease remains blocked until the existing fenced
+        ``reconcile`` method settles the actual cost.  The operation is
+        intentionally scoped by owner identity and repeated revocations are
+        idempotent for the same reason code.
+        """
+        return await self._cancel_owner_operations(
+            owner_id,
+            reason_code=reason_code,
+        )
+
     def _reject_owner_policy(
         self,
         request: GpuAdmissionRequest,
@@ -228,6 +251,8 @@ __all__ = [
     "REMOTE_INFERENCE_DEFAULT_QUEUE",
     "REMOTE_INFERENCE_DEFAULT_OWNER_OUTSTANDING",
     "REMOTE_INFERENCE_OWNER_COST_UNKNOWN_REASON",
+    "REMOTE_INFERENCE_OWNER_REVOCATION_REASON",
+    "GPU_OWNER_REVOCATION_REASON",
     "RemoteInferenceReceiptRepository",
     "GPU_ADMISSION_SCHEMA_VERSION",
     "GPU_ADMISSION_STATUSES",

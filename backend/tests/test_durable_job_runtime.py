@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
+from sqlalchemy import update
 from src.db.engine import _ensure_legacy_columns, _map_legacy_workflow_status
 from src.db.models import WorkflowRunState
 
@@ -27,6 +28,7 @@ from src.workflows.job_runtime import (
     _canonical_remote_inference_receipt,
     _digest,
     _safe_inputs_digest,
+    _safe_structure,
     _validate_admission_authority,
     _validate_retry_actor,
     durable_job_repository,
@@ -202,7 +204,13 @@ def test_retry_requires_owner_identity_and_canonical_reconciliation_receipt():
     with pytest.raises(ValueError):
         _canonical_reconciliation_receipt(None)
     canonical, digest = _canonical_reconciliation_receipt(
-        {"status": "read_back", "secret_token": "must-not-persist"}
+        {
+            "effect_id": "effect-1",
+            "effect_type": "destination_write",
+            "status": "read_back",
+            "outcome": "absent",
+            "secret_token": "must-not-persist",
+        }
     )
     assert digest
     assert "must-not-persist" not in canonical
@@ -233,6 +241,27 @@ def test_remote_admission_receipts_are_allowlisted_and_redacted():
         _canonical_remote_inference_receipt(
             {"operation_id": "operation-1", "job_id": "job-1", "owner_id": "service:strategist", "status": "unknown"}
         )
+
+
+def test_durable_receipts_redact_secret_key_variants_and_error_payloads():
+    safe = _safe_structure(
+        {
+            "details": {
+                "api-key": "secret-api-key",
+                "apikey": "secret-apikey",
+                "x-api-key": "secret-x-api-key",
+                "Authorization": "Bearer secret-authorization",
+                "original_error": "provider response included secret-original-error",
+                "safe_reason": "provider_timeout",
+            }
+        }
+    )
+    assert safe["details"]["api-key"] == "[redacted]"
+    assert safe["details"]["apikey"] == "[redacted]"
+    assert safe["details"]["x-api-key"] == "[redacted]"
+    assert safe["details"]["Authorization"] == "[redacted]"
+    assert safe["details"]["original_error"] == "[redacted]"
+    assert safe["details"]["safe_reason"] == "provider_timeout"
 
 
 @pytest.mark.asyncio
@@ -414,6 +443,7 @@ async def test_admission_is_idempotent_and_lifecycle_records_safe_receipts(async
         reconciled=True,
         reconciliation_receipt={
             "effect_id": "destination-write-1",
+            "effect_type": "destination_write",
             "status": "read_back",
             "readback_digest": "digest-1",
         },
@@ -528,3 +558,183 @@ async def test_unclaimed_failure_uses_atomic_service_owner_fence(async_db):
     )
     assert failed["status"] == "failed"
     assert failed["failure_reason"] == "queue_error"
+
+
+@pytest.mark.asyncio
+async def test_claim_heartbeat_and_terminal_transition_share_revision_cas(async_db):
+    admitted = await durable_job_repository.admit_job(
+        _spec(job_id="job-743-cas", dedupe_key="candidate-cas")
+    )
+    await durable_job_repository.queue_job(admitted["job_id"], expected_revision=admitted["revision"])
+    claimed = await durable_job_repository.claim_job(
+        admitted["job_id"],
+        owner="runner-cas",
+        expected_revision=admitted["revision"] + 1,
+    )
+    token = claimed["lease"]["fencing_token"]
+    heartbeated = await durable_job_repository.heartbeat_job(
+        admitted["job_id"],
+        owner="runner-cas",
+        fencing_token=token,
+        expected_revision=claimed["revision"],
+    )
+
+    with pytest.raises(DurableJobLeaseError, match="revision"):
+        await durable_job_repository.transition_job(
+            admitted["job_id"],
+            "succeeded",
+            owner="runner-cas",
+            fencing_token=token,
+            expected_revision=claimed["revision"],
+        )
+
+    terminal = await durable_job_repository.transition_job(
+        admitted["job_id"],
+        "succeeded",
+        owner="runner-cas",
+        fencing_token=token,
+        expected_state="running",
+        expected_revision=heartbeated["revision"],
+    )
+    assert terminal["status"] == "succeeded"
+    assert terminal["revision"] == heartbeated["revision"] + 1
+
+
+@pytest.mark.asyncio
+async def test_expired_lease_transfer_requires_source_fence_and_increments_both_counters(async_db):
+    admitted = await durable_job_repository.admit_job(
+        _spec(job_id="job-743-transfer", dedupe_key="candidate-transfer")
+    )
+    await durable_job_repository.queue_job(admitted["job_id"])
+    claimed = await durable_job_repository.claim_job(
+        admitted["job_id"], owner="runner-old", lease_seconds=300
+    )
+    async with async_db() as db:
+        await db.execute(
+            update(WorkflowRunState)
+            .where(WorkflowRunState.run_identity == admitted["job_id"])
+            .values(lease_expires_at=datetime.now(timezone.utc) - timedelta(seconds=1))
+        )
+
+    with pytest.raises(DurableJobLeaseError):
+        await durable_job_repository.transfer_lease(
+            admitted["job_id"],
+            owner="runner-new",
+            expected_owner="runner-old",
+            fencing_token=claimed["lease"]["fencing_token"] - 1,
+            expected_revision=claimed["revision"],
+        )
+    transferred = await durable_job_repository.transfer_lease(
+        admitted["job_id"],
+        owner="runner-new",
+        expected_owner="runner-old",
+        fencing_token=claimed["lease"]["fencing_token"],
+        expected_revision=claimed["revision"],
+    )
+    assert transferred["lease"]["owner"] == "runner-new"
+    assert transferred["lease"]["fencing_token"] == claimed["lease"]["fencing_token"] + 1
+    assert transferred["revision"] == claimed["revision"] + 1
+
+
+@pytest.mark.asyncio
+async def test_restart_recovery_keeps_unknown_effect_and_cost_liability_out_of_retry(async_db):
+    admitted = await durable_job_repository.admit_job(
+        _spec(job_id="job-743-unknown", dedupe_key="candidate-unknown")
+    )
+    await durable_job_repository.queue_job(admitted["job_id"])
+    claimed = await durable_job_repository.claim_job(
+        admitted["job_id"], owner="runner-unknown", lease_seconds=1
+    )
+    token = claimed["lease"]["fencing_token"]
+    await durable_job_repository.record_effect(
+        admitted["job_id"],
+        effect_type="destination_write",
+        status="intent",
+        details={"destination_ledger": "controlled", "payload": "redacted"},
+        owner="runner-unknown",
+        fencing_token=token,
+    )
+    recovered = await durable_job_repository.recover_stale_jobs(
+        now=datetime.now(timezone.utc) + timedelta(seconds=5)
+    )
+    recovered_job = next(item for item in recovered if item["job_id"] == admitted["job_id"])
+    assert recovered_job["status"] == "unknown_external_effect"
+    assert recovered_job["receipt"]["recovery_state"] == "unknown_external_effect"
+    with pytest.raises(DurableJobTransitionError, match="reconciliation"):
+        await durable_job_repository.retry_job(
+            admitted["job_id"],
+            owner_kind="service",
+            owner_principal_id="service:strategist",
+            service_id="service:strategist",
+            reconciliation_receipt={
+                "effect_id": "missing-effect",
+                "effect_type": "destination_write",
+                "status": "read_back",
+                "outcome": "absent",
+            },
+        )
+
+    reconciled = await durable_job_repository.reconcile_external_effect(
+        admitted["job_id"],
+        owner_kind="service",
+        owner_principal_id="service:strategist",
+        service_id="service:strategist",
+        reconciliation_receipt={
+            "effect_id": next(
+                item["effect_id"]
+                for item in recovered_job["effects"]
+                if item.get("status") == "intent"
+            ),
+            "effect_type": "destination_write",
+            "status": "read_back",
+            "outcome": "absent",
+        },
+    )
+    retried = await durable_job_repository.retry_job(
+        admitted["job_id"],
+        owner_kind="service",
+        owner_principal_id="service:strategist",
+        service_id="service:strategist",
+        reconciliation_receipt={
+            "effect_id": "missing-after-reconcile",
+            "effect_type": "destination_write",
+            "status": "read_back",
+            "outcome": "absent",
+        },
+        expected_revision=reconciled["revision"],
+    )
+    assert retried["status"] == "queued"
+
+    cost_job = await durable_job_repository.admit_job(
+        _spec(job_id="job-743-cost", dedupe_key="candidate-cost")
+    )
+    await durable_job_repository.queue_job(cost_job["job_id"])
+    cost_claimed = await durable_job_repository.claim_job(
+        cost_job["job_id"], owner="runner-cost", lease_seconds=1
+    )
+    await durable_job_repository.record_effect(
+        cost_job["job_id"],
+        effect_type="remote_inference_admission",
+        status="unknown",
+        details={"unknown_cost_outstanding": True},
+        owner="runner-cost",
+        fencing_token=cost_claimed["lease"]["fencing_token"],
+    )
+    cost_recovery = await durable_job_repository.recover_stale_jobs(
+        now=datetime.now(timezone.utc) + timedelta(seconds=5)
+    )
+    cost_recovered = next(item for item in cost_recovery if item["job_id"] == cost_job["job_id"])
+    assert cost_recovered["status"] == "cost_liability"
+    with pytest.raises(DurableJobTransitionError, match="reconciliation"):
+        await durable_job_repository.retry_job(
+            cost_job["job_id"],
+            owner_kind="service",
+            owner_principal_id="service:strategist",
+            service_id="service:strategist",
+            reconciliation_receipt={
+                "effect_id": "cost-effect",
+                "effect_type": "remote_inference_admission",
+                "status": "settled",
+                "actual_cost_microusd": 0,
+            },
+        )

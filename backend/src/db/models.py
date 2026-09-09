@@ -246,6 +246,10 @@ class WorkflowRunState(SQLModel, table=True):
     lease_owner: Optional[str] = Field(default=None, index=True)
     lease_expires_at: Optional[datetime] = Field(default=None, index=True)
     fencing_token: int = Field(default=0, index=True)
+    # Monotonic compare-and-swap revision for typed durable-job writes. This
+    # is separate from ``fencing_token``: receipt writes may advance the row
+    # revision without transferring ownership.
+    revision: int = Field(default=0, index=True)
     attempt_count: int = Field(default=0, index=True)
     max_attempts: int = Field(default=1, index=True)
     failure_reason: Optional[str] = Field(default=None, index=True)

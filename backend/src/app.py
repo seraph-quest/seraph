@@ -1,4 +1,5 @@
 import os
+import logging
 from contextlib import asynccontextmanager
 from urllib.parse import urlparse, urlsplit, urlunsplit
 
@@ -291,6 +292,23 @@ def _augment_inference_readiness(
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await init_db()
+    # Recover expired durable invocation leases before scheduler jobs can
+    # observe an old ``running`` occurrence and incorrectly skip it.  Recovery
+    # is fail-closed and operator-visible; a failed recovery is not hidden as
+    # a healthy startup.
+    try:
+        from src.workflows.job_runtime import durable_job_repository
+
+        recovered_jobs = await durable_job_repository.recover_stale_jobs()
+        if recovered_jobs:
+            logging.getLogger(__name__).warning(
+                "Recovered %d stale durable job(s) during startup",
+                len(recovered_jobs),
+            )
+    except Exception:
+        logging.getLogger(__name__).exception(
+            "Durable job restart recovery failed; stale work remains operator-visible"
+        )
     ensure_soul_exists()
     init_llm_logging()
     # Load persisted settings before scheduler starts

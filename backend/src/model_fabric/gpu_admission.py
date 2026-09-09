@@ -874,6 +874,25 @@ class GpuAdmissionBroker(Generic[T]):
                 "claim_boundary": "process_local_admission_lease; durable_job_repository_remains_canonical",
             }
 
+    def receipt_for(self, operation_id: str) -> GpuAdmissionReceipt:
+        """Return the latest operator-safe receipt for one admitted operation.
+
+        Execution adapters use this readback after a callback returns because
+        ``execute`` and ``stream`` intentionally return provider values or
+        stream items rather than coupling callers to broker receipt objects.
+        The read is fenced by the broker condition and never exposes queued
+        payloads.
+        """
+        normalized_operation_id = str(operation_id or "").strip()
+        if not normalized_operation_id:
+            raise KeyError(operation_id)
+        with self._condition:
+            self._mark_active_deadline_locked()
+            operation = self._operations.get(normalized_operation_id)
+            if operation is None:
+                raise KeyError(operation_id)
+            return self._receipt_locked(operation)
+
     async def execute(
         self,
         request: GpuAdmissionRequest,

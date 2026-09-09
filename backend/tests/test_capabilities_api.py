@@ -7,7 +7,11 @@ from fastapi import HTTPException
 import pytest
 from starlette.requests import Request
 
-from src.api.capabilities import _explicit_runbook_entries, _runbook_labels_by_starter_pack
+from src.api.capabilities import (
+    WorkflowDraftRequest,
+    _explicit_runbook_entries,
+    _runbook_labels_by_starter_pack,
+)
 from src.approval.runtime import get_current_session_id, get_current_trust_principal
 from src.auth.service import test_bypass_operator
 from src.app import create_app
@@ -873,6 +877,19 @@ def _starter_pack_activation_request(operator):
     )
 
 
+def _workflow_draft_save_request(operator):
+    return Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/api/capabilities/workflow-drafts/save",
+            "headers": [],
+            "query_string": b"",
+            "state": {"operator": operator},
+        }
+    )
+
+
 @pytest.mark.asyncio
 async def test_activate_starter_pack_denies_invalid_middleware_authority_before_side_effects():
     from src.api.capabilities import activate_starter_pack
@@ -972,6 +989,118 @@ async def test_activate_starter_pack_binds_operator_for_full_route_and_resets_co
         and principal.session_id == operator.session_id
         for _label, principal in observed
     )
+    assert get_current_session_id() is None
+    assert get_current_trust_principal() is None
+
+
+@pytest.mark.asyncio
+async def test_save_workflow_draft_denies_invalid_middleware_authority_before_side_effects():
+    from src.api.capabilities import save_workflow_draft
+
+    operator = test_bypass_operator()
+    invalid_operators = (
+        None,
+        replace(operator, principal=replace(operator.principal, revoked=True)),
+        replace(operator, principal=replace(operator.principal, session_id="other-session")),
+        replace(operator, principal=replace(operator.principal, grants=())),
+    )
+    with (
+        patch("src.api.capabilities._validate_workflow_draft") as validate,
+        patch("src.api.capabilities.save_workspace_contribution") as save,
+        patch("src.api.capabilities.workflow_manager.reload") as reload_workflows,
+        patch("src.api.capabilities.log_integration_event", new_callable=AsyncMock) as log,
+    ):
+        for invalid_operator in invalid_operators:
+            with pytest.raises(HTTPException) as raised:
+                await save_workflow_draft(
+                    WorkflowDraftRequest(content="invalid"),
+                    _workflow_draft_save_request(invalid_operator),
+                )
+            assert raised.value.status_code == 401
+            assert raised.value.detail == {"code": "authentication_required"}
+
+    validate.assert_not_called()
+    save.assert_not_called()
+    reload_workflows.assert_not_called()
+    log.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_save_workflow_draft_binds_operator_for_full_route_and_resets_context():
+    from src.api.capabilities import save_workflow_draft
+
+    operator = test_bypass_operator()
+    observed: list[tuple[str, object]] = []
+
+    def observe(label: str):
+        observed.append((label, get_current_trust_principal()))
+
+    validation = {
+        "valid": True,
+        "errors": [],
+        "workflow": {
+            "name": "Bound Draft",
+            "tool_name": "workflow_bound_draft",
+            "description": "",
+            "requires_tools": [],
+            "requires_skills": [],
+            "user_invocable": True,
+            "step_count": 1,
+            "step_tools": ["write_file"],
+            "inputs": {},
+        },
+    }
+
+    def validate_draft(_content: str):
+        observe("validation")
+        return validation
+
+    def ensure_workspace_extensions():
+        observe("workspace_extensions")
+
+    def save_workspace(*_args, **_kwargs):
+        observe("workspace_write")
+        return "/tmp/workspace-capabilities/workflows/bound_draft.md"
+
+    def reload_workflows():
+        observe("reload")
+        return []
+
+    with (
+        patch("src.api.capabilities._validate_workflow_draft", side_effect=validate_draft),
+        patch(
+            "src.api.capabilities._ensure_workflow_manager_workspace_extensions_loaded",
+            side_effect=ensure_workspace_extensions,
+        ),
+        patch("src.api.capabilities.save_workspace_contribution", side_effect=save_workspace),
+        patch("src.api.capabilities.workflow_manager.reload", side_effect=reload_workflows),
+        patch(
+            "src.api.capabilities.log_integration_event",
+            new_callable=AsyncMock,
+            side_effect=lambda **_kwargs: observe("audit"),
+        ) as log,
+    ):
+        payload = await save_workflow_draft(
+            WorkflowDraftRequest(content="draft"),
+            _workflow_draft_save_request(operator),
+        )
+
+    assert payload["status"] == "saved"
+    assert [label for label, _principal in observed] == [
+        "validation",
+        "workspace_extensions",
+        "workspace_write",
+        "reload",
+        "audit",
+    ]
+    assert all(
+        principal is not None
+        and principal.principal_id == operator.principal.principal_id
+        and principal.principal_type is PrincipalType.OPERATOR
+        and principal.session_id == operator.session_id
+        for _label, principal in observed
+    )
+    log.assert_awaited_once()
     assert get_current_session_id() is None
     assert get_current_trust_principal() is None
 

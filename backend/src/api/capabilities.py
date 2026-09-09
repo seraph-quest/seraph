@@ -2121,32 +2121,42 @@ async def validate_workflow_draft(body: WorkflowDraftRequest):
 
 
 @router.post("/capabilities/workflow-drafts/save")
-async def save_workflow_draft(body: WorkflowDraftRequest):
-    validation = _validate_workflow_draft(body.content)
-    if not validation["valid"] or not validation["workflow"]:
-        raise HTTPException(status_code=400, detail="Workflow draft is invalid")
-    workflow_name = str(validation["workflow"]["name"])
-    file_name = f"{sanitize_workflow_name(workflow_name)}.md"
-    _ensure_workflow_manager_workspace_extensions_loaded()
-    file_path = str(save_workspace_contribution("workflows", file_name=file_name, content=body.content))
-    workflow_manager.reload()
-    await log_integration_event(
-        integration_type="workflow_draft",
-        name=workflow_name,
-        outcome="succeeded",
-        details={
-            "status": "saved",
-            "file_path": file_path,
-            "step_count": validation["workflow"]["step_count"],
-            "step_tools": validation["workflow"]["step_tools"],
-        },
+async def save_workflow_draft(body: WorkflowDraftRequest, request: Request):
+    operator = _require_authenticated_capability_operator(request)
+    active_session_id = operator.session_id
+    tokens = set_runtime_context(
+        active_session_id,
+        context_manager.get_context().approval_mode,
+        trust_principal=bind_operator_principal(operator, active_session_id),
     )
-    return {
-        "status": "saved",
-        "name": workflow_name,
-        "file_path": file_path,
-        "workflow": validation["workflow"],
-    }
+    try:
+        validation = _validate_workflow_draft(body.content)
+        if not validation["valid"] or not validation["workflow"]:
+            raise HTTPException(status_code=400, detail="Workflow draft is invalid")
+        workflow_name = str(validation["workflow"]["name"])
+        file_name = f"{sanitize_workflow_name(workflow_name)}.md"
+        _ensure_workflow_manager_workspace_extensions_loaded()
+        file_path = str(save_workspace_contribution("workflows", file_name=file_name, content=body.content))
+        workflow_manager.reload()
+        await log_integration_event(
+            integration_type="workflow_draft",
+            name=workflow_name,
+            outcome="succeeded",
+            details={
+                "status": "saved",
+                "file_path": file_path,
+                "step_count": validation["workflow"]["step_count"],
+                "step_tools": validation["workflow"]["step_tools"],
+            },
+        )
+        return {
+            "status": "saved",
+            "name": workflow_name,
+            "file_path": file_path,
+            "workflow": validation["workflow"],
+        }
+    finally:
+        reset_runtime_context(tokens)
 
 
 @router.post("/capabilities/starter-packs/{name}/activate")

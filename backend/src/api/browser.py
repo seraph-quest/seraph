@@ -5,14 +5,19 @@ from __future__ import annotations
 import asyncio
 from typing import Literal
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
 from config.settings import settings
+from src.approval.runtime import reset_runtime_context, set_runtime_context
+from src.api.capabilities import _require_authenticated_capability_operator
+from src.auth.cancellation import assert_runtime_not_revoked
+from src.auth.service import bind_operator_principal
 from src.browser.sessions import browser_session_runtime
 from src.extensions.browser_providers import list_browser_provider_inventory
 from src.extensions.registry import ExtensionRegistry, default_manifest_roots_for_workspace
 from src.extensions.state import connector_enabled_overrides, load_extension_state_payload
+from src.observer.manager import context_manager
 from src.tools.browser_session_tool import _resolve_browser_provider
 from src.tools.browser_tool import browse_webpage
 
@@ -43,6 +48,7 @@ class BrowserComputerUseControlActionRequest(BrowserSessionControlRequest):
 
 
 async def _capture_or_raise(url: str, capture: str) -> str:
+    assert_runtime_not_revoked()
     content = await asyncio.to_thread(browse_webpage, url.strip(), action=capture)
     if str(content or "").startswith("Error:"):
         raise HTTPException(status_code=400, detail=content)
@@ -55,6 +61,24 @@ def _metadata_only_session_payload(payload: dict[str, object] | None) -> dict[st
     metadata = dict(payload)
     metadata.pop("content", None)
     return metadata
+
+
+def _bind_browser_operator(request: Request, owner_session_id: str):
+    """Bind one browser mutation to the authenticated operator session."""
+
+    operator = _require_authenticated_capability_operator(request)
+    active_session_id = operator.session_id
+    if str(owner_session_id or "").strip() != active_session_id:
+        raise HTTPException(
+            status_code=403,
+            detail={"code": "browser_owner_session_mismatch"},
+        )
+    tokens = set_runtime_context(
+        active_session_id,
+        context_manager.get_context().approval_mode,
+        trust_principal=bind_operator_principal(operator, active_session_id),
+    )
+    return active_session_id, tokens
 
 
 @router.get("/browser/providers")
@@ -115,21 +139,28 @@ async def list_browser_sessions(owner_session_id: str = Query(..., min_length=1)
 
 
 @router.post("/browser/sessions")
-async def open_browser_session(request: BrowserSessionOpenRequest):
-    provider_info, provider_error = _resolve_browser_provider(request.provider)
-    if provider_error:
-        raise HTTPException(status_code=400, detail=provider_error)
-    content = await _capture_or_raise(request.url, request.capture)
-    payload = browser_session_runtime.open_session(
-        owner_session_id=request.owner_session_id,
-        url=request.url.strip(),
-        provider_name=provider_info["provider_name"],
-        provider_kind=provider_info["provider_kind"],
-        execution_mode=provider_info["execution_mode"],
-        capture=request.capture,
-        content=content,
-    )
-    return {"session": _metadata_only_session_payload(payload)}
+async def open_browser_session(request: BrowserSessionOpenRequest, http_request: Request):
+    owner_session_id, tokens = _bind_browser_operator(http_request, request.owner_session_id)
+    try:
+        assert_runtime_not_revoked()
+        provider_info, provider_error = _resolve_browser_provider(request.provider)
+        if provider_error:
+            raise HTTPException(status_code=400, detail=provider_error)
+        assert_runtime_not_revoked()
+        content = await _capture_or_raise(request.url, request.capture)
+        assert_runtime_not_revoked()
+        payload = browser_session_runtime.open_session(
+            owner_session_id=owner_session_id,
+            url=request.url.strip(),
+            provider_name=provider_info["provider_name"],
+            provider_kind=provider_info["provider_kind"],
+            execution_mode=provider_info["execution_mode"],
+            capture=request.capture,
+            content=content,
+        )
+        return {"session": _metadata_only_session_payload(payload)}
+    finally:
+        reset_runtime_context(tokens)
 
 
 @router.get("/browser/sessions/{session_id}")
@@ -141,23 +172,34 @@ async def get_browser_session(session_id: str, owner_session_id: str = Query(...
 
 
 @router.post("/browser/sessions/{session_id}/snapshot")
-async def snapshot_browser_session(session_id: str, request: BrowserSessionSnapshotRequest):
-    capture_url = browser_session_runtime.get_session_capture_url(
-        session_id,
-        owner_session_id=request.owner_session_id,
-    )
-    if capture_url is None:
-        raise HTTPException(status_code=404, detail="browser_session_not_found")
-    content = await _capture_or_raise(capture_url, request.capture)
-    payload = browser_session_runtime.snapshot_session(
-        owner_session_id=request.owner_session_id,
-        session_id=session_id,
-        capture=request.capture,
-        content=content,
-    )
-    if isinstance(payload, dict) and payload.get("error") == "session_quarantined":
-        raise HTTPException(status_code=409, detail=payload)
-    return {"session": _metadata_only_session_payload(payload)}
+async def snapshot_browser_session(
+    session_id: str,
+    request: BrowserSessionSnapshotRequest,
+    http_request: Request,
+):
+    owner_session_id, tokens = _bind_browser_operator(http_request, request.owner_session_id)
+    try:
+        assert_runtime_not_revoked()
+        capture_url = browser_session_runtime.get_session_capture_url(
+            session_id,
+            owner_session_id=owner_session_id,
+        )
+        if capture_url is None:
+            raise HTTPException(status_code=404, detail="browser_session_not_found")
+        assert_runtime_not_revoked()
+        content = await _capture_or_raise(capture_url, request.capture)
+        assert_runtime_not_revoked()
+        payload = browser_session_runtime.snapshot_session(
+            owner_session_id=owner_session_id,
+            session_id=session_id,
+            capture=request.capture,
+            content=content,
+        )
+        if isinstance(payload, dict) and payload.get("error") == "session_quarantined":
+            raise HTTPException(status_code=409, detail=payload)
+        return {"session": _metadata_only_session_payload(payload)}
+    finally:
+        reset_runtime_context(tokens)
 
 
 @router.get("/browser/sessions/{session_id}/journal")
@@ -186,37 +228,67 @@ async def read_browser_ref(ref: str, owner_session_id: str = Query(..., min_leng
 
 
 @router.post("/browser/sessions/{session_id}/control")
-async def control_browser_session(session_id: str, request: BrowserSessionControlRequest):
-    if request.action == "replay_snapshot":
-        replay_state = browser_session_runtime.validate_replay_session(
-            session_id,
-            owner_session_id=request.owner_session_id,
-            acknowledge_degraded_fallback=request.acknowledge_degraded_fallback,
-        )
-        if replay_state is None:
-            raise HTTPException(status_code=404, detail="browser_session_not_found")
-        if isinstance(replay_state, dict) and replay_state.get("error"):
-            raise HTTPException(status_code=409, detail=replay_state)
-        session = replay_state["session"]
-        capture = str(session.get("latest_capture") or "extract")
-        capture_url = browser_session_runtime.get_session_capture_url(
-            session_id,
-            owner_session_id=request.owner_session_id,
-        )
-        if capture_url is None:
-            raise HTTPException(status_code=404, detail="browser_session_not_found")
-        content = await _capture_or_raise(capture_url, capture)
-        payload = browser_session_runtime.snapshot_session(
-            owner_session_id=request.owner_session_id,
-            session_id=session_id,
-            capture=capture,
-            content=content,
-        )
-        if isinstance(payload, dict) and payload.get("error") == "session_quarantined":
-            raise HTTPException(status_code=409, detail=payload)
+async def control_browser_session(
+    session_id: str,
+    request: BrowserSessionControlRequest,
+    http_request: Request,
+):
+    owner_session_id, tokens = _bind_browser_operator(http_request, request.owner_session_id)
+    try:
+        assert_runtime_not_revoked()
+        if request.action == "replay_snapshot":
+            replay_state = browser_session_runtime.validate_replay_session(
+                session_id,
+                owner_session_id=owner_session_id,
+                acknowledge_degraded_fallback=request.acknowledge_degraded_fallback,
+            )
+            if replay_state is None:
+                raise HTTPException(status_code=404, detail="browser_session_not_found")
+            if isinstance(replay_state, dict) and replay_state.get("error"):
+                raise HTTPException(status_code=409, detail=replay_state)
+            session = replay_state["session"]
+            capture = str(session.get("latest_capture") or "extract")
+            assert_runtime_not_revoked()
+            capture_url = browser_session_runtime.get_session_capture_url(
+                session_id,
+                owner_session_id=owner_session_id,
+            )
+            if capture_url is None:
+                raise HTTPException(status_code=404, detail="browser_session_not_found")
+            assert_runtime_not_revoked()
+            content = await _capture_or_raise(capture_url, capture)
+            assert_runtime_not_revoked()
+            payload = browser_session_runtime.snapshot_session(
+                owner_session_id=owner_session_id,
+                session_id=session_id,
+                capture=capture,
+                content=content,
+            )
+            if isinstance(payload, dict) and payload.get("error") == "session_quarantined":
+                raise HTTPException(status_code=409, detail=payload)
+            assert_runtime_not_revoked()
+            result = browser_session_runtime.control_session(
+                session_id,
+                owner_session_id=owner_session_id,
+                action=request.action,
+                reason=request.reason,
+                acknowledge_degraded_fallback=request.acknowledge_degraded_fallback,
+            )
+            if result is None:
+                raise HTTPException(status_code=404, detail="browser_session_not_found")
+            if isinstance(result, dict) and result.get("error"):
+                raise HTTPException(status_code=409, detail=result)
+            refreshed = browser_session_runtime.get_session(
+                session_id,
+                owner_session_id=owner_session_id,
+            )
+            result["session"] = refreshed or payload
+            return result
+
+        assert_runtime_not_revoked()
         result = browser_session_runtime.control_session(
             session_id,
-            owner_session_id=request.owner_session_id,
+            owner_session_id=owner_session_id,
             action=request.action,
             reason=request.reason,
             acknowledge_degraded_fallback=request.acknowledge_degraded_fallback,
@@ -225,33 +297,26 @@ async def control_browser_session(session_id: str, request: BrowserSessionContro
             raise HTTPException(status_code=404, detail="browser_session_not_found")
         if isinstance(result, dict) and result.get("error"):
             raise HTTPException(status_code=409, detail=result)
-        refreshed = browser_session_runtime.get_session(
-            session_id,
-            owner_session_id=request.owner_session_id,
-        )
-        result["session"] = refreshed or payload
         return result
-
-    result = browser_session_runtime.control_session(
-        session_id,
-        owner_session_id=request.owner_session_id,
-        action=request.action,
-        reason=request.reason,
-        acknowledge_degraded_fallback=request.acknowledge_degraded_fallback,
-    )
-    if result is None:
-        raise HTTPException(status_code=404, detail="browser_session_not_found")
-    if isinstance(result, dict) and result.get("error"):
-        raise HTTPException(status_code=409, detail=result)
-    return result
+    finally:
+        reset_runtime_context(tokens)
 
 
 @router.delete("/browser/sessions/{session_id}")
-async def close_browser_session(session_id: str, owner_session_id: str = Query(..., min_length=1)):
-    payload = browser_session_runtime.close_session(session_id, owner_session_id=owner_session_id)
-    if payload is None:
-        raise HTTPException(status_code=404, detail="browser_session_not_found")
-    return {"session": payload}
+async def close_browser_session(
+    http_request: Request,
+    session_id: str,
+    owner_session_id: str = Query(..., min_length=1),
+):
+    owner_session_id, tokens = _bind_browser_operator(http_request, owner_session_id)
+    try:
+        assert_runtime_not_revoked()
+        payload = browser_session_runtime.close_session(session_id, owner_session_id=owner_session_id)
+        if payload is None:
+            raise HTTPException(status_code=404, detail="browser_session_not_found")
+        return {"session": payload}
+    finally:
+        reset_runtime_context(tokens)
 
 
 @router.get("/operator/browser-computer-use-control")
@@ -273,5 +338,8 @@ async def browser_computer_use_control(owner_session_id: str = Query(..., min_le
 
 
 @router.post("/operator/browser-computer-use-control/actions")
-async def browser_computer_use_control_action(request: BrowserComputerUseControlActionRequest):
-    return await control_browser_session(request.session_id, request)
+async def browser_computer_use_control_action(
+    request: BrowserComputerUseControlActionRequest,
+    http_request: Request,
+):
+    return await control_browser_session(request.session_id, request, http_request)

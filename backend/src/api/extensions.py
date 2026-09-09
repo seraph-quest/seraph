@@ -7,13 +7,16 @@ from pathlib import Path
 import re
 from typing import Any
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 from smolagents import MCPClient
 
 from config.settings import settings
 from src.approval.repository import approval_repository, fingerprint_tool_call
+from src.approval.runtime import reset_runtime_context, set_runtime_context
 from src.audit.runtime import log_integration_event
+from src.auth.cancellation import assert_runtime_not_revoked
+from src.auth.service import bind_operator_principal
 from src.extensions.channel_routing import (
     SUPPORTED_CHANNEL_ROUTE_TRANSPORTS,
     list_channel_route_bindings,
@@ -52,6 +55,7 @@ from src.extensions.state import (
     save_extension_state_payload,
 )
 from src.native_tools.registry import canonical_tool_name
+from src.observer.manager import context_manager
 from src.tools.policy import get_tool_execution_boundaries, get_tool_risk_level
 from src.tools.mcp_manager import mcp_manager
 
@@ -89,6 +93,14 @@ _PRIVATE_PATH_PATTERN = re.compile(
     r"|[A-Za-z]:\\[^\s'\",;)]*"
     r")"
 )
+
+
+def _require_authenticated_capability_operator(request: Request):
+    """Load the shared capability operator gate without an API import cycle."""
+
+    from src.api.capabilities import _require_authenticated_capability_operator
+
+    return _require_authenticated_capability_operator(request)
 
 
 def _content_hash(value: str) -> str:
@@ -1313,42 +1325,68 @@ async def list_extension_package_connectors(extension_id: str):
 
 
 @router.post("/extensions/{extension_id}/connectors/test")
-async def test_extension_package_connector(extension_id: str, req: ExtensionConnectorTestRequest):
-    try:
-        connector = get_extension_connector(extension_id, req.reference)
-    except KeyError as exc:
-        detail = (
-            f"Extension '{extension_id}' not found"
-            if str(exc) == f"'{extension_id}'"
-            else f"Connector reference '{req.reference}' is not part of extension '{extension_id}'"
-        )
-        raise HTTPException(status_code=404, detail=detail) from exc
-
-    connector_type = str(connector.get("type") or "")
-    health = connector.get("health") if isinstance(connector.get("health"), dict) else None
-    if connector_type == "mcp_servers":
-        return await _test_extension_mcp_connector(connector)
-
-    await log_integration_event(
-        integration_type="extension_connector_test",
-        name=str(connector.get("name") or req.reference),
-        outcome="succeeded" if isinstance(health, dict) and bool(health.get("ready")) else "skipped",
-        details={
-            "status": str(health.get("state") if isinstance(health, dict) else connector.get("status") or "unknown"),
-            "extension_id": extension_id,
-            "reference": req.reference,
-            "connector_type": connector_type,
-        },
+async def test_extension_package_connector(
+    extension_id: str,
+    req: ExtensionConnectorTestRequest,
+    request: Request,
+):
+    operator = _require_authenticated_capability_operator(request)
+    active_session_id = operator.session_id
+    tokens = set_runtime_context(
+        active_session_id,
+        context_manager.get_context().approval_mode,
+        trust_principal=bind_operator_principal(operator, active_session_id),
     )
-    return {
-        "status": str(health.get("state") if isinstance(health, dict) else connector.get("status") or "unknown"),
-        "message": str(health.get("summary") if isinstance(health, dict) else connector.get("status") or "Connector status"),
-        "health": health,
-    }
+    try:
+        try:
+            connector = get_extension_connector(extension_id, req.reference)
+        except KeyError as exc:
+            detail = (
+                f"Extension '{extension_id}' not found"
+                if str(exc) == f"'{extension_id}'"
+                else f"Connector reference '{req.reference}' is not part of extension '{extension_id}'"
+            )
+            raise HTTPException(status_code=404, detail=detail) from exc
+
+        connector_type = str(connector.get("type") or "")
+        health = connector.get("health") if isinstance(connector.get("health"), dict) else None
+        if connector_type == "mcp_servers":
+            assert_runtime_not_revoked()
+            return await _test_extension_mcp_connector(connector)
+
+        await log_integration_event(
+            integration_type="extension_connector_test",
+            name=str(connector.get("name") or req.reference),
+            outcome="succeeded" if isinstance(health, dict) and bool(health.get("ready")) else "skipped",
+            details={
+                "status": str(health.get("state") if isinstance(health, dict) else connector.get("status") or "unknown"),
+                "extension_id": extension_id,
+                "reference": req.reference,
+                "connector_type": connector_type,
+            },
+        )
+        return {
+            "status": str(health.get("state") if isinstance(health, dict) else connector.get("status") or "unknown"),
+            "message": str(health.get("summary") if isinstance(health, dict) else connector.get("status") or "Connector status"),
+            "health": health,
+        }
+    finally:
+        reset_runtime_context(tokens)
 
 
 @router.post("/extensions/{extension_id}/connectors/enabled")
-async def set_extension_package_connector_enabled(extension_id: str, req: ExtensionConnectorToggleRequest):
+async def set_extension_package_connector_enabled(
+    extension_id: str,
+    req: ExtensionConnectorToggleRequest,
+    request: Request,
+):
+    operator = _require_authenticated_capability_operator(request)
+    active_session_id = operator.session_id
+    tokens = set_runtime_context(
+        active_session_id,
+        context_manager.get_context().approval_mode,
+        trust_principal=bind_operator_principal(operator, active_session_id),
+    )
     preview: dict[str, Any] | None = None
     try:
         preview = get_extension(extension_id)
@@ -1398,10 +1436,33 @@ async def set_extension_package_connector_enabled(extension_id: str, req: Extens
                 raise ValueError(
                     f"extension '{extension_id}' is degraded and cannot enable packaged connectors until validation issues are fixed"
                 )
-            await _require_extension_lifecycle_approval("enable", connector_preview)
+            await _require_extension_lifecycle_approval(
+                "enable",
+                connector_preview,
+                session_id=active_session_id,
+            )
         else:
-            await _require_extension_lifecycle_approval("disable", connector_preview)
+            await _require_extension_lifecycle_approval(
+                "disable",
+                connector_preview,
+                session_id=active_session_id,
+            )
+        assert_runtime_not_revoked()
         result = set_extension_connector_enabled(extension_id, req.reference, enabled=req.enabled)
+        await _log_extension_lifecycle_event(
+            action="enable" if req.enabled else "disable",
+            outcome="succeeded",
+            preview=result.get("extension"),
+            path=extension_id,
+            extra_details={
+                "reference": req.reference,
+                "changed": result.get("changed"),
+            },
+        )
+        return {
+            "status": "enabled" if req.enabled else "disabled",
+            **result,
+        }
     except KeyError as exc:
         detail = (
             f"Extension '{extension_id}' not found"
@@ -1428,20 +1489,8 @@ async def set_extension_package_connector_enabled(extension_id: str, req: Extens
         )
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
-    await _log_extension_lifecycle_event(
-        action="enable" if req.enabled else "disable",
-        outcome="succeeded",
-        preview=result.get("extension"),
-        path=extension_id,
-        extra_details={
-            "reference": req.reference,
-            "changed": result.get("changed"),
-        },
-    )
-    return {
-        "status": "enabled" if req.enabled else "disabled",
-        **result,
-    }
+    finally:
+        reset_runtime_context(tokens)
 
 
 @router.get("/extensions/{extension_id}/source")
@@ -1455,7 +1504,18 @@ async def get_extension_package_source(extension_id: str, reference: str):
 
 
 @router.post("/extensions/{extension_id}/source")
-async def save_extension_package_source(extension_id: str, req: ExtensionSourceSaveRequest):
+async def save_extension_package_source(
+    extension_id: str,
+    req: ExtensionSourceSaveRequest,
+    request: Request,
+):
+    operator = _require_authenticated_capability_operator(request)
+    active_session_id = operator.session_id
+    tokens = set_runtime_context(
+        active_session_id,
+        context_manager.get_context().approval_mode,
+        trust_principal=bind_operator_principal(operator, active_session_id),
+    )
     preview: dict[str, Any] | None = None
     try:
         source_preview = get_extension_source(extension_id, req.reference)
@@ -1474,9 +1534,19 @@ async def save_extension_package_source(extension_id: str, req: ExtensionSourceS
                     "target_type": "source_file",
                 },
                 fingerprint_context=approval_context,
+                session_id=active_session_id,
                 summary_suffix="for requested source changes",
             )
+        assert_runtime_not_revoked()
         payload = save_extension_source(extension_id, req.reference, req.content)
+        await _log_extension_lifecycle_event(
+            action="save_source",
+            outcome="succeeded",
+            preview=payload.get("extension"),
+            path=extension_id,
+            extra_details={"reference": req.reference},
+        )
+        return payload
     except KeyError as exc:
         await _log_extension_lifecycle_event(
             action="save_source",
@@ -1497,14 +1567,8 @@ async def save_extension_package_source(extension_id: str, req: ExtensionSourceS
             extra_details={"reference": req.reference},
         )
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    await _log_extension_lifecycle_event(
-        action="save_source",
-        outcome="succeeded",
-        preview=payload.get("extension"),
-        path=extension_id,
-        extra_details={"reference": req.reference},
-    )
-    return payload
+    finally:
+        reset_runtime_context(tokens)
 
 
 @router.post("/extensions/validate")

@@ -4,8 +4,10 @@ import asyncio
 from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import json
+import multiprocessing
 from dataclasses import replace
 from pathlib import Path
+import stat
 import threading
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -124,6 +126,25 @@ def _write_workspace_extension_manifest(package_root: Path, *, contribution_type
         f"    - {relative_path}\n",
         encoding="utf-8",
     )
+
+
+def _hold_evolution_destination_lock(workspace_dir: str, ready, release) -> None:
+    from src.evolution.engine import _evolution_target_write_lock
+
+    with patch("src.evolution.engine.settings.workspace_dir", workspace_dir):
+        with _evolution_target_write_lock("prompt_pack", "review-review-candidate.md"):
+            ready.set()
+            if not release.wait(timeout=10):
+                raise RuntimeError("timed out waiting for lock release")
+
+
+def _enter_evolution_destination_lock(workspace_dir: str, attempted, entered) -> None:
+    from src.evolution.engine import _evolution_target_write_lock
+
+    with patch("src.evolution.engine.settings.workspace_dir", workspace_dir):
+        attempted.set()
+        with _evolution_target_write_lock("prompt_pack", "review-review-candidate.md"):
+            entered.set()
 
 
 def _evolution_request(operator):
@@ -741,6 +762,53 @@ def test_evolution_engine_serializes_distinct_sources_for_same_candidate_destina
     failures = [result for result in results if isinstance(result, ValueError)]
     assert len(failures) == 1
     assert str(failures[0]) == EVOLUTION_FILE_NAME_ERROR
+
+
+def test_evolution_engine_serializes_destination_across_processes(tmp_path):
+    context = multiprocessing.get_context("spawn")
+    ready = context.Event()
+    release = context.Event()
+    attempted = context.Event()
+    entered = context.Event()
+    workspace_dir = str(tmp_path)
+    holder = context.Process(
+        target=_hold_evolution_destination_lock,
+        args=(workspace_dir, ready, release),
+    )
+    contender = context.Process(
+        target=_enter_evolution_destination_lock,
+        args=(workspace_dir, attempted, entered),
+    )
+
+    holder.start()
+    try:
+        assert ready.wait(timeout=10)
+        contender.start()
+        assert attempted.wait(timeout=10)
+        assert not entered.wait(timeout=0.5)
+        release.set()
+        assert entered.wait(timeout=10)
+    finally:
+        release.set()
+        for process in (holder, contender):
+            process.join(timeout=10)
+            if process.is_alive():
+                process.terminate()
+                process.join(timeout=5)
+
+    assert holder.exitcode == 0
+    assert contender.exitcode == 0
+    lock_path = (
+        tmp_path
+        / "extensions"
+        / "workspace-capabilities"
+        / "evolution"
+        / "locks"
+        / "prompt_pack"
+        / "review-review-candidate.md.lock"
+    )
+    assert lock_path.exists()
+    assert stat.S_IMODE(lock_path.stat().st_mode) == 0o600
 
 
 def test_evolution_engine_rejects_manifest_declared_candidate_before_generation(tmp_path):

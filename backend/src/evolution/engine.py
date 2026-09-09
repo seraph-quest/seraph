@@ -5,6 +5,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
+import fcntl
 import hashlib
 import json
 import os
@@ -188,6 +189,13 @@ def _receipt_path(target_type: EvolutionTargetType, file_name: str) -> Path:
     return _validate_evolution_path_containment(path)
 
 
+def _evolution_lock_path(target_type: EvolutionTargetType, file_name: str) -> Path:
+    file_name = validate_evolution_file_name(file_name)
+    package_root = workspace_capability_package_root()
+    path = package_root / "evolution" / "locks" / target_type / f"{file_name}.lock"
+    return _validate_evolution_path_containment(path)
+
+
 def _assert_review_candidate_destination_available(
     target_type: EvolutionTargetType,
     *,
@@ -232,7 +240,19 @@ def _evolution_target_write_lock(target_type: EvolutionTargetType, candidate_fil
             lock = Lock()
             _EVOLUTION_TARGET_LOCKS[key] = lock
     with lock:
-        yield
+        lock_path = _evolution_lock_path(target_type, candidate_file_name)
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        open_flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(lock_path, open_flags, 0o600)
+        try:
+            os.fchmod(descriptor, 0o600)
+            fcntl.flock(descriptor, fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(descriptor, fcntl.LOCK_UN)
+        finally:
+            os.close(descriptor)
 
 
 def _validate_evolution_path_containment(path: Path) -> Path:

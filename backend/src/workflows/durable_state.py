@@ -1472,9 +1472,15 @@ class WorkflowStateRepository:
             payload["artifact_reviews"] = [self._serialize_review(review) for review in reviews]
             for item in [run, *steps, *reviews]:
                 db.expunge(item)
+            metadata = _as_dict(payload.get("metadata"))
+            orchestration_v2 = _as_dict(metadata.get("orchestration_v2"))
             return {
                 "workflow_name": payload["workflow_name"],
                 "run_fingerprint": payload["run_fingerprint"],
+                "session_id": payload["session_id"],
+                "owner_kind": payload["owner_kind"],
+                "owner_principal_id": payload["owner_principal_id"],
+                "service_id": payload["service_id"],
                 "approval_context": payload["approval_context"],
                 "step_records": payload["step_records"],
                 "checkpoint_step_ids": [step["id"] for step in payload["step_records"]],
@@ -1484,6 +1490,9 @@ class WorkflowStateRepository:
                 "checkpoint_context": payload["checkpoint_context"],
                 "checkpoint_context_available": payload["checkpoint_context_available"],
                 "durable_run_identity": payload["run_identity"],
+                "revision": orchestration_v2.get("revision"),
+                "lease": _as_dict(orchestration_v2.get("lease")),
+                "orchestration_v2": orchestration_v2,
                 "state_source": "durable_workflow_state",
             }
 

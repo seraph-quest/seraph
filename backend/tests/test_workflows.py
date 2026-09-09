@@ -21,8 +21,10 @@ from src.workflows.manager import (
     DurableWorkflowStateUnavailable,
     WorkflowManager,
     WorkflowTool,
+    _assert_workflow_parent_recovery_authority,
     _approval_context_for_workflow,
     _checkpoint_context_allowed,
+    _workflow_recovery_owner,
     workflow_manager,
 )
 from src.approval.exceptions import ApprovalRequired
@@ -699,9 +701,24 @@ class TestWorkflowManager:
         search = DummyTool("web_search", lambda query: f"fresh result for {query}")
         write = DummyTool("write_file", lambda file_path, content: f"wrote {file_path}: {content}")
         workflow_tool = WorkflowTool(workflow, {"web_search": search, "write_file": write})
+        operator = _test_bypass_operator()
         parent_run_identity = "session-1:workflow_web_brief_to_file:parent"
         checkpoint_payload = {
             "workflow_name": "web-brief-to-file",
+            "session_id": "session-1",
+            "owner_kind": "user",
+            "owner_principal_id": operator.principal.principal_id,
+            "durable_run_identity": parent_run_identity,
+            "state_source": "durable_workflow_state",
+            "orchestration_v2": {
+                "revision": 7,
+                "lease": {
+                    "owner": _workflow_recovery_owner(operator.principal.principal_id, "session-1"),
+                    "lease_id": "parent-lease",
+                    "expires_at": "2099-01-01T00:00:00+00:00",
+                    "revision": 7,
+                },
+            },
             "checkpoint_context": {
                 "search": {
                     "tool": "web_search",
@@ -722,19 +739,29 @@ class TestWorkflowManager:
             ],
         }
 
-        with patch(
-            "src.workflows.manager._load_workflow_checkpoint_payload",
-            AsyncMock(return_value=checkpoint_payload),
-        ):
-            result = workflow_tool(
-                query="seraph",
-                file_path="notes/brief.md",
-                _seraph_resume_from_step="save",
-                _seraph_parent_run_identity=parent_run_identity,
-                _seraph_root_run_identity=parent_run_identity,
-                _seraph_branch_kind="retry_failed_step",
-                _seraph_branch_depth=1,
-            )
+        tokens = set_runtime_context(
+            "session-1",
+            "balanced",
+            trust_principal=replace(operator.principal, session_id="session-1"),
+        )
+        try:
+            with patch(
+                "src.workflows.manager._load_workflow_checkpoint_payload",
+                AsyncMock(return_value=checkpoint_payload),
+            ):
+                result = workflow_tool(
+                    query="seraph",
+                    file_path="notes/brief.md",
+                    _seraph_resume_from_step="save",
+                    _seraph_parent_run_identity=parent_run_identity,
+                    _seraph_root_run_identity=parent_run_identity,
+                    _seraph_branch_kind="retry_failed_step",
+                    _seraph_branch_depth=1,
+                    _seraph_parent_revision=7,
+                    _seraph_parent_lease_id="parent-lease",
+                )
+        finally:
+            reset_runtime_context(tokens)
 
         assert result == "Saved search results for seraph to notes/brief.md."
         assert search.calls == []
@@ -785,9 +812,24 @@ class TestWorkflowManager:
                 "write_file": DummyTool("write_file", lambda **_kwargs: (_ for _ in ()).throw(PermissionError("denied"))),
             },
         )
+        operator = _test_bypass_operator()
         parent_run_identity = "session-1:workflow_web_brief_to_file:parent"
         checkpoint_payload = {
             "workflow_name": "web-brief-to-file",
+            "session_id": "session-1",
+            "owner_kind": "user",
+            "owner_principal_id": operator.principal.principal_id,
+            "durable_run_identity": parent_run_identity,
+            "state_source": "durable_workflow_state",
+            "orchestration_v2": {
+                "revision": 7,
+                "lease": {
+                    "owner": _workflow_recovery_owner(operator.principal.principal_id, "session-1"),
+                    "lease_id": "parent-lease",
+                    "expires_at": "2099-01-01T00:00:00+00:00",
+                    "revision": 7,
+                },
+            },
             "checkpoint_context": {
                 "search": {
                     "tool": "web_search",
@@ -805,22 +847,32 @@ class TestWorkflowManager:
             ],
         }
 
-        with (
-            patch(
-                "src.workflows.manager._load_workflow_checkpoint_payload",
-                AsyncMock(return_value=checkpoint_payload),
-            ),
-            pytest.raises(PermissionError, match="denied"),
-        ):
-            workflow_tool(
-                query="seraph",
-                file_path="notes/brief.md",
-                _seraph_resume_from_step="save",
-                _seraph_parent_run_identity=parent_run_identity,
-                _seraph_root_run_identity=parent_run_identity,
-                _seraph_branch_kind="retry_failed_step",
-                _seraph_branch_depth=2,
-            )
+        tokens = set_runtime_context(
+            "session-1",
+            "balanced",
+            trust_principal=replace(operator.principal, session_id="session-1"),
+        )
+        try:
+            with (
+                patch(
+                    "src.workflows.manager._load_workflow_checkpoint_payload",
+                    AsyncMock(return_value=checkpoint_payload),
+                ),
+                pytest.raises(PermissionError, match="denied"),
+            ):
+                workflow_tool(
+                    query="seraph",
+                    file_path="notes/brief.md",
+                    _seraph_resume_from_step="save",
+                    _seraph_parent_run_identity=parent_run_identity,
+                    _seraph_root_run_identity=parent_run_identity,
+                    _seraph_branch_kind="retry_failed_step",
+                    _seraph_branch_depth=2,
+                    _seraph_parent_revision=7,
+                    _seraph_parent_lease_id="parent-lease",
+                )
+        finally:
+            reset_runtime_context(tokens)
 
         failure_payload = workflow_tool.get_audit_failure_payload({}, PermissionError("denied"))
         assert failure_payload is not None
@@ -6384,3 +6436,263 @@ class TestWorkflowSurfaces:
         workflow_runner = next(s for s in specialists if s.name == "workflow_runner")
         assert len(workflow_runner.tools) == 1
         assert not isinstance(workflow_runner.tools[0], ApprovalTool)
+
+
+def test_workflow_checkpoint_restore_fails_closed_without_durable_authority():
+    """A caller-supplied parent identity cannot restore checkpoint state by lookup alone."""
+    workflow = Workflow(
+        name="checkpoint-authority",
+        description="Checkpoint authority test",
+        inputs={"value": {"type": "string", "required": True}},
+        steps=[
+            WorkflowStep(id="first", tool="first_tool", arguments={"value": "{{ value }}"}),
+            WorkflowStep(id="second", tool="second_tool", arguments={"value": "{{ steps.first.result }}"}),
+        ],
+    )
+    first = DummyTool("first_tool", lambda **_kwargs: "fresh")
+    second = DummyTool("second_tool", lambda **_kwargs: "continued")
+    workflow_tool = WorkflowTool(workflow, {"first_tool": first, "second_tool": second})
+    checkpoint_payload = {
+        "workflow_name": workflow.name,
+        "session_id": "session-owner",
+        "owner_kind": "user",
+        "owner_principal_id": "operator:someone-else",
+        "state_source": "durable_workflow_state",
+        "checkpoint_context": {
+            "first": {"tool": "first_tool", "arguments": {"value": "cached"}, "result": "cached"},
+        },
+        "step_records": [{"id": "first", "tool": "first_tool", "status": "succeeded"}],
+    }
+    with (
+        patch(
+            "src.workflows.manager._load_workflow_checkpoint_payload",
+            AsyncMock(return_value=checkpoint_payload),
+        ),
+        patch("src.workflows.manager._run_required_durable_state_write", return_value=None),
+        patch("src.workflows.manager._run_durable_state_write", return_value=None),
+        pytest.raises(RuntimeError, match="authenticated session-bound principal"),
+    ):
+        workflow_tool(
+            value="requested",
+            _seraph_resume_from_step="second",
+            _seraph_parent_run_identity="session-owner:workflow_checkpoint_authority:parent",
+            _seraph_parent_revision=4,
+            _seraph_parent_lease_id="lease-parent",
+        )
+
+    assert first.calls == []
+    assert second.calls == []
+
+
+def test_workflow_checkpoint_restore_rejects_stale_or_wrong_owner_lease():
+    """Even an authenticated caller needs matching durable owner, lease, and revision."""
+    operator = _test_bypass_operator()
+    principal = replace(operator.principal, session_id="session-owner")
+    details = {
+        "state_source": "durable_workflow_state",
+        "session_id": "session-owner",
+        "owner_kind": "user",
+        "owner_principal_id": principal.principal_id,
+        "durable_run_identity": "session-owner:workflow_checkpoint_authority:parent",
+        "orchestration_v2": {
+            "revision": 9,
+            "lease": {
+                "owner": _workflow_recovery_owner(principal.principal_id, "session-owner"),
+                "lease_id": "lease-parent",
+                "expires_at": "2099-01-01T00:00:00+00:00",
+                "revision": 9,
+            },
+        },
+    }
+    tokens = set_runtime_context("session-owner", "balanced", trust_principal=principal)
+    try:
+        with pytest.raises(RuntimeError, match="does not match"):
+            _assert_workflow_parent_recovery_authority(
+                parent_run_identity="session-owner:workflow_checkpoint_authority:parent",
+                details=details,
+                control_inputs={"_seraph_parent_revision": 9, "_seraph_parent_lease_id": "wrong-lease"},
+            )
+        with pytest.raises(RuntimeError, match="stale"):
+            _assert_workflow_parent_recovery_authority(
+                parent_run_identity="session-owner:workflow_checkpoint_authority:parent",
+                details=details,
+                control_inputs={"_seraph_parent_revision": 8, "_seraph_parent_lease_id": "lease-parent"},
+            )
+        mismatched_owner = {**details, "owner_principal_id": "operator:other"}
+        with pytest.raises(RuntimeError, match="owner is not bound"):
+            _assert_workflow_parent_recovery_authority(
+                parent_run_identity="session-owner:workflow_checkpoint_authority:parent",
+                details=mismatched_owner,
+                control_inputs={"_seraph_parent_revision": 9, "_seraph_parent_lease_id": "lease-parent"},
+            )
+    finally:
+        reset_runtime_context(tokens)
+
+
+@pytest.mark.asyncio
+async def test_workflow_control_response_projects_receipts_and_run_metadata():
+    from src.api.workflows import WorkflowRunControlRequest, control_workflow_run
+
+    operator = _test_bypass_operator()
+    run_identity = "session-owner:workflow_example:receipt-projection"
+    run = {
+        "run_identity": run_identity,
+        "workflow_name": "example",
+        "tool_name": "workflow_example",
+        "session_id": "session-owner",
+        "status": "failed",
+        "owner_kind": "user",
+        "owner_principal_id": operator.principal.principal_id,
+        "replay_allowed": True,
+        "replay_block_reason": None,
+        "arguments": {"secret": "do-not-return"},
+        "artifact_paths": ["/tmp/private-artifact"],
+        "step_records": [{"id": "private-step", "status": "failed"}],
+        "continued_error_steps": ["private-step"],
+    }
+    refreshed_run = {**run, "metadata": {"secret": "durable-secret"}}
+    with (
+        patch("src.api.workflows._begin_rest_revocation_watch", return_value=None),
+        patch(
+            "src.api.workflows._find_workflow_run_for_control",
+            new_callable=AsyncMock,
+            side_effect=[run, refreshed_run],
+        ),
+        patch(
+            "src.api.workflows.workflow_state_repository.record_v2_operator_recovery_control",
+            new_callable=AsyncMock,
+            return_value={
+                "receipt": {
+                    "status": "recorded",
+                    "action": "audit",
+                    "target": "/tmp/private-artifact",
+                    "owner": "operator-private",
+                }
+            },
+        ),
+        patch("src.api.workflows.audit_repository.log_event", new_callable=AsyncMock),
+    ):
+        payload = await control_workflow_run(
+            run_identity,
+            WorkflowRunControlRequest(action="audit", target="/tmp/private-artifact"),
+            _workflow_mutator_request(operator, "/api/workflows/runs/control"),
+        )
+
+    encoded = json.dumps(payload)
+    assert payload["status"] == "recorded"
+    assert payload["control_receipt"]["status"] == "recorded"
+    assert payload["control_receipt"]["target"] == "redacted_operator_recovery_target"
+    assert payload["run"]["status"] == "failed"
+    assert "do-not-return" not in encoded
+    assert "durable-secret" not in encoded
+    assert "/tmp/private-artifact" not in encoded
+    assert "arguments" not in payload["run"]
+
+
+@pytest.mark.asyncio
+async def test_workflow_run_list_scopes_owner_and_projects_safe_metadata():
+    from src.api.workflows import list_workflow_runs
+
+    operator = _test_bypass_operator()
+    owned = {
+        "run_identity": "session-owner:workflow_example:owned",
+        "workflow_name": "example",
+        "tool_name": "workflow_example",
+        "status": "succeeded",
+        "owner_kind": "user",
+        "owner_principal_id": operator.principal.principal_id,
+        "arguments": {"secret": "owned-secret"},
+        "artifact_paths": ["/tmp/owned-private"],
+        "step_records": [{"id": "owned-private-step", "status": "succeeded"}],
+    }
+    other_owner = {
+        **owned,
+        "run_identity": "session-owner:workflow_example:other",
+        "owner_principal_id": "operator:other",
+        "arguments": {"secret": "other-secret"},
+    }
+    ownerless = {**owned, "run_identity": "session-owner:workflow_example:legacy", "owner_kind": "legacy"}
+    with patch(
+        "src.api.workflows._list_workflow_runs",
+        new_callable=AsyncMock,
+        return_value=[owned, other_owner, ownerless],
+    ):
+        payload = await list_workflow_runs(
+            _workflow_mutator_request(operator, "/api/workflows/runs"),
+            session_id="session-owner",
+        )
+
+    encoded = json.dumps(payload)
+    assert [run["run_identity"] for run in payload["runs"]] == [owned["run_identity"]]
+    assert "owned-secret" not in encoded
+    assert "other-secret" not in encoded
+    assert "/tmp/owned-private" not in encoded
+    assert "owned-private-step" not in encoded
+
+
+@pytest.mark.asyncio
+async def test_workflow_resume_plan_response_is_safe_and_failure_is_durable_receipted():
+    from src.api.workflows import WorkflowResumePlanRequest, build_workflow_resume_plan
+
+    operator = _test_bypass_operator()
+    run_identity = "session-owner:workflow_example:resume-projection"
+    run = {
+        "run_identity": run_identity,
+        "workflow_name": "example",
+        "session_id": "session-owner",
+        "owner_kind": "user",
+        "owner_principal_id": operator.principal.principal_id,
+        "replay_allowed": True,
+        "replay_block_reason": None,
+    }
+    unsafe_plan = {
+        "source_run_identity": run_identity,
+        "parent_run_identity": run_identity,
+        "root_run_identity": run_identity,
+        "branch_kind": "retry_failed_step",
+        "resume_from_step": "/tmp/private-step",
+        "resume_checkpoint_label": "private checkpoint",
+        "replay_allowed": True,
+        "draft": 'Run workflow "example" with secret=do-not-return.',
+        "checkpoint_candidates": [{"step_id": "/tmp/private-step", "label": "private checkpoint", "kind": "retry_failed_step"}],
+    }
+    with (
+        patch("src.api.workflows._begin_rest_revocation_watch", return_value=None),
+        patch("src.api.workflows._find_workflow_run_for_control", new_callable=AsyncMock, return_value=run),
+        patch("src.api.workflows._workflow_resume_plan", return_value=unsafe_plan),
+        patch("src.api.workflows._record_workflow_route_receipt", new_callable=AsyncMock) as receipt,
+    ):
+        payload = await build_workflow_resume_plan(
+            run_identity,
+            _workflow_mutator_request(operator, "/api/workflows/runs/resume-plan"),
+            WorkflowResumePlanRequest(),
+        )
+
+    encoded = json.dumps(payload)
+    assert payload["resume_plan"]["draft_available"] is True
+    assert payload["resume_plan"]["resume_from_step"].startswith("redacted_workflow_step_")
+    assert "do-not-return" not in encoded
+    assert "/tmp/private-step" not in encoded
+    receipt.assert_not_awaited()
+
+    with (
+        patch("src.api.workflows._begin_rest_revocation_watch", return_value=None),
+        patch("src.api.workflows._find_workflow_run_for_control", new_callable=AsyncMock, return_value=run),
+        patch(
+            "src.api.workflows._workflow_resume_plan",
+            side_effect=RuntimeError("unexpected provider secret /tmp/private-secret"),
+        ),
+        patch("src.api.workflows._record_workflow_route_receipt", new_callable=AsyncMock) as failed_receipt,
+    ):
+        with pytest.raises(HTTPException) as raised:
+            await build_workflow_resume_plan(
+                run_identity,
+                _workflow_mutator_request(operator, "/api/workflows/runs/resume-plan"),
+                WorkflowResumePlanRequest(step_id="private-step"),
+            )
+
+    assert raised.value.status_code == 500
+    assert raised.value.detail == "workflow_resume_plan_refused"
+    failed_receipt.assert_awaited_once()
+    assert failed_receipt.await_args.kwargs["event_type"] == "workflow_resume_plan_failed"
+    assert failed_receipt.await_args.kwargs["detail"] == "workflow_resume_plan_refused"

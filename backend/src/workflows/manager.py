@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timezone
+import hashlib
 import json
 import logging
 import os
@@ -60,6 +61,16 @@ _WORKFLOW_CONTROL_INPUTS: dict[str, dict[str, Any]] = {
         "description": "Optional checkpoint step id to resume or branch from.",
         "nullable": True,
     },
+    "_seraph_parent_revision": {
+        "type": "integer",
+        "description": "Durable revision expected for the parent workflow checkpoint.",
+        "nullable": True,
+    },
+    "_seraph_parent_lease_id": {
+        "type": "string",
+        "description": "Durable lease id expected for the parent workflow checkpoint.",
+        "nullable": True,
+    },
 }
 _WORKFLOW_CONTROL_FIELD_NAMES = set(_WORKFLOW_CONTROL_INPUTS)
 
@@ -109,6 +120,119 @@ def _workflow_durable_owner_fields() -> dict[str, str]:
             "service_id": principal_id,
         }
     return {}
+
+
+def _workflow_recovery_owner(principal_id: str, session_id: str) -> str:
+    """Return the stable owner label used by operator recovery leases."""
+    principal_digest = hashlib.sha256(principal_id.encode("utf-8", errors="replace")).hexdigest()[:16]
+    session_digest = hashlib.sha256(session_id.encode("utf-8", errors="replace")).hexdigest()[:16]
+    return f"operator:{principal_digest}:{session_digest}"
+
+
+def _workflow_parent_v2_state(details: dict[str, Any]) -> tuple[int | None, dict[str, Any]]:
+    metadata = details.get("metadata")
+    metadata = metadata if isinstance(metadata, dict) else {}
+    orchestration = details.get("orchestration_v2")
+    if not isinstance(orchestration, dict):
+        orchestration = metadata.get("orchestration_v2")
+    if not isinstance(orchestration, dict):
+        orchestration = {}
+    raw_revision = orchestration.get("revision", details.get("revision"))
+    try:
+        revision = int(raw_revision) if raw_revision is not None else None
+    except (TypeError, ValueError):
+        revision = None
+    lease = orchestration.get("lease", details.get("lease"))
+    return revision, lease if isinstance(lease, dict) else {}
+
+
+def _assert_workflow_parent_recovery_authority(
+    *,
+    parent_run_identity: str,
+    details: dict[str, Any],
+    control_inputs: dict[str, Any],
+) -> None:
+    """Fail closed before reusing checkpoint data from a caller-supplied run.
+
+    A parent identity is only a lookup key.  Reuse additionally requires a
+    durable owner/session binding and the active lease revision acquired by the
+    authenticated recovery route.
+    """
+    principal = get_current_trust_principal()
+    current_session_id = get_current_session_id()
+    if (
+        principal is None
+        or not principal.authenticated
+        or principal.revoked
+        or not str(principal.principal_id or "").strip()
+        or not current_session_id
+        or not str(principal.session_id or "").strip()
+        or str(principal.session_id).strip() != str(current_session_id).strip()
+    ):
+        raise RuntimeError("Workflow checkpoint recovery requires an authenticated session-bound principal")
+
+    try:
+        parent_session_id, _tool_name, _fingerprint, _discriminator = parse_workflow_run_identity(
+            parent_run_identity
+        )
+    except ValueError as exc:
+        raise RuntimeError("Workflow checkpoint recovery identity is invalid") from exc
+    if parent_session_id != current_session_id:
+        raise RuntimeError("Workflow checkpoint recovery session does not match the authenticated session")
+    if details.get("state_source") != "durable_workflow_state":
+        raise RuntimeError("Workflow checkpoint recovery requires durable parent state")
+    if str(details.get("durable_run_identity") or "").strip() != parent_run_identity:
+        raise RuntimeError("Workflow checkpoint recovery durable identity is not bound to the requested parent")
+    if str(details.get("session_id") or "").strip() != str(current_session_id).strip():
+        raise RuntimeError("Workflow checkpoint recovery parent session is not bound to the authenticated session")
+
+    principal_type = getattr(principal.principal_type, "value", principal.principal_type)
+    expected_owner_kind = "user" if str(principal_type or "").strip().lower() == "operator" else (
+        "service" if str(principal_type or "").strip().lower() == "service" else None
+    )
+    owner_kind = str(details.get("owner_kind") or "").strip().lower()
+    owner_principal_id = str(details.get("owner_principal_id") or "").strip()
+    if (
+        expected_owner_kind is None
+        or owner_kind != expected_owner_kind
+        or not owner_principal_id
+        or owner_principal_id != str(principal.principal_id).strip()
+    ):
+        raise RuntimeError("Workflow checkpoint recovery parent owner is not bound to the authenticated principal")
+    if expected_owner_kind == "service" and str(details.get("service_id") or "").strip() != owner_principal_id:
+        raise RuntimeError("Workflow checkpoint recovery service owner binding is invalid")
+
+    revision, lease = _workflow_parent_v2_state(details)
+    expected_revision = control_inputs.get("_seraph_parent_revision")
+    try:
+        expected_revision = int(expected_revision) if expected_revision is not None else None
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError("Workflow checkpoint recovery revision is invalid") from exc
+    expected_lease_id = str(control_inputs.get("_seraph_parent_lease_id") or "").strip()
+    lease_id = str(lease.get("lease_id") or "").strip()
+    lease_owner = str(lease.get("owner") or "").strip()
+    expires_at = lease.get("expires_at")
+    try:
+        expires = datetime.fromisoformat(str(expires_at).replace("Z", "+00:00"))
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError("Workflow checkpoint recovery parent lease is invalid") from exc
+    if expires.tzinfo is None:
+        expires = expires.replace(tzinfo=timezone.utc)
+    if not lease_id or expires <= datetime.now(timezone.utc):
+        raise RuntimeError("Workflow checkpoint recovery parent lease is unavailable")
+    if lease_owner != _workflow_recovery_owner(str(principal.principal_id), str(current_session_id)):
+        raise RuntimeError("Workflow checkpoint recovery parent lease owner is invalid")
+    if not expected_lease_id or expected_lease_id != lease_id:
+        raise RuntimeError("Workflow checkpoint recovery parent lease does not match the requested lease")
+    if revision is None or expected_revision is None or expected_revision != revision:
+        raise RuntimeError("Workflow checkpoint recovery parent revision is stale")
+    try:
+        lease_revision = int(lease.get("revision"))
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError("Workflow checkpoint recovery parent lease revision is invalid") from exc
+    if lease_revision != revision:
+        raise RuntimeError("Workflow checkpoint recovery parent lease revision is stale")
+
 
 def _run_durable_state_write(coro) -> Any | None:
     try:
@@ -1368,6 +1492,11 @@ class WorkflowTool(Tool):
             raise RuntimeError(
                 f"Workflow '{self.workflow.name}' could not load checkpoint state from '{parent_run_identity}'"
             )
+        _assert_workflow_parent_recovery_authority(
+            parent_run_identity=parent_run_identity,
+            details=details,
+            control_inputs=control_inputs,
+        )
         if str(details.get("workflow_name") or self.workflow.name) != self.workflow.name:
             raise RuntimeError(
                 f"Workflow '{self.workflow.name}' cannot reuse checkpoint state from a different workflow"

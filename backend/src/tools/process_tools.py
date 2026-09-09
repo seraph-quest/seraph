@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import shlex
+import signal
 import subprocess
 import sys
 import tempfile
@@ -604,6 +605,16 @@ def _delete_runtime_dir(path: Path) -> None:
         logger.debug("Failed to delete runtime directory %s", path, exc_info=True)
 
 
+def _kill_process_group(process: subprocess.Popen[Any]) -> None:
+    """Stop a command and every child it may have started."""
+    if process.poll() is not None:
+        return
+    try:
+        os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+    except (AttributeError, ProcessLookupError, PermissionError):
+        process.kill()
+
+
 def _command_env(*, worker_root: Path | None = None) -> dict[str, str]:
     env = {
         key: value
@@ -741,38 +752,46 @@ class ProcessRuntimeManager:
         )
         timeout = _normalize_timeout_seconds(timeout_seconds)
         worker_root = _worker_runtime_root(uuid.uuid4().hex)
+        process: subprocess.Popen[str] | None = None
         try:
-            result = subprocess.run(
+            process = subprocess.Popen(
                 [executable, *args],
                 cwd=str(resolved_cwd),
-                capture_output=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 text=True,
                 shell=False,
                 env=_command_env(worker_root=worker_root),
-                timeout=timeout,
+                start_new_session=True,
             )
-        except subprocess.TimeoutExpired:
-            _delete_runtime_dir(worker_root)
+            stdout, stderr = process.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired as exc:
+            if process is not None:
+                _kill_process_group(process)
+                stdout, stderr = process.communicate()
+            else:
+                stdout, stderr = exc.stdout or "", exc.stderr or ""
             return {
                 "ok": False,
                 "timed_out": True,
-                "exit_code": None,
-                "stdout": "",
-                "stderr": "",
+                "exit_code": process.returncode if process is not None else None,
+                "stdout": stdout or "",
+                "stderr": stderr or "",
                 "display_command": _display_command([executable, *args]),
                 "cwd": str(resolved_cwd),
                 "timeout_seconds": timeout,
             }
+        except OSError:
+            raise
         finally:
-            if "result" in locals():
-                _delete_runtime_dir(worker_root)
+            _delete_runtime_dir(worker_root)
 
         return {
-            "ok": result.returncode == 0,
+            "ok": process.returncode == 0,
             "timed_out": False,
-            "exit_code": result.returncode,
-            "stdout": result.stdout or "",
-            "stderr": result.stderr or "",
+            "exit_code": process.returncode,
+            "stdout": stdout or "",
+            "stderr": stderr or "",
             "display_command": _display_command([executable, *args]),
             "cwd": str(resolved_cwd),
             "timeout_seconds": timeout,

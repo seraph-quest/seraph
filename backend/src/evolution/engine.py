@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path, PureWindowsPath
 import re
+from threading import Lock
 from typing import Any, Callable, Literal
 
 import yaml
@@ -19,7 +21,7 @@ from src.auth.cancellation import assert_runtime_not_revoked
 from src.extensions.manifest import load_extension_manifest
 from src.extensions.layout import expected_layout_prefixes
 from src.extensions.registry import ExtensionRegistry, default_manifest_roots_for_workspace
-from src.extensions.workspace_package import save_workspace_contribution, workspace_capability_package_root
+from src.extensions.workspace_package import workspace_capability_package_root
 from src.evals.benchmark_catalog import benchmark_suite_names
 from src.native_tools.registry import TOOL_METADATA
 from src.runbooks.loader import Runbook, parse_runbook_content
@@ -67,6 +69,9 @@ _PREFERENCE_COLLAPSE_TOKENS = (
     "one-size-fits-all",
     "regardless of user preference",
 )
+
+_EVOLUTION_TARGET_LOCKS_GUARD = Lock()
+_EVOLUTION_TARGET_LOCKS: dict[tuple[str, str], Lock] = {}
 
 
 def require_evolution_operator_authority() -> TrustPrincipal:
@@ -128,6 +133,89 @@ def validate_evolution_file_name(file_name: str) -> str:
     ):
         raise ValueError(EVOLUTION_FILE_NAME_ERROR)
     return candidate
+
+
+def _candidate_file_name_for_target(
+    target_type: EvolutionTargetType,
+    *,
+    source_path: Path,
+    requested_file_name: str | None,
+) -> str:
+    """Return a review-candidate filename that cannot masquerade as a source.
+
+    The request may provide a readable label for compatibility with the
+    validation surface, but the engine owns the extension and candidate suffix.
+    Candidate files are never allowed to use the active source basename.
+    """
+    candidate = validate_evolution_file_name(
+        requested_file_name or _default_candidate_file_name(source_path)
+    )
+    expected_extension = _candidate_extension(target_type)
+    stem = Path(candidate).stem.casefold()
+    if Path(candidate).suffix.casefold() != expected_extension.casefold():
+        raise ValueError(EVOLUTION_FILE_NAME_ERROR)
+    if not (
+        stem.endswith(_CANDIDATE_SUFFIX.casefold())
+        or stem.endswith(_CANDIDATE_SUFFIX.lstrip("-").casefold())
+    ):
+        raise ValueError(EVOLUTION_FILE_NAME_ERROR)
+    if candidate.casefold() == source_path.name.casefold():
+        raise ValueError(EVOLUTION_FILE_NAME_ERROR)
+    return candidate
+
+
+def _contribution_type_for_target(target_type: EvolutionTargetType) -> str:
+    return {
+        "skill": "skills",
+        "runbook": "runbooks",
+        "starter_pack": "starter_packs",
+        "prompt_pack": "prompt_packs",
+    }[target_type]
+
+
+def _candidate_path(target_type: EvolutionTargetType, file_name: str) -> Path:
+    package_root = workspace_capability_package_root()
+    contribution_type = _contribution_type_for_target(target_type)
+    path = package_root / expected_layout_prefixes(contribution_type)[0] / file_name
+    return _validate_evolution_path_containment(path)
+
+
+def _receipt_path(target_type: EvolutionTargetType, file_name: str) -> Path:
+    package_root = workspace_capability_package_root()
+    path = package_root / "evolution" / "receipts" / target_type / f"{Path(file_name).stem}.json"
+    return _validate_evolution_path_containment(path)
+
+
+def _assert_review_candidate_destination_available(
+    target_type: EvolutionTargetType,
+    *,
+    source_path: Path,
+    file_name: str,
+) -> None:
+    """Fail closed before any generated content or artifact is written."""
+    candidate_path = _candidate_path(target_type, file_name)
+    receipt_path = _receipt_path(target_type, file_name)
+    if candidate_path.resolve() == source_path.resolve() or candidate_path.exists() or receipt_path.exists():
+        raise ValueError(EVOLUTION_FILE_NAME_ERROR)
+
+
+@contextmanager
+def _evolution_target_write_lock(target_type: EvolutionTargetType, source_path: Path):
+    """Serialize candidate lifecycle writes for one registered target.
+
+    Candidate generation and validation stay independent across targets.  A
+    proposal for one target owns this narrow lock from destination preflight
+    through snapshot, writes, and rollback so a competing invocation cannot
+    restore an older snapshot over its artifacts.
+    """
+    key = (target_type, os.path.normcase(str(source_path.resolve())))
+    with _EVOLUTION_TARGET_LOCKS_GUARD:
+        lock = _EVOLUTION_TARGET_LOCKS.get(key)
+        if lock is None:
+            lock = Lock()
+            _EVOLUTION_TARGET_LOCKS[key] = lock
+    with lock:
+        yield
 
 
 def _validate_evolution_path_containment(path: Path) -> Path:
@@ -863,11 +951,24 @@ def _safe_artifact_reference(value: str | None) -> str:
 
 def _write_receipt(candidate_file_name: str, receipt: EvolutionReceipt) -> str:
     candidate_file_name = validate_evolution_file_name(candidate_file_name)
-    receipts_dir = workspace_capability_package_root() / "evolution" / "receipts"
-    target = receipts_dir / f"{Path(candidate_file_name).stem}.json"
-    _validate_evolution_path_containment(target)
+    target = _receipt_path(receipt.target_type, candidate_file_name)
+    receipts_dir = target.parent
     receipts_dir.mkdir(parents=True, exist_ok=True)
-    target.write_text(json.dumps(_safe_receipt_payload(receipt), indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    payload = json.dumps(_safe_receipt_payload(receipt), indent=2, sort_keys=True) + "\n"
+    try:
+        descriptor = os.open(
+            target,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+            0o600,
+        )
+    except FileExistsError as exc:
+        raise ValueError(EVOLUTION_FILE_NAME_ERROR) from exc
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write(payload)
+    except Exception:
+        target.unlink(missing_ok=True)
+        raise
     return str(target)
 
 
@@ -878,19 +979,16 @@ def _evolution_artifact_snapshot(
 ) -> tuple[tuple[Path, bool, bytes | None], ...]:
     candidate_file_name = validate_evolution_file_name(candidate_file_name)
     package_root = workspace_capability_package_root()
-    contribution_type = {
-        "skill": "skills",
-        "runbook": "runbooks",
-        "starter_pack": "starter_packs",
-        "prompt_pack": "prompt_packs",
-    }[target_type]
-    candidate_path = package_root / expected_layout_prefixes(contribution_type)[0] / candidate_file_name
-    receipt_path = package_root / "evolution" / "receipts" / f"{Path(candidate_file_name).stem}.json"
+    candidate_path = _candidate_path(target_type, candidate_file_name)
+    receipt_path = _receipt_path(target_type, candidate_file_name)
+    # Keep the legacy receipt location in the rollback set so a partially
+    # written older worker or test double cannot leave sensitive data behind.
+    legacy_receipt_path = package_root / "evolution" / "receipts" / f"{Path(candidate_file_name).stem}.json"
     manifest_path = package_root / "manifest.yaml"
-    for path in (candidate_path, receipt_path, manifest_path):
+    for path in (candidate_path, receipt_path, legacy_receipt_path, manifest_path):
         _validate_evolution_path_containment(path)
     snapshot: list[tuple[Path, bool, bytes | None]] = []
-    for path in (candidate_path, receipt_path, manifest_path):
+    for path in (candidate_path, receipt_path, legacy_receipt_path, manifest_path):
         snapshot.append((path, path.exists(), path.read_bytes() if path.exists() else None))
     return tuple(snapshot)
 
@@ -906,15 +1004,27 @@ def _restore_evolution_artifacts(snapshot: tuple[tuple[Path, bool, bytes | None]
 
 def _save_candidate(target_type: EvolutionTargetType, *, file_name: str, content: str) -> str:
     file_name = validate_evolution_file_name(file_name)
-    contribution_type = {
-        "skill": "skills",
-        "runbook": "runbooks",
-        "starter_pack": "starter_packs",
-        "prompt_pack": "prompt_packs",
-    }[target_type]
-    candidate_path = workspace_capability_package_root() / expected_layout_prefixes(contribution_type)[0] / file_name
-    _validate_evolution_path_containment(candidate_path)
-    return str(save_workspace_contribution(contribution_type, file_name=file_name, content=content))
+    # Keep the familiar contribution layout for operator receipts, but do not
+    # register the file in the active manifest.  A review candidate therefore
+    # remains inert until a separately approved promotion copies it into a
+    # manifest-backed contribution.
+    candidate_path = _candidate_path(target_type, file_name)
+    candidate_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        descriptor = os.open(
+            candidate_path,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+            0o600,
+        )
+    except FileExistsError as exc:
+        raise ValueError(EVOLUTION_FILE_NAME_ERROR) from exc
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write(content)
+    except Exception:
+        candidate_path.unlink(missing_ok=True)
+        raise
+    return str(candidate_path)
 
 
 def evaluate_candidate(
@@ -928,8 +1038,10 @@ def evaluate_candidate(
 ) -> EvolutionReceipt:
     _check_evolution_boundary()
     resolved_source = _resolve_registered_target_path(target_type, source_path)
-    candidate_file_name = validate_evolution_file_name(
-        candidate_file_name or _default_candidate_file_name(resolved_source)
+    candidate_file_name = _candidate_file_name_for_target(
+        target_type,
+        source_path=resolved_source,
+        requested_file_name=candidate_file_name,
     )
     base_content = resolved_source.read_text(encoding="utf-8")
     objective_text = str(objective or "").strip()
@@ -1023,53 +1135,57 @@ def create_evolution_proposal(
     authority_check: EvolutionAuthorityCheck | None = None,
 ) -> dict[str, Any]:
     _check_evolution_boundary(authority_check)
-    requested_file_name = validate_evolution_file_name(file_name) if file_name is not None else None
     resolved_source = _resolve_registered_target_path(target_type, source_path)
-    candidate_file_name = (
-        requested_file_name
-        if requested_file_name is not None
-        else _default_candidate_file_name(resolved_source)
-    )
-    _check_evolution_boundary(authority_check)
-    candidate_name, candidate_content = generate_candidate_content(
+    candidate_file_name = _candidate_file_name_for_target(
         target_type,
-        source_path=str(resolved_source),
-        objective=objective,
-        observations=observations,
+        source_path=resolved_source,
+        requested_file_name=file_name,
     )
-    _check_evolution_boundary(authority_check)
-    receipt = evaluate_candidate(
-        target_type,
-        source_path=str(resolved_source),
-        candidate_content=candidate_content,
-        objective=objective,
-        observations=observations,
-        candidate_file_name=candidate_file_name,
-    )
-    _check_evolution_boundary(authority_check)
-    saved_path = None
-    receipt_path = None
-    if not receipt.blocked and receipt.score >= 0.7:
-        snapshot = _evolution_artifact_snapshot(target_type, candidate_file_name=candidate_file_name)
-        try:
-            _check_evolution_boundary(authority_check)
-            saved_path = _save_candidate(target_type, file_name=candidate_file_name, content=candidate_content)
-            _check_evolution_boundary(authority_check)
-            receipt_path = str(
-                workspace_capability_package_root() / "evolution" / "receipts" / f"{Path(candidate_file_name).stem}.json"
-            )
-            updated_gate = dict(receipt.benchmark_gate)
-            updated_gate["rollback_ready"] = True
-            updated_gate["safety_receipt_state"] = "candidate_and_receipt_written"
-            updated_gate["saved_candidate_path"] = saved_path
-            updated_gate["receipt_path"] = receipt_path
-            receipt = replace(receipt, saved_path=saved_path, benchmark_gate=updated_gate, receipt_path=receipt_path)
-            _check_evolution_boundary(authority_check)
-            _write_receipt(candidate_file_name, receipt)
-            _check_evolution_boundary(authority_check)
-        except Exception:
-            _restore_evolution_artifacts(snapshot)
-            raise
+    with _evolution_target_write_lock(target_type, resolved_source):
+        _check_evolution_boundary(authority_check)
+        _assert_review_candidate_destination_available(
+            target_type,
+            source_path=resolved_source,
+            file_name=candidate_file_name,
+        )
+        _check_evolution_boundary(authority_check)
+        candidate_name, candidate_content = generate_candidate_content(
+            target_type,
+            source_path=str(resolved_source),
+            objective=objective,
+            observations=observations,
+        )
+        _check_evolution_boundary(authority_check)
+        receipt = evaluate_candidate(
+            target_type,
+            source_path=str(resolved_source),
+            candidate_content=candidate_content,
+            objective=objective,
+            observations=observations,
+            candidate_file_name=candidate_file_name,
+        )
+        _check_evolution_boundary(authority_check)
+        saved_path = None
+        receipt_path = None
+        if not receipt.blocked and receipt.score >= 0.7:
+            snapshot = _evolution_artifact_snapshot(target_type, candidate_file_name=candidate_file_name)
+            try:
+                _check_evolution_boundary(authority_check)
+                saved_path = _save_candidate(target_type, file_name=candidate_file_name, content=candidate_content)
+                _check_evolution_boundary(authority_check)
+                receipt_path = str(_receipt_path(target_type, candidate_file_name))
+                updated_gate = dict(receipt.benchmark_gate)
+                updated_gate["rollback_ready"] = True
+                updated_gate["safety_receipt_state"] = "candidate_and_receipt_written"
+                updated_gate["saved_candidate_path"] = saved_path
+                updated_gate["receipt_path"] = receipt_path
+                receipt = replace(receipt, saved_path=saved_path, benchmark_gate=updated_gate, receipt_path=receipt_path)
+                _check_evolution_boundary(authority_check)
+                _write_receipt(candidate_file_name, receipt)
+                _check_evolution_boundary(authority_check)
+            except Exception:
+                _restore_evolution_artifacts(snapshot)
+                raise
     return {
         "status": "saved" if saved_path else "blocked",
         "candidate_name": candidate_name,

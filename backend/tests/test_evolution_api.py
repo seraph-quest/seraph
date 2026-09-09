@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 import json
 from dataclasses import replace
 from pathlib import Path
+import threading
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
@@ -255,9 +257,6 @@ async def test_evolution_routes_bind_exact_operator_context_and_reset_after_audi
         "evaluate",
         "ensure",
         "proposal",
-        "skill_reload",
-        "runbook_reload",
-        "pack_reload",
         "succeeded",
     ]
     assert all(
@@ -326,7 +325,7 @@ async def test_evolution_mutators_install_rest_watch_and_recheck_before_each_sta
 
     assert begin.call_count == 2
     assert end.await_count == 2
-    assert recheck.await_count == 12
+    assert recheck.await_count == 11
     assert get_current_session_id() is None
     assert get_current_trust_principal() is None
 
@@ -513,6 +512,194 @@ def test_evolution_engine_rejects_traversal_before_candidate_generation(tmp_path
                     file_name="../escape.md",
                 )
         generate.assert_not_called()
+    finally:
+        reset_runtime_context(tokens)
+
+
+def test_evolution_engine_rejects_active_source_name_and_non_candidate_suffix(tmp_path):
+    from src.evolution.engine import EVOLUTION_FILE_NAME_ERROR, create_evolution_proposal
+
+    operator = test_bypass_operator()
+    source_path = tmp_path / "review.md"
+    source_path.write_text("# Baseline\n", encoding="utf-8")
+    tokens = set_runtime_context(operator.session_id, "safe", trust_principal=operator.principal)
+    try:
+        with (
+            patch("src.evolution.engine._resolve_registered_target_path", return_value=source_path),
+            patch("src.evolution.engine.generate_candidate_content") as generate,
+        ):
+            for file_name in ("review.md", "review.md.bak"):
+                with pytest.raises(ValueError, match=EVOLUTION_FILE_NAME_ERROR):
+                    create_evolution_proposal(
+                        "prompt_pack",
+                        source_path=str(source_path),
+                        file_name=file_name,
+                    )
+        generate.assert_not_called()
+    finally:
+        reset_runtime_context(tokens)
+
+
+def test_evolution_engine_rejects_existing_review_candidate_without_overwrite(tmp_path):
+    from src.evolution.engine import EVOLUTION_FILE_NAME_ERROR, create_evolution_proposal
+
+    operator = test_bypass_operator()
+    source_path = tmp_path / "review.md"
+    source_path.write_text("# Baseline\n", encoding="utf-8")
+    candidate_path = tmp_path / "extensions" / "workspace-capabilities" / "prompts" / "review-review-candidate.md"
+    candidate_path.parent.mkdir(parents=True)
+    candidate_path.write_text("# Existing candidate\n", encoding="utf-8")
+    tokens = set_runtime_context(operator.session_id, "safe", trust_principal=operator.principal)
+    try:
+        with (
+            patch("src.evolution.engine.settings.workspace_dir", str(tmp_path)),
+            patch("src.evolution.engine._resolve_registered_target_path", return_value=source_path),
+            patch("src.evolution.engine.generate_candidate_content") as generate,
+        ):
+            with pytest.raises(ValueError, match=EVOLUTION_FILE_NAME_ERROR):
+                create_evolution_proposal(
+                    "prompt_pack",
+                    source_path=str(source_path),
+                )
+        generate.assert_not_called()
+        assert candidate_path.read_text(encoding="utf-8") == "# Existing candidate\n"
+    finally:
+        reset_runtime_context(tokens)
+
+
+def test_evolution_engine_serializes_concurrent_same_filename_proposals(tmp_path):
+    from src.evolution.engine import EVOLUTION_FILE_NAME_ERROR, EvolutionReceipt, create_evolution_proposal
+
+    operator = test_bypass_operator()
+    source_path = tmp_path / "review.md"
+    source_path.write_text("# Baseline\n", encoding="utf-8")
+    candidate_file_name = "review-review-candidate.md"
+    candidate_path = tmp_path / "extensions" / "workspace-capabilities" / "prompts" / candidate_file_name
+    receipt_path = (
+        tmp_path
+        / "extensions"
+        / "workspace-capabilities"
+        / "evolution"
+        / "receipts"
+        / "prompt_pack"
+        / "review-review-candidate.json"
+    )
+    start_gate = threading.Barrier(2)
+
+    def generate_candidate(_target_type, *, objective="", **_kwargs):
+        return f"{objective} Candidate", f"# {objective}\n"
+
+    def evaluate_candidate(_target_type, *, objective="", candidate_file_name, **_kwargs):
+        return EvolutionReceipt(
+            target_type="prompt_pack",
+            source_path=str(source_path),
+            source_name="Review",
+            candidate_name=f"{objective} Candidate",
+            candidate_file_name=candidate_file_name,
+            valid=True,
+            blocked=False,
+            score=0.8,
+            quality_state="guarded",
+            objective=objective,
+            observations=(),
+            constraints=(),
+            evals=(),
+            change_summary=("summary",),
+            review_risks=("risk",),
+            benchmark_gate={},
+            pr_draft={},
+        )
+
+    def invoke(objective):
+        tokens = set_runtime_context(operator.session_id, "safe", trust_principal=operator.principal)
+        try:
+            start_gate.wait(timeout=5)
+            return "saved", create_evolution_proposal(
+                "prompt_pack",
+                source_path=str(source_path),
+                objective=objective,
+                file_name=candidate_file_name,
+            )
+        except Exception as error:
+            return "failed", error
+        finally:
+            reset_runtime_context(tokens)
+
+    with (
+        patch("src.evolution.engine.settings.workspace_dir", str(tmp_path)),
+        patch("src.evolution.engine._resolve_registered_target_path", return_value=source_path),
+        patch("src.evolution.engine.generate_candidate_content", side_effect=generate_candidate),
+        patch("src.evolution.engine.evaluate_candidate", side_effect=evaluate_candidate),
+    ):
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            outcomes = [
+                future.result(timeout=5)
+                for future in (
+                    executor.submit(invoke, "first"),
+                    executor.submit(invoke, "second"),
+                )
+            ]
+
+    saved = [payload for status, payload in outcomes if status == "saved"]
+    failed = [error for status, error in outcomes if status == "failed"]
+    assert len(saved) == 1
+    assert len(failed) == 1
+    assert isinstance(failed[0], ValueError)
+    assert str(failed[0]) == EVOLUTION_FILE_NAME_ERROR
+
+    winner_objective = saved[0]["receipt"]["objective"]
+    assert candidate_path.read_text(encoding="utf-8") == f"# {winner_objective}\n"
+    assert candidate_path.exists()
+    assert receipt_path.exists()
+    receipt_payload = json.loads(receipt_path.read_text(encoding="utf-8"))
+    assert receipt_payload["benchmark_gate"]["saved_candidate_path"] == (
+        "prompts/review-review-candidate.md"
+    )
+
+
+def test_evolution_engine_keeps_saved_candidate_unregistered_until_promotion(tmp_path):
+    from src.evolution.engine import EvolutionReceipt, create_evolution_proposal
+
+    operator = test_bypass_operator()
+    source_path = tmp_path / "review.md"
+    source_path.write_text("# Baseline\n", encoding="utf-8")
+    receipt = EvolutionReceipt(
+        target_type="prompt_pack",
+        source_path=str(source_path),
+        source_name="Review",
+        candidate_name="Review Review Candidate",
+        candidate_file_name="review-review-candidate.md",
+        valid=True,
+        blocked=False,
+        score=0.8,
+        quality_state="guarded",
+        objective="improve review",
+        observations=(),
+        constraints=(),
+        evals=(),
+        change_summary=("summary",),
+        review_risks=("risk",),
+        benchmark_gate={},
+        pr_draft={},
+    )
+    tokens = set_runtime_context(operator.session_id, "safe", trust_principal=operator.principal)
+    try:
+        with (
+            patch("src.evolution.engine.settings.workspace_dir", str(tmp_path)),
+            patch("src.evolution.engine._resolve_registered_target_path", return_value=source_path),
+            patch("src.evolution.engine.generate_candidate_content", return_value=("Review Review Candidate", "# Candidate\n")),
+            patch("src.evolution.engine.evaluate_candidate", return_value=receipt),
+        ):
+            proposal = create_evolution_proposal(
+                "prompt_pack",
+                source_path=str(source_path),
+            )
+        assert proposal["status"] == "saved"
+        saved_path = Path(proposal["receipt"]["saved_path"])
+        assert saved_path.exists()
+        manifest_path = tmp_path / "extensions" / "workspace-capabilities" / "manifest.yaml"
+        if manifest_path.exists():
+            assert "prompts/review-review-candidate.md" not in manifest_path.read_text(encoding="utf-8")
     finally:
         reset_runtime_context(tokens)
 

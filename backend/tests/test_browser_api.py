@@ -3,12 +3,36 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+from dataclasses import replace
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
+from fastapi import HTTPException
+from starlette.requests import Request
 
 from config.settings import settings
+from src.approval.runtime import get_current_session_id, get_current_trust_principal
+from src.auth.cancellation import RuntimeRevokedError
+from src.auth.service import test_bypass_operator as _test_bypass_operator
 from src.browser.sessions import browser_session_runtime
+from src.security.trust_contract import PrincipalType
+
+
+AUTH_SESSION_ID = "test-auth-bypass"
+
+
+def _browser_mutator_request(operator):
+    return Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/api/browser/sessions",
+            "headers": [],
+            "query_string": b"",
+            "state": {"operator": operator},
+        }
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -16,6 +40,242 @@ def reset_browser_sessions():
     browser_session_runtime.reset_for_tests(delete_journal=True)
     yield
     browser_session_runtime.reset_for_tests(delete_journal=True)
+
+
+@pytest.mark.asyncio
+async def test_browser_mutators_deny_invalid_operator_before_provider_or_effect():
+    from src.api.browser import (
+        BrowserComputerUseControlActionRequest,
+        BrowserSessionControlRequest,
+        BrowserSessionOpenRequest,
+        BrowserSessionSnapshotRequest,
+        browser_computer_use_control_action,
+        close_browser_session,
+        control_browser_session,
+        open_browser_session,
+        snapshot_browser_session,
+    )
+
+    operator = _test_bypass_operator()
+    invalid_operators = (
+        None,
+        object(),
+        replace(operator, principal=replace(operator.principal, authenticated=False)),
+        replace(operator, principal=replace(operator.principal, revoked=True)),
+        replace(operator, principal=replace(operator.principal, session_id="other-session")),
+        replace(operator, principal=replace(operator.principal, principal_type=PrincipalType.SERVICE)),
+        replace(operator, principal=replace(operator.principal, grants=())),
+    )
+    with (
+        patch("src.api.browser._resolve_browser_provider") as resolve_provider,
+        patch("src.api.browser.browse_webpage") as capture,
+        patch("src.api.browser.browser_session_runtime.get_session_capture_url") as get_capture_url,
+        patch("src.api.browser.browser_session_runtime.validate_replay_session") as validate_replay,
+        patch("src.api.browser.browser_session_runtime.open_session") as open_session,
+        patch("src.api.browser.browser_session_runtime.snapshot_session") as snapshot,
+        patch("src.api.browser.browser_session_runtime.control_session") as control,
+        patch("src.api.browser.browser_session_runtime.close_session") as close,
+        patch("src.api.browser.context_manager.get_context") as get_context,
+    ):
+        for invalid_operator in invalid_operators:
+            http_request = _browser_mutator_request(invalid_operator)
+            with pytest.raises(HTTPException) as open_error:
+                await open_browser_session(
+                    BrowserSessionOpenRequest(
+                        owner_session_id=AUTH_SESSION_ID,
+                        url="https://example.test/blocked",
+                    ),
+                    http_request,
+                )
+            assert open_error.value.status_code == 401
+
+            with pytest.raises(HTTPException) as snapshot_error:
+                await snapshot_browser_session(
+                    "bs-missing",
+                    BrowserSessionSnapshotRequest(owner_session_id=AUTH_SESSION_ID),
+                    http_request,
+                )
+            assert snapshot_error.value.status_code == 401
+
+            with pytest.raises(HTTPException) as control_error:
+                await control_browser_session(
+                    "bs-missing",
+                    BrowserSessionControlRequest(owner_session_id=AUTH_SESSION_ID, action="close"),
+                    http_request,
+                )
+            assert control_error.value.status_code == 401
+
+            with pytest.raises(HTTPException) as action_error:
+                await browser_computer_use_control_action(
+                    BrowserComputerUseControlActionRequest(
+                        owner_session_id=AUTH_SESSION_ID,
+                        session_id="bs-missing",
+                        action="close",
+                    ),
+                    http_request,
+                )
+            assert action_error.value.status_code == 401
+
+            with pytest.raises(HTTPException) as close_error:
+                await close_browser_session(http_request, "bs-missing", AUTH_SESSION_ID)
+            assert close_error.value.status_code == 401
+
+    resolve_provider.assert_not_called()
+    capture.assert_not_called()
+    get_capture_url.assert_not_called()
+    validate_replay.assert_not_called()
+    open_session.assert_not_called()
+    snapshot.assert_not_called()
+    control.assert_not_called()
+    close.assert_not_called()
+    get_context.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_browser_mutators_reject_caller_owner_scope_before_effects():
+    from src.api.browser import (
+        BrowserSessionControlRequest,
+        BrowserSessionOpenRequest,
+        BrowserSessionSnapshotRequest,
+        close_browser_session,
+        control_browser_session,
+        open_browser_session,
+        snapshot_browser_session,
+    )
+
+    http_request = _browser_mutator_request(_test_bypass_operator())
+    with (
+        patch("src.api.browser._resolve_browser_provider") as resolve_provider,
+        patch("src.api.browser.browse_webpage") as capture,
+        patch("src.api.browser.browser_session_runtime.get_session_capture_url") as get_capture_url,
+        patch("src.api.browser.browser_session_runtime.open_session") as open_session,
+        patch("src.api.browser.browser_session_runtime.snapshot_session") as snapshot,
+        patch("src.api.browser.browser_session_runtime.control_session") as control,
+        patch("src.api.browser.browser_session_runtime.close_session") as close,
+        patch("src.api.browser.context_manager.get_context") as get_context,
+    ):
+        with pytest.raises(HTTPException) as open_error:
+            await open_browser_session(
+                BrowserSessionOpenRequest(
+                    owner_session_id="other-session",
+                    url="https://example.test/blocked",
+                ),
+                http_request,
+            )
+        assert open_error.value.status_code == 403
+
+        with pytest.raises(HTTPException) as snapshot_error:
+            await snapshot_browser_session(
+                "bs-missing",
+                BrowserSessionSnapshotRequest(owner_session_id="other-session"),
+                http_request,
+            )
+        assert snapshot_error.value.status_code == 403
+
+        with pytest.raises(HTTPException) as control_error:
+            await control_browser_session(
+                "bs-missing",
+                BrowserSessionControlRequest(owner_session_id="other-session", action="close"),
+                http_request,
+            )
+        assert control_error.value.status_code == 403
+
+        with pytest.raises(HTTPException) as close_error:
+            await close_browser_session(http_request, "bs-missing", "other-session")
+        assert close_error.value.status_code == 403
+
+    resolve_provider.assert_not_called()
+    capture.assert_not_called()
+    get_capture_url.assert_not_called()
+    open_session.assert_not_called()
+    snapshot.assert_not_called()
+    control.assert_not_called()
+    close.assert_not_called()
+    get_context.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_browser_open_binds_operator_context_and_resets_it():
+    from src.api.browser import BrowserSessionOpenRequest, open_browser_session
+
+    operator = _test_bypass_operator()
+    observed: list[object] = []
+    payload = {
+        "owner_session_id": operator.session_id,
+        "session_id": "bs-context",
+        "content": "private body",
+    }
+
+    def observe(*_args, **_kwargs):
+        observed.append(get_current_trust_principal())
+        return payload
+
+    with (
+        patch("src.api.browser.context_manager.get_context", return_value=SimpleNamespace(approval_mode="safe")),
+        patch(
+            "src.api.browser._resolve_browser_provider",
+            return_value=(
+                {
+                    "provider_name": "local-browser",
+                    "provider_kind": "local",
+                    "execution_mode": "local_runtime",
+                },
+                None,
+            ),
+        ),
+        patch("src.api.browser.browse_webpage", return_value="private body"),
+        patch("src.api.browser.browser_session_runtime.open_session", side_effect=observe),
+    ):
+        result = await open_browser_session(
+            BrowserSessionOpenRequest(owner_session_id=operator.session_id, url="https://example.test"),
+            _browser_mutator_request(operator),
+        )
+
+    assert result["session"]["owner_session_id"] == operator.session_id
+    assert observed
+    assert all(
+        principal is not None
+        and principal.principal_id == operator.principal.principal_id
+        and principal.principal_type is PrincipalType.OPERATOR
+        and principal.session_id == operator.session_id
+        for principal in observed
+    )
+    assert get_current_session_id() is None
+    assert get_current_trust_principal() is None
+
+
+@pytest.mark.asyncio
+async def test_browser_open_rechecks_revocation_before_capture_and_state_mutation():
+    from src.api.browser import BrowserSessionOpenRequest, open_browser_session
+
+    revoked = RuntimeRevokedError("authenticated operator session was revoked")
+    checks = [None, None, revoked]
+    with (
+        patch("src.api.browser.assert_runtime_not_revoked", side_effect=checks) as recheck,
+        patch(
+            "src.api.browser._resolve_browser_provider",
+            return_value=(
+                {
+                    "provider_name": "local-browser",
+                    "provider_kind": "local",
+                    "execution_mode": "local_runtime",
+                },
+                None,
+            ),
+        ) as resolve_provider,
+        patch("src.api.browser.browse_webpage") as capture,
+        patch("src.api.browser.browser_session_runtime.open_session") as open_session,
+    ):
+        with pytest.raises(RuntimeRevokedError):
+            await open_browser_session(
+                BrowserSessionOpenRequest(owner_session_id=AUTH_SESSION_ID, url="https://example.test"),
+                _browser_mutator_request(_test_bypass_operator()),
+            )
+
+    assert recheck.call_count == 3
+    resolve_provider.assert_called_once()
+    capture.assert_not_called()
+    open_session.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -154,7 +414,7 @@ async def test_browser_session_capture_does_not_block_api_event_loop(client):
             client.post(
                 "/api/browser/sessions",
                 json={
-                    "owner_session_id": "session-slow",
+                    "owner_session_id": AUTH_SESSION_ID,
                     "url": "https://example.test/slow",
                     "capture": "extract",
                 },
@@ -167,7 +427,7 @@ async def test_browser_session_capture_does_not_block_api_event_loop(client):
         response = await request_task
 
     assert response.status_code == 200
-    assert response.json()["session"]["owner_session_id"] == "session-slow"
+    assert response.json()["session"]["owner_session_id"] == AUTH_SESSION_ID
 
 
 @pytest.mark.asyncio
@@ -176,7 +436,7 @@ async def test_browser_session_rest_surface_is_owner_scoped_and_provenanced(clie
         open_response = await client.post(
             "/api/browser/sessions",
             json={
-                "owner_session_id": "session-a",
+                "owner_session_id": AUTH_SESSION_ID,
                 "url": "https://example.test/research",
                 "capture": "extract",
             },
@@ -184,7 +444,7 @@ async def test_browser_session_rest_surface_is_owner_scoped_and_provenanced(clie
 
     assert open_response.status_code == 200
     session = open_response.json()["session"]
-    assert session["owner_session_id"] == "session-a"
+    assert session["owner_session_id"] == AUTH_SESSION_ID
     assert session["provider_name"] == "local-browser"
     assert session["execution_mode"] == "local_runtime"
     assert session["partition_id"].startswith("bp-")
@@ -200,12 +460,12 @@ async def test_browser_session_rest_surface_is_owner_scoped_and_provenanced(clie
     assert provenance["contains_cookie"] is False
     assert provenance["contains_secret"] is False
 
-    list_response = await client.get("/api/browser/sessions?owner_session_id=session-a")
+    list_response = await client.get(f"/api/browser/sessions?owner_session_id={AUTH_SESSION_ID}")
     assert list_response.status_code == 200
     assert [item["session_id"] for item in list_response.json()["sessions"]] == [session["session_id"]]
 
     operator_response = await client.get(
-        "/api/operator/browser-computer-use-control?owner_session_id=session-a"
+        f"/api/operator/browser-computer-use-control?owner_session_id={AUTH_SESSION_ID}"
     )
     assert operator_response.status_code == 200
     operator_payload = operator_response.json()
@@ -218,7 +478,7 @@ async def test_browser_session_rest_surface_is_owner_scoped_and_provenanced(clie
     assert cross_owner_response.status_code == 404
 
     ref_response = await client.get(
-        f"/api/browser/refs/{session['latest_ref']}?owner_session_id=session-a"
+        f"/api/browser/refs/{session['latest_ref']}?owner_session_id={AUTH_SESSION_ID}"
     )
     assert ref_response.status_code == 200
     ref_payload = ref_response.json()["ref"]
@@ -237,7 +497,7 @@ async def test_browser_session_journal_survives_reload_without_raw_content(clien
             open_response = await client.post(
                 "/api/browser/sessions",
                 json={
-                    "owner_session_id": "session-journal",
+                    "owner_session_id": AUTH_SESSION_ID,
                     "url": "https://example.test/private?token=secret",
                     "capture": "extract",
                 },
@@ -251,7 +511,7 @@ async def test_browser_session_journal_survives_reload_without_raw_content(clien
         with patch("src.api.browser.browse_webpage", return_value="Second private DOM token=secret"):
             snapshot_response = await client.post(
                 f"/api/browser/sessions/{session['session_id']}/snapshot",
-                json={"owner_session_id": "session-journal", "capture": "html"},
+                json={"owner_session_id": AUTH_SESSION_ID, "capture": "html"},
             )
         assert snapshot_response.status_code == 200
         assert "content" not in snapshot_response.json()["session"]
@@ -269,7 +529,7 @@ async def test_browser_session_journal_survives_reload_without_raw_content(clien
         assert "metadata_only" in journal_text
 
         browser_session_runtime.reset_for_tests(delete_journal=False)
-        list_response = await client.get("/api/browser/sessions?owner_session_id=session-journal")
+        list_response = await client.get(f"/api/browser/sessions?owner_session_id={AUTH_SESSION_ID}")
         assert list_response.status_code == 200
         listed = list_response.json()["sessions"]
         assert [item["session_id"] for item in listed] == [session["session_id"]]
@@ -281,7 +541,7 @@ async def test_browser_session_journal_survives_reload_without_raw_content(clien
         assert "token=secret" not in json.dumps(list_response.json())
 
         journal_response = await client.get(
-            f"/api/browser/sessions/{session['session_id']}/journal?owner_session_id=session-journal"
+            f"/api/browser/sessions/{session['session_id']}/journal?owner_session_id={AUTH_SESSION_ID}"
         )
         assert journal_response.status_code == 200
         journal = journal_response.json()["journal"]
@@ -290,7 +550,7 @@ async def test_browser_session_journal_survives_reload_without_raw_content(clien
         assert "token=secret" not in json.dumps(journal_response.json())
 
         ref_response = await client.get(
-            f"/api/browser/refs/{listed[0]['latest_ref']}?owner_session_id=session-journal"
+            f"/api/browser/refs/{listed[0]['latest_ref']}?owner_session_id={AUTH_SESSION_ID}"
         )
         assert ref_response.status_code == 200
         ref_payload = ref_response.json()["ref"]
@@ -309,14 +569,14 @@ async def test_browser_session_quarantine_blocks_snapshot_and_replay(client):
     with patch("src.api.browser.browse_webpage", return_value="Example page body"):
         open_response = await client.post(
             "/api/browser/sessions",
-            json={"owner_session_id": "session-q", "url": "https://example.test/research"},
+            json={"owner_session_id": AUTH_SESSION_ID, "url": "https://example.test/research"},
         )
     session_id = open_response.json()["session"]["session_id"]
 
     quarantine_response = await client.post(
         f"/api/browser/sessions/{session_id}/control",
         json={
-            "owner_session_id": "session-q",
+            "owner_session_id": AUTH_SESSION_ID,
             "action": "quarantine",
             "reason": "hostile-page prompt injection",
         },
@@ -328,21 +588,21 @@ async def test_browser_session_quarantine_blocks_snapshot_and_replay(client):
     with patch("src.api.browser.browse_webpage", return_value="Should not persist"):
         snapshot_response = await client.post(
             f"/api/browser/sessions/{session_id}/snapshot",
-            json={"owner_session_id": "session-q", "capture": "extract"},
+            json={"owner_session_id": AUTH_SESSION_ID, "capture": "extract"},
         )
     assert snapshot_response.status_code == 409
     assert snapshot_response.json()["detail"]["error"] == "session_quarantined"
 
     replay_response = await client.post(
         f"/api/browser/sessions/{session_id}/control",
-        json={"owner_session_id": "session-q", "action": "replay_snapshot"},
+        json={"owner_session_id": AUTH_SESSION_ID, "action": "replay_snapshot"},
     )
     assert replay_response.status_code == 409
     assert replay_response.json()["detail"]["error"] == "session_quarantined"
 
     recover_response = await client.post(
         f"/api/browser/sessions/{session_id}/control",
-        json={"owner_session_id": "session-q", "action": "recover"},
+        json={"owner_session_id": AUTH_SESSION_ID, "action": "recover"},
     )
     assert recover_response.status_code == 200
     assert recover_response.json()["session"]["status"] == "open"
@@ -411,7 +671,7 @@ async def test_browser_session_degraded_fallback_replay_requires_acknowledgement
             open_response = await client.post(
                 "/api/browser/sessions",
                 json={
-                    "owner_session_id": "session-r",
+                    "owner_session_id": AUTH_SESSION_ID,
                     "url": "https://example.test/research",
                     "provider": "remote-cdp",
                 },
@@ -425,7 +685,7 @@ async def test_browser_session_degraded_fallback_replay_requires_acknowledgement
 
     replay_without_ack = await client.post(
         f"/api/browser/sessions/{session['session_id']}/control",
-        json={"owner_session_id": "session-r", "action": "replay_snapshot"},
+        json={"owner_session_id": AUTH_SESSION_ID, "action": "replay_snapshot"},
     )
     assert replay_without_ack.status_code == 409
     assert replay_without_ack.json()["detail"]["error"] == "degraded_fallback_acknowledgement_required"
@@ -435,14 +695,14 @@ async def test_browser_session_degraded_fallback_replay_requires_acknowledgement
             failed_replay = await client.post(
                 f"/api/browser/sessions/{session['session_id']}/control",
                 json={
-                    "owner_session_id": "session-r",
+                    "owner_session_id": AUTH_SESSION_ID,
                     "action": "replay_snapshot",
                     "acknowledge_degraded_fallback": True,
                 },
             )
     assert failed_replay.status_code == 400
     failed_state = await client.get(
-        f"/api/browser/sessions/{session['session_id']}?owner_session_id=session-r"
+        f"/api/browser/sessions/{session['session_id']}?owner_session_id={AUTH_SESSION_ID}"
     )
     assert failed_state.status_code == 200
     failed_session = failed_state.json()["session"]
@@ -457,7 +717,7 @@ async def test_browser_session_degraded_fallback_replay_requires_acknowledgement
             replay_with_ack = await client.post(
                 f"/api/browser/sessions/{session['session_id']}/control",
                 json={
-                    "owner_session_id": "session-r",
+                    "owner_session_id": AUTH_SESSION_ID,
                     "action": "replay_snapshot",
                     "acknowledge_degraded_fallback": True,
                 },

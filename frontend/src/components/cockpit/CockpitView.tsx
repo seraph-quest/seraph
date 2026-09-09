@@ -59,6 +59,17 @@ interface ObserverState {
   upcoming_events?: Array<{ summary?: string; start?: string }>;
 }
 
+interface RuntimeInferenceReadiness {
+  status?: string;
+  reasons?: string[];
+  provider?: string;
+  active_only?: boolean;
+  cloud_egress?: string;
+  cloud_consent?: boolean;
+  cost_ceiling_microusd?: number | null;
+  profile_id?: string | null;
+}
+
 interface RuntimeStatus {
   version: string;
   build_id: string;
@@ -83,6 +94,9 @@ interface RuntimeStatus {
     queue_status_endpoint?: string;
     health_endpoint?: string;
     backend_health_endpoint?: string;
+    inference_ready?: boolean;
+    inference_readiness?: RuntimeInferenceReadiness;
+    legacy_local_route_blocked?: boolean;
   };
   timezone?: string;
   llm_logging_enabled?: boolean;
@@ -6679,6 +6693,7 @@ function normalizeRuntimeStatus(value: unknown): RuntimeStatus | null {
 function normalizeEffectiveRuntime(value: unknown): RuntimeStatus["effective_runtime"] | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const record = value as Record<string, unknown>;
+  const inferenceReadiness = normalizeRuntimeInferenceReadiness(record.inference_readiness);
   return {
     runtime_path: typeof record.runtime_path === "string" ? record.runtime_path : undefined,
     active_profile: typeof record.active_profile === "string" ? record.active_profile : undefined,
@@ -6696,6 +6711,63 @@ function normalizeEffectiveRuntime(value: unknown): RuntimeStatus["effective_run
     queue_status_endpoint: typeof record.queue_status_endpoint === "string" ? record.queue_status_endpoint : undefined,
     health_endpoint: typeof record.health_endpoint === "string" ? record.health_endpoint : undefined,
     backend_health_endpoint: typeof record.backend_health_endpoint === "string" ? record.backend_health_endpoint : undefined,
+    inference_ready: typeof record.inference_ready === "boolean" ? record.inference_ready : undefined,
+    inference_readiness: inferenceReadiness ?? undefined,
+    legacy_local_route_blocked: typeof record.legacy_local_route_blocked === "boolean"
+      ? record.legacy_local_route_blocked
+      : undefined,
+  };
+}
+
+function normalizeRuntimeInferenceReadiness(value: unknown): RuntimeInferenceReadiness | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const record = value as Record<string, unknown>;
+  return {
+    status: typeof record.status === "string" ? record.status : undefined,
+    reasons: Array.isArray(record.reasons)
+      ? record.reasons.filter((reason): reason is string => typeof reason === "string")
+      : undefined,
+    provider: typeof record.provider === "string" ? record.provider : undefined,
+    active_only: typeof record.active_only === "boolean" ? record.active_only : undefined,
+    cloud_egress: typeof record.cloud_egress === "string" ? record.cloud_egress : undefined,
+    cloud_consent: typeof record.cloud_consent === "boolean" ? record.cloud_consent : undefined,
+    cost_ceiling_microusd: typeof record.cost_ceiling_microusd === "number" && Number.isFinite(record.cost_ceiling_microusd)
+      ? record.cost_ceiling_microusd
+      : record.cost_ceiling_microusd === null
+        ? null
+        : undefined,
+    profile_id: typeof record.profile_id === "string" ? record.profile_id : record.profile_id === null ? null : undefined,
+  };
+}
+
+function runtimeReadinessPresent(value: RuntimeStatus["effective_runtime"] | undefined): boolean {
+  return value?.inference_ready !== undefined
+    || value?.inference_readiness?.status !== undefined
+    || value?.inference_readiness?.reasons !== undefined;
+}
+
+function mergeRuntimeReadiness(current: RuntimeStatus | null, next: RuntimeStatus): RuntimeStatus {
+  const currentEffective = current?.effective_runtime;
+  if (!currentEffective || !runtimeReadinessPresent(currentEffective)) return next;
+
+  const nextEffective = next.effective_runtime;
+  return {
+    ...next,
+    effective_runtime: {
+      ...currentEffective,
+      ...(nextEffective ?? {}),
+      // Operator posture can carry newer route/model metadata even when its
+      // runtime shape predates the readiness fields from /api/runtime/status.
+      provider: nextEffective?.provider ?? next.provider ?? currentEffective.provider,
+      provider_label: nextEffective?.provider_label ?? next.provider ?? currentEffective.provider_label,
+      model: nextEffective?.model ?? next.model ?? currentEffective.model,
+      model_label: nextEffective?.model_label ?? next.model_label ?? currentEffective.model_label,
+      route_label: nextEffective?.route_label ?? next.provider ?? currentEffective.route_label,
+      inference_ready: nextEffective?.inference_ready ?? currentEffective.inference_ready,
+      inference_readiness: runtimeReadinessPresent(nextEffective)
+        ? nextEffective?.inference_readiness
+        : currentEffective.inference_readiness,
+    },
   };
 }
 
@@ -7186,14 +7258,18 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       setOperatorControlPlane(nextOperatorControlPlane);
       const operatorPostureRuntime = normalizeRuntimeStatus(nextOperatorControlPlane?.runtime_posture.runtime);
       if (operatorPostureRuntime) {
-        storeRuntimeReceipt(operatorPostureRuntime);
-        setRuntimeReceipt({ status: operatorPostureRuntime, source: "operator_posture" });
+        const mergedRuntime = mergeRuntimeReadiness(runtimeReceipt?.status ?? null, operatorPostureRuntime);
+        storeRuntimeReceipt(mergedRuntime);
+        setRuntimeReceipt({
+          status: mergedRuntime,
+          source: runtimeReceipt?.source === "retained" ? "retained" : "operator_posture",
+        });
       }
       markDeepPaneLoaded("control_plane", Boolean(nextOperatorControlPlane));
       return;
     }
     markDeepPaneLoaded("control_plane", false);
-  }, [fetchCockpitJson, markDeepPaneLoaded, updateDeepPaneState]);
+  }, [fetchCockpitJson, markDeepPaneLoaded, runtimeReceipt, updateDeepPaneState]);
 
   const loadWorkflowOrchestration = useCallback(async () => {
     updateDeepPaneState("workflow_orchestration", "loading");
@@ -8429,10 +8505,15 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   const runtimeDegraded = runtimeStatus?.model_fabric?.status === "degraded"
     || (interactiveFabricRoute?.last_outcome != null && !isSuccessfulModelFabricOutcome(interactiveFabricRoute.last_outcome))
     || (interactiveFabricRoute?.persistence != null && interactiveFabricRoute.persistence !== "persisted");
+  const runtimeReadinessStatus = runtimeStatus?.effective_runtime?.inference_readiness?.status;
+  const runtimeBlocked = runtimeStatus?.effective_runtime?.inference_ready === false
+    || runtimeReadinessStatus === "configuration_required";
+  const runtimeReadinessDegraded = runtimeReadinessStatus === "degraded";
   const runtimeProviderLabel = [
     runtimeProviderLabelBase,
     interactiveFabricRoute?.fallback_used ? "FALLBACK" : "",
-    runtimeDegraded ? "DEGRADED" : "",
+    runtimeBlocked ? "BLOCKED" : "",
+    runtimeDegraded || runtimeReadinessDegraded ? "DEGRADED" : "",
     runtimeReceipt?.source === "retained" ? "STALE" : "",
   ].filter(Boolean).join(" ");
   const runtimeModelLabel = (

@@ -971,6 +971,7 @@ from src.observer.screen_repository import ScreenObservationRepository
 from src.observer.sources.time_source import gather_time
 from src.memory.consolidator import consolidate_session
 from src.memory import soul as soul_mod
+from src.memory.hybrid_retrieval import HybridMemoryRetrievalResult
 from src.memory.vector_store import _reset_vector_store_state, add_memory, search
 from src.observer.context import CurrentContext
 from src.observer.manager import ContextManager
@@ -1413,6 +1414,27 @@ def _make_context(**overrides: Any) -> CurrentContext:
     )
     defaults.update(overrides)
     return CurrentContext(**defaults)
+
+
+def _make_hybrid_memory_fixture(
+    texts: tuple[str, ...] = (),
+    *,
+    degraded: bool = False,
+    reason: str | None = None,
+) -> HybridMemoryRetrievalResult:
+    """Build a typed result at the canonical daily-briefing retrieval seam."""
+    diagnostics = (
+        ({"reason": reason, "status": "degraded_no_learning"},)
+        if reason
+        else ()
+    )
+    return HybridMemoryRetrievalResult(
+        context="\n".join(f"- [memory] {text}" for text in texts),
+        buckets={"memory": texts} if texts else {},
+        degraded=degraded,
+        hits=(),
+        diagnostics=diagnostics,
+    )
 
 
 def _tool_names(agent: Any) -> list[str]:
@@ -5647,6 +5669,7 @@ async def _eval_daily_briefing_fallback() -> dict[str, Any]:
     mock_context_manager = MagicMock()
     mock_context_manager.refresh = AsyncMock(return_value=ctx)
     mock_deliver = AsyncMock()
+    memory_fixture = _make_hybrid_memory_fixture(("Prioritize reliability",))
     no_route = NoCompliantModelRouteError()
 
     with (
@@ -5665,7 +5688,10 @@ async def _eval_daily_briefing_fallback() -> dict[str, Any]:
         patch.object(settings, "fallback_llm_api_base", "http://localhost:11434/v1"),
         patch("src.observer.manager.context_manager", mock_context_manager),
         patch("src.memory.soul.read_soul", return_value="# Soul\nName: Hero"),
-        patch("src.memory.vector_store.search_with_status", return_value=([{"category": "memory", "text": "Prioritize reliability"}], False)),
+        patch(
+            "src.scheduler.jobs.daily_briefing.retrieve_hybrid_memory",
+            new=AsyncMock(return_value=memory_fixture),
+        ) as mock_memory,
         patch("src.llm_runtime.logger.warning"),
         patch(
             "src.scheduler.jobs.daily_briefing.completion_with_fallback",
@@ -5675,7 +5701,10 @@ async def _eval_daily_briefing_fallback() -> dict[str, Any]:
     ):
         await _run_scheduler_eval_job("daily_briefing", run_daily_briefing)
 
+    mock_memory.assert_awaited_once_with(query="daily priorities and routines", limit=3)
     mock_completion.assert_awaited_once()
+    prompt = mock_completion.await_args.kwargs["messages"][0]["content"]
+    assert "Prioritize reliability" in prompt
     mock_deliver.assert_not_called()
     return {
         "primary_model": "openrouter/anthropic/claude-sonnet-4",
@@ -5692,11 +5721,18 @@ async def _eval_daily_briefing_degraded_memories_audit() -> dict[str, Any]:
     mock_context_manager.refresh = AsyncMock(return_value=ctx)
     mock_deliver = AsyncMock()
     mock_log_event = AsyncMock()
+    memory_fixture = _make_hybrid_memory_fixture(
+        degraded=True,
+        reason="vector_store_search_failed",
+    )
 
     with (
         patch("src.observer.manager.context_manager", mock_context_manager),
         patch("src.memory.soul.read_soul", return_value="# Soul\nName: Hero"),
-        patch("src.memory.vector_store.search_with_status", return_value=([], True)),
+        patch(
+            "src.scheduler.jobs.daily_briefing.retrieve_hybrid_memory",
+            new=AsyncMock(return_value=memory_fixture),
+        ) as mock_memory,
         patch(
             "src.scheduler.jobs.daily_briefing.completion_with_fallback",
             AsyncMock(return_value=_make_litellm_response("Good morning. Here is the plan.")),
@@ -5706,6 +5742,7 @@ async def _eval_daily_briefing_degraded_memories_audit() -> dict[str, Any]:
     ):
         await _run_scheduler_eval_job("daily_briefing", run_daily_briefing)
 
+    mock_memory.assert_awaited_once_with(query="daily priorities and routines", limit=3)
     degraded = _find_audit_call(
         mock_log_event,
         event_type="background_task_degraded",
@@ -5734,14 +5771,15 @@ async def _eval_daily_briefing_delivery_behavior() -> dict[str, Any]:
     mock_context_manager.refresh = AsyncMock(return_value=ctx)
     mock_deliver = AsyncMock(return_value=DeliveryDecision.deliver)
     mock_log_event = AsyncMock()
+    memory_fixture = _make_hybrid_memory_fixture(("Morning briefings should be concrete.",))
 
     with (
         patch("src.observer.manager.context_manager", mock_context_manager),
         patch("src.memory.soul.read_soul", return_value="# Soul\nName: Hero"),
         patch(
-            "src.memory.vector_store.search_with_status",
-            return_value=([{"category": "fact", "text": "Morning briefings should be concrete."}], False),
-        ),
+            "src.scheduler.jobs.daily_briefing.retrieve_hybrid_memory",
+            new=AsyncMock(return_value=memory_fixture),
+        ) as mock_memory,
         patch(
             "src.scheduler.jobs.daily_briefing.completion_with_fallback",
             AsyncMock(
@@ -5749,12 +5787,15 @@ async def _eval_daily_briefing_delivery_behavior() -> dict[str, Any]:
                     "Good morning. Design review at 09:30. Focus on proactive eval coverage."
                 )
             ),
-        ),
+        ) as mock_completion,
         patch("src.observer.delivery.deliver_or_queue", mock_deliver),
         patch.object(audit_repository, "log_event", mock_log_event),
     ):
         await _run_scheduler_eval_job("daily_briefing", run_daily_briefing)
 
+    mock_memory.assert_awaited_once_with(query="daily priorities and routines", limit=3)
+    prompt = mock_completion.await_args.kwargs["messages"][0]["content"]
+    assert "Morning briefings should be concrete." in prompt
     delivered_message = mock_deliver.await_args.args[0]
     delivered_kwargs = mock_deliver.await_args.kwargs
     succeeded = _find_audit_call(
@@ -6027,7 +6068,15 @@ async def _eval_scheduled_local_runtime_profile() -> dict[str, Any]:
             ("src.memory.soul.read_soul", patch("src.memory.soul.read_soul", return_value="# Soul\nName: Hero")),
             ("src.scheduler.jobs.evening_review._count_messages_today", patch("src.scheduler.jobs.evening_review._count_messages_today", AsyncMock(return_value=(5, False)))),
             ("src.scheduler.jobs.evening_review._get_completed_goals_today", patch("src.scheduler.jobs.evening_review._get_completed_goals_today", AsyncMock(return_value=(["Close routing gap"], False)))),
-            ("src.memory.vector_store.search_with_status", patch("src.memory.vector_store.search_with_status", return_value=([{"category": "memory", "text": "Prefer local summaries"}], False))),
+            (
+                "src.scheduler.jobs.daily_briefing.retrieve_hybrid_memory",
+                patch(
+                    "src.scheduler.jobs.daily_briefing.retrieve_hybrid_memory",
+                    new=AsyncMock(
+                        return_value=_make_hybrid_memory_fixture(("Prefer local summaries",)),
+                    ),
+                ),
+            ),
             ("src.observer.delivery.deliver_or_queue", patch("src.observer.delivery.deliver_or_queue", mock_deliver)),
         ):
             stack.enter_context(replacement)

@@ -5,7 +5,8 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
 import json
-from pathlib import Path
+import os
+from pathlib import Path, PureWindowsPath
 import re
 from typing import Any, Callable, Literal
 
@@ -31,6 +32,7 @@ from src.security.trust_contract import AuthorityGrant, PrincipalType, TrustPrin
 
 EvolutionTargetType = Literal["skill", "runbook", "starter_pack", "prompt_pack"]
 EvolutionAuthorityCheck = Callable[[], None]
+EVOLUTION_FILE_NAME_ERROR = "Candidate file name must stay within the managed workspace package"
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _CANDIDATE_SUFFIX = "-review-candidate"
@@ -101,7 +103,42 @@ def require_evolution_operator_authority() -> TrustPrincipal:
 
 def _check_evolution_boundary(authority_check: EvolutionAuthorityCheck | None = None) -> None:
     require_evolution_operator_authority()
-    (authority_check or assert_runtime_not_revoked)()
+    # The engine owns the revocation fence even when a caller supplies an
+    # additional callback.  A callback may be incomplete or accidentally omit
+    # the built-in session check, so it can only add checks here.
+    assert_runtime_not_revoked()
+    if authority_check is not None:
+        authority_check()
+
+
+def validate_evolution_file_name(file_name: str) -> str:
+    """Allow only a single managed-package filename at the engine boundary."""
+    candidate = str(file_name or "").strip()
+    windows_path = PureWindowsPath(candidate)
+    if (
+        not candidate
+        or "\x00" in candidate
+        or os.path.isabs(candidate)
+        or "/" in candidate
+        or "\\" in candidate
+        or windows_path.is_absolute()
+        or bool(windows_path.drive)
+        or any(part in {".", ".."} for part in windows_path.parts)
+        or Path(candidate).name != candidate
+    ):
+        raise ValueError(EVOLUTION_FILE_NAME_ERROR)
+    return candidate
+
+
+def _validate_evolution_path_containment(path: Path) -> Path:
+    """Reject managed artifact paths whose resolved parent escapes the package."""
+    package_root = workspace_capability_package_root().resolve()
+    resolved = path.resolve()
+    try:
+        resolved.relative_to(package_root)
+    except ValueError as exc:
+        raise ValueError(EVOLUTION_FILE_NAME_ERROR) from exc
+    return path
 
 
 @dataclass(frozen=True)
@@ -825,9 +862,11 @@ def _safe_artifact_reference(value: str | None) -> str:
 
 
 def _write_receipt(candidate_file_name: str, receipt: EvolutionReceipt) -> str:
+    candidate_file_name = validate_evolution_file_name(candidate_file_name)
     receipts_dir = workspace_capability_package_root() / "evolution" / "receipts"
-    receipts_dir.mkdir(parents=True, exist_ok=True)
     target = receipts_dir / f"{Path(candidate_file_name).stem}.json"
+    _validate_evolution_path_containment(target)
+    receipts_dir.mkdir(parents=True, exist_ok=True)
     target.write_text(json.dumps(_safe_receipt_payload(receipt), indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return str(target)
 
@@ -837,6 +876,7 @@ def _evolution_artifact_snapshot(
     *,
     candidate_file_name: str,
 ) -> tuple[tuple[Path, bool, bytes | None], ...]:
+    candidate_file_name = validate_evolution_file_name(candidate_file_name)
     package_root = workspace_capability_package_root()
     contribution_type = {
         "skill": "skills",
@@ -847,6 +887,8 @@ def _evolution_artifact_snapshot(
     candidate_path = package_root / expected_layout_prefixes(contribution_type)[0] / candidate_file_name
     receipt_path = package_root / "evolution" / "receipts" / f"{Path(candidate_file_name).stem}.json"
     manifest_path = package_root / "manifest.yaml"
+    for path in (candidate_path, receipt_path, manifest_path):
+        _validate_evolution_path_containment(path)
     snapshot: list[tuple[Path, bool, bytes | None]] = []
     for path in (candidate_path, receipt_path, manifest_path):
         snapshot.append((path, path.exists(), path.read_bytes() if path.exists() else None))
@@ -863,12 +905,15 @@ def _restore_evolution_artifacts(snapshot: tuple[tuple[Path, bool, bytes | None]
 
 
 def _save_candidate(target_type: EvolutionTargetType, *, file_name: str, content: str) -> str:
+    file_name = validate_evolution_file_name(file_name)
     contribution_type = {
         "skill": "skills",
         "runbook": "runbooks",
         "starter_pack": "starter_packs",
         "prompt_pack": "prompt_packs",
     }[target_type]
+    candidate_path = workspace_capability_package_root() / expected_layout_prefixes(contribution_type)[0] / file_name
+    _validate_evolution_path_containment(candidate_path)
     return str(save_workspace_contribution(contribution_type, file_name=file_name, content=content))
 
 
@@ -883,6 +928,9 @@ def evaluate_candidate(
 ) -> EvolutionReceipt:
     _check_evolution_boundary()
     resolved_source = _resolve_registered_target_path(target_type, source_path)
+    candidate_file_name = validate_evolution_file_name(
+        candidate_file_name or _default_candidate_file_name(resolved_source)
+    )
     base_content = resolved_source.read_text(encoding="utf-8")
     objective_text = str(objective or "").strip()
     normalized_observations = _normalize_observations(observations)
@@ -890,7 +938,7 @@ def evaluate_candidate(
     candidate_metadata = _validate_target(
         target_type,
         content=candidate_content,
-        path=str(resolved_source.with_name(candidate_file_name or _default_candidate_file_name(resolved_source))),
+        path=str(resolved_source.with_name(candidate_file_name)),
     )
     constraints = _evaluate_constraints(
         target_type,
@@ -919,7 +967,7 @@ def evaluate_candidate(
         source_path=str(resolved_source),
         source_name=str(source_metadata.get("name") or source_metadata.get("title") or resolved_source.stem),
         candidate_name=str(candidate_metadata.get("name") or candidate_metadata.get("title") or resolved_source.stem),
-        candidate_file_name=candidate_file_name or _default_candidate_file_name(resolved_source),
+        candidate_file_name=candidate_file_name,
         valid=True,
         blocked=blocked,
         score=score,
@@ -975,7 +1023,13 @@ def create_evolution_proposal(
     authority_check: EvolutionAuthorityCheck | None = None,
 ) -> dict[str, Any]:
     _check_evolution_boundary(authority_check)
+    requested_file_name = validate_evolution_file_name(file_name) if file_name is not None else None
     resolved_source = _resolve_registered_target_path(target_type, source_path)
+    candidate_file_name = (
+        requested_file_name
+        if requested_file_name is not None
+        else _default_candidate_file_name(resolved_source)
+    )
     _check_evolution_boundary(authority_check)
     candidate_name, candidate_content = generate_candidate_content(
         target_type,
@@ -984,7 +1038,6 @@ def create_evolution_proposal(
         observations=observations,
     )
     _check_evolution_boundary(authority_check)
-    candidate_file_name = file_name or _default_candidate_file_name(resolved_source)
     receipt = evaluate_candidate(
         target_type,
         source_path=str(resolved_source),

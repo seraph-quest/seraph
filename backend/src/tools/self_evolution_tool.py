@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from smolagents import tool
 
-from src.auth.cancellation import assert_runtime_not_revoked
+from src.auth.cancellation import RuntimeRevokedError, assert_runtime_not_revoked
 from src.evolution.engine import (
     create_evolution_proposal,
     require_evolution_operator_authority,
@@ -36,13 +36,24 @@ def propose_capability_evolution(
     """
     require_evolution_operator_authority()
     assert_runtime_not_revoked()
-    proposal = create_evolution_proposal(
-        target_type,  # type: ignore[arg-type]
-        source_path=source_path,
-        objective=objective,
-        observations=[line.strip() for line in observations.splitlines() if line.strip()],
-        authority_check=assert_runtime_not_revoked,
-    )
+    try:
+        proposal = create_evolution_proposal(
+            target_type,  # type: ignore[arg-type]
+            source_path=source_path,
+            objective=objective,
+            observations=[line.strip() for line in observations.splitlines() if line.strip()],
+            authority_check=assert_runtime_not_revoked,
+        )
+    except RuntimeRevokedError as exc:
+        raise RuntimeRevokedError("Operator session was revoked.") from exc
+    except ValueError as exc:
+        raise ValueError(
+            "Evolution candidate is invalid; inspect the authenticated operator receipt."
+        ) from exc
+    except Exception as exc:
+        raise RuntimeError(
+            "Evolution operation failed; inspect the authenticated operator receipt."
+        ) from exc
     receipt = proposal["receipt"]
     lines = [
         f"status: {proposal['status']}",

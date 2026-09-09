@@ -24,7 +24,12 @@ from src.api.chat import (
 from src.audit.runtime import log_integration_event
 from src.auth.cancellation import RuntimeRevokedError, assert_runtime_not_revoked
 from src.auth.service import AuthFailure, bind_operator_principal
-from src.evolution.engine import create_evolution_proposal, evaluate_candidate, list_evolution_targets
+from src.evolution.engine import (
+    EVOLUTION_FILE_NAME_ERROR,
+    create_evolution_proposal,
+    evaluate_candidate,
+    list_evolution_targets,
+)
 from src.extensions.registry import default_manifest_roots_for_workspace
 from src.observer.manager import context_manager
 from src.runbooks.manager import runbook_manager
@@ -64,10 +69,12 @@ def _safe_file_name(file_name: str | None, *, target_type: EvolutionTargetType, 
     if (
         not candidate
         or os.path.isabs(candidate)
+        or "/" in candidate
+        or "\\" in candidate
         or normalized.startswith("..")
         or os.path.basename(normalized) != normalized
     ):
-        raise ValueError("candidate file name rejected")
+        raise ValueError(EVOLUTION_FILE_NAME_ERROR)
     stem, ext = os.path.splitext(normalized)
     safe_stem = _FILE_NAME_RE.sub("-", stem).strip("-_.") or Path(source_path).stem
     return f"{safe_stem}{ext or _DEFAULT_EXTENSIONS[target_type]}"
@@ -137,7 +144,25 @@ def _reload_evolution_managers_with_authority() -> None:
     assert_runtime_not_revoked()
 
 
-def _evolution_failure_detail(code: str, *, audit_receipt: dict[str, object] | None = None) -> dict[str, object]:
+def _redact_evolution_value_error(exc: ValueError) -> str:
+    """Keep established safe input errors while hiding parser/path details."""
+    message = str(exc)
+    if message == EVOLUTION_FILE_NAME_ERROR or re.fullmatch(
+        r"(?:skill|runbook|starter_pack|prompt_pack) source must be a registered evolution target",
+        message,
+    ):
+        return message
+    return "Evolution candidate is invalid; inspect the authenticated operator receipt."
+
+
+def _evolution_failure_detail(
+    code: str,
+    *,
+    audit_receipt: dict[str, object] | None = None,
+    message: str | None = None,
+) -> str | dict[str, object]:
+    if audit_receipt is None:
+        return message or "Evolution operation failed; inspect the authenticated operator receipt."
     detail: dict[str, object] = {
         "code": code,
         "message": "Evolution operation failed; inspect the authenticated operator receipt.",
@@ -145,6 +170,31 @@ def _evolution_failure_detail(code: str, *, audit_receipt: dict[str, object] | N
     if audit_receipt is not None:
         detail["audit_receipt"] = audit_receipt
     return detail
+
+
+async def _run_evolution_thread_cancel_safe(func, *args, **kwargs):
+    """Wait for synchronous evolution work to finish before propagating cancel."""
+    worker = asyncio.create_task(asyncio.to_thread(func, *args, **kwargs))
+    try:
+        return await asyncio.shield(worker)
+    except asyncio.CancelledError:
+        try:
+            await worker
+        except (Exception, asyncio.CancelledError):
+            # The caller is already being cancelled. The engine owns rollback
+            # for worker failures; do not leave a detached write in flight.
+            pass
+        raise
+
+
+async def _close_evolution_request(request: Request, revocation_scope, tokens) -> None:
+    """Stop the watcher, fence cleanup, and always clear bound context."""
+    try:
+        await _end_rest_revocation_watch(revocation_scope)
+        if revocation_scope is not None:
+            await _ensure_evolution_authorized(request, revocation_scope)
+    finally:
+        reset_runtime_context(tokens)
 
 
 def _evolution_degraded_audit_receipt(operator) -> dict[str, object]:
@@ -248,7 +298,7 @@ async def validate_evolution_candidate(req: EvolutionValidationRequest, request:
     try:
         revocation_scope = _begin_rest_revocation_watch(request)
         await _ensure_evolution_authorized(request, revocation_scope)
-        await asyncio.to_thread(_ensure_evolution_managers_loaded)
+        await _run_evolution_thread_cancel_safe(_ensure_evolution_managers_loaded)
         await _ensure_evolution_authorized(request, revocation_scope)
         candidate_file_name = _safe_file_name(
             req.file_name,
@@ -257,7 +307,7 @@ async def validate_evolution_candidate(req: EvolutionValidationRequest, request:
         )
         await _ensure_evolution_authorized(request, revocation_scope)
         try:
-            receipt = await asyncio.to_thread(
+            receipt = await _run_evolution_thread_cancel_safe(
                 evaluate_candidate,
                 req.target_type,
                 source_path=req.source_path,
@@ -273,7 +323,11 @@ async def validate_evolution_candidate(req: EvolutionValidationRequest, request:
             status_code = 400 if audit_ok else 503
             raise HTTPException(
                 status_code=status_code,
-                detail=_evolution_failure_detail("evolution_candidate_invalid", audit_receipt=audit_receipt),
+                detail=_evolution_failure_detail(
+                    "evolution_candidate_invalid",
+                    audit_receipt=audit_receipt,
+                    message=_redact_evolution_value_error(exc),
+                ),
             ) from exc
         await _ensure_evolution_authorized(request, revocation_scope)
         return {"receipt": receipt.to_dict()}
@@ -291,7 +345,11 @@ async def validate_evolution_candidate(req: EvolutionValidationRequest, request:
         status_code = 400 if audit_ok else 503
         raise HTTPException(
             status_code=status_code,
-            detail=_evolution_failure_detail("evolution_candidate_invalid", audit_receipt=audit_receipt),
+            detail=_evolution_failure_detail(
+                "evolution_candidate_invalid",
+                audit_receipt=audit_receipt,
+                message=_redact_evolution_value_error(exc),
+            ),
         ) from exc
     except Exception as exc:
         await _ensure_evolution_authorized(request, revocation_scope)
@@ -300,13 +358,13 @@ async def validate_evolution_candidate(req: EvolutionValidationRequest, request:
         status_code = 500 if audit_ok else 503
         raise HTTPException(
             status_code=status_code,
-            detail=_evolution_failure_detail("evolution_operation_failed", audit_receipt=audit_receipt),
+            detail=_evolution_failure_detail(
+                "evolution_operation_failed",
+                audit_receipt=audit_receipt,
+            ),
         ) from exc
     finally:
-        try:
-            await _end_rest_revocation_watch(revocation_scope)
-        finally:
-            reset_runtime_context(tokens)
+        await _close_evolution_request(request, revocation_scope, tokens)
 
 
 @router.post("/evolution/proposals")
@@ -322,7 +380,7 @@ async def create_governed_evolution_proposal(req: EvolutionProposalRequest, requ
     try:
         revocation_scope = _begin_rest_revocation_watch(request)
         await _ensure_evolution_authorized(request, revocation_scope)
-        await asyncio.to_thread(_ensure_evolution_managers_loaded)
+        await _run_evolution_thread_cancel_safe(_ensure_evolution_managers_loaded)
         await _ensure_evolution_authorized(request, revocation_scope)
         candidate_file_name = _safe_file_name(
             req.file_name,
@@ -331,7 +389,7 @@ async def create_governed_evolution_proposal(req: EvolutionProposalRequest, requ
         )
         await _ensure_evolution_authorized(request, revocation_scope)
         try:
-            proposal = await asyncio.to_thread(
+            proposal = await _run_evolution_thread_cancel_safe(
                 create_evolution_proposal,
                 req.target_type,
                 source_path=req.source_path,
@@ -347,12 +405,16 @@ async def create_governed_evolution_proposal(req: EvolutionProposalRequest, requ
             status_code = 400 if audit_ok else 503
             raise HTTPException(
                 status_code=status_code,
-                detail=_evolution_failure_detail("evolution_candidate_invalid", audit_receipt=audit_receipt),
+                detail=_evolution_failure_detail(
+                    "evolution_candidate_invalid",
+                    audit_receipt=audit_receipt,
+                    message=_redact_evolution_value_error(exc),
+                ),
             ) from exc
 
         if proposal["status"] == "saved":
             await _ensure_evolution_authorized(request, revocation_scope)
-            await asyncio.to_thread(_reload_evolution_managers_with_authority)
+            await _run_evolution_thread_cancel_safe(_reload_evolution_managers_with_authority)
 
         await _ensure_evolution_authorized(request, revocation_scope)
         outcome = "succeeded" if proposal["status"] == "saved" else "blocked"
@@ -362,6 +424,7 @@ async def create_governed_evolution_proposal(req: EvolutionProposalRequest, requ
             outcome=outcome,
             receipt=proposal.get("receipt"),
         )
+        await _ensure_evolution_authorized(request, revocation_scope)
         if not audit_ok:
             return JSONResponse(
                 status_code=503,
@@ -387,7 +450,11 @@ async def create_governed_evolution_proposal(req: EvolutionProposalRequest, requ
         status_code = 400 if audit_ok else 503
         raise HTTPException(
             status_code=status_code,
-            detail=_evolution_failure_detail("evolution_candidate_invalid", audit_receipt=audit_receipt),
+            detail=_evolution_failure_detail(
+                "evolution_candidate_invalid",
+                audit_receipt=audit_receipt,
+                message=_redact_evolution_value_error(exc),
+            ),
         ) from exc
     except Exception as exc:
         await _ensure_evolution_authorized(request, revocation_scope)
@@ -396,10 +463,10 @@ async def create_governed_evolution_proposal(req: EvolutionProposalRequest, requ
         status_code = 500 if audit_ok else 503
         raise HTTPException(
             status_code=status_code,
-            detail=_evolution_failure_detail("evolution_operation_failed", audit_receipt=audit_receipt),
+            detail=_evolution_failure_detail(
+                "evolution_operation_failed",
+                audit_receipt=audit_receipt,
+            ),
         ) from exc
     finally:
-        try:
-            await _end_rest_revocation_watch(revocation_scope)
-        finally:
-            reset_runtime_context(tokens)
+        await _close_evolution_request(request, revocation_scope, tokens)

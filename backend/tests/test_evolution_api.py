@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from dataclasses import replace
 from pathlib import Path
@@ -135,6 +136,10 @@ def _evolution_request(operator):
     )
 
 
+async def _run_evolution_inline(func, *args, **kwargs):
+    return func(*args, **kwargs)
+
+
 @pytest.mark.asyncio
 async def test_evolution_mutators_deny_invalid_operator_before_side_effects():
     from src.api.evolution import EvolutionProposalRequest, EvolutionValidationRequest
@@ -223,6 +228,7 @@ async def test_evolution_routes_bind_exact_operator_context_and_reset_after_audi
             "src.api.evolution.create_evolution_proposal",
             side_effect=lambda *_args, **_kwargs: (observe("proposal") or proposal_payload),
         ),
+        patch("src.api.evolution._run_evolution_thread_cancel_safe", side_effect=_run_evolution_inline),
         patch("src.api.evolution.skill_manager.reload", side_effect=lambda: observe("skill_reload")),
         patch("src.api.evolution.runbook_manager.reload", side_effect=lambda: observe("runbook_reload")),
         patch("src.api.evolution.starter_pack_manager.reload", side_effect=lambda: observe("pack_reload")),
@@ -296,6 +302,7 @@ async def test_evolution_mutators_install_rest_watch_and_recheck_before_each_sta
         patch("src.api.evolution._begin_rest_revocation_watch", return_value=watch) as begin,
         patch("src.api.evolution._end_rest_revocation_watch", new_callable=AsyncMock) as end,
         patch("src.api.evolution._ensure_rest_authorized", new_callable=AsyncMock) as recheck,
+        patch("src.api.evolution._run_evolution_thread_cancel_safe", side_effect=_run_evolution_inline),
         patch("src.api.evolution._ensure_evolution_managers_loaded"),
         patch("src.api.evolution.evaluate_candidate", return_value=receipt),
         patch("src.api.evolution.create_evolution_proposal", return_value=proposal),
@@ -319,7 +326,7 @@ async def test_evolution_mutators_install_rest_watch_and_recheck_before_each_sta
 
     assert begin.call_count == 2
     assert end.await_count == 2
-    assert recheck.await_count == 9
+    assert recheck.await_count == 12
     assert get_current_session_id() is None
     assert get_current_trust_principal() is None
 
@@ -332,6 +339,7 @@ async def test_evolution_proposal_rechecks_revocation_before_creation_and_resets
     revoked = RuntimeRevokedError("operator session was revoked")
     with (
         patch("src.api.evolution.context_manager.get_context", return_value=SimpleNamespace(approval_mode="safe")),
+        patch("src.api.evolution._run_evolution_thread_cancel_safe", side_effect=_run_evolution_inline),
         patch("src.api.evolution._ensure_evolution_managers_loaded") as ensure,
         patch("src.api.evolution.assert_runtime_not_revoked", side_effect=[None, revoked]),
         patch("src.api.evolution.create_evolution_proposal") as create,
@@ -349,6 +357,211 @@ async def test_evolution_proposal_rechecks_revocation_before_creation_and_resets
     audit.assert_not_awaited()
     assert get_current_session_id() is None
     assert get_current_trust_principal() is None
+
+
+@pytest.mark.asyncio
+async def test_evolution_proposal_denies_auth_revocation_during_audit_and_after_watcher_cleanup():
+    from src.api.evolution import EvolutionProposalRequest, create_governed_evolution_proposal
+
+    operator = test_bypass_operator()
+    watch = object()
+    audit_started = False
+    cleanup_finished = False
+    post_cleanup_checked = False
+    recheck_count = 0
+
+    async def recheck(_request, _scope):
+        nonlocal post_cleanup_checked, recheck_count
+        recheck_count += 1
+        if audit_started:
+            post_cleanup_checked = post_cleanup_checked or cleanup_finished
+            raise HTTPException(
+                status_code=401,
+                detail={"code": "session_revoked", "message": "Operator session was revoked."},
+            )
+
+    async def audit_event(**_kwargs):
+        nonlocal audit_started
+        audit_started = True
+
+    async def end_watch(_scope):
+        nonlocal cleanup_finished
+        cleanup_finished = True
+
+    async def run_inline(func, *args, **kwargs):
+        return func(*args, **kwargs)
+
+    proposal = {
+        "status": "saved",
+        "receipt": {"valid": True, "blocked": False, "score": 0.8, "constraints": [], "benchmark_gate": {}},
+    }
+    with (
+        patch("src.api.evolution.context_manager.get_context", return_value=SimpleNamespace(approval_mode="safe")),
+        patch("src.api.evolution._begin_rest_revocation_watch", return_value=watch),
+        patch("src.api.evolution._end_rest_revocation_watch", new_callable=AsyncMock, side_effect=end_watch) as end,
+        patch("src.api.evolution._ensure_rest_authorized", new_callable=AsyncMock, side_effect=recheck),
+        patch("src.api.evolution._run_evolution_thread_cancel_safe", side_effect=run_inline),
+        patch("src.api.evolution._ensure_evolution_managers_loaded"),
+        patch("src.api.evolution.create_evolution_proposal", return_value=proposal),
+        patch("src.api.evolution._reload_evolution_managers_with_authority"),
+        patch("src.api.evolution.log_integration_event", new_callable=AsyncMock, side_effect=audit_event) as audit,
+    ):
+        with pytest.raises(HTTPException) as error:
+            await create_governed_evolution_proposal(
+                EvolutionProposalRequest(target_type="prompt_pack", source_path="/tmp/source.md"),
+                _evolution_request(operator),
+            )
+
+    assert error.value.status_code == 401
+    assert recheck_count >= 6
+    assert post_cleanup_checked is True
+    audit.assert_awaited_once()
+    end.assert_awaited_once_with(watch)
+    assert get_current_session_id() is None
+    assert get_current_trust_principal() is None
+
+
+@pytest.mark.asyncio
+async def test_evolution_validate_redacts_parser_error_but_keeps_string_detail():
+    from src.api.evolution import EvolutionValidationRequest, validate_evolution_candidate
+
+    operator = test_bypass_operator()
+    audit = AsyncMock()
+    with (
+        patch("src.api.evolution.context_manager.get_context", return_value=SimpleNamespace(approval_mode="safe")),
+        patch("src.api.evolution._run_evolution_thread_cancel_safe", side_effect=_run_evolution_inline),
+        patch("src.api.evolution._ensure_evolution_managers_loaded"),
+        patch(
+            "src.api.evolution.evaluate_candidate",
+            side_effect=ValueError("candidate parser failed at /private/operator/secret.md"),
+        ),
+        patch("src.api.evolution.log_integration_event", audit),
+    ):
+        with pytest.raises(HTTPException) as error:
+            await validate_evolution_candidate(
+                EvolutionValidationRequest(
+                    target_type="prompt_pack",
+                    source_path="/tmp/source.md",
+                    candidate_content="# Candidate",
+                ),
+                _evolution_request(operator),
+            )
+
+    assert error.value.status_code == 400
+    assert error.value.detail == "Evolution candidate is invalid; inspect the authenticated operator receipt."
+    assert isinstance(error.value.detail, str)
+    assert "/private/operator/secret.md" not in error.value.detail
+    audit.assert_awaited_once()
+    assert get_current_session_id() is None
+    assert get_current_trust_principal() is None
+
+
+@pytest.mark.asyncio
+async def test_evolution_thread_cancellation_waits_for_sync_worker_completion():
+    from src.api.evolution import _run_evolution_thread_cancel_safe
+
+    started = asyncio.Event()
+    finished = asyncio.Event()
+
+    def persist_receipt():
+        finished.set()
+        return "receipt-written"
+
+    async def delayed_thread(func, *args, **kwargs):
+        started.set()
+        await asyncio.sleep(0.03)
+        return func(*args, **kwargs)
+
+    with patch("src.api.evolution.asyncio.to_thread", side_effect=delayed_thread):
+        worker = asyncio.create_task(_run_evolution_thread_cancel_safe(persist_receipt))
+        await started.wait()
+        worker.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await worker
+    assert finished.is_set()
+
+
+def test_evolution_engine_always_runs_builtin_revocation_fence_with_callback():
+    from src.evolution.engine import _check_evolution_boundary
+
+    operator = test_bypass_operator()
+    tokens = set_runtime_context(operator.session_id, "safe", trust_principal=operator.principal)
+    try:
+        with patch("src.evolution.engine.assert_runtime_not_revoked") as builtin_check:
+            _check_evolution_boundary(lambda: None)
+        builtin_check.assert_called_once()
+    finally:
+        reset_runtime_context(tokens)
+
+
+def test_evolution_engine_rejects_traversal_before_candidate_generation(tmp_path):
+    from src.evolution.engine import EVOLUTION_FILE_NAME_ERROR, create_evolution_proposal
+
+    operator = test_bypass_operator()
+    source_path = tmp_path / "review.md"
+    source_path.write_text("# Baseline\n", encoding="utf-8")
+    tokens = set_runtime_context(operator.session_id, "safe", trust_principal=operator.principal)
+    try:
+        with (
+            patch("src.evolution.engine._resolve_registered_target_path", return_value=source_path),
+            patch("src.evolution.engine.generate_candidate_content") as generate,
+        ):
+            with pytest.raises(ValueError, match=EVOLUTION_FILE_NAME_ERROR):
+                create_evolution_proposal(
+                    "prompt_pack",
+                    source_path=str(source_path),
+                    file_name="../escape.md",
+                )
+        generate.assert_not_called()
+    finally:
+        reset_runtime_context(tokens)
+
+
+def test_self_evolution_tool_redacts_native_parser_errors():
+    from src.tools.self_evolution_tool import propose_capability_evolution
+
+    operator = test_bypass_operator()
+    tokens = set_runtime_context(operator.session_id, "safe", trust_principal=operator.principal)
+    try:
+        with patch(
+            "src.tools.self_evolution_tool.create_evolution_proposal",
+            side_effect=ValueError("parser failed at /private/operator/secret.md: secret content"),
+        ):
+            with pytest.raises(ValueError, match="Evolution candidate is invalid") as error:
+                propose_capability_evolution.forward(
+                    "prompt_pack",
+                    "/workspace/review.md",
+                    "improve receipts",
+                    "one observation",
+                )
+        assert "/private/operator/secret.md" not in str(error.value)
+        assert "secret content" not in str(error.value)
+        with patch(
+            "src.tools.self_evolution_tool.create_evolution_proposal",
+            side_effect=PermissionError("permission denied: /private/operator/secret.md"),
+        ):
+            with pytest.raises(RuntimeError, match="Evolution operation failed") as native_error:
+                propose_capability_evolution.forward(
+                    "prompt_pack",
+                    "/workspace/review.md",
+                    "improve receipts",
+                    "one observation",
+                )
+        assert "/private/operator/secret.md" not in str(native_error.value)
+        with patch(
+            "src.tools.self_evolution_tool.create_evolution_proposal",
+            side_effect=RuntimeRevokedError("revoked while reading /private/operator/secret.md"),
+        ):
+            with pytest.raises(RuntimeRevokedError, match="Operator session was revoked") as revoked_error:
+                propose_capability_evolution.forward(
+                    "prompt_pack",
+                    "/workspace/review.md",
+                    "improve receipts",
+                    "one observation",
+                )
+        assert "/private/operator/secret.md" not in str(revoked_error.value)
+    finally:
+        reset_runtime_context(tokens)
 
 
 def test_self_evolution_tool_denies_direct_call_without_human_operator_context():

@@ -293,8 +293,13 @@ async def test_extension_package_mutators_recheck_revocation_before_effect_and_r
         patch("src.api.extensions._log_extension_lifecycle_event", new_callable=AsyncMock) as audit,
     ):
         for route, args, path in route_calls:
-            with pytest.raises(RuntimeRevokedError):
+            with pytest.raises(HTTPException) as revoked_error:
                 await route(*args, _extension_mutator_request(operator, path))
+            assert revoked_error.value.status_code == 401
+            assert revoked_error.value.detail == {
+                "code": "session_revoked",
+                "message": "Operator session was revoked.",
+            }
             assert get_current_session_id() is None
             assert get_current_trust_principal() is None
 
@@ -459,6 +464,39 @@ async def test_extension_package_install_rechecks_rest_revocation_after_approval
     install.assert_not_called()
     assert get_current_session_id() is None
     assert get_current_trust_principal() is None
+
+
+@pytest.mark.asyncio
+async def test_public_install_maps_late_runtime_revocation_to_bounded_401(client, tmp_path):
+    from src.api.extensions import install_extension_path
+
+    package_path = str(tmp_path / "revoked-package")
+    preview = {
+        "ok": True,
+        "id": "seraph.revoked-public",
+        "extension_id": "seraph.revoked-public",
+        "path": package_path,
+        "package_digest": "revoked-public-digest",
+        "approval_profile": {"requires_lifecycle_approval": False},
+    }
+    revoked = RuntimeRevokedError("session token and secret should never reach the response")
+    with (
+        patch("src.api.extensions.validate_extension_path", return_value=preview),
+        patch("src.api.extensions._require_extension_lifecycle_approval", new_callable=AsyncMock),
+        patch("src.api.extensions.assert_runtime_not_revoked", side_effect=revoked),
+        patch("src.api.extensions.install_extension_path") as install,
+        patch("src.api.extensions.log_integration_event", new_callable=AsyncMock),
+    ):
+        response = await client.post("/api/extensions/install", json={"path": package_path})
+
+    assert response.status_code == 401
+    assert response.json() == {
+        "detail": {
+            "code": "session_revoked",
+            "message": "Operator session was revoked.",
+        }
+    }
+    install.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -949,25 +987,28 @@ async def test_extension_mutators_recheck_revocation_before_external_or_file_eff
         patch("src.api.extensions.get_extension_source", return_value=source_preview),
         patch("src.api.extensions.save_extension_source") as save_source,
     ):
-        with pytest.raises(RuntimeRevokedError):
+        with pytest.raises(HTTPException) as connector_error:
             await test_extension_package_connector(
                 "seraph.example",
                 ExtensionConnectorTestRequest(reference="connectors/example.yaml"),
                 _extension_mutator_request(operator, "/api/extensions/seraph.example/connectors/test"),
             )
-        with pytest.raises(RuntimeRevokedError):
+        with pytest.raises(HTTPException) as enabled_error:
             await set_extension_package_connector_enabled(
                 "seraph.example",
                 ExtensionConnectorToggleRequest(reference="connectors/example.yaml", enabled=True),
                 _extension_mutator_request(operator, "/api/extensions/seraph.example/connectors/enabled"),
             )
-        with pytest.raises(RuntimeRevokedError):
+        with pytest.raises(HTTPException) as source_error:
             await save_extension_package_source(
                 "seraph.example",
                 ExtensionSourceSaveRequest(reference="workflows/example.md", content="new content"),
                 _extension_mutator_request(operator, "/api/extensions/seraph.example/source"),
             )
 
+    assert connector_error.value.status_code == 401
+    assert enabled_error.value.status_code == 401
+    assert source_error.value.status_code == 401
     test_connector.assert_not_awaited()
     set_enabled.assert_not_called()
     save_source.assert_not_called()
@@ -1238,12 +1279,17 @@ async def test_extension_configure_rechecks_revocation_and_resets_context_on_err
         patch("src.api.extensions.configure_extension") as configure_extension,
         patch("src.api.extensions.log_integration_event", new_callable=AsyncMock),
     ):
-        with pytest.raises(RuntimeRevokedError):
+        with pytest.raises(HTTPException) as revoked_error:
             await configure_extension_package(
                 "seraph.example",
                 ExtensionConfigRequest(config={}),
                 _extension_mutator_request(operator, "/api/extensions/seraph.example/configure"),
             )
+        assert revoked_error.value.status_code == 401
+        assert revoked_error.value.detail == {
+            "code": "session_revoked",
+            "message": "Operator session was revoked.",
+        }
         configure_extension.assert_not_called()
         assert get_current_session_id() is None
         assert get_current_trust_principal() is None
@@ -1513,12 +1559,17 @@ async def test_extension_lifecycle_routes_deny_revocation_before_effect():
             ),
         )
         for route, body, path in route_calls:
-            with pytest.raises(RuntimeRevokedError):
+            with pytest.raises(HTTPException) as revoked_error:
                 await route(
                     "seraph.example",
                     body,
                     _extension_mutator_request(operator, path),
                 )
+            assert revoked_error.value.status_code == 401
+            assert revoked_error.value.detail == {
+                "code": "session_revoked",
+                "message": "Operator session was revoked.",
+            }
             assert get_current_session_id() is None
             assert get_current_trust_principal() is None
 
@@ -2983,6 +3034,26 @@ async def test_install_configure_toggle_and_remove_workspace_extension(client, e
         assert skill_manager.get_skill("local-skill").enabled is True
         assert workflow_manager.get_workflow("local-workflow") is not None
         assert workflow_manager.get_workflow("local-workflow").enabled is True
+
+
+def test_whole_extension_enable_rolls_back_prior_targets_on_middle_failure(extension_runtime, tmp_path):
+    from src.extensions.lifecycle import disable_extension, enable_extension, install_extension_path
+
+    package_dir = _write_installable_extension(tmp_path)
+    install_extension_path(str(package_dir))
+    disable_extension("seraph.test-installable")
+    assert skill_manager.get_skill("local-skill").enabled is False
+    assert workflow_manager.get_workflow("local-workflow").enabled is False
+
+    with patch(
+        "src.extensions.lifecycle.workflow_manager.enable",
+        side_effect=RuntimeError("workflow runtime failed after skill mutation"),
+    ):
+        with pytest.raises(RuntimeError, match="workflow runtime failed"):
+            enable_extension("seraph.test-installable")
+
+    assert skill_manager.get_skill("local-skill").enabled is False
+    assert workflow_manager.get_workflow("local-workflow").enabled is False
 
 
 @pytest.mark.asyncio

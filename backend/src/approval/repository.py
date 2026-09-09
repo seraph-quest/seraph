@@ -30,6 +30,18 @@ def fingerprint_tool_call(
 
 
 class ApprovalRepository:
+    async def get(self, approval_id: str) -> ApprovalRequest | None:
+        """Fetch an approval without resolving it."""
+
+        async with get_session() as db:
+            result = await db.execute(
+                select(ApprovalRequest).where(ApprovalRequest.id == approval_id)
+            )
+            request = result.scalars().first()
+            if request is not None:
+                db.expunge(request)
+            return request
+
     async def get_or_create_pending(
         self,
         *,

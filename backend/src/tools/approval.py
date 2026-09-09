@@ -351,6 +351,16 @@ class ApprovalTool(Tool):
                 fingerprint=fingerprint,
                 details={
                     "arguments": redact_for_audit(arguments),
+                    **(
+                        {"approval_owner_session_id": session_id}
+                        if session_id
+                        else {}
+                    ),
+                    **(
+                        {"approval_owner_principal_id": principal.principal_id}
+                        if principal is not None and principal.principal_id
+                        else {}
+                    ),
                     **({"approval_context": approval_context} if approval_context else {}),
                 },
             )

@@ -1,9 +1,26 @@
 """Tests for approval request APIs."""
 
+from dataclasses import replace
 import pytest
+from fastapi import HTTPException
+from starlette.requests import Request
 from unittest.mock import patch
 
 from src.approval.repository import approval_repository
+from src.auth.service import test_bypass_operator as _test_bypass_operator
+
+
+def _approval_request(operator) -> Request:
+    return Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/api/approvals/test/approve",
+            "headers": [],
+            "query_string": b"",
+            "state": {"operator": operator},
+        }
+    )
 
 
 @pytest.mark.asyncio
@@ -16,7 +33,7 @@ async def test_list_pending_approvals_empty(client):
 @pytest.mark.asyncio
 async def test_approve_pending_request(client):
     request = await approval_repository.get_or_create_pending(
-        session_id="s1",
+        session_id="test-auth-bypass",
         tool_name="shell_execute",
         risk_level="high",
         summary="Calling tool: shell_execute({\"code\": \"[redacted]\"})",
@@ -26,14 +43,14 @@ async def test_approve_pending_request(client):
     resp = await client.post(f"/api/approvals/{request.id}/approve")
     assert resp.status_code == 200
     assert resp.json()["status"] == "approved"
-    assert resp.json()["session_id"] == "s1"
+    assert resp.json()["session_id"] == "test-auth-bypass"
     assert resp.json()["resume_message"] == "run this snippet"
 
 
 @pytest.mark.asyncio
 async def test_deny_pending_request(client):
     request = await approval_repository.get_or_create_pending(
-        session_id="s1",
+        session_id="test-auth-bypass",
         tool_name="get_secret",
         risk_level="high",
         summary="Calling tool: get_secret({\"key\": \"[redacted]\"})",
@@ -43,6 +60,35 @@ async def test_deny_pending_request(client):
     resp = await client.post(f"/api/approvals/{request.id}/deny")
     assert resp.status_code == 200
     assert resp.json()["status"] == "denied"
+
+
+@pytest.mark.asyncio
+async def test_approval_decision_rejects_cross_session_operator(async_db):
+    from src.api.approvals import approve_request
+
+    owner = _test_bypass_operator()
+    request = await approval_repository.get_or_create_pending(
+        session_id=owner.session_id,
+        tool_name="extension_install",
+        risk_level="high",
+        summary="Install extension",
+        fingerprint="cross-session",
+        details={"approval_owner_session_id": owner.session_id},
+    )
+    other = replace(
+        owner,
+        session_id="other-session",
+        principal=replace(owner.principal, session_id="other-session"),
+    )
+
+    with pytest.raises(HTTPException) as error:
+        await approve_request(request.id, _approval_request(other))
+
+    assert error.value.status_code == 403
+    assert error.value.detail == {"code": "approval_owner_mismatch"}
+    pending = await approval_repository.get(request.id)
+    assert pending is not None
+    assert pending.status == "pending"
 
 
 @pytest.mark.asyncio

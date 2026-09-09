@@ -11,7 +11,11 @@ from typing import Any
 import yaml
 
 from config.settings import settings
-from src.extensions.layout import expected_layout_prefixes, resolve_package_reference
+from src.extensions.layout import (
+    expected_layout_prefixes,
+    reject_symlink_entries,
+    resolve_package_reference,
+)
 from src.extensions.manifest import load_extension_manifest, parse_extension_manifest
 from src.extensions.permissions import evaluate_tool_permissions
 from src.runbooks.loader import parse_runbook_content
@@ -209,7 +213,7 @@ def save_workspace_contribution(
         for sibling in target_path.parent.iterdir()
     ):
         raise ValueError(WORKSPACE_FILE_NAME_ERROR)
-
+    reject_symlink_entries(package_root)
     payload = _load_or_create_manifest_payload(package_root)
     contribution_bucket = payload.setdefault("contributes", {}).setdefault(contribution_type, [])
     if any(
@@ -224,6 +228,9 @@ def save_workspace_contribution(
         contribution_bucket.sort()
     payload["version"] = _today_version()
 
+    reject_symlink_entries(package_root)
+    if target_path.is_symlink():
+        raise ValueError("managed workspace package cannot contain symlink entries")
     _validate_workspace_contribution(contribution_type, target_path, content)
 
     manifest_path = package_root / "manifest.yaml"

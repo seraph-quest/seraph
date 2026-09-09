@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 from datetime import datetime, timezone
 from typing import Any
@@ -10,6 +11,60 @@ from typing import Any
 from config.settings import settings
 
 STATE_FILE_NAME = "extensions-state.json"
+_REASON_MAX_LENGTH = 160
+_SENSITIVE_DETAIL_KEYS = {
+    "authorization",
+    "credential",
+    "error",
+    "headers",
+    "message",
+    "password",
+    "path",
+    "reason",
+    "resume_message",
+    "secret",
+    "summary",
+    "token",
+    "url",
+}
+
+
+def _safe_reason(reason: Any, *, default: str = "operator lifecycle request") -> str:
+    """Persist a bounded reason without retaining operator-supplied text."""
+
+    text = " ".join(str(reason or "").split())[:_REASON_MAX_LENGTH]
+    if not text:
+        return default
+    digest = hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+    return f"{default} (input:{digest})"
+
+
+def _safe_detail_value(key: str, value: Any) -> Any:
+    if isinstance(value, dict):
+        return {str(item_key): _safe_detail_value(str(item_key), item) for item_key, item in value.items()}
+    if isinstance(value, list):
+        return [_safe_detail_value(key, item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_safe_detail_value(key, item) for item in value)
+    if isinstance(value, str) and (
+        key.lower() in _SENSITIVE_DETAIL_KEYS
+        or "reason" in key.lower()
+        or "url" in key.lower()
+        or "secret" in key.lower()
+        or "token" in key.lower()
+    ):
+        digest = hashlib.sha256(value.encode("utf-8")).hexdigest()[:16]
+        return f"[redacted:{digest}]"
+    return value
+
+
+def _safe_lifecycle_details(details: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(details, dict):
+        return {}
+    return {
+        str(key): _safe_detail_value(str(key), value)
+        for key, value in details.items()
+    }
 
 
 def state_path() -> str:
@@ -141,7 +196,7 @@ def revoke_extension_governance(
         if key_id not in revoked_key_ids:
             revoked_key_ids.append(key_id)
     if reason:
-        governance["revocation_reason"] = reason
+        governance["revocation_reason"] = _safe_reason(reason, default="operator governance revocation")
     return governance
 
 
@@ -189,7 +244,7 @@ def append_extension_lifecycle_event(
         "status": status,
         "actor": actor,
         "created_at": _utc_now(),
-        "details": details or {},
+        "details": _safe_lifecycle_details(details),
     }
     events.append(event)
     lifecycle["last_event"] = event
@@ -220,7 +275,7 @@ def add_extension_rollback_snapshot(
         "path": snapshot_path,
         "version": version,
         "digest": digest,
-        "reason": reason,
+        "reason": _safe_reason(reason, default="rollback snapshot"),
         "created_by": created_by,
         "created_at": _utc_now(),
     }
@@ -247,7 +302,7 @@ def set_extension_quarantine(
     quarantine = {
         "active": active,
         "state": "quarantined" if active else "cleared",
-        "reason": reason,
+        "reason": _safe_reason(reason),
         "actor": actor,
         "digest": digest,
         "version": version,
@@ -420,7 +475,7 @@ def revoke_node_adapter_pairing_entry(
     entry["trust_state"] = "untrusted"
     entry["pairing_state"] = "revoked"
     if reason:
-        entry["revocation_reason"] = reason
+        entry["revocation_reason"] = _safe_reason(reason, default="node adapter revocation")
     if revoked_at:
         entry["revoked_at"] = revoked_at
     return entry

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path, PurePosixPath
+import stat
 
 MANIFEST_FILENAMES = ("manifest.yaml", "manifest.yml")
 
@@ -39,6 +41,47 @@ _CONTRIBUTION_LAYOUT_PARTS = tuple(
 )
 
 
+def reject_symlink_entries(root: Path) -> None:
+    """Reject symlinks and special files anywhere below an extension package.
+
+    Package paths are untrusted input.  ``Path.is_file()``, ``rglob()`` and
+    ``copytree()`` follow symlinks by default, which could make validation,
+    digesting, or installation read a host file outside the package.  Walk
+    with ``lstat``/``follow_symlinks=False`` so the decision is made on the
+    package entry itself.
+    """
+
+    root = Path(root)
+    try:
+        root_stat = root.lstat()
+    except FileNotFoundError:
+        return
+    if stat.S_ISLNK(root_stat.st_mode):
+        raise ValueError("extension package cannot contain symlink entries")
+    if not stat.S_ISDIR(root_stat.st_mode):
+        return
+
+    pending = [root]
+    while pending:
+        current = pending.pop()
+        try:
+            entries = os.scandir(current)
+        except OSError as exc:
+            raise ValueError("extension package could not be inspected safely") from exc
+        with entries:
+            for entry in entries:
+                try:
+                    entry_stat = entry.stat(follow_symlinks=False)
+                except OSError as exc:
+                    raise ValueError("extension package could not be inspected safely") from exc
+                if stat.S_ISLNK(entry_stat.st_mode):
+                    raise ValueError("extension package cannot contain symlink entries")
+                if stat.S_ISDIR(entry_stat.st_mode):
+                    pending.append(Path(entry.path))
+                elif not stat.S_ISREG(entry_stat.st_mode):
+                    raise ValueError("extension package contains an unsupported file entry")
+
+
 def expected_layout_prefixes(contribution_type: str) -> tuple[str, ...]:
     prefixes = CONTRIBUTION_LAYOUTS.get(contribution_type)
     if prefixes is None:
@@ -57,6 +100,9 @@ def validate_contribution_layout(contribution_type: str, reference: str) -> str:
 def resolve_package_reference(package_root: Path, reference: str) -> Path:
     resolved_root = package_root.resolve()
     resolved_reference = (package_root / reference).resolve()
+    if not (resolved_root == resolved_reference or resolved_root in resolved_reference.parents):
+        raise ValueError("resolved contribution path escapes the package root")
+    reject_symlink_entries(package_root)
     if resolved_root == resolved_reference or resolved_root in resolved_reference.parents:
         return resolved_reference
     raise ValueError("resolved contribution path escapes the package root")
@@ -89,6 +135,7 @@ def iter_extension_manifest_paths(roots: list[str]) -> list[Path]:
         root_path = Path(root)
         if not root_path.exists():
             continue
+        reject_symlink_entries(root_path)
         if root_path.is_file() and root_path.name in MANIFEST_FILENAMES:
             discovered[str(root_path.resolve())] = root_path
             continue

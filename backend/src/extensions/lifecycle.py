@@ -34,7 +34,11 @@ from src.extensions.governance import (
     build_governance_status,
     extension_permission_fingerprint,
 )
-from src.extensions.layout import iter_extension_manifest_paths, resolve_package_reference
+from src.extensions.layout import (
+    iter_extension_manifest_paths,
+    reject_symlink_entries,
+    resolve_package_reference,
+)
 from src.extensions.manifest import (
     ExtensionManifest,
     ExtensionManifestError,
@@ -172,18 +176,38 @@ def _slugify(value: str) -> str:
 
 
 def _hash_extension_directory(root: Path) -> str:
+    reject_symlink_entries(root)
     hasher = hashlib.sha256()
     for file_path in sorted(path for path in root.rglob("*") if path.is_file()):
         relative_path = file_path.relative_to(root).as_posix()
         hasher.update(relative_path.encode("utf-8"))
         hasher.update(b"\0")
-        with file_path.open("rb") as handle:
+        try:
+            file_descriptor = os.open(
+                file_path,
+                os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+            )
+        except OSError as exc:
+            raise ValueError("extension package could not be read safely") from exc
+        with os.fdopen(file_descriptor, "rb") as handle:
             while True:
                 chunk = handle.read(8192)
                 if not chunk:
                     break
                 hasher.update(chunk)
     return hasher.hexdigest()
+
+
+def _copy_extension_package(source: Path, destination: Path) -> None:
+    """Copy a package without ever dereferencing package-provided symlinks."""
+
+    reject_symlink_entries(source)
+    try:
+        shutil.copytree(source, destination, symlinks=True)
+        reject_symlink_entries(destination)
+    except Exception:
+        shutil.rmtree(destination, ignore_errors=True)
+        raise
 
 
 def _extension_package_digest(root_path: str | None) -> str | None:
@@ -878,9 +902,11 @@ def _location_for_extension(extension: ExtensionRecord) -> str:
 
 
 def _load_manifest_from_path(path: str) -> tuple[Path, ExtensionManifest]:
-    candidate = Path(path).expanduser().resolve()
+    candidate = Path(path).expanduser()
     if not candidate.exists():
         raise ValueError(f"extension path does not exist: {path}")
+    reject_symlink_entries(candidate)
+    candidate = candidate.resolve()
     manifest_paths = iter_extension_manifest_paths([str(candidate)])
     if not manifest_paths:
         raise ValueError(f"no extension manifest found under {path}")
@@ -1380,7 +1406,7 @@ def _validate_extension_candidate_package(
     resolved_reference = str(resolved_path.relative_to(root_path))
     with tempfile.TemporaryDirectory(prefix="seraph-extension-package-") as temp_root:
         candidate_root = Path(temp_root) / "package"
-        shutil.copytree(extension.root_path, candidate_root)
+        _copy_extension_package(Path(extension.root_path), candidate_root)
         candidate_target = candidate_root / Path(resolved_reference)
         candidate_target.parent.mkdir(parents=True, exist_ok=True)
         candidate_target.write_text(content, encoding="utf-8")
@@ -2771,7 +2797,7 @@ def install_extension_path(path: str) -> dict[str, Any]:
     if target_root.exists():
         raise FileExistsError(f"extension install target already exists: {target_root}")
     target_root.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copytree(package_root, target_root)
+    _copy_extension_package(package_root, target_root)
     try:
         _refresh_runtime()
         installed_extension = _registry().snapshot().get_extension(manifest.id)
@@ -2836,7 +2862,7 @@ def update_extension_path(path: str) -> dict[str, Any]:
         persistent_snapshot_root = (
             Path(_workspace_root()) / ".seraph-extension-snapshots" / _slugify(manifest.id) / snapshot_id
         )
-        shutil.copytree(package_root, staging_root)
+        _copy_extension_package(package_root, staging_root)
         shutil.move(target_root, backup_root)
         shutil.move(staging_root, target_root)
         try:
@@ -2846,7 +2872,7 @@ def update_extension_path(path: str) -> dict[str, Any]:
                 raise ValueError(f"extension '{manifest.id}' did not load after update")
             _sync_mcp_servers_for_updated_extension(existing, updated_extension)
             persistent_snapshot_root.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copytree(backup_root, persistent_snapshot_root)
+            _copy_extension_package(backup_root, persistent_snapshot_root)
         except Exception:
             if target_root.exists():
                 shutil.rmtree(target_root, ignore_errors=True)
@@ -2881,7 +2907,92 @@ def update_extension_path(path: str) -> dict[str, Any]:
     return get_extension(manifest.id)
 
 
+def _capture_enable_transaction_state() -> dict[str, Any]:
+    return {
+        "skills": {
+            str(skill.name): bool(skill.enabled)
+            for skill in getattr(skill_manager, "_skills", [])
+            if getattr(skill, "name", None)
+        },
+        "skills_disabled": set(getattr(skill_manager, "_disabled", set())),
+        "workflows": {
+            str(workflow.name): bool(workflow.enabled)
+            for workflow in getattr(workflow_manager, "_workflows", [])
+            if getattr(workflow, "name", None)
+        },
+        "workflows_disabled": set(getattr(workflow_manager, "_disabled", set())),
+        "mcp_config": deepcopy(getattr(mcp_manager, "_config", {})),
+        "mcp_status": deepcopy(getattr(mcp_manager, "_status", {})),
+        "mcp_tools": {
+            str(name): list(tools)
+            for name, tools in getattr(mcp_manager, "_tools", {}).items()
+        },
+        "state": deepcopy(_state_payload()),
+    }
+
+
+def _restore_enable_transaction_state(snapshot: dict[str, Any]) -> None:
+    skill_states = snapshot.get("skills", {})
+    for skill in getattr(skill_manager, "_skills", []):
+        if skill.name in skill_states:
+            skill.enabled = bool(skill_states[skill.name])
+    skill_manager._disabled = set(snapshot.get("skills_disabled", set()))
+    skill_manager._save_config()
+
+    workflow_states = snapshot.get("workflows", {})
+    for workflow in getattr(workflow_manager, "_workflows", []):
+        if workflow.name in workflow_states:
+            workflow.enabled = bool(workflow_states[workflow.name])
+    workflow_manager._disabled = set(snapshot.get("workflows_disabled", set()))
+    workflow_manager._save_config()
+
+    # Tear down any connection opened by the failed transaction before
+    # restoring the immutable config snapshot.  Reconnect only the servers
+    # that were connected before the transaction began.
+    for name in list(getattr(mcp_manager, "_clients", {})):
+        mcp_manager.disconnect(name)
+    mcp_manager._config = deepcopy(snapshot.get("mcp_config", {}))
+    mcp_manager._status = deepcopy(snapshot.get("mcp_status", {}))
+    mcp_manager._tools = {
+        str(name): list(tools)
+        for name, tools in snapshot.get("mcp_tools", {}).items()
+    }
+    for name, server in mcp_manager._config.items():
+        if bool(server.get("enabled", True)):
+            mcp_manager.connect(name, server.get("url", ""), headers=server.get("headers"))
+    mcp_manager._save_config()
+    _save_state(deepcopy(snapshot.get("state", {"extensions": {}})))
+
+
 def _set_enabled(extension_id: str, enabled: bool) -> dict[str, Any]:
+    """Apply all target changes transactionally across runtime and state."""
+
+    snapshot = _capture_enable_transaction_state()
+    try:
+        return _set_enabled_unchecked(extension_id, enabled)
+    except Exception as exc:
+        try:
+            _restore_enable_transaction_state(snapshot)
+        except Exception as recovery_error:
+            recovery_payload = _state_payload()
+            append_extension_lifecycle_event(
+                recovery_payload,
+                extension_id,
+                action="enable" if enabled else "disable",
+                status="recovery_required",
+                details={
+                    "error": str(recovery_error),
+                    "original_error": str(exc),
+                },
+            )
+            _save_state(recovery_payload)
+            raise RuntimeError(
+                f"extension '{extension_id}' failed and runtime recovery was incomplete"
+            ) from recovery_error
+        raise
+
+
+def _set_enabled_unchecked(extension_id: str, enabled: bool) -> dict[str, Any]:
     snapshot = _registry().snapshot()
     extension = snapshot.get_extension(extension_id)
     if extension is None:
@@ -3081,6 +3192,10 @@ def _set_enabled(extension_id: str, enabled: bool) -> dict[str, Any]:
                     enabled=enabled,
                 )
                 ok = True
+        if not ok:
+            raise ValueError(
+                f"extension target '{target_name}' could not be {'enabled' if enabled else 'disabled'}"
+            )
         changed.append({
             "type": target["type"],
             "name": target_name,
@@ -3348,8 +3463,8 @@ def rollback_extension(extension_id: str, *, snapshot_id: str | None = None) -> 
     with tempfile.TemporaryDirectory(prefix="seraph-extension-rollback-") as temp_root:
         current_backup = Path(temp_root) / "current"
         candidate = Path(temp_root) / "candidate"
-        shutil.copytree(target_root, current_backup)
-        shutil.copytree(snapshot_path, candidate)
+        _copy_extension_package(target_root, current_backup)
+        _copy_extension_package(snapshot_path, candidate)
         if target_root.exists():
             shutil.rmtree(target_root)
         shutil.move(candidate, target_root)

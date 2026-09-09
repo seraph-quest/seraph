@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Request
 import json
 
 from src.approval.repository import approval_repository
@@ -8,6 +8,50 @@ from src.audit.repository import audit_repository
 from src.tools.policy import get_current_tool_policy_mode
 
 router = APIRouter()
+
+
+def _require_approval_operator(request: Request):
+    """Use the same authenticated operator gate as capability execution."""
+
+    from src.api.capabilities import _require_authenticated_capability_operator
+
+    return _require_authenticated_capability_operator(request)
+
+
+def _approval_details(request) -> dict:
+    if not request.details_json:
+        return {}
+    try:
+        details = json.loads(request.details_json)
+    except (TypeError, ValueError):
+        return {}
+    return details if isinstance(details, dict) else {}
+
+
+def _require_approval_owner(request: Request, approval, operator) -> dict:
+    """Bind a decision to the session or principal that created the approval."""
+
+    details = _approval_details(approval)
+    owner_session_id = str(details.get("approval_owner_session_id") or "").strip()
+    owner_principal_id = str(details.get("approval_owner_principal_id") or "").strip()
+    current_principal_id = str(
+        getattr(getattr(operator, "principal", None), "principal_id", "") or ""
+    ).strip()
+
+    if owner_session_id:
+        allowed = owner_session_id == operator.session_id
+    elif owner_principal_id:
+        allowed = owner_principal_id == current_principal_id
+    else:
+        # Older rows have no explicit owner metadata.  Their session binding
+        # remains the only safe authority available for a decision.
+        allowed = bool(approval.session_id) and approval.session_id == operator.session_id
+    if not allowed:
+        raise HTTPException(
+            status_code=403,
+            detail={"code": "approval_owner_mismatch"},
+        )
+    return details
 
 
 @router.get("/approvals/pending")
@@ -49,7 +93,14 @@ async def list_pending_approvals(
 
 
 @router.post("/approvals/{approval_id}/approve")
-async def approve_request(approval_id: str):
+async def approve_request(approval_id: str, request: Request):
+    operator = _require_approval_operator(request)
+    # Resolve only after authentication and owner binding, so a cross-session
+    # caller cannot consume a pending approval as a side effect of probing it.
+    pending = await approval_repository.get(approval_id)
+    if pending is None:
+        raise HTTPException(status_code=404, detail="Approval request not found")
+    details = _require_approval_owner(request, pending, operator)
     request = await approval_repository.resolve(approval_id, "approved")
     if request is None:
         raise HTTPException(status_code=404, detail="Approval request not found")
@@ -64,7 +115,7 @@ async def approve_request(approval_id: str):
         summary=f"Approved high-risk action for {request.tool_name}",
     )
 
-    details = json.loads(request.details_json) if request.details_json else {}
+    details = details if isinstance(details, dict) else _approval_details(request)
     resume_message = details.get("resume_message")
 
     response = {"status": request.status, "id": request.id}
@@ -75,7 +126,12 @@ async def approve_request(approval_id: str):
 
 
 @router.post("/approvals/{approval_id}/deny")
-async def deny_request(approval_id: str):
+async def deny_request(approval_id: str, request: Request):
+    operator = _require_approval_operator(request)
+    pending = await approval_repository.get(approval_id)
+    if pending is None:
+        raise HTTPException(status_code=404, detail="Approval request not found")
+    _require_approval_owner(request, pending, operator)
     request = await approval_repository.resolve(approval_id, "denied")
     if request is None:
         raise HTTPException(status_code=404, detail="Approval request not found")

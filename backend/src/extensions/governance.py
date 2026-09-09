@@ -8,6 +8,7 @@ from typing import Any
 
 import yaml
 
+from src.extensions.layout import reject_symlink_entries
 from src.extensions.manifest import ExtensionManifest, ExtensionTrust
 
 SIGNATURE_ALGORITHM = "seraph-sha256-v1"
@@ -57,6 +58,7 @@ def governance_package_digest(root_path: str | Path | None) -> str | None:
     root = Path(root_path)
     if not root.exists() or not root.is_dir():
         return None
+    reject_symlink_entries(root)
     manifest_path = _manifest_path(root)
     hasher = hashlib.sha256()
     for file_path in sorted(path for path in root.rglob("*") if path.is_file()):

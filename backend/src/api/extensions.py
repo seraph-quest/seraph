@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+from contextlib import contextmanager
+import fcntl
+import os
 from pathlib import Path
 import re
 from threading import RLock
@@ -15,7 +18,11 @@ from smolagents import MCPClient
 
 from config.settings import settings
 from src.approval.repository import approval_repository, fingerprint_tool_call
-from src.approval.runtime import reset_runtime_context, set_runtime_context
+from src.approval.runtime import (
+    get_current_trust_principal,
+    reset_runtime_context,
+    set_runtime_context,
+)
 from src.audit.runtime import log_integration_event
 from src.auth.cancellation import assert_runtime_not_revoked
 from src.auth.cancellation import RuntimeRevokedError
@@ -101,12 +108,49 @@ _PRIVATE_PATH_PATTERN = re.compile(
     r"|[A-Za-z]:\\[^\s'\",;)]*"
     r")"
 )
+_EXTERNAL_URL_PATTERN = re.compile(r"https?://[^\s'\",;\)\]}]+", re.IGNORECASE)
+_SENSITIVE_ASSIGNMENT_PATTERN = re.compile(
+    r"(?i)\b(authorization|api[_-]?key|access[_-]?token|client[_-]?secret|password|secret|token)"
+    r"(\s*[:=]\s*)[^\s,;]+"
+)
 
 # Lifecycle helpers are synchronous and reopen package/registry state.  Keep
 # the final snapshot check and the corresponding effect together for API
 # requests in this process.  The lifecycle module has no shared lock, so this
 # does not claim to serialize filesystem changes made by another process.
 _EXTENSION_EFFECT_LOCK = RLock()
+
+
+@contextmanager
+def _extension_effect_guard():
+    """Serialize approval identity checks and effects across API processes."""
+
+    lock_path = Path(settings.workspace_dir) / ".seraph-extension-lifecycle.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with _EXTENSION_EFFECT_LOCK:
+        try:
+            descriptor = os.open(
+                lock_path,
+                os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0),
+                0o600,
+            )
+        except OSError as exc:
+            raise RuntimeError("extension lifecycle lock is unavailable") from exc
+        with os.fdopen(descriptor, "a+") as lock_file:
+            try:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+            except OSError as exc:
+                raise RuntimeError("extension lifecycle lock is unavailable") from exc
+            try:
+                yield
+            finally:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+
+_SESSION_REVOKED_DETAIL = {
+    "code": "session_revoked",
+    "message": "Operator session was revoked.",
+}
 
 
 def _require_authenticated_capability_operator(request: Request):
@@ -117,8 +161,22 @@ def _require_authenticated_capability_operator(request: Request):
     return _require_authenticated_capability_operator(request)
 
 
+def _assert_extension_runtime_not_revoked() -> None:
+    try:
+        assert_runtime_not_revoked()
+    except RuntimeRevokedError as exc:
+        raise HTTPException(status_code=401, detail=dict(_SESSION_REVOKED_DETAIL)) from exc
+
+
 def _content_hash(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()[:16]
+
+
+def _operator_actor(operator: Any) -> str:
+    principal_id = str(getattr(getattr(operator, "principal", None), "principal_id", "") or "")
+    session_id = str(getattr(operator, "session_id", "") or "")
+    identity = principal_id or session_id or "operator"
+    return f"operator:{_content_hash(identity)}"
 
 
 def _redacted_path_receipt(value: Any) -> dict[str, Any] | None:
@@ -129,14 +187,24 @@ def _redacted_path_receipt(value: Any) -> dict[str, Any] | None:
 
 
 def _redact_extension_error(value: Any) -> str:
-    """Keep operator errors useful without returning private filesystem paths."""
+    """Keep lifecycle errors useful without returning paths, URLs, or secrets."""
 
     text = str(value)
 
     def replace(match: re.Match[str]) -> str:
         return f"{match.group(1)}[private path:{_content_hash(match.group(2))}]"
 
-    return _PRIVATE_PATH_PATTERN.sub(replace, text)
+    text = _PRIVATE_PATH_PATTERN.sub(replace, text)
+
+    def replace_url(match: re.Match[str]) -> str:
+        return f"[redacted url:{_content_hash(match.group(0))}]"
+
+    text = _EXTERNAL_URL_PATTERN.sub(replace_url, text)
+
+    def replace_secret(match: re.Match[str]) -> str:
+        return f"{match.group(1)}{match.group(2)}[redacted]"
+
+    return _SENSITIVE_ASSIGNMENT_PATTERN.sub(replace_secret, text)
 
 
 def _redact_lifecycle_receipt_value(value: Any) -> Any:
@@ -152,6 +220,34 @@ def _redact_lifecycle_receipt_value(value: Any) -> Any:
     if isinstance(value, tuple):
         return tuple(_redact_lifecycle_receipt_value(item) for item in value)
     if isinstance(value, str):
+        return _redact_extension_error(value)
+    return value
+
+
+def _redact_lifecycle_api_value(value: Any, *, key: str | None = None) -> Any:
+    """Redact lifecycle reasons and connector diagnostics while preserving paths."""
+
+    key_text = (key or "").lower()
+    if isinstance(value, dict):
+        return {
+            str(item_key): _redact_lifecycle_api_value(item, key=str(item_key))
+            for item_key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_redact_lifecycle_api_value(item, key=key) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_redact_lifecycle_api_value(item, key=key) for item in value)
+    if not isinstance(value, str):
+        return value
+    if key_text == "reason" or "reason" in key_text:
+        return f"[redacted reason:{_content_hash(value)}]"
+    if (
+        key_text in {"error", "status_message", "url", "authorization", "headers", "password", "secret", "token"}
+        or "url" in key_text
+        or "secret" in key_text
+        or "token" in key_text
+        or _EXTERNAL_URL_PATTERN.search(value)
+    ):
         return _redact_extension_error(value)
     return value
 
@@ -181,15 +277,9 @@ async def _ensure_extension_rest_authorized(request: Request, scope) -> None:
     try:
         assert_runtime_not_revoked()
     except RuntimeRevokedError as exc:
-        raise HTTPException(
-            status_code=401,
-            detail={"code": "session_revoked", "message": "Operator session was revoked."},
-        ) from exc
+        raise HTTPException(status_code=401, detail=dict(_SESSION_REVOKED_DETAIL)) from exc
     if scope[0].is_set():
-        raise HTTPException(
-            status_code=401,
-            detail={"code": "session_revoked", "message": "Operator session was revoked."},
-        )
+        raise HTTPException(status_code=401, detail=dict(_SESSION_REVOKED_DETAIL))
 
 
 def _extension_identity(preview: dict[str, Any]) -> tuple[str, str | None, str | None]:
@@ -818,11 +908,7 @@ async def _log_extension_lifecycle_event(
         "load_error_count": _extension_load_error_count(preview),
         "extension_status": preview.get("status"),
         "ok": preview.get("ok"),
-        "error": (
-            _redact_extension_error(error)
-            if redact_paths and error is not None
-            else error
-        ),
+        "error": _redact_extension_error(error) if error is not None else None,
         **(safe_extra_details or {}),
     }
     await log_integration_event(
@@ -1155,6 +1241,8 @@ async def _require_extension_lifecycle_approval(
         "permissions": safe_permissions,
         **package_identity,
     }
+    owner_principal = get_current_trust_principal()
+    owner_principal_id = str(getattr(owner_principal, "principal_id", "") or "").strip()
     if isinstance(safe_fingerprint_context, dict):
         arguments.update(safe_fingerprint_context)
     if safe_target_reference:
@@ -1221,6 +1309,10 @@ async def _require_extension_lifecycle_approval(
         "approval_scope": approval_scope,
         **package_identity,
     }
+    if session_id:
+        details["approval_owner_session_id"] = session_id
+    if owner_principal_id:
+        details["approval_owner_principal_id"] = owner_principal_id
     if isinstance(safe_fingerprint_context, dict):
         details.update(safe_fingerprint_context)
     request = await approval_repository.get_or_create_pending(
@@ -1252,7 +1344,7 @@ async def _test_extension_mcp_connector(connector: dict[str, Any]) -> dict[str, 
     safe_name = _redact_extension_error(name)
     config = mcp_manager._config.get(name)
     if not config:
-        health = connector.get("health")
+        health = _redact_lifecycle_receipt_value(connector.get("health"))
         return {
             "status": "inactive",
             "message": "Connector is not registered in the MCP runtime.",
@@ -1274,7 +1366,7 @@ async def _test_extension_mcp_connector(connector: dict[str, Any]) -> dict[str, 
         return {
             "status": "disabled",
             "message": "Enable the connector before running a live test.",
-            "health": connector.get("health"),
+            "health": _redact_lifecycle_receipt_value(connector.get("health")),
         }
 
     url = config["url"]
@@ -1297,9 +1389,10 @@ async def _test_extension_mcp_connector(connector: dict[str, Any]) -> dict[str, 
             "status": "auth_required",
             "message": f"Missing environment variables: {', '.join(missing_vars)}",
             "missing_env_vars": missing_vars,
-            "health": connector.get("health"),
+            "health": _redact_lifecycle_receipt_value(connector.get("health")),
         }
 
+    client: MCPClient | None = None
     try:
         params: dict[str, Any] = {"url": url, "transport": "streamable-http"}
         if raw_headers:
@@ -1310,7 +1403,6 @@ async def _test_extension_mcp_connector(connector: dict[str, Any]) -> dict[str, 
         client = MCPClient(params, structured_output=False)
         tools = client.get_tools()
         tool_names = [tool.name for tool in tools]
-        client.disconnect()
         await log_integration_event(
             integration_type="extension_connector_test",
             name=safe_name,
@@ -1328,7 +1420,7 @@ async def _test_extension_mcp_connector(connector: dict[str, Any]) -> dict[str, 
             "status": "ok",
             "tool_count": len(tools),
             "tools": tool_names,
-            "health": connector.get("health"),
+            "health": _redact_lifecycle_receipt_value(connector.get("health")),
         }
     except Exception as exc:
         exc_str = str(exc).lower()
@@ -1348,8 +1440,16 @@ async def _test_extension_mcp_connector(connector: dict[str, Any]) -> dict[str, 
         return {
             "status": status,
             "message": _redact_extension_error(exc),
-            "health": connector.get("health"),
+            "health": _redact_lifecycle_receipt_value(connector.get("health")),
         }
+    finally:
+        if client is not None:
+            try:
+                client.disconnect()
+            except Exception:
+                # Disconnect failures must not replace the bounded connector
+                # result or leak transport/client diagnostics.
+                pass
 
 
 @router.post("/extensions/scaffold", status_code=201)
@@ -1371,7 +1471,7 @@ async def scaffold_extension_package_in_workspace(
         slug = _scaffold_package_slug(req.package_name)
         extension_id = req.extension_id.strip() if isinstance(req.extension_id, str) and req.extension_id.strip() else f"seraph.{slug}"
         package_root = Path(settings.workspace_dir) / "extensions" / slug
-        assert_runtime_not_revoked()
+        _assert_extension_runtime_not_revoked()
         scaffold = scaffold_extension_package(
             package_root,
             extension_id=extension_id,
@@ -1418,7 +1518,7 @@ async def scaffold_extension_package_in_workspace(
 
 @router.get("/extensions")
 async def list_extension_packages():
-    return list_extensions()
+    return _redact_lifecycle_api_value(list_extensions())
 
 
 @router.get("/extensions/diagnostics")
@@ -1479,7 +1579,7 @@ async def update_channel_routing(req: ChannelRoutingUpdateRequest, request: Requ
                 primary_transport=binding.primary_transport,
                 fallback_transport=binding.fallback_transport,
             )
-        assert_runtime_not_revoked()
+        _assert_extension_runtime_not_revoked()
         save_extension_state_payload(state_payload)
         await log_integration_event(
             integration_type="channel_routing",
@@ -1497,7 +1597,7 @@ async def update_channel_routing(req: ChannelRoutingUpdateRequest, request: Requ
 @router.get("/extensions/{extension_id}")
 async def get_extension_package(extension_id: str):
     try:
-        return {"extension": get_extension(extension_id)}
+        return {"extension": _redact_lifecycle_api_value(get_extension(extension_id))}
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=f"Extension '{extension_id}' not found") from exc
 
@@ -1505,7 +1605,7 @@ async def get_extension_package(extension_id: str):
 @router.get("/extensions/{extension_id}/lifecycle")
 async def get_extension_package_lifecycle(extension_id: str):
     try:
-        return extension_lifecycle_status(extension_id)
+        return _redact_lifecycle_api_value(extension_lifecycle_status(extension_id))
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=f"Extension '{extension_id}' not found") from exc
 
@@ -1535,16 +1635,16 @@ async def review_extension_package(
             redact_paths=True,
         )
         await _ensure_extension_rest_authorized(request, revocation_scope)
-        with _EXTENSION_EFFECT_LOCK:
+        with _extension_effect_guard():
             _assert_registered_extension_effect_identity(
                 extension_id,
                 preview,
                 action="review",
             )
-            assert_runtime_not_revoked()
+            _assert_extension_runtime_not_revoked()
             result = record_extension_review(
                 extension_id,
-                reviewed_by="cockpit",
+                reviewed_by=_operator_actor(operator),
                 reason=req.reason,
             )
         await _log_extension_lifecycle_event(
@@ -1608,17 +1708,17 @@ async def quarantine_extension_package(
             redact_paths=True,
         )
         await _ensure_extension_rest_authorized(request, revocation_scope)
-        with _EXTENSION_EFFECT_LOCK:
+        with _extension_effect_guard():
             _assert_registered_extension_effect_identity(
                 extension_id,
                 preview,
                 action="quarantine",
             )
-            assert_runtime_not_revoked()
+            _assert_extension_runtime_not_revoked()
             result = quarantine_extension(
                 extension_id,
                 reason=req.reason or "operator quarantine",
-                actor="cockpit",
+                actor=_operator_actor(operator),
             )
         await _log_extension_lifecycle_event(
             action="quarantine",
@@ -1681,16 +1781,16 @@ async def reenter_extension_package(
             redact_paths=True,
         )
         await _ensure_extension_rest_authorized(request, revocation_scope)
-        with _EXTENSION_EFFECT_LOCK:
+        with _extension_effect_guard():
             _assert_registered_extension_effect_identity(
                 extension_id,
                 preview,
                 action="reentry",
             )
-            assert_runtime_not_revoked()
+            _assert_extension_runtime_not_revoked()
             result = reenter_extension(
                 extension_id,
-                reviewed_by="cockpit",
+                reviewed_by=_operator_actor(operator),
                 reason=req.reason,
             )
         await _log_extension_lifecycle_event(
@@ -1777,9 +1877,9 @@ async def rollback_extension_package(
             redact_paths=True,
         )
         await _ensure_extension_rest_authorized(request, revocation_scope)
-        with _EXTENSION_EFFECT_LOCK:
+        with _extension_effect_guard():
             _assert_rollback_effect_identity(extension_id, preview, snapshot)
-            assert_runtime_not_revoked()
+            _assert_extension_runtime_not_revoked()
             # Pass the approved snapshot id even when the request omitted one;
             # the lifecycle effect must restore the exact approved record.
             result = rollback_extension(
@@ -1825,7 +1925,7 @@ async def rollback_extension_package(
 @router.get("/extensions/{extension_id}/connectors")
 async def list_extension_package_connectors(extension_id: str):
     try:
-        return list_extension_connectors(extension_id)
+        return _redact_lifecycle_api_value(list_extension_connectors(extension_id))
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=f"Extension '{extension_id}' not found") from exc
 
@@ -1865,7 +1965,7 @@ async def test_extension_package_connector(
         health = connector.get("health") if isinstance(connector.get("health"), dict) else None
         if connector_type == "mcp_servers":
             await _ensure_extension_rest_authorized(request, revocation_scope)
-            with _EXTENSION_EFFECT_LOCK:
+            with _extension_effect_guard():
                 current_preview = _assert_connector_effect_identity(
                     extension_id,
                     req.reference,
@@ -1875,13 +1975,13 @@ async def test_extension_package_connector(
                 current_connector = _extension_contribution(current_preview, req.reference)
                 if isinstance(current_connector, dict):
                     connector = current_connector
-                assert_runtime_not_revoked()
+                _assert_extension_runtime_not_revoked()
             result = await _test_extension_mcp_connector(connector)
             await _ensure_extension_rest_authorized(request, revocation_scope)
             return result
 
         await _ensure_extension_rest_authorized(request, revocation_scope)
-        with _EXTENSION_EFFECT_LOCK:
+        with _extension_effect_guard():
             current_preview = _assert_connector_effect_identity(
                 extension_id,
                 req.reference,
@@ -1891,7 +1991,7 @@ async def test_extension_package_connector(
             current_connector = _extension_contribution(current_preview, req.reference)
             if isinstance(current_connector, dict):
                 connector = current_connector
-            assert_runtime_not_revoked()
+            _assert_extension_runtime_not_revoked()
         connector_type = str(connector.get("type") or "")
         health = connector.get("health") if isinstance(connector.get("health"), dict) else None
         await log_integration_event(
@@ -1907,8 +2007,10 @@ async def test_extension_package_connector(
         )
         return {
             "status": str(health.get("state") if isinstance(health, dict) else connector.get("status") or "unknown"),
-            "message": str(health.get("summary") if isinstance(health, dict) else connector.get("status") or "Connector status"),
-            "health": health,
+            "message": _redact_extension_error(
+                str(health.get("summary") if isinstance(health, dict) else connector.get("status") or "Connector status")
+            ),
+            "health": _redact_lifecycle_api_value(health),
         }
     finally:
         await _end_rest_revocation_watch(revocation_scope)
@@ -1993,14 +2095,14 @@ async def set_extension_package_connector_enabled(
                 redact_paths=True,
             )
         await _ensure_extension_rest_authorized(request, revocation_scope)
-        with _EXTENSION_EFFECT_LOCK:
+        with _extension_effect_guard():
             _assert_connector_effect_identity(
                 extension_id,
                 req.reference,
                 connector_preview,
                 action="enable" if req.enabled else "disable",
             )
-            assert_runtime_not_revoked()
+            _assert_extension_runtime_not_revoked()
             result = set_extension_connector_enabled(extension_id, req.reference, enabled=req.enabled)
         await _log_extension_lifecycle_event(
             action="enable" if req.enabled else "disable",
@@ -2100,7 +2202,7 @@ async def save_extension_package_source(
                 redact_paths=True,
             )
         await _ensure_extension_rest_authorized(request, revocation_scope)
-        with _EXTENSION_EFFECT_LOCK:
+        with _extension_effect_guard():
             if not isinstance(source_preview, dict):
                 raise ValueError(
                     "extension source identity is unavailable; retry the lifecycle action"
@@ -2112,7 +2214,7 @@ async def save_extension_package_source(
                 req.content,
                 approval_context,
             )
-            assert_runtime_not_revoked()
+            _assert_extension_runtime_not_revoked()
             payload = save_extension_source(extension_id, req.reference, req.content)
         await _log_extension_lifecycle_event(
             action="save_source",
@@ -2162,9 +2264,9 @@ async def validate_extension_package_path(req: ExtensionPathRequest):
             action="validate",
             outcome="failed",
             path=req.path,
-            error=str(exc),
+            error=_redact_extension_error(exc),
         )
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HTTPException(status_code=400, detail=_redact_extension_error(exc)) from exc
     await _log_extension_lifecycle_event(
         action="validate",
         outcome="succeeded",
@@ -2203,13 +2305,13 @@ async def install_extension_package(req: ExtensionPathRequest, request: Request)
             redact_paths=True,
         )
         await _ensure_extension_rest_authorized(request, revocation_scope)
-        with _EXTENSION_EFFECT_LOCK:
+        with _extension_effect_guard():
             _assert_extension_path_effect_identity(
                 req.path,
                 preview,
                 action="install",
             )
-            assert_runtime_not_revoked()
+            _assert_extension_runtime_not_revoked()
             extension = install_extension_path(req.path)
         await _log_extension_lifecycle_event(
             action="install",
@@ -2281,13 +2383,13 @@ async def update_extension_package(req: ExtensionPathRequest, request: Request):
             redact_paths=True,
         )
         await _ensure_extension_rest_authorized(request, revocation_scope)
-        with _EXTENSION_EFFECT_LOCK:
+        with _extension_effect_guard():
             _assert_extension_path_effect_identity(
                 req.path,
                 preview,
                 action="update",
             )
-            assert_runtime_not_revoked()
+            _assert_extension_runtime_not_revoked()
             extension = update_extension_path(req.path)
         await _log_extension_lifecycle_event(
             action="update",
@@ -2358,13 +2460,13 @@ async def enable_extension_package(extension_id: str, request: Request):
             redact_paths=True,
         )
         await _ensure_extension_rest_authorized(request, revocation_scope)
-        with _EXTENSION_EFFECT_LOCK:
+        with _extension_effect_guard():
             _assert_registered_extension_effect_identity(
                 extension_id,
                 preview,
                 action="enable",
             )
-            assert_runtime_not_revoked()
+            _assert_extension_runtime_not_revoked()
             result = enable_extension(extension_id)
         await _log_extension_lifecycle_event(
             action="enable",
@@ -2426,13 +2528,13 @@ async def disable_extension_package(extension_id: str, request: Request):
             redact_paths=True,
         )
         await _ensure_extension_rest_authorized(request, revocation_scope)
-        with _EXTENSION_EFFECT_LOCK:
+        with _extension_effect_guard():
             _assert_registered_extension_effect_identity(
                 extension_id,
                 preview,
                 action="disable",
             )
-            assert_runtime_not_revoked()
+            _assert_extension_runtime_not_revoked()
             result = disable_extension(extension_id)
         await _log_extension_lifecycle_event(
             action="disable",
@@ -2503,14 +2605,14 @@ async def configure_extension_package(
                 redact_paths=True,
             )
         await _ensure_extension_rest_authorized(request, revocation_scope)
-        with _EXTENSION_EFFECT_LOCK:
+        with _extension_effect_guard():
             _assert_config_effect_identity(
                 extension_id,
                 preview,
                 req.config,
                 approval_context,
             )
-            assert_runtime_not_revoked()
+            _assert_extension_runtime_not_revoked()
             extension = configure_extension(extension_id, req.config)
         await _log_extension_lifecycle_event(
             action="configure",
@@ -2570,13 +2672,13 @@ async def remove_extension_package(extension_id: str, request: Request):
             redact_paths=True,
         )
         await _ensure_extension_rest_authorized(request, revocation_scope)
-        with _EXTENSION_EFFECT_LOCK:
+        with _extension_effect_guard():
             _assert_registered_extension_effect_identity(
                 extension_id,
                 preview,
                 action="remove",
             )
-            assert_runtime_not_revoked()
+            _assert_extension_runtime_not_revoked()
             remove_extension(extension_id)
         await _log_extension_lifecycle_event(
             action="remove",

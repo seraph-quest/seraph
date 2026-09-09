@@ -1682,7 +1682,14 @@ async def validate_extension_package_path(req: ExtensionPathRequest):
 
 
 @router.post("/extensions/install", status_code=201)
-async def install_extension_package(req: ExtensionPathRequest):
+async def install_extension_package(req: ExtensionPathRequest, request: Request):
+    operator = _require_authenticated_capability_operator(request)
+    active_session_id = operator.session_id
+    tokens = set_runtime_context(
+        active_session_id,
+        context_manager.get_context().approval_mode,
+        trust_principal=bind_operator_principal(operator, active_session_id),
+    )
     preview: dict[str, Any] | None = None
     try:
         preview = validate_extension_path(req.path)
@@ -1694,8 +1701,23 @@ async def install_extension_package(req: ExtensionPathRequest):
             raise ValueError(
                 f"extension '{extension_id}' is already installed; use update to replace the workspace package"
             )
-        await _require_extension_lifecycle_approval("install", preview)
+        await _require_extension_lifecycle_approval(
+            "install",
+            preview,
+            session_id=active_session_id,
+        )
+        assert_runtime_not_revoked()
         extension = install_extension_path(req.path)
+        await _log_extension_lifecycle_event(
+            action="install",
+            outcome="succeeded",
+            preview=extension,
+            path=req.path,
+            extra_details={
+                "location": extension.get("location"),
+            },
+        )
+        return {"status": "installed", "extension": extension}
     except FileExistsError as exc:
         await _log_extension_lifecycle_event(
             action="install",
@@ -1714,20 +1736,19 @@ async def install_extension_package(req: ExtensionPathRequest):
             error=str(exc),
         )
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    await _log_extension_lifecycle_event(
-        action="install",
-        outcome="succeeded",
-        preview=extension,
-        path=req.path,
-        extra_details={
-            "location": extension.get("location"),
-        },
-    )
-    return {"status": "installed", "extension": extension}
+    finally:
+        reset_runtime_context(tokens)
 
 
 @router.post("/extensions/update")
-async def update_extension_package(req: ExtensionPathRequest):
+async def update_extension_package(req: ExtensionPathRequest, request: Request):
+    operator = _require_authenticated_capability_operator(request)
+    active_session_id = operator.session_id
+    tokens = set_runtime_context(
+        active_session_id,
+        context_manager.get_context().approval_mode,
+        trust_principal=bind_operator_principal(operator, active_session_id),
+    )
     preview: dict[str, Any] | None = None
     try:
         preview = validate_extension_path(req.path)
@@ -1744,8 +1765,23 @@ async def update_extension_package(req: ExtensionPathRequest):
             raise ValueError(
                 f"extension '{extension_id}' downgrade requires explicit downgrade lifecycle control"
             )
-        await _require_extension_lifecycle_approval("update", preview)
+        await _require_extension_lifecycle_approval(
+            "update",
+            preview,
+            session_id=active_session_id,
+        )
+        assert_runtime_not_revoked()
         extension = update_extension_path(req.path)
+        await _log_extension_lifecycle_event(
+            action="update",
+            outcome="succeeded",
+            preview=extension,
+            path=req.path,
+            extra_details={
+                "location": extension.get("location"),
+            },
+        )
+        return {"status": "updated", "extension": extension}
     except KeyError as exc:
         extension_id = preview.get("extension_id") if isinstance(preview, dict) else req.path
         await _log_extension_lifecycle_event(
@@ -1765,20 +1801,19 @@ async def update_extension_package(req: ExtensionPathRequest):
             error=str(exc),
         )
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    await _log_extension_lifecycle_event(
-        action="update",
-        outcome="succeeded",
-        preview=extension,
-        path=req.path,
-        extra_details={
-            "location": extension.get("location"),
-        },
-    )
-    return {"status": "updated", "extension": extension}
+    finally:
+        reset_runtime_context(tokens)
 
 
 @router.post("/extensions/{extension_id}/enable")
-async def enable_extension_package(extension_id: str):
+async def enable_extension_package(extension_id: str, request: Request):
+    operator = _require_authenticated_capability_operator(request)
+    active_session_id = operator.session_id
+    tokens = set_runtime_context(
+        active_session_id,
+        context_manager.get_context().approval_mode,
+        trust_principal=bind_operator_principal(operator, active_session_id),
+    )
     preview: dict[str, Any] | None = None
     try:
         preview = get_extension(extension_id)
@@ -1790,8 +1825,24 @@ async def enable_extension_package(extension_id: str):
             raise ValueError(
                 f"extension '{extension_id}' is degraded and cannot be enabled until validation issues are fixed"
             )
-        await _require_extension_lifecycle_approval("enable", preview)
+        await _require_extension_lifecycle_approval(
+            "enable",
+            preview,
+            session_id=active_session_id,
+        )
+        assert_runtime_not_revoked()
         result = enable_extension(extension_id)
+        await _log_extension_lifecycle_event(
+            action="enable",
+            outcome="succeeded",
+            preview=result.get("extension"),
+            path=extension_id,
+            extra_details={
+                "changed": result["changed"],
+                "changed_count": len(result.get("changed", [])),
+            },
+        )
+        return {"status": "enabled", **result}
     except KeyError as exc:
         await _log_extension_lifecycle_event(
             action="enable",
@@ -1809,26 +1860,40 @@ async def enable_extension_package(extension_id: str):
             error=str(exc),
         )
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    await _log_extension_lifecycle_event(
-        action="enable",
-        outcome="succeeded",
-        preview=result.get("extension"),
-        path=extension_id,
-        extra_details={
-            "changed": result["changed"],
-            "changed_count": len(result.get("changed", [])),
-        },
-    )
-    return {"status": "enabled", **result}
+    finally:
+        reset_runtime_context(tokens)
 
 
 @router.post("/extensions/{extension_id}/disable")
-async def disable_extension_package(extension_id: str):
+async def disable_extension_package(extension_id: str, request: Request):
+    operator = _require_authenticated_capability_operator(request)
+    active_session_id = operator.session_id
+    tokens = set_runtime_context(
+        active_session_id,
+        context_manager.get_context().approval_mode,
+        trust_principal=bind_operator_principal(operator, active_session_id),
+    )
     preview: dict[str, Any] | None = None
     try:
         preview = get_extension(extension_id)
-        await _require_extension_lifecycle_approval("disable", preview)
+        await _require_extension_lifecycle_approval(
+            "disable",
+            preview,
+            session_id=active_session_id,
+        )
+        assert_runtime_not_revoked()
         result = disable_extension(extension_id)
+        await _log_extension_lifecycle_event(
+            action="disable",
+            outcome="succeeded",
+            preview=result.get("extension"),
+            path=extension_id,
+            extra_details={
+                "changed": result["changed"],
+                "changed_count": len(result.get("changed", [])),
+            },
+        )
+        return {"status": "disabled", **result}
     except KeyError as exc:
         await _log_extension_lifecycle_event(
             action="disable",
@@ -1837,17 +1902,8 @@ async def disable_extension_package(extension_id: str):
             error=f"Extension '{extension_id}' not found",
         )
         raise HTTPException(status_code=404, detail=f"Extension '{extension_id}' not found") from exc
-    await _log_extension_lifecycle_event(
-        action="disable",
-        outcome="succeeded",
-        preview=result.get("extension"),
-        path=extension_id,
-        extra_details={
-            "changed": result["changed"],
-            "changed_count": len(result.get("changed", [])),
-        },
-    )
-    return {"status": "disabled", **result}
+    finally:
+        reset_runtime_context(tokens)
 
 
 @router.post("/extensions/{extension_id}/configure")
@@ -1908,12 +1964,31 @@ async def configure_extension_package(
 
 
 @router.delete("/extensions/{extension_id}")
-async def remove_extension_package(extension_id: str):
+async def remove_extension_package(extension_id: str, request: Request):
+    operator = _require_authenticated_capability_operator(request)
+    active_session_id = operator.session_id
+    tokens = set_runtime_context(
+        active_session_id,
+        context_manager.get_context().approval_mode,
+        trust_principal=bind_operator_principal(operator, active_session_id),
+    )
     preview: dict[str, Any] | None = None
     try:
         preview = get_extension(extension_id)
-        await _require_extension_lifecycle_approval("remove", preview)
+        await _require_extension_lifecycle_approval(
+            "remove",
+            preview,
+            session_id=active_session_id,
+        )
+        assert_runtime_not_revoked()
         remove_extension(extension_id)
+        await _log_extension_lifecycle_event(
+            action="remove",
+            outcome="succeeded",
+            preview=preview,
+            path=extension_id,
+        )
+        return {"status": "removed", "name": extension_id}
     except KeyError as exc:
         await _log_extension_lifecycle_event(
             action="remove",
@@ -1931,10 +2006,5 @@ async def remove_extension_package(extension_id: str):
             error=str(exc),
         )
         raise HTTPException(status_code=409, detail=str(exc)) from exc
-    await _log_extension_lifecycle_event(
-        action="remove",
-        outcome="succeeded",
-        preview=preview,
-        path=extension_id,
-    )
-    return {"status": "removed", "name": extension_id}
+    finally:
+        reset_runtime_context(tokens)

@@ -42,6 +42,7 @@ from src.model_fabric.remote_inference_admission import (
     RemoteInferenceAdmissionError as GpuAdmissionError,
     RemoteInferenceAdmissionIdentityError as GpuAdmissionIdentityError,
     RemoteInferenceAdmissionRequest as GpuAdmissionRequest,
+    current_remote_inference_receipt_binding,
     remote_inference_admission_broker as gpu_admission_broker,
 )
 from src.operators.local_codex import reject_legacy_external_agent_model
@@ -3061,6 +3062,34 @@ def _persist_sync_gpu_admission_denial(
         logger.warning("Failed to persist synchronous GPU admission denial", exc_info=True)
 
 
+def _persist_bound_sync_admission_receipt(
+    operation_id: str,
+    *,
+    receipt: Any | None = None,
+    readback: bool = False,
+) -> None:
+    """Adopt a completed sync broker receipt into the bound durable job."""
+    binding = current_remote_inference_receipt_binding()
+    if binding is None:
+        return
+    persisted_receipt = receipt
+    if persisted_receipt is None and readback:
+        try:
+            persisted_receipt = gpu_admission_broker.receipt_for(operation_id)
+        except (AttributeError, KeyError):
+            return
+    if persisted_receipt is None:
+        return
+    _run_receipt_hook_sync(
+        gpu_admission_broker.persist_receipt(
+            persisted_receipt,
+            repository=binding.repository,
+            owner=binding.owner,
+            fencing_token=binding.fencing_token,
+        )
+    )
+
+
 def _execute_sync_with_gpu_admission(
     *,
     context: Any | None,
@@ -3091,8 +3120,13 @@ def _execute_sync_with_gpu_admission(
             "canonical synchronous inference requires a valid GPU admission owner context"
         ) from error
     try:
-        return gpu_admission_broker.execute_sync(request, operation)
+        result = gpu_admission_broker.execute_sync(request, operation)
     except GpuAdmissionError as error:
+        _persist_bound_sync_admission_receipt(
+            operation_id,
+            receipt=getattr(error, "receipt", None),
+            readback=True,
+        )
         # A post-callback deadline is an uncertain provider result, not a
         # zero-attempt admission denial.  Its blocked receipt keeps the active
         # lease held for reconciliation; the surrounding route receipt owns
@@ -3117,6 +3151,15 @@ def _execute_sync_with_gpu_admission(
             ),
         )
         raise
+    except BaseException:
+        # The broker can finalize a failed operation before the provider
+        # exception escapes. Read back that terminal/uncertain receipt so a
+        # durable caller never loses the provider outcome just because the
+        # exception was not an admission error subtype.
+        _persist_bound_sync_admission_receipt(operation_id, readback=True)
+        raise
+    _persist_bound_sync_admission_receipt(operation_id, readback=True)
+    return result
 
 
 def _reserved_output_tokens_from_kwargs(

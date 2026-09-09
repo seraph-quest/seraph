@@ -576,6 +576,10 @@ async def run_strategist_tick() -> None:
         reset_current_llm_request_id(llm_request_token)
         raw = await run_strategist_decision_completion(
             guardian_state=guardian_state,
+            durable_job_id=durable_job_id,
+            admission_repository=durable_job_repository,
+            durable_lease_owner=_STRATEGIST_RUNNER_ID,
+            durable_fencing_token=durable_fencing_token,
         )
 
         decision = parse_strategist_response(str(raw))

@@ -14,6 +14,7 @@ from src.approval.runtime import reset_runtime_context, set_runtime_context
 from src.tools.approval import AuthorityTool
 from src.tools.audit import AuditedTool
 from src.security.trust_contract import AuthorityGrant, PrincipalType, TrustPrincipal, canonical_digest
+from src.model_fabric.remote_inference_admission import current_remote_inference_receipt_binding
 
 
 # ── parse_strategist_response tests ──────────────────────
@@ -214,3 +215,46 @@ async def test_run_strategist_decision_completion_uses_bounded_runtime_path(mock
     assert "Do not call tools" in completion.await_args.kwargs["messages"][0]["content"]
     call = completion.await_args.kwargs
     assert call["request_context"].data_digest == canonical_digest(call["messages"])
+
+
+@pytest.mark.asyncio
+async def test_run_strategist_decision_completion_binds_durable_admission_receipts():
+    response = MagicMock()
+    response.choices = [
+        MagicMock(
+            message=MagicMock(
+                content='{"should_intervene": false, "content": "", "reasoning": "No intervention"}'
+            )
+        )
+    ]
+    completion = AsyncMock(return_value=response)
+    principal = TrustPrincipal(
+        principal_id="service:strategist",
+        principal_type=PrincipalType.SERVICE,
+        grants=(AuthorityGrant.MODEL_INFERENCE,),
+        session_id="strategist-session",
+        job_id="scheduler-job",
+    )
+    tokens = set_runtime_context(
+        "strategist-session",
+        "off",
+        trust_principal=principal,
+    )
+    repository = MagicMock()
+    try:
+        with patch("src.agent.strategist.completion_with_fallback", completion):
+            raw = await run_strategist_decision_completion(
+                "Current context",
+                durable_job_id="strategist_tick:durable",
+                admission_repository=repository,
+                durable_lease_owner="scheduler:strategist_tick",
+                durable_fencing_token=11,
+            )
+    finally:
+        reset_runtime_context(tokens)
+
+    assert raw == '{"should_intervene": false, "content": "", "reasoning": "No intervention"}'
+    request_context = completion.await_args.kwargs["request_context"]
+    assert request_context.principal.job_id == "strategist_tick:durable"
+    assert request_context.principal.session_id == "strategist-session"
+    assert current_remote_inference_receipt_binding() is None

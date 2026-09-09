@@ -1163,16 +1163,40 @@ async def get_extension_package_lifecycle(extension_id: str):
 
 
 @router.post("/extensions/{extension_id}/review")
-async def review_extension_package(extension_id: str, req: ExtensionLifecycleReasonRequest):
+async def review_extension_package(
+    extension_id: str,
+    req: ExtensionLifecycleReasonRequest,
+    request: Request,
+):
+    operator = _require_authenticated_capability_operator(request)
+    active_session_id = operator.session_id
+    tokens = set_runtime_context(
+        active_session_id,
+        context_manager.get_context().approval_mode,
+        trust_principal=bind_operator_principal(operator, active_session_id),
+    )
     preview: dict[str, Any] | None = None
     try:
         preview = get_extension(extension_id)
-        await _require_extension_lifecycle_approval("review", preview)
+        await _require_extension_lifecycle_approval(
+            "review",
+            preview,
+            session_id=active_session_id,
+        )
+        assert_runtime_not_revoked()
         result = record_extension_review(
             extension_id,
             reviewed_by="cockpit",
             reason=req.reason,
         )
+        await _log_extension_lifecycle_event(
+            action="review",
+            outcome="succeeded",
+            preview=result.get("extension"),
+            path=extension_id,
+            extra_details={"receipt_id": result.get("receipt", {}).get("id")},
+        )
+        return result
     except KeyError as exc:
         await _log_extension_lifecycle_event(
             action="review",
@@ -1190,27 +1214,45 @@ async def review_extension_package(extension_id: str, req: ExtensionLifecycleRea
             error=str(exc),
         )
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    await _log_extension_lifecycle_event(
-        action="review",
-        outcome="succeeded",
-        preview=result.get("extension"),
-        path=extension_id,
-        extra_details={"receipt_id": result.get("receipt", {}).get("id")},
-    )
-    return result
+    finally:
+        reset_runtime_context(tokens)
 
 
 @router.post("/extensions/{extension_id}/quarantine")
-async def quarantine_extension_package(extension_id: str, req: ExtensionLifecycleReasonRequest):
+async def quarantine_extension_package(
+    extension_id: str,
+    req: ExtensionLifecycleReasonRequest,
+    request: Request,
+):
+    operator = _require_authenticated_capability_operator(request)
+    active_session_id = operator.session_id
+    tokens = set_runtime_context(
+        active_session_id,
+        context_manager.get_context().approval_mode,
+        trust_principal=bind_operator_principal(operator, active_session_id),
+    )
     preview: dict[str, Any] | None = None
     try:
         preview = get_extension(extension_id)
-        await _require_extension_lifecycle_approval("quarantine", preview)
+        await _require_extension_lifecycle_approval(
+            "quarantine",
+            preview,
+            session_id=active_session_id,
+        )
+        assert_runtime_not_revoked()
         result = quarantine_extension(
             extension_id,
             reason=req.reason or "operator quarantine",
             actor="cockpit",
         )
+        await _log_extension_lifecycle_event(
+            action="quarantine",
+            outcome="succeeded",
+            preview=result.get("extension"),
+            path=extension_id,
+            extra_details={"receipt_id": result.get("receipt", {}).get("id")},
+        )
+        return result
     except KeyError as exc:
         await _log_extension_lifecycle_event(
             action="quarantine",
@@ -1228,27 +1270,45 @@ async def quarantine_extension_package(extension_id: str, req: ExtensionLifecycl
             error=str(exc),
         )
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    await _log_extension_lifecycle_event(
-        action="quarantine",
-        outcome="succeeded",
-        preview=result.get("extension"),
-        path=extension_id,
-        extra_details={"receipt_id": result.get("receipt", {}).get("id")},
-    )
-    return result
+    finally:
+        reset_runtime_context(tokens)
 
 
 @router.post("/extensions/{extension_id}/reentry")
-async def reenter_extension_package(extension_id: str, req: ExtensionLifecycleReasonRequest):
+async def reenter_extension_package(
+    extension_id: str,
+    req: ExtensionLifecycleReasonRequest,
+    request: Request,
+):
+    operator = _require_authenticated_capability_operator(request)
+    active_session_id = operator.session_id
+    tokens = set_runtime_context(
+        active_session_id,
+        context_manager.get_context().approval_mode,
+        trust_principal=bind_operator_principal(operator, active_session_id),
+    )
     preview: dict[str, Any] | None = None
     try:
         preview = get_extension(extension_id)
-        await _require_extension_lifecycle_approval("reentry", preview)
+        await _require_extension_lifecycle_approval(
+            "reentry",
+            preview,
+            session_id=active_session_id,
+        )
+        assert_runtime_not_revoked()
         result = reenter_extension(
             extension_id,
             reviewed_by="cockpit",
             reason=req.reason,
         )
+        await _log_extension_lifecycle_event(
+            action="reentry",
+            outcome="succeeded",
+            preview=result.get("extension"),
+            path=extension_id,
+            extra_details={"receipt_id": result.get("receipt", {}).get("id")},
+        )
+        return result
     except KeyError as exc:
         await _log_extension_lifecycle_event(
             action="reentry",
@@ -1266,18 +1326,23 @@ async def reenter_extension_package(extension_id: str, req: ExtensionLifecycleRe
             error=str(exc),
         )
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    await _log_extension_lifecycle_event(
-        action="reentry",
-        outcome="succeeded",
-        preview=result.get("extension"),
-        path=extension_id,
-        extra_details={"receipt_id": result.get("receipt", {}).get("id")},
-    )
-    return result
+    finally:
+        reset_runtime_context(tokens)
 
 
 @router.post("/extensions/{extension_id}/rollback")
-async def rollback_extension_package(extension_id: str, req: ExtensionRollbackRequest):
+async def rollback_extension_package(
+    extension_id: str,
+    req: ExtensionRollbackRequest,
+    request: Request,
+):
+    operator = _require_authenticated_capability_operator(request)
+    active_session_id = operator.session_id
+    tokens = set_runtime_context(
+        active_session_id,
+        context_manager.get_context().approval_mode,
+        trust_principal=bind_operator_principal(operator, active_session_id),
+    )
     preview: dict[str, Any] | None = None
     try:
         preview = get_extension(extension_id)
@@ -1307,8 +1372,18 @@ async def rollback_extension_package(extension_id: str, req: ExtensionRollbackRe
                 "restored_digest": snapshot.get("digest"),
                 "snapshot_path_hash": _content_hash(str(snapshot.get("path") or "")),
             },
+            session_id=active_session_id,
         )
+        assert_runtime_not_revoked()
         result = rollback_extension(extension_id, snapshot_id=req.snapshot_id)
+        await _log_extension_lifecycle_event(
+            action="rollback",
+            outcome="succeeded",
+            preview=result.get("extension"),
+            path=extension_id,
+            extra_details={"receipt_id": result.get("receipt", {}).get("id")},
+        )
+        return result
     except KeyError as exc:
         await _log_extension_lifecycle_event(
             action="rollback",
@@ -1326,14 +1401,8 @@ async def rollback_extension_package(extension_id: str, req: ExtensionRollbackRe
             error=str(exc),
         )
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    await _log_extension_lifecycle_event(
-        action="rollback",
-        outcome="succeeded",
-        preview=result.get("extension"),
-        path=extension_id,
-        extra_details={"receipt_id": result.get("receipt", {}).get("id")},
-    )
-    return result
+    finally:
+        reset_runtime_context(tokens)
 
 
 @router.get("/extensions/{extension_id}/connectors")

@@ -612,7 +612,29 @@ def _kill_process_group(process: subprocess.Popen[Any]) -> None:
     try:
         os.killpg(os.getpgid(process.pid), signal.SIGKILL)
     except (AttributeError, ProcessLookupError, PermissionError):
-        process.kill()
+        try:
+            process.kill()
+        except ProcessLookupError:
+            pass
+
+
+def _bounded_reap_process(process: subprocess.Popen[Any], *, timeout: float = 1.0) -> tuple[str, str]:
+    """Reap pipes without allowing a descendant-held pipe to hang the caller."""
+    try:
+        stdout, stderr = process.communicate(timeout=timeout)
+        return stdout or "", stderr or ""
+    except subprocess.TimeoutExpired as exc:
+        for stream in (process.stdout, process.stderr):
+            if stream is not None:
+                try:
+                    stream.close()
+                except OSError:
+                    pass
+        try:
+            process.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            pass
+        return exc.stdout or "", exc.stderr or ""
 
 
 def _command_env(*, worker_root: Path | None = None) -> dict[str, str]:
@@ -711,15 +733,24 @@ class ProcessRuntimeManager:
     def _stop_managed_process(process: ManagedProcess, *, force: bool) -> dict[str, Any]:
         if process.popen.poll() is None:
             if force:
-                process.popen.kill()
-                process.popen.wait(timeout=5)
-            else:
-                process.popen.terminate()
+                _kill_process_group(process.popen)
                 try:
-                    process.popen.wait(timeout=5)
+                    process.popen.wait(timeout=2)
                 except subprocess.TimeoutExpired:
                     process.popen.kill()
-                    process.popen.wait(timeout=5)
+            else:
+                try:
+                    os.killpg(os.getpgid(process.popen.pid), signal.SIGTERM)
+                except (AttributeError, ProcessLookupError, PermissionError):
+                    process.popen.terminate()
+                try:
+                    process.popen.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    _kill_process_group(process.popen)
+                    try:
+                        process.popen.wait(timeout=2)
+                    except subprocess.TimeoutExpired:
+                        pass
         payload = process.status_payload()
         payload["stopped"] = True
         return payload
@@ -768,7 +799,7 @@ class ProcessRuntimeManager:
         except subprocess.TimeoutExpired as exc:
             if process is not None:
                 _kill_process_group(process)
-                stdout, stderr = process.communicate()
+                stdout, stderr = _bounded_reap_process(process)
             else:
                 stdout, stderr = exc.stdout or "", exc.stderr or ""
             return {

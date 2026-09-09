@@ -22,7 +22,8 @@ import os
 import re
 import shutil
 import stat
-from dataclasses import dataclass, field
+import time
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterable
@@ -124,6 +125,21 @@ class NativeSoftwareEngineeringError(ValueError):
 
 
 @dataclass(frozen=True, slots=True)
+class NativeSoftwareEngineeringApprovalReceipt:
+    """Immutable, single-job approval evidence for the deterministic apply."""
+
+    receipt_id: str
+    owner_principal_id: str
+    session_id: str
+    job_id: str
+    preview_digest: str
+    expires_at: float
+    action: str = "apply"
+    decision: str = "approved"
+    consumed: bool = False
+
+
+@dataclass(frozen=True, slots=True)
 class NativeSoftwareEngineeringRequest:
     """Inputs for one bounded fixture invocation.
 
@@ -149,6 +165,7 @@ class NativeSoftwareEngineeringRequest:
     # Approval is required by default. A caller must provide an explicit
     # bounded approval decision before the patch can be applied.
     patch_approval: str = "required"
+    approval_receipt: NativeSoftwareEngineeringApprovalReceipt | None = None
     instruction_text: str = ""
     cancel_before_test: bool = False
 
@@ -190,6 +207,44 @@ def _digest_bytes(value: bytes) -> str:
 
 def _digest_text(value: str) -> str:
     return _digest_bytes(value.encode("utf-8"))
+
+
+def _preview_scope_digest(request: NativeSoftwareEngineeringRequest) -> str:
+    return _digest(
+        {
+            "action": "apply",
+            "job_id": request.job_id,
+            "session_id": request.session_id,
+            "file_path": FIXTURE_BUG_FILE,
+            "before_sha256": _digest_text(FIXTURE_BEFORE_TEXT),
+            "after_sha256": _digest_text(FIXTURE_AFTER_TEXT),
+        }
+    )
+
+
+def build_native_software_engineering_approval_receipt(
+    request: NativeSoftwareEngineeringRequest,
+    *,
+    receipt_id: str | None = None,
+    expires_at: float | None = None,
+) -> NativeSoftwareEngineeringApprovalReceipt:
+    """Create bounded approval evidence for a separately authorized caller.
+
+    This helper only creates immutable scope evidence; it is not an approval
+    endpoint. An authenticated operator/API must issue the corresponding
+    approval record before this evidence can be trusted in a production route.
+    """
+    _validate_request_identity(request)
+    if expires_at is None:
+        expires_at = time.time() + 300
+    return NativeSoftwareEngineeringApprovalReceipt(
+        receipt_id=receipt_id or f"native-swe-approval:{request.job_id}",
+        owner_principal_id=request.owner_principal_id,
+        session_id=request.session_id,
+        job_id=request.job_id,
+        preview_digest=_preview_scope_digest(request),
+        expires_at=float(expires_at),
+    )
 
 
 def _safe_relative(path: Path, root: Path, *, reason_code: str) -> str:
@@ -375,6 +430,29 @@ def _validate_test_command(request: NativeSoftwareEngineeringRequest) -> None:
 def _validate_patch_approval(request: NativeSoftwareEngineeringRequest) -> None:
     if request.patch_approval not in _PATCH_APPROVAL_STATES:
         raise NativeSoftwareEngineeringError("patch_approval_state_invalid")
+    receipt = request.approval_receipt
+    if request.patch_approval != "approved":
+        if receipt is not None:
+            raise NativeSoftwareEngineeringError("approval_receipt_state_mismatch")
+        return
+    if not isinstance(receipt, NativeSoftwareEngineeringApprovalReceipt):
+        raise NativeSoftwareEngineeringError("approval_receipt_required")
+    if receipt.consumed:
+        raise NativeSoftwareEngineeringError("approval_receipt_replayed")
+    if receipt.decision != "approved" or receipt.action != "apply":
+        raise NativeSoftwareEngineeringError("approval_receipt_scope_invalid")
+    if receipt.owner_principal_id != request.owner_principal_id:
+        raise NativeSoftwareEngineeringError("approval_receipt_owner_mismatch")
+    if receipt.session_id != request.session_id or receipt.job_id != request.job_id:
+        raise NativeSoftwareEngineeringError("approval_receipt_binding_mismatch")
+    if receipt.preview_digest != _preview_scope_digest(request):
+        raise NativeSoftwareEngineeringError("approval_receipt_preview_mismatch")
+    try:
+        receipt_expires_at = float(receipt.expires_at)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise NativeSoftwareEngineeringError("approval_receipt_expiry_invalid") from exc
+    if receipt_expires_at <= time.time():
+        raise NativeSoftwareEngineeringError("approval_receipt_expired")
 
 
 def _prepare_fixture(request: NativeSoftwareEngineeringRequest, *, executable: bool = False) -> _PreparedFixture:
@@ -472,7 +550,11 @@ def build_native_software_engineering_plan(
             "required": True,
             "state": request.patch_approval,
             "boundary": "preview_then_approval_then_apply",
-            "source": "deterministic_fixture_policy",
+            "source": (
+                "bound_immutable_approval_receipt"
+                if request.patch_approval == "approved"
+                else "deterministic_fixture_policy"
+            ),
         },
         "authority": {
             "owner_principal_id": request.owner_principal_id,
@@ -1048,15 +1130,34 @@ async def run_native_software_engineering_fixture(
             "job_id": request.job_id,
             "state": request.patch_approval,
             "required": True,
-            "source": "deterministic_fixture_policy",
+            "source": (
+                "bound_immutable_approval_receipt"
+                if request.patch_approval == "approved"
+                else "deterministic_fixture_policy"
+            ),
             "authority_source": "durable_job_owner",
             "owner_principal_id": request.owner_principal_id,
             "actor_roles_are_metadata_only": True,
+            "approval_receipt": (
+                {
+                    "receipt_id": request.approval_receipt.receipt_id,
+                    "owner_principal_id": request.approval_receipt.owner_principal_id,
+                    "session_id": request.approval_receipt.session_id,
+                    "job_id": request.approval_receipt.job_id,
+                    "preview_digest": request.approval_receipt.preview_digest,
+                    "expires_at": request.approval_receipt.expires_at,
+                    "action": request.approval_receipt.action,
+                    "decision": request.approval_receipt.decision,
+                }
+                if request.approval_receipt is not None
+                else None
+            ),
             "scope": {
                 "file_path": FIXTURE_BUG_FILE,
                 "before_sha256": preview_payload["before_sha256"],
                 "after_sha256": preview_payload["after_sha256"],
                 "preview_artifact": _relative_workspace_path(job_workspace.artifact_dir / "patch.preview.json"),
+                "preview_digest": _preview_scope_digest(request),
             },
         }
         await _record_artifact(
@@ -1076,7 +1177,11 @@ async def run_native_software_engineering_fixture(
             details={
                 "approval_artifact": _relative_workspace_path(job_workspace.artifact_dir / "approval.json"),
                 "state": request.patch_approval,
-                "source": "deterministic_fixture_policy",
+                "source": (
+                    "bound_immutable_approval_receipt"
+                    if request.patch_approval == "approved"
+                    else "deterministic_fixture_policy"
+                ),
             },
             owner=worker_owner,
             fencing_token=fencing_token,
@@ -1450,6 +1555,41 @@ async def run_native_software_engineering_fixture(
         }
 
 
+async def resume_native_software_engineering_fixture(
+    request: NativeSoftwareEngineeringRequest,
+    approval_receipt: NativeSoftwareEngineeringApprovalReceipt,
+) -> dict[str, Any]:
+    """Validate a bound approval before any future durable resume integration.
+
+    The current fixture runner has no authenticated operator resume endpoint
+    that can atomically consume an existing ApprovalRequest. Consequently this
+    operation deliberately remains blocked after validating the immutable
+    receipt; it cannot turn a caller supplied ``approved`` flag into authority
+    or replay an awaiting job.
+    """
+    candidate = replace(request, patch_approval="approved", approval_receipt=approval_receipt)
+    try:
+        _validate_request_identity(candidate)
+        _validate_patch_approval(candidate)
+    except NativeSoftwareEngineeringError as exc:
+        return {
+            "status": "blocked",
+            "reason_code": exc.reason_code,
+            "evidence_mode": NATIVE_SOFTWARE_ENGINEERING_EVIDENCE_MODE,
+            "provider": None,
+            "operator_visible": True,
+        }
+    return {
+        "status": "blocked",
+        "reason_code": "approval_resume_requires_operator_route",
+        "evidence_mode": NATIVE_SOFTWARE_ENGINEERING_EVIDENCE_MODE,
+        "provider": None,
+        "approval_resume_supported": False,
+        "follow_up": "bind resume to an authenticated ApprovalRequest and atomic durable checkpoint transition",
+        "operator_visible": True,
+    }
+
+
 async def cancel_native_software_engineering_job(
     job_id: str,
     *,
@@ -1477,10 +1617,13 @@ __all__ = [
     "NATIVE_SOFTWARE_ENGINEERING_CAPABILITY_VERSION",
     "NATIVE_SOFTWARE_ENGINEERING_EVIDENCE_MODE",
     "NativeSoftwareEngineeringError",
+    "NativeSoftwareEngineeringApprovalReceipt",
     "NativeSoftwareEngineeringRequest",
+    "build_native_software_engineering_approval_receipt",
     "build_native_software_engineering_plan",
     "cancel_native_software_engineering_job",
     "native_software_engineering_fixture_root",
     "preflight_native_software_engineering_fixture",
+    "resume_native_software_engineering_fixture",
     "run_native_software_engineering_fixture",
 ]

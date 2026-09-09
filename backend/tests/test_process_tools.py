@@ -65,6 +65,35 @@ def test_run_command_success():
     assert "guardian process ready" in result
 
 
+def test_run_command_timeout_does_not_wait_for_descendant_held_pipes():
+    script_name = _write_script(
+        "wave_process_orphaned_pipe.py",
+        """
+        import os
+        import subprocess
+        import sys
+        import time
+
+        subprocess.Popen(
+            [sys.executable, "-c", "import os,time; os.setsid(); time.sleep(3)"],
+            stdout=sys.stdout,
+            stderr=sys.stderr,
+        )
+        time.sleep(30)
+        """,
+    )
+    started = time.monotonic()
+
+    result = process_runtime_manager.run_command(
+        command="python3",
+        args_json=f'["{script_name}"]',
+        timeout_seconds=1,
+    )
+
+    assert result["timed_out"] is True
+    assert time.monotonic() - started < 4
+
+
 def test_run_command_uses_disposable_worker_home_and_cleans_up():
     script_name = _write_script(
         "wave1_process_worker_env.py",

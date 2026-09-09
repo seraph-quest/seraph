@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 import shutil
+import time
 from pathlib import Path
 
 import pytest
@@ -13,8 +15,10 @@ from src.security.trust_contract import AuthorityGrant, PrincipalType, TrustPrin
 import src.workflows.native_software_engineering as native_swe
 from src.workflows.native_software_engineering import (
     NativeSoftwareEngineeringRequest,
+    build_native_software_engineering_approval_receipt,
     native_software_engineering_fixture_root,
     preflight_native_software_engineering_fixture,
+    resume_native_software_engineering_fixture,
     run_native_software_engineering_fixture,
 )
 
@@ -22,6 +26,11 @@ from src.workflows.native_software_engineering import (
 def _copy_fixture(destination: Path) -> Path:
     shutil.copytree(native_software_engineering_fixture_root(), destination)
     return destination
+
+
+def _approved_receipt(job_id: str):
+    request = NativeSoftwareEngineeringRequest(job_id=job_id)
+    return build_native_software_engineering_approval_receipt(request)
 
 
 @pytest.fixture(autouse=True)
@@ -104,6 +113,66 @@ def test_preflight_blocks_scope_command_timeout_and_role_authority_violations(tm
         assert receipt["reason_code"] == reason_code
 
 
+def test_preflight_rejects_unbound_replayed_and_stale_approval_receipts(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.setattr(settings, "workspace_dir", str(workspace))
+    source = _copy_fixture(workspace / "fixture")
+    base = NativeSoftwareEngineeringRequest(
+        fixture_root=source,
+        job_id="approval-binding",
+        patch_approval="approved",
+    )
+
+    cases = (
+        (base, "approval_receipt_required"),
+        (
+            replace(
+                base,
+                fixture_root=None,
+                approval_receipt=build_native_software_engineering_approval_receipt(
+                    replace(base, fixture_root=None), expires_at=time.time() - 1
+                ),
+            ),
+            "approval_receipt_expired",
+        ),
+        (
+            replace(
+                base,
+                fixture_root=None,
+                approval_receipt=replace(
+                    _approved_receipt(base.job_id), preview_digest="stale"
+                ),
+            ),
+            "approval_receipt_preview_mismatch",
+        ),
+        (
+            replace(
+                base,
+                fixture_root=None,
+                approval_receipt=replace(_approved_receipt(base.job_id), consumed=True),
+            ),
+            "approval_receipt_replayed",
+        ),
+    )
+    for request, reason_code in cases:
+        receipt = preflight_native_software_engineering_fixture(request)
+        assert receipt["status"] == "blocked"
+        assert receipt["reason_code"] == reason_code
+
+
+@pytest.mark.asyncio
+async def test_resume_requires_bound_receipt_and_stays_blocked_without_operator_route():
+    request = NativeSoftwareEngineeringRequest(job_id="approval-resume")
+    receipt = _approved_receipt(request.job_id)
+
+    result = await resume_native_software_engineering_fixture(request, receipt)
+
+    assert result["status"] == "blocked"
+    assert result["reason_code"] == "approval_resume_requires_operator_route"
+    assert result["approval_resume_supported"] is False
+
+
 @pytest.mark.asyncio
 async def test_runner_keeps_fixture_immutable_and_records_job_owned_vertical_slice(
     async_db,
@@ -120,6 +189,7 @@ async def test_runner_keeps_fixture_immutable_and_records_job_owned_vertical_sli
         fixture_root=source,
         job_id="native-swe-success",
         patch_approval="approved",
+        approval_receipt=_approved_receipt("native-swe-success"),
     )
 
     assert result["status"] == "succeeded"
@@ -178,6 +248,7 @@ async def test_runner_timeout_fails_closed_and_keeps_recoverable_workspace(async
         fixture_root=source,
         job_id="native-swe-timeout",
         patch_approval="approved",
+        approval_receipt=_approved_receipt("native-swe-timeout"),
         test_timeout_seconds=1,
     )
 
@@ -202,6 +273,7 @@ async def test_runner_cancellation_keeps_patch_and_receipts_recoverable(async_db
         fixture_root=native_software_engineering_fixture_root(),
         job_id="native-swe-cancel",
         patch_approval="approved",
+        approval_receipt=_approved_receipt("native-swe-cancel"),
         cancel_before_test=True,
     )
 

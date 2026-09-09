@@ -1746,7 +1746,11 @@ class DurableJobRepository:
                     lease_expires_at=None,
                     updated_at=now,
                     heartbeat_at=now,
-                    finished_at=now,
+                    finished_at=(
+                        now
+                        if target_status in DURABLE_JOB_TERMINAL_STATUSES or target_status == "failed"
+                        else None
+                    ),
                     revision=WorkflowRunState.revision + 1,
                 )
             )

@@ -118,6 +118,12 @@ async def _ensure_rest_authorized(http_request: HttpRequest, scope) -> None:
             http_request.cookies.get(settings.operator_auth_cookie_name),
             touch=False,
         )
+        # The watcher may revoke the session while token authentication is
+        # awaiting its result. Recheck both the context guard and the watcher
+        # event after that await, before the caller performs its side effect.
+        assert_runtime_not_revoked()
+        if scope[0].is_set():
+            raise RuntimeRevokedError("authenticated operator session was revoked")
     except (AuthFailure, RuntimeRevokedError) as exc:
         raise HTTPException(
             status_code=401,

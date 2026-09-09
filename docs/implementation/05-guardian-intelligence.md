@@ -141,9 +141,14 @@ exact target still match the current choice. Missing, ambiguous, stale, or
 unreadable correction evidence is retained as `strategy_delta_provenance=unresolved`
 with no claimed ID. The same digest and provenance status are
 included in direct snapshot and web-brief result payloads. Raw query and
-correction content are not stored in the goal-loop audit detail. This is
-governed strategy adaptation with explicit no-learning execution receipts; it
-is not silent prompt, tool, authority, or harness self-modification.
+correction content are not stored in the goal-loop audit detail. Caller-supplied
+evidence references are bounded opaque typed digests; only a safe generated
+strategy-delta identifier remains readable for durable lookup. Stored positive
+provenance is revalidated against the current goal, revision, target, and
+decision-input digest or downgraded to unresolved, and priority is part of that
+linkage. This is governed strategy adaptation with explicit no-learning
+execution receipts; it is not silent prompt, tool, authority, or harness
+self-modification.
 
 Scheduled child admission binds the work to the strategist occurrence's live
 durable fence before creating or replaying work. The child identity is stable

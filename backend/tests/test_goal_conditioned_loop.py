@@ -9,6 +9,9 @@ from src.goals.contracts import (
 from src.goals.repository import goal_repository
 from src.goals.repository import deserialize_success_criterion, serialize_success_criterion
 from src.guardian.goal_conditioned_loop import (
+    _existing_receipt,
+    _redact_receipt_details,
+    _safe_digest,
     build_goal_candidate_decision,
     dispatch_goal_candidate,
     list_goal_loop_receipts,
@@ -233,7 +236,7 @@ async def test_correction_changes_later_choice_and_persists_provenance():
         corrected_goal,
         GoalCandidateRequest(
             capability_id="workflow.web-brief-to-file",
-            inputs={"query": "new source", "file_path": "briefs/new.md"},
+            inputs={"query": "new source", "file_path": "briefs/new.md", "priority": 0},
             evidence_refs=["strategy-delta:delta-correction-1"],
         ),
     )
@@ -351,7 +354,25 @@ async def test_strategy_delta_provenance_requires_applied_goal_target_linkage():
     assert await resolve(delta(goal_id="other-goal")) == (None, "unresolved")
     assert await resolve(delta(goal_revision_after=3)) == (None, "unresolved")
     assert await resolve(delta(author_id="")) == (None, "unresolved")
-    assert await resolve(delta()) == (delta_id, "verified")
+    valid_candidate = candidate.model_copy(
+        update={
+            "inputs": {
+                "query": "new source",
+                "file_path": "briefs/new.md",
+                "priority": 0,
+            }
+        }
+    )
+    assert await resolve(delta(), valid_candidate) == (delta_id, "verified")
+
+    # A correction that only changes scheduler priority must be linked into
+    # the candidate input digest; omitting it cannot produce verified
+    # provenance.
+    assert await resolve(delta(), candidate) == (None, "unresolved")
+    wrong_priority = valid_candidate.model_copy(
+        update={"inputs": {**valid_candidate.inputs, "priority": 1}}
+    )
+    assert await resolve(delta(), wrong_priority) == (None, "unresolved")
 
     wrong_inputs = candidate.model_copy(update={"inputs": {"query": "other source"}})
     assert await resolve(delta(), wrong_inputs) == (
@@ -394,3 +415,104 @@ def test_legacy_receipt_ids_are_sanitized_without_verified_provenance():
     assert _sanitize_strategy_delta_receipt(
         {"strategy_delta_id": "delta-1", "strategy_delta_provenance": "verified"}
     )["strategy_delta_id"] == "delta-1"
+
+
+def test_receipt_evidence_refs_are_typed_opaque_digests():
+    details = _redact_receipt_details(
+        {
+            "evidence_refs": [
+                "https://private.example/search?q=secret-query",
+                "operator:secret correction prose",
+                "strategy-delta:delta-safe-1",
+                "strategy-delta:https://private.example/correction",
+            ]
+        }
+    )
+
+    refs = details["evidence_refs"]
+    assert "private.example" not in str(refs)
+    assert "secret-query" not in str(refs)
+    assert "secret correction prose" not in str(refs)
+    assert "strategy-delta:delta-safe-1" in refs
+    assert any(ref.startswith("evidence:") for ref in refs)
+    assert any(ref.startswith("strategy-delta:invalid:") for ref in refs)
+
+
+async def test_legacy_verified_receipt_is_downgraded_without_revalidation():
+    from datetime import datetime, timezone
+    from unittest.mock import AsyncMock, patch
+
+    from src.db.models import Goal
+
+    delta_id = "delta-legacy-1"
+    goal = Goal(
+        id="goal-legacy",
+        title="Legacy receipt",
+        revision=2,
+        success_criterion_json=GoalSuccessCriterion(
+            description="A readable brief is present",
+            verifier_kind="artifact_readback",
+            target={
+                "query": "safe query",
+                "file_path": "briefs/safe.md",
+                "priority": 0,
+                "strategy_delta_id": delta_id,
+            },
+        ).model_dump_json(),
+    )
+    candidate = build_goal_candidate_decision(
+        goal,
+        GoalCandidateRequest(
+            capability_id="workflow.web-brief-to-file",
+            inputs={
+                "query": "safe query",
+                "file_path": "briefs/safe.md",
+                "priority": 0,
+            },
+            evidence_refs=[f"strategy-delta:{delta_id}"],
+        ),
+    )
+    details = {
+        "dedupe_key": candidate.dedupe_key,
+        "goal_id": candidate.goal_id,
+        "goal_revision": candidate.goal_revision,
+        "capability_id": candidate.capability_id,
+        "input_digest": _safe_digest(candidate.inputs),
+        "strategy_delta_id": delta_id,
+        "strategy_delta_provenance": "verified",
+        "evidence_refs": [f"strategy-delta:{delta_id}"],
+    }
+    event = {
+        "id": "audit-legacy",
+        "event_type": "goal_loop_outcome",
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "details": details,
+    }
+
+    with (
+        patch(
+            "src.guardian.goal_conditioned_loop.audit_repository.list_events",
+            new=AsyncMock(return_value=[event]),
+        ),
+        patch(
+            "src.guardian.goal_conditioned_loop.get_strategy_delta",
+            new=AsyncMock(return_value=None),
+        ),
+        patch(
+            "src.guardian.goal_conditioned_loop.goal_repository.get",
+            new=AsyncMock(return_value=goal),
+        ),
+    ):
+        replay = await _existing_receipt(
+            event_type="goal_loop_outcome",
+            dedupe_key=candidate.dedupe_key,
+            candidate=candidate,
+            goal=goal,
+        )
+        listed = await list_goal_loop_receipts(goal.id)
+
+    assert replay is not None
+    assert replay["strategy_delta_id"] is None
+    assert replay["strategy_delta_provenance"] == "unresolved"
+    assert listed[0]["strategy_delta_id"] is None
+    assert listed[0]["strategy_delta_provenance"] == "unresolved"

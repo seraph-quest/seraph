@@ -32,6 +32,8 @@ from src.evolution.engine import (
     create_evolution_proposal,
     evaluate_candidate,
     list_evolution_targets,
+    rollback_evolution_proposal,
+    write_evolution_recovery_receipt,
 )
 from src.extensions.registry import default_manifest_roots_for_workspace
 from src.observer.manager import context_manager
@@ -67,6 +69,9 @@ _SAFE_AUDIT_RECEIPT_STATES = frozenset({"candidate_only", "candidate_and_receipt
 _SAFE_AUDIT_ARTIFACT_STATES = frozenset({"not_written", "written", "rolled_back", "rollback_failed", "unknown"})
 _SAFE_AUDIT_ROLLBACK_STATES = frozenset({"not_attempted", "rolled_back", "failed", "unknown"})
 _SAFE_AUDIT_OUTCOMES = frozenset({"succeeded", "blocked", "failed", "unknown"})
+_SAFE_AUDIT_REASONS = frozenset(
+    {"audit_persistence_failed", "artifact_persistence_failed", "recovery_required"}
+)
 _SAFE_AUDIT_CONSTRAINT_NAMES = frozenset(
     {
         "tool_scope_expansion",
@@ -217,12 +222,93 @@ async def _run_evolution_thread_cancel_safe(func, *args, **kwargs):
         raise
 
 
-async def _close_evolution_request(request: Request, revocation_scope, tokens) -> None:
+def _has_persisted_evolution_proposal(proposal) -> bool:
+    if not isinstance(proposal, dict) or proposal.get("status") != "saved":
+        return False
+    receipt = proposal.get("receipt")
+    if not isinstance(receipt, dict):
+        return False
+    return bool(
+        receipt.get("saved_path")
+        or receipt.get("receipt_path")
+        or receipt.get("candidate_handle")
+        or receipt.get("receipt_handle")
+    )
+
+
+async def _rollback_or_record_evolution_recovery(proposal) -> tuple[bool, str]:
+    """Clean post-persist artifacts without consulting the revoked session."""
+    try:
+        rolled_back = await _run_evolution_thread_cancel_safe(
+            rollback_evolution_proposal,
+            proposal,
+        )
+    except Exception:
+        rolled_back = False
+    if rolled_back:
+        return True, ""
+    try:
+        recovery_handle = await _run_evolution_thread_cancel_safe(
+            write_evolution_recovery_receipt,
+            proposal,
+        )
+    except Exception:
+        recovery_handle = ""
+    return False, str(recovery_handle or "")
+
+
+def _evolution_recovery_required_exception(
+    operator,
+    proposal,
+    *,
+    recovery_handle: str = "",
+) -> HTTPException:
+    receipt = proposal.get("receipt") if isinstance(proposal, dict) else None
+    audit_receipt = _evolution_degraded_audit_receipt(
+        operator,
+        reason="recovery_required",
+        lineage=_evolution_receipt_lineage(receipt),
+        artifact_state="written",
+        rollback_state="failed",
+    )
+    if recovery_handle:
+        audit_receipt["recovery_receipt_handle"] = _safe_audit_handle(recovery_handle)
+    return HTTPException(
+        status_code=503,
+        detail=_evolution_failure_detail(
+            "evolution_recovery_required",
+            audit_receipt=audit_receipt,
+        ),
+    )
+
+
+async def _close_evolution_request(
+    request: Request,
+    revocation_scope,
+    tokens,
+    *,
+    operator=None,
+    persisted_proposal=None,
+    skip_final_authorization: bool = False,
+) -> None:
     """Stop the watcher, fence cleanup, and always clear bound context."""
     try:
         await _end_rest_revocation_watch(revocation_scope)
-        if revocation_scope is not None:
-            await _ensure_evolution_authorized(request, revocation_scope)
+        if revocation_scope is not None and not skip_final_authorization:
+            try:
+                await _ensure_evolution_authorized(request, revocation_scope)
+            except (HTTPException, RuntimeRevokedError, AuthFailure):
+                if operator is not None and _has_persisted_evolution_proposal(persisted_proposal):
+                    rolled_back, recovery_handle = await _rollback_or_record_evolution_recovery(
+                        persisted_proposal
+                    )
+                    if not rolled_back:
+                        raise _evolution_recovery_required_exception(
+                            operator,
+                            persisted_proposal,
+                            recovery_handle=recovery_handle,
+                        )
+                raise
     finally:
         reset_runtime_context(tokens)
 
@@ -346,11 +432,7 @@ def _evolution_degraded_audit_receipt(
     session_id = str(operator.session_id)
     receipt: dict[str, object] = {
         "status": "degraded",
-        "reason": (
-            reason
-            if reason in {"audit_persistence_failed", "artifact_persistence_failed"}
-            else "audit_persistence_failed"
-        ),
+        "reason": reason if reason in _SAFE_AUDIT_REASONS else "audit_persistence_failed",
         "principal_id": str(operator.principal.principal_id),
         "session_id_digest": hashlib.sha256(session_id.encode("utf-8")).hexdigest(),
     }
@@ -582,6 +664,8 @@ async def create_governed_evolution_proposal(req: EvolutionProposalRequest, requ
             detail={"code": "session_revoked", "message": "Operator session was revoked."},
         ) from exc
     revocation_scope = None
+    proposal = None
+    recovery_exception_raised = False
     try:
         revocation_scope = _begin_rest_revocation_watch(request)
         await _ensure_evolution_authorized(request, revocation_scope)
@@ -644,15 +728,29 @@ async def create_governed_evolution_proposal(req: EvolutionProposalRequest, requ
         # Proposals are persisted as unregistered review candidates.  Do not
         # reload active managers here: promotion is a separate, approval-gated
         # operation and a proposal must never alter live agent instructions.
-        await _ensure_evolution_authorized(request, revocation_scope)
-        outcome = "succeeded" if proposal["status"] == "saved" else "blocked"
-        audit_ok = await _audit_evolution_event(
-            operator,
-            req,
-            outcome=outcome,
-            receipt=proposal.get("receipt"),
-        )
-        await _ensure_evolution_authorized(request, revocation_scope)
+        try:
+            await _ensure_evolution_authorized(request, revocation_scope)
+            outcome = "succeeded" if proposal["status"] == "saved" else "blocked"
+            audit_ok = await _audit_evolution_event(
+                operator,
+                req,
+                outcome=outcome,
+                receipt=proposal.get("receipt"),
+            )
+            await _ensure_evolution_authorized(request, revocation_scope)
+        except (HTTPException, RuntimeRevokedError, AuthFailure) as exc:
+            if _has_persisted_evolution_proposal(proposal):
+                rolled_back, recovery_handle = await _rollback_or_record_evolution_recovery(proposal)
+                persisted_proposal = proposal
+                proposal = None
+                if not rolled_back:
+                    recovery_exception_raised = True
+                    raise _evolution_recovery_required_exception(
+                        operator,
+                        persisted_proposal,
+                        recovery_handle=recovery_handle,
+                    ) from exc
+            raise
         if not audit_ok:
             return JSONResponse(
                 status_code=503,
@@ -670,6 +768,19 @@ async def create_governed_evolution_proposal(req: EvolutionProposalRequest, requ
     except HTTPException:
         raise
     except (RuntimeRevokedError, AuthFailure) as exc:
+        if _has_persisted_evolution_proposal(proposal):
+            persisted_proposal = proposal
+            proposal = None
+            rolled_back, recovery_handle = await _rollback_or_record_evolution_recovery(
+                persisted_proposal
+            )
+            if not rolled_back:
+                recovery_exception_raised = True
+                raise _evolution_recovery_required_exception(
+                    operator,
+                    persisted_proposal,
+                    recovery_handle=recovery_handle,
+                ) from exc
         lineage = getattr(exc, "evolution_lineage", None)
         detail: dict[str, object] = {
             "code": "session_revoked",
@@ -724,4 +835,11 @@ async def create_governed_evolution_proposal(req: EvolutionProposalRequest, requ
             ),
         ) from exc
     finally:
-        await _close_evolution_request(request, revocation_scope, tokens)
+        await _close_evolution_request(
+            request,
+            revocation_scope,
+            tokens,
+            operator=operator,
+            persisted_proposal=proposal,
+            skip_final_authorization=recovery_exception_raised,
+        )

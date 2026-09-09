@@ -122,7 +122,7 @@ async def test_save_skill_draft_rejects_reserved_evolution_candidate_name():
     ):
         with pytest.raises(HTTPException) as raised:
             await save_skill_draft(
-                SkillDraftRequest(content="draft", file_name="Review-Review-Candidate.MD"),
+                SkillDraftRequest(content="draft", file_name="ReviewReview-Candidate.MD"),
                 _skill_mutator_request(operator),
             )
 

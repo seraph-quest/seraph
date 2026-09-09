@@ -24,14 +24,21 @@ WORKSPACE_CAPABILITY_PACKAGE_ID = "seraph.workspace-capabilities"
 WORKSPACE_CAPABILITY_PACKAGE_DIRNAME = "workspace-capabilities"
 WORKSPACE_CAPABILITY_DISPLAY_NAME = "Workspace capabilities"
 EVOLUTION_CANDIDATE_FILE_NAME_ERROR = "Review candidate filenames are reserved for governed evolution"
+EVOLUTION_CANDIDATE_SUFFIXES = ("-review-candidate", "review-candidate")
 
 
-def _is_evolution_candidate_file_name(file_name: str) -> bool:
-    """Keep generic package saves away from inert governed candidates."""
+def is_evolution_candidate_file_name(file_name: str) -> bool:
+    """Identify every filename accepted by the governed evolution engine."""
     candidate = str(file_name or "").strip()
     if not candidate or Path(candidate).name != candidate:
         return False
-    return Path(candidate).stem.casefold().endswith("-review-candidate")
+    stem = Path(candidate).stem.casefold()
+    return any(stem.endswith(suffix) for suffix in EVOLUTION_CANDIDATE_SUFFIXES)
+
+
+# Keep the old private import available for callers that used the package
+# helper before the predicate became the shared cross-surface contract.
+_is_evolution_candidate_file_name = is_evolution_candidate_file_name
 
 
 def _current_seraph_version() -> str:
@@ -169,7 +176,7 @@ def save_workspace_contribution(
 ) -> Path:
     if contribution_type not in {"skills", "workflows", "runbooks", "starter_packs", "prompt_packs"}:
         raise ValueError(f"unsupported managed workspace contribution type: {contribution_type}")
-    if _is_evolution_candidate_file_name(file_name):
+    if is_evolution_candidate_file_name(file_name):
         raise ValueError(EVOLUTION_CANDIDATE_FILE_NAME_ERROR)
 
     package_root = workspace_capability_package_root(workspace_dir)

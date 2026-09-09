@@ -443,6 +443,78 @@ async def test_evolution_proposal_denies_auth_revocation_during_audit_and_after_
 
 
 @pytest.mark.asyncio
+async def test_evolution_proposal_rolls_back_persisted_artifacts_on_final_revocation(tmp_path):
+    from src.api.evolution import EvolutionProposalRequest, create_governed_evolution_proposal
+
+    operator = test_bypass_operator()
+    package_root = tmp_path / "extensions" / "workspace-capabilities"
+    candidate_path = package_root / "prompts" / "review-candidate.md"
+    receipt_path = package_root / "evolution" / "receipts" / "prompt_pack" / "review-candidate.json"
+    candidate_content = "# Candidate\n"
+    candidate_digest = hashlib.sha256(candidate_content.encode("utf-8")).hexdigest()
+    lineage = {
+        "proposal_id": "proposal-candidate",
+        "source_content_digest": "a" * 64,
+        "source_version": "a" * 64,
+        "candidate_content_digest": candidate_digest,
+        "candidate_artifact_digest": candidate_digest,
+        "candidate_handle": "prompts/review-candidate.md",
+        "receipt_handle": "evolution/receipts/prompt_pack/review-candidate.json",
+    }
+    receipt_payload = {
+        "target_type": "prompt_pack",
+        "candidate_file_name": "review-candidate.md",
+        "saved_path": str(candidate_path),
+        "receipt_path": str(receipt_path),
+        **lineage,
+        "lineage": lineage,
+    }
+    candidate_path.parent.mkdir(parents=True)
+    receipt_path.parent.mkdir(parents=True)
+    candidate_path.write_text(candidate_content, encoding="utf-8")
+    receipt_path.write_text(json.dumps(receipt_payload), encoding="utf-8")
+    proposal = {"status": "saved", "receipt": receipt_payload}
+    watch = object()
+    recheck_count = 0
+
+    async def recheck(_request, _scope):
+        nonlocal recheck_count
+        recheck_count += 1
+        if recheck_count == 5:
+            raise HTTPException(
+                status_code=401,
+                detail={"code": "session_revoked", "message": "Operator session was revoked."},
+            )
+
+    with (
+        patch("src.api.evolution.settings.workspace_dir", str(tmp_path)),
+        patch("src.evolution.engine.settings.workspace_dir", str(tmp_path)),
+        patch("src.api.evolution.context_manager.get_context", return_value=SimpleNamespace(approval_mode="safe")),
+        patch("src.api.evolution._begin_rest_revocation_watch", return_value=watch),
+        patch("src.api.evolution._end_rest_revocation_watch", new_callable=AsyncMock) as end,
+        patch("src.api.evolution._ensure_rest_authorized", new_callable=AsyncMock, side_effect=recheck),
+        patch("src.api.evolution._run_evolution_thread_cancel_safe", side_effect=_run_evolution_inline),
+        patch("src.api.evolution._ensure_evolution_managers_loaded"),
+        patch("src.api.evolution.create_evolution_proposal", return_value=proposal),
+        patch("src.api.evolution.log_integration_event", new_callable=AsyncMock) as audit,
+    ):
+        with pytest.raises(HTTPException) as raised:
+            await create_governed_evolution_proposal(
+                EvolutionProposalRequest(target_type="prompt_pack", source_path="/tmp/source.md"),
+                _evolution_request(operator),
+            )
+
+    assert raised.value.status_code == 401
+    assert recheck_count == 6
+    assert not candidate_path.exists()
+    assert not receipt_path.exists()
+    audit.assert_awaited_once()
+    end.assert_awaited_once_with(watch)
+    assert get_current_session_id() is None
+    assert get_current_trust_principal() is None
+
+
+@pytest.mark.asyncio
 async def test_evolution_validate_redacts_parser_error_but_keeps_string_detail():
     from src.api.evolution import EvolutionValidationRequest, validate_evolution_candidate
 
@@ -783,6 +855,12 @@ def test_evolution_engine_normalizes_case_variant_destination_identity(tmp_path)
             requested_file_name="Review-Review-Candidate.MD",
         )
         assert canonical_name == "review-review-candidate.md"
+        alias_name = _candidate_file_name_for_target(
+            "prompt_pack",
+            source_path=source_path,
+            requested_file_name="ReviewReview-Candidate.MD",
+        )
+        assert alias_name == "reviewreview-candidate.md"
         assert _candidate_path("prompt_pack", "REVIEW-REVIEW-CANDIDATE.MD") == _candidate_path(
             "prompt_pack", canonical_name
         )
@@ -1878,13 +1956,14 @@ def test_workspace_contribution_save_rejects_reserved_evolution_candidate_name(t
         save_workspace_contribution,
     )
 
-    with pytest.raises(ValueError, match=EVOLUTION_CANDIDATE_FILE_NAME_ERROR):
-        save_workspace_contribution(
-            "skills",
-            file_name="Review-Review-Candidate.MD",
-            content="candidate content",
-            workspace_dir=str(tmp_path),
-        )
+    for file_name in ("Review-Review-Candidate.MD", "ReviewReview-Candidate.MD"):
+        with pytest.raises(ValueError, match=EVOLUTION_CANDIDATE_FILE_NAME_ERROR):
+            save_workspace_contribution(
+                "skills",
+                file_name=file_name,
+                content="candidate content",
+                workspace_dir=str(tmp_path),
+            )
 
     assert not (tmp_path / "extensions" / "workspace-capabilities").exists()
 

@@ -61,6 +61,14 @@ _BLOCKED_LIVE_CONTROL_CLAIMS = [
 ]
 _PROVIDER_QUARANTINES: dict[str, dict[str, Any]] = {}
 
+_CANONICAL_MEMORY_DELETE_EXPORT_REASON = "operator_delete_export"
+_CANONICAL_MEMORY_REDACTED_STATE = "canonical_memory_redacted"
+_CANONICAL_MEMORY_DELETE_ACTIONS = {
+    "propagate_delete_export",
+    "operator_delete_export",
+}
+_CANONICAL_MEMORY_DELETE_CONTENT = "[delete/export propagated by operator]"
+
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
@@ -127,6 +135,44 @@ def _memory_payload(memory: Memory) -> dict[str, Any]:
         "privacy_boundary": _safe_privacy_boundary(metadata.get("privacy_boundary")),
         "operator_control": metadata.get("operator_control") or {},
     }
+
+
+def _canonical_memory_deletion_marker(memory: Memory) -> str | None:
+    """Return a durable canonical delete marker, if one is present.
+
+    Canonical delete/export is terminal for the local memory record. Read both
+    the current nested operator-control fields and older top-level markers so a
+    rollback cannot revive a tombstone after a metadata-shape migration.
+    """
+
+    metadata = _metadata(memory)
+    operator_control = metadata.get("operator_control")
+    operator_control = operator_control if isinstance(operator_control, dict) else {}
+
+    archived_reason = str(metadata.get("archived_reason") or "").strip().lower()
+    if archived_reason == _CANONICAL_MEMORY_DELETE_EXPORT_REASON:
+        return f"archived_reason={archived_reason}"
+
+    delete_export_state = str(
+        operator_control.get("delete_export_state")
+        or metadata.get("delete_export_state")
+        or ""
+    ).strip().lower()
+    if delete_export_state == _CANONICAL_MEMORY_REDACTED_STATE:
+        return f"delete_export_state={delete_export_state}"
+
+    last_action = str(operator_control.get("last_action") or "").strip().lower()
+    if last_action in _CANONICAL_MEMORY_DELETE_ACTIONS:
+        return f"last_action={last_action}"
+
+    # The propagated replacement is itself a canonical redaction marker. Keep
+    # this fallback for records written before the explicit state fields.
+    if str(memory.content or "").strip() == _CANONICAL_MEMORY_DELETE_CONTENT:
+        return "content=canonical_memory_redacted"
+    if str(memory.summary or "").strip() == _CANONICAL_MEMORY_DELETE_CONTENT:
+        return "summary=canonical_memory_redacted"
+
+    return None
 
 
 @dataclass(frozen=True)
@@ -1107,9 +1153,17 @@ async def apply_memory_live_control_action(
         existing = await memory_repository.get_memory(memory_id)
         if existing is None:
             raise ValueError(f"Unknown memory id: {memory_id}")
-        memory = await memory_repository.update_memory_control_metadata(
+        deletion_marker = _canonical_memory_deletion_marker(existing)
+        if deletion_marker is not None:
+            raise ValueError(
+                "cannot rollback canonical memory after operator delete/export "
+                f"redaction ({deletion_marker})"
+            )
+        memory = await memory_repository.rollback_memory_if_unchanged(
             memory_id,
-            status=MemoryStatus.active,
+            expected_updated_at=existing.updated_at,
+            expected_metadata_json=existing.metadata_json,
+            expected_status=existing.status,
             confidence=max(float(existing.confidence or 0.0), 0.55),
             importance=max(float(existing.importance or 0.0), 0.55),
             reinforcement=max(float(existing.reinforcement or 0.0), 1.0),
@@ -1129,8 +1183,8 @@ async def apply_memory_live_control_action(
         memory = await memory_repository.update_memory_control_metadata(
             memory_id,
             status=MemoryStatus.archived,
-            content="[delete/export propagated by operator]",
-            summary="[delete/export propagated by operator]",
+            content=_CANONICAL_MEMORY_DELETE_CONTENT,
+            summary=_CANONICAL_MEMORY_DELETE_CONTENT,
             confidence=0.0,
             importance=0.0,
             reinforcement=0.0,
@@ -1141,11 +1195,11 @@ async def apply_memory_live_control_action(
                     privacy_boundary=boundary,
                     reason=reason,
                     extra={
-                        "delete_export_state": "canonical_memory_redacted",
+                        "delete_export_state": _CANONICAL_MEMORY_REDACTED_STATE,
                         "provider_propagation_state": "runtime_receipt_only_no_full_provider_parity_claim",
                     },
                 ),
-                "archived_reason": "operator_delete_export",
+                "archived_reason": _CANONICAL_MEMORY_DELETE_EXPORT_REASON,
                 "archived_at": now.isoformat(),
             },
         )

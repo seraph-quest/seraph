@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import func, or_
+from sqlalchemy import func, or_, update
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import col, select
 
@@ -1015,6 +1015,81 @@ class MemoryRepository:
             memory.updated_at = _now()
             db.add(memory)
             await db.flush()
+            db.expunge(memory)
+            return memory
+
+    async def rollback_memory_if_unchanged(
+        self,
+        memory_id: str,
+        *,
+        expected_updated_at: datetime,
+        expected_metadata_json: str | None,
+        expected_status: MemoryStatus | str,
+        confidence: float,
+        importance: float,
+        reinforcement: float,
+        last_confirmed_at: datetime,
+        metadata_updates: dict[str, Any],
+    ) -> Memory:
+        """Restore one memory only when its control snapshot is unchanged.
+
+        The conditional update closes the read-then-write race with
+        delete/export: if another control commits after the caller reads the
+        memory, the expected timestamp or metadata no longer matches and this
+        method performs no activation.
+        """
+
+        normalized_memory_id = str(memory_id or "").strip()
+        if not normalized_memory_id:
+            raise ValueError("memory_id must be non-empty")
+        normalized_status = _coerce_enum(expected_status, MemoryStatus)
+        expected_metadata = expected_metadata_json
+        try:
+            parsed_metadata = json.loads(expected_metadata or "{}")
+        except json.JSONDecodeError:
+            parsed_metadata = {}
+        metadata = parsed_metadata if isinstance(parsed_metadata, dict) else {}
+        metadata.update(metadata_updates or {})
+
+        def _normalize_timestamp(value: datetime) -> datetime:
+            if value.tzinfo is None:
+                return value.replace(tzinfo=timezone.utc)
+            return value.astimezone(timezone.utc)
+
+        expected_metadata_guard = (
+            Memory.metadata_json.is_(None)
+            if expected_metadata is None
+            else Memory.metadata_json == expected_metadata
+        )
+        async with get_session() as db:
+            result = await db.execute(
+                update(Memory)
+                .where(
+                    Memory.id == normalized_memory_id,
+                    Memory.updated_at == _normalize_timestamp(expected_updated_at),
+                    Memory.status == normalized_status,
+                    expected_metadata_guard,
+                )
+                .values(
+                    status=MemoryStatus.active,
+                    confidence=max(0.0, min(1.0, float(confidence))),
+                    importance=max(0.0, min(1.0, float(importance))),
+                    reinforcement=max(0.0, float(reinforcement)),
+                    last_confirmed_at=_normalize_timestamp(last_confirmed_at),
+                    metadata_json=json.dumps(metadata, sort_keys=True),
+                    updated_at=_now(),
+                )
+            )
+            if result.rowcount != 1:
+                raise ValueError(
+                    "memory changed before rollback; canonical deletion or another "
+                    "memory control won"
+                )
+            memory = (
+                await db.execute(select(Memory).where(Memory.id == normalized_memory_id))
+            ).scalars().first()
+            if memory is None:  # pragma: no cover - guarded update matched a row
+                raise ValueError(f"Unknown memory id: {normalized_memory_id}")
             db.expunge(memory)
             return memory
 

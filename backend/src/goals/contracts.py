@@ -12,7 +12,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Any, Literal
 
-from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class CriterionVerifierKind(str, Enum):
@@ -153,8 +153,17 @@ class GoalExecutionResult(BaseModel):
     reason: str = Field(default="", max_length=1_000)
 
 
+StrategyDeltaProvenance = Literal["verified", "unresolved", "not_present"]
+
+
 class GoalOutcomeReceipt(BaseModel):
-    """Separate execution, verification, usefulness, and learning axes."""
+    """Separate execution, verification, usefulness, and learning axes.
+
+    ``decision_input_digest`` and ``strategy_delta_id`` keep a later outcome
+    inspectably linked to the bounded choice that produced it.  They are
+    digests/identifiers only; raw inputs and correction content stay out of
+    the durable receipt.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
@@ -163,6 +172,9 @@ class GoalOutcomeReceipt(BaseModel):
     outcome_id: str
     candidate_id: str
     dedupe_key: str
+    decision_input_digest: str | None = None
+    strategy_delta_id: str | None = None
+    strategy_delta_provenance: StrategyDeltaProvenance = "not_present"
     goal_id: str
     goal_revision: int = Field(ge=1)
     execution_status: Literal["succeeded", "failed", "blocked"]
@@ -173,6 +185,16 @@ class GoalOutcomeReceipt(BaseModel):
     artifact_ref: str | None = None
     evidence_refs: list[str] = Field(default_factory=list)
     reason: str = ""
+
+    @model_validator(mode="after")
+    def _clear_unverified_strategy_delta(self) -> "GoalOutcomeReceipt":
+        """Never expose an ID without an explicit verified provenance state."""
+
+        if self.strategy_delta_provenance != "verified":
+            self.strategy_delta_id = None
+        elif not self.strategy_delta_id:
+            self.strategy_delta_provenance = "unresolved"
+        return self
 
 
 def normalized_evidence_refs(*refs: str | None) -> tuple[str, ...]:

@@ -134,9 +134,21 @@ paths, unsupported fields, or unavailable strategy-delta storage. An audit-store
 outage returns an explicit degraded response after the bounded delta mutation;
 the durable delta remains the operator-visible recovery record and does not
 grant new authority or source scope. `GET /api/goals/{id}/loop` exposes bounded
-correction history for operator inspection. This is governed strategy
-adaptation with explicit no-learning execution receipts; it is not silent
-prompt, tool, authority, or harness self-modification.
+correction history for operator inspection. Later candidate and outcome
+receipts preserve a redacted decision-input digest and expose a strategy-delta
+ID only after it resolves to an applied, goal-owned delta whose revision and
+exact target still match the current choice. Missing, ambiguous, stale, or
+unreadable correction evidence is retained as `strategy_delta_provenance=unresolved`
+with no claimed ID. The same digest and provenance status are
+included in direct snapshot and web-brief result payloads. Raw query and
+correction content are not stored in the goal-loop audit detail. Caller-supplied
+evidence references are bounded opaque typed digests; only a safe generated
+strategy-delta identifier remains readable for durable lookup. Stored positive
+provenance is revalidated against the current goal, revision, target, and
+decision-input digest or downgraded to unresolved, and priority is part of that
+linkage. This is governed strategy adaptation with explicit no-learning
+execution receipts; it is not silent prompt, tool, authority, or harness
+self-modification.
 
 Scheduled child admission binds the work to the strategist occurrence's live
 durable fence before creating or replaying work. The child identity is stable

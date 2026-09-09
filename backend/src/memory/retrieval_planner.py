@@ -226,6 +226,25 @@ def _normalize_provider_claim_value(value: object) -> str:
     return " ".join(value.split())
 
 
+def _ambiguous_provider_buckets(
+    buckets: dict[str, tuple[str, ...]],
+) -> frozenset[str]:
+    ambiguous: set[str] = set()
+    for raw_bucket, values in buckets.items():
+        bucket = _normalize_provider_claim_value(raw_bucket)
+        if not bucket:
+            continue
+        if not isinstance(values, (tuple, list)):
+            ambiguous.add(bucket)
+            continue
+        if any(
+            not isinstance(value, str) or "\r" in value or "\n" in value
+            for value in values
+        ):
+            ambiguous.add(bucket)
+    return frozenset(ambiguous)
+
+
 def _normalize_provider_context_records(provider_context: str) -> tuple[str, ...]:
     """Keep multiline provider claims attached to their record boundary."""
 
@@ -245,6 +264,24 @@ def _normalize_provider_context_records(provider_context: str) -> tuple[str, ...
     if current:
         records.append(" ".join(current))
     return tuple(record for record in records if _provider_context_hit(record) is not None)
+
+
+def _drop_ambiguous_provider_context_buckets(
+    provider_context: str,
+    ambiguous_buckets: frozenset[str],
+) -> str:
+    if not ambiguous_buckets:
+        return provider_context
+    safe_records: list[str] = []
+    for record in _normalize_provider_context_records(provider_context):
+        provider_hit = _provider_context_hit(record)
+        if provider_hit is None:
+            continue
+        bucket = _normalize_provider_claim_value(provider_hit.bucket)
+        if bucket in ambiguous_buckets:
+            continue
+        safe_records.append(record)
+    return "\n".join(safe_records)
 
 
 def _suppress_provider_context_conflicts(
@@ -276,6 +313,8 @@ def _suppress_provider_context_conflicts(
 def _filter_provider_buckets(
     buckets: dict[str, tuple[str, ...]],
     suppressed: tuple[tuple[str, str], ...],
+    *,
+    excluded_buckets: frozenset[str] = frozenset(),
 ) -> dict[str, tuple[str, ...]]:
     suppressed_keys = {
         (normalized_bucket, normalized_text)
@@ -286,7 +325,7 @@ def _filter_provider_buckets(
     normalized_buckets: dict[str, list[str]] = {}
     for raw_bucket, values in buckets.items():
         bucket = _normalize_provider_claim_value(raw_bucket)
-        if not bucket or not isinstance(values, (tuple, list)):
+        if not bucket or bucket in excluded_buckets or not isinstance(values, (tuple, list)):
             continue
         normalized_values = normalized_buckets.setdefault(bucket, [])
         for raw_text in values:
@@ -635,14 +674,20 @@ async def plan_memory_retrieval(
         limit=3,
         include_user_model=bool(provider_project_hints),
     )
+    ambiguous_provider_buckets = _ambiguous_provider_buckets(provider_retrieval.buckets)
+    provider_context_input = _drop_ambiguous_provider_context_buckets(
+        provider_retrieval.context,
+        ambiguous_provider_buckets,
+    )
     if not normalized_query:
         provider_context, suppressed_provider = _suppress_provider_context_conflicts(
             canonical_context=structured_context,
-            provider_context=provider_retrieval.context,
+            provider_context=provider_context_input,
         )
         provider_buckets = _filter_provider_buckets(
             provider_retrieval.buckets,
             suppressed_provider,
+            excluded_buckets=ambiguous_provider_buckets,
         )
         retrieval_diagnostics = _canonical_provider_conflict_diagnostic(
             len(suppressed_provider),
@@ -693,11 +738,12 @@ async def plan_memory_retrieval(
     lane = "episodic" if _prefer_episodic_lane(normalized_query) else "hybrid"
     provider_context, suppressed_provider = _suppress_provider_context_conflicts(
         canonical_context=_merge_contexts(structured_context, semantic_context),
-        provider_context=provider_retrieval.context,
+        provider_context=provider_context_input,
     )
     provider_buckets = _filter_provider_buckets(
         provider_retrieval.buckets,
         suppressed_provider,
+        excluded_buckets=ambiguous_provider_buckets,
     )
     retrieval_diagnostics = (
         *hybrid.diagnostics,

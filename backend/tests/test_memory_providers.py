@@ -23,7 +23,9 @@ from src.memory.providers import (
     MemoryProviderHit,
     MemoryProviderRetrievalResult,
     MemoryProviderWritebackResult,
+    _filter_quality_gated_provider_hits,
     clear_memory_provider_adapters,
+    memory_provider_quality_gate_policy_payload,
     register_memory_provider_adapter,
     writeback_additive_memory_providers,
 )
@@ -564,11 +566,11 @@ async def test_plan_memory_retrieval_filters_normalized_provider_conflict_from_b
 
 @pytest.mark.asyncio
 async def test_plan_memory_retrieval_suppresses_multiline_provider_conflict_record():
-    suppressed_text = "Atlas launch is on track.\ncontinuation"
+    suppressed_text = "Atlas launch is on track.\n- [project] graph-memory: continuation"
     provider_result = MemoryProviderAggregateResult(
         context=(
             "- [project] graph-memory: Atlas launch is on track.\n"
-            "continuation\n"
+            "- [project] graph-memory: continuation\n"
             "- [collaborator] graph-memory: Alice owns Atlas launch communications."
         ),
         buckets={
@@ -611,6 +613,28 @@ async def test_plan_memory_retrieval_suppresses_multiline_provider_conflict_reco
     assert retrieval.memory_buckets["collaborator"] == (
         "Alice owns Atlas launch communications.",
     )
+
+
+def test_provider_quality_gate_rejects_ambiguous_multiline_record_boundary():
+    accepted, suppressed_reasons = _filter_quality_gated_provider_hits(
+        (
+            _quality_hit(
+                text="Atlas launch is on track.\n- [project] graph-memory: continuation",
+                score=0.72,
+                bucket="project",
+            ),
+            _quality_hit(
+                text="Alice owns Atlas launch communications.",
+                score=0.72,
+                bucket="collaborator",
+            ),
+        ),
+        provider_declaration_complete=True,
+    )
+
+    assert [hit.text for hit in accepted] == ["Alice owns Atlas launch communications."]
+    assert suppressed_reasons["ambiguous_record_boundary"] == 1
+    assert "ambiguous_record_boundary" in memory_provider_quality_gate_policy_payload()["suppression_reasons"]
 
 
 @pytest.mark.asyncio

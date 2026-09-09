@@ -283,6 +283,7 @@ def memory_provider_quality_gate_policy_payload() -> dict[str, Any]:
             "unsafe_privacy_boundary",
             "provider_conflict_policy_drift",
             "missing_suppression_rules",
+            "ambiguous_record_boundary",
             "stale_provider_evidence",
             "irrelevant_provider_evidence",
         ],
@@ -481,6 +482,8 @@ def _provider_hit_quality_failures(hit: MemoryProviderHit) -> tuple[str, ...]:
     failures: list[str] = []
     if not str(hit.text or "").strip():
         failures.append("missing_text")
+    if isinstance(hit.text, str) and ("\r" in hit.text or "\n" in hit.text):
+        failures.append("ambiguous_record_boundary")
     if not str(hit.evidence_id or "").strip():
         failures.append("missing_evidence_id")
     if hit.confidence is None:

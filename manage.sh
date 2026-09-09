@@ -15,7 +15,7 @@
 #   ./manage.sh -e [dev|prod] down      - Stop Docker services + daemon.
 #   ./manage.sh -e [dev|prod] logs      - View Docker logs.
 #   ./manage.sh -e [dev|prod] build     - Build or rebuild Docker services.
-#   ./manage.sh -e [dev|prod] local up|down|status|logs|run - Manage the direct local frontend/backend stack.
+#   ./manage.sh -e dev local up|down|status|logs|run - Manage the direct local frontend/backend stack.
 #   ./manage.sh -e [dev|prod] daemon start|stop|status|logs - Manage screen daemon.
 #   ./manage.sh -e [dev|prod] proxy start|stop|status|logs  - Manage stdio MCP proxy.
 #
@@ -63,7 +63,7 @@ function display_help() {
     echo "          Also stops daemon if running."
     echo "  logs    Follow log output (e.g., 'logs -f backend')."
     echo "  build   Build or rebuild services."
-    echo "  local   Manage the direct local frontend/backend stack: up, down, status, logs, run."
+    echo "  local   Manage the direct local frontend/backend stack (dev only): up, down, status, logs, run."
     echo "  daemon  Manage screen daemon: start, stop, status, logs."
     echo "  proxy   Manage stdio-to-HTTP MCP proxy: start, stop, status, logs."
     echo
@@ -611,6 +611,15 @@ function local_frontend_is_running() {
     pid_is_running "$LOCAL_FRONTEND_PID_FILE"
 }
 
+function reject_prod_local_stack() {
+    if [ "$ENV" = "prod" ]; then
+        echo "Error: '$PROG_NAME -e prod local' is unsupported: production authentication requires HTTPS, while the managed local stack is plain HTTP." >&2
+        echo "Use '$PROG_NAME -e prod up -d' behind a configured HTTPS ingress after the production preflight passes." >&2
+        return 1
+    fi
+    return 0
+}
+
 function start_local_backend() {
     if local_backend_is_running; then
         local pid
@@ -625,7 +634,7 @@ function start_local_backend() {
     nohup /bin/bash -c '
         cd "$1" || exit 1
         export WORKSPACE_DIR="$2" LLM_LOG_DIR="$3" UV_CACHE_DIR="$4" DEFAULT_MODEL="$5" SERAPH_LOCAL_SERVICE=backend
-        exec uv run uvicorn src.app:create_app --factory --host 0.0.0.0 --port "$6"
+        exec uv run uvicorn src.app:create_app --factory --host 127.0.0.1 --port "$6"
     ' seraph-local-backend "$SCRIPT_DIR/backend" "$LOCAL_WORKSPACE_DIR" "$LOCAL_LLM_LOG_DIR" "$LOCAL_UV_CACHE_DIR" "$LOCAL_DEFAULT_MODEL" "$LOCAL_BACKEND_PORT" </dev/null >> "$LOCAL_BACKEND_LOG_FILE" 2>&1 &
     local pid=$!
     echo "$pid" > "$LOCAL_BACKEND_PID_FILE"
@@ -652,9 +661,9 @@ function start_local_frontend() {
         cd "$1" || exit 1
         export VITE_API_URL="$2" VITE_WS_URL="$3" SERAPH_LOCAL_SERVICE=frontend
         if [ -x ./node_modules/.bin/vite ]; then
-            exec ./node_modules/.bin/vite --host 0.0.0.0 --port "$4"
+            exec ./node_modules/.bin/vite --host 127.0.0.1 --port "$4"
         fi
-        exec npm run dev -- --host 0.0.0.0 --port "$4"
+        exec npm run dev -- --host 127.0.0.1 --port "$4"
     ' seraph-local-frontend "$SCRIPT_DIR/frontend" "/api" "ws://127.0.0.1:$LOCAL_BACKEND_PORT/ws/chat" "$LOCAL_FRONTEND_PORT" </dev/null >> "$LOCAL_FRONTEND_LOG_FILE" 2>&1 &
     local pid=$!
     echo "$pid" > "$LOCAL_FRONTEND_PID_FILE"
@@ -668,6 +677,9 @@ function start_local_frontend() {
 }
 
 function local_up() {
+    if ! reject_prod_local_stack; then
+        return 1
+    fi
     ensure_runtime_dirs
     if ! start_local_backend; then
         echo "Local stack failed: backend did not start cleanly." >&2
@@ -701,6 +713,9 @@ function local_down() {
 }
 
 function local_status() {
+    if ! reject_prod_local_stack; then
+        return 1
+    fi
     echo "Environment: $ENV"
     echo "Env file: $ENV_FILE"
     echo "Default model: ${DEFAULT_MODEL:-openrouter/anthropic/claude-sonnet-4}"
@@ -845,28 +860,29 @@ fi
 
 if [ "$COMMAND" = "local" ]; then
     LOCAL_SUB="${1:-}"
+    LOCAL_EXIT_STATUS=0
     case "$LOCAL_SUB" in
         up)
-            local_up
+            local_up || LOCAL_EXIT_STATUS=$?
             ;;
         run)
-            local_run
+            local_run || LOCAL_EXIT_STATUS=$?
             ;;
         down)
-            local_down
+            local_down || LOCAL_EXIT_STATUS=$?
             ;;
         status)
-            local_status
+            local_status || LOCAL_EXIT_STATUS=$?
             ;;
         logs)
             shift || true
-            local_logs "${1:-all}"
+            local_logs "${1:-all}" || LOCAL_EXIT_STATUS=$?
             ;;
         *)
             error_exit "Unknown local subcommand '$LOCAL_SUB'. Use: up, down, status, logs, run"
             ;;
     esac
-    exit 0
+    exit "$LOCAL_EXIT_STATUS"
 fi
 
 # Handle proxy subcommand

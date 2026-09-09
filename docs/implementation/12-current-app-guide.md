@@ -35,6 +35,27 @@ reported as configuration-required or degraded. Local model servers and the
 VLM wrapper are retained only for historical diagnostics; they are not active
 runtime prerequisites.
 
+The production compose path keeps the backend on a private Docker network and
+does not publish its API port. The managed direct local stack is a development
+HTTP surface only; do not run `./manage.sh -e prod local up` or use it as a
+production browser path because the production auth cookie is secure and
+requires HTTPS. The production command is the private compose path:
+
+```bash
+python3 backend/production_preflight.py --env-file .env.prod --format json
+./manage.sh -e prod up -d
+```
+
+Expose the authenticated API and browser through a deployment-specific HTTPS
+ingress. This slice does not provide that ingress or claim a live host
+acceptance receipt; those deployment and identity edges remain separate work.
+
+The CPU-host preflight reports core/auth/workspace readiness separately from
+OpenRouter configuration. It performs no provider request and does not inspect
+CUDA, model weights, a local model server, or the VLM wrapper. Missing
+OpenRouter credentials or policy are visible as `configuration_required`; no
+local fallback is selected.
+
 ## Historical develop topology
 
 The following topology describes the pre-#775 `develop` baseline and remains
@@ -78,6 +99,19 @@ curl -sS http://127.0.0.1:8004/health
 curl -sS http://127.0.0.1:8004/api/runtime/status
 curl -sS http://127.0.0.1:8004/api/settings/artifact-storage
 ```
+
+For a production compose configuration, inspect the same receipt before
+starting the backend:
+
+```bash
+python3 backend/production_preflight.py --env-file .env.prod --format json
+./manage.sh -e prod up -d
+```
+
+`/health` is the core process check. `/api/runtime/status` is the authenticated
+runtime receipt and may report OpenRouter `configuration_required` while the
+local core remains healthy. A live provider or host receipt requires a separate
+operator-approved probe and is outside this offline launch check.
 
 Production API access is authenticated with a server-side, single-operator
 session. Generate a PBKDF2 password hash in the backend environment, store it

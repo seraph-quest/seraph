@@ -282,6 +282,9 @@ class WebBriefToFileService(GoalSnapshotToFileService):
                 if isinstance(receipt.get("authority_receipt"), dict)
                 else None
             ),
+            decision_input_digest=outcome.decision_input_digest,
+            strategy_delta_id=outcome.strategy_delta_id,
+            strategy_delta_provenance=outcome.strategy_delta_provenance,
             evidence_refs=list(outcome.evidence_refs),
             reason=outcome.reason,
         )

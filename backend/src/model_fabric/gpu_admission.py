@@ -85,6 +85,7 @@ GPU_ACTIVE_DEADLINE_REASON = "deadline_expired_active"
 GPU_CALLBACK_RUNNING_REASON = "provider_callback_still_running"
 GPU_OWNER_CAPACITY_REASON = "owner_capacity_exhausted"
 GPU_OWNER_BUDGET_REASON = "owner_budget_exhausted"
+GPU_OWNER_REVOCATION_REASON = "owner_revoked"
 
 
 class GpuAdmissionError(RuntimeError):
@@ -99,6 +100,10 @@ class GpuAdmissionError(RuntimeError):
 
 class GpuAdmissionCapacityError(GpuAdmissionError):
     code = "capacity_exhausted"
+
+
+class GpuAdmissionOwnerRevokedError(GpuAdmissionError):
+    code = GPU_OWNER_REVOCATION_REASON
 
 
 class GpuAdmissionOwnerCapacityError(GpuAdmissionCapacityError):
@@ -417,6 +422,9 @@ class GpuAdmissionBroker(Generic[T]):
         self._sequence = 0
         self._fencing_token = 0
         self._last_degraded_reason: str | None = None
+        # Owner revocation is intentionally process-local.  Durable job
+        # authority and restart adoption remain outside this admission lease.
+        self._revoked_owners: set[str] = set()
 
     async def enqueue(
         self,
@@ -460,6 +468,18 @@ class GpuAdmissionBroker(Generic[T]):
                 return self._receipt_locked(existing)
             raise GpuAdmissionIdentityError(
                 f"operation is already admitted and active: {request.operation_id}"
+            )
+        if request.owner_id in self._revoked_owners:
+            operation = self._record_terminal_locked(
+                request,
+                status="rejected",
+                reason_code=GPU_OWNER_REVOCATION_REASON,
+                observed_at=observed_at,
+            )
+            self._last_degraded_reason = GPU_OWNER_REVOCATION_REASON
+            raise GpuAdmissionOwnerRevokedError(
+                "GPU operation owner has been revoked",
+                receipt=self._receipt_locked(operation),
             )
         if request.deadline_at <= observed_at:
             operation = self._record_terminal_locked(
@@ -588,13 +608,23 @@ class GpuAdmissionBroker(Generic[T]):
             if uncertain:
                 return self._hold_for_reconciliation_locked(
                     operation,
-                    reason_code=reason_code or "provider_result_uncertain",
+                    reason_code=(
+                        operation.reason_code
+                        if operation.cancel_requested and operation.reason_code
+                        else reason_code or "provider_result_uncertain"
+                    ),
                     observed_at=observed_at,
                 )
             if operation.request.deadline_at <= observed_at:
                 return self._hold_for_reconciliation_locked(
                     operation,
                     reason_code="deadline_expired_after_callback",
+                    observed_at=observed_at,
+                )
+            if operation.cancel_requested and self.uncertain_on_callback_error:
+                return self._hold_for_reconciliation_locked(
+                    operation,
+                    reason_code=operation.reason_code or "provider_result_uncertain",
                     observed_at=observed_at,
                 )
             if operation.cancel_requested:
@@ -688,6 +718,68 @@ class GpuAdmissionBroker(Generic[T]):
                     actual_cost_microusd=actual_cost_microusd,
                 )
             return self._receipt_locked(operation)
+
+    async def _cancel_owner_operations(
+        self,
+        owner_id: str,
+        *,
+        reason_code: str,
+    ) -> tuple[GpuAdmissionReceipt, ...]:
+        """Cancel one owner's queued work and request cancellation of active work.
+
+        The owner identity is the scope of this operation.  Queued operations
+        are removed atomically before any provider callback can be invoked.
+        Running work is only marked for cooperative cancellation; the active
+        lease remains occupied until its callback crosses the normal release
+        or reconciliation boundary.  Repeating the same revocation returns
+        its prior receipts so an operator can safely retry the control.
+        """
+        normalized_owner = str(owner_id or "").strip()
+        normalized_reason = str(reason_code or "").strip()
+        if not normalized_owner:
+            raise ValueError("owner_id is required")
+        if normalized_reason != GPU_OWNER_REVOCATION_REASON:
+            raise ValueError("reason_code must be owner_revoked")
+        with self._condition:
+            self._mark_active_deadline_locked()
+            self._revoked_owners.add(normalized_owner)
+            matches = [
+                operation
+                for operation in self._operations.values()
+                if operation.request.owner_id == normalized_owner
+                and (
+                    operation.status in {"queued", "running", "blocked"}
+                    or (
+                        operation.status == "cancelled"
+                        and operation.reason_code == normalized_reason
+                    )
+                )
+            ]
+            matches.sort(key=lambda operation: operation.sequence)
+            receipts: list[GpuAdmissionReceipt] = []
+            for operation in matches:
+                if operation.status == "queued":
+                    self._queue.remove(operation.request.operation_id)
+                    operation.status = "cancelled"
+                    operation.reason_code = normalized_reason
+                    operation.finished_at = self._clock()
+                    self._last_degraded_reason = normalized_reason
+                elif operation.status == "running":
+                    operation.cancel_requested = True
+                    operation.reason_code = normalized_reason
+                    if self._active_task is not None:
+                        self._cancel_active_task()
+                    self._last_degraded_reason = normalized_reason
+                elif operation.status == "blocked" and not operation.callback_completed:
+                    operation.cancel_requested = True
+                    operation.reason_code = normalized_reason
+                    if self._active_task is not None:
+                        self._cancel_active_task()
+                    self._last_degraded_reason = normalized_reason
+                receipts.append(self._receipt_locked(operation))
+            if matches:
+                self._notify_all_locked()
+            return tuple(receipts)
 
     async def status(self) -> dict[str, object]:
         """Return an operator-safe broker receipt with no queued payloads."""
@@ -962,13 +1054,23 @@ class GpuAdmissionBroker(Generic[T]):
             if uncertain:
                 return self._hold_for_reconciliation_locked(
                     operation,
-                    reason_code=reason_code or "provider_result_uncertain",
+                    reason_code=(
+                        operation.reason_code
+                        if operation.cancel_requested and operation.reason_code
+                        else reason_code or "provider_result_uncertain"
+                    ),
                     observed_at=observed_at,
                 )
             if operation.request.deadline_at <= observed_at:
                 return self._hold_for_reconciliation_locked(
                     operation,
                     reason_code="deadline_expired_after_callback",
+                    observed_at=observed_at,
+                )
+            if operation.cancel_requested and self.uncertain_on_callback_error:
+                return self._hold_for_reconciliation_locked(
+                    operation,
+                    reason_code=operation.reason_code or "provider_result_uncertain",
                     observed_at=observed_at,
                 )
             if operation.cancel_requested:
@@ -1349,6 +1451,7 @@ class GpuAdmissionBroker(Generic[T]):
             self._queue.clear()
             self._active_task = None
             self._last_degraded_reason = None
+            self._revoked_owners.clear()
             self._notify_all_locked()
 
     async def _cancel_after_wait(
@@ -1555,6 +1658,11 @@ class GpuAdmissionBroker(Generic[T]):
                 receipt=receipt,
             )
         if operation.status == "rejected":
+            if operation.reason_code == GPU_OWNER_REVOCATION_REASON:
+                raise GpuAdmissionOwnerRevokedError(
+                    "GPU operation owner has been revoked",
+                    receipt=receipt,
+                )
             if operation.reason_code == GPU_OWNER_CAPACITY_REASON:
                 raise GpuAdmissionOwnerCapacityError(
                     "GPU operation was rejected at the owner outstanding limit",
@@ -1709,8 +1817,10 @@ __all__ = [
     "GPU_ADMISSION_STATUSES",
     "GPU_OWNER_CAPACITY_REASON",
     "GPU_OWNER_BUDGET_REASON",
+    "GPU_OWNER_REVOCATION_REASON",
     "GpuAdmissionBroker",
     "GpuAdmissionCapacityError",
+    "GpuAdmissionOwnerRevokedError",
     "GpuAdmissionCancelledError",
     "GpuAdmissionError",
     "GpuAdmissionExpiredError",

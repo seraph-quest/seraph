@@ -10,11 +10,13 @@ import pytest
 from src.model_fabric.remote_inference_admission import (
     REMOTE_INFERENCE_ADMISSION_SCHEMA_VERSION,
     REMOTE_INFERENCE_OWNER_COST_UNKNOWN_REASON,
+    REMOTE_INFERENCE_OWNER_REVOCATION_REASON,
     RemoteInferenceAdmissionBroker,
     RemoteInferenceAdmissionCancelledError,
     RemoteInferenceAdmissionExpiredError,
     RemoteInferenceAdmissionOwnerBudgetError,
     RemoteInferenceAdmissionOwnerCapacityError,
+    RemoteInferenceAdmissionOwnerRevokedError,
     RemoteInferenceAdmissionRequest,
     RemoteInferenceAdmissionUncertainError,
     RemoteInferencePriority,
@@ -90,6 +92,232 @@ async def test_remote_priority_and_fifo_order_are_preserved():
         await broker.release(lease)
 
     assert order == ["chat", "goal", "low-1", "low-2"]
+
+
+@pytest.mark.asyncio
+async def test_owner_revocation_is_scoped_and_cancels_queued_work_before_dispatch():
+    broker = RemoteInferenceAdmissionBroker(clock=_Clock())
+    active_request = _request(
+        "owner-b-active",
+        owner_id="owner-b",
+        priority=RemoteInferencePriority.REPORTS_RESEARCH_MEMORY,
+    )
+    owner_a_low = _request(
+        "owner-a-low",
+        owner_id="owner-a",
+        priority=RemoteInferencePriority.REPORTS_RESEARCH_MEMORY,
+    )
+    owner_a_high = _request(
+        "owner-a-high",
+        owner_id="owner-a",
+        priority=RemoteInferencePriority.INTERACTIVE_CHAT,
+    )
+    owner_b_follow_up = _request(
+        "owner-b-follow-up",
+        owner_id="owner-b",
+        priority=RemoteInferencePriority.INTERACTIVE_CHAT,
+    )
+    active_started = asyncio.Event()
+    release_active = asyncio.Event()
+    provider_calls: list[str] = []
+
+    async def active_provider():
+        provider_calls.append(active_request.operation_id)
+        active_started.set()
+        await release_active.wait()
+        return "active"
+
+    async def follow_up_provider():
+        provider_calls.append(owner_b_follow_up.operation_id)
+        return "follow-up"
+
+    active_task = asyncio.create_task(broker.execute(active_request, active_provider))
+    await active_started.wait()
+    await broker.enqueue(owner_a_low)
+    await broker.enqueue(owner_a_high)
+    follow_up_task = asyncio.create_task(broker.execute(owner_b_follow_up, follow_up_provider))
+    for _ in range(10):
+        if [item["operation_id"] for item in (await broker.status())["queued"]] == [
+            owner_b_follow_up.operation_id,
+            owner_a_high.operation_id,
+            owner_a_low.operation_id,
+        ]:
+            break
+        await asyncio.sleep(0)
+
+    revoked = await broker.cancel_owner("owner-a")
+
+    assert [receipt.operation_id for receipt in revoked] == [
+        owner_a_low.operation_id,
+        owner_a_high.operation_id,
+    ]
+    assert all(receipt.status == "cancelled" for receipt in revoked)
+    assert all(receipt.reason_code == "owner_revoked" for receipt in revoked)
+    assert provider_calls == [active_request.operation_id]
+    status = await broker.status()
+    assert status["active"]["operation_id"] == active_request.operation_id
+    assert status["active"]["cancel_requested"] is False
+    assert [item["operation_id"] for item in status["queued"]] == [
+        owner_b_follow_up.operation_id,
+    ]
+
+    # Repeating the same owner revocation is idempotent and cannot affect the
+    # other owner's queued operation or its priority ordering.
+    repeated = await broker.cancel_owner("owner-a")
+    assert [receipt.operation_id for receipt in repeated] == [
+        owner_a_low.operation_id,
+        owner_a_high.operation_id,
+    ]
+    assert all(receipt.status == "cancelled" for receipt in repeated)
+    assert [item["operation_id"] for item in (await broker.status())["queued"]] == [
+        owner_b_follow_up.operation_id,
+    ]
+
+    release_active.set()
+    assert await active_task == "active"
+    assert await follow_up_task == "follow-up"
+    assert provider_calls == [active_request.operation_id, owner_b_follow_up.operation_id]
+
+
+@pytest.mark.asyncio
+async def test_owner_revocation_keeps_active_remote_cost_uncertain_until_reconciled():
+    broker = RemoteInferenceAdmissionBroker(clock=_Clock())
+    request = _request("owner-revoked-active", estimated_cost_microusd=12)
+    callback_started = asyncio.Event()
+    callback_cancelled = asyncio.Event()
+    follow_up_started = False
+
+    async def provider():
+        callback_started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            callback_cancelled.set()
+            raise
+
+    async def follow_up_provider():
+        nonlocal follow_up_started
+        follow_up_started = True
+        return "follow-up"
+
+    task = asyncio.create_task(broker.execute(request, provider))
+    await callback_started.wait()
+
+    requested = await broker.cancel_owner(request.owner_id)
+    assert len(requested) == 1
+    assert requested[0].status == "running"
+    assert requested[0].cancel_requested is True
+    assert requested[0].reason_code == "owner_revoked"
+
+    # A repeated revocation reports the same in-flight operation without
+    # releasing its lease or changing its fencing identity.
+    repeated = await broker.cancel_owner(request.owner_id)
+    assert repeated[0].status == "running"
+    assert repeated[0].fencing_token == requested[0].fencing_token
+
+    follow_up_task = asyncio.create_task(
+        broker.execute(_request("after-owner-revocation", owner_id="owner-b"), follow_up_provider)
+    )
+    await asyncio.sleep(0)
+    assert follow_up_started is False
+
+    with pytest.raises(RemoteInferenceAdmissionUncertainError) as error:
+        await task
+    assert callback_cancelled.is_set()
+    assert error.value.receipt.status == "blocked"
+    assert error.value.receipt.reason_code == "owner_revoked"
+    assert error.value.receipt.reconciliation_required is True
+    assert error.value.receipt.callback_completed is True
+
+    blocked_repeat = await broker.cancel_owner(request.owner_id)
+    assert blocked_repeat[0].status == "blocked"
+    assert blocked_repeat[0].reconciliation_required is True
+
+    settled = await broker.reconcile(
+        request.operation_id,
+        owner_id=request.owner_id,
+        fencing_token=error.value.receipt.fencing_token or 0,
+        outcome="cancelled",
+        reason_code="owner_revoked_reconciled",
+        actual_cost_microusd=9,
+    )
+    assert settled.status == "cancelled"
+    assert settled.cost_settled_microusd == 9
+    assert await follow_up_task == "follow-up"
+    assert follow_up_started is True
+
+
+@pytest.mark.asyncio
+async def test_owner_revocation_rejects_empty_scope_without_touching_other_owners():
+    broker = RemoteInferenceAdmissionBroker(clock=_Clock())
+    other = _request("other-owner-queued", owner_id="owner-b")
+    await broker.enqueue(other)
+
+    assert await broker.cancel_owner("owner-a") == ()
+
+    with pytest.raises(ValueError, match="owner_id is required"):
+        await broker.cancel_owner(" ")
+
+    status = await broker.status()
+    assert [item["operation_id"] for item in status["queued"]] == [other.operation_id]
+
+
+@pytest.mark.asyncio
+async def test_revoked_owner_cannot_reenter_and_other_owner_still_runs():
+    broker = RemoteInferenceAdmissionBroker(clock=_Clock())
+    await broker.cancel_owner("owner-a")
+    revoked_request = _request("revoked-owner-reentry", owner_id="owner-a")
+    revoked_provider_called = False
+
+    async def revoked_provider():
+        nonlocal revoked_provider_called
+        revoked_provider_called = True
+
+    with pytest.raises(RemoteInferenceAdmissionOwnerRevokedError) as rejected:
+        await broker.execute(revoked_request, revoked_provider)
+    assert rejected.value.code == REMOTE_INFERENCE_OWNER_REVOCATION_REASON
+    assert rejected.value.receipt.status == "rejected"
+    assert rejected.value.receipt.reason_code == REMOTE_INFERENCE_OWNER_REVOCATION_REASON
+    assert revoked_provider_called is False
+
+    # The terminal receipt remains idempotent, and acquire reports the same
+    # stable owner-revoked denial if a caller retries the operation identity.
+    terminal = await broker.enqueue(revoked_request)
+    assert terminal.status == "rejected"
+    with pytest.raises(RemoteInferenceAdmissionOwnerRevokedError) as acquire_error:
+        await broker.acquire(revoked_request.operation_id)
+    assert acquire_error.value.receipt.reason_code == REMOTE_INFERENCE_OWNER_REVOCATION_REASON
+
+    other_request = _request("owner-b-after-revocation", owner_id="owner-b")
+    other_called = False
+
+    async def other_provider():
+        nonlocal other_called
+        other_called = True
+        return "owner-b-result"
+
+    assert await broker.execute(other_request, other_provider) == "owner-b-result"
+    assert other_called is True
+
+
+@pytest.mark.asyncio
+async def test_owner_revocation_reason_is_strictly_allowlisted_and_redacted():
+    broker = RemoteInferenceAdmissionBroker(clock=_Clock())
+    secret_like_reason = "provider_key=sk-live-secret"
+
+    with pytest.raises(ValueError, match="reason_code must be owner_revoked") as error:
+        await broker.cancel_owner("owner-a", reason_code=secret_like_reason)
+    assert secret_like_reason not in str(error.value)
+
+    status = await broker.status()
+    assert status["degraded"] is False
+    assert secret_like_reason not in str(status)
+
+    # The rejected custom reason did not create a tombstone or alter the
+    # admission lane; the owner can still be revoked with the safe token.
+    receipts = await broker.cancel_owner("owner-a")
+    assert receipts == ()
+    assert receipts == await broker.cancel_owner("owner-a")
 
 
 @pytest.mark.asyncio

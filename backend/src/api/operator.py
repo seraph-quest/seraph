@@ -2103,6 +2103,11 @@ def _workflow_orchestration_entries(
             "thread_continue_message": workflow_surface_continue_message(run),
             "output_path": output_path,
             "artifact_paths": visible_artifact_paths,
+            "artifact_registry": (
+                run.get("artifact_registry")
+                if isinstance(run.get("artifact_registry"), list)
+                else []
+            ),
             "step_records": visible_step_records,
             "pending_approval_count": int(run.get("pending_approval_count") or 0),
             "pending_approval_ids": run.get("pending_approval_ids") if isinstance(run.get("pending_approval_ids"), list) else [],

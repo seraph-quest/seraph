@@ -24,7 +24,7 @@ from src.api.chat import (
 )
 from src.agent.session import session_manager
 from src.agent.factory import get_base_tools_and_active_skills
-from src.artifacts.registry import artifact_records_from_paths
+from src.artifacts.registry import artifact_id_for, artifact_records_from_paths
 from src.approval.repository import fingerprint_tool_call
 from src.approval.repository import approval_repository
 from src.approval.runtime import reset_runtime_context, set_runtime_context
@@ -44,6 +44,7 @@ from src.workflows.loader import parse_workflow_content
 from src.workflows.manager import approval_context_requires_tracked_lineage, workflow_manager
 from src.workflows.durable_state import _safe_operator_recovery_target, workflow_state_repository
 from src.workflows.run_identity import build_workflow_run_identity, parse_workflow_run_identity
+from src.workspace import WorkspaceStateClass, canonical_workspace_registry
 
 router = APIRouter()
 
@@ -137,6 +138,56 @@ _WORKFLOW_SAFE_REFUSAL_CODES = _WORKFLOW_REPLAY_BLOCK_REASONS | {
     "workflow_action_handle_mismatch",
 }
 _WORKFLOW_SAFE_TOKEN_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
+_WORKFLOW_SAFE_ARTIFACT_ID_RE = re.compile(r"^art_[0-9a-f]{24}$")
+_WORKFLOW_SAFE_ARTIFACT_DIGEST_RE = re.compile(r"^(?:sha256:)?[0-9a-f]{64}$", re.IGNORECASE)
+_WORKFLOW_ARTIFACT_SECRET_PARTS = frozenset(
+    {
+        ".aws",
+        ".azure",
+        ".config",
+        ".docker",
+        ".gnupg",
+        ".ssh",
+        "credential",
+        "credentials",
+        "private",
+        "secret",
+        "secrets",
+        "token",
+        "tokens",
+        "vault",
+    }
+)
+_WORKFLOW_ARTIFACT_SECRET_NAMES = frozenset(
+    {
+        ".env",
+        ".env.dev",
+        ".env.local",
+        ".env.production",
+        ".npmrc",
+        ".pypirc",
+        "credentials",
+        "credentials.json",
+        "google_credentials.json",
+        "id_dsa",
+        "id_ecdsa",
+        "id_ed25519",
+        "id_rsa",
+        "known_hosts",
+        "private_key",
+    }
+)
+_WORKFLOW_ARTIFACT_SECRET_NAME_TOKENS = (
+    "api-key",
+    "api_key",
+    "apikey",
+    "credential",
+    "password",
+    "private",
+    "secret",
+    "token",
+)
+_WORKFLOW_ARTIFACT_SECRET_SUFFIXES = (".key", ".p12", ".pem", ".pfx")
 
 
 def _workflow_identity_digest(run_identity: str) -> str:
@@ -345,6 +396,112 @@ def _safe_workflow_identity(value: Any, *, fallback: str = "workflow") -> str:
     return _safe_workflow_token(candidate, fallback=f"{fallback}:{_workflow_identity_digest(candidate)}")
 
 
+def _safe_workflow_artifact_path(value: Any) -> str | None:
+    """Return a canonical workspace artifact path without exposing host paths."""
+    if not isinstance(value, str):
+        return None
+    candidate = value.strip().replace("\\", "/")
+    if not candidate or len(candidate) > 512 or "\x00" in candidate:
+        return None
+    parts = candidate.split("/")
+    if (
+        candidate.startswith("/")
+        or any(part in {"", ".", ".."} for part in parts)
+        or any(not (char.isalnum() or char in " ./_-") for char in candidate)
+    ):
+        return None
+    lower_parts = {part.lower() for part in parts}
+    file_name = parts[-1].lower()
+    if (
+        lower_parts & _WORKFLOW_ARTIFACT_SECRET_PARTS
+        or file_name in _WORKFLOW_ARTIFACT_SECRET_NAMES
+        or file_name.endswith(_WORKFLOW_ARTIFACT_SECRET_SUFFIXES)
+        or any(token in file_name for token in _WORKFLOW_ARTIFACT_SECRET_NAME_TOKENS)
+    ):
+        return None
+    try:
+        state_class = canonical_workspace_registry(settings.workspace_dir).classify_path(candidate)
+    except Exception:
+        return None
+    if state_class is not WorkspaceStateClass.CANONICAL:
+        return None
+    return candidate
+
+
+def _safe_workflow_artifact_digest(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    candidate = value.strip()
+    if not _WORKFLOW_SAFE_ARTIFACT_DIGEST_RE.fullmatch(candidate):
+        return None
+    if candidate.lower().startswith("sha256:"):
+        candidate = candidate[7:]
+    return candidate.lower()
+
+
+def _safe_workflow_artifact_id(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    candidate = value.strip()
+    return candidate if _WORKFLOW_SAFE_ARTIFACT_ID_RE.fullmatch(candidate) else None
+
+
+def _safe_workflow_artifact_projection(value: Any) -> dict[str, Any]:
+    """Project only managed artifact identity, digest, and logical path."""
+    if not isinstance(value, dict):
+        return {"artifact_paths": [], "artifact_registry": []}
+
+    raw_registry = value.get("artifact_registry")
+    raw_paths = value.get("artifact_paths")
+    candidates: list[tuple[str, dict[str, Any]]] = []
+    if isinstance(raw_registry, list):
+        for item in raw_registry:
+            if not isinstance(item, dict):
+                continue
+            path = _safe_workflow_artifact_path(item.get("file_path") or item.get("path"))
+            if path is not None:
+                candidates.append((path, item))
+    if isinstance(raw_paths, list):
+        for raw_path in raw_paths:
+            path = _safe_workflow_artifact_path(raw_path)
+            if path is not None:
+                candidates.append((path, {}))
+
+    workflow_name = _safe_workflow_token(value.get("workflow_name"), fallback="workflow")
+    run_identity = _safe_workflow_identity(value.get("run_identity") or value.get("id"))
+    safe_registry: list[dict[str, Any]] = []
+    seen_paths: set[str] = set()
+    for path, source in candidates:
+        if path in seen_paths:
+            continue
+        seen_paths.add(path)
+        digest = None
+        for field_name in ("content_sha256", "artifact_digest", "digest"):
+            digest = _safe_workflow_artifact_digest(source.get(field_name))
+            if digest is not None:
+                break
+        artifact_id = _safe_workflow_artifact_id(source.get("artifact_id"))
+        if artifact_id is None:
+            artifact_id = artifact_id_for(
+                file_path=path,
+                artifact_type="workspace_file",
+                producer=f"workflow:{workflow_name}",
+                run_id=run_identity,
+                content_sha256=digest,
+            )
+        safe_registry.append(
+            {
+                "artifact_id": artifact_id,
+                "file_path": path,
+                "content_sha256": digest,
+            }
+        )
+    return {
+        "artifact_paths": [record["file_path"] for record in safe_registry],
+        "artifact_registry": safe_registry,
+    }
+
+
 def _safe_workflow_action_handle(
     value: Any,
     *,
@@ -517,6 +674,7 @@ def _safe_workflow_run_projection(value: Any) -> dict[str, Any] | None:
     raw_inputs = value.get("replay_inputs")
     if not isinstance(raw_inputs, dict):
         raw_inputs = value.get("arguments") if isinstance(value.get("arguments"), dict) else {}
+    artifact_projection = _safe_workflow_artifact_projection(value)
     replay_allowed = bool(value.get("replay_allowed", True))
     replay_block_reason = (
         _safe_workflow_refusal_detail(value.get("replay_block_reason"), fallback="workflow_replay_blocked")
@@ -583,7 +741,9 @@ def _safe_workflow_run_projection(value: Any) -> dict[str, Any] | None:
         "finished_at": value.get("finished_at") if isinstance(value.get("finished_at"), str) else None,
         "pending_approval_count": _safe_workflow_count(value.get("pending_approval_count")),
         "checkpoint_context_available": bool(value.get("checkpoint_context_available")),
-        "artifact_count": len(value.get("artifact_paths") or []) if isinstance(value.get("artifact_paths"), list) else 0,
+        "artifact_count": len(artifact_projection["artifact_paths"]),
+        "artifact_paths": artifact_projection["artifact_paths"],
+        "artifact_registry": artifact_projection["artifact_registry"],
         "step_count": len(raw_steps),
         "step_tools": [
             _safe_workflow_token(tool, fallback="workflow_step")

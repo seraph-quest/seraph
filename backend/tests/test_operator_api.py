@@ -10088,7 +10088,14 @@ async def test_operator_workflow_orchestration_scopes_safe_projection_and_revoca
         "retry_from_step_draft": secret,
         "replay_draft": secret,
         "replay_inputs": {"secret": secret, "path": "/private/owned"},
-        "artifact_paths": [f"/private/{secret}.md"],
+        "artifact_paths": [f"/private/{secret}.md", "notes/owned-output.md"],
+        "artifact_registry": [{
+            "artifact_id": "art_0123456789abcdef01234567",
+            "file_path": "notes/owned-output.md",
+            "content_sha256": "sha256:" + "b" * 64,
+            "producer": secret,
+            "recovery_hint": secret,
+        }],
         "step_records": [{
             "id": f"private-{secret}",
             "index": 0,
@@ -10145,6 +10152,12 @@ async def test_operator_workflow_orchestration_scopes_safe_projection_and_revoca
     assert secret not in encoded
     assert "/private/" not in encoded
     workflow = payload["workflows"][0]
+    assert workflow["artifact_paths"] == ["notes/owned-output.md"]
+    assert workflow["artifact_registry"] == [{
+        "artifact_id": "art_0123456789abcdef01234567",
+        "file_path": "notes/owned-output.md",
+        "content_sha256": "b" * 64,
+    }]
     assert workflow["checkpoint_candidates"][0]["resume_draft"] is None
     assert workflow["checkpoint_candidates"][0]["action_handle"]["run_identity"] == "owned-run"
     assert workflow["step_records"][0]["id"].startswith("redacted_workflow_step_")

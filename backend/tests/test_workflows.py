@@ -6940,6 +6940,19 @@ def test_workflow_safe_projection_preserves_cockpit_handles_without_raw_inputs()
         "replay_allowed": True,
         "replay_draft": 'Run workflow "example" with secret="never-return".',
         "replay_inputs": {"secret": "never-return", "file_path": "/tmp/private"},
+        "artifact_paths": [
+            "notes/review.md",
+            "/tmp/private-output.md",
+            "notes/private-token.md",
+            "tmp/runtime.log",
+        ],
+        "artifact_registry": [{
+            "artifact_id": "art_0123456789abcdef01234567",
+            "file_path": "notes/review.md",
+            "content_sha256": "sha256:" + "a" * 64,
+            "producer": "workflow:example",
+            "recovery_hint": "never-return",
+        }],
         "continued_error_steps": ["checkpoint/private-step"],
         "step_records": [{
             "id": "checkpoint/private-step",
@@ -6962,9 +6975,18 @@ def test_workflow_safe_projection_preserves_cockpit_handles_without_raw_inputs()
     assert projection["step_records"][0]["id"].startswith("redacted_workflow_step_")
     assert projection["checkpoint_candidates"][0]["action_handle"]["requires_live_control"] is True
     assert projection["replay_inputs"]["redacted"] is True
+    assert projection["artifact_paths"] == ["notes/review.md"]
+    assert projection["artifact_registry"] == [{
+        "artifact_id": "art_0123456789abcdef01234567",
+        "file_path": "notes/review.md",
+        "content_sha256": "a" * 64,
+    }]
+    assert projection["artifact_count"] == 1
     encoded = json.dumps(projection)
     assert "never-return" not in encoded
     assert "/tmp/private" not in encoded
+    assert "private-token" not in encoded
+    assert "runtime.log" not in encoded
     assert "checkpoint/private-step" not in encoded
 
 
@@ -7014,12 +7036,16 @@ async def test_branch_child_control_consumes_child_action_handle_identity():
             "tool": "write_file",
             "status": "succeeded",
         }],
+        "artifact_paths": ["notes/child-output.md", "/tmp/child-private.md"],
     }
     projection = _safe_workflow_run_projection(child_run)
     assert projection is not None
     action_handle = projection["checkpoint_candidates"][0]["action_handle"]
     assert action_handle["run_identity"] == child_identity
     assert action_handle["run_identity"] != parent_identity
+    assert projection["artifact_paths"] == ["notes/child-output.md"]
+    assert projection["artifact_registry"][0]["file_path"] == "notes/child-output.md"
+    assert "/tmp/child-private.md" not in json.dumps(projection)
 
     lease_owner = _workflow_operator_owner(operator.principal.principal_id, "session-owner")
     lease = {

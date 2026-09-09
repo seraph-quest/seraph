@@ -369,8 +369,13 @@ def _safe_workflow_action_handle(
     handle: dict[str, Any] = {
         "kind": "workflow_control",
         "action": _safe_workflow_action(action),
+        # The handle is posted to the route for the run that emitted it.  A
+        # parent identity is lineage metadata, never the route authority; a
+        # branch child must therefore carry its own identity here.
         "run_identity": _safe_workflow_identity(
-            source.get("parent_run_identity") or source.get("run_identity")
+            source.get("run_identity")
+            or source.get("source_run_identity")
+            or source.get("id")
         ),
         "step_id": _safe_workflow_step_id(raw_step_id) if raw_step_id else None,
         "thread_id": _safe_workflow_token(source.get("thread_id") or source.get("session_id"), fallback=""),
@@ -512,7 +517,7 @@ def _safe_workflow_run_projection(value: Any) -> dict[str, Any] | None:
     raw_inputs = value.get("replay_inputs")
     if not isinstance(raw_inputs, dict):
         raw_inputs = value.get("arguments") if isinstance(value.get("arguments"), dict) else {}
-    replay_allowed = bool(value.get("replay_allowed"))
+    replay_allowed = bool(value.get("replay_allowed", True))
     replay_block_reason = (
         _safe_workflow_refusal_detail(value.get("replay_block_reason"), fallback="workflow_replay_blocked")
         if value.get("replay_block_reason")
@@ -534,6 +539,25 @@ def _safe_workflow_run_projection(value: Any) -> dict[str, Any] | None:
         if value.get("thread_label")
         else None,
         "thread_source": _safe_workflow_token(value.get("thread_source"), fallback="session"),
+        # Preserve branch grouping for Cockpit while keeping lineage values in
+        # the same opaque identity form as the control handle.
+        "root_run_identity": (
+            _safe_workflow_identity(value.get("root_run_identity"))
+            if value.get("root_run_identity")
+            else None
+        ),
+        "parent_run_identity": (
+            _safe_workflow_identity(value.get("parent_run_identity"))
+            if value.get("parent_run_identity")
+            else None
+        ),
+        "branch_kind": (
+            _safe_workflow_token(value.get("branch_kind"), fallback="branch")
+            if value.get("branch_kind")
+            else None
+        ),
+        "branch_depth": _safe_workflow_count(value.get("branch_depth")),
+        "is_branch_run": bool(value.get("parent_run_identity")),
         "continue_message": (
             "Use the live workflow recovery controls to continue this run."
             if value.get("thread_continue_message")
@@ -542,7 +566,17 @@ def _safe_workflow_run_projection(value: Any) -> dict[str, Any] | None:
             or value.get("retry_from_step_draft")
             else None
         ),
-        "thread_continue_message": None,
+        # Operator orchestration derives this surface through
+        # workflow_surface_continue_message(), so retain only the generic
+        # safe message rather than the raw continuation text.
+        "thread_continue_message": (
+            "Use the live workflow recovery controls to continue this run."
+            if value.get("thread_continue_message")
+            or value.get("approval_recovery_message")
+            or value.get("replay_draft")
+            or value.get("retry_from_step_draft")
+            else None
+        ),
         "approval_recovery_message": None,
         "started_at": value.get("started_at") if isinstance(value.get("started_at"), str) else None,
         "updated_at": value.get("updated_at") if isinstance(value.get("updated_at"), str) else None,

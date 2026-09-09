@@ -6966,3 +6966,159 @@ def test_workflow_safe_projection_preserves_cockpit_handles_without_raw_inputs()
     assert "never-return" not in encoded
     assert "/tmp/private" not in encoded
     assert "checkpoint/private-step" not in encoded
+
+
+@pytest.mark.asyncio
+async def test_branch_child_control_consumes_child_action_handle_identity():
+    """A branch child handle must target the child control route it came from."""
+    from src.api.workflows import (
+        WorkflowRunControlRequest,
+        _safe_workflow_run_projection,
+        _safe_workflow_step_id,
+        _workflow_operator_owner,
+        control_workflow_run,
+    )
+
+    operator = _test_bypass_operator()
+    parent_identity = "session-owner:workflow_example:parent"
+    child_identity = "session-owner:workflow_example:child"
+    raw_step_id = "child/checkpoint"
+    child_run = {
+        "id": "child-run",
+        "run_identity": child_identity,
+        "root_run_identity": parent_identity,
+        "parent_run_identity": parent_identity,
+        "branch_kind": "branch_from_checkpoint",
+        "branch_depth": 1,
+        "workflow_name": "example",
+        "tool_name": "workflow_example",
+        "session_id": "session-owner",
+        "thread_id": "session-owner",
+        "status": "running",
+        "availability": "ready",
+        "pending_approvals": [],
+        "replay_allowed": True,
+        "replay_block_reason": None,
+        "owner_kind": "user",
+        "owner_principal_id": operator.principal.principal_id,
+        "checkpoint_candidates": [{
+            "step_id": raw_step_id,
+            "label": "child checkpoint",
+            "kind": "branch_from_checkpoint",
+            "status": "succeeded",
+            "resume_supported": True,
+        }],
+        "step_records": [{
+            "id": raw_step_id,
+            "index": 0,
+            "tool": "write_file",
+            "status": "succeeded",
+        }],
+    }
+    projection = _safe_workflow_run_projection(child_run)
+    assert projection is not None
+    action_handle = projection["checkpoint_candidates"][0]["action_handle"]
+    assert action_handle["run_identity"] == child_identity
+    assert action_handle["run_identity"] != parent_identity
+
+    lease_owner = _workflow_operator_owner(operator.principal.principal_id, "session-owner")
+    lease = {
+        "owner": lease_owner,
+        "lease_id": "child-lease",
+        "expires_at": "2099-01-01T00:00:00+00:00",
+        "revision": 7,
+    }
+    raw_plan = {
+        "source_run_identity": child_identity,
+        "parent_run_identity": parent_identity,
+        "root_run_identity": parent_identity,
+        "thread_id": "session-owner",
+        "branch_kind": "branch_from_checkpoint",
+        "resume_from_step": raw_step_id,
+        "resume_checkpoint_label": "child checkpoint",
+        "replay_allowed": True,
+        "draft": 'Run workflow "example" with private="never-return".',
+        "replay_inputs": {"private": "never-return"},
+        "parent_revision": 7,
+        "parent_lease_id": "child-lease",
+    }
+    transition_kwargs: dict[str, object] = {}
+    control_kwargs: dict[str, object] = {}
+
+    async def record_transition(**kwargs):
+        transition_kwargs.update(kwargs)
+        return {
+            "receipt": {
+                "status": "recorded",
+                "transition_key": kwargs["transition_key"],
+                "revision": 8,
+            },
+            "orchestration_v2": {"revision": 8, "lease": lease},
+        }
+
+    async def record_control(**kwargs):
+        control_kwargs.update(kwargs)
+        return {
+            "receipt": {
+                "status": "recorded",
+                "owner": kwargs["owner"],
+                "lease_id": "child-lease",
+                "revision": 9,
+            },
+            "orchestration_v2": {
+                "revision": 9,
+                "lease": {**lease, "revision": 9},
+            },
+        }
+
+    with (
+        patch("src.api.workflows._begin_rest_revocation_watch", return_value=None),
+        patch(
+            "src.api.workflows._find_workflow_run_for_control",
+            new_callable=AsyncMock,
+            side_effect=[child_run, child_run],
+        ),
+        patch("src.api.workflows._workflow_resume_plan", return_value=raw_plan),
+        patch(
+            "src.api.workflows.workflow_state_repository.acquire_or_renew_v2_lease",
+            new_callable=AsyncMock,
+            return_value={
+                "receipt": {"status": "acquired"},
+                "orchestration_v2": {"revision": 7, "lease": lease},
+            },
+        ),
+        patch(
+            "src.api.workflows.workflow_state_repository.build_v2_recovery_plan",
+            new_callable=AsyncMock,
+            return_value={"receipt": {"status": "ready"}},
+        ),
+        patch(
+            "src.api.workflows.workflow_state_repository.record_v2_transition",
+            new_callable=AsyncMock,
+            side_effect=record_transition,
+        ),
+        patch(
+            "src.api.workflows.workflow_state_repository.record_v2_operator_recovery_control",
+            new_callable=AsyncMock,
+            side_effect=record_control,
+        ),
+        patch("src.api.workflows.audit_repository.log_event", new_callable=AsyncMock),
+    ):
+        payload = await control_workflow_run(
+            child_identity,
+            WorkflowRunControlRequest(
+                action="branch",
+                step_id=action_handle["step_id"],
+                action_handle=action_handle,
+            ),
+            _workflow_mutator_request(operator, "/api/workflows/runs/control"),
+        )
+
+    assert transition_kwargs["step_id"] == raw_step_id
+    assert control_kwargs["owner"] == lease_owner
+    assert payload["status"] == "recorded"
+    assert payload["run_identity"] == child_identity
+    assert payload["resume_plan"]["action_handle"]["run_identity"] == child_identity
+    encoded = json.dumps(payload)
+    assert raw_step_id not in encoded
+    assert "never-return" not in encoded

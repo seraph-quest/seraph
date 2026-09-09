@@ -6740,6 +6740,37 @@ function normalizeRuntimeInferenceReadiness(value: unknown): RuntimeInferenceRea
   };
 }
 
+function runtimeReadinessPresent(value: RuntimeStatus["effective_runtime"] | undefined): boolean {
+  return value?.inference_ready !== undefined
+    || value?.inference_readiness?.status !== undefined
+    || value?.inference_readiness?.reasons !== undefined;
+}
+
+function mergeRuntimeReadiness(current: RuntimeStatus | null, next: RuntimeStatus): RuntimeStatus {
+  const currentEffective = current?.effective_runtime;
+  if (!currentEffective || !runtimeReadinessPresent(currentEffective)) return next;
+
+  const nextEffective = next.effective_runtime;
+  return {
+    ...next,
+    effective_runtime: {
+      ...currentEffective,
+      ...(nextEffective ?? {}),
+      // Operator posture can carry newer route/model metadata even when its
+      // runtime shape predates the readiness fields from /api/runtime/status.
+      provider: nextEffective?.provider ?? next.provider ?? currentEffective.provider,
+      provider_label: nextEffective?.provider_label ?? next.provider ?? currentEffective.provider_label,
+      model: nextEffective?.model ?? next.model ?? currentEffective.model,
+      model_label: nextEffective?.model_label ?? next.model_label ?? currentEffective.model_label,
+      route_label: nextEffective?.route_label ?? next.provider ?? currentEffective.route_label,
+      inference_ready: nextEffective?.inference_ready ?? currentEffective.inference_ready,
+      inference_readiness: runtimeReadinessPresent(nextEffective)
+        ? nextEffective?.inference_readiness
+        : currentEffective.inference_readiness,
+    },
+  };
+}
+
 function loadStoredRuntimeReceipt(): RuntimeReceipt | null {
   if (typeof window === "undefined") return null;
   try {
@@ -7227,14 +7258,15 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       setOperatorControlPlane(nextOperatorControlPlane);
       const operatorPostureRuntime = normalizeRuntimeStatus(nextOperatorControlPlane?.runtime_posture.runtime);
       if (operatorPostureRuntime) {
-        storeRuntimeReceipt(operatorPostureRuntime);
-        setRuntimeReceipt({ status: operatorPostureRuntime, source: "operator_posture" });
+        const mergedRuntime = mergeRuntimeReadiness(runtimeReceipt?.status ?? null, operatorPostureRuntime);
+        storeRuntimeReceipt(mergedRuntime);
+        setRuntimeReceipt({ status: mergedRuntime, source: "operator_posture" });
       }
       markDeepPaneLoaded("control_plane", Boolean(nextOperatorControlPlane));
       return;
     }
     markDeepPaneLoaded("control_plane", false);
-  }, [fetchCockpitJson, markDeepPaneLoaded, updateDeepPaneState]);
+  }, [fetchCockpitJson, markDeepPaneLoaded, runtimeReceipt, updateDeepPaneState]);
 
   const loadWorkflowOrchestration = useCallback(async () => {
     updateDeepPaneState("workflow_orchestration", "loading");
@@ -8477,7 +8509,8 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   const runtimeProviderLabel = [
     runtimeProviderLabelBase,
     interactiveFabricRoute?.fallback_used ? "FALLBACK" : "",
-    runtimeBlocked ? "BLOCKED" : runtimeDegraded || runtimeReadinessDegraded ? "DEGRADED" : "",
+    runtimeBlocked ? "BLOCKED" : "",
+    runtimeDegraded || runtimeReadinessDegraded ? "DEGRADED" : "",
     runtimeReceipt?.source === "retained" ? "STALE" : "",
   ].filter(Boolean).join(" ");
   const runtimeModelLabel = (

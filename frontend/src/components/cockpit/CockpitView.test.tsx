@@ -54,6 +54,7 @@ function mockCockpitBaselineFetch(
     extensions?: Record<string, unknown>;
     browserProviders?: Record<string, unknown>;
     browserSessions?: Record<string, unknown>;
+    operatorControlPlane?: Record<string, unknown>;
   },
 ) {
   fetchMock.mockImplementation((input: RequestInfo | URL) => {
@@ -96,6 +97,9 @@ function mockCockpitBaselineFetch(
         ...(options.browserProviders ?? { providers: [] }),
         ...(options.browserSessions ?? { sessions: [] }),
       }));
+    }
+    if (url.includes("/api/operator/control-plane")) {
+      return Promise.resolve(mockResponse(options.operatorControlPlane ?? {}));
     }
     if (url.includes("/api/browser/sessions")) {
       return Promise.resolve(mockResponse(options.browserSessions ?? { sessions: [] }));
@@ -716,6 +720,78 @@ describe("CockpitView", () => {
 
     expect(await screen.findByText("OPENROUTER BLOCKED · GROK 4.1 FAST")).toBeInTheDocument();
     expect(screen.queryByText("OPENROUTER · GROK 4.1 FAST")).not.toBeInTheDocument();
+  });
+
+  it("retains blocked readiness when control-plane posture omits readiness fields", async () => {
+    mockCockpitBaselineFetch(fetchMock, {
+      runtimeStatus: {
+        version: "test",
+        build_id: "SERAPH_TEST",
+        provider: "openrouter",
+        model: "x-ai/grok-4.1-fast",
+        model_label: "grok-4.1-fast",
+        effective_runtime: {
+          provider: "openrouter",
+          provider_label: "openrouter",
+          model: "x-ai/grok-4.1-fast",
+          model_label: "grok-4.1-fast",
+          route_label: "openrouter",
+          inference_ready: false,
+          inference_readiness: {
+            status: "configuration_required",
+            reasons: ["openrouter_api_key_missing"],
+          },
+        },
+      },
+      operatorControlPlane: mockOperatorControlPlaneRuntime({
+        version: "test",
+        build_id: "SERAPH_TEST_POSTURE",
+        provider: "openrouter",
+        model: "x-ai/grok-4.2",
+        model_label: "grok-4.2",
+      }),
+    });
+
+    render(<CockpitView onSend={vi.fn()} />);
+
+    expect(await screen.findByText("OPENROUTER BLOCKED · GROK 4.1 FAST")).toBeInTheDocument();
+    fireEvent.click(screen.getAllByRole("button", { name: "load control plane" })[0]);
+
+    await waitFor(() => {
+      expect(fetchMock.mock.calls.some(([input]) => String(input).includes("/api/operator/control-plane"))).toBe(true);
+      expect(screen.getByText("OPENROUTER BLOCKED · GROK 4.2")).toBeInTheDocument();
+    });
+    expect(screen.queryByText("OPENROUTER · GROK 4.2")).not.toBeInTheDocument();
+    expect(screen.queryByText("openrouter_api_key_missing")).not.toBeInTheDocument();
+  });
+
+  it("keeps BLOCKED and DEGRADED telemetry tokens independent", async () => {
+    mockCockpitBaselineFetch(fetchMock, {
+      runtimeStatus: {
+        version: "test",
+        build_id: "SERAPH_TEST",
+        provider: "openrouter",
+        model: "x-ai/grok-4.1-fast",
+        model_label: "grok-4.1-fast",
+        effective_runtime: {
+          provider: "openrouter",
+          provider_label: "openrouter",
+          model: "x-ai/grok-4.1-fast",
+          model_label: "grok-4.1-fast",
+          route_label: "openrouter",
+          inference_ready: false,
+          inference_readiness: {
+            status: "configuration_required",
+            reasons: ["openrouter_api_key_missing"],
+          },
+        },
+        model_fabric: { status: "degraded" },
+      },
+    });
+
+    render(<CockpitView onSend={vi.fn()} />);
+
+    expect(await screen.findByText("OPENROUTER BLOCKED DEGRADED · GROK 4.1 FAST")).toBeInTheDocument();
   });
 
   it("preserves legacy runtime labels when readiness fields are absent", async () => {

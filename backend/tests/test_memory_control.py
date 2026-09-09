@@ -1,7 +1,8 @@
 import asyncio
+import json
 from dataclasses import replace
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from fastapi import HTTPException
 import pytest
@@ -10,6 +11,7 @@ from config.settings import settings
 from src.api import memory as memory_api
 from src.auth.service import test_bypass_operator
 from src.db.models import MemoryEdgeType, MemoryKind
+from src.memory import control as memory_control
 from src.memory.hybrid_retrieval import retrieve_hybrid_memory
 from src.memory.repository import memory_repository
 from src.memory.retrieval_planner import plan_memory_retrieval
@@ -54,6 +56,83 @@ def test_memory_actor_rejects_non_operator_or_mismatched_session():
         assert raised.value.status_code == 401
 
     assert memory_api.authenticated_memory_actor(request) == "operator:test-bypass"
+
+
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        {"archived_reason": "operator_delete_export"},
+        {"operator_control": {"delete_export_state": "canonical_memory_redacted"}},
+        {"delete_export_state": "canonical_memory_redacted"},
+    ],
+)
+def test_memory_rollback_rejects_canonical_tombstone_before_mutation(metadata):
+    deleted = SimpleNamespace(metadata_json=json.dumps(metadata))
+
+    async def invoke():
+        with (
+            patch.object(memory_control.memory_repository, "get_memory", return_value=deleted),
+            patch.object(
+                memory_control.memory_repository,
+                "update_memory_control_metadata",
+                side_effect=AssertionError("rollback mutated a canonical tombstone"),
+            ) as update,
+        ):
+            with pytest.raises(ValueError, match="operator delete/export redaction"):
+                await memory_control.apply_memory_live_control_action(
+                    action="rollback_memory",
+                    acknowledged=True,
+                    memory_id="deleted-memory",
+                    privacy_boundary="operator_visible",
+                )
+            update.assert_not_called()
+
+    asyncio.run(invoke())
+
+
+def test_memory_rollback_keeps_ordinary_archived_memory_reversible():
+    existing = SimpleNamespace(
+        metadata_json="{}",
+        content="Ordinary rollback candidate.",
+        summary="Ordinary rollback candidate",
+        confidence=0.2,
+        importance=0.2,
+        reinforcement=0.2,
+    )
+    restored = SimpleNamespace(id="ordinary-memory", source_session_id=None)
+
+    async def invoke():
+        with (
+            patch.object(memory_control.memory_repository, "get_memory", return_value=existing),
+            patch.object(
+                memory_control.memory_repository,
+                "update_memory_control_metadata",
+                return_value=restored,
+            ) as update,
+            patch.object(
+                memory_control,
+                "_log_live_control_event",
+                new=AsyncMock(return_value=SimpleNamespace(id="audit-ordinary-rollback")),
+            ),
+            patch.object(
+                memory_control,
+                "get_memory_live_controls_snapshot",
+                new=AsyncMock(return_value={}),
+            ),
+            patch.object(memory_control, "_memory_payload", return_value={"status": "active"}),
+        ):
+            result = await memory_control.apply_memory_live_control_action(
+                action="rollback_memory",
+                acknowledged=True,
+                memory_id="ordinary-memory",
+                privacy_boundary="operator_visible",
+            )
+
+        update.assert_awaited_once()
+        assert result["memory"]["status"] == "active"
+        assert result["receipt"]["changed_memory"] is True
+
+    asyncio.run(invoke())
 
 
 @pytest.mark.asyncio
@@ -390,6 +469,33 @@ async def test_memory_live_controls_decay_and_delete_export_are_bounded_operator
     assert "seraph-delete-me" not in exported.text
     assert exported.json()["receipt"]["blocked_claims"]
     assert exported.json()["receipt"]["privacy_boundary"] == "sensitive"
+
+    rollback = await client.post(
+        "/api/operator/guardian-memory-live-control/actions",
+        json={
+            "action": "rollback_memory",
+            "acknowledge_rollback_boundary": True,
+            "memory_id": created.memory_id,
+            "reason": "A deleted canonical memory must not be revived.",
+        },
+    )
+    stored_after_rollback = await memory_repository.get_memory(created.memory_id)
+
+    assert rollback.status_code == 400
+    assert "operator delete/export redaction" in rollback.json()["detail"]
+    assert stored_after_rollback is not None
+    assert stored_after_rollback.status.value == "archived"
+    assert stored_after_rollback.content == "[delete/export propagated by operator]"
+    assert stored_after_rollback.summary == "[delete/export propagated by operator]"
+
+    with patch("src.memory.hybrid_retrieval.search_with_status", return_value=([], False)):
+        retrieval = await retrieve_hybrid_memory(
+            query="legacy export token",
+            active_projects=(),
+            limit=4,
+        )
+    assert "seraph-delete-me" not in retrieval.context
+    assert retrieval.context == ""
 
 
 @pytest.mark.asyncio

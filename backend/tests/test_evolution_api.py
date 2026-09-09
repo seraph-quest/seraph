@@ -657,6 +657,126 @@ def test_evolution_engine_serializes_concurrent_same_filename_proposals(tmp_path
     )
 
 
+def test_evolution_engine_serializes_distinct_sources_for_same_candidate_destination(tmp_path):
+    from src.evolution.engine import EVOLUTION_FILE_NAME_ERROR, EvolutionReceipt, create_evolution_proposal
+
+    operator = test_bypass_operator()
+    source_a = tmp_path / "source-a" / "review.md"
+    source_b = tmp_path / "source-b" / "review.md"
+    source_a.parent.mkdir(parents=True)
+    source_b.parent.mkdir(parents=True)
+    source_a.write_text("# Baseline A\n", encoding="utf-8")
+    source_b.write_text("# Baseline B\n", encoding="utf-8")
+    candidate_file_name = "review-review-candidate.md"
+    first_started = threading.Event()
+    release_first = threading.Event()
+    second_started = threading.Event()
+
+    def resolve_target(_target_type, source_path):
+        return Path(source_path)
+
+    def generate_candidate(_target_type, *, objective="", **_kwargs):
+        if objective == "first":
+            first_started.set()
+            assert release_first.wait(timeout=5)
+        else:
+            second_started.set()
+        return f"{objective.title()} Candidate", f"# {objective}\n"
+
+    def evaluate_candidate(_target_type, *, source_path, objective="", candidate_file_name, **_kwargs):
+        return EvolutionReceipt(
+            target_type="prompt_pack",
+            source_path=source_path,
+            source_name="Review",
+            candidate_name=f"{objective.title()} Candidate",
+            candidate_file_name=candidate_file_name,
+            valid=True,
+            blocked=False,
+            score=0.8,
+            quality_state="guarded",
+            objective=objective,
+            observations=(),
+            constraints=(),
+            evals=(),
+            change_summary=("summary",),
+            review_risks=("risk",),
+            benchmark_gate={},
+            pr_draft={},
+        )
+
+    def invoke(source_path, objective):
+        tokens = set_runtime_context(operator.session_id, "safe", trust_principal=operator.principal)
+        try:
+            return create_evolution_proposal(
+                "prompt_pack",
+                source_path=str(source_path),
+                objective=objective,
+                file_name=candidate_file_name,
+            )
+        except Exception as error:
+            return error
+        finally:
+            reset_runtime_context(tokens)
+
+    with (
+        patch("src.evolution.engine.settings.workspace_dir", str(tmp_path)),
+        patch("src.evolution.engine._resolve_registered_target_path", side_effect=resolve_target),
+        patch("src.evolution.engine.generate_candidate_content", side_effect=generate_candidate),
+        patch("src.evolution.engine.evaluate_candidate", side_effect=evaluate_candidate),
+    ):
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            first_future = executor.submit(invoke, source_a, "first")
+            assert first_started.wait(timeout=5)
+            second_future = executor.submit(invoke, source_b, "second")
+            try:
+                assert not second_started.wait(timeout=0.2)
+            finally:
+                release_first.set()
+            first_result = first_future.result(timeout=5)
+            second_result = second_future.result(timeout=5)
+
+    results = [first_result, second_result]
+    assert sum(isinstance(result, dict) and result.get("status") == "saved" for result in results) == 1
+    failures = [result for result in results if isinstance(result, ValueError)]
+    assert len(failures) == 1
+    assert str(failures[0]) == EVOLUTION_FILE_NAME_ERROR
+
+
+def test_evolution_engine_rejects_manifest_declared_candidate_before_generation(tmp_path):
+    from src.evolution.engine import EVOLUTION_FILE_NAME_ERROR, create_evolution_proposal
+
+    operator = test_bypass_operator()
+    source_path = tmp_path / "review.md"
+    source_path.write_text("# Baseline\n", encoding="utf-8")
+    package_root = tmp_path / "extensions" / "workspace-capabilities"
+    _write_workspace_extension_manifest(
+        package_root,
+        contribution_type="prompt_packs",
+        relative_path="prompts/review-review-candidate.md",
+    )
+    manifest_text = (package_root / "manifest.yaml").read_text(encoding="utf-8")
+    candidate_path = package_root / "prompts" / "review-review-candidate.md"
+    tokens = set_runtime_context(operator.session_id, "safe", trust_principal=operator.principal)
+    try:
+        with (
+            patch("src.evolution.engine.settings.workspace_dir", str(tmp_path)),
+            patch("src.evolution.engine._resolve_registered_target_path", return_value=source_path),
+            patch("src.evolution.engine.generate_candidate_content") as generate,
+        ):
+            with pytest.raises(ValueError, match=EVOLUTION_FILE_NAME_ERROR):
+                create_evolution_proposal(
+                    "prompt_pack",
+                    source_path=str(source_path),
+                    file_name="review-review-candidate.md",
+                )
+        generate.assert_not_called()
+    finally:
+        reset_runtime_context(tokens)
+
+    assert not candidate_path.exists()
+    assert (package_root / "manifest.yaml").read_text(encoding="utf-8") == manifest_text
+
+
 def test_evolution_engine_keeps_saved_candidate_unregistered_until_promotion(tmp_path):
     from src.evolution.engine import EvolutionReceipt, create_evolution_proposal
 
@@ -858,6 +978,14 @@ def test_evolution_engine_rolls_back_partial_candidate_and_receipt_on_revocation
     )
     candidate_path = tmp_path / "extensions" / "workspace-capabilities" / "prompts" / "review-candidate.md"
     receipt_path = tmp_path / "extensions" / "workspace-capabilities" / "evolution" / "receipts" / "review-candidate.json"
+    package_root = tmp_path / "extensions" / "workspace-capabilities"
+    _write_workspace_extension_manifest(
+        package_root,
+        contribution_type="prompt_packs",
+        relative_path="prompts/review.md",
+    )
+    manifest_path = package_root / "manifest.yaml"
+    manifest_text = manifest_path.read_text(encoding="utf-8")
 
     def write_candidate(*_args, **_kwargs):
         candidate_path.parent.mkdir(parents=True, exist_ok=True)
@@ -896,7 +1024,7 @@ def test_evolution_engine_rolls_back_partial_candidate_and_receipt_on_revocation
 
     assert not candidate_path.exists()
     assert not receipt_path.exists()
-    assert not (tmp_path / "extensions" / "workspace-capabilities" / "manifest.yaml").exists()
+    assert manifest_path.read_text(encoding="utf-8") == manifest_text
     assert get_current_session_id() is None
     assert get_current_trust_principal() is None
 

@@ -195,20 +195,35 @@ def _assert_review_candidate_destination_available(
     """Fail closed before any generated content or artifact is written."""
     candidate_path = _candidate_path(target_type, file_name)
     receipt_path = _receipt_path(target_type, file_name)
-    if candidate_path.resolve() == source_path.resolve() or candidate_path.exists() or receipt_path.exists():
+    package_root = workspace_capability_package_root().resolve()
+    manifest_path = package_root / "manifest.yaml"
+    manifest_declares_candidate = False
+    if manifest_path.is_file():
+        try:
+            manifest = load_extension_manifest(manifest_path)
+        except ValueError as exc:
+            raise ValueError(EVOLUTION_FILE_NAME_ERROR) from exc
+        relative_candidate_path = candidate_path.resolve().relative_to(package_root).as_posix()
+        declared_paths = getattr(manifest.contributes, _contribution_type_for_target(target_type), ())
+        manifest_declares_candidate = relative_candidate_path in declared_paths
+    if (
+        candidate_path.resolve() == source_path.resolve()
+        or candidate_path.exists()
+        or receipt_path.exists()
+        or manifest_declares_candidate
+    ):
         raise ValueError(EVOLUTION_FILE_NAME_ERROR)
 
 
 @contextmanager
-def _evolution_target_write_lock(target_type: EvolutionTargetType, source_path: Path):
-    """Serialize candidate lifecycle writes for one registered target.
+def _evolution_target_write_lock(target_type: EvolutionTargetType, candidate_file_name: str):
+    """Serialize candidate lifecycle writes for one final destination.
 
     Candidate generation and validation stay independent across targets.  A
-    proposal for one target owns this narrow lock from destination preflight
-    through snapshot, writes, and rollback so a competing invocation cannot
-    restore an older snapshot over its artifacts.
+    proposal owns this narrow lock from destination preflight through snapshot,
+    writes, and rollback so competing sources cannot race on one candidate.
     """
-    key = (target_type, os.path.normcase(str(source_path.resolve())))
+    key = (target_type, os.path.normcase(validate_evolution_file_name(candidate_file_name)))
     with _EVOLUTION_TARGET_LOCKS_GUARD:
         lock = _EVOLUTION_TARGET_LOCKS.get(key)
         if lock is None:
@@ -984,11 +999,12 @@ def _evolution_artifact_snapshot(
     # Keep the legacy receipt location in the rollback set so a partially
     # written older worker or test double cannot leave sensitive data behind.
     legacy_receipt_path = package_root / "evolution" / "receipts" / f"{Path(candidate_file_name).stem}.json"
-    manifest_path = package_root / "manifest.yaml"
-    for path in (candidate_path, receipt_path, legacy_receipt_path, manifest_path):
+    # Candidate writes are intentionally inert and never mutate the manifest;
+    # restoring a manifest snapshot could clobber an unrelated operator change.
+    for path in (candidate_path, receipt_path, legacy_receipt_path):
         _validate_evolution_path_containment(path)
     snapshot: list[tuple[Path, bool, bytes | None]] = []
-    for path in (candidate_path, receipt_path, legacy_receipt_path, manifest_path):
+    for path in (candidate_path, receipt_path, legacy_receipt_path):
         snapshot.append((path, path.exists(), path.read_bytes() if path.exists() else None))
     return tuple(snapshot)
 
@@ -1141,7 +1157,7 @@ def create_evolution_proposal(
         source_path=resolved_source,
         requested_file_name=file_name,
     )
-    with _evolution_target_write_lock(target_type, resolved_source):
+    with _evolution_target_write_lock(target_type, candidate_file_name):
         _check_evolution_boundary(authority_check)
         _assert_review_candidate_destination_available(
             target_type,

@@ -444,6 +444,7 @@ class MemorySnapshot(SQLModel, table=True):
     kind: MemorySnapshotKind = Field(default=MemorySnapshotKind.bounded_guardian_context, index=True, unique=True)
     content: str = Field(default="")
     source_hash: Optional[str] = Field(default=None)
+    canonical_tombstone_revision: Optional[str] = Field(default=None, index=True)
     created_at: datetime = Field(default_factory=_now)
     updated_at: datetime = Field(default_factory=_now)
 

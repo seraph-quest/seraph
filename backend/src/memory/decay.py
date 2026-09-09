@@ -5,12 +5,20 @@ import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
-from sqlalchemy import func
+from sqlalchemy import exists, func
 from sqlmodel import col, select
 
 from src.db.engine import get_session
-from src.db.models import Memory, MemoryEdge, MemoryEdgeType, MemoryKind, MemoryStatus
+from src.db.models import (
+    Memory,
+    MemoryEdge,
+    MemoryEdgeType,
+    MemoryKind,
+    MemoryStatus,
+    MemoryTombstone,
+)
 from src.memory.repository import (
+    _begin_canonical_write,
     _canonical_memory_deletion_marker,
     _canonical_memory_without_tombstone_clause,
     memory_repository,
@@ -149,6 +157,7 @@ async def summarize_memory_reconciliation_state(*, limit: int = 5) -> dict[str, 
                 await db.execute(
                     select(Memory)
                     .where(Memory.status == MemoryStatus.superseded)
+                    .where(_canonical_memory_without_tombstone_clause())
                     .order_by(col(Memory.updated_at).desc(), col(Memory.created_at).desc())
                     .limit(limit)
                 )
@@ -157,10 +166,21 @@ async def summarize_memory_reconciliation_state(*, limit: int = 5) -> dict[str, 
                 await db.execute(
                     select(Memory)
                     .where(Memory.status == MemoryStatus.archived)
+                    .where(_canonical_memory_without_tombstone_clause())
                     .order_by(col(Memory.updated_at).desc(), col(Memory.created_at).desc())
                     .limit(limit)
                 )
             ).scalars().all()
+            superseded_memories = [
+                memory
+                for memory in superseded_memories
+                if _canonical_memory_deletion_marker(memory) is None
+            ]
+            archived_memories = [
+                memory
+                for memory in archived_memories
+                if _canonical_memory_deletion_marker(memory) is None
+            ]
             for memory in (*superseded_memories, *archived_memories):
                 db.expunge(memory)
             active_count = int(
@@ -168,7 +188,7 @@ async def summarize_memory_reconciliation_state(*, limit: int = 5) -> dict[str, 
                     await db.execute(
                         select(func.count()).select_from(Memory).where(
                             Memory.status == MemoryStatus.active
-                        )
+                        ).where(_canonical_memory_without_tombstone_clause())
                     )
                 ).scalar_one()
                 or 0
@@ -178,7 +198,7 @@ async def summarize_memory_reconciliation_state(*, limit: int = 5) -> dict[str, 
                     await db.execute(
                         select(func.count()).select_from(Memory).where(
                             Memory.status == MemoryStatus.superseded
-                        )
+                        ).where(_canonical_memory_without_tombstone_clause())
                     )
                 ).scalar_one()
                 or 0
@@ -188,7 +208,7 @@ async def summarize_memory_reconciliation_state(*, limit: int = 5) -> dict[str, 
                     await db.execute(
                         select(func.count()).select_from(Memory).where(
                             Memory.status == MemoryStatus.archived
-                        )
+                        ).where(_canonical_memory_without_tombstone_clause())
                     )
                 ).scalar_one()
                 or 0
@@ -198,6 +218,14 @@ async def summarize_memory_reconciliation_state(*, limit: int = 5) -> dict[str, 
                     await db.execute(
                         select(func.count()).select_from(MemoryEdge).where(
                             MemoryEdge.edge_type == MemoryEdgeType.contradicts
+                        ).where(
+                            ~exists().where(
+                                MemoryTombstone.memory_id == MemoryEdge.from_memory_id
+                            )
+                        ).where(
+                            ~exists().where(
+                                MemoryTombstone.memory_id == MemoryEdge.to_memory_id
+                            )
                         )
                     )
                 ).scalar_one()
@@ -423,6 +451,7 @@ async def apply_memory_decay_policies(
     archived_count = 0
 
     async with get_session() as db:
+        await _begin_canonical_write(db)
         active_memories = (
             await db.execute(
                 select(Memory)

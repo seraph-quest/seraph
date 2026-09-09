@@ -235,6 +235,11 @@ async def _ensure_legacy_columns(conn) -> None:
                 columns.add(column)
         return columns
 
+    await _add_missing_columns(
+        "memory_snapshots",
+        {"canonical_tombstone_revision": "VARCHAR"},
+    )
+
     session_columns = await _add_missing_columns(
         "sessions",
         {"owner_principal_id": "VARCHAR"},

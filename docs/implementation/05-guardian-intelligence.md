@@ -217,7 +217,11 @@ an existing canonical tombstone is found, before it can change content,
 metadata, scope, timestamps, or source state. `reconcile_memory_tombstones`
 re-applies content-free redaction after a stale row restore, and
 `list_memories_for_reindex` reconciles before admitting active canonical rows to
-a local deterministic reindex. Hybrid retrieval performs the same reconciliation
+a local deterministic reindex. Snapshot reads and writes carry a content-free
+tombstone-ledger revision and fail closed when that authority is unavailable or
+changes during assembly. `MemoryEpisode` rows remain outside this Gate A
+tombstone ledger and require the deferred episodic-retention/deletion slice.
+Hybrid retrieval performs the same reconciliation
 and fails closed with an explicit degraded/no-learning receipt if the local
 authority check is unavailable. External provider deletion remains
 asynchronous and receipt-bound; the review-outcome and pin reactivation paths

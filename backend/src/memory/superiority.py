@@ -4,15 +4,18 @@ import json
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import func
+from sqlalchemy import exists, func
 from sqlmodel import col, select
 
 from src.audit.repository import audit_repository
 from src.db.engine import get_session
-from src.db.models import AuditEvent, Memory, MemorySource, MemoryStatus
+from src.db.models import AuditEvent, Memory, MemorySource, MemoryStatus, MemoryTombstone
 from src.memory.benchmark import build_guardian_memory_benchmark_report
 from src.memory.decay import memory_reconciliation_policy_payload, summarize_memory_reconciliation_state
-from src.memory.repository import memory_repository
+from src.memory.repository import (
+    _canonical_memory_without_tombstone_clause,
+    memory_repository,
+)
 
 M6_MEMORY_SUPERIORITY_BENCHMARK_SUITE_NAME = "m6_memory_superiority"
 M6_MEMORY_SUPERIORITY_BENCHMARK_SCENARIO_NAMES = (
@@ -145,10 +148,16 @@ def m6_memory_superiority_policy_payload() -> dict[str, Any]:
 
 async def _memory_counts() -> dict[str, int]:
     async with get_session() as db:
-        active = int((await db.execute(select(func.count()).select_from(Memory).where(Memory.status == MemoryStatus.active))).scalar_one() or 0)
-        superseded = int((await db.execute(select(func.count()).select_from(Memory).where(Memory.status == MemoryStatus.superseded))).scalar_one() or 0)
-        archived = int((await db.execute(select(func.count()).select_from(Memory).where(Memory.status == MemoryStatus.archived))).scalar_one() or 0)
-        sources = int((await db.execute(select(func.count()).select_from(MemorySource))).scalar_one() or 0)
+        active = int((await db.execute(select(func.count()).select_from(Memory).where(Memory.status == MemoryStatus.active).where(_canonical_memory_without_tombstone_clause()))).scalar_one() or 0)
+        superseded = int((await db.execute(select(func.count()).select_from(Memory).where(Memory.status == MemoryStatus.superseded).where(_canonical_memory_without_tombstone_clause()))).scalar_one() or 0)
+        archived = int((await db.execute(select(func.count()).select_from(Memory).where(Memory.status == MemoryStatus.archived).where(_canonical_memory_without_tombstone_clause()))).scalar_one() or 0)
+        sources = int((await db.execute(
+            select(func.count())
+            .select_from(MemorySource)
+            .where(
+                ~exists().where(MemoryTombstone.memory_id == MemorySource.memory_id)
+            )
+        )).scalar_one() or 0)
     return {
         "active": active,
         "superseded": superseded,

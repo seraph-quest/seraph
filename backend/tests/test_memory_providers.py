@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from sqlalchemy.exc import SQLAlchemyError
 
 from config.settings import settings
 from src.api.memory import list_memory_providers
@@ -19,6 +20,7 @@ from src.extensions.lifecycle import (
 )
 from src.extensions.registry import _current_seraph_version
 from src.memory.hybrid_retrieval import HybridMemoryRetrievalResult
+from src.memory.hybrid_retrieval import retrieve_hybrid_memory
 from src.memory.providers import (
     MemoryProviderAggregateResult,
     MemoryProviderHit,
@@ -1326,3 +1328,78 @@ async def test_memory_provider_writeback_keeps_high_quality_duplicate_when_low_q
     assert diagnostics["suppressed_reason_counts"]["low_quality"] == 1
     assert diagnostics["suppressed_reason_counts"]["duplicate"] == 0
     assert adapter.writeback_calls[0]["texts"] == ["Atlas launch is the active release project."]
+
+
+@pytest.mark.asyncio
+async def test_empty_query_blocks_provider_when_structured_memory_read_fails():
+    with (
+        patch(
+            "src.memory.retrieval_planner.memory_repository.reconcile_memory_tombstones",
+            new=AsyncMock(return_value={"status": "ready"}),
+        ),
+        patch(
+            "src.memory.retrieval_planner.build_structured_memory_context_bundle",
+            new=AsyncMock(side_effect=SQLAlchemyError("canonical read outage")),
+        ),
+        patch(
+            "src.memory.retrieval_planner.retrieve_additive_memory_provider_context",
+            new=AsyncMock(side_effect=AssertionError("provider context must be blocked")),
+        ),
+    ):
+        result = await plan_memory_retrieval(query="", active_projects=())
+
+    assert result.semantic_context == ""
+    assert result.episodic_context == ""
+    assert result.memory_buckets == {}
+    assert result.degraded is True
+    assert result.lane == "canonical_memory_unavailable"
+    assert result.retrieval_diagnostics[0]["reason"] == "canonical_memory_read_unavailable"
+
+
+@pytest.mark.asyncio
+async def test_empty_query_propagates_degraded_provider_state_to_plan_receipt():
+    provider_result = MemoryProviderAggregateResult(
+        context="- [fact] Provider advisory",
+        buckets={"fact": ("Provider advisory",)},
+        degraded=True,
+        diagnostics=({"name": "graph-memory", "degraded": True},),
+    )
+    with (
+        patch(
+            "src.memory.retrieval_planner.memory_repository.reconcile_memory_tombstones",
+            new=AsyncMock(return_value={"status": "ready"}),
+        ),
+        patch(
+            "src.memory.retrieval_planner.build_structured_memory_context_bundle",
+            new=AsyncMock(return_value=("", {})),
+        ),
+        patch(
+            "src.memory.retrieval_planner.retrieve_additive_memory_provider_context",
+            new=AsyncMock(return_value=provider_result),
+        ),
+    ):
+        result = await plan_memory_retrieval(query="", active_projects=())
+
+    assert result.degraded is True
+    assert result.decision_receipt["confidence"]["degraded"] is True
+
+
+@pytest.mark.asyncio
+async def test_hybrid_retrieval_converts_sqlalchemy_outage_to_empty_degraded_result():
+    with patch(
+        "src.memory.hybrid_retrieval._retrieve_hybrid_memory",
+        new=AsyncMock(side_effect=SQLAlchemyError("canonical read outage")),
+    ):
+        result = await retrieve_hybrid_memory(query="status")
+
+    assert isinstance(result, HybridMemoryRetrievalResult)
+    assert result.context == ""
+    assert result.buckets == {}
+    assert result.hits == ()
+    assert result.degraded is True
+    assert result.diagnostics == (
+        {
+            "reason": "canonical_memory_read_unavailable",
+            "status": "degraded_no_learning",
+        },
+    )

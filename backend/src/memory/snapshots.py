@@ -5,11 +5,11 @@ import json
 
 from sqlalchemy.exc import SQLAlchemyError
 
-from src.db.models import MemoryKind, MemorySnapshotKind
+from src.db.models import MemoryKind, MemorySnapshot, MemorySnapshotKind
 from src.memory.repository import memory_repository
 from src.memory.soul import read_soul
 
-_SESSION_BOUNDED_SNAPSHOT_CACHE: dict[str, str] = {}
+_SESSION_BOUNDED_SNAPSHOT_CACHE: dict[str, tuple[str, str]] = {}
 
 
 def _extract_soul_section_lines(soul_context: str, section: str, *, limit: int) -> tuple[str, ...]:
@@ -62,12 +62,31 @@ async def _reconcile_snapshot_memory() -> tuple[bool, dict[str, object]]:
     return receipt.get("status") == "ready", receipt
 
 
+async def _snapshot_tombstone_revision() -> str | None:
+    try:
+        return await memory_repository.get_memory_tombstone_revision()
+    except SQLAlchemyError:
+        return None
+
+
+def _empty_snapshot() -> MemorySnapshot:
+    return MemorySnapshot(
+        kind=MemorySnapshotKind.bounded_guardian_context,
+        content="",
+        source_hash=None,
+    )
+
+
 async def render_bounded_guardian_snapshot(
     *,
     soul_context: str | None = None,
 ) -> tuple[str, str]:
     memory_read_ready, _receipt = await _reconcile_snapshot_memory()
     if not memory_read_ready:
+        return "", hashlib.sha256(b"guardian_snapshot_memory_unavailable").hexdigest()
+
+    revision_before = await _snapshot_tombstone_revision()
+    if revision_before is None:
         return "", hashlib.sha256(b"guardian_snapshot_memory_unavailable").hexdigest()
 
     resolved_soul = soul_context if isinstance(soul_context, str) else read_soul()
@@ -91,6 +110,10 @@ async def render_bounded_guardian_snapshot(
         )
     except SQLAlchemyError:
         return "", hashlib.sha256(b"guardian_snapshot_memory_unavailable").hexdigest()
+
+    revision_after = await _snapshot_tombstone_revision()
+    if revision_after is None or revision_after != revision_before:
+        return "", hashlib.sha256(b"guardian_snapshot_memory_changed").hexdigest()
 
     identity_bits = _extract_soul_section_lines(resolved_soul, "Identity", limit=3)
     goal_bits = _dedupe_preserve(
@@ -162,15 +185,22 @@ async def refresh_bounded_guardian_snapshot(
     *,
     soul_context: str | None = None,
 ):
-    content, source_hash = await render_bounded_guardian_snapshot(soul_context=soul_context)
-    current = await memory_repository.get_snapshot(MemorySnapshotKind.bounded_guardian_context)
-    if current is not None and current.source_hash == source_hash and current.content == content:
-        return current
-    return await memory_repository.save_snapshot(
-        kind=MemorySnapshotKind.bounded_guardian_context,
-        content=content,
-        source_hash=source_hash,
-    )
+    try:
+        content, source_hash = await render_bounded_guardian_snapshot(soul_context=soul_context)
+        revision = await _snapshot_tombstone_revision()
+        if revision is None:
+            return _empty_snapshot()
+        current = await memory_repository.get_snapshot(MemorySnapshotKind.bounded_guardian_context)
+        if current is not None and current.source_hash == source_hash and current.content == content:
+            return current
+        return await memory_repository.save_snapshot(
+            kind=MemorySnapshotKind.bounded_guardian_context,
+            content=content,
+            source_hash=source_hash,
+            canonical_tombstone_revision=revision,
+        )
+    except (SQLAlchemyError, RuntimeError):
+        return _empty_snapshot()
 
 
 async def get_or_create_bounded_guardian_snapshot(
@@ -188,25 +218,49 @@ async def get_or_create_bounded_guardian_snapshot(
 
     if session_id is not None:
         cached = _SESSION_BOUNDED_SNAPSHOT_CACHE.get(session_id)
-        if isinstance(cached, str) and cached.strip():
-            return cached
+        if cached is not None:
+            cached_content, cached_revision = cached
+            current_revision = await _snapshot_tombstone_revision()
+            if current_revision is None:
+                _SESSION_BOUNDED_SNAPSHOT_CACHE.pop(session_id, None)
+                return ""
+            if cached_revision == current_revision and cached_content.strip():
+                return cached_content
+            _SESSION_BOUNDED_SNAPSHOT_CACHE.pop(session_id, None)
 
-    content, source_hash = await render_bounded_guardian_snapshot(soul_context=soul_context)
-    current = await memory_repository.get_snapshot(MemorySnapshotKind.bounded_guardian_context)
-    if current is None or current.source_hash != source_hash or current.content != content:
-        current = await memory_repository.save_snapshot(
-            kind=MemorySnapshotKind.bounded_guardian_context,
-            content=content,
-            source_hash=source_hash,
-        )
+    try:
+        content, source_hash = await render_bounded_guardian_snapshot(soul_context=soul_context)
+        revision = await _snapshot_tombstone_revision()
+        if revision is None:
+            return ""
+        current = await memory_repository.get_snapshot(MemorySnapshotKind.bounded_guardian_context)
+        if current is None or current.source_hash != source_hash or current.content != content:
+            current = await memory_repository.save_snapshot(
+                kind=MemorySnapshotKind.bounded_guardian_context,
+                content=content,
+                source_hash=source_hash,
+                canonical_tombstone_revision=revision,
+            )
+    except (SQLAlchemyError, RuntimeError):
+        if session_id is not None:
+            _SESSION_BOUNDED_SNAPSHOT_CACHE.pop(session_id, None)
+        return ""
     if session_id is not None and current.content.strip():
-        _SESSION_BOUNDED_SNAPSHOT_CACHE[session_id] = current.content
+        _SESSION_BOUNDED_SNAPSHOT_CACHE[session_id] = (
+            current.content,
+            str(current.canonical_tombstone_revision or revision),
+        )
         return current.content
     if current is not None and current.content.strip():
         return current.content
     snapshot = await refresh_bounded_guardian_snapshot(soul_context=soul_context)
     if session_id is not None and snapshot.content.strip():
-        _SESSION_BOUNDED_SNAPSHOT_CACHE[session_id] = snapshot.content
+        snapshot_revision = snapshot.canonical_tombstone_revision
+        if snapshot_revision is not None:
+            _SESSION_BOUNDED_SNAPSHOT_CACHE[session_id] = (
+                snapshot.content,
+                snapshot_revision,
+            )
     return snapshot.content
 
 

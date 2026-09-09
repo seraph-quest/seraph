@@ -267,7 +267,40 @@ def _render_result(
     )
 
 
+def _degraded_canonical_retrieval_result() -> HybridMemoryRetrievalResult:
+    return HybridMemoryRetrievalResult(
+        context="",
+        buckets={},
+        degraded=True,
+        hits=(),
+        diagnostics=(
+            {
+                "reason": "canonical_memory_read_unavailable",
+                "status": "degraded_no_learning",
+            },
+        ),
+    )
+
+
 async def retrieve_hybrid_memory(
+    *,
+    query: str,
+    active_projects: tuple[str, ...] = (),
+    limit: int = 8,
+) -> HybridMemoryRetrievalResult:
+    """Retrieve canonical memory with a fail-closed database boundary."""
+
+    try:
+        return await _retrieve_hybrid_memory(
+            query=query,
+            active_projects=active_projects,
+            limit=limit,
+        )
+    except SQLAlchemyError:
+        return _degraded_canonical_retrieval_result()
+
+
+async def _retrieve_hybrid_memory(
     *,
     query: str,
     active_projects: tuple[str, ...] = (),

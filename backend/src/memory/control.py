@@ -425,6 +425,15 @@ async def correct_memory(
             extra={"pinned": False},
         ),
     }
+    superseded_metadata_updates = {
+        "superseded_reason": "operator_correction",
+        "operator_control": {
+            "last_action": "superseded_by_operator_correction",
+            "last_actor": actor,
+            "last_reason": str(reason or "").strip(),
+            "last_action_at": now.isoformat(),
+        },
+    }
 
     created = await memory_repository.create_memory(
         content=normalized_content,
@@ -439,6 +448,8 @@ async def correct_memory(
         reinforcement=1.5,
         metadata=metadata_updates,
         last_confirmed_at=now,
+        supersedes_memory_id=corrects_memory_id,
+        supersedes_metadata=superseded_metadata_updates if corrects_memory_id else None,
     )
     memory = await memory_repository.get_memory(created.memory_id)
     if memory is None:  # pragma: no cover - defensive, create_memory already flushed
@@ -446,20 +457,9 @@ async def correct_memory(
 
     corrected_memory = None
     if corrects_memory_id:
-        corrected_memory = await memory_repository.update_memory_control_metadata(
-            corrects_memory_id,
-            status=MemoryStatus.superseded,
-            metadata_updates={
-                "superseded_reason": "operator_correction",
-                "superseded_by_memory_id": memory.id,
-                "operator_control": {
-                    "last_action": "superseded_by_operator_correction",
-                    "last_actor": actor,
-                    "last_reason": str(reason or "").strip(),
-                    "last_action_at": now.isoformat(),
-                },
-            },
-        )
+        corrected_memory = await memory_repository.get_memory(corrects_memory_id)
+        if corrected_memory is None:  # pragma: no cover - atomic target update
+            raise ValueError(f"Unknown memory id: {corrects_memory_id}")
         await memory_repository.create_edge(
             from_memory_id=memory.id,
             to_memory_id=corrected_memory.id,

@@ -567,7 +567,7 @@ async def build_structured_memory_context_bundle(
         try:
             reconciliation = await memory_repository.reconcile_memory_tombstones()
         except SQLAlchemyError:
-            return "", {}
+            raise
         if reconciliation.get("status") != "ready":
             return "", {}
 
@@ -613,7 +613,7 @@ async def build_structured_memory_context_bundle(
             else []
         )
     except SQLAlchemyError:
-        return "", {}
+        raise
 
     if procedural_memories:
         grouped[MemoryKind.procedural.value] = procedural_memories
@@ -669,8 +669,10 @@ async def build_structured_memory_context_bundle(
             bucket_name=bucket_name_for_kind(memory.kind),
         )
 
-    filtered_lines, _filtered_buckets = _suppress_structured_context_contradictions(lines)
-    return "\n".join(filtered_lines[:8]), {key: tuple(values) for key, values in bucketed.items()}
+    filtered_lines, filtered_buckets = _suppress_structured_context_contradictions(lines)
+    return "\n".join(filtered_lines[:8]), {
+        key: tuple(values) for key, values in filtered_buckets.items()
+    }
 
 
 def _blocked_memory_retrieval_result(
@@ -717,6 +719,16 @@ def _blocked_memory_retrieval_result(
     )
 
 
+def _hybrid_canonical_read_is_unavailable(result) -> bool:
+    """Identify a hybrid result that must not be replaced by provider context."""
+
+    return any(
+        str(diagnostic.get("status") or "") == "degraded_no_learning"
+        and str(diagnostic.get("reason") or "").startswith("canonical_")
+        for diagnostic in result.diagnostics
+    )
+
+
 async def plan_memory_retrieval(
     *,
     query: str,
@@ -751,6 +763,26 @@ async def plan_memory_retrieval(
         active_projects=active_projects,
         structured_buckets=structured_buckets,
     )
+
+    hybrid = None
+    if normalized_query:
+        try:
+            hybrid = await retrieve_hybrid_memory(
+                query=normalized_query,
+                active_projects=active_projects,
+                limit=8,
+            )
+        except SQLAlchemyError:
+            return _blocked_memory_retrieval_result(
+                reason="canonical_memory_read_unavailable",
+                receipt={"status": "degraded_no_learning"},
+            )
+        if _hybrid_canonical_read_is_unavailable(hybrid):
+            return _blocked_memory_retrieval_result(
+                reason="canonical_memory_read_unavailable",
+                receipt={"status": "degraded_no_learning"},
+            )
+
     provider_retrieval = await retrieve_additive_memory_provider_context(
         query=normalized_query,
         active_projects=provider_project_hints,
@@ -786,7 +818,7 @@ async def plan_memory_retrieval(
             semantic_context=semantic_context,
             episodic_context="",
             memory_buckets=buckets,
-            degraded=False,
+            degraded=provider_retrieval.degraded,
             lane=lane,
             provider_diagnostics=provider_retrieval.diagnostics,
             retrieval_diagnostics=retrieval_diagnostics,
@@ -796,18 +828,14 @@ async def plan_memory_retrieval(
                 episodic_context="",
                 structured_context=structured_context,
                 provider_context=provider_context,
-                degraded=False,
+                degraded=provider_retrieval.degraded,
                 provider_diagnostics=provider_retrieval.diagnostics,
                 retrieval_diagnostics=retrieval_diagnostics,
                 memory_buckets=buckets,
             ),
         )
 
-    hybrid = await retrieve_hybrid_memory(
-        query=normalized_query,
-        active_projects=active_projects,
-        limit=8,
-    )
+    assert hybrid is not None
     semantic_hits = [hit for hit in hybrid.hits if hit.bucket != "episode"]
     episodic_hits = [hit for hit in hybrid.hits if hit.bucket == "episode"]
     semantic_context, semantic_buckets = _render_hits(

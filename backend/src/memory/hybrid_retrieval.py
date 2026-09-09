@@ -11,7 +11,11 @@ from sqlmodel import col, select
 
 from src.db.engine import get_session
 from src.db.models import Memory, MemoryEpisode, MemoryStatus
-from src.memory.repository import memory_repository
+from src.memory.repository import (
+    _canonical_memory_deletion_marker,
+    _canonical_memory_without_tombstone_clause,
+    memory_repository,
+)
 from src.memory.types import bucket_name_for_kind
 from src.memory.vector_store import search_with_status
 
@@ -270,9 +274,6 @@ async def retrieve_hybrid_memory(
     limit: int = 8,
 ) -> HybridMemoryRetrievalResult:
     normalized_query = _normalize_text(query)
-    if not normalized_query:
-        return HybridMemoryRetrievalResult(context="", buckets={}, degraded=False, hits=())
-
     try:
         tombstone_reconciliation = await memory_repository.reconcile_memory_tombstones()
     except SQLAlchemyError:
@@ -288,6 +289,30 @@ async def retrieve_hybrid_memory(
                     "reason": "canonical_tombstone_reconciliation_unavailable",
                     "status": "degraded_no_learning",
                 },
+            ),
+        )
+    if tombstone_reconciliation.get("status") != "ready":
+        return HybridMemoryRetrievalResult(
+            context="",
+            buckets={},
+            degraded=True,
+            hits=(),
+            diagnostics=(
+                {
+                    "reason": "canonical_tombstone_reconciliation_degraded",
+                    "status": "degraded_no_learning",
+                    "tombstone_reconciliation": tombstone_reconciliation,
+                },
+            ),
+        )
+    if not normalized_query:
+        return HybridMemoryRetrievalResult(
+            context="",
+            buckets={},
+            degraded=False,
+            hits=(),
+            diagnostics=(
+                {"tombstone_reconciliation": tombstone_reconciliation},
             ),
         )
 
@@ -311,6 +336,7 @@ async def retrieve_hybrid_memory(
         semantic_stmt = (
             select(Memory)
             .where(Memory.status == MemoryStatus.active)
+            .where(_canonical_memory_without_tombstone_clause())
             .order_by(
                 col(Memory.importance).desc(),
                 col(Memory.last_confirmed_at).desc(),
@@ -323,13 +349,18 @@ async def retrieve_hybrid_memory(
                 or_(*[memory_text.like(pattern) for pattern in query_term_patterns])
             )
         semantic_result = await db.execute(semantic_stmt)
-        semantic_memories = semantic_result.scalars().all()
+        semantic_memories = [
+            memory
+            for memory in semantic_result.scalars().all()
+            if _canonical_memory_deletion_marker(memory) is None
+        ]
 
         linked_memories: list[Memory] = []
         if project_entity_ids:
             linked_stmt = (
                 select(Memory)
                 .where(Memory.status == MemoryStatus.active)
+                .where(_canonical_memory_without_tombstone_clause())
                 .where(col(Memory.project_entity_id).in_(project_entity_ids))
                 .order_by(
                     col(Memory.importance).desc(),
@@ -339,7 +370,11 @@ async def retrieve_hybrid_memory(
                 .limit(max(limit * 4, 12))
             )
             linked_result = await db.execute(linked_stmt)
-            linked_memories = linked_result.scalars().all()
+            linked_memories = [
+                memory
+                for memory in linked_result.scalars().all()
+                if _canonical_memory_deletion_marker(memory) is None
+            ]
 
         episode_stmt = (
             select(MemoryEpisode)
@@ -390,6 +425,7 @@ async def retrieve_hybrid_memory(
                 await db.execute(
                     select(Memory.embedding_id, Memory.id, Memory.summary, Memory.content)
                     .where(Memory.status == MemoryStatus.active)
+                    .where(_canonical_memory_without_tombstone_clause())
                     .where(
                         or_(
                             col(Memory.embedding_id).in_(vector_hit_ids),
@@ -464,7 +500,7 @@ async def retrieve_hybrid_memory(
 
     for hit in vector_hits:
         hit_id = str(hit.get("id") or "").strip()
-        if hit_id and active_vector_ids is not None and hit_id not in active_vector_ids:
+        if not hit_id or active_vector_ids is None or hit_id not in active_vector_ids:
             continue
         text = _normalize_text(str(hit.get("text") or ""))
         if not text:

@@ -25,6 +25,12 @@ async def test_hybrid_retrieval_combines_semantic_episode_and_vector_hits(async_
         confidence=0.9,
         project_entity_id=atlas.id,
     )
+    await memory_repository.create_memory(
+        content="Atlas stakeholder brief needs a summary update.",
+        kind=MemoryKind.fact,
+        summary="Atlas stakeholder brief needs a summary update.",
+        embedding_id="vec-atlas-brief",
+    )
     await memory_repository.create_episode(
         episode_type=MemoryEpisodeType.workflow,
         session_id="s1",
@@ -40,6 +46,7 @@ async def test_hybrid_retrieval_combines_semantic_episode_and_vector_hits(async_
         return_value=(
             [
                 {
+                    "id": "vec-atlas-brief",
                     "text": "Atlas stakeholder brief needs a summary update.",
                     "category": "fact",
                     "score": 0.18,
@@ -50,7 +57,7 @@ async def test_hybrid_retrieval_combines_semantic_episode_and_vector_hits(async_
         ),
     ):
         result = await retrieve_hybrid_memory(
-            query="Atlas upload summary",
+            query="upload status",
             active_projects=("Atlas",),
             limit=6,
         )
@@ -256,3 +263,27 @@ async def test_hybrid_retrieval_filters_shared_embedding_hits_when_text_is_stale
     assert "Atlas launch is delayed." not in result.context
     assert "[project] Atlas launch on track" in result.context
     assert all(hit.text != "Atlas launch is delayed." for hit in result.hits)
+
+
+@pytest.mark.asyncio
+async def test_hybrid_retrieval_rejects_unknown_identity_vector_hits(async_db):
+    with patch(
+        "src.memory.hybrid_retrieval.search_with_status",
+        return_value=(
+            [
+                {
+                    "text": "Unknown deleted payload must never be recalled.",
+                    "category": "fact",
+                    "score": 0.01,
+                },
+            ],
+            False,
+        ),
+    ):
+        result = await retrieve_hybrid_memory(
+            query="deleted payload",
+            limit=4,
+        )
+
+    assert result.context == ""
+    assert result.hits == ()

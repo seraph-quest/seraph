@@ -909,21 +909,36 @@ async def get_memory_live_controls_snapshot(
     provider_inventory = _apply_provider_quarantine_overlay(list_memory_provider_inventory())
     fetch_limit = bounded_limit if not owner_session_id else min(bounded_limit * 10, 200)
     try:
-        active = _scope_memories_to_owner(
-            await memory_repository.list_memories(status=MemoryStatus.active, limit=fetch_limit),
-            owner_session_id,
-        )[:bounded_limit]
-        superseded = _scope_memories_to_owner(
-            await memory_repository.list_memories(status=MemoryStatus.superseded, limit=fetch_limit),
-            owner_session_id,
-        )[:bounded_limit]
-        archived = _scope_memories_to_owner(
-            await memory_repository.list_memories(status=MemoryStatus.archived, limit=fetch_limit),
-            owner_session_id,
-        )[:bounded_limit]
-        receipts = await list_memory_audit_receipts(limit=bounded_limit)
-        reconciliation = await summarize_memory_reconciliation_state(limit=min(bounded_limit, 10))
-        operator_status = "guardian_memory_live_controls_visible"
+        tombstone_reconciliation = await memory_repository.reconcile_memory_tombstones()
+        if tombstone_reconciliation.get("status") != "ready":
+            active = []
+            superseded = []
+            archived = []
+            receipts = {"events": []}
+            reconciliation = {
+                "summary": {
+                    "status": "degraded_no_learning",
+                    "reason": "canonical tombstone reconciliation requires repair",
+                },
+                "tombstone_reconciliation": tombstone_reconciliation,
+            }
+            operator_status = "guardian_memory_live_controls_degraded"
+        else:
+            active = _scope_memories_to_owner(
+                await memory_repository.list_memories(status=MemoryStatus.active, limit=fetch_limit),
+                owner_session_id,
+            )[:bounded_limit]
+            superseded = _scope_memories_to_owner(
+                await memory_repository.list_memories(status=MemoryStatus.superseded, limit=fetch_limit),
+                owner_session_id,
+            )[:bounded_limit]
+            archived = _scope_memories_to_owner(
+                await memory_repository.list_memories(status=MemoryStatus.archived, limit=fetch_limit),
+                owner_session_id,
+            )[:bounded_limit]
+            receipts = await list_memory_audit_receipts(limit=bounded_limit)
+            reconciliation = await summarize_memory_reconciliation_state(limit=min(bounded_limit, 10))
+            operator_status = "guardian_memory_live_controls_visible"
     except SQLAlchemyError:
         active = []
         superseded = []

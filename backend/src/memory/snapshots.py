@@ -3,6 +3,8 @@ from __future__ import annotations
 import hashlib
 import json
 
+from sqlalchemy.exc import SQLAlchemyError
+
 from src.db.models import MemoryKind, MemorySnapshotKind
 from src.memory.repository import memory_repository
 from src.memory.soul import read_soul
@@ -52,28 +54,43 @@ def _memory_snapshot_text(memory) -> str:
     return (memory.summary or memory.content or "").strip()
 
 
+async def _reconcile_snapshot_memory() -> tuple[bool, dict[str, object]]:
+    try:
+        receipt = await memory_repository.reconcile_memory_tombstones()
+    except SQLAlchemyError:
+        return False, {"status": "degraded_no_learning"}
+    return receipt.get("status") == "ready", receipt
+
+
 async def render_bounded_guardian_snapshot(
     *,
     soul_context: str | None = None,
 ) -> tuple[str, str]:
+    memory_read_ready, _receipt = await _reconcile_snapshot_memory()
+    if not memory_read_ready:
+        return "", hashlib.sha256(b"guardian_snapshot_memory_unavailable").hexdigest()
+
     resolved_soul = soul_context if isinstance(soul_context, str) else read_soul()
-    grouped = await memory_repository.list_memories_by_kinds(
-        kinds=(
-            MemoryKind.goal,
-            MemoryKind.commitment,
-            MemoryKind.preference,
-            MemoryKind.communication_preference,
-            MemoryKind.project,
-            MemoryKind.collaborator,
-            MemoryKind.obligation,
-            MemoryKind.routine,
-        ),
-        limit_per_kind=2,
-    )
-    procedural_memories = await memory_repository.list_memories(
-        kind=MemoryKind.procedural,
-        limit=4,
-    )
+    try:
+        grouped = await memory_repository.list_memories_by_kinds(
+            kinds=(
+                MemoryKind.goal,
+                MemoryKind.commitment,
+                MemoryKind.preference,
+                MemoryKind.communication_preference,
+                MemoryKind.project,
+                MemoryKind.collaborator,
+                MemoryKind.obligation,
+                MemoryKind.routine,
+            ),
+            limit_per_kind=2,
+        )
+        procedural_memories = await memory_repository.list_memories(
+            kind=MemoryKind.procedural,
+            limit=4,
+        )
+    except SQLAlchemyError:
+        return "", hashlib.sha256(b"guardian_snapshot_memory_unavailable").hexdigest()
 
     identity_bits = _extract_soul_section_lines(resolved_soul, "Identity", limit=3)
     goal_bits = _dedupe_preserve(
@@ -161,6 +178,14 @@ async def get_or_create_bounded_guardian_snapshot(
     soul_context: str | None = None,
     session_id: str | None = None,
 ) -> str:
+    memory_read_ready, receipt = await _reconcile_snapshot_memory()
+    if not memory_read_ready:
+        if session_id is not None:
+            _SESSION_BOUNDED_SNAPSHOT_CACHE.pop(session_id, None)
+        return ""
+    if int(receipt.get("reapplied_count") or 0) > 0:
+        _SESSION_BOUNDED_SNAPSHOT_CACHE.clear()
+
     if session_id is not None:
         cached = _SESSION_BOUNDED_SNAPSHOT_CACHE.get(session_id)
         if isinstance(cached, str) and cached.strip():

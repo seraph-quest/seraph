@@ -10,7 +10,11 @@ from sqlmodel import col, select
 
 from src.db.engine import get_session
 from src.db.models import Memory, MemoryEdge, MemoryEdgeType, MemoryKind, MemoryStatus
-from src.memory.repository import memory_repository
+from src.memory.repository import (
+    _canonical_memory_deletion_marker,
+    _canonical_memory_without_tombstone_clause,
+    memory_repository,
+)
 
 _STOPWORDS = {
     "a",
@@ -423,12 +427,18 @@ async def apply_memory_decay_policies(
             await db.execute(
                 select(Memory)
                 .where(Memory.status == MemoryStatus.active)
+                .where(_canonical_memory_without_tombstone_clause())
                 .order_by(
                     col(Memory.kind).asc(),
                     col(Memory.created_at).asc(),
                 )
             )
         ).scalars().all()
+        active_memories = [
+            memory
+            for memory in active_memories
+            if _canonical_memory_deletion_marker(memory) is None
+        ]
 
         for index, memory in enumerate(active_memories):
             if memory.status != MemoryStatus.active:

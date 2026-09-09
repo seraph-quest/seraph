@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from sqlalchemy.exc import SQLAlchemyError
+
 from src.db.models import MemoryEntityType, MemoryKind
 from src.memory.hybrid_retrieval import (
     HybridMemoryHit,
@@ -559,26 +561,60 @@ def _memory_context_text(kind_name: str, memory) -> str:
 async def build_structured_memory_context_bundle(
     *,
     active_projects: tuple[str, ...] = (),
+    _skip_tombstone_reconciliation: bool = False,
 ) -> tuple[str, dict[str, tuple[str, ...]]]:
-    grouped = await memory_repository.list_memories_by_kinds(
-        kinds=(
-            MemoryKind.goal,
-            MemoryKind.commitment,
-            MemoryKind.preference,
-            MemoryKind.communication_preference,
-            MemoryKind.pattern,
-            MemoryKind.project,
-            MemoryKind.collaborator,
-            MemoryKind.obligation,
-            MemoryKind.routine,
-            MemoryKind.timeline,
-        ),
-        limit_per_kind=2,
-    )
-    procedural_memories = await memory_repository.list_memories(
-        kind=MemoryKind.procedural,
-        limit=4,
-    )
+    if not _skip_tombstone_reconciliation:
+        try:
+            reconciliation = await memory_repository.reconcile_memory_tombstones()
+        except SQLAlchemyError:
+            return "", {}
+        if reconciliation.get("status") != "ready":
+            return "", {}
+
+    try:
+        grouped = await memory_repository.list_memories_by_kinds(
+            kinds=(
+                MemoryKind.goal,
+                MemoryKind.commitment,
+                MemoryKind.preference,
+                MemoryKind.communication_preference,
+                MemoryKind.pattern,
+                MemoryKind.project,
+                MemoryKind.collaborator,
+                MemoryKind.obligation,
+                MemoryKind.routine,
+                MemoryKind.timeline,
+            ),
+            limit_per_kind=2,
+        )
+        procedural_memories = await memory_repository.list_memories(
+            kind=MemoryKind.procedural,
+            limit=4,
+        )
+
+        linked_project_entities = await memory_repository.find_entities_by_names(
+            names=active_projects,
+            entity_type=MemoryEntityType.project,
+        )
+        linked_memories = (
+            await memory_repository.list_memories_for_entities(
+                project_entity_ids=tuple(entity.id for entity in linked_project_entities.values()),
+                kinds=(
+                    MemoryKind.commitment,
+                    MemoryKind.project,
+                    MemoryKind.collaborator,
+                    MemoryKind.obligation,
+                    MemoryKind.routine,
+                    MemoryKind.timeline,
+                ),
+                limit=8,
+            )
+            if linked_project_entities
+            else []
+        )
+    except SQLAlchemyError:
+        return "", {}
+
     if procedural_memories:
         grouped[MemoryKind.procedural.value] = procedural_memories
 
@@ -625,33 +661,60 @@ async def build_structured_memory_context_bundle(
                 bucket_name=bucket_name,
             )
 
-    linked_project_entities = await memory_repository.find_entities_by_names(
-        names=active_projects,
-        entity_type=MemoryEntityType.project,
-    )
-    if linked_project_entities:
-        linked_memories = await memory_repository.list_memories_for_entities(
-            project_entity_ids=tuple(entity.id for entity in linked_project_entities.values()),
-            kinds=(
-                MemoryKind.commitment,
-                MemoryKind.project,
-                MemoryKind.collaborator,
-                MemoryKind.obligation,
-                MemoryKind.routine,
-                MemoryKind.timeline,
-            ),
-            limit=8,
+    for memory in linked_memories:
+        _append_structured_memory_line(
+            bucketed=bucketed,
+            lines=lines,
+            text=_memory_context_text(memory.kind.value, memory),
+            bucket_name=bucket_name_for_kind(memory.kind),
         )
-        for memory in linked_memories:
-            _append_structured_memory_line(
-                bucketed=bucketed,
-                lines=lines,
-                text=_memory_context_text(memory.kind.value, memory),
-                bucket_name=bucket_name_for_kind(memory.kind),
-            )
 
     filtered_lines, _filtered_buckets = _suppress_structured_context_contradictions(lines)
     return "\n".join(filtered_lines[:8]), {key: tuple(values) for key, values in bucketed.items()}
+
+
+def _blocked_memory_retrieval_result(
+    *,
+    reason: str,
+    receipt: dict[str, object],
+) -> MemoryRetrievalPlanResult:
+    diagnostic = {
+        "reason": reason,
+        "status": "degraded_no_learning",
+        "tombstone_reconciliation": receipt,
+    }
+    decision_receipt = {
+        "receipt_type": "memory_decision",
+        "changed_decision": False,
+        "changed_intervention_timing": False,
+        "lane": "canonical_memory_unavailable",
+        "intervention_timing": "no_memory_context",
+        "capability_choice": {
+            "lane": "canonical_memory_unavailable",
+            "canonical_guardian_memory": False,
+            "provider_capabilities_used": [],
+            "provider_failed_capabilities": [],
+            "degraded": True,
+        },
+        "suppression": {"suppressed_count": 0, "reasons": [reason]},
+        "provenance": {
+            "guardian_canonical": False,
+            "external_advisory": False,
+            "policy": "canonical_first_fail_closed",
+        },
+        "confidence": {"degraded": True, "bucket_count": 0},
+        "privacy_boundary": "operator_visible",
+        "auditability": {"retrieval_diagnostics_visible": True},
+    }
+    return MemoryRetrievalPlanResult(
+        semantic_context="",
+        episodic_context="",
+        memory_buckets={},
+        degraded=True,
+        lane="canonical_memory_unavailable",
+        retrieval_diagnostics=(diagnostic,),
+        decision_receipt=decision_receipt,
+    )
 
 
 async def plan_memory_retrieval(
@@ -659,9 +722,29 @@ async def plan_memory_retrieval(
     query: str,
     active_projects: tuple[str, ...] = (),
 ) -> MemoryRetrievalPlanResult:
-    structured_context, structured_buckets = await build_structured_memory_context_bundle(
-        active_projects=active_projects,
-    )
+    try:
+        tombstone_reconciliation = await memory_repository.reconcile_memory_tombstones()
+    except SQLAlchemyError:
+        return _blocked_memory_retrieval_result(
+            reason="canonical_tombstone_reconciliation_unavailable",
+            receipt={"status": "degraded_no_learning"},
+        )
+    if tombstone_reconciliation.get("status") != "ready":
+        return _blocked_memory_retrieval_result(
+            reason="canonical_tombstone_reconciliation_degraded",
+            receipt=tombstone_reconciliation,
+        )
+
+    try:
+        structured_context, structured_buckets = await build_structured_memory_context_bundle(
+            active_projects=active_projects,
+            _skip_tombstone_reconciliation=True,
+        )
+    except SQLAlchemyError:
+        return _blocked_memory_retrieval_result(
+            reason="canonical_memory_read_unavailable",
+            receipt={"status": "degraded_no_learning"},
+        )
     normalized_query = query.strip()
     provider_project_hints = _project_hint_candidates(
         query=normalized_query,

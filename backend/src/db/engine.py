@@ -48,6 +48,7 @@ OPERATOR_REQUIRED_TABLES = (
     "queued_insights",
     "guardian_interventions",
     "strategy_deltas",
+    "memory_tombstones",
 )
 
 _LEGACY_WORKFLOW_STATUS_MAP = {

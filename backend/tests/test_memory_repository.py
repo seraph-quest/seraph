@@ -6,6 +6,7 @@ from unittest.mock import patch
 
 import pytest
 from sqlalchemy.exc import IntegrityError
+from sqlmodel import select
 
 from src.db.models import (
     Memory,
@@ -18,6 +19,8 @@ from src.db.models import (
     MemoryTombstone,
 )
 from src.memory.repository import memory_repository
+from src.memory.retrieval_planner import plan_memory_retrieval
+from src.memory.snapshots import render_bounded_guardian_snapshot
 
 
 _SCOPED_LEARNING_SCOPE = {
@@ -785,6 +788,8 @@ async def test_sync_scoped_memory_integrity_error_recovery_preserves_tombstone()
                 return _Result(first=None)
             if self.execute_calls == 2:
                 return _Result(all_rows=[])
+            if self.execute_calls == 3:
+                return _Result(first=None)
             return _Result(first=tombstone)
 
         def add(self, _memory):
@@ -820,7 +825,7 @@ async def test_sync_scoped_memory_integrity_error_recovery_preserves_tombstone()
     assert result is None
     assert db.flush_calls == 1
     assert db.rollback_calls == 1
-    assert db.execute_calls == 3
+    assert db.execute_calls == 4
     assert {
         field: getattr(tombstone, field)
         for field in snapshot
@@ -1234,3 +1239,70 @@ async def test_concurrent_tombstone_requests_share_one_authoritative_row(async_d
     assert stored is not None
     assert stored.actor == "operator-0"
     assert stored.reason == "concurrent-0"
+
+
+@pytest.mark.asyncio
+async def test_restored_tombstone_blocks_planner_mutations_and_source_payloads(async_db):
+    created = await memory_repository.create_memory(
+        content="Private restore poison must never influence a plan.",
+        summary="Private restore poison",
+        kind=MemoryKind.preference,
+        source_session_id="private-session",
+        source_message_id="private-message",
+        source_snippet="The erased private preference payload.",
+    )
+    await memory_repository.mark_memory_tombstoned(
+        created.memory_id,
+        actor="operator",
+        reason="privacy request",
+    )
+
+    async with async_db() as db:
+        await db.execute(
+            Memory.__table__.update()
+            .where(Memory.id == created.memory_id)
+            .values(
+                content="Private restore poison must never influence a plan.",
+                summary="Private restore poison",
+                status=MemoryStatus.active,
+                metadata_json="{}",
+            )
+        )
+        await db.execute(
+            MemorySource.__table__.update()
+            .where(MemorySource.memory_id == created.memory_id)
+            .values(snippet="Restored private source payload.")
+        )
+
+    sources = await memory_repository.list_sources(memory_id=created.memory_id)
+    assert sources[0].snippet is None
+
+    plan = await plan_memory_retrieval(query="")
+    assert "Private restore poison" not in plan.semantic_context
+    assert plan.degraded is False
+
+    snapshot, _source_hash = await render_bounded_guardian_snapshot(
+        soul_context="## Identity\n- Operator\n",
+    )
+    assert "Private restore poison" not in snapshot
+
+    with pytest.raises(ValueError, match="cannot reactivate canonical memory"):
+        await memory_repository.update_memory_control_metadata(
+            created.memory_id,
+            status=MemoryStatus.active,
+        )
+    with pytest.raises(ValueError, match="cannot merge canonical memory"):
+        await memory_repository.merge_memory(
+            created.memory_id,
+            summary="A revived private preference",
+        )
+
+    await memory_repository.reconcile_memory_tombstones()
+    async with async_db() as db:
+        source = (
+            await db.execute(
+                select(MemorySource).where(MemorySource.memory_id == created.memory_id)
+            )
+        ).scalars().first()
+        assert source is not None
+        assert source.snippet is None

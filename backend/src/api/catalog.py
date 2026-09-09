@@ -470,6 +470,7 @@ async def require_catalog_install_approval(
     *,
     consume: bool = True,
     session_id: str | None = None,
+    owner_operator_session_id: str | None = None,
 ) -> None:
     lifecycle_preview = _catalog_install_approval_preview(name)
     if lifecycle_preview is None:
@@ -482,6 +483,7 @@ async def require_catalog_install_approval(
         preview,
         consume=consume,
         session_id=session_id,
+        owner_operator_session_id=owner_operator_session_id,
     )
 
 

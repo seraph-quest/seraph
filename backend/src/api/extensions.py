@@ -17,7 +17,10 @@ from pydantic import BaseModel, Field
 from smolagents import MCPClient
 
 from config.settings import settings
-from src.approval.identity import build_approval_owner_details
+from src.approval.identity import (
+    approval_owner_operator_session_id,
+    build_approval_owner_details,
+)
 from src.approval.repository import approval_repository, fingerprint_tool_call
 from src.approval.runtime import (
     get_current_trust_principal,
@@ -1127,6 +1130,7 @@ async def _require_extension_lifecycle_approval(
     *,
     consume: bool = True,
     session_id: str | None = None,
+    owner_operator_session_id: str | None = None,
     fingerprint_context: dict[str, Any] | None = None,
     summary_suffix: str | None = None,
     redact_paths: bool = False,
@@ -1194,6 +1198,10 @@ async def _require_extension_lifecycle_approval(
         **package_identity,
     }
     owner_principal = get_current_trust_principal()
+    owner_operator_session_id = owner_operator_session_id or approval_owner_operator_session_id(
+        session_id=session_id,
+        principal=owner_principal,
+    )
     if isinstance(safe_fingerprint_context, dict):
         arguments.update(safe_fingerprint_context)
     if safe_target_reference:
@@ -1203,17 +1211,24 @@ async def _require_extension_lifecycle_approval(
     if safe_target_type:
         arguments["target_type"] = safe_target_type
     fingerprint = fingerprint_tool_call(tool_name, arguments)
+    owner_kwargs = (
+        {"owner_operator_session_id": owner_operator_session_id}
+        if owner_operator_session_id
+        else {}
+    )
     approval_satisfied = (
         await approval_repository.consume_approved(
             session_id=session_id,
             tool_name=tool_name,
             fingerprint=fingerprint,
+            **owner_kwargs,
         )
         if consume
         else await approval_repository.has_approved(
             session_id=session_id,
             tool_name=tool_name,
             fingerprint=fingerprint,
+            **owner_kwargs,
         )
     )
     if approval_satisfied:
@@ -1260,12 +1275,13 @@ async def _require_extension_lifecycle_approval(
         "approval_scope": approval_scope,
         **package_identity,
     }
-    details.update(
-        build_approval_owner_details(
-            session_id=session_id,
-            principal=owner_principal,
-        )
+    owner_details = build_approval_owner_details(
+        session_id=session_id,
+        principal=owner_principal,
     )
+    if owner_operator_session_id:
+        owner_details["approval_owner_operator_session_id"] = owner_operator_session_id
+    details.update(owner_details)
     if isinstance(safe_fingerprint_context, dict):
         details.update(safe_fingerprint_context)
     request = await approval_repository.get_or_create_pending(

@@ -16,11 +16,16 @@ STATE_FILE_NAME = "extensions-state.json"
 _REASON_MAX_LENGTH = 160
 _SENSITIVE_DETAIL_KEYS = {
     "authorization",
+    "api_key",
+    "apikey",
+    "x-api-key",
+    "auth_header",
     "credential",
     "error",
     "headers",
     "message",
     "password",
+    "private_key",
     "path",
     "reason",
     "resume_message",
@@ -111,6 +116,7 @@ def redact_lifecycle_receipt_value(
         or "url" in key_text
         or "secret" in key_text
         or "token" in key_text
+        or "credential" in key_text
     )
     error_scope = _error_scope or key_text in _ERROR_SCOPE_KEYS
     if isinstance(value, Mapping):

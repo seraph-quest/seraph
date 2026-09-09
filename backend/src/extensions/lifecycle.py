@@ -2863,10 +2863,10 @@ def update_extension_path(path: str) -> dict[str, Any]:
         persistent_snapshot_root = (
             Path(_workspace_root()) / ".seraph-extension-snapshots" / _slugify(manifest.id) / snapshot_id
         )
-        _copy_extension_package(package_root, staging_root)
-        shutil.move(target_root, backup_root)
-        shutil.move(staging_root, target_root)
         try:
+            _copy_extension_package(package_root, staging_root)
+            shutil.move(target_root, backup_root)
+            shutil.move(staging_root, target_root)
             _refresh_runtime()
             updated_extension = _registry().snapshot().get_extension(manifest.id)
             if updated_extension is None:
@@ -2877,9 +2877,7 @@ def update_extension_path(path: str) -> dict[str, Any]:
         except Exception:
             recovery_errors: list[BaseException] = []
             try:
-                if target_root.exists():
-                    shutil.rmtree(target_root, ignore_errors=True)
-                shutil.move(backup_root, target_root)
+                _restore_extension_tree_from_backup(backup_root, target_root)
                 _refresh_runtime()
             except BaseException as recovery_error:  # pragma: no cover - defensive boundary
                 recovery_errors.append(recovery_error)
@@ -2937,6 +2935,36 @@ def _capture_mcp_transaction_state() -> dict[str, Any]:
             for name, client in getattr(mcp_manager, "_clients", {}).items()
         },
     }
+
+
+def _restore_extension_tree_from_backup(backup_root: Path, target_root: Path) -> None:
+    """Restore a lifecycle package when a filesystem effect aborts."""
+    if backup_root.exists():
+        if target_root.exists():
+            shutil.rmtree(target_root)
+        shutil.copytree(backup_root, target_root)
+        return
+    # A failed first move leaves the original tree in place. If it is gone
+    # without a backup, recovery cannot be claimed safely.
+    if not target_root.exists():
+        raise RuntimeError("extension filesystem recovery backup is unavailable")
+
+
+def _capture_optional_file(path_value: str | None) -> tuple[Path | None, bytes | None]:
+    if not path_value:
+        return None, None
+    path = Path(path_value)
+    return path, path.read_bytes() if path.is_file() else None
+
+
+def _restore_optional_file(path: Path | None, contents: bytes | None) -> None:
+    if path is None:
+        return
+    if contents is None:
+        path.unlink(missing_ok=True)
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(contents)
 
 
 def _restore_mcp_transaction_state(snapshot: dict[str, Any]) -> None:
@@ -3536,12 +3564,12 @@ def rollback_extension(extension_id: str, *, snapshot_id: str | None = None) -> 
     with tempfile.TemporaryDirectory(prefix="seraph-extension-rollback-") as temp_root:
         current_backup = Path(temp_root) / "current"
         candidate = Path(temp_root) / "candidate"
-        _copy_extension_package(target_root, current_backup)
-        _copy_extension_package(snapshot_path, candidate)
-        if target_root.exists():
-            shutil.rmtree(target_root)
-        shutil.move(candidate, target_root)
         try:
+            _copy_extension_package(target_root, current_backup)
+            _copy_extension_package(snapshot_path, candidate)
+            if target_root.exists():
+                shutil.rmtree(target_root)
+            shutil.move(candidate, target_root)
             _refresh_runtime()
             rolled_back = _registry().snapshot().get_extension(extension.id)
             if rolled_back is None:
@@ -3550,9 +3578,7 @@ def rollback_extension(extension_id: str, *, snapshot_id: str | None = None) -> 
         except Exception:
             recovery_errors: list[BaseException] = []
             try:
-                if target_root.exists():
-                    shutil.rmtree(target_root, ignore_errors=True)
-                shutil.move(current_backup, target_root)
+                _restore_extension_tree_from_backup(current_backup, target_root)
                 _refresh_runtime()
             except BaseException as recovery_error:  # pragma: no cover - defensive boundary
                 recovery_errors.append(recovery_error)
@@ -3665,31 +3691,59 @@ def remove_extension(extension_id: str) -> None:
     if _location_for_extension(extension) != "workspace" or not extension.root_path:
         raise ValueError(f"extension '{extension_id}' is not removable")
     mcp_snapshot = _capture_mcp_transaction_state()
-    try:
-        skill_config_changed = False
-        workflow_config_changed = False
-        for target in _toggle_targets(extension):
-            if target["type"] == "skill" and target["name"] in skill_manager._disabled:
-                skill_manager._disabled.discard(target["name"])
-                skill_config_changed = True
-            if target["type"] == "workflow" and target["name"] in workflow_manager._disabled:
-                workflow_manager._disabled.discard(target["name"])
-                workflow_config_changed = True
-        if skill_config_changed:
-            skill_manager._save_config()
-        if workflow_config_changed:
-            workflow_manager._save_config()
-        _remove_mcp_servers_for_extension(extension)
-        shutil.rmtree(extension.root_path)
-        payload = _state_payload()
-        payload.get("extensions", {}).pop(extension_id, None)
-        _save_state(payload)
-        _refresh_runtime()
-    except Exception:
+    target_root = Path(extension.root_path)
+    state_path_snapshot, state_file_before = _capture_optional_file(_state_path())
+    skill_config_path, skill_config_before = _capture_optional_file(
+        getattr(skill_manager, "_config_path", None)
+    )
+    workflow_config_path, workflow_config_before = _capture_optional_file(
+        getattr(workflow_manager, "_config_path", None)
+    )
+    skill_disabled_before = set(getattr(skill_manager, "_disabled", set()))
+    workflow_disabled_before = set(getattr(workflow_manager, "_disabled", set()))
+    with tempfile.TemporaryDirectory(prefix="seraph-extension-remove-") as temp_root:
+        backup_root = Path(temp_root) / "extension"
+        _copy_extension_package(target_root, backup_root)
         try:
-            _restore_mcp_transaction_state(mcp_snapshot)
-        except Exception as recovery_error:  # pragma: no cover - defensive boundary
-            raise RuntimeError(
-                f"extension '{extension_id}' removal failed and MCP recovery was incomplete"
-            ) from recovery_error
-        raise
+            skill_config_changed = False
+            workflow_config_changed = False
+            for target in _toggle_targets(extension):
+                if target["type"] == "skill" and target["name"] in skill_manager._disabled:
+                    skill_manager._disabled.discard(target["name"])
+                    skill_config_changed = True
+                if target["type"] == "workflow" and target["name"] in workflow_manager._disabled:
+                    workflow_manager._disabled.discard(target["name"])
+                    workflow_config_changed = True
+            if skill_config_changed:
+                skill_manager._save_config()
+            if workflow_config_changed:
+                workflow_manager._save_config()
+            _remove_mcp_servers_for_extension(extension)
+            shutil.rmtree(target_root)
+            payload = _state_payload()
+            payload.get("extensions", {}).pop(extension_id, None)
+            _save_state(payload)
+            _refresh_runtime()
+        except Exception:
+            recovery_errors: list[BaseException] = []
+            skill_manager._disabled = set(skill_disabled_before)
+            workflow_manager._disabled = set(workflow_disabled_before)
+            try:
+                _restore_extension_tree_from_backup(backup_root, target_root)
+                _restore_optional_file(skill_config_path, skill_config_before)
+                _restore_optional_file(workflow_config_path, workflow_config_before)
+                _restore_optional_file(state_path_snapshot, state_file_before)
+                _refresh_runtime()
+                skill_manager._disabled = set(skill_disabled_before)
+                workflow_manager._disabled = set(workflow_disabled_before)
+            except BaseException as recovery_error:  # pragma: no cover - defensive boundary
+                recovery_errors.append(recovery_error)
+            try:
+                _restore_mcp_transaction_state(mcp_snapshot)
+            except BaseException as recovery_error:  # pragma: no cover - defensive boundary
+                recovery_errors.append(recovery_error)
+            if recovery_errors:
+                raise RuntimeError(
+                    f"extension '{extension_id}' removal failed and lifecycle recovery was incomplete"
+                ) from recovery_errors[0]
+            raise

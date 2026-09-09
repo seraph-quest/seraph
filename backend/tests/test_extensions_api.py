@@ -3694,6 +3694,21 @@ def test_extension_lifecycle_restores_mcp_state_on_update_rollback_and_remove_fa
     original_manifest = (root / "manifest.yaml").read_text(encoding="utf-8")
     before_update = mcp_state()
 
+    lifecycle_module = __import__("src.extensions.lifecycle", fromlist=["shutil"])
+    real_move = lifecycle_module.shutil.move
+
+    def fail_staged_update_move(source, destination):
+        if Path(destination) == root and Path(source).name == "package":
+            raise OSError("staged extension move blocked")
+        return real_move(source, destination)
+
+    with patch("src.extensions.lifecycle.shutil.move", side_effect=fail_staged_update_move):
+        with pytest.raises(OSError, match="staged extension move blocked"):
+            update_extension_path(str(updated_package_dir))
+
+    assert (root / "manifest.yaml").read_text(encoding="utf-8") == original_manifest
+    assert mcp_state() == before_update
+
     def block_secondary_after_primary(_previous, _updated):
         mcp_manager._config["github-primary"]["url"] = "https://blocked.example/primary"
         raise ValueError("secondary policy blocked")
@@ -3712,6 +3727,20 @@ def test_extension_lifecycle_restores_mcp_state_on_update_rollback_and_remove_fa
     assert "version: 2026.4.01" in (root / "manifest.yaml").read_text(encoding="utf-8")
     rollback_snapshot = extension_lifecycle_status(extension_id)["rollback"]["snapshots"][0]
     before_rollback = mcp_state()
+
+    real_move = lifecycle_module.shutil.move
+
+    def fail_rollback_move(source, destination):
+        if Path(destination) == root and Path(source).name == "candidate":
+            raise OSError("rollback extension move blocked")
+        return real_move(source, destination)
+
+    with patch("src.extensions.lifecycle.shutil.move", side_effect=fail_rollback_move):
+        with pytest.raises(OSError, match="rollback extension move blocked"):
+            rollback_extension(extension_id, snapshot_id=rollback_snapshot["id"])
+
+    assert "version: 2026.4.01" in (root / "manifest.yaml").read_text(encoding="utf-8")
+    assert mcp_state() == before_rollback
 
     def block_rollback_after_primary(_previous, _updated):
         mcp_manager._config["github-primary"]["enabled"] = True
@@ -3738,6 +3767,38 @@ def test_extension_lifecycle_restores_mcp_state_on_update_rollback_and_remove_fa
         side_effect=block_remove,
     ):
         with pytest.raises(RuntimeError, match="secondary removal policy blocked"):
+            remove_extension(extension_id)
+
+    assert root.is_dir()
+    assert mcp_state() == before_remove
+
+    before_remove = mcp_state()
+    with patch(
+        "src.extensions.lifecycle._save_state",
+        side_effect=RuntimeError("extension state save blocked"),
+    ):
+        with pytest.raises(RuntimeError, match="extension state save blocked"):
+            remove_extension(extension_id)
+
+    assert root.is_dir()
+    assert mcp_state() == before_remove
+
+    before_remove = mcp_state()
+    real_refresh = lifecycle_module._refresh_runtime
+    refresh_calls = 0
+
+    def fail_remove_refresh_once():
+        nonlocal refresh_calls
+        refresh_calls += 1
+        if refresh_calls == 1:
+            raise RuntimeError("extension runtime refresh blocked")
+        return real_refresh()
+
+    with patch(
+        "src.extensions.lifecycle._refresh_runtime",
+        side_effect=fail_remove_refresh_once,
+    ):
+        with pytest.raises(RuntimeError, match="extension runtime refresh blocked"):
             remove_extension(extension_id)
 
     assert root.is_dir()

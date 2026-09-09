@@ -561,6 +561,15 @@ async def run_strategist_tick() -> None:
             owner=_STRATEGIST_RUNNER_ID,
             fencing_token=durable_fencing_token,
         )
+        # Keep the shared durable child contract live across the bounded
+        # proactive work and model call. The repository performs the row-level
+        # state/revision/fence CAS; a lost lease fails closed below.
+        await durable_job_repository.heartbeat_job(
+            durable_job_id,
+            owner=_STRATEGIST_RUNNER_ID,
+            fencing_token=durable_fencing_token,
+            lease_seconds=max(int(settings.agent_strategist_timeout), 1) + 30,
+        )
         llm_request_id = f"strategist_tick:{started_at}"
         _register_request(llm_request_id)
         llm_request_token = set_current_llm_request_id(llm_request_id)

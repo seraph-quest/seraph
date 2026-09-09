@@ -360,6 +360,7 @@ async def _ensure_legacy_columns(conn) -> None:
             "lease_owner": "VARCHAR",
             "lease_expires_at": "DATETIME",
             "fencing_token": "INTEGER DEFAULT 0",
+            "revision": "INTEGER DEFAULT 0",
             "attempt_count": "INTEGER DEFAULT 0",
             "max_attempts": "INTEGER DEFAULT 1",
             "failure_reason": "VARCHAR",
@@ -370,6 +371,15 @@ async def _ensure_legacy_columns(conn) -> None:
             "result_summary": "VARCHAR",
         },
     )
+    if workflow_job_columns and "revision" in await _table_columns("workflow_run_states"):
+        await conn.exec_driver_sql(
+            "UPDATE workflow_run_states SET revision = 0 "
+            "WHERE revision IS NULL OR revision < 0"
+        )
+        await conn.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_workflow_run_states_revision "
+            "ON workflow_run_states (revision)"
+        )
     # ``_add_missing_columns`` returns the existing set as well as newly added
     # columns, so this index is recreated on every startup even when a prior
     # migration already added the idempotency fields.

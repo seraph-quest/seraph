@@ -759,6 +759,7 @@ async def _require_extension_lifecycle_approval(
     preview: dict[str, Any],
     *,
     consume: bool = True,
+    session_id: str | None = None,
     fingerprint_context: dict[str, Any] | None = None,
     summary_suffix: str | None = None,
 ) -> None:
@@ -807,13 +808,13 @@ async def _require_extension_lifecycle_approval(
     fingerprint = fingerprint_tool_call(tool_name, arguments)
     approval_satisfied = (
         await approval_repository.consume_approved(
-            session_id=None,
+            session_id=session_id,
             tool_name=tool_name,
             fingerprint=fingerprint,
         )
         if consume
         else await approval_repository.has_approved(
-            session_id=None,
+            session_id=session_id,
             tool_name=tool_name,
             fingerprint=fingerprint,
         )
@@ -864,7 +865,7 @@ async def _require_extension_lifecycle_approval(
     if isinstance(fingerprint_context, dict):
         details.update(fingerprint_context)
     request = await approval_repository.get_or_create_pending(
-        session_id=None,
+        session_id=session_id,
         tool_name=tool_name,
         risk_level=str(approval_profile.get("risk_level") or "high"),
         summary=summary,

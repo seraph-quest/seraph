@@ -13268,30 +13268,41 @@ async def _eval_source_adapter_evidence_behavior() -> dict[str, Any]:
         ),
     ):
         adapter_inventory = list_source_adapter_inventory()
-        search_bundle = collect_source_evidence_bundle(
-            contract="source_discovery.read",
-            query="seraph roadmap",
-            max_results=1,
+        # Direct adapter eval calls use an explicit synthetic operator identity;
+        # production callers must obtain an authoritative principal from auth.
+        tokens = set_runtime_context(
+            "session-1",
+            "safe",
+            trust_principal=TrustPrincipal(
+                principal_id="operator:source-evidence-eval",
+                principal_type=PrincipalType.OPERATOR,
+                grants=(AuthorityGrant.CAPABILITY_EXECUTE,),
+                session_id="session-1",
+            ),
         )
-        page_bundle = collect_source_evidence_bundle(
-            contract="webpage.read",
-            url="https://example.com/about",
-        )
-        tokens = set_runtime_context("session-1", "safe")
         try:
+            search_bundle = collect_source_evidence_bundle(
+                contract="source_discovery.read",
+                query="seraph roadmap",
+                max_results=1,
+            )
+            page_bundle = collect_source_evidence_bundle(
+                contract="webpage.read",
+                url="https://example.com/about",
+            )
             session_bundle = collect_source_evidence_bundle(
                 contract="webpage.read",
                 source="browser_session",
                 owner_session_id="session-1",
                 ref=str(session_payload["latest_ref"]),
             )
+            github_bundle = collect_source_evidence_bundle(
+                contract="work_items.read",
+                source="github-managed",
+                query="is:issue source adapter",
+            )
         finally:
             reset_runtime_context(tokens)
-        github_bundle = collect_source_evidence_bundle(
-            contract="work_items.read",
-            source="github-managed",
-            query="is:issue source adapter",
-        )
         overview = _build_capability_overview()
 
     browser_session_runtime.reset_for_tests()

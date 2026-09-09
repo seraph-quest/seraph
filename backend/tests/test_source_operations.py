@@ -225,6 +225,64 @@ def test_source_evidence_adapter_dispatches_with_authenticated_capability_author
     search.assert_called_once_with("bounded query", max_results=5)
 
 
+def test_source_evidence_adapter_denies_mutating_managed_contract_before_dispatch():
+    create_issue = FakeMCPTool("create_issue", [{"id": 99, "title": "should not be returned"}])
+    adapter_inventory = {
+        "adapters": [
+            {
+                "name": "github-managed",
+                "provider": "github",
+                "source_kind": "managed_connector",
+                "authenticated": True,
+                "adapter_state": "ready",
+                "degraded_reason": None,
+                "next_best_sources": [],
+                "operations": [
+                    {
+                        "contract": "work_items.write",
+                        "input_mode": "structured_action",
+                        "executable": True,
+                        "mutating": True,
+                        "requires_approval": True,
+                        "runtime_server": "github",
+                        "tool_name": "create_issue",
+                        "result_kind": "work_item",
+                    }
+                ],
+            }
+        ]
+    }
+    tokens = set_runtime_context(
+        "source-session",
+        "high_risk",
+        trust_principal=_source_operator_principal(),
+    )
+    try:
+        with (
+            patch("src.extensions.source_operations.list_source_capability_inventory", return_value={}),
+            patch(
+                "src.extensions.source_operations.list_source_adapter_inventory",
+                return_value=adapter_inventory,
+            ),
+            patch(
+                "src.extensions.source_operations.mcp_manager.get_server_tools",
+                return_value=[create_issue],
+            ),
+        ):
+            bundle = collect_source_evidence_bundle(
+                contract="work_items.write",
+                source="github-managed",
+                query="provider-controlled mutation text",
+            )
+    finally:
+        reset_runtime_context(tokens)
+
+    assert bundle["status"] == "failed"
+    assert bundle["items"] == []
+    assert bundle["warnings"] == ["Source evidence collection does not execute mutating contracts."]
+    assert create_issue.calls == []
+
+
 @pytest.mark.asyncio
 async def test_source_evidence_endpoint_reads_existing_browser_snapshot():
     payload = browser_session_runtime.open_session(

@@ -1941,6 +1941,12 @@ def collect_source_evidence_bundle(
         response["next_best_sources"] = list(selected_adapter.get("next_best_sources") or [])
         return response
 
+    if bool(selected_operation.get("mutating")) or _is_mutating_contract(contract):
+        response["status"] = "failed"
+        response["warnings"].append("Source evidence collection does not execute mutating contracts.")
+        response["next_best_sources"] = list(selected_adapter.get("next_best_sources") or [])
+        return response
+
     if not bool(selected_operation.get("executable")):
         reason = str(selected_operation.get("reason") or selected_adapter.get("degraded_reason") or "unavailable")
         response["warnings"].append(

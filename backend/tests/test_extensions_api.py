@@ -385,6 +385,175 @@ async def test_extension_scaffold_and_channel_routing_bind_context_and_reset(tmp
 
 
 @pytest.mark.asyncio
+async def test_extension_configure_denies_invalid_operator_before_lookup_or_effect():
+    from src.api.extensions import ExtensionConfigRequest, configure_extension_package
+
+    operator = _test_bypass_operator()
+    invalid_operators = (
+        None,
+        object(),
+        replace(operator, principal=replace(operator.principal, authenticated=False)),
+        replace(operator, principal=replace(operator.principal, revoked=True)),
+        replace(operator, principal=replace(operator.principal, session_id="other-session")),
+        replace(operator, principal=replace(operator.principal, principal_type=PrincipalType.SERVICE)),
+        replace(operator, principal=replace(operator.principal, grants=())),
+    )
+
+    with (
+        patch("src.api.extensions.get_extension") as get_extension,
+        patch("src.api.extensions.configure_extension") as configure_extension,
+        patch("src.api.extensions._configure_request_approval_context") as approval_context,
+        patch("src.api.extensions._require_extension_lifecycle_approval", new_callable=AsyncMock) as approval,
+        patch("src.api.extensions._log_extension_lifecycle_event", new_callable=AsyncMock) as audit,
+        patch("src.api.extensions.context_manager.get_context") as get_context,
+    ):
+        for invalid_operator in invalid_operators:
+            with pytest.raises(HTTPException) as error:
+                await configure_extension_package(
+                    "seraph.example",
+                    ExtensionConfigRequest(config={"messaging_connectors": {"telegram": {"bot_token": "secret"}}}),
+                    _extension_mutator_request(invalid_operator, "/api/extensions/seraph.example/configure"),
+                )
+            assert error.value.status_code == 401
+            assert error.value.detail == {"code": "authentication_required"}
+
+    get_extension.assert_not_called()
+    configure_extension.assert_not_called()
+    approval_context.assert_not_called()
+    approval.assert_not_awaited()
+    audit.assert_not_awaited()
+    get_context.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_extension_configure_binds_context_preserves_approval_and_redacts_secret_receipts():
+    from src.api.extensions import ExtensionConfigRequest, configure_extension_package
+
+    operator = _test_bypass_operator()
+    secret = "super-secret-config-value"
+    preview = {
+        "id": "seraph.secret-pack",
+        "display_name": "Secret Pack",
+        "status": "ready",
+        "approval_profile": {
+            "requires_lifecycle_approval": True,
+            "lifecycle_boundaries": ["secret_management"],
+            "risk_level": "high",
+        },
+        "contributions": [
+            {
+                "type": "messaging_connectors",
+                "name": "telegram",
+                "config_fields": [{"key": "bot_token", "input": "password"}],
+            },
+        ],
+        "config": {},
+    }
+    configured = {
+        **preview,
+        "config": {"messaging_connectors": {"telegram": {"bot_token": "__SERAPH_STORED_SECRET__"}}},
+    }
+    observed: list[tuple[str, object]] = []
+    approval_calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+    audit_details: list[dict[str, object]] = []
+
+    def observe(label: str):
+        observed.append((label, get_current_trust_principal()))
+
+    async def record_approval(*args, **kwargs):
+        observe("approval")
+        approval_calls.append((args, kwargs))
+
+    def record_configure(*_args, **_kwargs):
+        observe("configure")
+        return configured
+
+    async def record_audit(**kwargs):
+        observe(str(kwargs.get("outcome") or "audit"))
+        details = kwargs.get("details")
+        if isinstance(details, dict):
+            audit_details.append(details)
+
+    with (
+        patch("src.api.extensions.context_manager.get_context", return_value=SimpleNamespace(approval_mode="high_risk")),
+        patch("src.api.extensions.get_extension", side_effect=lambda *_args, **_kwargs: (observe("lookup") or preview)),
+        patch("src.api.extensions._require_extension_lifecycle_approval", new_callable=AsyncMock, side_effect=record_approval),
+        patch("src.api.extensions.assert_runtime_not_revoked") as check_revoked,
+        patch("src.api.extensions.configure_extension", side_effect=record_configure),
+        patch("src.api.extensions.log_integration_event", new_callable=AsyncMock, side_effect=record_audit),
+    ):
+        payload = await configure_extension_package(
+            "seraph.secret-pack",
+            ExtensionConfigRequest(config={"messaging_connectors": {"telegram": {"bot_token": secret}}}),
+            _extension_mutator_request(operator, "/api/extensions/seraph.secret-pack/configure"),
+        )
+
+    assert payload == {"status": "configured", "extension": configured}
+    assert [label for label, _principal in observed] == ["lookup", "approval", "configure", "succeeded"]
+    assert all(
+        principal is not None
+        and principal.principal_id == operator.principal.principal_id
+        and principal.principal_type is PrincipalType.OPERATOR
+        and principal.session_id == operator.session_id
+        for _label, principal in observed
+    )
+    assert len(approval_calls) == 1
+    _approval_args, approval_kwargs = approval_calls[0]
+    assert approval_kwargs["session_id"] == operator.session_id
+    assert secret not in repr(approval_kwargs)
+    assert audit_details
+    assert secret not in repr(audit_details)
+    assert check_revoked.call_count == 1
+    assert get_current_session_id() is None
+    assert get_current_trust_principal() is None
+
+
+@pytest.mark.asyncio
+async def test_extension_configure_rechecks_revocation_and_resets_context_on_errors():
+    from src.api.extensions import ExtensionConfigRequest, configure_extension_package
+
+    operator = _test_bypass_operator()
+    preview = {
+        "id": "seraph.example",
+        "status": "ready",
+        "approval_profile": {"requires_lifecycle_approval": False},
+        "contributions": [],
+    }
+    revoked = RuntimeRevokedError("operator session was revoked")
+
+    with (
+        patch("src.api.extensions.context_manager.get_context", return_value=SimpleNamespace(approval_mode="safe")),
+        patch("src.api.extensions.get_extension", return_value=preview),
+        patch("src.api.extensions.assert_runtime_not_revoked", side_effect=revoked) as check_revoked,
+        patch("src.api.extensions.configure_extension") as configure_extension,
+        patch("src.api.extensions.log_integration_event", new_callable=AsyncMock),
+    ):
+        with pytest.raises(RuntimeRevokedError):
+            await configure_extension_package(
+                "seraph.example",
+                ExtensionConfigRequest(config={}),
+                _extension_mutator_request(operator, "/api/extensions/seraph.example/configure"),
+            )
+        configure_extension.assert_not_called()
+        assert get_current_session_id() is None
+        assert get_current_trust_principal() is None
+
+        check_revoked.side_effect = None
+        configure_extension.side_effect = ValueError("invalid configuration")
+        with pytest.raises(HTTPException) as error:
+            await configure_extension_package(
+                "seraph.example",
+                ExtensionConfigRequest(config={}),
+                _extension_mutator_request(operator, "/api/extensions/seraph.example/configure"),
+            )
+        assert error.value.status_code == 422
+        assert configure_extension.call_count == 1
+        assert check_revoked.call_count == 2
+        assert get_current_session_id() is None
+        assert get_current_trust_principal() is None
+
+
+@pytest.mark.asyncio
 async def test_extension_lifecycle_routes_deny_invalid_operator_before_side_effects():
     from src.api.extensions import (
         ExtensionLifecycleReasonRequest,

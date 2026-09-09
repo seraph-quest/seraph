@@ -1851,7 +1851,18 @@ async def disable_extension_package(extension_id: str):
 
 
 @router.post("/extensions/{extension_id}/configure")
-async def configure_extension_package(extension_id: str, req: ExtensionConfigRequest):
+async def configure_extension_package(
+    extension_id: str,
+    req: ExtensionConfigRequest,
+    request: Request,
+):
+    operator = _require_authenticated_capability_operator(request)
+    active_session_id = operator.session_id
+    tokens = set_runtime_context(
+        active_session_id,
+        context_manager.get_context().approval_mode,
+        trust_principal=bind_operator_principal(operator, active_session_id),
+    )
     preview: dict[str, Any] | None = None
     try:
         preview = get_extension(extension_id)
@@ -1861,9 +1872,19 @@ async def configure_extension_package(extension_id: str, req: ExtensionConfigReq
                 "configure",
                 preview,
                 fingerprint_context=approval_context,
+                session_id=active_session_id,
                 summary_suffix="for requested config changes",
             )
+        assert_runtime_not_revoked()
         extension = configure_extension(extension_id, req.config)
+        await _log_extension_lifecycle_event(
+            action="configure",
+            outcome="succeeded",
+            preview=extension or preview,
+            path=extension_id,
+            extra_details={"config_keys": sorted(req.config.keys())},
+        )
+        return {"status": "configured", "extension": extension}
     except KeyError as exc:
         await _log_extension_lifecycle_event(
             action="configure",
@@ -1882,14 +1903,8 @@ async def configure_extension_package(extension_id: str, req: ExtensionConfigReq
             extra_details={"config_keys": sorted(req.config.keys())},
         )
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    await _log_extension_lifecycle_event(
-        action="configure",
-        outcome="succeeded",
-        preview=extension or preview,
-        path=extension_id,
-        extra_details={"config_keys": sorted(req.config.keys())},
-    )
-    return {"status": "configured", "extension": extension}
+    finally:
+        reset_runtime_context(tokens)
 
 
 @router.delete("/extensions/{extension_id}")

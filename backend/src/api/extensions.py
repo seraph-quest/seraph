@@ -17,6 +17,11 @@ from src.approval.runtime import reset_runtime_context, set_runtime_context
 from src.audit.runtime import log_integration_event
 from src.auth.cancellation import assert_runtime_not_revoked
 from src.auth.service import bind_operator_principal
+from src.api.chat import (
+    _begin_rest_revocation_watch,
+    _end_rest_revocation_watch,
+    _ensure_rest_authorized,
+)
 from src.extensions.channel_routing import (
     SUPPORTED_CHANNEL_ROUTE_TRANSPORTS,
     list_channel_route_bindings,
@@ -105,6 +110,82 @@ def _require_authenticated_capability_operator(request: Request):
 
 def _content_hash(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()[:16]
+
+
+def _redacted_path_receipt(value: Any) -> dict[str, Any] | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    return {"redacted": True, "digest": _content_hash(text)}
+
+
+def _redact_extension_error(value: Any) -> str:
+    """Keep operator errors useful without returning private filesystem paths."""
+
+    text = str(value)
+
+    def replace(match: re.Match[str]) -> str:
+        return f"{match.group(1)}[private path:{_content_hash(match.group(2))}]"
+
+    return _PRIVATE_PATH_PATTERN.sub(replace, text)
+
+
+def _extension_identity(preview: dict[str, Any]) -> tuple[str, str | None, str | None]:
+    extension_id = str(preview.get("id") or preview.get("extension_id") or "")
+    root_path = preview.get("root_path") or preview.get("path")
+    path_text = str(root_path).strip() if root_path else None
+    package_digest = preview.get("package_digest")
+    digest_text = str(package_digest).strip() if package_digest else None
+    return extension_id, path_text, digest_text
+
+
+def _assert_extension_effect_identity(
+    approved_preview: dict[str, Any],
+    current_preview: dict[str, Any],
+    *,
+    action: str,
+) -> None:
+    """Reject a lifecycle effect when its approved package snapshot changed."""
+
+    approved_id, approved_path, approved_digest = _extension_identity(approved_preview)
+    current_id, current_path, current_digest = _extension_identity(current_preview)
+    if (
+        not approved_id
+        or approved_id != current_id
+        or not approved_path
+        or not current_path
+        or _content_hash(approved_path) != _content_hash(current_path)
+        or not approved_digest
+        or not current_digest
+        or approved_digest != current_digest
+    ):
+        raise ValueError(
+            f"extension package changed after {action} approval; retry the lifecycle action"
+        )
+
+
+def _assert_extension_path_effect_identity(
+    path: str,
+    approved_preview: dict[str, Any],
+    *,
+    action: str,
+) -> None:
+    current_preview = validate_extension_path(path)
+    if not isinstance(current_preview, dict) or not current_preview.get("ok", False):
+        raise ValueError(
+            f"extension package changed after {action} approval; retry the lifecycle action"
+        )
+    _assert_extension_effect_identity(approved_preview, current_preview, action=action)
+
+
+def _assert_registered_extension_effect_identity(
+    extension_id: str,
+    approved_preview: dict[str, Any],
+    *,
+    action: str,
+) -> None:
+    current_preview = get_extension(extension_id)
+    _assert_extension_effect_identity(approved_preview, current_preview, action=action)
 
 
 def _lifecycle_fallback_preview(preview: dict[str, Any]) -> dict[str, Any]:
@@ -476,6 +557,7 @@ async def _log_extension_lifecycle_event(
     path: str | None = None,
     error: str | None = None,
     extra_details: dict[str, Any] | None = None,
+    redact_paths: bool = False,
 ) -> None:
     preview = preview if isinstance(preview, dict) else {}
     permission_summary = preview.get("permission_summary")
@@ -485,7 +567,12 @@ async def _log_extension_lifecycle_event(
         else None
     )
     extension_id = str(preview.get("id") or preview.get("extension_id") or "")
-    display_name = str(preview.get("display_name") or extension_id or Path(path or "extension").name or "extension")
+    display_name = str(
+        preview.get("display_name")
+        or extension_id
+        or ("extension" if redact_paths else Path(path or "extension").name)
+        or "extension"
+    )
     details = {
         "action": action,
         "status": f"{action}_{outcome}" if outcome == "failed" else (
@@ -499,8 +586,16 @@ async def _log_extension_lifecycle_event(
             else "removed" if action == "remove"
             else action
         ),
-        "path": preview.get("path") or path,
-        "manifest_path": preview.get("manifest_path"),
+        "path": (
+            _redacted_path_receipt(preview.get("path") or path)
+            if redact_paths
+            else preview.get("path") or path
+        ),
+        "manifest_path": (
+            _redacted_path_receipt(preview.get("manifest_path"))
+            if redact_paths
+            else preview.get("manifest_path")
+        ),
         "extension_id": extension_id or None,
         "extension_display_name": display_name,
         "version": preview.get("version"),
@@ -513,7 +608,11 @@ async def _log_extension_lifecycle_event(
         "load_error_count": _extension_load_error_count(preview),
         "extension_status": preview.get("status"),
         "ok": preview.get("ok"),
-        "error": error,
+        "error": (
+            _redact_extension_error(error)
+            if redact_paths and error is not None
+            else error
+        ),
         **(extra_details or {}),
     }
     await log_integration_event(
@@ -774,6 +873,7 @@ async def _require_extension_lifecycle_approval(
     session_id: str | None = None,
     fingerprint_context: dict[str, Any] | None = None,
     summary_suffix: str | None = None,
+    redact_paths: bool = False,
 ) -> None:
     preview = _lifecycle_fallback_preview(preview)
     approval_profile = preview.get("approval_profile")
@@ -801,13 +901,19 @@ async def _require_extension_lifecycle_approval(
     target_name = str(preview.get("target_name") or preview.get("name") or "")
     target_type = str(preview.get("target_type") or preview.get("type") or "")
     tool_name = f"extension_{action}"
+    package_path = preview.get("root_path") or preview.get("path")
+    package_identity = (
+        {"package_path_hash": _content_hash(str(package_path or ""))}
+        if redact_paths
+        else {"package_path": package_path}
+    )
     arguments = {
         "extension_id": extension_id,
         "version": preview.get("version"),
-        "package_path": preview.get("root_path") or preview.get("path"),
         "package_digest": preview.get("package_digest"),
         "boundaries": lifecycle_boundaries,
         "permissions": preview.get("permissions"),
+        **package_identity,
     }
     if isinstance(fingerprint_context, dict):
         arguments.update(fingerprint_context)
@@ -868,11 +974,11 @@ async def _require_extension_lifecycle_approval(
         "target_reference": target_reference or None,
         "target_name": target_name or None,
         "target_type": target_type or None,
-        "package_path": preview.get("root_path") or preview.get("path"),
         "package_digest": preview.get("package_digest"),
         "permissions": preview.get("permissions"),
         "approval_profile": approval_profile,
         "approval_scope": approval_scope,
+        **package_identity,
     }
     if isinstance(fingerprint_context, dict):
         details.update(fingerprint_context)
@@ -1691,7 +1797,9 @@ async def install_extension_package(req: ExtensionPathRequest, request: Request)
         trust_principal=bind_operator_principal(operator, active_session_id),
     )
     preview: dict[str, Any] | None = None
+    revocation_scope = None
     try:
+        revocation_scope = _begin_rest_revocation_watch(request)
         preview = validate_extension_path(req.path)
         if not preview.get("ok", False):
             raise ValueError("extension package failed validation")
@@ -1705,6 +1813,13 @@ async def install_extension_package(req: ExtensionPathRequest, request: Request)
             "install",
             preview,
             session_id=active_session_id,
+            redact_paths=True,
+        )
+        await _ensure_rest_authorized(request, revocation_scope)
+        _assert_extension_path_effect_identity(
+            req.path,
+            preview,
+            action="install",
         )
         assert_runtime_not_revoked()
         extension = install_extension_path(req.path)
@@ -1713,6 +1828,7 @@ async def install_extension_package(req: ExtensionPathRequest, request: Request)
             outcome="succeeded",
             preview=extension,
             path=req.path,
+            redact_paths=True,
             extra_details={
                 "location": extension.get("location"),
             },
@@ -1724,19 +1840,22 @@ async def install_extension_package(req: ExtensionPathRequest, request: Request)
             outcome="failed",
             preview=preview,
             path=req.path,
-            error=str(exc),
+            error=_redact_extension_error(exc),
+            redact_paths=True,
         )
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
+        raise HTTPException(status_code=409, detail=_redact_extension_error(exc)) from exc
     except ValueError as exc:
         await _log_extension_lifecycle_event(
             action="install",
             outcome="failed",
             preview=preview,
             path=req.path,
-            error=str(exc),
+            error=_redact_extension_error(exc),
+            redact_paths=True,
         )
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
+        raise HTTPException(status_code=422, detail=_redact_extension_error(exc)) from exc
     finally:
+        await _end_rest_revocation_watch(revocation_scope)
         reset_runtime_context(tokens)
 
 
@@ -1750,7 +1869,9 @@ async def update_extension_package(req: ExtensionPathRequest, request: Request):
         trust_principal=bind_operator_principal(operator, active_session_id),
     )
     preview: dict[str, Any] | None = None
+    revocation_scope = None
     try:
+        revocation_scope = _begin_rest_revocation_watch(request)
         preview = validate_extension_path(req.path)
         if not preview.get("ok", False):
             raise ValueError("extension package failed validation")
@@ -1769,6 +1890,13 @@ async def update_extension_package(req: ExtensionPathRequest, request: Request):
             "update",
             preview,
             session_id=active_session_id,
+            redact_paths=True,
+        )
+        await _ensure_rest_authorized(request, revocation_scope)
+        _assert_extension_path_effect_identity(
+            req.path,
+            preview,
+            action="update",
         )
         assert_runtime_not_revoked()
         extension = update_extension_path(req.path)
@@ -1777,6 +1905,7 @@ async def update_extension_package(req: ExtensionPathRequest, request: Request):
             outcome="succeeded",
             preview=extension,
             path=req.path,
+            redact_paths=True,
             extra_details={
                 "location": extension.get("location"),
             },
@@ -1789,19 +1918,25 @@ async def update_extension_package(req: ExtensionPathRequest, request: Request):
             outcome="failed",
             preview=preview,
             path=req.path,
-            error=f"Extension '{extension_id}' not found",
+            error=_redact_extension_error(f"Extension '{extension_id}' not found"),
+            redact_paths=True,
         )
-        raise HTTPException(status_code=404, detail=f"Extension '{extension_id}' not found") from exc
+        raise HTTPException(
+            status_code=404,
+            detail=_redact_extension_error(f"Extension '{extension_id}' not found"),
+        ) from exc
     except ValueError as exc:
         await _log_extension_lifecycle_event(
             action="update",
             outcome="failed",
             preview=preview,
             path=req.path,
-            error=str(exc),
+            error=_redact_extension_error(exc),
+            redact_paths=True,
         )
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
+        raise HTTPException(status_code=422, detail=_redact_extension_error(exc)) from exc
     finally:
+        await _end_rest_revocation_watch(revocation_scope)
         reset_runtime_context(tokens)
 
 
@@ -1815,7 +1950,9 @@ async def enable_extension_package(extension_id: str, request: Request):
         trust_principal=bind_operator_principal(operator, active_session_id),
     )
     preview: dict[str, Any] | None = None
+    revocation_scope = None
     try:
+        revocation_scope = _begin_rest_revocation_watch(request)
         preview = get_extension(extension_id)
         if preview.get("status") != "ready":
             if preview.get("status") == "quarantined":
@@ -1829,6 +1966,13 @@ async def enable_extension_package(extension_id: str, request: Request):
             "enable",
             preview,
             session_id=active_session_id,
+            redact_paths=True,
+        )
+        await _ensure_rest_authorized(request, revocation_scope)
+        _assert_registered_extension_effect_identity(
+            extension_id,
+            preview,
+            action="enable",
         )
         assert_runtime_not_revoked()
         result = enable_extension(extension_id)
@@ -1837,6 +1981,7 @@ async def enable_extension_package(extension_id: str, request: Request):
             outcome="succeeded",
             preview=result.get("extension"),
             path=extension_id,
+            redact_paths=True,
             extra_details={
                 "changed": result["changed"],
                 "changed_count": len(result.get("changed", [])),
@@ -1848,19 +1993,25 @@ async def enable_extension_package(extension_id: str, request: Request):
             action="enable",
             outcome="failed",
             path=extension_id,
-            error=f"Extension '{extension_id}' not found",
+            error=_redact_extension_error(f"Extension '{extension_id}' not found"),
+            redact_paths=True,
         )
-        raise HTTPException(status_code=404, detail=f"Extension '{extension_id}' not found") from exc
+        raise HTTPException(
+            status_code=404,
+            detail=_redact_extension_error(f"Extension '{extension_id}' not found"),
+        ) from exc
     except ValueError as exc:
         await _log_extension_lifecycle_event(
             action="enable",
             outcome="failed",
             preview=preview,
             path=extension_id,
-            error=str(exc),
+            error=_redact_extension_error(exc),
+            redact_paths=True,
         )
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
+        raise HTTPException(status_code=422, detail=_redact_extension_error(exc)) from exc
     finally:
+        await _end_rest_revocation_watch(revocation_scope)
         reset_runtime_context(tokens)
 
 
@@ -1874,12 +2025,21 @@ async def disable_extension_package(extension_id: str, request: Request):
         trust_principal=bind_operator_principal(operator, active_session_id),
     )
     preview: dict[str, Any] | None = None
+    revocation_scope = None
     try:
+        revocation_scope = _begin_rest_revocation_watch(request)
         preview = get_extension(extension_id)
         await _require_extension_lifecycle_approval(
             "disable",
             preview,
             session_id=active_session_id,
+            redact_paths=True,
+        )
+        await _ensure_rest_authorized(request, revocation_scope)
+        _assert_registered_extension_effect_identity(
+            extension_id,
+            preview,
+            action="disable",
         )
         assert_runtime_not_revoked()
         result = disable_extension(extension_id)
@@ -1888,6 +2048,7 @@ async def disable_extension_package(extension_id: str, request: Request):
             outcome="succeeded",
             preview=result.get("extension"),
             path=extension_id,
+            redact_paths=True,
             extra_details={
                 "changed": result["changed"],
                 "changed_count": len(result.get("changed", [])),
@@ -1899,10 +2060,25 @@ async def disable_extension_package(extension_id: str, request: Request):
             action="disable",
             outcome="failed",
             path=extension_id,
-            error=f"Extension '{extension_id}' not found",
+            error=_redact_extension_error(f"Extension '{extension_id}' not found"),
+            redact_paths=True,
         )
-        raise HTTPException(status_code=404, detail=f"Extension '{extension_id}' not found") from exc
+        raise HTTPException(
+            status_code=404,
+            detail=_redact_extension_error(f"Extension '{extension_id}' not found"),
+        ) from exc
+    except ValueError as exc:
+        await _log_extension_lifecycle_event(
+            action="disable",
+            outcome="failed",
+            preview=preview,
+            path=extension_id,
+            error=_redact_extension_error(exc),
+            redact_paths=True,
+        )
+        raise HTTPException(status_code=422, detail=_redact_extension_error(exc)) from exc
     finally:
+        await _end_rest_revocation_watch(revocation_scope)
         reset_runtime_context(tokens)
 
 
@@ -1973,12 +2149,21 @@ async def remove_extension_package(extension_id: str, request: Request):
         trust_principal=bind_operator_principal(operator, active_session_id),
     )
     preview: dict[str, Any] | None = None
+    revocation_scope = None
     try:
+        revocation_scope = _begin_rest_revocation_watch(request)
         preview = get_extension(extension_id)
         await _require_extension_lifecycle_approval(
             "remove",
             preview,
             session_id=active_session_id,
+            redact_paths=True,
+        )
+        await _ensure_rest_authorized(request, revocation_scope)
+        _assert_registered_extension_effect_identity(
+            extension_id,
+            preview,
+            action="remove",
         )
         assert_runtime_not_revoked()
         remove_extension(extension_id)
@@ -1987,6 +2172,7 @@ async def remove_extension_package(extension_id: str, request: Request):
             outcome="succeeded",
             preview=preview,
             path=extension_id,
+            redact_paths=True,
         )
         return {"status": "removed", "name": extension_id}
     except KeyError as exc:
@@ -1994,17 +2180,23 @@ async def remove_extension_package(extension_id: str, request: Request):
             action="remove",
             outcome="failed",
             path=extension_id,
-            error=f"Extension '{extension_id}' not found",
+            error=_redact_extension_error(f"Extension '{extension_id}' not found"),
+            redact_paths=True,
         )
-        raise HTTPException(status_code=404, detail=f"Extension '{extension_id}' not found") from exc
+        raise HTTPException(
+            status_code=404,
+            detail=_redact_extension_error(f"Extension '{extension_id}' not found"),
+        ) from exc
     except ValueError as exc:
         await _log_extension_lifecycle_event(
             action="remove",
             outcome="failed",
             preview=preview,
             path=extension_id,
-            error=str(exc),
+            error=_redact_extension_error(exc),
+            redact_paths=True,
         )
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
+        raise HTTPException(status_code=409, detail=_redact_extension_error(exc)) from exc
     finally:
+        await _end_rest_revocation_watch(revocation_scope)
         reset_runtime_context(tokens)

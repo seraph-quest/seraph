@@ -1,16 +1,22 @@
 from unittest.mock import patch
 
 import pytest
+from fastapi import HTTPException
 from httpx import ASGITransport, AsyncClient
+from starlette.requests import Request
 
 from src.app import create_app
+from src.api.capabilities import SourceEvidenceRequest, source_evidence
+from src.approval.runtime import reset_runtime_context, set_runtime_context
 from src.observer.context import CurrentContext
 from src.browser.sessions import browser_session_runtime
 from src.api.capabilities import _build_capability_overview
+from src.security.trust_contract import AuthorityGrant, PrincipalType, TrustPrincipal
 from src.extensions.source_operations import (
     build_source_mutation_plan,
     build_source_report_plan,
     build_source_review_plan,
+    collect_source_evidence_bundle,
     execute_source_mutation_bundle,
 )
 from src.tools.source_evidence_tool import collect_source_evidence
@@ -33,6 +39,17 @@ class FakeMCPTool:
         if callable(self._payload):
             return self._payload(**kwargs)
         return self._payload
+
+
+def _source_operator_principal(*, session_id: str = "source-session", revoked: bool = False) -> TrustPrincipal:
+    return TrustPrincipal(
+        principal_id="operator:source-test",
+        principal_type=PrincipalType.OPERATOR,
+        authenticated=True,
+        revoked=revoked,
+        grants=(AuthorityGrant.CAPABILITY_EXECUTE,),
+        session_id=session_id,
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -105,6 +122,7 @@ async def test_source_evidence_endpoint_collects_search_results_in_normalized_sh
         async with AsyncClient(transport=ASGITransport(app=create_app()), base_url="http://test") as client:
             response = await client.post(
                 "/api/capabilities/source-evidence",
+                headers={"X-Seraph-Session-Id": "test-auth-bypass"},
                 json={"contract": "source_discovery.read", "query": "seraph roadmap", "max_results": 2},
             )
 
@@ -126,6 +144,7 @@ async def test_source_evidence_endpoint_collects_public_page_content():
         async with AsyncClient(transport=ASGITransport(app=create_app()), base_url="http://test") as client:
             response = await client.post(
                 "/api/capabilities/source-evidence",
+                headers={"X-Seraph-Session-Id": "test-auth-bypass"},
                 json={"contract": "webpage.read", "url": "https://example.com/about"},
             )
 
@@ -138,9 +157,78 @@ async def test_source_evidence_endpoint_collects_public_page_content():
 
 
 @pytest.mark.asyncio
+async def test_source_evidence_route_denies_without_middleware_principal_before_dispatch():
+    request = Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/api/capabilities/source-evidence",
+            "headers": [],
+            "query_string": b"",
+            "state": {},
+        }
+    )
+    with patch("src.extensions.source_operations.search_web_records") as search:
+        with pytest.raises(HTTPException) as raised:
+            await source_evidence(
+                SourceEvidenceRequest(contract="source_discovery.read", query="bounded query"),
+                request,
+            )
+
+    assert getattr(raised.value, "status_code", None) == 401
+    search.assert_not_called()
+
+
+def test_source_evidence_adapter_denies_missing_or_revoked_principal_before_provider_dispatch():
+    records = [{"title": "safe", "href": "https://example.com/safe", "body": "evidence"}]
+    for principal, session_id in (
+        (None, None),
+        (_source_operator_principal(session_id="source-session", revoked=True), "source-session"),
+    ):
+        tokens = set_runtime_context(session_id, "high_risk", trust_principal=principal)
+        try:
+            with patch(
+                "src.extensions.source_operations.search_web_records",
+                return_value=(records, []),
+            ) as search:
+                with pytest.raises(PermissionError, match="runtime authority is unavailable"):
+                    collect_source_evidence_bundle(
+                        contract="source_discovery.read",
+                        query="bounded query",
+                    )
+                search.assert_not_called()
+        finally:
+            reset_runtime_context(tokens)
+
+
+def test_source_evidence_adapter_dispatches_with_authenticated_capability_authority():
+    records = [{"title": "safe", "href": "https://example.com/safe", "body": "evidence"}]
+    tokens = set_runtime_context(
+        "source-session",
+        "high_risk",
+        trust_principal=_source_operator_principal(),
+    )
+    try:
+        with patch(
+            "src.extensions.source_operations.search_web_records",
+            return_value=(records, []),
+        ) as search:
+            bundle = collect_source_evidence_bundle(
+                contract="source_discovery.read",
+                query="bounded query",
+            )
+    finally:
+        reset_runtime_context(tokens)
+
+    assert bundle["status"] == "ok"
+    assert bundle["summary"]["item_count"] == 1
+    search.assert_called_once_with("bounded query", max_results=5)
+
+
+@pytest.mark.asyncio
 async def test_source_evidence_endpoint_reads_existing_browser_snapshot():
     payload = browser_session_runtime.open_session(
-        owner_session_id="session-1",
+        owner_session_id="test-auth-bypass",
         url="https://example.com/context",
         provider_name="local-browser",
         provider_kind="local",
@@ -152,11 +240,11 @@ async def test_source_evidence_endpoint_reads_existing_browser_snapshot():
     async with AsyncClient(transport=ASGITransport(app=create_app()), base_url="http://test") as client:
         response = await client.post(
             "/api/capabilities/source-evidence",
-            headers={"X-Seraph-Session-Id": "session-1"},
+            headers={"X-Seraph-Session-Id": "test-auth-bypass"},
             json={
                 "contract": "webpage.read",
                 "source": "browser_session",
-                "owner_session_id": "session-1",
+                "owner_session_id": "test-auth-bypass",
                 "ref": payload["latest_ref"],
             },
         )
@@ -184,7 +272,7 @@ async def test_source_evidence_endpoint_denies_cross_session_browser_snapshot_ow
     async with AsyncClient(transport=ASGITransport(app=create_app()), base_url="http://test") as client:
         response = await client.post(
             "/api/capabilities/source-evidence",
-            headers={"X-Seraph-Session-Id": "session-2"},
+            headers={"X-Seraph-Session-Id": "test-auth-bypass"},
             json={
                 "contract": "webpage.read",
                 "source": "browser_session",
@@ -231,6 +319,7 @@ async def test_source_evidence_endpoint_reports_degraded_managed_connector_with_
         async with AsyncClient(transport=ASGITransport(app=create_app()), base_url="http://test") as client:
             response = await client.post(
                 "/api/capabilities/source-evidence",
+                headers={"X-Seraph-Session-Id": "test-auth-bypass"},
                 json={"contract": "work_items.read", "source": "github-managed"},
             )
 
@@ -403,6 +492,7 @@ async def test_source_evidence_endpoint_collects_github_work_items_via_bound_run
         async with AsyncClient(transport=ASGITransport(app=create_app()), base_url="http://test") as client:
             response = await client.post(
                 "/api/capabilities/source-evidence",
+                headers={"X-Seraph-Session-Id": "test-auth-bypass"},
                 json={
                     "contract": "work_items.read",
                     "source": "github-managed",

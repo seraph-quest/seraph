@@ -9,7 +9,7 @@ import os
 import tempfile
 from typing import Any
 
-from fastapi import APIRouter, Header, HTTPException, Query
+from fastapi import APIRouter, Header, HTTPException, Query, Request
 from pydantic import BaseModel
 from sqlmodel import select
 
@@ -22,6 +22,7 @@ from src.api.catalog import (
     load_catalog_items,
     require_catalog_install_approval,
 )
+from src.auth.service import AuthenticatedOperator, bind_operator_principal
 from src.audit.runtime import log_integration_event
 from src.db.engine import get_session as get_db
 from src.db.models import UserProfile
@@ -52,6 +53,7 @@ from src.tools.policy import (
     get_tool_risk_level,
     is_tool_allowed,
 )
+from src.security.trust_contract import AuthorityGrant, PrincipalType
 from src.workflows.manager import workflow_manager
 from src.workflows.loader import scan_workflow_paths, scan_workflows, sanitize_workflow_name
 
@@ -153,9 +155,59 @@ class WorkflowDraftRequest(BaseModel):
     content: str
 
 
+def _require_authenticated_source_operator(request: Request) -> AuthenticatedOperator:
+    """Use middleware-bound operator authority for source evidence dispatch."""
+    operator = getattr(request.state, "operator", None)
+    principal = getattr(operator, "principal", None)
+    session_id = str(getattr(operator, "session_id", "") or "").strip()
+    principal_type = getattr(getattr(principal, "principal_type", None), "value", None) or str(
+        getattr(principal, "principal_type", "") or ""
+    ).strip()
+    principal_session_id = str(getattr(principal, "session_id", "") or "").strip()
+    grants = {str(getattr(grant, "value", grant)) for grant in getattr(principal, "grants", ())}
+    if (
+        not isinstance(operator, AuthenticatedOperator)
+        or principal is None
+        or principal_type != PrincipalType.OPERATOR.value
+        or not bool(getattr(principal, "authenticated", False))
+        or bool(getattr(principal, "revoked", False))
+        or not session_id
+        or principal_session_id != session_id
+        or AuthorityGrant.CAPABILITY_EXECUTE.value not in grants
+    ):
+        raise HTTPException(status_code=401, detail={"code": "authentication_required"})
+    return operator
+
+
 @router.post("/capabilities/source-evidence")
-async def source_evidence(req: SourceEvidenceRequest, x_seraph_session_id: str | None = Header(default=None)):
-    active_session_id = (x_seraph_session_id or "").strip()
+async def source_evidence(
+    req: SourceEvidenceRequest,
+    request: Request,
+    x_seraph_session_id: str | None = Header(default=None),
+):
+    operator = _require_authenticated_source_operator(request)
+    authenticated_session_id = operator.session_id
+    requested_session_id = (x_seraph_session_id or "").strip()
+    active_session_id = authenticated_session_id
+    if requested_session_id and requested_session_id != authenticated_session_id:
+        return {
+            "status": "failed",
+            "request": {
+                "contract": req.contract,
+                "source": req.source,
+                "query": req.query,
+                "url": req.url,
+                "ref": req.ref,
+                "session_id": req.session_id,
+                "owner_session_id": req.owner_session_id,
+                "max_results": req.max_results,
+            },
+            "adapter": None,
+            "items": [],
+            "warnings": ["source evidence session header does not match the authenticated operator session."],
+            "next_best_sources": [],
+            "summary": {"item_count": 0, "contract": req.contract},
+        }
     existing_session_id = get_current_session_id()
     if existing_session_id and active_session_id and existing_session_id != active_session_id:
         return {
@@ -177,23 +229,30 @@ async def source_evidence(req: SourceEvidenceRequest, x_seraph_session_id: str |
             "summary": {"item_count": 0, "contract": req.contract},
         }
 
-    tokens = None
-    if active_session_id and not existing_session_id:
-        tokens = set_runtime_context(active_session_id, context_manager.get_context().approval_mode)
+    tokens = set_runtime_context(
+        active_session_id,
+        context_manager.get_context().approval_mode,
+        trust_principal=bind_operator_principal(operator, active_session_id),
+    )
     try:
-        return collect_source_evidence_bundle(
-            contract=req.contract,
-            source=req.source,
-            query=req.query,
-            url=req.url,
-            ref=req.ref,
-            session_id=req.session_id,
-            owner_session_id=req.owner_session_id,
-            max_results=req.max_results,
-        )
+        try:
+            return collect_source_evidence_bundle(
+                contract=req.contract,
+                source=req.source,
+                query=req.query,
+                url=req.url,
+                ref=req.ref,
+                session_id=req.session_id,
+                owner_session_id=req.owner_session_id,
+                max_results=req.max_results,
+            )
+        except PermissionError as exc:
+            raise HTTPException(
+                status_code=403,
+                detail={"code": "source_evidence_authority_denied", "reason": str(exc)},
+            ) from exc
     finally:
-        if tokens is not None:
-            reset_runtime_context(tokens)
+        reset_runtime_context(tokens)
 
 
 @router.post("/capabilities/source-review-plan")

@@ -183,6 +183,7 @@ async def test_owner_revocation_is_scoped_and_cancels_queued_work_before_dispatc
 @pytest.mark.asyncio
 async def test_owner_revocation_keeps_active_remote_cost_uncertain_until_reconciled():
     broker = RemoteInferenceAdmissionBroker(clock=_Clock())
+    recovery_token = broker.register_recovery_authority("recovery-service")
     request = _request("owner-revoked-active", estimated_cost_microusd=12)
     callback_started = asyncio.Event()
     callback_cancelled = asyncio.Event()
@@ -203,6 +204,9 @@ async def test_owner_revocation_keeps_active_remote_cost_uncertain_until_reconci
 
     task = asyncio.create_task(broker.execute(request, provider))
     await callback_started.wait()
+
+    with pytest.raises(RuntimeError, match="bootstrap-only"):
+        broker.register_recovery_authority("late-attacker")
 
     requested = await broker.cancel_owner(request.owner_id)
     assert len(requested) == 1
@@ -240,6 +244,7 @@ async def test_owner_revocation_keeps_active_remote_cost_uncertain_until_reconci
             owner_id=request.owner_id,
             job_id=request.job_id,
             fencing_token=error.value.receipt.fencing_token or 0,
+            recovery_authority_token="owner-b",
             outcome="cancelled",
             reason_code="owner_revoked_reconciled",
             actual_cost_microusd=9,
@@ -259,7 +264,7 @@ async def test_owner_revocation_keeps_active_remote_cost_uncertain_until_reconci
         owner_id=request.owner_id,
         job_id=request.job_id,
         fencing_token=error.value.receipt.fencing_token or 0,
-        recovery_owner_id="owner-b",
+        recovery_authority_token=recovery_token,
         outcome="cancelled",
         reason_code="owner_revoked_reconciled",
         actual_cost_microusd=9,

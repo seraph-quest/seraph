@@ -15,6 +15,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 from enum import Enum
 import math
+import secrets
 import threading
 import time
 from typing import Any, Generic, TypeVar
@@ -437,6 +438,33 @@ class GpuAdmissionBroker(Generic[T]):
         # Owner revocation is intentionally process-local.  Durable job
         # authority and restart adoption remain outside this admission lease.
         self._revoked_owners: set[str] = set()
+        # Recovery authority is bootstrap state owned by this broker.  Callers
+        # receive an opaque token from register_recovery_authority(); the
+        # reconcile path never trusts a caller-supplied authority name.
+        self._recovery_authority_tokens: dict[str, str] = {}
+        self._recovery_registry_sealed = False
+
+    def register_recovery_authority(self, authority_id: str) -> str:
+        """Register a non-revoked operator/service and issue an opaque token.
+
+        Registration is a trusted broker bootstrap seam.  The returned token
+        is the only recovery credential accepted by ``reconcile`` for a
+        revoked operation owner; authority names are never accepted there.
+        """
+        normalized_authority = str(authority_id or "").strip()
+        if not normalized_authority or len(normalized_authority) > 256:
+            raise ValueError("authority_id is required and must be <= 256 characters")
+        with self._condition:
+            if self._recovery_registry_sealed:
+                raise RuntimeError("recovery authority registration is bootstrap-only")
+            if normalized_authority in self._revoked_owners:
+                raise ValueError("recovery authority is revoked")
+            for token, registered_authority in self._recovery_authority_tokens.items():
+                if registered_authority == normalized_authority:
+                    return token
+            token = secrets.token_urlsafe(32)
+            self._recovery_authority_tokens[token] = normalized_authority
+            return token
 
     async def enqueue(
         self,
@@ -461,6 +489,7 @@ class GpuAdmissionBroker(Generic[T]):
         *,
         clock_offset: float = 0.0,
     ) -> GpuAdmissionReceipt:
+        self._recovery_registry_sealed = True
         self._mark_active_deadline_locked()
         self._expire_locked(observed_at)
         existing = self._operations.get(request.operation_id)
@@ -1317,7 +1346,7 @@ class GpuAdmissionBroker(Generic[T]):
         owner_id: str,
         job_id: str,
         fencing_token: int,
-        recovery_owner_id: str | None = None,
+        recovery_authority_token: str | None = None,
         outcome: str = "failed",
         reason_code: str = "provider_result_reconciled",
         actual_cost_microusd: int | None = None,
@@ -1326,8 +1355,8 @@ class GpuAdmissionBroker(Generic[T]):
 
         ``owner_id``, ``job_id``, and ``fencing_token`` identify the exact
         blocked attempt.  A revoked owner cannot settle its own uncertain
-        result; a trusted, non-revoked recovery caller must be named
-        explicitly through ``recovery_owner_id``.
+        result; a broker-registered, non-revoked recovery authority must
+        present its opaque token through ``recovery_authority_token``.
         """
         if outcome not in {"succeeded", "failed", "cancelled"}:
             raise ValueError("GPU reconciliation outcome is not supported")
@@ -1336,8 +1365,8 @@ class GpuAdmissionBroker(Generic[T]):
         normalized_operation_id = str(operation_id or "").strip()
         normalized_owner = str(owner_id or "").strip()
         normalized_job = str(job_id or "").strip()
-        normalized_recovery_owner = (
-            None if recovery_owner_id is None else str(recovery_owner_id).strip()
+        normalized_recovery_token = (
+            None if recovery_authority_token is None else str(recovery_authority_token).strip()
         )
         if not normalized_operation_id or not normalized_owner or not normalized_job:
             raise GpuAdmissionLeaseError(
@@ -1370,11 +1399,8 @@ class GpuAdmissionBroker(Generic[T]):
                     receipt=receipt,
                 )
             if operation.request.owner_id in self._revoked_owners:
-                if (
-                    not normalized_recovery_owner
-                    or normalized_recovery_owner == normalized_owner
-                    or normalized_recovery_owner in self._revoked_owners
-                ):
+                recovery_authority = self._recovery_authority_tokens.get(normalized_recovery_token or "")
+                if recovery_authority is None or recovery_authority in self._revoked_owners:
                     receipt = self._receipt_locked(
                         operation,
                         reason_code=GPU_OWNER_REVOCATION_REASON,
@@ -1383,7 +1409,7 @@ class GpuAdmissionBroker(Generic[T]):
                         "GPU operation owner has been revoked",
                         receipt=receipt,
                     )
-            elif normalized_recovery_owner is not None:
+            elif normalized_recovery_token is not None:
                 receipt = self._receipt_locked(
                     operation,
                     reason_code="stale_owner_or_fencing_token",
@@ -1520,6 +1546,8 @@ class GpuAdmissionBroker(Generic[T]):
             self._active_task = None
             self._last_degraded_reason = None
             self._revoked_owners.clear()
+            self._recovery_authority_tokens.clear()
+            self._recovery_registry_sealed = False
             self._notify_all_locked()
 
     async def _cancel_after_wait(

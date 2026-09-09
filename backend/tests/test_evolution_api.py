@@ -1,12 +1,20 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
+from fastapi import HTTPException
 import pytest
+from starlette.requests import Request
 
+from src.approval.runtime import get_current_session_id, get_current_trust_principal
+from src.auth.cancellation import RuntimeRevokedError
+from src.auth.service import test_bypass_operator
 from src.runbooks.manager import runbook_manager
+from src.security.trust_contract import PrincipalType
 from src.skills.manager import skill_manager
 from src.starter_packs.manager import starter_pack_manager
 
@@ -107,6 +115,173 @@ def _write_workspace_extension_manifest(package_root: Path, *, contribution_type
         f"    - {relative_path}\n",
         encoding="utf-8",
     )
+
+
+def _evolution_request(operator):
+    return Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/api/evolution/proposals",
+            "headers": [],
+            "query_string": b"",
+            "state": {"operator": operator},
+        }
+    )
+
+
+@pytest.mark.asyncio
+async def test_evolution_mutators_deny_invalid_operator_before_side_effects():
+    from src.api.evolution import EvolutionProposalRequest, EvolutionValidationRequest
+    from src.api.evolution import create_governed_evolution_proposal, validate_evolution_candidate
+
+    operator = test_bypass_operator()
+    invalid_operators = (
+        None,
+        object(),
+        replace(operator, principal=replace(operator.principal, authenticated=False)),
+        replace(operator, principal=replace(operator.principal, revoked=True)),
+        replace(operator, principal=replace(operator.principal, session_id="other-session")),
+        replace(operator, principal=replace(operator.principal, principal_type=PrincipalType.SERVICE)),
+        replace(operator, principal=replace(operator.principal, grants=())),
+    )
+    validation = EvolutionValidationRequest(
+        target_type="prompt_pack",
+        source_path="/tmp/source.md",
+        candidate_content="# Candidate",
+    )
+    proposal = EvolutionProposalRequest(target_type="prompt_pack", source_path="/tmp/source.md")
+    with (
+        patch("src.api.evolution._ensure_evolution_managers_loaded") as ensure,
+        patch("src.api.evolution.evaluate_candidate") as evaluate,
+        patch("src.api.evolution.create_evolution_proposal") as create,
+        patch("src.api.evolution.log_integration_event", new_callable=AsyncMock) as audit,
+    ):
+        for invalid_operator in invalid_operators:
+            with pytest.raises(HTTPException) as validation_error:
+                await validate_evolution_candidate(validation, _evolution_request(invalid_operator))
+            assert validation_error.value.status_code == 401
+            with pytest.raises(HTTPException) as proposal_error:
+                await create_governed_evolution_proposal(proposal, _evolution_request(invalid_operator))
+            assert proposal_error.value.status_code == 401
+
+    ensure.assert_not_called()
+    evaluate.assert_not_called()
+    create.assert_not_called()
+    audit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_evolution_routes_bind_exact_operator_context_and_reset_after_audit():
+    from src.api.evolution import EvolutionProposalRequest, EvolutionValidationRequest
+    from src.api.evolution import create_governed_evolution_proposal, validate_evolution_candidate
+
+    operator = test_bypass_operator()
+    observed: list[tuple[str, object]] = []
+
+    def observe(label: str):
+        observed.append((label, get_current_trust_principal()))
+
+    receipt = SimpleNamespace(
+        to_dict=lambda: {
+            "valid": True,
+            "blocked": False,
+            "score": 0.8,
+            "quality_state": "guarded",
+            "constraints": [],
+            "benchmark_gate": {"rollout_state": "guarded_review"},
+        }
+    )
+    proposal_payload = {
+        "status": "saved",
+        "receipt": receipt.to_dict(),
+        "candidate_content": "candidate secret must stay out of audit",
+    }
+
+    async def audit_event(**kwargs):
+        observe(str(kwargs.get("outcome") or "audit"))
+        assert "candidate secret" not in repr(kwargs)
+
+    with (
+        patch("src.api.evolution.context_manager.get_context", return_value=SimpleNamespace(approval_mode="balanced")),
+        patch(
+            "src.api.evolution._ensure_evolution_managers_loaded",
+            side_effect=lambda: observe("ensure"),
+        ),
+        patch(
+            "src.api.evolution.evaluate_candidate",
+            side_effect=lambda *_args, **_kwargs: (observe("evaluate") or receipt),
+        ),
+        patch(
+            "src.api.evolution.create_evolution_proposal",
+            side_effect=lambda *_args, **_kwargs: (observe("proposal") or proposal_payload),
+        ),
+        patch("src.api.evolution.skill_manager.reload", side_effect=lambda: observe("skill_reload")),
+        patch("src.api.evolution.runbook_manager.reload", side_effect=lambda: observe("runbook_reload")),
+        patch("src.api.evolution.starter_pack_manager.reload", side_effect=lambda: observe("pack_reload")),
+        patch("src.api.evolution.log_integration_event", new_callable=AsyncMock, side_effect=audit_event),
+    ):
+        validation_payload = await validate_evolution_candidate(
+            EvolutionValidationRequest(
+                target_type="prompt_pack",
+                source_path="/tmp/source.md",
+                candidate_content="# Candidate",
+                objective="secret objective",
+            ),
+            _evolution_request(operator),
+        )
+        proposal_result = await create_governed_evolution_proposal(
+            EvolutionProposalRequest(target_type="prompt_pack", source_path="/tmp/source.md"),
+            _evolution_request(operator),
+        )
+
+    assert validation_payload["receipt"]["valid"] is True
+    assert proposal_result["status"] == "saved"
+    assert [label for label, _principal in observed] == [
+        "ensure",
+        "evaluate",
+        "ensure",
+        "proposal",
+        "skill_reload",
+        "runbook_reload",
+        "pack_reload",
+        "succeeded",
+    ]
+    assert all(
+        principal is not None
+        and principal.principal_id == operator.principal.principal_id
+        and principal.principal_type is PrincipalType.OPERATOR
+        and principal.session_id == operator.session_id
+        for _label, principal in observed
+    )
+    assert get_current_session_id() is None
+    assert get_current_trust_principal() is None
+
+
+@pytest.mark.asyncio
+async def test_evolution_proposal_rechecks_revocation_before_creation_and_resets_context():
+    from src.api.evolution import EvolutionProposalRequest, create_governed_evolution_proposal
+
+    operator = test_bypass_operator()
+    revoked = RuntimeRevokedError("operator session was revoked")
+    with (
+        patch("src.api.evolution.context_manager.get_context", return_value=SimpleNamespace(approval_mode="safe")),
+        patch("src.api.evolution._ensure_evolution_managers_loaded") as ensure,
+        patch("src.api.evolution.assert_runtime_not_revoked", side_effect=[None, revoked]),
+        patch("src.api.evolution.create_evolution_proposal") as create,
+        patch("src.api.evolution.log_integration_event", new_callable=AsyncMock) as audit,
+    ):
+        with pytest.raises(RuntimeRevokedError):
+            await create_governed_evolution_proposal(
+                EvolutionProposalRequest(target_type="prompt_pack", source_path="/tmp/source.md"),
+                _evolution_request(operator),
+            )
+
+    ensure.assert_called_once()
+    create.assert_not_called()
+    audit.assert_not_awaited()
+    assert get_current_session_id() is None
+    assert get_current_trust_principal() is None
 
 
 @pytest.mark.asyncio

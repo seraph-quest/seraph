@@ -2,18 +2,24 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 from pathlib import Path
 import re
 from typing import Literal
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from config.settings import settings
+from src.approval.runtime import reset_runtime_context, set_runtime_context
+from src.api.capabilities import _require_authenticated_capability_operator
 from src.audit.runtime import log_integration_event
+from src.auth.cancellation import assert_runtime_not_revoked
+from src.auth.service import bind_operator_principal
 from src.evolution.engine import create_evolution_proposal, evaluate_candidate, list_evolution_targets
 from src.extensions.registry import default_manifest_roots_for_workspace
+from src.observer.manager import context_manager
 from src.runbooks.manager import runbook_manager
 from src.skills.manager import skill_manager
 from src.starter_packs.manager import starter_pack_manager
@@ -87,6 +93,71 @@ def _ensure_evolution_managers_loaded() -> None:
         starter_pack_manager.init(starter_legacy_path, manifest_roots=manifest_roots)
 
 
+def _bind_evolution_operator(request: Request):
+    """Bind evolution work to middleware-authenticated operator authority."""
+    operator = _require_authenticated_capability_operator(request)
+    session_id = operator.session_id
+    tokens = set_runtime_context(
+        session_id,
+        context_manager.get_context().approval_mode,
+        trust_principal=bind_operator_principal(operator, session_id),
+    )
+    return tokens
+
+
+def _evolution_audit_details(
+    req: EvolutionProposalRequest,
+    *,
+    outcome: str,
+    receipt: dict[str, object] | None = None,
+) -> dict[str, object]:
+    """Build a metadata-only audit detail payload.
+
+    Evolution inputs can contain arbitrary operator text and candidate content.
+    Keep audit receipts useful for state transitions without copying any of that
+    content, paths, or parser error text into the audit stream.
+    """
+    details: dict[str, object] = {
+        "target_type": req.target_type,
+        "outcome": outcome,
+        "source_path_digest": hashlib.sha256(req.source_path.encode("utf-8")).hexdigest(),
+    }
+    if receipt is None:
+        return details
+    details["receipt"] = {
+        "valid": bool(receipt.get("valid")),
+        "blocked": bool(receipt.get("blocked")),
+        "score": receipt.get("score"),
+        "quality_state": receipt.get("quality_state"),
+        "constraint_states": [
+            {
+                "name": item.get("name"),
+                "status": item.get("status"),
+                "blocked": bool(item.get("blocked")),
+            }
+            for item in receipt.get("constraints", [])
+            if isinstance(item, dict)
+        ],
+        "benchmark_gate": {
+            key: receipt.get("benchmark_gate", {}).get(key)
+            for key in (
+                "rollout_state",
+                "regression_gate",
+                "acceptance_state",
+                "diversity_guard_state",
+                "canary_required",
+                "rollback_ready_required",
+                "rollback_ready",
+                "safety_receipt_state",
+            )
+            if isinstance(receipt.get("benchmark_gate"), dict)
+        },
+        "saved": bool(receipt.get("saved_path")),
+        "receipt_written": bool(receipt.get("receipt_path")),
+    }
+    return details
+
+
 @router.get("/evolution/targets")
 async def evolution_targets():
     _ensure_evolution_managers_loaded()
@@ -94,56 +165,75 @@ async def evolution_targets():
 
 
 @router.post("/evolution/validate")
-async def validate_evolution_candidate(req: EvolutionValidationRequest):
-    _ensure_evolution_managers_loaded()
+async def validate_evolution_candidate(req: EvolutionValidationRequest, request: Request):
+    tokens = _bind_evolution_operator(request)
     try:
-        receipt = evaluate_candidate(
-            req.target_type,
-            source_path=req.source_path,
-            candidate_content=req.candidate_content,
-            objective=req.objective,
-            observations=req.observations,
-            candidate_file_name=_safe_file_name(req.file_name, target_type=req.target_type, source_path=req.source_path),
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return {"receipt": receipt.to_dict()}
+        assert_runtime_not_revoked()
+        _ensure_evolution_managers_loaded()
+        assert_runtime_not_revoked()
+        try:
+            receipt = evaluate_candidate(
+                req.target_type,
+                source_path=req.source_path,
+                candidate_content=req.candidate_content,
+                objective=req.objective,
+                observations=req.observations,
+                candidate_file_name=_safe_file_name(
+                    req.file_name,
+                    target_type=req.target_type,
+                    source_path=req.source_path,
+                ),
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {"receipt": receipt.to_dict()}
+    finally:
+        reset_runtime_context(tokens)
 
 
 @router.post("/evolution/proposals")
-async def create_governed_evolution_proposal(req: EvolutionProposalRequest):
-    _ensure_evolution_managers_loaded()
+async def create_governed_evolution_proposal(req: EvolutionProposalRequest, request: Request):
+    tokens = _bind_evolution_operator(request)
     try:
-        proposal = create_evolution_proposal(
-            req.target_type,
-            source_path=req.source_path,
-            objective=req.objective,
-            observations=req.observations,
-            file_name=_safe_file_name(req.file_name, target_type=req.target_type, source_path=req.source_path),
-        )
-    except ValueError as exc:
+        assert_runtime_not_revoked()
+        _ensure_evolution_managers_loaded()
+        assert_runtime_not_revoked()
+        try:
+            proposal = create_evolution_proposal(
+                req.target_type,
+                source_path=req.source_path,
+                objective=req.objective,
+                observations=req.observations,
+                file_name=_safe_file_name(
+                    req.file_name,
+                    target_type=req.target_type,
+                    source_path=req.source_path,
+                ),
+            )
+        except ValueError as exc:
+            assert_runtime_not_revoked()
+            await log_integration_event(
+                integration_type="self_evolution",
+                name=req.target_type,
+                outcome="failed",
+                details=_evolution_audit_details(req, outcome="failed"),
+            )
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        if proposal["status"] == "saved":
+            assert_runtime_not_revoked()
+            skill_manager.reload()
+            runbook_manager.reload()
+            starter_pack_manager.reload()
+
+        assert_runtime_not_revoked()
+        outcome = "succeeded" if proposal["status"] == "saved" else "blocked"
         await log_integration_event(
             integration_type="self_evolution",
             name=req.target_type,
-            outcome="failed",
-            details={"source_path": req.source_path, "error": str(exc)},
+            outcome=outcome,
+            details=_evolution_audit_details(req, outcome=outcome, receipt=proposal.get("receipt")),
         )
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-    if proposal["status"] == "saved":
-        skill_manager.reload()
-        runbook_manager.reload()
-        starter_pack_manager.reload()
-
-    await log_integration_event(
-        integration_type="self_evolution",
-        name=req.target_type,
-        outcome="succeeded" if proposal["status"] == "saved" else "blocked",
-        details={
-            "source_path": req.source_path,
-            "objective": req.objective,
-            "observations": req.observations,
-            "receipt": proposal["receipt"],
-        },
-    )
-    return proposal
+        return proposal
+    finally:
+        reset_runtime_context(tokens)

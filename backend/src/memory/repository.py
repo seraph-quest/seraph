@@ -2221,32 +2221,56 @@ class MemoryRepository:
         weight: float = 1.0,
         metadata: dict[str, Any] | None = None,
     ) -> MemoryEdge:
-        if not from_memory_id or not to_memory_id:
+        normalized_from_memory_id = str(from_memory_id or "").strip()
+        normalized_to_memory_id = str(to_memory_id or "").strip()
+        if not normalized_from_memory_id or not normalized_to_memory_id:
             raise ValueError("from_memory_id and to_memory_id must be non-empty")
         normalized_edge_type = _coerce_enum(edge_type, MemoryEdgeType)
-        async with get_session() as db:
-            existing = (
-                await db.execute(
-                    select(MemoryEdge)
-                    .where(MemoryEdge.from_memory_id == from_memory_id)
-                    .where(MemoryEdge.to_memory_id == to_memory_id)
-                    .where(MemoryEdge.edge_type == normalized_edge_type)
+        endpoint_ids = {normalized_from_memory_id, normalized_to_memory_id}
+        async with self._canonical_memory_lock:
+            async with get_session() as db:
+                # Edge creation is a canonical write.  Serialize the endpoint
+                # check with tombstone writes so a deleted endpoint cannot be
+                # admitted between the check and the insert.
+                await _begin_canonical_write(db)
+                endpoint_result = await db.execute(
+                    select(Memory).where(
+                        Memory.id.in_(endpoint_ids),
+                        _canonical_memory_without_tombstone_clause(),
+                    )
                 )
-            ).scalars().first()
-            if existing is not None:
-                db.expunge(existing)
-                return existing
-            edge = MemoryEdge(
-                from_memory_id=from_memory_id,
-                to_memory_id=to_memory_id,
-                edge_type=normalized_edge_type,
-                weight=weight,
-                metadata_json=json.dumps(metadata or {}, sort_keys=True),
-            )
-            db.add(edge)
-            await db.flush()
-            db.expunge(edge)
-            return edge
+                canonical_endpoint_ids = {
+                    memory.id
+                    for memory in endpoint_result.scalars().all()
+                    if _canonical_memory_deletion_marker(memory) is None
+                }
+                if canonical_endpoint_ids != endpoint_ids:
+                    raise ValueError(
+                        "edge endpoints must reference existing canonical memories"
+                    )
+
+                existing = (
+                    await db.execute(
+                        select(MemoryEdge)
+                        .where(MemoryEdge.from_memory_id == normalized_from_memory_id)
+                        .where(MemoryEdge.to_memory_id == normalized_to_memory_id)
+                        .where(MemoryEdge.edge_type == normalized_edge_type)
+                    )
+                ).scalars().first()
+                if existing is not None:
+                    db.expunge(existing)
+                    return existing
+                edge = MemoryEdge(
+                    from_memory_id=normalized_from_memory_id,
+                    to_memory_id=normalized_to_memory_id,
+                    edge_type=normalized_edge_type,
+                    weight=weight,
+                    metadata_json=json.dumps(metadata or {}, sort_keys=True),
+                )
+                db.add(edge)
+                await db.flush()
+                db.expunge(edge)
+                return edge
 
     async def list_edges(
         self,
@@ -2256,15 +2280,53 @@ class MemoryRepository:
         edge_type: MemoryEdgeType | str | None = None,
     ) -> list[MemoryEdge]:
         async with get_session() as db:
-            stmt = select(MemoryEdge).order_by(col(MemoryEdge.created_at).asc())
+            # Tombstones are canonical authority.  Keep both endpoint
+            # predicates in the same read transaction so a stale edge never
+            # becomes context merely because its row survived deletion.
+            stmt = (
+                select(MemoryEdge)
+                .where(
+                    ~exists().where(
+                        MemoryTombstone.memory_id == MemoryEdge.from_memory_id
+                    ),
+                    ~exists().where(
+                        MemoryTombstone.memory_id == MemoryEdge.to_memory_id
+                    ),
+                )
+                .order_by(col(MemoryEdge.created_at).asc())
+            )
             if from_memory_id is not None:
-                stmt = stmt.where(MemoryEdge.from_memory_id == from_memory_id)
+                stmt = stmt.where(
+                    MemoryEdge.from_memory_id == str(from_memory_id).strip()
+                )
             if to_memory_id is not None:
-                stmt = stmt.where(MemoryEdge.to_memory_id == to_memory_id)
+                stmt = stmt.where(
+                    MemoryEdge.to_memory_id == str(to_memory_id).strip()
+                )
             if edge_type is not None:
                 stmt = stmt.where(MemoryEdge.edge_type == _coerce_enum(edge_type, MemoryEdgeType))
             result = await db.execute(stmt)
             edges = result.scalars().all()
+            endpoint_ids = {
+                memory_id
+                for edge in edges
+                for memory_id in (edge.from_memory_id, edge.to_memory_id)
+            }
+            if endpoint_ids:
+                endpoint_result = await db.execute(
+                    select(Memory).where(Memory.id.in_(endpoint_ids))
+                )
+                canonical_endpoint_ids = {
+                    memory.id
+                    for memory in endpoint_result.scalars().all()
+                    if _canonical_memory_deletion_marker(memory) is None
+                }
+                edges = [
+                    edge
+                    for edge in edges
+                    if edge.from_memory_id in canonical_endpoint_ids
+                    and edge.to_memory_id in canonical_endpoint_ids
+                ]
             for edge in edges:
                 db.expunge(edge)
             return list(edges)

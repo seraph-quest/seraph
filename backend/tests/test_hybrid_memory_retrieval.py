@@ -4,7 +4,7 @@ import pytest
 
 from src.agent.session import SessionManager
 from src.db.models import MemoryEpisodeType, MemoryKind
-from src.memory.hybrid_retrieval import retrieve_hybrid_memory
+from src.memory.hybrid_retrieval import _validate_vector_hits, retrieve_hybrid_memory
 from src.memory.repository import memory_repository
 
 
@@ -287,3 +287,51 @@ async def test_hybrid_retrieval_rejects_unknown_identity_vector_hits(async_db):
 
     assert result.context == ""
     assert result.hits == ()
+
+
+def test_hybrid_retrieval_rejects_malformed_vector_score():
+    validated, reason = _validate_vector_hits(
+        [
+            {
+                "id": "vec-invalid",
+                "text": "Must never become canonical context.",
+                "score": "not-a-number",
+            }
+        ]
+    )
+
+    assert validated == []
+    assert reason == "canonical_vector_score_invalid"
+
+
+@pytest.mark.asyncio
+async def test_hybrid_retrieval_returns_empty_degraded_result_for_malformed_vector_score(async_db):
+    await memory_repository.create_memory(
+        content="Canonical status memory.",
+        summary="Canonical status memory.",
+        embedding_id="vec-invalid",
+    )
+
+    with patch(
+        "src.memory.hybrid_retrieval.search_with_status",
+        return_value=(
+            [
+                {
+                    "id": "vec-invalid",
+                    "text": "Must never become canonical context.",
+                    "category": "fact",
+                    "score": "not-a-number",
+                }
+            ],
+            False,
+        ),
+    ):
+        result = await retrieve_hybrid_memory(query="status", limit=4)
+
+    assert result.context == ""
+    assert result.hits == ()
+    assert result.degraded is True
+    assert result.diagnostics[0] == {
+        "reason": "canonical_vector_score_invalid",
+        "status": "degraded_no_learning",
+    }

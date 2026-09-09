@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import logging
+import math
 import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -18,6 +20,8 @@ from src.memory.repository import (
 )
 from src.memory.types import bucket_name_for_kind
 from src.memory.vector_store import search_with_status
+
+logger = logging.getLogger(__name__)
 
 
 _STOPWORDS = {
@@ -267,7 +271,10 @@ def _render_result(
     )
 
 
-def _degraded_canonical_retrieval_result() -> HybridMemoryRetrievalResult:
+def _degraded_canonical_retrieval_result(
+    *,
+    reason: str = "canonical_memory_read_unavailable",
+) -> HybridMemoryRetrievalResult:
     return HybridMemoryRetrievalResult(
         context="",
         buckets={},
@@ -275,11 +282,41 @@ def _degraded_canonical_retrieval_result() -> HybridMemoryRetrievalResult:
         hits=(),
         diagnostics=(
             {
-                "reason": "canonical_memory_read_unavailable",
+                "reason": reason,
                 "status": "degraded_no_learning",
             },
         ),
     )
+
+
+def _validate_vector_hits(
+    raw_hits: object,
+) -> tuple[list[dict[str, object]], str | None]:
+    """Validate untrusted vector output before it can enter canonical context."""
+
+    if not isinstance(raw_hits, (list, tuple)):
+        return [], "canonical_vector_payload_invalid"
+    validated: list[dict[str, object]] = []
+    for hit in raw_hits:
+        if not isinstance(hit, dict):
+            return [], "canonical_vector_payload_invalid"
+        normalized = dict(hit)
+        if "score" in normalized:
+            raw_score = normalized["score"]
+            if raw_score is None or isinstance(raw_score, bool):
+                return [], "canonical_vector_score_invalid"
+            try:
+                score = float(raw_score)
+            except (TypeError, ValueError, OverflowError):
+                return [], "canonical_vector_score_invalid"
+            if not math.isfinite(score):
+                return [], "canonical_vector_score_invalid"
+            normalized["score"] = score
+        if "text" in normalized and normalized["text"] is not None:
+            if not isinstance(normalized["text"], str):
+                return [], "canonical_vector_payload_invalid"
+        validated.append(normalized)
+    return validated, None
 
 
 async def retrieve_hybrid_memory(
@@ -296,7 +333,15 @@ async def retrieve_hybrid_memory(
             active_projects=active_projects,
             limit=limit,
         )
+    except asyncio.CancelledError:
+        raise
     except SQLAlchemyError:
+        return _degraded_canonical_retrieval_result()
+    except Exception:
+        # Provider/index payloads and local adapters are untrusted inputs at
+        # this boundary.  Keep the failure visible while preventing malformed
+        # data from becoming canonical context.
+        logger.exception("Canonical hybrid memory retrieval failed")
         return _degraded_canonical_retrieval_result()
 
 
@@ -445,6 +490,11 @@ async def _retrieve_hybrid_memory(
         normalized_query,
         max(limit * 2, 8),
     )
+    vector_hits, vector_validation_error = _validate_vector_hits(vector_hits)
+    if vector_validation_error is not None:
+        return _degraded_canonical_retrieval_result(
+            reason=vector_validation_error,
+        )
     active_vector_ids: set[str] | None = None
     active_vector_texts: dict[str, set[str]] = {}
     vector_hit_ids = tuple(

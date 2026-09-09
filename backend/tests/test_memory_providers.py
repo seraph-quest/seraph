@@ -1403,3 +1403,33 @@ async def test_hybrid_retrieval_converts_sqlalchemy_outage_to_empty_degraded_res
             "status": "degraded_no_learning",
         },
     )
+
+
+@pytest.mark.asyncio
+async def test_retrieval_planner_blocks_malformed_hybrid_payload_before_provider_context():
+    with (
+        patch(
+            "src.memory.retrieval_planner.memory_repository.reconcile_memory_tombstones",
+            new=AsyncMock(return_value={"status": "ready"}),
+        ),
+        patch(
+            "src.memory.retrieval_planner.build_structured_memory_context_bundle",
+            new=AsyncMock(return_value=("", {})),
+        ),
+        patch(
+            "src.memory.retrieval_planner.retrieve_hybrid_memory",
+            new=AsyncMock(return_value={"diagnostics": "malformed"}),
+        ),
+        patch(
+            "src.memory.retrieval_planner.retrieve_additive_memory_provider_context",
+            new=AsyncMock(side_effect=AssertionError("provider context must be blocked")),
+        ),
+    ):
+        result = await plan_memory_retrieval(query="status", active_projects=())
+
+    assert result.semantic_context == ""
+    assert result.episodic_context == ""
+    assert result.memory_buckets == {}
+    assert result.degraded is True
+    assert result.lane == "canonical_memory_unavailable"
+    assert result.retrieval_diagnostics[0]["reason"] == "canonical_retrieval_payload_invalid"

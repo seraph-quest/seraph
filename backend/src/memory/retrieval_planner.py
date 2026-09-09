@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import asyncio
+import logging
+import math
 from dataclasses import dataclass, field
 
 from sqlalchemy.exc import SQLAlchemyError
@@ -7,13 +10,20 @@ from sqlalchemy.exc import SQLAlchemyError
 from src.db.models import MemoryEntityType, MemoryKind
 from src.memory.hybrid_retrieval import (
     HybridMemoryHit,
+    HybridMemoryRetrievalResult,
     _apply_contradiction_aware_ranking,
     _contradictory_hits,
     retrieve_hybrid_memory,
 )
-from src.memory.providers import retrieve_additive_memory_provider_context
+from src.memory.providers import (
+    MemoryProviderAggregateResult,
+    retrieve_additive_memory_provider_context,
+)
 from src.memory.repository import memory_repository
 from src.memory.types import bucket_name_for_kind
+
+
+logger = logging.getLogger(__name__)
 
 
 _EPISODIC_CUES = (
@@ -729,6 +739,65 @@ def _hybrid_canonical_read_is_unavailable(result) -> bool:
     )
 
 
+def _hybrid_retrieval_payload_is_valid(
+    result: object,
+) -> bool:
+    """Reject malformed canonical retrieval before context assembly."""
+
+    if not isinstance(result, HybridMemoryRetrievalResult):
+        return False
+    if not isinstance(result.context, str) or not isinstance(result.buckets, dict):
+        return False
+    if not isinstance(result.degraded, bool) or not isinstance(result.hits, (tuple, list)):
+        return False
+    if not isinstance(result.diagnostics, (tuple, list)):
+        return False
+    if any(not isinstance(item, dict) for item in result.diagnostics):
+        return False
+    if any(
+        not isinstance(bucket, str)
+        or not isinstance(values, (tuple, list))
+        or any(not isinstance(value, str) for value in values)
+        for bucket, values in result.buckets.items()
+    ):
+        return False
+    for hit in result.hits:
+        if not (
+            isinstance(hit, HybridMemoryHit)
+            and isinstance(hit.text, str)
+            and isinstance(hit.bucket, str)
+            and isinstance(hit.source, str)
+            and isinstance(hit.score, (int, float))
+            and not isinstance(hit.score, bool)
+        ):
+            return False
+        try:
+            if not math.isfinite(float(hit.score)):
+                return False
+        except (TypeError, ValueError, OverflowError):
+            return False
+    return True
+
+
+def _provider_retrieval_payload_is_valid(result: object) -> bool:
+    """Reject malformed advisory output before it can be echoed to a prompt."""
+
+    if not isinstance(result, MemoryProviderAggregateResult):
+        return False
+    if not isinstance(result.context, str) or not isinstance(result.buckets, dict):
+        return False
+    if not isinstance(result.degraded, bool) or not isinstance(result.diagnostics, (tuple, list)):
+        return False
+    if any(not isinstance(item, dict) for item in result.diagnostics):
+        return False
+    return all(
+        isinstance(bucket, str)
+        and isinstance(values, (tuple, list))
+        and all(isinstance(value, str) for value in values)
+        for bucket, values in result.buckets.items()
+    )
+
+
 async def plan_memory_retrieval(
     *,
     query: str,
@@ -736,7 +805,15 @@ async def plan_memory_retrieval(
 ) -> MemoryRetrievalPlanResult:
     try:
         tombstone_reconciliation = await memory_repository.reconcile_memory_tombstones()
+    except asyncio.CancelledError:
+        raise
     except SQLAlchemyError:
+        return _blocked_memory_retrieval_result(
+            reason="canonical_tombstone_reconciliation_unavailable",
+            receipt={"status": "degraded_no_learning"},
+        )
+    except Exception:
+        logger.exception("Canonical tombstone reconciliation failed in retrieval planner")
         return _blocked_memory_retrieval_result(
             reason="canonical_tombstone_reconciliation_unavailable",
             receipt={"status": "degraded_no_learning"},
@@ -752,7 +829,15 @@ async def plan_memory_retrieval(
             active_projects=active_projects,
             _skip_tombstone_reconciliation=True,
         )
+    except asyncio.CancelledError:
+        raise
     except SQLAlchemyError:
+        return _blocked_memory_retrieval_result(
+            reason="canonical_memory_read_unavailable",
+            receipt={"status": "degraded_no_learning"},
+        )
+    except Exception:
+        logger.exception("Canonical structured memory read failed in retrieval planner")
         return _blocked_memory_retrieval_result(
             reason="canonical_memory_read_unavailable",
             receipt={"status": "degraded_no_learning"},
@@ -772,9 +857,22 @@ async def plan_memory_retrieval(
                 active_projects=active_projects,
                 limit=8,
             )
+        except asyncio.CancelledError:
+            raise
         except SQLAlchemyError:
             return _blocked_memory_retrieval_result(
                 reason="canonical_memory_read_unavailable",
+                receipt={"status": "degraded_no_learning"},
+            )
+        except Exception:
+            logger.exception("Canonical hybrid memory read failed in retrieval planner")
+            return _blocked_memory_retrieval_result(
+                reason="canonical_memory_read_unavailable",
+                receipt={"status": "degraded_no_learning"},
+            )
+        if not _hybrid_retrieval_payload_is_valid(hybrid):
+            return _blocked_memory_retrieval_result(
+                reason="canonical_retrieval_payload_invalid",
                 receipt={"status": "degraded_no_learning"},
             )
         if _hybrid_canonical_read_is_unavailable(hybrid):
@@ -783,12 +881,26 @@ async def plan_memory_retrieval(
                 receipt={"status": "degraded_no_learning"},
             )
 
-    provider_retrieval = await retrieve_additive_memory_provider_context(
-        query=normalized_query,
-        active_projects=provider_project_hints,
-        limit=3,
-        include_user_model=bool(provider_project_hints),
-    )
+    try:
+        provider_retrieval = await retrieve_additive_memory_provider_context(
+            query=normalized_query,
+            active_projects=provider_project_hints,
+            limit=3,
+            include_user_model=bool(provider_project_hints),
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        logger.exception("Advisory memory provider retrieval failed")
+        return _blocked_memory_retrieval_result(
+            reason="provider_retrieval_unavailable",
+            receipt={"status": "degraded_no_learning"},
+        )
+    if not _provider_retrieval_payload_is_valid(provider_retrieval):
+        return _blocked_memory_retrieval_result(
+            reason="provider_retrieval_payload_invalid",
+            receipt={"status": "degraded_no_learning"},
+        )
     ambiguous_provider_buckets = _ambiguous_provider_buckets(provider_retrieval.buckets)
     provider_context_input = _drop_ambiguous_provider_context_buckets(
         provider_retrieval.context,

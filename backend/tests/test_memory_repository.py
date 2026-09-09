@@ -236,6 +236,39 @@ async def test_create_edge_dedupes_identical_relationship(async_db):
 
 
 @pytest.mark.asyncio
+async def test_edges_reject_and_hide_tombstoned_endpoints(async_db):
+    first = await memory_repository.create_memory(
+        content="Canonical edge source.",
+        kind=MemoryKind.fact,
+    )
+    second = await memory_repository.create_memory(
+        content="Canonical edge target.",
+        kind=MemoryKind.fact,
+    )
+    await memory_repository.create_edge(
+        from_memory_id=first.memory_id,
+        to_memory_id=second.memory_id,
+        edge_type=MemoryEdgeType.related,
+    )
+
+    await memory_repository.mark_memory_tombstoned(
+        first.memory_id,
+        actor="test-operator",
+    )
+
+    assert await memory_repository.list_edges(
+        from_memory_id=first.memory_id,
+        to_memory_id=second.memory_id,
+    ) == []
+    with pytest.raises(ValueError, match="canonical memories"):
+        await memory_repository.create_edge(
+            from_memory_id=first.memory_id,
+            to_memory_id=second.memory_id,
+            edge_type=MemoryEdgeType.related,
+        )
+
+
+@pytest.mark.asyncio
 async def test_create_memory_rejects_unknown_entity_links(async_db):
     with pytest.raises(IntegrityError):
         await memory_repository.create_memory(

@@ -73,6 +73,104 @@ def _coerce_enum(
         raise ValueError(f"Invalid {enum_cls.__name__}: {value!r}") from exc
 
 
+_CANONICAL_MEMORY_DELETE_EXPORT_REASON = "operator_delete_export"
+_CANONICAL_MEMORY_REDACTED_STATE = "canonical_memory_redacted"
+_CANONICAL_MEMORY_DELETE_ACTIONS = {
+    "propagate_delete_export",
+    "operator_delete_export",
+}
+_CANONICAL_MEMORY_DELETE_CONTENT = "[delete/export propagated by operator]"
+
+
+def _canonical_memory_deletion_marker(memory: Memory) -> str | None:
+    """Return a durable canonical delete marker, if one is present.
+
+    Canonical delete/export is terminal for the local memory record. Read both
+    the current nested operator-control fields and older top-level markers so
+    provider or learning ingress cannot revive a tombstone after a metadata
+    shape migration. Malformed metadata on an archived or superseded row fails
+    closed because it cannot disprove that a canonical deletion marker exists;
+    an active malformed row remains an ordinary writable record.
+    """
+
+    raw_metadata = getattr(memory, "metadata_json", None)
+    metadata_malformed = False
+    try:
+        parsed_metadata = json.loads(raw_metadata or "{}")
+    except (TypeError, json.JSONDecodeError):
+        parsed_metadata = {}
+        metadata_malformed = bool(raw_metadata)
+    metadata = parsed_metadata if isinstance(parsed_metadata, dict) else {}
+    if not isinstance(parsed_metadata, dict):
+        metadata_malformed = True
+
+    operator_control_value = metadata.get("operator_control")
+    if operator_control_value is None:
+        operator_control: dict[str, Any] = {}
+    elif isinstance(operator_control_value, dict):
+        operator_control = operator_control_value
+    else:
+        operator_control = {}
+        metadata_malformed = True
+
+    def _marker_value(value: Any) -> str:
+        if not isinstance(value, str):
+            return ""
+        return value.strip().lower()
+
+    archived_reason = _marker_value(metadata.get("archived_reason"))
+    if "archived_reason" in metadata and not isinstance(metadata.get("archived_reason"), str):
+        metadata_malformed = True
+    if archived_reason == _CANONICAL_MEMORY_DELETE_EXPORT_REASON:
+        return f"archived_reason={archived_reason}"
+
+    delete_export_state_value = operator_control.get("delete_export_state")
+    top_level_delete_export_state = metadata.get("delete_export_state")
+    if "delete_export_state" in operator_control and not isinstance(delete_export_state_value, str):
+        metadata_malformed = True
+    if "delete_export_state" in metadata and not isinstance(top_level_delete_export_state, str):
+        metadata_malformed = True
+    for delete_export_state in (
+        _marker_value(delete_export_state_value),
+        _marker_value(top_level_delete_export_state),
+    ):
+        if delete_export_state == _CANONICAL_MEMORY_REDACTED_STATE:
+            return f"delete_export_state={delete_export_state}"
+
+    last_action_value = operator_control.get("last_action")
+    if "last_action" in operator_control and not isinstance(last_action_value, str):
+        metadata_malformed = True
+    top_level_last_action = metadata.get("last_action")
+    if "last_action" in metadata and not isinstance(top_level_last_action, str):
+        metadata_malformed = True
+    for last_action in (
+        _marker_value(last_action_value),
+        _marker_value(top_level_last_action),
+    ):
+        if last_action in _CANONICAL_MEMORY_DELETE_ACTIONS:
+            return f"last_action={last_action}"
+
+    # The propagated replacement is itself a canonical redaction marker. Keep
+    # this fallback for records written before the explicit state fields.
+    content = str(getattr(memory, "content", "") or "").strip()
+    summary = str(getattr(memory, "summary", "") or "").strip()
+    if content == _CANONICAL_MEMORY_DELETE_CONTENT:
+        return "content=canonical_memory_redacted"
+    if summary == _CANONICAL_MEMORY_DELETE_CONTENT:
+        return "summary=canonical_memory_redacted"
+
+    if metadata_malformed:
+        status = getattr(memory, "status", None)
+        try:
+            normalized_status = _coerce_enum(status, MemoryStatus).value
+        except (TypeError, ValueError):
+            normalized_status = str(status or "").strip().lower()
+        if normalized_status in {MemoryStatus.archived.value, MemoryStatus.superseded.value}:
+            return "metadata=malformed_suppressed_memory"
+
+    return None
+
+
 def _sqlite_json_object_path(key: str) -> str:
     if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key):
         return f"$.{key}"
@@ -622,6 +720,58 @@ class MemoryRepository:
                 session_source_created=session_source_created,
             )
 
+    async def _cas_update_scoped_memory(
+        self,
+        db,
+        memory: Memory,
+        *,
+        values_builder,
+    ) -> Memory | None:
+        """Update an existing scoped row only when its control snapshot holds."""
+
+        def _normalize_timestamp(value: datetime) -> datetime:
+            if value.tzinfo is None:
+                return value.replace(tzinfo=timezone.utc)
+            return value.astimezone(timezone.utc)
+
+        async def _select_memory_by_id(memory_id: str) -> Memory | None:
+            return (
+                await db.execute(select(Memory).where(Memory.id == memory_id))
+            ).scalars().first()
+
+        for _attempt in range(2):
+            if _canonical_memory_deletion_marker(memory) is not None:
+                return None
+            expected_metadata = memory.metadata_json
+            expected_status = _coerce_enum(memory.status, MemoryStatus)
+            expected_updated_at = _normalize_timestamp(memory.updated_at)
+            expected_metadata_guard = (
+                Memory.metadata_json.is_(None)
+                if expected_metadata is None
+                else Memory.metadata_json == expected_metadata
+            )
+            result = await db.execute(
+                update(Memory)
+                .where(
+                    Memory.id == memory.id,
+                    Memory.updated_at == expected_updated_at,
+                    Memory.status == expected_status,
+                    expected_metadata_guard,
+                )
+                .values(**values_builder(memory))
+            )
+            if result.rowcount == 1:
+                return memory
+
+            # A competing control may have committed after the read. Reset
+            # this transaction before reconciling the current row so a winning
+            # canonical delete can never be overwritten.
+            await db.rollback()
+            memory = await _select_memory_by_id(memory.id)
+            if memory is None:
+                return None
+        return None
+
     async def sync_scoped_memory(
         self,
         *,
@@ -637,6 +787,15 @@ class MemoryRepository:
         source_session_id: str | None = None,
         last_confirmed_at: datetime | None = None,
     ) -> MemoryWriteResult | None:
+        """Create or refresh one memory for a stable kind/scope pair.
+
+        ``None`` means either the existing empty-content archive path ran, a
+        non-empty ingress was suppressed because the existing row carries a
+        canonical delete/export tombstone, or a concurrent row change could
+        not be reconciled safely. These outcomes are no-ops and are not
+        successful write receipts.
+        """
+
         normalized_kind = _coerce_enum(kind, MemoryKind)
         normalized_category = _coerce_enum(
             category if category is not None else MemoryCategory.preference,
@@ -701,21 +860,23 @@ class MemoryRepository:
                         )
                     ).scalars().all()
                     memory = next((item for item in candidates if _matches_scope(item)), None)
-                    if memory is not None and memory.scope_key != normalized_scope_key:
-                        memory.scope_key = normalized_scope_key
-                        db.add(memory)
-                        await db.flush()
+
+                if memory is not None and _canonical_memory_deletion_marker(memory) is not None:
+                    return None
 
                 if not normalized_content:
                     if memory is None:
                         return None
-                    memory.status = MemoryStatus.archived
-                    memory.updated_at = _now()
-                    memory.scope_key = normalized_scope_key
-                    memory.metadata_json = json.dumps(merged_metadata, sort_keys=True)
-                    db.add(memory)
-                    await db.flush()
-                    db.expunge(memory)
+                    await self._cas_update_scoped_memory(
+                        db,
+                        memory,
+                        values_builder=lambda _current: {
+                            "status": MemoryStatus.archived,
+                            "updated_at": _now(),
+                            "scope_key": normalized_scope_key,
+                            "metadata_json": json.dumps(merged_metadata, sort_keys=True),
+                        },
+                    )
                     return None
 
                 if memory is None:
@@ -747,41 +908,67 @@ class MemoryRepository:
                         ).scalars().first()
                         if memory is None:
                             raise
-                        memory.content = normalized_content
-                        memory.category = normalized_category
-                        memory.summary = normalized_summary
-                        memory.confidence = confidence
-                        memory.importance = importance
-                        memory.reinforcement = max(memory.reinforcement, reinforcement)
-                        memory.status = MemoryStatus.active
-                        if source_session_id:
-                            memory.source_session_id = source_session_id
-                        if last_confirmed_at is not None:
-                            memory.last_confirmed_at = _normalize_timestamp(last_confirmed_at)
-                        memory.scope_key = normalized_scope_key
-                        memory.metadata_json = json.dumps(merged_metadata, sort_keys=True)
-                        memory.updated_at = _now()
-                        db.add(memory)
-                        await db.flush()
+                        memory = await self._cas_update_scoped_memory(
+                            db,
+                            memory,
+                            values_builder=lambda current: {
+                                "content": normalized_content,
+                                "category": normalized_category,
+                                "summary": normalized_summary,
+                                "confidence": confidence,
+                                "importance": importance,
+                                "reinforcement": max(current.reinforcement, reinforcement),
+                                "status": MemoryStatus.active,
+                                "scope_key": normalized_scope_key,
+                                "metadata_json": json.dumps(merged_metadata, sort_keys=True),
+                                "updated_at": _now(),
+                                **(
+                                    {"source_session_id": source_session_id}
+                                    if source_session_id
+                                    else {}
+                                ),
+                                **(
+                                    {
+                                        "last_confirmed_at": _normalize_timestamp(last_confirmed_at)
+                                    }
+                                    if last_confirmed_at is not None
+                                    else {}
+                                ),
+                            },
+                        )
+                        if memory is None:
+                            return None
                     db.expunge(memory)
                     return MemoryWriteResult(memory_id=memory.id)
 
-                memory.content = normalized_content
-                memory.category = normalized_category
-                memory.summary = normalized_summary
-                memory.confidence = confidence
-                memory.importance = importance
-                memory.reinforcement = max(memory.reinforcement, reinforcement)
-                memory.status = MemoryStatus.active
-                memory.scope_key = normalized_scope_key
-                if source_session_id:
-                    memory.source_session_id = source_session_id
-                if last_confirmed_at is not None:
-                    memory.last_confirmed_at = _normalize_timestamp(last_confirmed_at)
-                memory.metadata_json = json.dumps(merged_metadata, sort_keys=True)
-                memory.updated_at = _now()
-                db.add(memory)
-                await db.flush()
+                memory = await self._cas_update_scoped_memory(
+                    db,
+                    memory,
+                    values_builder=lambda current: {
+                        "content": normalized_content,
+                        "category": normalized_category,
+                        "summary": normalized_summary,
+                        "confidence": confidence,
+                        "importance": importance,
+                        "reinforcement": max(current.reinforcement, reinforcement),
+                        "status": MemoryStatus.active,
+                        "scope_key": normalized_scope_key,
+                        "metadata_json": json.dumps(merged_metadata, sort_keys=True),
+                        "updated_at": _now(),
+                        **(
+                            {"source_session_id": source_session_id}
+                            if source_session_id
+                            else {}
+                        ),
+                        **(
+                            {"last_confirmed_at": _normalize_timestamp(last_confirmed_at)}
+                            if last_confirmed_at is not None
+                            else {}
+                        ),
+                    },
+                )
+                if memory is None:
+                    return None
                 db.expunge(memory)
                 return MemoryWriteResult(
                     memory_id=memory.id,

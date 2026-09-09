@@ -25437,31 +25437,51 @@ async def _eval_mcp_test_api_audit() -> dict[str, Any]:
     mock_client = MagicMock()
     mock_client.get_tools.return_value = [mock_tool]
     mock_log_event = AsyncMock()
+    observed_principals: list[TrustPrincipal | None] = []
+    credential_resolution_results = iter(
+        [
+            ({}, ["GITHUB_TOKEN"], [], ["env"]),
+            ({"Authorization": "Bearer ghp_test"}, [], [], ["env"]),
+            ({"Authorization": "Bearer ghp_test"}, [], [], ["env"]),
+        ]
+    )
+
+    def resolve_headers(_raw_headers):
+        observed_principals.append(get_current_trust_principal())
+        return next(credential_resolution_results)
 
     with (
+        patch.object(settings, "deployment_environment", "test"),
+        patch.object(settings, "operator_auth_allow_unauthenticated_tests", True),
         patch("src.api.mcp.mcp_manager") as mock_mgr,
         patch.object(audit_repository, "log_event", mock_log_event),
     ):
+        test_request = Request(
+            {
+                "type": "http",
+                "method": "POST",
+                "path": "/api/mcp/servers/gh/test",
+                "headers": [],
+                "query_string": b"",
+                "state": {"operator": test_bypass_operator()},
+            }
+        )
         mock_mgr._config = {
             "gh": {
                 "url": "http://gh/mcp",
                 "headers": {"Authorization": "Bearer ${GITHUB_TOKEN}"},
             }
         }
-        mock_mgr.resolve_headers.side_effect = [
-            ({}, ["GITHUB_TOKEN"], [], ["env"]),
-            ({"Authorization": "Bearer ghp_test"}, [], [], ["env"]),
-            ({"Authorization": "Bearer ghp_test"}, [], [], ["env"]),
-        ]
+        mock_mgr.resolve_headers.side_effect = resolve_headers
 
-        auth_required = await test_mcp_server("gh")
+        auth_required = await test_mcp_server("gh", test_request)
 
         with patch("smolagents.MCPClient", return_value=mock_client):
-            success = await test_mcp_server("gh")
+            success = await test_mcp_server("gh", test_request)
 
         with patch("smolagents.MCPClient", side_effect=ConnectionError("refused")):
             try:
-                await test_mcp_server("gh")
+                await test_mcp_server("gh", test_request)
             except HTTPException as exc:
                 failure_status_code = exc.status_code
             else:  # pragma: no cover - defensive guard
@@ -25482,6 +25502,20 @@ async def _eval_mcp_test_api_audit() -> dict[str, Any]:
         event_type="integration_failed",
         tool_name="mcp_test:gh",
     )
+    operator = test_request.state.operator
+    authority_bound = (
+        len(observed_principals) == 3
+        and all(
+            principal is not None
+            and principal.principal_id == operator.principal.principal_id
+            and principal.principal_type is PrincipalType.OPERATOR
+            and principal.session_id == operator.session_id
+            and AuthorityGrant.CAPABILITY_EXECUTE.value
+            in {str(getattr(grant, "value", grant)) for grant in principal.grants}
+            for principal in observed_principals
+        )
+    )
+    audit_payload = str(mock_log_event.call_args_list)
     return {
         "auth_required_status": auth_required["status"],
         "missing_env_vars": auth_required_event["details"]["missing_env_vars"],
@@ -25492,6 +25526,9 @@ async def _eval_mcp_test_api_audit() -> dict[str, Any]:
         "failure_status_code": failure_status_code,
         "failure_status": failed_event["details"]["status"],
         "failure_error": failed_event["details"]["error"],
+        "route_reached": len(observed_principals) == 3,
+        "authority_bound": authority_bound,
+        "receipts_redacted": "ghp_test" not in audit_payload,
     }
 
 

@@ -192,7 +192,7 @@ def _browser_provider_inventory_payload() -> dict[str, object]:
 @router.get("/browser/providers")
 async def list_browser_providers(
     http_request: Request,
-    owner_session_id: str | None = Query(default=None, min_length=1),
+    owner_session_id: str = Query(..., min_length=1),
 ):
     async with _browser_request_authority(http_request, owner_session_id):
         payload = _browser_provider_inventory_payload()

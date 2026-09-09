@@ -5,7 +5,7 @@ import json
 import time
 from dataclasses import replace
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from fastapi import HTTPException
@@ -925,7 +925,10 @@ async def test_browser_provider_inventory_endpoint_lists_staged_remote_modes(cli
     )
 
     with patch.object(settings, "workspace_dir", str(workspace)):
-        response = await client.get("/api/browser/providers")
+        response = await client.get(
+            "/api/browser/providers",
+            params={"owner_session_id": AUTH_SESSION_ID},
+        )
 
     assert response.status_code == 200
     providers = response.json()["providers"]
@@ -1138,6 +1141,81 @@ async def test_authenticated_browser_rest_requires_persisted_conversation_owner(
     )
     assert owned_control.status_code == 200
     assert owned_control.json()["session"]["status"] == "closed"
+
+
+@pytest.mark.asyncio
+async def test_authenticated_chat_ingress_binds_browser_provider_and_read_owner(
+    client,
+    monkeypatch,
+):
+    origin = "http://localhost:3001"
+    monkeypatch.setattr(settings, "operator_auth_secret", "correct horse battery staple")
+    monkeypatch.setattr(settings, "operator_auth_secret_hash", "")
+    monkeypatch.setattr(settings, "operator_auth_allowed_hosts", "test,localhost,127.0.0.1")
+    monkeypatch.setattr(settings, "operator_auth_allowed_origins", origin)
+    monkeypatch.setattr(settings, "operator_auth_cookie_secure", False)
+
+    login_response = await client.post(
+        "/api/auth/login",
+        json={"password": "correct horse battery staple"},
+        headers={"origin": origin},
+    )
+    assert login_response.status_code == 200
+
+    agent = MagicMock()
+    agent.run.return_value = "chat ingress response"
+    with patch(
+        "src.api.chat.create_onboarding_agent",
+        return_value=agent,
+    ):
+        chat_response = await client.post(
+            "/api/chat",
+            json={"message": "Check the website"},
+            headers={"origin": origin},
+        )
+    assert chat_response.status_code == 200
+    conversation_id = chat_response.json()["session_id"]
+    conversation = await session_manager.get(conversation_id)
+    assert conversation is not None
+    assert conversation.owner_principal_id == "operator:single"
+
+    ownerless_response = await client.get("/api/browser/providers")
+    assert ownerless_response.status_code == 422
+
+    provider_response = await client.get(
+        "/api/browser/providers",
+        params={"owner_session_id": conversation_id},
+    )
+    assert provider_response.status_code == 200
+    assert isinstance(provider_response.json()["providers"], list)
+
+    with patch("src.api.browser.browse_webpage", return_value="chat-owned page body"):
+        open_response = await client.post(
+            "/api/browser/sessions",
+            json={
+                "owner_session_id": conversation_id,
+                "url": "https://example.test/chat-owned",
+            },
+            headers={"origin": origin},
+        )
+    assert open_response.status_code == 200
+    browser_session = open_response.json()["session"]
+
+    read_response = await client.get(
+        f"/api/browser/sessions/{browser_session['session_id']}",
+        params={"owner_session_id": conversation_id},
+    )
+    assert read_response.status_code == 200
+    assert read_response.json()["session"]["owner_session_id"] == conversation_id
+
+    unowned_id = "unowned-browser-read-conversation"
+    await session_manager.get_or_create(unowned_id)
+    cross_owner_response = await client.get(
+        "/api/browser/providers",
+        params={"owner_session_id": unowned_id},
+    )
+    assert cross_owner_response.status_code == 403
+    assert cross_owner_response.json()["detail"]["code"] == "browser_owner_session_forbidden"
 
 
 @pytest.mark.asyncio
@@ -1421,7 +1499,10 @@ async def test_duplicate_browser_provider_names_keep_only_priority_winner_visibl
         )
 
     with patch.object(settings, "workspace_dir", str(workspace)):
-        response = await client.get("/api/browser/providers")
+        response = await client.get(
+            "/api/browser/providers",
+            params={"owner_session_id": AUTH_SESSION_ID},
+        )
 
     assert response.status_code == 200
     shared = [item for item in response.json()["providers"] if item["name"] == "shared-provider"]

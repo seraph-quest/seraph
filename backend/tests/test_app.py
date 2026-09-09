@@ -298,6 +298,6 @@ async def test_runtime_status_uses_openrouter_and_blanks_unsafe_legacy_endpoints
 
 @pytest.mark.asyncio
 async def test_browser_provider_api_is_publicly_exposed(client):
-    response = await client.get("/api/browser/providers")
+    response = await client.get("/api/browser/providers?owner_session_id=test-auth-bypass")
 
     assert response.status_code == 200

@@ -47,6 +47,14 @@ def _public_url(url: str) -> str:
     return urlunsplit((parts.scheme, netloc, path, query, ""))
 
 
+def _url_redaction_required(url: str) -> bool:
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return True
+    return bool(parts.username or parts.password or parts.query or parts.fragment)
+
+
 def _journal_path_for_workspace(workspace_dir: str | None = None) -> Path:
     root = Path(workspace_dir or settings.workspace_dir).expanduser().resolve()
     return root / "artifacts" / "browser-session-journal" / "session-journal.jsonl"
@@ -655,6 +663,7 @@ class BrowserSessionRuntime:
             ):
                 return None
             snapshot = session.snapshots[index]
+            public_url = _public_url(session.url)
             return {
                 "session_id": session_id,
                 "owner_session_id": session.owner_session_id,
@@ -663,7 +672,8 @@ class BrowserSessionRuntime:
                 "content": snapshot.content if snapshot.content else None,
                 "content_available": bool(snapshot.content),
                 "summary": snapshot.summary,
-                "url": session.url,
+                "url": public_url,
+                "url_redacted": public_url != session.url or _url_redaction_required(session.url),
                 "provider_name": session.provider_name,
                 "provider_kind": session.provider_kind,
                 "execution_mode": session.execution_mode,

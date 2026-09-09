@@ -12,9 +12,14 @@ from fastapi import HTTPException
 from starlette.requests import Request
 
 from config.settings import settings
-from src.approval.runtime import get_current_session_id, get_current_trust_principal
+from src.approval.runtime import (
+    get_current_session_id,
+    get_current_trust_principal,
+    reset_runtime_context,
+    set_runtime_context,
+)
 from src.auth.cancellation import RuntimeRevokedError
-from src.auth.service import test_bypass_operator as _test_bypass_operator
+from src.auth.service import AuthFailure, test_bypass_operator as _test_bypass_operator
 from src.browser.sessions import browser_session_runtime
 from src.security.trust_contract import PrincipalType
 
@@ -22,13 +27,13 @@ from src.security.trust_contract import PrincipalType
 AUTH_SESSION_ID = "test-auth-bypass"
 
 
-def _browser_request(operator, *, method: str, path: str):
+def _browser_request(operator, *, method: str, path: str, headers=None):
     return Request(
         {
             "type": "http",
             "method": method,
             "path": path,
-            "headers": [],
+            "headers": headers or [],
             "query_string": b"",
             "state": {"operator": operator},
         }
@@ -39,8 +44,8 @@ def _browser_mutator_request(operator):
     return _browser_request(operator, method="POST", path="/api/browser/sessions")
 
 
-def _browser_read_request(operator, path: str = "/api/browser/providers"):
-    return _browser_request(operator, method="GET", path=path)
+def _browser_read_request(operator, path: str = "/api/browser/providers", *, headers=None):
+    return _browser_request(operator, method="GET", path=path, headers=headers)
 
 
 @pytest.fixture(autouse=True)
@@ -378,55 +383,59 @@ async def test_browser_reads_reject_caller_owner_scope_before_inventory_or_looku
     )
 
     operator = _test_bypass_operator()
-    with (
-        patch("src.api.browser._browser_provider_inventory_payload") as provider_inventory,
-        patch("src.api.browser.browser_session_runtime.list_sessions") as list_sessions,
-        patch("src.api.browser.browser_session_runtime.list_journal") as list_journal,
-        patch("src.api.browser.browser_session_runtime.get_session") as get_session,
-        patch("src.api.browser.browser_session_runtime.read_ref") as read_ref,
-        patch("src.api.browser.context_manager.get_context") as get_context,
-    ):
-        with pytest.raises(HTTPException) as provider_error:
-            await list_browser_providers(_browser_read_request(operator), "other-session")
-        assert provider_error.value.status_code == 403
+    context_tokens = set_runtime_context("conversation-a", "safe")
+    try:
+        with (
+            patch("src.api.browser._browser_provider_inventory_payload") as provider_inventory,
+            patch("src.api.browser.browser_session_runtime.list_sessions") as list_sessions,
+            patch("src.api.browser.browser_session_runtime.list_journal") as list_journal,
+            patch("src.api.browser.browser_session_runtime.get_session") as get_session,
+            patch("src.api.browser.browser_session_runtime.read_ref") as read_ref,
+            patch("src.api.browser.context_manager.get_context") as get_context,
+        ):
+            with pytest.raises(HTTPException) as provider_error:
+                await list_browser_providers(_browser_read_request(operator), "other-session")
+            assert provider_error.value.status_code == 403
 
-        with pytest.raises(HTTPException) as sessions_error:
-            await list_browser_sessions(
-                _browser_read_request(operator, "/api/browser/sessions"),
-                "other-session",
-            )
-        assert sessions_error.value.status_code == 403
+            with pytest.raises(HTTPException) as sessions_error:
+                await list_browser_sessions(
+                    _browser_read_request(operator, "/api/browser/sessions"),
+                    "other-session",
+                )
+            assert sessions_error.value.status_code == 403
 
-        with pytest.raises(HTTPException) as session_error:
-            await get_browser_session(
-                "bs-read",
-                _browser_read_request(operator, "/api/browser/sessions/bs-read"),
-                "other-session",
-            )
-        assert session_error.value.status_code == 403
+            with pytest.raises(HTTPException) as session_error:
+                await get_browser_session(
+                    "bs-read",
+                    _browser_read_request(operator, "/api/browser/sessions/bs-read"),
+                    "other-session",
+                )
+            assert session_error.value.status_code == 403
 
-        with pytest.raises(HTTPException) as journal_error:
-            await get_browser_session_journal(
-                "bs-read",
-                _browser_read_request(operator, "/api/browser/sessions/bs-read/journal"),
-                "other-session",
-            )
-        assert journal_error.value.status_code == 403
+            with pytest.raises(HTTPException) as journal_error:
+                await get_browser_session_journal(
+                    "bs-read",
+                    _browser_read_request(operator, "/api/browser/sessions/bs-read/journal"),
+                    "other-session",
+                )
+            assert journal_error.value.status_code == 403
 
-        with pytest.raises(HTTPException) as ref_error:
-            await read_browser_ref(
-                "ref-read",
-                _browser_read_request(operator, "/api/browser/refs/ref-read"),
-                "other-session",
-            )
-        assert ref_error.value.status_code == 403
+            with pytest.raises(HTTPException) as ref_error:
+                await read_browser_ref(
+                    "ref-read",
+                    _browser_read_request(operator, "/api/browser/refs/ref-read"),
+                    "other-session",
+                )
+            assert ref_error.value.status_code == 403
 
-        with pytest.raises(HTTPException) as control_error:
-            await browser_computer_use_control(
-                _browser_read_request(operator, "/api/operator/browser-computer-use-control"),
-                "other-session",
-            )
-        assert control_error.value.status_code == 403
+            with pytest.raises(HTTPException) as control_error:
+                await browser_computer_use_control(
+                    _browser_read_request(operator, "/api/operator/browser-computer-use-control"),
+                    "other-session",
+                )
+            assert control_error.value.status_code == 403
+    finally:
+        reset_runtime_context(context_tokens)
 
     provider_inventory.assert_not_called()
     list_sessions.assert_not_called()
@@ -530,6 +539,43 @@ async def test_browser_reads_bind_operator_context_and_reset_it():
 
 
 @pytest.mark.asyncio
+async def test_browser_read_binds_conversation_owner_separate_from_auth_session():
+    from src.api.browser import get_browser_session
+
+    conversation_owner = "conversation-owner"
+    operator = replace(
+        _test_bypass_operator(),
+        session_id="auth-cookie-session",
+        principal=replace(_test_bypass_operator().principal, session_id="auth-cookie-session"),
+    )
+    agent_tokens = set_runtime_context(conversation_owner, "safe")
+    try:
+        created = browser_session_runtime.open_session(
+            owner_session_id=conversation_owner,
+            url="https://user:password@example.test/private?token=secret",
+            provider_name="local-browser",
+            provider_kind="local",
+            execution_mode="local_runtime",
+            capture="extract",
+            content="agent-created private body",
+        )
+    finally:
+        reset_runtime_context(agent_tokens)
+
+    response = await get_browser_session(
+        str(created["session_id"]),
+        _browser_read_request(operator, "/api/browser/sessions/agent-created"),
+        conversation_owner,
+    )
+
+    assert response["session"]["owner_session_id"] == conversation_owner
+    assert response["session"]["session_id"] == created["session_id"]
+    assert response["session"]["url"] == "https://example.test/private?redacted"
+    assert get_current_session_id() is None
+    assert get_current_trust_principal() is None
+
+
+@pytest.mark.asyncio
 async def test_browser_read_rechecks_revocation_before_return_and_resets_context():
     from src.api.browser import get_browser_session
 
@@ -544,15 +590,60 @@ async def test_browser_read_rechecks_revocation_before_return_and_resets_context
         patch("src.api.browser.assert_runtime_not_revoked", side_effect=[None, revoked]) as recheck,
         patch("src.api.browser.browser_session_runtime.get_session", return_value=payload) as get_session,
     ):
-        with pytest.raises(RuntimeRevokedError):
+        with pytest.raises(HTTPException) as revoked_error:
             await get_browser_session(
                 "bs-revoked",
                 _browser_read_request(_test_bypass_operator(), "/api/browser/sessions/bs-revoked"),
                 AUTH_SESSION_ID,
             )
+    assert revoked_error.value.status_code == 401
+    assert revoked_error.value.detail["code"] == "session_revoked"
 
     assert recheck.call_count == 2
     get_session.assert_called_once_with("bs-revoked", owner_session_id=AUTH_SESSION_ID)
+    assert get_current_session_id() is None
+    assert get_current_trust_principal() is None
+
+
+@pytest.mark.asyncio
+async def test_browser_read_watcher_maps_revocation_during_awaited_read():
+    from src.api.browser import browser_computer_use_control
+
+    operator = _test_bypass_operator()
+    cookie = f"{settings.operator_auth_cookie_name}=opaque-auth-cookie".encode()
+
+    async def slow_provider_payload():
+        await asyncio.sleep(0.65)
+        return {"providers": []}
+
+    auth_calls = 0
+
+    async def authenticate(_token, *, touch=False):
+        nonlocal auth_calls
+        assert touch is False
+        auth_calls += 1
+        if auth_calls == 1:
+            return operator
+        raise AuthFailure("session_revoked")
+
+    request = _browser_read_request(
+        operator,
+        "/api/operator/browser-computer-use-control",
+        headers=[(b"cookie", cookie)],
+    )
+    with (
+        patch.object(settings, "operator_auth_revocation_poll_seconds", 0.25),
+        patch("src.api.chat.auth_enabled", return_value=True),
+        patch("src.api.chat.authenticate_token", side_effect=authenticate),
+        patch("src.api.browser._browser_provider_payload", new=AsyncMock(side_effect=slow_provider_payload)),
+        patch("src.api.browser.browser_session_runtime.list_sessions", return_value=[]),
+        patch("src.api.browser.browser_session_runtime.list_journal", return_value=[]),
+    ):
+        with pytest.raises(HTTPException) as revoked_error:
+            await browser_computer_use_control(request, "conversation-owner")
+
+    assert revoked_error.value.status_code == 401
+    assert revoked_error.value.detail["code"] == "session_revoked"
     assert get_current_session_id() is None
     assert get_current_trust_principal() is None
 
@@ -754,7 +845,7 @@ async def test_browser_session_rest_surface_is_owner_scoped_and_provenanced(clie
     cross_owner_response = await client.get(
         f"/api/browser/sessions/{session['session_id']}?owner_session_id=session-b"
     )
-    assert cross_owner_response.status_code == 403
+    assert cross_owner_response.status_code == 404
 
     ref_response = await client.get(
         f"/api/browser/refs/{session['latest_ref']}?owner_session_id={AUTH_SESSION_ID}"
@@ -835,12 +926,14 @@ async def test_browser_session_journal_survives_reload_without_raw_content(clien
         ref_payload = ref_response.json()["ref"]
         assert ref_payload["content_available"] is False
         assert ref_payload["content"] is None
+        assert ref_payload["url"] == "https://example.test/private?redacted"
+        assert ref_payload["url_redacted"] is True
         assert ref_payload["artifact_provenance"]["raw_artifact_body_exposed"] is True
 
         cross_owner_journal = await client.get(
             f"/api/browser/sessions/{session['session_id']}/journal?owner_session_id=other-session"
         )
-        assert cross_owner_journal.status_code == 403
+        assert cross_owner_journal.status_code == 404
 
 
 @pytest.mark.asyncio

@@ -155,8 +155,8 @@ class WorkflowDraftRequest(BaseModel):
     content: str
 
 
-def _require_authenticated_source_operator(request: Request) -> AuthenticatedOperator:
-    """Use middleware-bound operator authority for source evidence dispatch."""
+def _require_authenticated_capability_operator(request: Request) -> AuthenticatedOperator:
+    """Require middleware-bound operator authority for capability execution."""
     operator = getattr(request.state, "operator", None)
     principal = getattr(operator, "principal", None)
     session_id = str(getattr(operator, "session_id", "") or "").strip()
@@ -185,7 +185,7 @@ async def source_evidence(
     request: Request,
     x_seraph_session_id: str | None = Header(default=None),
 ):
-    operator = _require_authenticated_source_operator(request)
+    operator = _require_authenticated_capability_operator(request)
     authenticated_session_id = operator.session_id
     requested_session_id = (x_seraph_session_id or "").strip()
     active_session_id = authenticated_session_id
@@ -2150,26 +2150,36 @@ async def save_workflow_draft(body: WorkflowDraftRequest):
 
 
 @router.post("/capabilities/starter-packs/{name}/activate")
-async def activate_starter_pack(name: str):
-    overview_before = _build_capability_overview()
-    preflight_before = _capability_preflight_payload(
-        overview=overview_before,
-        target_type="starter_pack",
-        name=name,
+async def activate_starter_pack(name: str, request: Request):
+    operator = _require_authenticated_capability_operator(request)
+    active_session_id = operator.session_id
+    tokens = set_runtime_context(
+        active_session_id,
+        context_manager.get_context().approval_mode,
+        trust_principal=bind_operator_principal(operator, active_session_id),
     )
-    result = await _activate_starter_pack_by_name(name)
-    overview = _build_capability_overview()
-    preflight_after = _capability_preflight_payload(
-        overview=overview,
-        target_type="starter_pack",
-        name=name,
-    )
-    return {
-        **result,
-        "doctor_plan_before": _doctor_plan(preflight=preflight_before),
-        "doctor_plan_after": _doctor_plan(preflight=preflight_after),
-        "overview": overview,
-    }
+    try:
+        overview_before = _build_capability_overview()
+        preflight_before = _capability_preflight_payload(
+            overview=overview_before,
+            target_type="starter_pack",
+            name=name,
+        )
+        result = await _activate_starter_pack_by_name(name)
+        overview = _build_capability_overview()
+        preflight_after = _capability_preflight_payload(
+            overview=overview,
+            target_type="starter_pack",
+            name=name,
+        )
+        return {
+            **result,
+            "doctor_plan_before": _doctor_plan(preflight=preflight_before),
+            "doctor_plan_after": _doctor_plan(preflight=preflight_after),
+            "overview": overview,
+        }
+    finally:
+        reset_runtime_context(tokens)
 
 
 @router.post("/capabilities/bootstrap")

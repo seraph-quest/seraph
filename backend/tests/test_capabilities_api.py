@@ -1,14 +1,19 @@
+from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from httpx import ASGITransport, AsyncClient
 from fastapi import HTTPException
 import pytest
+from starlette.requests import Request
 
 from src.api.capabilities import _explicit_runbook_entries, _runbook_labels_by_starter_pack
+from src.approval.runtime import get_current_session_id, get_current_trust_principal
+from src.auth.service import test_bypass_operator
 from src.app import create_app
 from src.observer.context import CurrentContext
 from src.extensions.registry import bundled_manifest_root, default_manifest_roots_for_workspace
+from src.security.trust_contract import PrincipalType
 
 
 @pytest.fixture
@@ -853,6 +858,122 @@ async def test_activate_starter_pack_enables_seeded_assets(client):
     assert payload["doctor_plan_after"]["ready"] is True
     enable_skill.assert_called_with("web-briefing")
     enable_workflow.assert_called_with("web-brief-to-file")
+
+
+def _starter_pack_activation_request(operator):
+    return Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/api/capabilities/starter-packs/research-briefing/activate",
+            "headers": [],
+            "query_string": b"",
+            "state": {"operator": operator},
+        }
+    )
+
+
+@pytest.mark.asyncio
+async def test_activate_starter_pack_denies_invalid_middleware_authority_before_side_effects():
+    from src.api.capabilities import activate_starter_pack
+
+    operator = test_bypass_operator()
+    invalid_operators = (
+        None,
+        replace(operator, principal=replace(operator.principal, revoked=True)),
+        replace(operator, principal=replace(operator.principal, session_id="other-session")),
+        replace(operator, principal=replace(operator.principal, principal_type=PrincipalType.SERVICE)),
+        replace(operator, principal=replace(operator.principal, grants=())),
+    )
+    with (
+        patch("src.api.capabilities._build_capability_overview") as overview,
+        patch("src.api.capabilities._activate_starter_pack_by_name", new_callable=AsyncMock) as activate,
+        patch("src.api.capabilities.install_catalog_item_by_name") as install,
+        patch("src.api.capabilities.skill_manager.enable") as enable_skill,
+        patch("src.api.capabilities.workflow_manager.enable") as enable_workflow,
+        patch("src.api.capabilities.workflow_manager.reload") as reload_workflows,
+        patch("src.api.capabilities.log_integration_event", new_callable=AsyncMock) as log,
+    ):
+        for invalid_operator in invalid_operators:
+            with pytest.raises(HTTPException) as raised:
+                await activate_starter_pack(
+                    "research-briefing",
+                    _starter_pack_activation_request(invalid_operator),
+                )
+            assert raised.value.status_code == 401
+            assert raised.value.detail == {"code": "authentication_required"}
+
+    overview.assert_not_called()
+    activate.assert_not_called()
+    install.assert_not_called()
+    enable_skill.assert_not_called()
+    enable_workflow.assert_not_called()
+    reload_workflows.assert_not_called()
+    log.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_activate_starter_pack_binds_operator_for_full_route_and_resets_context():
+    from src.api.capabilities import activate_starter_pack
+
+    operator = test_bypass_operator()
+    request = _starter_pack_activation_request(operator)
+    observed: list[tuple[str, object]] = []
+
+    def observe(label: str):
+        principal = get_current_trust_principal()
+        observed.append((label, principal))
+
+    def overview():
+        observe("overview")
+        return {"starter_packs": [], "summary": {}}
+
+    async def activate(_name: str):
+        observe("activation")
+        return {
+            "status": "activated",
+            "name": "research-briefing",
+            "installed_catalog_items": [],
+            "enabled_skills": [],
+            "enabled_workflows": [],
+            "missing_entries": [],
+        }
+
+    def preflight(**_kwargs):
+        observe("preflight")
+        return {"recommended_actions": [], "ready": True}
+
+    def doctor(**_kwargs):
+        observe("doctor")
+        return {}
+
+    with (
+        patch("src.api.capabilities._build_capability_overview", side_effect=overview),
+        patch("src.api.capabilities._activate_starter_pack_by_name", side_effect=activate),
+        patch("src.api.capabilities._capability_preflight_payload", side_effect=preflight),
+        patch("src.api.capabilities._doctor_plan", side_effect=doctor),
+    ):
+        payload = await activate_starter_pack("research-briefing", request)
+
+    assert payload["status"] == "activated"
+    assert [label for label, _principal in observed] == [
+        "overview",
+        "preflight",
+        "activation",
+        "overview",
+        "preflight",
+        "doctor",
+        "doctor",
+    ]
+    assert all(
+        principal is not None
+        and principal.principal_id == operator.principal.principal_id
+        and principal.principal_type is PrincipalType.OPERATOR
+        and principal.session_id == operator.session_id
+        for _label, principal in observed
+    )
+    assert get_current_session_id() is None
+    assert get_current_trust_principal() is None
 
 
 @pytest.mark.asyncio

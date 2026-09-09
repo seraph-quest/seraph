@@ -14,7 +14,13 @@ from src.db.engine import get_session
 from src.db.models import Memory, MemoryEdgeType, MemoryKind, MemoryStatus, StrategyDelta
 from src.memory.decay import apply_memory_decay_policies, summarize_memory_reconciliation_state
 from src.memory.providers import list_memory_provider_inventory
-from src.memory.repository import memory_repository
+from src.memory.repository import (
+    _CANONICAL_MEMORY_DELETE_EXPORT_REASON,
+    _CANONICAL_MEMORY_DELETE_CONTENT,
+    _CANONICAL_MEMORY_REDACTED_STATE,
+    _canonical_memory_deletion_marker,
+    memory_repository,
+)
 from src.memory.types import kind_to_category, normalize_memory_kind
 
 
@@ -60,7 +66,6 @@ _BLOCKED_LIVE_CONTROL_CLAIMS = [
     "reference_system_exceedance",
 ]
 _PROVIDER_QUARANTINES: dict[str, dict[str, Any]] = {}
-
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
@@ -1107,9 +1112,17 @@ async def apply_memory_live_control_action(
         existing = await memory_repository.get_memory(memory_id)
         if existing is None:
             raise ValueError(f"Unknown memory id: {memory_id}")
-        memory = await memory_repository.update_memory_control_metadata(
+        deletion_marker = _canonical_memory_deletion_marker(existing)
+        if deletion_marker is not None:
+            raise ValueError(
+                "cannot rollback canonical memory after operator delete/export "
+                f"redaction ({deletion_marker})"
+            )
+        memory = await memory_repository.rollback_memory_if_unchanged(
             memory_id,
-            status=MemoryStatus.active,
+            expected_updated_at=existing.updated_at,
+            expected_metadata_json=existing.metadata_json,
+            expected_status=existing.status,
             confidence=max(float(existing.confidence or 0.0), 0.55),
             importance=max(float(existing.importance or 0.0), 0.55),
             reinforcement=max(float(existing.reinforcement or 0.0), 1.0),
@@ -1129,8 +1142,8 @@ async def apply_memory_live_control_action(
         memory = await memory_repository.update_memory_control_metadata(
             memory_id,
             status=MemoryStatus.archived,
-            content="[delete/export propagated by operator]",
-            summary="[delete/export propagated by operator]",
+            content=_CANONICAL_MEMORY_DELETE_CONTENT,
+            summary=_CANONICAL_MEMORY_DELETE_CONTENT,
             confidence=0.0,
             importance=0.0,
             reinforcement=0.0,
@@ -1141,11 +1154,11 @@ async def apply_memory_live_control_action(
                     privacy_boundary=boundary,
                     reason=reason,
                     extra={
-                        "delete_export_state": "canonical_memory_redacted",
+                        "delete_export_state": _CANONICAL_MEMORY_REDACTED_STATE,
                         "provider_propagation_state": "runtime_receipt_only_no_full_provider_parity_claim",
                     },
                 ),
-                "archived_reason": "operator_delete_export",
+                "archived_reason": _CANONICAL_MEMORY_DELETE_EXPORT_REASON,
                 "archived_at": now.isoformat(),
             },
         )

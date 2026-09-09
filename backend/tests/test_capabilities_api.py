@@ -1,14 +1,25 @@
+from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from httpx import ASGITransport, AsyncClient
 from fastapi import HTTPException
 import pytest
+from starlette.requests import Request
 
-from src.api.capabilities import _explicit_runbook_entries, _runbook_labels_by_starter_pack
+from src.api.capabilities import (
+    CapabilityBootstrapRequest,
+    WorkflowDraftRequest,
+    bootstrap_capability,
+    _explicit_runbook_entries,
+    _runbook_labels_by_starter_pack,
+)
+from src.approval.runtime import get_current_session_id, get_current_trust_principal
+from src.auth.service import test_bypass_operator
 from src.app import create_app
 from src.observer.context import CurrentContext
 from src.extensions.registry import bundled_manifest_root, default_manifest_roots_for_workspace
+from src.security.trust_contract import PrincipalType
 
 
 @pytest.fixture
@@ -855,6 +866,260 @@ async def test_activate_starter_pack_enables_seeded_assets(client):
     enable_workflow.assert_called_with("web-brief-to-file")
 
 
+def _starter_pack_activation_request(operator):
+    return Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/api/capabilities/starter-packs/research-briefing/activate",
+            "headers": [],
+            "query_string": b"",
+            "state": {"operator": operator},
+        }
+    )
+
+
+def _workflow_draft_save_request(operator):
+    return Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/api/capabilities/workflow-drafts/save",
+            "headers": [],
+            "query_string": b"",
+            "state": {"operator": operator},
+        }
+    )
+
+
+def _capability_bootstrap_request(operator):
+    return Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/api/capabilities/bootstrap",
+            "headers": [],
+            "query_string": b"",
+            "state": {"operator": operator},
+        }
+    )
+
+
+@pytest.mark.asyncio
+async def test_activate_starter_pack_denies_invalid_middleware_authority_before_side_effects():
+    from src.api.capabilities import activate_starter_pack
+
+    operator = test_bypass_operator()
+    invalid_operators = (
+        None,
+        replace(operator, principal=replace(operator.principal, revoked=True)),
+        replace(operator, principal=replace(operator.principal, session_id="other-session")),
+        replace(operator, principal=replace(operator.principal, principal_type=PrincipalType.SERVICE)),
+        replace(operator, principal=replace(operator.principal, grants=())),
+    )
+    with (
+        patch("src.api.capabilities._build_capability_overview") as overview,
+        patch("src.api.capabilities._activate_starter_pack_by_name", new_callable=AsyncMock) as activate,
+        patch("src.api.capabilities.install_catalog_item_by_name") as install,
+        patch("src.api.capabilities.skill_manager.enable") as enable_skill,
+        patch("src.api.capabilities.workflow_manager.enable") as enable_workflow,
+        patch("src.api.capabilities.workflow_manager.reload") as reload_workflows,
+        patch("src.api.capabilities.log_integration_event", new_callable=AsyncMock) as log,
+    ):
+        for invalid_operator in invalid_operators:
+            with pytest.raises(HTTPException) as raised:
+                await activate_starter_pack(
+                    "research-briefing",
+                    _starter_pack_activation_request(invalid_operator),
+                )
+            assert raised.value.status_code == 401
+            assert raised.value.detail == {"code": "authentication_required"}
+
+    overview.assert_not_called()
+    activate.assert_not_called()
+    install.assert_not_called()
+    enable_skill.assert_not_called()
+    enable_workflow.assert_not_called()
+    reload_workflows.assert_not_called()
+    log.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_activate_starter_pack_binds_operator_for_full_route_and_resets_context():
+    from src.api.capabilities import activate_starter_pack
+
+    operator = test_bypass_operator()
+    request = _starter_pack_activation_request(operator)
+    observed: list[tuple[str, object]] = []
+
+    def observe(label: str):
+        principal = get_current_trust_principal()
+        observed.append((label, principal))
+
+    def overview():
+        observe("overview")
+        return {"starter_packs": [], "summary": {}}
+
+    async def activate(_name: str):
+        observe("activation")
+        return {
+            "status": "activated",
+            "name": "research-briefing",
+            "installed_catalog_items": [],
+            "enabled_skills": [],
+            "enabled_workflows": [],
+            "missing_entries": [],
+        }
+
+    def preflight(**_kwargs):
+        observe("preflight")
+        return {"recommended_actions": [], "ready": True}
+
+    def doctor(**_kwargs):
+        observe("doctor")
+        return {}
+
+    with (
+        patch("src.api.capabilities._build_capability_overview", side_effect=overview),
+        patch("src.api.capabilities._activate_starter_pack_by_name", side_effect=activate),
+        patch("src.api.capabilities._capability_preflight_payload", side_effect=preflight),
+        patch("src.api.capabilities._doctor_plan", side_effect=doctor),
+    ):
+        payload = await activate_starter_pack("research-briefing", request)
+
+    assert payload["status"] == "activated"
+    assert [label for label, _principal in observed] == [
+        "overview",
+        "preflight",
+        "activation",
+        "overview",
+        "preflight",
+        "doctor",
+        "doctor",
+    ]
+    assert all(
+        principal is not None
+        and principal.principal_id == operator.principal.principal_id
+        and principal.principal_type is PrincipalType.OPERATOR
+        and principal.session_id == operator.session_id
+        for _label, principal in observed
+    )
+    assert get_current_session_id() is None
+    assert get_current_trust_principal() is None
+
+
+@pytest.mark.asyncio
+async def test_save_workflow_draft_denies_invalid_middleware_authority_before_side_effects():
+    from src.api.capabilities import save_workflow_draft
+
+    operator = test_bypass_operator()
+    invalid_operators = (
+        None,
+        replace(operator, principal=replace(operator.principal, revoked=True)),
+        replace(operator, principal=replace(operator.principal, session_id="other-session")),
+        replace(operator, principal=replace(operator.principal, grants=())),
+    )
+    with (
+        patch("src.api.capabilities._validate_workflow_draft") as validate,
+        patch("src.api.capabilities.save_workspace_contribution") as save,
+        patch("src.api.capabilities.workflow_manager.reload") as reload_workflows,
+        patch("src.api.capabilities.log_integration_event", new_callable=AsyncMock) as log,
+    ):
+        for invalid_operator in invalid_operators:
+            with pytest.raises(HTTPException) as raised:
+                await save_workflow_draft(
+                    WorkflowDraftRequest(content="invalid"),
+                    _workflow_draft_save_request(invalid_operator),
+                )
+            assert raised.value.status_code == 401
+            assert raised.value.detail == {"code": "authentication_required"}
+
+    validate.assert_not_called()
+    save.assert_not_called()
+    reload_workflows.assert_not_called()
+    log.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_save_workflow_draft_binds_operator_for_full_route_and_resets_context():
+    from src.api.capabilities import save_workflow_draft
+
+    operator = test_bypass_operator()
+    observed: list[tuple[str, object]] = []
+
+    def observe(label: str):
+        observed.append((label, get_current_trust_principal()))
+
+    validation = {
+        "valid": True,
+        "errors": [],
+        "workflow": {
+            "name": "Bound Draft",
+            "tool_name": "workflow_bound_draft",
+            "description": "",
+            "requires_tools": [],
+            "requires_skills": [],
+            "user_invocable": True,
+            "step_count": 1,
+            "step_tools": ["write_file"],
+            "inputs": {},
+        },
+    }
+
+    def validate_draft(_content: str):
+        observe("validation")
+        return validation
+
+    def ensure_workspace_extensions():
+        observe("workspace_extensions")
+
+    def save_workspace(*_args, **_kwargs):
+        observe("workspace_write")
+        return "/tmp/workspace-capabilities/workflows/bound_draft.md"
+
+    def reload_workflows():
+        observe("reload")
+        return []
+
+    with (
+        patch("src.api.capabilities._validate_workflow_draft", side_effect=validate_draft),
+        patch(
+            "src.api.capabilities._ensure_workflow_manager_workspace_extensions_loaded",
+            side_effect=ensure_workspace_extensions,
+        ),
+        patch("src.api.capabilities.save_workspace_contribution", side_effect=save_workspace),
+        patch("src.api.capabilities.workflow_manager.reload", side_effect=reload_workflows),
+        patch(
+            "src.api.capabilities.log_integration_event",
+            new_callable=AsyncMock,
+            side_effect=lambda **_kwargs: observe("audit"),
+        ) as log,
+    ):
+        payload = await save_workflow_draft(
+            WorkflowDraftRequest(content="draft"),
+            _workflow_draft_save_request(operator),
+        )
+
+    assert payload["status"] == "saved"
+    assert [label for label, _principal in observed] == [
+        "validation",
+        "workspace_extensions",
+        "workspace_write",
+        "reload",
+        "audit",
+    ]
+    assert all(
+        principal is not None
+        and principal.principal_id == operator.principal.principal_id
+        and principal.principal_type is PrincipalType.OPERATOR
+        and principal.session_id == operator.session_id
+        for _label, principal in observed
+    )
+    log.assert_awaited_once()
+    assert get_current_session_id() is None
+    assert get_current_trust_principal() is None
+
+
 @pytest.mark.asyncio
 async def test_activate_manifest_backed_starter_pack_works(client, _setup_manifest_pack_and_runbook_managers):
     def install_side_effect(name: str):
@@ -1550,6 +1815,163 @@ async def test_capabilities_overview_repairs_starter_pack_skill_only_tool_blocks
     assert pack["blocked_skills"][0]["missing_tools"] == ["execute_code"]
     assert any(action["type"] == "set_tool_policy" and action["mode"] == "full" for action in pack["recommended_actions"])
     assert not any(action["type"] == "activate_starter_pack" for action in pack["recommended_actions"])
+
+
+@pytest.mark.asyncio
+async def test_capability_bootstrap_denies_invalid_middleware_authority_before_side_effects():
+    operator = test_bypass_operator()
+    invalid_operators = (
+        None,
+        replace(operator, principal=replace(operator.principal, revoked=True)),
+        replace(operator, principal=replace(operator.principal, session_id="other-session")),
+        replace(operator, principal=replace(operator.principal, principal_type=PrincipalType.SERVICE)),
+        replace(operator, principal=replace(operator.principal, grants=())),
+    )
+
+    with (
+        patch("src.api.capabilities._build_capability_overview") as overview,
+        patch("src.api.capabilities._capability_preflight_payload") as preflight,
+        patch("src.api.capabilities._apply_safe_capability_action", new_callable=AsyncMock) as apply_action,
+        patch("src.api.capabilities.log_integration_event", new_callable=AsyncMock) as log,
+        patch("src.api.capabilities.context_manager.get_context") as get_context,
+    ):
+        for invalid_operator in invalid_operators:
+            with pytest.raises(HTTPException) as raised:
+                await bootstrap_capability(
+                    CapabilityBootstrapRequest(target_type="workflow", name="web-brief-to-file"),
+                    _capability_bootstrap_request(invalid_operator),
+                )
+            assert raised.value.status_code == 401
+            assert raised.value.detail == {"code": "authentication_required"}
+
+    overview.assert_not_called()
+    preflight.assert_not_called()
+    apply_action.assert_not_awaited()
+    log.assert_not_awaited()
+    get_context.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_capability_bootstrap_binds_operator_for_full_route_and_resets_context():
+    operator = test_bypass_operator()
+    observed: list[tuple[str, object]] = []
+    blocked_preflight = {
+        "target_type": "workflow",
+        "name": "web-brief-to-file",
+        "label": "Run web-brief-to-file",
+        "description": "Enable a disabled workflow",
+        "availability": "disabled",
+        "blocking_reasons": ["workflow disabled"],
+        "recommended_actions": [],
+        "command": 'Run workflow "web-brief-to-file" with query="seraph".',
+        "parameter_schema": {},
+        "risk_level": "medium",
+        "execution_boundaries": ["workspace_read"],
+        "autorepair_actions": [
+            {
+                "type": "toggle_workflow",
+                "label": "Enable workflow",
+                "name": "web-brief-to-file",
+                "enabled": True,
+            }
+        ],
+        "can_autorepair": True,
+        "ready": False,
+    }
+    ready_preflight = {
+        **blocked_preflight,
+        "availability": "ready",
+        "blocking_reasons": [],
+        "recommended_actions": [],
+        "autorepair_actions": [],
+        "can_autorepair": False,
+        "ready": True,
+    }
+
+    def observe(label: str):
+        observed.append((label, get_current_trust_principal()))
+
+    overview_calls = 0
+
+    def overview():
+        nonlocal overview_calls
+        overview_calls += 1
+        observe("overview")
+        return {"summary": {"workflows_ready": max(overview_calls - 1, 0)}}
+
+    preflight_values = iter((blocked_preflight, ready_preflight))
+
+    def preflight(**_kwargs):
+        observe("preflight")
+        return next(preflight_values)
+
+    async def apply_action(_action):
+        observe("apply")
+        return {
+            "type": "toggle_workflow",
+            "name": "web-brief-to-file",
+            "enabled": True,
+            "status": "applied",
+        }
+
+    async def audit(**_kwargs):
+        observe("audit")
+
+    with (
+        patch("src.api.capabilities._build_capability_overview", side_effect=overview),
+        patch("src.api.capabilities._capability_preflight_payload", side_effect=preflight),
+        patch("src.api.capabilities._apply_safe_capability_action", side_effect=apply_action),
+        patch("src.api.capabilities.log_integration_event", new_callable=AsyncMock, side_effect=audit) as log,
+        patch("src.api.capabilities._doctor_plan", side_effect=lambda **_kwargs: (observe("doctor") or {})),
+    ):
+        payload = await bootstrap_capability(
+            CapabilityBootstrapRequest(target_type="workflow", name="web-brief-to-file"),
+            _capability_bootstrap_request(operator),
+        )
+
+    assert payload["status"] == "ready"
+    assert payload["applied_actions"][0]["status"] == "applied"
+    assert [label for label, _principal in observed] == [
+        "overview",
+        "preflight",
+        "apply",
+        "overview",
+        "preflight",
+        "audit",
+        "doctor",
+        "overview",
+    ]
+    assert all(
+        principal is not None
+        and principal.principal_id == operator.principal.principal_id
+        and principal.principal_type is PrincipalType.OPERATOR
+        and principal.session_id == operator.session_id
+        for _label, principal in observed
+    )
+    log.assert_awaited_once()
+    assert get_current_session_id() is None
+    assert get_current_trust_principal() is None
+
+
+@pytest.mark.asyncio
+async def test_capability_bootstrap_resets_context_when_execution_raises():
+    operator = test_bypass_operator()
+    observed: list[object] = []
+
+    def overview():
+        observed.append(get_current_trust_principal())
+        raise RuntimeError("bootstrap overview failed")
+
+    with patch("src.api.capabilities._build_capability_overview", side_effect=overview):
+        with pytest.raises(RuntimeError, match="bootstrap overview failed"):
+            await bootstrap_capability(
+                CapabilityBootstrapRequest(target_type="workflow", name="web-brief-to-file"),
+                _capability_bootstrap_request(operator),
+            )
+
+    assert observed and observed[0] is not None
+    assert get_current_session_id() is None
+    assert get_current_trust_principal() is None
 
 
 @pytest.mark.asyncio

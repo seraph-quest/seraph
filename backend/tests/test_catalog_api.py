@@ -2,18 +2,27 @@
 
 import json
 import os
+from dataclasses import replace
 from pathlib import Path
 import shutil
+from types import SimpleNamespace
 
+from fastapi import HTTPException
 import pytest
 import pytest_asyncio
-from unittest.mock import patch, MagicMock
+from starlette.requests import Request
+from unittest.mock import AsyncMock, patch, MagicMock
 
 from config.settings import settings
+from src.api import catalog as catalog_api
+from src.api.catalog import require_catalog_install_approval
+from src.approval.runtime import get_current_session_id, get_current_trust_principal
+from src.auth.service import test_bypass_operator as _test_bypass_operator
 from src.skills.manager import SkillManager
 from src.api.catalog import install_catalog_item_by_name
 from src.extensions.registry import default_manifest_roots_for_workspace
 from src.runbooks.manager import runbook_manager
+from src.security.trust_contract import PrincipalType
 from src.skills.manager import skill_manager
 from src.starter_packs.manager import starter_pack_manager
 from src.tools.mcp_manager import mcp_manager
@@ -195,6 +204,207 @@ def bundled_skills_dir(tmp_path):
 
 
 # ── TestCatalogAPI ───────────────────────────────────────
+
+
+def _catalog_install_request(operator):
+    return Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/api/catalog/install/test-catalog-skill",
+            "headers": [],
+            "query_string": b"",
+            "state": {"operator": operator},
+        }
+    )
+
+
+class _LifecycleApprovalStore:
+    def __init__(self):
+        self.records: dict[tuple[str | None, str, str], SimpleNamespace] = {}
+        self.next_id = 1
+
+    async def consume_approved(self, *, session_id, tool_name, fingerprint):
+        record = self.records.get((session_id, tool_name, fingerprint))
+        if record is None or record.status != "approved":
+            return False
+        record.status = "consumed"
+        return True
+
+    async def has_approved(self, *, session_id, tool_name, fingerprint):
+        record = self.records.get((session_id, tool_name, fingerprint))
+        return record is not None and record.status == "approved"
+
+    async def get_or_create_pending(
+        self,
+        *,
+        session_id,
+        tool_name,
+        risk_level,
+        summary,
+        fingerprint,
+        details,
+    ):
+        key = (session_id, tool_name, fingerprint)
+        record = self.records.get(key)
+        if record is None:
+            record = SimpleNamespace(
+                id=f"approval-{self.next_id}",
+                risk_level=risk_level,
+                status="pending",
+                session_id=session_id,
+                tool_name=tool_name,
+                fingerprint=fingerprint,
+                summary=summary,
+                details=details,
+            )
+            self.next_id += 1
+            self.records[key] = record
+        return record
+
+    def approve(self, *, session_id, tool_name, fingerprint):
+        self.records[(session_id, tool_name, fingerprint)].status = "approved"
+
+
+def _catalog_lifecycle_preview():
+    return {
+        "id": "seraph.catalog-session-bound",
+        "display_name": "Session Bound Catalog Item",
+        "version": "2026.9.9",
+        "root_path": "catalog://session-bound",
+        "path": "catalog://session-bound",
+        "package_digest": "catalog-package-digest",
+        "approval_profile": {
+            "requires_lifecycle_approval": True,
+            "lifecycle_boundaries": ["workspace_write"],
+            "risk_level": "high",
+        },
+    }
+
+
+@pytest.mark.asyncio
+async def test_catalog_lifecycle_approval_cannot_cross_sessions_and_allows_same_session():
+    store = _LifecycleApprovalStore()
+    with (
+        patch("src.api.catalog._catalog_install_approval_preview", return_value=("install", _catalog_lifecycle_preview())),
+        patch("src.api.extensions.approval_repository", store),
+    ):
+        with pytest.raises(HTTPException) as pending:
+            await require_catalog_install_approval("session-bound", session_id="session-a")
+        assert pending.value.status_code == 409
+        detail = pending.value.detail
+        approval_key = next(key for key, record in store.records.items() if record.id == detail["approval_id"])
+        store.approve(session_id="session-a", tool_name=approval_key[1], fingerprint=approval_key[2])
+
+        await require_catalog_install_approval("session-bound", session_id="session-a")
+
+        with pytest.raises(HTTPException) as cross_session:
+            await require_catalog_install_approval("session-bound", session_id="session-b")
+        assert cross_session.value.status_code == 409
+        assert cross_session.value.detail["approval_id"] != detail["approval_id"]
+
+    assert store.records[approval_key].status == "consumed"
+
+
+@pytest.mark.asyncio
+async def test_install_item_denies_invalid_middleware_authority_before_side_effects():
+    operator = _test_bypass_operator()
+    invalid_operators = (
+        None,
+        replace(operator, principal=replace(operator.principal, revoked=True)),
+        replace(operator, principal=replace(operator.principal, session_id="other-session")),
+        replace(operator, principal=replace(operator.principal, principal_type=PrincipalType.SERVICE)),
+        replace(operator, principal=replace(operator.principal, grants=())),
+    )
+    with (
+        patch("src.api.catalog.require_catalog_install_approval", new_callable=AsyncMock) as approval,
+        patch("src.api.catalog.install_catalog_item_by_name") as install,
+    ):
+        for invalid_operator in invalid_operators:
+            with pytest.raises(HTTPException) as raised:
+                await catalog_api.install_item(
+                    "test-catalog-skill",
+                    _catalog_install_request(invalid_operator),
+                )
+            assert raised.value.status_code == 401
+            assert raised.value.detail == {"code": "authentication_required"}
+
+    approval.assert_not_called()
+    install.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_install_item_binds_operator_for_approval_and_install_and_resets_context():
+    operator = _test_bypass_operator()
+    observed: list[tuple[str, object]] = []
+
+    async def approve(_name: str, *, session_id: str | None = None):
+        observed.append(("approval", get_current_trust_principal()))
+        assert session_id == operator.session_id
+
+    def install(_name: str):
+        observed.append(("install", get_current_trust_principal()))
+        return {"ok": True, "status": "installed", "type": "skill"}
+
+    with (
+        patch("src.api.catalog.require_catalog_install_approval", side_effect=approve) as approval,
+        patch("src.api.catalog.install_catalog_item_by_name", side_effect=install),
+    ):
+        payload = await catalog_api.install_item(
+            "test-catalog-skill",
+            _catalog_install_request(operator),
+        )
+
+    assert payload == {
+        "status": "installed",
+        "name": "test-catalog-skill",
+        "type": "skill",
+    }
+    assert [label for label, _principal in observed] == ["approval", "install"]
+    approval.assert_awaited_once_with("test-catalog-skill", session_id=operator.session_id)
+    assert all(
+        principal is not None
+        and principal.principal_id == operator.principal.principal_id
+        and principal.principal_type is PrincipalType.OPERATOR
+        and principal.session_id == operator.session_id
+        for _label, principal in observed
+    )
+    assert get_current_session_id() is None
+    assert get_current_trust_principal() is None
+
+
+@pytest.mark.asyncio
+async def test_install_item_resets_operator_context_when_install_raises():
+    operator = _test_bypass_operator()
+    observed: list[tuple[str, object]] = []
+
+    async def approve(_name: str, *, session_id: str | None = None):
+        observed.append(("approval", get_current_trust_principal()))
+        assert session_id == operator.session_id
+
+    def install(_name: str):
+        observed.append(("install", get_current_trust_principal()))
+        raise RuntimeError("install failed")
+
+    with (
+        patch("src.api.catalog.require_catalog_install_approval", side_effect=approve),
+        patch("src.api.catalog.install_catalog_item_by_name", side_effect=install),
+        pytest.raises(RuntimeError, match="install failed"),
+    ):
+        await catalog_api.install_item(
+            "test-catalog-skill",
+            _catalog_install_request(operator),
+        )
+
+    assert [label for label, _principal in observed] == ["approval", "install"]
+    assert all(
+        principal is not None
+        and principal.principal_id == operator.principal.principal_id
+        and principal.session_id == operator.session_id
+        for _label, principal in observed
+    )
+    assert get_current_session_id() is None
+    assert get_current_trust_principal() is None
 
 
 class TestCatalogAPI:
@@ -789,7 +999,12 @@ class TestCatalogAPI:
         approve = await client.post(f"/api/approvals/{approval_detail['approval_id']}/approve")
         assert approve.status_code == 200
 
-        await require_catalog_install_approval("seraph.hermes-browserbase", consume=False)
+        operator = _test_bypass_operator()
+        await require_catalog_install_approval(
+            "seraph.hermes-browserbase",
+            consume=False,
+            session_id=operator.session_id,
+        )
 
         install = await client.post("/api/catalog/install/seraph.hermes-browserbase")
         assert install.status_code == 201

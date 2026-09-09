@@ -155,10 +155,11 @@ class WorkflowDraftRequest(BaseModel):
     content: str
 
 
-def _require_authenticated_source_operator(request: Request) -> AuthenticatedOperator:
-    """Use middleware-bound operator authority for source evidence dispatch."""
+def _require_authenticated_capability_operator(request: Request) -> AuthenticatedOperator:
+    """Require middleware-bound operator authority for capability execution."""
     operator = getattr(request.state, "operator", None)
     principal = getattr(operator, "principal", None)
+    principal_id = str(getattr(principal, "principal_id", "") or "").strip()
     session_id = str(getattr(operator, "session_id", "") or "").strip()
     principal_type = getattr(getattr(principal, "principal_type", None), "value", None) or str(
         getattr(principal, "principal_type", "") or ""
@@ -171,6 +172,7 @@ def _require_authenticated_source_operator(request: Request) -> AuthenticatedOpe
         or principal_type != PrincipalType.OPERATOR.value
         or not bool(getattr(principal, "authenticated", False))
         or bool(getattr(principal, "revoked", False))
+        or not principal_id
         or not session_id
         or principal_session_id != session_id
         or AuthorityGrant.CAPABILITY_EXECUTE.value not in grants
@@ -185,7 +187,7 @@ async def source_evidence(
     request: Request,
     x_seraph_session_id: str | None = Header(default=None),
 ):
-    operator = _require_authenticated_source_operator(request)
+    operator = _require_authenticated_capability_operator(request)
     authenticated_session_id = operator.session_id
     requested_session_id = (x_seraph_session_id or "").strip()
     active_session_id = authenticated_session_id
@@ -2121,131 +2123,161 @@ async def validate_workflow_draft(body: WorkflowDraftRequest):
 
 
 @router.post("/capabilities/workflow-drafts/save")
-async def save_workflow_draft(body: WorkflowDraftRequest):
-    validation = _validate_workflow_draft(body.content)
-    if not validation["valid"] or not validation["workflow"]:
-        raise HTTPException(status_code=400, detail="Workflow draft is invalid")
-    workflow_name = str(validation["workflow"]["name"])
-    file_name = f"{sanitize_workflow_name(workflow_name)}.md"
-    _ensure_workflow_manager_workspace_extensions_loaded()
-    file_path = str(save_workspace_contribution("workflows", file_name=file_name, content=body.content))
-    workflow_manager.reload()
-    await log_integration_event(
-        integration_type="workflow_draft",
-        name=workflow_name,
-        outcome="succeeded",
-        details={
-            "status": "saved",
-            "file_path": file_path,
-            "step_count": validation["workflow"]["step_count"],
-            "step_tools": validation["workflow"]["step_tools"],
-        },
+async def save_workflow_draft(body: WorkflowDraftRequest, request: Request):
+    operator = _require_authenticated_capability_operator(request)
+    active_session_id = operator.session_id
+    tokens = set_runtime_context(
+        active_session_id,
+        context_manager.get_context().approval_mode,
+        trust_principal=bind_operator_principal(operator, active_session_id),
     )
-    return {
-        "status": "saved",
-        "name": workflow_name,
-        "file_path": file_path,
-        "workflow": validation["workflow"],
-    }
+    try:
+        validation = _validate_workflow_draft(body.content)
+        if not validation["valid"] or not validation["workflow"]:
+            raise HTTPException(status_code=400, detail="Workflow draft is invalid")
+        workflow_name = str(validation["workflow"]["name"])
+        file_name = f"{sanitize_workflow_name(workflow_name)}.md"
+        _ensure_workflow_manager_workspace_extensions_loaded()
+        file_path = str(save_workspace_contribution("workflows", file_name=file_name, content=body.content))
+        workflow_manager.reload()
+        await log_integration_event(
+            integration_type="workflow_draft",
+            name=workflow_name,
+            outcome="succeeded",
+            details={
+                "status": "saved",
+                "file_path": file_path,
+                "step_count": validation["workflow"]["step_count"],
+                "step_tools": validation["workflow"]["step_tools"],
+            },
+        )
+        return {
+            "status": "saved",
+            "name": workflow_name,
+            "file_path": file_path,
+            "workflow": validation["workflow"],
+        }
+    finally:
+        reset_runtime_context(tokens)
 
 
 @router.post("/capabilities/starter-packs/{name}/activate")
-async def activate_starter_pack(name: str):
-    overview_before = _build_capability_overview()
-    preflight_before = _capability_preflight_payload(
-        overview=overview_before,
-        target_type="starter_pack",
-        name=name,
+async def activate_starter_pack(name: str, request: Request):
+    operator = _require_authenticated_capability_operator(request)
+    active_session_id = operator.session_id
+    tokens = set_runtime_context(
+        active_session_id,
+        context_manager.get_context().approval_mode,
+        trust_principal=bind_operator_principal(operator, active_session_id),
     )
-    result = await _activate_starter_pack_by_name(name)
-    overview = _build_capability_overview()
-    preflight_after = _capability_preflight_payload(
-        overview=overview,
-        target_type="starter_pack",
-        name=name,
-    )
-    return {
-        **result,
-        "doctor_plan_before": _doctor_plan(preflight=preflight_before),
-        "doctor_plan_after": _doctor_plan(preflight=preflight_after),
-        "overview": overview,
-    }
+    try:
+        overview_before = _build_capability_overview()
+        preflight_before = _capability_preflight_payload(
+            overview=overview_before,
+            target_type="starter_pack",
+            name=name,
+        )
+        result = await _activate_starter_pack_by_name(name)
+        overview = _build_capability_overview()
+        preflight_after = _capability_preflight_payload(
+            overview=overview,
+            target_type="starter_pack",
+            name=name,
+        )
+        return {
+            **result,
+            "doctor_plan_before": _doctor_plan(preflight=preflight_before),
+            "doctor_plan_after": _doctor_plan(preflight=preflight_after),
+            "overview": overview,
+        }
+    finally:
+        reset_runtime_context(tokens)
 
 
 @router.post("/capabilities/bootstrap")
-async def bootstrap_capability(body: CapabilityBootstrapRequest):
-    overview_before = _build_capability_overview()
-    preflight = _capability_preflight_payload(
-        overview=overview_before,
-        target_type=body.target_type,
-        name=body.name,
+async def bootstrap_capability(body: CapabilityBootstrapRequest, request: Request):
+    operator = _require_authenticated_capability_operator(request)
+    active_session_id = operator.session_id
+    tokens = set_runtime_context(
+        active_session_id,
+        context_manager.get_context().approval_mode,
+        trust_principal=bind_operator_principal(operator, active_session_id),
     )
-    seen_actions: set[tuple[str, str | None, str | None, bool | None, str | None]] = set()
-    applied_actions: list[dict[str, Any]] = []
-    manual_actions: list[dict[str, Any]] = []
-
-    for _ in range(6):
-        if preflight["ready"]:
-            break
-        safe_actions = [
-            action
-            for action in preflight.get("autorepair_actions", []) or []
-            if (
-                isinstance(action, dict)
-                and str(action.get("type") or "") in _LOW_RISK_AUTOREPAIR_ACTION_TYPES
-                and _action_key(action) not in seen_actions
-            )
-        ]
-        if not safe_actions:
-            break
-        for action in _ordered_bootstrap_actions(safe_actions):
-            seen_actions.add(_action_key(action))
-            applied_actions.append(await _apply_safe_capability_action(action))
-        refreshed = _build_capability_overview()
+    try:
+        overview_before = _build_capability_overview()
         preflight = _capability_preflight_payload(
-            overview=refreshed,
+            overview=overview_before,
             target_type=body.target_type,
             name=body.name,
         )
+        seen_actions: set[tuple[str, str | None, str | None, bool | None, str | None]] = set()
+        applied_actions: list[dict[str, Any]] = []
+        manual_actions: list[dict[str, Any]] = []
 
-    manual_actions = _manual_bootstrap_actions(preflight, seen=seen_actions)
-    outcome = (
-        "ready"
-        if preflight["ready"]
-        else ("partially_repaired" if any(_action_made_progress(action) for action in applied_actions) else "blocked")
-    )
-    await log_integration_event(
-        integration_type="capability_bootstrap",
-        name=f"{body.target_type}:{body.name}",
-        outcome="succeeded" if preflight["ready"] else "degraded",
-        details={
+        for _ in range(6):
+            if preflight["ready"]:
+                break
+            safe_actions = [
+                action
+                for action in preflight.get("autorepair_actions", []) or []
+                if (
+                    isinstance(action, dict)
+                    and str(action.get("type") or "") in _LOW_RISK_AUTOREPAIR_ACTION_TYPES
+                    and _action_key(action) not in seen_actions
+                )
+            ]
+            if not safe_actions:
+                break
+            for action in _ordered_bootstrap_actions(safe_actions):
+                seen_actions.add(_action_key(action))
+                applied_actions.append(await _apply_safe_capability_action(action))
+            refreshed = _build_capability_overview()
+            preflight = _capability_preflight_payload(
+                overview=refreshed,
+                target_type=body.target_type,
+                name=body.name,
+            )
+
+        manual_actions = _manual_bootstrap_actions(preflight, seen=seen_actions)
+        outcome = (
+            "ready"
+            if preflight["ready"]
+            else ("partially_repaired" if any(_action_made_progress(action) for action in applied_actions) else "blocked")
+        )
+        await log_integration_event(
+            integration_type="capability_bootstrap",
+            name=f"{body.target_type}:{body.name}",
+            outcome="succeeded" if preflight["ready"] else "degraded",
+            details={
+                "target_type": body.target_type,
+                "ready_before": overview_before.get("summary", {}),
+                "availability_after": preflight["availability"],
+                "blocking_reasons_after": preflight["blocking_reasons"],
+                "applied_actions": applied_actions,
+                "manual_actions": manual_actions,
+                "command_ready": bool(preflight.get("command")) and preflight["ready"],
+            },
+        )
+        return {
             "target_type": body.target_type,
-            "ready_before": overview_before.get("summary", {}),
-            "availability_after": preflight["availability"],
-            "blocking_reasons_after": preflight["blocking_reasons"],
+            "name": body.name,
+            "label": preflight["label"],
+            "status": outcome,
+            "ready": preflight["ready"],
+            "availability": preflight["availability"],
+            "blocking_reasons": preflight["blocking_reasons"],
             "applied_actions": applied_actions,
             "manual_actions": manual_actions,
-            "command_ready": bool(preflight.get("command")) and preflight["ready"],
-        },
-    )
-    return {
-        "target_type": body.target_type,
-        "name": body.name,
-        "label": preflight["label"],
-        "status": outcome,
-        "ready": preflight["ready"],
-        "availability": preflight["availability"],
-        "blocking_reasons": preflight["blocking_reasons"],
-        "applied_actions": applied_actions,
-        "manual_actions": manual_actions,
-        "command": preflight["command"] if preflight["ready"] else None,
-        "parameter_schema": preflight["parameter_schema"],
-        "risk_level": preflight["risk_level"],
-        "execution_boundaries": preflight["execution_boundaries"],
-        "doctor_plan": _doctor_plan(
-            preflight=preflight,
-            applied_actions=applied_actions,
-            manual_actions=manual_actions,
-        ),
-        "overview": _build_capability_overview(),
-    }
+            "command": preflight["command"] if preflight["ready"] else None,
+            "parameter_schema": preflight["parameter_schema"],
+            "risk_level": preflight["risk_level"],
+            "execution_boundaries": preflight["execution_boundaries"],
+            "doctor_plan": _doctor_plan(
+                preflight=preflight,
+                applied_actions=applied_actions,
+                manual_actions=manual_actions,
+            ),
+            "overview": _build_capability_overview(),
+        }
+    finally:
+        reset_runtime_context(tokens)

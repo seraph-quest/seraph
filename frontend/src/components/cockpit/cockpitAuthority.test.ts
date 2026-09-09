@@ -1,0 +1,82 @@
+import { describe, expect, it } from "vitest";
+
+import {
+  displayApprovalOwnerMetadata,
+  isApprovalAuthorityReady,
+  selectApprovalForWorkflow,
+} from "./cockpitAuthority";
+
+const auth = {
+  status: "authenticated" as const,
+  principalId: "operator:single",
+  sessionId: "browser-session-1",
+};
+
+const approval = {
+  id: "approval-1",
+  tool_name: "filesystem:workspace",
+  status: "pending",
+  session_id: "conversation-1",
+  approval_conversation_id: "conversation-1",
+  approval_owner_principal_id: "operator:single",
+  approval_owner_operator_session_id: "browser-session-1",
+};
+
+describe("cockpit approval authority", () => {
+  it("requires both the authenticated principal and browser session owner", () => {
+    expect(isApprovalAuthorityReady(approval, auth, "ready")).toBe(true);
+    expect(isApprovalAuthorityReady(
+      approval,
+      { ...auth, sessionId: "browser-session-2" },
+      "ready",
+    )).toBe(false);
+    expect(isApprovalAuthorityReady(
+      { ...approval, approval_owner_principal_id: undefined },
+      auth,
+      "ready",
+    )).toBe(false);
+    expect(isApprovalAuthorityReady(
+      { ...approval, approval_owner_operator_session_id: undefined },
+      auth,
+      "ready",
+    )).toBe(false);
+  });
+
+  it("locks rows while approval data is stale and when its supplied expiry has passed", () => {
+    expect(isApprovalAuthorityReady(approval, auth, "stale")).toBe(false);
+    expect(isApprovalAuthorityReady(
+      { ...approval, expires_at: "2020-01-01T00:00:00Z" },
+      auth,
+      "ready",
+      Date.parse("2026-01-01T00:00:00Z"),
+    )).toBe(false);
+    expect(isApprovalAuthorityReady(
+      { ...approval, expires_at: "not-a-date" },
+      auth,
+      "ready",
+    )).toBe(false);
+  });
+
+  it("does not select an unrelated pending approval for a workflow", () => {
+    expect(selectApprovalForWorkflow(
+      [{ ...approval }, { ...approval, id: "approval-2", session_id: "other-conversation" }],
+      { toolName: "filesystem:workspace", sessionId: "workflow-conversation", pendingApprovalIds: [] },
+    )).toBe(null);
+    expect(selectApprovalForWorkflow(
+      [{ ...approval, id: "approval-2", session_id: "other-conversation" }],
+      { toolName: "filesystem:workspace", sessionId: "workflow-conversation", pendingApprovalIds: ["missing"] },
+    )).toBe(null);
+  });
+
+  it("keeps owner metadata inspectable without exposing full identifiers", () => {
+    const metadata = displayApprovalOwnerMetadata({
+      ...approval,
+      approval_owner_source: "operator_auth_session",
+      approval_owner_expires_at: "2026-09-09T12:00:00Z",
+    });
+    expect(metadata.principal).toBe("…single");
+    expect(metadata.session).toBe("…sion-1");
+    expect(metadata.source).toBe("operator_auth_session");
+    expect(metadata.expiry).toBe("2026-09-09T12:00:00Z");
+  });
+});

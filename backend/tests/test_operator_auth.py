@@ -72,6 +72,10 @@ async def test_login_cookie_session_refresh_rotation_and_logout(client):
     session = await client.get("/api/auth/session")
     assert session.status_code == 200
     assert session.json()["principal_id"] == "operator:single"
+    assert session.json()["session_id"]
+    assert session.json()["session_id"] != old_token
+    assert session.json()["absolute_expires_at"]
+    assert old_token not in session.text
 
     refreshed = await client.post("/api/auth/refresh", headers={"origin": ORIGIN})
     assert refreshed.status_code == 200

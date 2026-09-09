@@ -58,6 +58,10 @@ export interface OutcomeApprovalSummary {
   permissions?: string[];
   threadLabel?: string | null;
   authorized?: boolean;
+  ownerPrincipal?: string | null;
+  ownerSession?: string | null;
+  ownerSource?: string | null;
+  ownerExpiry?: string | null;
 }
 
 export interface OutcomeRouteSummary {
@@ -109,6 +113,7 @@ export interface OutcomeCockpitPanelProps {
   evidence: OutcomeEvidenceSummary;
   result: OutcomeResultSummary;
   workLoadState?: OutcomeCockpitState;
+  approvalLoadState?: "loading" | "ready" | "stale";
   onOpenPriorities?: () => void;
   onLoadWork?: () => void;
   onInspectWork?: () => void;
@@ -242,6 +247,7 @@ export function OutcomeCockpitPanel({
   evidence,
   result,
   workLoadState = "partial_metadata",
+  approvalLoadState = "ready",
   onOpenPriorities,
   onLoadWork,
   onInspectWork,
@@ -254,7 +260,10 @@ export function OutcomeCockpitPanel({
   onRetry,
   onBranch,
 }: OutcomeCockpitPanelProps) {
-  const approvalLocked = actionLocked(approval?.state ?? "empty", approval?.authorized !== false);
+  const approvalLocked = approvalLoadState !== "ready"
+    || actionLocked(approval?.state ?? "empty", approval?.authorized !== false);
+  const approvalCardState: OutcomeCockpitState = approval?.state
+    ?? (approvalLoadState === "loading" ? "loading" : approvalLoadState === "stale" ? "stale" : "empty");
   const recoveryLocked = !(
     work?.state
     && !RECOVERY_LOCKED_STATES.includes(work.state)
@@ -281,6 +290,7 @@ export function OutcomeCockpitPanel({
       <p className="cockpit-outcome-status" role="status" aria-live="polite">
         Inspect backend receipts before treating a work item as complete. {stateMessage(
           approval?.state
+            ?? (approvalLoadState === "loading" ? "loading" : approvalLoadState === "stale" ? "stale" : null)
             ?? work?.state
             ?? route.state,
         )}
@@ -354,7 +364,7 @@ export function OutcomeCockpitPanel({
         <Card
           id="outcome-approval-card"
           label="Next decision / approval"
-          state={approval?.state ?? "empty"}
+          state={approvalCardState}
           actions={(
             <>
               {approval && onOpenThread ? <ActionButton action={{ label: "Inspect thread", onClick: onOpenThread }} /> : null}
@@ -390,9 +400,19 @@ export function OutcomeCockpitPanel({
               <ValueRow label="scope" value={approval.scope?.length ? approval.scope.join(" · ") : "scope unavailable"} />
               <ValueRow label="permission scope" value={approval.permissions?.length ? approval.permissions.join(" · ") : "permission scope unavailable"} />
               <ValueRow label="thread" value={display(approval.threadLabel, "thread unavailable")} />
+              <ValueRow label="owner principal" value={display(approval.ownerPrincipal)} />
+              <ValueRow label="owner session" value={display(approval.ownerSession)} />
+              <ValueRow label="owner source" value={display(approval.ownerSource)} />
+              <ValueRow label="owner expiry" value={display(approval.ownerExpiry)} />
             </>
           ) : (
-            <div className="cockpit-outcome-empty">No pending approval is reported by the approvals endpoint.</div>
+            <div className="cockpit-outcome-empty">
+              {approvalLoadState === "loading"
+                ? "Loading the current approval endpoint…"
+                : approvalLoadState === "stale"
+                  ? "The approvals endpoint is stale or unavailable. Effect controls remain locked until refresh."
+                  : "No pending approval is reported by the approvals endpoint."}
+            </div>
           )}
         </Card>
 

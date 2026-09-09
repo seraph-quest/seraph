@@ -247,4 +247,35 @@ describe("OutcomeCockpitPanel", () => {
     expect(screen.getByTestId("outcome-result-card")).toHaveAttribute("data-state", "partial_metadata");
     expect(within(screen.getByTestId("outcome-result-card")).getByText("verification").parentElement).toHaveTextContent("unknown");
   });
+
+  it("clears stale approval data into an explicit locked state", () => {
+    const onApprove = vi.fn();
+    render(<OutcomeCockpitPanel
+      {...fixtureModel()}
+      approval={null}
+      approvalLoadState="stale"
+      onApprove={onApprove}
+    />);
+
+    expect(screen.getByTestId("outcome-approval-card")).toHaveAttribute("data-state", "stale");
+    expect(screen.getByText(/approvals endpoint is stale or unavailable/i)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Approve" })).not.toBeInTheDocument();
+    expect(onApprove).not.toHaveBeenCalled();
+  });
+
+  it("renders redacted owner metadata alongside an awaiting decision", () => {
+    renderFixture({
+      approval: {
+        ownerPrincipal: "…single",
+        ownerSession: "…sion-1",
+        ownerSource: "operator_auth_session",
+        ownerExpiry: "2026-09-09T12:00:00Z",
+      },
+    });
+
+    expect(screen.getByText("…single")).toBeInTheDocument();
+    expect(screen.getByText("…sion-1")).toBeInTheDocument();
+    expect(screen.getByText("operator_auth_session")).toBeInTheDocument();
+    expect(screen.getByText("2026-09-09T12:00:00Z")).toBeInTheDocument();
+  });
 });

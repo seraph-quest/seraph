@@ -23,6 +23,15 @@ from src.extensions.capability_contributions import parse_prompt_pack_definition
 WORKSPACE_CAPABILITY_PACKAGE_ID = "seraph.workspace-capabilities"
 WORKSPACE_CAPABILITY_PACKAGE_DIRNAME = "workspace-capabilities"
 WORKSPACE_CAPABILITY_DISPLAY_NAME = "Workspace capabilities"
+EVOLUTION_CANDIDATE_FILE_NAME_ERROR = "Review candidate filenames are reserved for governed evolution"
+
+
+def _is_evolution_candidate_file_name(file_name: str) -> bool:
+    """Keep generic package saves away from inert governed candidates."""
+    candidate = str(file_name or "").strip()
+    if not candidate or Path(candidate).name != candidate:
+        return False
+    return Path(candidate).stem.casefold().endswith("-review-candidate")
 
 
 def _current_seraph_version() -> str:
@@ -160,6 +169,8 @@ def save_workspace_contribution(
 ) -> Path:
     if contribution_type not in {"skills", "workflows", "runbooks", "starter_packs", "prompt_packs"}:
         raise ValueError(f"unsupported managed workspace contribution type: {contribution_type}")
+    if _is_evolution_candidate_file_name(file_name):
+        raise ValueError(EVOLUTION_CANDIDATE_FILE_NAME_ERROR)
 
     package_root = workspace_capability_package_root(workspace_dir)
     payload = _load_or_create_manifest_payload(package_root)

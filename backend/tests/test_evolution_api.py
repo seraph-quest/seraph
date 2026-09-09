@@ -1448,6 +1448,76 @@ def test_evolution_benchmark_readback_tolerates_tampered_types_and_file_races(tm
     assert by_id["malformed"]["blocked_constraints"] == []
 
 
+def test_evolution_benchmark_readback_verifies_rollback_artifacts_and_bounds_metadata(tmp_path):
+    from src.evolution.benchmark import _recent_evolution_receipts
+
+    package_root = tmp_path / "extensions" / "workspace-capabilities"
+    candidate_path = package_root / "prompts" / "candidate.md"
+    receipt_path = package_root / "evolution" / "receipts" / "prompt_pack" / "candidate.json"
+    candidate_path.parent.mkdir(parents=True)
+    receipt_path.parent.mkdir(parents=True)
+    candidate_content = "# Candidate\n"
+    candidate_path.write_text(candidate_content, encoding="utf-8")
+    candidate_digest = hashlib.sha256(candidate_content.encode("utf-8")).hexdigest()
+    receipt_path.write_text(
+        json.dumps(
+            {
+                "proposal_id": "proposal-candidate",
+                "candidate_name": "Candidate\nwith\tcontrols" + "x" * 300,
+                "candidate_name_digest": "not-a-digest",
+                "target_type": "prompt_pack",
+                "source_content_digest": "a" * 64,
+                "source_version": "a" * 64,
+                "candidate_content_digest": candidate_digest,
+                "candidate_artifact_digest": candidate_digest,
+                "benchmark_gate": {
+                    "saved_candidate_path": str(candidate_path),
+                    "receipt_path": str(receipt_path),
+                    "rollback_ready": True,
+                    "rollout_state": "attacker-state",
+                    "regression_gate": "pass",
+                    "acceptance_state": "ready_for_canary",
+                    "diversity_guard_state": "multi_signal_preserved",
+                    "safety_receipt_state": "candidate_and_receipt_written",
+                    "blocked_constraints": [
+                        "instruction_surface_expansion",
+                        "attacker\nconstraint",
+                        "scope_expansion",
+                    ],
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with patch(
+        "src.evolution.benchmark.workspace_capability_package_root",
+        return_value=package_root,
+    ):
+        receipts = _recent_evolution_receipts(limit=1)
+
+    receipt = receipts[0]
+    assert receipt["candidate_name"].startswith("Candidate with controls")
+    assert len(receipt["candidate_name"]) <= 160
+    assert "\n" not in receipt["candidate_name"]
+    assert "\t" not in receipt["candidate_name"]
+    assert receipt["candidate_name_digest"] == hashlib.sha256(
+        receipt["candidate_name"].encode("utf-8")
+    ).hexdigest()
+    assert receipt["rollout_state"] == "unknown"
+    assert receipt["regression_gate"] == "pass"
+    assert receipt["blocked_constraints"] == ["instruction_surface_expansion", "scope_expansion"]
+    assert receipt["rollback_ready"] is True
+
+    candidate_path.write_text("# Tampered Candidate\n", encoding="utf-8")
+    with patch(
+        "src.evolution.benchmark.workspace_capability_package_root",
+        return_value=package_root,
+    ):
+        tampered_receipt = _recent_evolution_receipts(limit=1)[0]
+    assert tampered_receipt["rollback_ready"] is False
+
+
 @pytest.mark.asyncio
 async def test_evolution_validate_blocks_skill_tool_scope_expansion(client, tmp_path, preserve_evolution_managers):
     source_path = tmp_path / "skills" / "web-briefing.md"
@@ -1800,3 +1870,136 @@ async def test_workspace_contribution_save_rolls_back_on_invalid_prompt_pack(tmp
     manifest_text = (package_root / "manifest.yaml").read_text(encoding="utf-8")
     assert "prompts/broken.md" not in manifest_text
     assert not (prompts_dir / "broken.md").exists()
+
+
+def test_workspace_contribution_save_rejects_reserved_evolution_candidate_name(tmp_path):
+    from src.extensions.workspace_package import (
+        EVOLUTION_CANDIDATE_FILE_NAME_ERROR,
+        save_workspace_contribution,
+    )
+
+    with pytest.raises(ValueError, match=EVOLUTION_CANDIDATE_FILE_NAME_ERROR):
+        save_workspace_contribution(
+            "skills",
+            file_name="Review-Review-Candidate.MD",
+            content="candidate content",
+            workspace_dir=str(tmp_path),
+        )
+
+    assert not (tmp_path / "extensions" / "workspace-capabilities").exists()
+
+
+def test_evolution_audit_details_preserve_only_bounded_lineage(tmp_path):
+    from src.api.evolution import EvolutionProposalRequest, _evolution_audit_details
+
+    candidate_path = tmp_path / "extensions" / "workspace-capabilities" / "prompts" / "candidate.md"
+    receipt_path = (
+        tmp_path
+        / "extensions"
+        / "workspace-capabilities"
+        / "evolution"
+        / "receipts"
+        / "prompt_pack"
+        / "candidate.json"
+    )
+    proposal_id = "proposal-candidate"
+    source_digest = "a" * 64
+    candidate_digest = "b" * 64
+    with patch("src.api.evolution.settings.workspace_dir", str(tmp_path)):
+        details = _evolution_audit_details(
+            EvolutionProposalRequest(
+                target_type="prompt_pack",
+                source_path="/private/operator/source.md",
+                objective="secret objective",
+            ),
+            outcome="succeeded",
+            receipt={
+                "proposal_id": proposal_id,
+                "source_content_digest": source_digest,
+                "source_version": source_digest,
+                "candidate_content_digest": candidate_digest,
+                "candidate_artifact_digest": candidate_digest,
+                "saved_path": str(candidate_path),
+                "receipt_path": str(receipt_path),
+                "valid": True,
+                "blocked": False,
+                "score": 0.8,
+                "quality_state": "guarded",
+                "benchmark_gate": {
+                    "rollout_state": "guarded_review",
+                    "regression_gate": "warn",
+                    "acceptance_state": "held_for_canary",
+                    "diversity_guard_state": "single_signal_watch",
+                    "canary_required": True,
+                    "rollback_ready_required": True,
+                    "rollback_ready": True,
+                    "safety_receipt_state": "candidate_and_receipt_written",
+                },
+            },
+        )
+
+    lineage = details["lineage"]
+    assert lineage["proposal_id"] == proposal_id
+    assert lineage["source_content_digest"] == source_digest
+    assert lineage["candidate_content_digest"] == candidate_digest
+    assert lineage["candidate_artifact_digest"] == candidate_digest
+    assert lineage["candidate_handle"] == "prompts/candidate.md"
+    assert lineage["receipt_handle"] == "evolution/receipts/prompt_pack/candidate.json"
+    assert "/private/operator" not in repr(details)
+    assert "secret objective" not in repr(details)
+
+
+@pytest.mark.asyncio
+async def test_evolution_persistence_failure_returns_and_audits_safe_lineage_receipt():
+    from src.api.evolution import EvolutionProposalRequest, create_governed_evolution_proposal
+    from src.evolution.engine import EvolutionPersistenceError
+
+    operator = test_bypass_operator()
+    error = EvolutionPersistenceError(
+        "candidate receipt write failed",
+        lineage={
+            "proposal_id": "proposal-candidate",
+            "source_content_digest": "a" * 64,
+            "source_version": "a" * 64,
+            "candidate_content_digest": "b" * 64,
+            "candidate_artifact_digest": "b" * 64,
+            "candidate_handle": "prompts/candidate.md",
+            "receipt_handle": "evolution/receipts/prompt_pack/candidate.json",
+        },
+        artifacts_written=True,
+        rollback_failed=False,
+    )
+    watch = object()
+    with (
+        patch("src.api.evolution.context_manager.get_context", return_value=SimpleNamespace(approval_mode="safe")),
+        patch("src.api.evolution._begin_rest_revocation_watch", return_value=watch),
+        patch("src.api.evolution._end_rest_revocation_watch", new_callable=AsyncMock),
+        patch("src.api.evolution._ensure_rest_authorized", new_callable=AsyncMock),
+        patch("src.api.evolution._run_evolution_thread_cancel_safe", side_effect=_run_evolution_inline),
+        patch("src.api.evolution._ensure_evolution_managers_loaded"),
+        patch("src.api.evolution.create_evolution_proposal", side_effect=error),
+        patch("src.api.evolution.log_integration_event", new_callable=AsyncMock, return_value=True) as audit,
+    ):
+        with pytest.raises(HTTPException) as raised:
+            await create_governed_evolution_proposal(
+                EvolutionProposalRequest(
+                    target_type="prompt_pack",
+                    source_path="/private/operator/source.md",
+                ),
+                _evolution_request(operator),
+            )
+
+    assert raised.value.status_code == 500
+    detail = raised.value.detail
+    audit_receipt = detail["audit_receipt"]
+    assert audit_receipt["reason"] == "artifact_persistence_failed"
+    assert audit_receipt["proposal_id"] == "proposal-candidate"
+    assert audit_receipt["source_content_digest"] == "a" * 64
+    assert audit_receipt["candidate_artifact_digest"] == "b" * 64
+    assert audit_receipt["candidate_handle"] == "prompts/candidate.md"
+    assert audit_receipt["receipt_handle"] == "evolution/receipts/prompt_pack/candidate.json"
+    assert "/private/operator" not in repr(detail)
+    audit.assert_awaited_once()
+    audit_details = audit.call_args.kwargs["details"]
+    assert audit_details["lineage"]["proposal_id"] == "proposal-candidate"
+    assert audit_details["receipt"]["candidate_artifact_digest"] == "b" * 64

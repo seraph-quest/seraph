@@ -20,7 +20,7 @@ import yaml
 from config.settings import settings
 from src.extensions.capability_contributions import parse_prompt_pack_definition
 from src.approval.runtime import get_current_session_id, get_current_trust_principal
-from src.auth.cancellation import assert_runtime_not_revoked
+from src.auth.cancellation import RuntimeRevokedError, assert_runtime_not_revoked
 from src.extensions.manifest import load_extension_manifest
 from src.extensions.layout import MANIFEST_FILENAMES, expected_layout_prefixes
 from src.extensions.registry import ExtensionRegistry, default_manifest_roots_for_workspace
@@ -38,6 +38,23 @@ from src.security.trust_contract import AuthorityGrant, PrincipalType, TrustPrin
 EvolutionTargetType = Literal["skill", "runbook", "starter_pack", "prompt_pack"]
 EvolutionAuthorityCheck = Callable[[], None]
 EVOLUTION_FILE_NAME_ERROR = "Candidate file name must stay within the managed workspace package"
+
+
+class EvolutionPersistenceError(ValueError):
+    """Describe a post-write failure without retaining sensitive host paths."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        lineage: dict[str, str],
+        artifacts_written: bool,
+        rollback_failed: bool,
+    ) -> None:
+        super().__init__(message)
+        self.evolution_lineage = dict(lineage)
+        self.artifacts_written = bool(artifacts_written)
+        self.rollback_failed = bool(rollback_failed)
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _CANDIDATE_SUFFIX = "-review-candidate"
@@ -1054,6 +1071,34 @@ def _sha256_artifact(path: str | Path) -> str:
     return _sha256_bytes(resolved_path.read_bytes())
 
 
+def _safe_lineage_handle(value: str | None) -> str:
+    try:
+        return _safe_artifact_reference(value)
+    except Exception:
+        return "artifact" if value else ""
+
+
+def _evolution_lineage_payload(
+    receipt: EvolutionReceipt,
+    *,
+    saved_path: str | None = None,
+    receipt_path: str | None = None,
+    candidate_artifact_digest: str | None = None,
+) -> dict[str, str]:
+    """Expose only stable lineage fields for audit and persistence failures."""
+    return {
+        "proposal_id": str(receipt.proposal_id or ""),
+        "source_content_digest": str(receipt.source_content_digest or ""),
+        "source_version": str(receipt.source_version or receipt.source_content_digest or ""),
+        "candidate_content_digest": str(receipt.candidate_content_digest or ""),
+        "candidate_artifact_digest": str(
+            candidate_artifact_digest or receipt.candidate_artifact_digest or receipt.candidate_content_digest or ""
+        ),
+        "candidate_handle": _safe_lineage_handle(saved_path or receipt.candidate_handle),
+        "receipt_handle": _safe_lineage_handle(receipt_path or receipt.receipt_handle),
+    }
+
+
 def _new_proposal_id() -> str:
     return uuid.uuid4().hex
 
@@ -1304,9 +1349,13 @@ def create_evolution_proposal(
                     raise ValueError("source content changed during evolution proposal")
             _check_evolution_boundary(authority_check)
             snapshot = _evolution_artifact_snapshot(target_type, candidate_file_name=candidate_file_name)
+            artifact_written = False
+            candidate_artifact_digest = ""
+            receipt_for_error = receipt
             try:
                 _check_evolution_boundary(authority_check)
                 saved_path = _save_candidate(target_type, file_name=candidate_file_name, content=candidate_content)
+                artifact_written = True
                 _check_evolution_boundary(authority_check)
                 candidate_artifact_digest = _sha256_artifact(saved_path)
                 _check_evolution_boundary(authority_check)
@@ -1330,11 +1379,36 @@ def create_evolution_proposal(
                     candidate_handle=_safe_artifact_reference(saved_path),
                     receipt_handle=_safe_artifact_reference(receipt_path),
                 )
+                receipt_for_error = receipt
                 _check_evolution_boundary(authority_check)
                 _write_receipt(candidate_file_name, receipt)
                 _check_evolution_boundary(authority_check)
-            except Exception:
-                _restore_evolution_artifacts(snapshot)
+            except Exception as exc:
+                rollback_error = None
+                try:
+                    _restore_evolution_artifacts(snapshot)
+                except Exception as restore_exc:
+                    rollback_error = restore_exc
+                if artifact_written or saved_path or receipt_path:
+                    lineage = _evolution_lineage_payload(
+                        receipt_for_error,
+                        saved_path=saved_path,
+                        receipt_path=receipt_path,
+                        candidate_artifact_digest=candidate_artifact_digest,
+                    )
+                    setattr(exc, "evolution_lineage", lineage)
+                    setattr(exc, "artifacts_written", bool(artifact_written or saved_path or receipt_path))
+                    setattr(exc, "rollback_failed", rollback_error is not None)
+                    if isinstance(exc, RuntimeRevokedError):
+                        raise
+                    raise EvolutionPersistenceError(
+                        "Evolution artifact persistence failed",
+                        lineage=lineage,
+                        artifacts_written=bool(artifact_written or saved_path or receipt_path),
+                        rollback_failed=rollback_error is not None,
+                    ) from (rollback_error or exc)
+                if rollback_error is not None:
+                    raise rollback_error from exc
                 raise
     return {
         "status": "saved" if saved_path else "blocked",

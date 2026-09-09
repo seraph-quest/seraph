@@ -92,6 +92,45 @@ async def test_save_skill_draft_persists_and_reloads(client, tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_save_skill_draft_rejects_reserved_evolution_candidate_name():
+    from src.api.skills import SkillDraftRequest, save_skill_draft
+    from src.extensions.workspace_package import EVOLUTION_CANDIDATE_FILE_NAME_ERROR
+
+    operator = _test_bypass_operator()
+    validation = {
+        "valid": True,
+        "errors": [],
+        "skill": {
+            "name": "Review Candidate",
+            "description": "",
+            "requires_tools": [],
+            "user_invocable": True,
+            "enabled": True,
+            "file_path": "<draft>",
+        },
+        "runtime_ready": True,
+        "missing_tools": [],
+    }
+    with (
+        patch("src.api.skills.context_manager.get_context", return_value=SimpleNamespace(approval_mode="safe")),
+        patch("src.api.skills._validate_skill_content", return_value=validation),
+        patch("src.api.skills._ensure_skill_manager_workspace_extensions_loaded"),
+        patch(
+            "src.api.skills.save_workspace_contribution",
+            side_effect=ValueError(EVOLUTION_CANDIDATE_FILE_NAME_ERROR),
+        ),
+    ):
+        with pytest.raises(HTTPException) as raised:
+            await save_skill_draft(
+                SkillDraftRequest(content="draft", file_name="Review-Review-Candidate.MD"),
+                _skill_mutator_request(operator),
+            )
+
+    assert raised.value.status_code == 409
+    assert raised.value.detail == EVOLUTION_CANDIDATE_FILE_NAME_ERROR
+
+
+@pytest.mark.asyncio
 async def test_save_skill_draft_rejects_invalid_content(client):
     resp = await client.post("/api/skills/save", json={"content": "not frontmatter"})
     assert resp.status_code == 400

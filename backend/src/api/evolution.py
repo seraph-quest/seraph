@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import math
 import os
 from pathlib import Path
 import re
@@ -26,6 +27,8 @@ from src.auth.cancellation import RuntimeRevokedError, assert_runtime_not_revoke
 from src.auth.service import AuthFailure, bind_operator_principal
 from src.evolution.engine import (
     EVOLUTION_FILE_NAME_ERROR,
+    EvolutionPersistenceError,
+    _safe_artifact_reference,
     create_evolution_proposal,
     evaluate_candidate,
     list_evolution_targets,
@@ -47,6 +50,33 @@ _DEFAULT_EXTENSIONS: dict[EvolutionTargetType, str] = {
     "starter_pack": ".json",
     "prompt_pack": ".md",
 }
+
+_AUDIT_DIGEST_RE = re.compile(r"^[0-9a-fA-F]{64}$")
+_AUDIT_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,95}$")
+_SAFE_AUDIT_TARGET_TYPES = frozenset({"skill", "runbook", "starter_pack", "prompt_pack"})
+_SAFE_AUDIT_QUALITY_STATES = frozenset({"invalid", "blocked", "ready", "guarded", "weak", "unknown"})
+_SAFE_AUDIT_ROLLOUT_STATES = frozenset({"blocked", "review_ready", "guarded_review", "weak", "unknown"})
+_SAFE_AUDIT_REGRESSION_GATES = frozenset({"blocked", "pass", "warn", "unknown"})
+_SAFE_AUDIT_ACCEPTANCE_STATES = frozenset(
+    {"blocked", "ready_for_canary", "held_for_canary", "held_back", "unknown"}
+)
+_SAFE_AUDIT_DIVERSITY_STATES = frozenset(
+    {"blocked_preference_collapse", "multi_signal_preserved", "single_signal_watch", "unknown"}
+)
+_SAFE_AUDIT_RECEIPT_STATES = frozenset({"candidate_only", "candidate_and_receipt_written", "unknown"})
+_SAFE_AUDIT_ARTIFACT_STATES = frozenset({"not_written", "written", "rolled_back", "rollback_failed", "unknown"})
+_SAFE_AUDIT_ROLLBACK_STATES = frozenset({"not_attempted", "rolled_back", "failed", "unknown"})
+_SAFE_AUDIT_OUTCOMES = frozenset({"succeeded", "blocked", "failed", "unknown"})
+_SAFE_AUDIT_CONSTRAINT_NAMES = frozenset(
+    {
+        "tool_scope_expansion",
+        "target_surface_drift",
+        "scope_expansion",
+        "instruction_surface_expansion",
+        "preference_diversity_collapse",
+    }
+)
+_SAFE_AUDIT_CONSTRAINT_STATES = frozenset({"pass", "blocked", "unknown"})
 
 
 class EvolutionProposalRequest(BaseModel):
@@ -197,14 +227,155 @@ async def _close_evolution_request(request: Request, revocation_scope, tokens) -
         reset_runtime_context(tokens)
 
 
-def _evolution_degraded_audit_receipt(operator) -> dict[str, object]:
+def _safe_audit_text(value, default: str = "", *, limit: int = 160) -> str:
+    candidate = value if isinstance(value, str) else default
+    if not isinstance(candidate, str):
+        return ""
+    sanitized = "".join(
+        " " if ord(character) < 32 or ord(character) == 127 else character
+        for character in candidate
+    )
+    return " ".join(sanitized.split())[:limit]
+
+
+def _safe_audit_identifier(value, default: str = "") -> str:
+    candidate = _safe_audit_text(value, default, limit=96)
+    return candidate if _AUDIT_ID_RE.fullmatch(candidate) else ""
+
+
+def _safe_audit_digest(value) -> str:
+    if not isinstance(value, str):
+        return ""
+    candidate = value.strip().lower()
+    return candidate if _AUDIT_DIGEST_RE.fullmatch(candidate) else ""
+
+
+def _safe_audit_score(value) -> float:
+    if isinstance(value, bool):
+        return 0.0
+    try:
+        score = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return 0.0
+    return score if math.isfinite(score) else 0.0
+
+
+def _safe_audit_enum(value, allowed: frozenset[str], default: str = "unknown") -> str:
+    candidate = _safe_audit_text(value, limit=64)
+    return candidate if candidate in allowed else default
+
+
+def _safe_audit_bool(value) -> bool:
+    return value if isinstance(value, bool) else False
+
+
+def _safe_audit_handle(value) -> str:
+    if not isinstance(value, str) or not value.strip():
+        return ""
+    if any(ord(character) < 32 or ord(character) == 127 for character in value):
+        return "artifact"
+    try:
+        reference = _safe_artifact_reference(value)
+        if not reference or len(reference) > 160:
+            return "artifact"
+        if any(ord(character) < 32 or ord(character) == 127 for character in reference):
+            return "artifact"
+        return reference
+    except Exception:
+        return "artifact"
+
+
+def _first_receipt_value(receipt: dict[str, object], lineage: dict[str, object], *keys: str):
+    for key in keys:
+        if key in receipt and receipt[key] not in (None, ""):
+            return receipt[key]
+        if key in lineage and lineage[key] not in (None, ""):
+            return lineage[key]
+    return None
+
+
+def _evolution_receipt_lineage(receipt: dict[str, object] | None) -> dict[str, str]:
+    """Extract bounded lineage fields while withholding all raw receipt text."""
+    if not isinstance(receipt, dict):
+        return {}
+    raw_lineage = receipt.get("lineage")
+    lineage = raw_lineage if isinstance(raw_lineage, dict) else {}
+    proposal_id = _safe_audit_identifier(_first_receipt_value(receipt, lineage, "proposal_id"))
+    source_content_digest = _safe_audit_digest(
+        _first_receipt_value(receipt, lineage, "source_content_digest")
+    )
+    source_version = _safe_audit_digest(_first_receipt_value(receipt, lineage, "source_version"))
+    if not source_version:
+        source_version = source_content_digest
+    candidate_content_digest = _safe_audit_digest(
+        _first_receipt_value(receipt, lineage, "candidate_content_digest")
+    )
+    candidate_artifact_digest = _safe_audit_digest(
+        _first_receipt_value(receipt, lineage, "candidate_artifact_digest")
+    )
+    candidate_name_digest = _safe_audit_digest(
+        _first_receipt_value(receipt, lineage, "candidate_name_digest")
+    )
+    candidate_handle = _safe_audit_handle(
+        _first_receipt_value(receipt, lineage, "candidate_handle", "saved_path")
+    )
+    receipt_handle = _safe_audit_handle(
+        _first_receipt_value(receipt, lineage, "receipt_handle", "receipt_path")
+    )
+    result = {
+        "proposal_id": proposal_id,
+        "source_content_digest": source_content_digest,
+        "source_version": source_version,
+        "candidate_content_digest": candidate_content_digest,
+        "candidate_artifact_digest": candidate_artifact_digest,
+        "candidate_name_digest": candidate_name_digest,
+        "candidate_handle": candidate_handle,
+        "receipt_handle": receipt_handle,
+    }
+    return {key: value for key, value in result.items() if value}
+
+
+def _evolution_degraded_audit_receipt(
+    operator,
+    *,
+    reason: str = "audit_persistence_failed",
+    lineage: dict[str, str] | None = None,
+    artifact_state: str | None = None,
+    rollback_state: str | None = None,
+) -> dict[str, object]:
     session_id = str(operator.session_id)
-    return {
+    receipt: dict[str, object] = {
         "status": "degraded",
-        "reason": "audit_persistence_failed",
+        "reason": (
+            reason
+            if reason in {"audit_persistence_failed", "artifact_persistence_failed"}
+            else "audit_persistence_failed"
+        ),
         "principal_id": str(operator.principal.principal_id),
         "session_id_digest": hashlib.sha256(session_id.encode("utf-8")).hexdigest(),
     }
+    if artifact_state in _SAFE_AUDIT_ARTIFACT_STATES:
+        receipt["artifact_state"] = artifact_state
+    if rollback_state in _SAFE_AUDIT_ROLLBACK_STATES:
+        receipt["rollback_state"] = rollback_state
+    safe_lineage = _evolution_receipt_lineage({"lineage": lineage}) if lineage else {}
+    if safe_lineage:
+        receipt.update(safe_lineage)
+        receipt["lineage"] = safe_lineage
+    return receipt
+
+
+def _evolution_persistence_error_receipt(operator, error: BaseException) -> dict[str, object]:
+    lineage = getattr(error, "evolution_lineage", None)
+    rollback_failed = bool(getattr(error, "rollback_failed", False))
+    artifacts_written = bool(getattr(error, "artifacts_written", False))
+    return _evolution_degraded_audit_receipt(
+        operator,
+        reason="artifact_persistence_failed",
+        lineage=lineage if isinstance(lineage, dict) else None,
+        artifact_state="written" if artifacts_written else "not_written",
+        rollback_state="failed" if rollback_failed else "rolled_back",
+    )
 
 
 async def _audit_evolution_event(operator, req: EvolutionProposalRequest, *, outcome: str, receipt=None) -> bool:
@@ -239,43 +410,77 @@ def _evolution_audit_details(
     """
     details: dict[str, object] = {
         "target_type": req.target_type,
-        "outcome": outcome,
+        "outcome": _safe_audit_enum(outcome, _SAFE_AUDIT_OUTCOMES),
         "source_path_digest": hashlib.sha256(req.source_path.encode("utf-8")).hexdigest(),
     }
-    if receipt is None:
+    if not isinstance(receipt, dict):
         return details
     benchmark_gate = receipt.get("benchmark_gate")
-    details["receipt"] = {
-        "valid": bool(receipt.get("valid")),
-        "blocked": bool(receipt.get("blocked")),
+    lineage = _evolution_receipt_lineage(receipt)
+    safe_receipt: dict[str, object] = {
+        "valid": _safe_audit_bool(receipt.get("valid")),
+        "blocked": _safe_audit_bool(receipt.get("blocked")),
         "score": receipt.get("score"),
-        "quality_state": receipt.get("quality_state"),
-        "constraint_states": [
-            {
-                "name": item.get("name"),
-                "status": item.get("status"),
-                "blocked": bool(item.get("blocked")),
-            }
-            for item in receipt.get("constraints", [])
-            if isinstance(item, dict)
-        ],
-        "benchmark_gate": {
-            key: benchmark_gate.get(key)
-            for key in (
-                "rollout_state",
-                "regression_gate",
-                "acceptance_state",
-                "diversity_guard_state",
-                "canary_required",
-                "rollback_ready_required",
-                "rollback_ready",
-                "safety_receipt_state",
-            )
-            if isinstance(benchmark_gate, dict)
-        },
-        "saved": bool(receipt.get("saved_path")),
-        "receipt_written": bool(receipt.get("receipt_path")),
+        "quality_state": _safe_audit_enum(
+            receipt.get("quality_state"), _SAFE_AUDIT_QUALITY_STATES
+        ),
+        "constraint_states": [],
+        "benchmark_gate": {},
+        "saved": _safe_audit_bool(receipt.get("saved_path")) or bool(lineage.get("candidate_handle")),
+        "receipt_written": _safe_audit_bool(receipt.get("receipt_path")) or bool(lineage.get("receipt_handle")),
     }
+    score = _safe_audit_score(receipt.get("score"))
+    safe_receipt["score"] = score
+    constraints = receipt.get("constraints")
+    if isinstance(constraints, list):
+        constraint_states: list[dict[str, object]] = []
+        for item in constraints[:16]:
+            if not isinstance(item, dict):
+                continue
+            name = _safe_audit_text(item.get("name"), limit=64)
+            if name not in _SAFE_AUDIT_CONSTRAINT_NAMES:
+                continue
+            constraint_states.append(
+                {
+                    "name": name,
+                    "status": _safe_audit_enum(item.get("status"), _SAFE_AUDIT_CONSTRAINT_STATES),
+                    "blocked": _safe_audit_bool(item.get("blocked")),
+                }
+            )
+        safe_receipt["constraint_states"] = constraint_states
+    if isinstance(benchmark_gate, dict):
+        safe_receipt["benchmark_gate"] = {
+            "rollout_state": _safe_audit_enum(
+                benchmark_gate.get("rollout_state"), _SAFE_AUDIT_ROLLOUT_STATES
+            ),
+            "regression_gate": _safe_audit_enum(
+                benchmark_gate.get("regression_gate"), _SAFE_AUDIT_REGRESSION_GATES
+            ),
+            "acceptance_state": _safe_audit_enum(
+                benchmark_gate.get("acceptance_state"), _SAFE_AUDIT_ACCEPTANCE_STATES
+            ),
+            "diversity_guard_state": _safe_audit_enum(
+                benchmark_gate.get("diversity_guard_state"), _SAFE_AUDIT_DIVERSITY_STATES
+            ),
+            "canary_required": _safe_audit_bool(benchmark_gate.get("canary_required")),
+            "rollback_ready_required": _safe_audit_bool(benchmark_gate.get("rollback_ready_required")),
+            "rollback_ready": _safe_audit_bool(benchmark_gate.get("rollback_ready")),
+            "safety_receipt_state": _safe_audit_enum(
+                benchmark_gate.get("safety_receipt_state"), _SAFE_AUDIT_RECEIPT_STATES
+            ),
+        }
+    if lineage:
+        safe_receipt.update(lineage)
+        details["lineage"] = lineage
+    for key in ("artifact_state", "rollback_state"):
+        if key in receipt:
+            allowed = (
+                _SAFE_AUDIT_ARTIFACT_STATES
+                if key == "artifact_state"
+                else _SAFE_AUDIT_ROLLBACK_STATES
+            )
+            safe_receipt[key] = _safe_audit_enum(receipt.get(key), allowed)
+    details["receipt"] = safe_receipt
     return details
 
 
@@ -398,6 +603,30 @@ async def create_governed_evolution_proposal(req: EvolutionProposalRequest, requ
                 file_name=candidate_file_name,
                 authority_check=assert_runtime_not_revoked,
             )
+        except EvolutionPersistenceError as exc:
+            await _ensure_evolution_authorized(request, revocation_scope)
+            lineage = _evolution_receipt_lineage(
+                {"lineage": getattr(exc, "evolution_lineage", {})}
+            )
+            audit_ok = await _audit_evolution_event(
+                operator,
+                req,
+                outcome="failed",
+                receipt={
+                    "lineage": lineage,
+                    "artifact_state": "written",
+                    "rollback_state": "failed" if exc.rollback_failed else "rolled_back",
+                },
+            )
+            audit_receipt = _evolution_persistence_error_receipt(operator, exc)
+            status_code = 500 if audit_ok else 503
+            raise HTTPException(
+                status_code=status_code,
+                detail=_evolution_failure_detail(
+                    "evolution_artifact_persistence_failed",
+                    audit_receipt=audit_receipt,
+                ),
+            ) from exc
         except ValueError as exc:
             await _ensure_evolution_authorized(request, revocation_scope)
             audit_ok = await _audit_evolution_event(operator, req, outcome="failed")
@@ -431,16 +660,43 @@ async def create_governed_evolution_proposal(req: EvolutionProposalRequest, requ
                     "status": "degraded",
                     "code": "audit_persistence_failed",
                     "message": "Evolution completed but its authenticated audit receipt could not be persisted.",
-                    "audit_receipt": _evolution_degraded_audit_receipt(operator),
+                    "audit_receipt": _evolution_degraded_audit_receipt(
+                        operator,
+                        lineage=_evolution_receipt_lineage(proposal.get("receipt")),
+                    ),
                 },
             )
         return proposal
     except HTTPException:
         raise
     except (RuntimeRevokedError, AuthFailure) as exc:
+        lineage = getattr(exc, "evolution_lineage", None)
+        detail: dict[str, object] = {
+            "code": "session_revoked",
+            "message": "Operator session was revoked.",
+        }
+        if isinstance(lineage, dict) and lineage:
+            detail["audit_receipt"] = _evolution_persistence_error_receipt(operator, exc)
         raise HTTPException(
             status_code=401,
-            detail={"code": "session_revoked", "message": "Operator session was revoked."},
+            detail=detail,
+        ) from exc
+    except EvolutionPersistenceError as exc:
+        await _ensure_evolution_authorized(request, revocation_scope)
+        audit_ok = await _audit_evolution_event(
+            operator,
+            req,
+            outcome="failed",
+            receipt={"lineage": getattr(exc, "evolution_lineage", {})},
+        )
+        audit_receipt = _evolution_persistence_error_receipt(operator, exc)
+        status_code = 500 if audit_ok else 503
+        raise HTTPException(
+            status_code=status_code,
+            detail=_evolution_failure_detail(
+                "evolution_artifact_persistence_failed",
+                audit_receipt=audit_receipt,
+            ),
         ) from exc
     except ValueError as exc:
         await _ensure_evolution_authorized(request, revocation_scope)

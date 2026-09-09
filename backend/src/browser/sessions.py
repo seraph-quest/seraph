@@ -247,6 +247,7 @@ class BrowserSession:
     provider_degradation: dict[str, object] = field(default_factory=dict)
     control_events: list[dict[str, object]] = field(default_factory=list)
     snapshots: list[BrowserSnapshot] = field(default_factory=list)
+    replayable: bool = True
 
     def latest_snapshot(self) -> BrowserSnapshot | None:
         return self.snapshots[-1] if self.snapshots else None
@@ -279,6 +280,12 @@ class BrowserSession:
             "latest_capture": latest.capture if latest is not None else None,
             "latest_summary": latest.summary if latest is not None else "",
             "latest_artifact_provenance": latest.artifact_provenance if latest is not None else None,
+            "replayable": self.replayable,
+            "replayability_reason": (
+                ""
+                if self.replayable
+                else "private_execution_target_not_persisted"
+            ),
         }
 
 
@@ -402,10 +409,14 @@ class BrowserSessionRuntime:
                 )
         existing = self._sessions.get(session_id)
         if existing is None:
+            stored_url = str(session_payload.get("url") or "")
+            recovered_redacted_url = bool(session_payload.get("url_redacted")) or _url_redaction_required(
+                stored_url
+            )
             existing = BrowserSession(
                 session_id=session_id,
                 owner_session_id=owner_session_id,
-                url=str(session_payload.get("url") or ""),
+                url=stored_url,
                 provider_name=str(session_payload.get("provider_name") or "unknown"),
                 provider_kind=str(session_payload.get("provider_kind") or "unknown"),
                 execution_mode=str(session_payload.get("execution_mode") or "unknown"),
@@ -428,8 +439,13 @@ class BrowserSessionRuntime:
                 ),
                 control_events=[],
                 snapshots=[],
+                replayable=not recovered_redacted_url,
             )
             self._sessions[session_id] = existing
+        elif bool(session_payload.get("url_redacted")):
+            # A journal entry carries only the public URL.  Once that is the
+            # recovered state, the private execution target is unavailable.
+            existing.replayable = False
         existing.status = str(session_payload.get("status") or existing.status)
         existing.risk_state = str(session_payload.get("risk_state") or existing.risk_state)
         existing.recovery_state = str(session_payload.get("recovery_state") or existing.recovery_state)
@@ -644,7 +660,11 @@ class BrowserSessionRuntime:
         with self._lock:
             self._ensure_loaded_locked()
             session = self._sessions.get(session_id)
-            if session is None or session.owner_session_id != owner_session_id:
+            if (
+                session is None
+                or session.owner_session_id != owner_session_id
+                or not session.replayable
+            ):
                 return None
             return session.url
 
@@ -697,6 +717,11 @@ class BrowserSessionRuntime:
                 return {"error": "session_quarantined", "session": session.as_summary()}
             if session.provider_degradation.get("degraded") is True and not acknowledge_degraded_fallback:
                 return {"error": "degraded_fallback_acknowledgement_required", "session": session.as_summary()}
+            if not session.replayable:
+                return {
+                    "error": "session_replay_unavailable_after_reload",
+                    "session": session.as_summary(),
+                }
             return {"session": session.as_summary()}
 
     def close_session(self, session_id: str, *, owner_session_id: str) -> dict[str, object] | None:
@@ -752,6 +777,11 @@ class BrowserSessionRuntime:
                 and not acknowledge_degraded_fallback
             ):
                 return {"error": "degraded_fallback_acknowledgement_required", "session": session.as_summary()}
+            if normalized_action == "replay_snapshot" and not session.replayable:
+                return {
+                    "error": "session_replay_unavailable_after_reload",
+                    "session": session.as_summary(),
+                }
             created_at = _utc_now()
             event = {
                 "id": f"browser-control:{session_id}:{normalized_action}:{len(session.control_events) + 1}",

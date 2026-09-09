@@ -303,6 +303,17 @@ async def websocket_chat(websocket: WebSocket):
                 )
                 continue
 
+            if ws_msg.session_id is not None and not ws_msg.session_id.strip():
+                active_turn_completed = True
+                await websocket.send_text(
+                    WSResponse(
+                        type="error",
+                        content="Chat session id must not be blank.",
+                        seq=_next_seq(),
+                    ).model_dump_json()
+                )
+                continue
+
             try:
                 session = await session_manager.get_or_create(
                     ws_msg.session_id,

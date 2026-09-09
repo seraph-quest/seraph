@@ -227,6 +227,11 @@ async def chat(request: ChatRequest, http_request: HttpRequest):
             status_code=exc.status_code,
             detail={"code": exc.code, "message": exc.message},
         ) from exc
+    if request.session_id is not None and not request.session_id.strip():
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "chat_session_required"},
+        )
     try:
         session = await session_manager.get_or_create(
             request.session_id,

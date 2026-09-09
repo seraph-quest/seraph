@@ -276,6 +276,22 @@ def test_browser_session_rejects_open_failure_without_persisting_session(browser
     assert browser_session(action="list") == "No browser sessions are open."
 
 
+def test_browser_session_redacts_provider_error_url(browser_runtime_session):
+    provider_error = (
+        "Error: browsing https://user:password@example.com/private?token=secret#fragment failed."
+    )
+    with patch("src.tools.browser_session_tool.browse_webpage", return_value=provider_error):
+        result = browser_session(
+            action="open",
+            url="https://user:password@example.com/private?token=secret#fragment",
+        )
+
+    assert result == "Error: browsing https://example.com/private?redacted failed."
+    assert "password" not in result
+    assert "secret" not in result
+    assert browser_session(action="list") == "No browser sessions are open."
+
+
 def test_browser_session_rejects_snapshot_failure_without_persisting_capture(browser_runtime_session):
     timeout_error = f"Error: browsing https://example.com/docs timed out after {settings.browser_timeout}s"
     with patch("src.tools.browser_session_tool.browse_webpage", side_effect=["first capture", timeout_error]):

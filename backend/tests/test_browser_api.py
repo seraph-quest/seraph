@@ -1326,6 +1326,41 @@ async def test_authenticated_chat_cannot_claim_other_owned_conversation(client, 
 
 
 @pytest.mark.asyncio
+async def test_authenticated_ingress_rejects_blank_owner_ids(client, monkeypatch):
+    origin = "http://localhost:3001"
+    monkeypatch.setattr(settings, "operator_auth_secret", "correct horse battery staple")
+    monkeypatch.setattr(settings, "operator_auth_secret_hash", "")
+    monkeypatch.setattr(settings, "operator_auth_allowed_hosts", "test,localhost,127.0.0.1")
+    monkeypatch.setattr(settings, "operator_auth_allowed_origins", origin)
+    monkeypatch.setattr(settings, "operator_auth_cookie_secure", False)
+
+    login_response = await client.post(
+        "/api/auth/login",
+        json={"password": "correct horse battery staple"},
+        headers={"origin": origin},
+    )
+    assert login_response.status_code == 200
+
+    with patch("src.api.chat.create_onboarding_agent") as create_agent:
+        blank_chat = await client.post(
+            "/api/chat",
+            json={"session_id": " \t ", "message": "must not create"},
+            headers={"origin": origin},
+        )
+    assert blank_chat.status_code == 422
+    assert blank_chat.json()["detail"]["code"] == "chat_session_required"
+    create_agent.assert_not_called()
+
+    blank_browser = await client.get(
+        "/api/browser/providers",
+        params={"owner_session_id": " \t "},
+        headers={"origin": origin},
+    )
+    assert blank_browser.status_code == 422
+    assert blank_browser.json()["detail"]["code"] == "browser_owner_session_required"
+
+
+@pytest.mark.asyncio
 async def test_browser_session_journal_survives_reload_without_raw_content(client, tmp_path):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -1371,6 +1406,8 @@ async def test_browser_session_journal_survives_reload_without_raw_content(clien
         listed = list_response.json()["sessions"]
         assert [item["session_id"] for item in listed] == [session["session_id"]]
         assert listed[0]["snapshot_count"] == 2
+        assert listed[0]["replayable"] is False
+        assert listed[0]["replayability_reason"] == "private_execution_target_not_persisted"
         assert listed[0]["journal_schema"] == "seraph.browser_session_journal.v1"
         assert listed[0]["journal_entry_count"] >= 2
         assert "Private page body" not in json.dumps(list_response.json())
@@ -1396,6 +1433,22 @@ async def test_browser_session_journal_survives_reload_without_raw_content(clien
         assert ref_payload["url"] == "https://example.test/private?redacted"
         assert ref_payload["url_redacted"] is True
         assert ref_payload["artifact_provenance"]["raw_artifact_body_exposed"] is True
+
+        with patch("src.api.browser.browse_webpage") as replay_capture:
+            recovered_snapshot = await client.post(
+                f"/api/browser/sessions/{session['session_id']}/snapshot",
+                json={"owner_session_id": AUTH_SESSION_ID, "capture": "extract"},
+            )
+        assert recovered_snapshot.status_code == 409
+        assert recovered_snapshot.json()["detail"]["error"] == "session_replay_unavailable_after_reload"
+        replay_capture.assert_not_called()
+
+        recovered_replay = await client.post(
+            f"/api/browser/sessions/{session['session_id']}/control",
+            json={"owner_session_id": AUTH_SESSION_ID, "action": "replay_snapshot"},
+        )
+        assert recovered_replay.status_code == 409
+        assert recovered_replay.json()["detail"]["error"] == "session_replay_unavailable_after_reload"
 
         cross_owner_journal = await client.get(
             f"/api/browser/sessions/{session['session_id']}/journal?owner_session_id=other-session"

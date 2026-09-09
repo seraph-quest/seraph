@@ -23,7 +23,7 @@ from src.extensions.registry import ExtensionRegistry, default_manifest_roots_fo
 from src.extensions.state import connector_enabled_overrides, load_extension_state_payload
 from src.observer.manager import context_manager
 from src.tools.browser_session_tool import _resolve_browser_provider
-from src.tools.browser_tool import browse_webpage
+from src.tools.browser_tool import browse_webpage, redact_browser_error
 
 router = APIRouter()
 
@@ -55,7 +55,7 @@ async def _capture_or_raise(url: str, capture: str) -> str:
     assert_runtime_not_revoked()
     content = await asyncio.to_thread(browse_webpage, url.strip(), action=capture)
     if str(content or "").startswith("Error:"):
-        raise HTTPException(status_code=400, detail=content)
+        raise HTTPException(status_code=400, detail=redact_browser_error(content))
     return content
 
 
@@ -84,6 +84,11 @@ async def _bind_browser_operator(request: Request, owner_session_id: str | None)
     relation must be added at the session boundary before that model changes.
     """
     operator = _require_authenticated_capability_operator(request)
+    if owner_session_id is not None and not str(owner_session_id).strip():
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "browser_owner_session_required"},
+        )
     requested_session_id = str(owner_session_id or "").strip()
     active_runtime_session_id = get_current_session_id()
     if (
@@ -263,6 +268,20 @@ async def snapshot_browser_session(
     http_request: Request,
 ):
     async with _browser_request_authority(http_request, request.owner_session_id) as owner_session_id:
+        session = browser_session_runtime.get_session(
+            session_id,
+            owner_session_id=owner_session_id,
+        )
+        if session is None:
+            raise HTTPException(status_code=404, detail="browser_session_not_found")
+        if session.get("replayable") is False:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "error": "session_replay_unavailable_after_reload",
+                    "session": session,
+                },
+            )
         capture_url = browser_session_runtime.get_session_capture_url(
             session_id,
             owner_session_id=owner_session_id,

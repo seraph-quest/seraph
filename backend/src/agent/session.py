@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from time import perf_counter
 
 from sqlalchemy import func, or_, text, update
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlmodel import select, col
 
 from config.settings import settings
@@ -104,54 +104,82 @@ def _coerce_datetime(value: object) -> datetime | None:
 class SessionManager:
     """DB-backed session manager replacing the old in-memory dict."""
 
+    @staticmethod
+    async def _claim_session_owner(db, session: Session, owner_principal_id: str | None) -> None:
+        if not owner_principal_id:
+            return
+        existing_owner_principal_id = str(session.owner_principal_id or "").strip() or None
+        if existing_owner_principal_id is None:
+            claimed = await db.execute(
+                update(Session)
+                .where(
+                    Session.id == session.id,
+                    Session.owner_principal_id.is_(None),
+                )
+                .values(owner_principal_id=owner_principal_id)
+            )
+            await db.flush()
+            if claimed.rowcount != 1:
+                await db.refresh(session)
+                existing_owner_principal_id = str(session.owner_principal_id or "").strip() or None
+                if existing_owner_principal_id != owner_principal_id:
+                    raise SessionOwnerMismatchError(session.id)
+            else:
+                session.owner_principal_id = owner_principal_id
+        elif existing_owner_principal_id != owner_principal_id:
+            raise SessionOwnerMismatchError(session.id)
+
     async def get_or_create(
         self,
         session_id: str | None = None,
         *,
         owner_principal_id: str | None = None,
     ) -> Session:
+        if session_id is not None and not str(session_id).strip():
+            raise ValueError("session_id must not be blank")
+        if owner_principal_id is not None and not str(owner_principal_id).strip():
+            raise ValueError("owner_principal_id must not be blank")
         normalized_owner_principal_id = str(owner_principal_id or "").strip() or None
         async with get_session() as db:
             if session_id:
                 result = await db.execute(select(Session).where(Session.id == session_id))
                 session = result.scalars().first()
                 if session:
-                    existing_owner_principal_id = str(session.owner_principal_id or "").strip() or None
-                    if normalized_owner_principal_id:
-                        if existing_owner_principal_id is None:
-                            claimed = await db.execute(
-                                update(Session)
-                                .where(
-                                    Session.id == session.id,
-                                    Session.owner_principal_id.is_(None),
-                                )
-                                .values(owner_principal_id=normalized_owner_principal_id)
-                            )
-                            await db.flush()
-                            if claimed.rowcount != 1:
-                                await db.refresh(session)
-                                existing_owner_principal_id = (
-                                    str(session.owner_principal_id or "").strip() or None
-                                )
-                                if existing_owner_principal_id != normalized_owner_principal_id:
-                                    raise SessionOwnerMismatchError(session.id)
-                            else:
-                                session.owner_principal_id = normalized_owner_principal_id
-                        elif existing_owner_principal_id != normalized_owner_principal_id:
-                            raise SessionOwnerMismatchError(session.id)
+                    await self._claim_session_owner(db, session, normalized_owner_principal_id)
                     db.expunge(session)
                     return session
 
             new_id = session_id or uuid.uuid4().hex
-            session = Session(
-                id=new_id,
-                owner_principal_id=normalized_owner_principal_id,
-                title="New Conversation",
-            )
-            db.add(session)
-            await db.flush()
-            db.expunge(session)
-            return session
+            for attempt in range(2):
+                session = Session(
+                    id=new_id,
+                    owner_principal_id=normalized_owner_principal_id,
+                    title="New Conversation",
+                )
+                db.add(session)
+                try:
+                    await db.flush()
+                except IntegrityError:
+                    await db.rollback()
+                    if session_id:
+                        result = await db.execute(select(Session).where(Session.id == new_id))
+                        existing = result.scalars().first()
+                        if existing is None:
+                            raise
+                        await self._claim_session_owner(
+                            db,
+                            existing,
+                            normalized_owner_principal_id,
+                        )
+                        db.expunge(existing)
+                        return existing
+                    if attempt == 1:
+                        raise
+                    new_id = uuid.uuid4().hex
+                else:
+                    db.expunge(session)
+                    return session
+            raise RuntimeError("session creation retry exhausted")
 
     async def get(self, session_id: str) -> Session | None:
         async with get_session() as db:

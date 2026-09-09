@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -182,6 +183,7 @@ async def test_owner_revocation_is_scoped_and_cancels_queued_work_before_dispatc
 @pytest.mark.asyncio
 async def test_owner_revocation_keeps_active_remote_cost_uncertain_until_reconciled():
     broker = RemoteInferenceAdmissionBroker(clock=_Clock())
+    recovery_token = broker.register_recovery_authority("recovery-service")
     request = _request("owner-revoked-active", estimated_cost_microusd=12)
     callback_started = asyncio.Event()
     callback_cancelled = asyncio.Event()
@@ -202,6 +204,9 @@ async def test_owner_revocation_keeps_active_remote_cost_uncertain_until_reconci
 
     task = asyncio.create_task(broker.execute(request, provider))
     await callback_started.wait()
+
+    with pytest.raises(RuntimeError, match="bootstrap-only"):
+        broker.register_recovery_authority("late-attacker")
 
     requested = await broker.cancel_owner(request.owner_id)
     assert len(requested) == 1
@@ -233,10 +238,33 @@ async def test_owner_revocation_keeps_active_remote_cost_uncertain_until_reconci
     assert blocked_repeat[0].status == "blocked"
     assert blocked_repeat[0].reconciliation_required is True
 
+    with pytest.raises(RemoteInferenceAdmissionOwnerRevokedError) as revoked_reconcile:
+        await broker.reconcile(
+            request.operation_id,
+            owner_id=request.owner_id,
+            job_id=request.job_id,
+            fencing_token=error.value.receipt.fencing_token or 0,
+            recovery_authority_token="owner-b",
+            outcome="cancelled",
+            reason_code="owner_revoked_reconciled",
+            actual_cost_microusd=9,
+        )
+    assert revoked_reconcile.value.receipt.reason_code == REMOTE_INFERENCE_OWNER_REVOCATION_REASON
+
+    with pytest.raises(RemoteInferenceAdmissionOwnerRevokedError):
+        await broker.cancel(
+            request.operation_id,
+            owner_id=request.owner_id,
+            fencing_token=error.value.receipt.fencing_token or 0,
+            actual_cost_microusd=9,
+        )
+
     settled = await broker.reconcile(
         request.operation_id,
         owner_id=request.owner_id,
+        job_id=request.job_id,
         fencing_token=error.value.receipt.fencing_token or 0,
+        recovery_authority_token=recovery_token,
         outcome="cancelled",
         reason_code="owner_revoked_reconciled",
         actual_cost_microusd=9,
@@ -422,6 +450,7 @@ async def test_uncertain_remote_result_retains_cost_until_fenced_reconciliation(
     settled = await broker.reconcile(
         request.operation_id,
         owner_id=request.owner_id,
+        job_id=request.job_id,
         fencing_token=lease.fencing_token,
         outcome="succeeded",
         actual_cost_microusd=70,
@@ -434,6 +463,7 @@ async def test_uncertain_remote_result_retains_cost_until_fenced_reconciliation(
         await broker.reconcile(
             request.operation_id,
             owner_id=request.owner_id,
+            job_id=request.job_id,
             fencing_token=lease.fencing_token,
             outcome="succeeded",
             actual_cost_microusd=70,
@@ -458,11 +488,13 @@ async def test_remote_callback_failure_is_uncertain_until_actual_cost_reconcilia
         await broker.reconcile(
             request.operation_id,
             owner_id=request.owner_id,
+            job_id=request.job_id,
             fencing_token=error.value.receipt.fencing_token or 0,
         )
     settled = await broker.reconcile(
         request.operation_id,
         owner_id=request.owner_id,
+        job_id=request.job_id,
         fencing_token=error.value.receipt.fencing_token or 0,
         actual_cost_microusd=18,
     )
@@ -485,6 +517,7 @@ async def test_unknown_settlement_stays_held_until_owner_fenced_reconciliation()
         await broker.reconcile(
             request.operation_id,
             owner_id=request.owner_id,
+            job_id=request.job_id,
             fencing_token=lease.fencing_token + 1,
             outcome="succeeded",
             actual_cost_microusd=20,
@@ -493,15 +526,77 @@ async def test_unknown_settlement_stays_held_until_owner_fenced_reconciliation()
     assert (await broker.status())["active"]["status"] == "blocked"
     assert (await broker.status())["capacity"]["owners"][request.owner_id]["outstanding"] == 1
 
+    with pytest.raises(GpuAdmissionLeaseError) as wrong_job:
+        await broker.reconcile(
+            request.operation_id,
+            owner_id=request.owner_id,
+            job_id="job-from-another-attempt",
+            fencing_token=lease.fencing_token,
+            outcome="succeeded",
+            actual_cost_microusd=20,
+        )
+    assert wrong_job.value.receipt.reason_code == "stale_owner_or_fencing_token"
+    assert (await broker.status())["active"]["status"] == "blocked"
+
     settled = await broker.reconcile(
         request.operation_id,
         owner_id=request.owner_id,
+        job_id=request.job_id,
         fencing_token=lease.fencing_token,
         outcome="succeeded",
         actual_cost_microusd=20,
     )
     assert settled.status == "succeeded"
     assert (await broker.status())["active"] is None
+
+
+@pytest.mark.asyncio
+async def test_remote_lease_job_identity_and_reconciliation_reason_are_fenced_and_bounded():
+    broker = RemoteInferenceAdmissionBroker(clock=_Clock())
+    request = _request("lease-job-fence", estimated_cost_microusd=20)
+    await broker.enqueue(request)
+    lease = await broker.acquire(request.operation_id)
+
+    with pytest.raises(GpuAdmissionLeaseError) as wrong_job:
+        await broker.release(replace(lease, job_id="job-from-another-attempt"))
+    assert wrong_job.value.receipt.reason_code == "stale_owner_or_fencing_token"
+    assert (await broker.status())["active"]["operation_id"] == request.operation_id
+
+    blocked = await broker.release(lease, uncertain=True)
+    assert blocked.status == "blocked"
+
+    secret_like_reason = "provider_key=sk-live-secret"
+    with pytest.raises(ValueError, match="bounded reason code") as secret_error:
+        await broker.reconcile(
+            request.operation_id,
+            owner_id=request.owner_id,
+            job_id=request.job_id,
+            fencing_token=lease.fencing_token,
+            reason_code=secret_like_reason,
+            actual_cost_microusd=18,
+        )
+    assert secret_like_reason not in str(secret_error.value)
+    assert (await broker.status())["active"]["status"] == "blocked"
+
+    settled = await broker.reconcile(
+        request.operation_id,
+        owner_id=request.owner_id,
+        job_id=request.job_id,
+        fencing_token=lease.fencing_token,
+        outcome="succeeded",
+        actual_cost_microusd=18,
+    )
+    assert settled.status == "succeeded"
+    assert settled.cost_settled_microusd == 18
+
+    with pytest.raises(GpuAdmissionLeaseError):
+        await broker.reconcile(
+            request.operation_id,
+            owner_id=request.owner_id,
+            job_id=request.job_id,
+            fencing_token=lease.fencing_token,
+            actual_cost_microusd=18,
+        )
 
 
 @pytest.mark.asyncio

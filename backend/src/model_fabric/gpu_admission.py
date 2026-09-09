@@ -15,6 +15,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 from enum import Enum
 import math
+import secrets
 import threading
 import time
 from typing import Any, Generic, TypeVar
@@ -86,6 +87,18 @@ GPU_CALLBACK_RUNNING_REASON = "provider_callback_still_running"
 GPU_OWNER_CAPACITY_REASON = "owner_capacity_exhausted"
 GPU_OWNER_BUDGET_REASON = "owner_budget_exhausted"
 GPU_OWNER_REVOCATION_REASON = "owner_revoked"
+
+
+def _normalize_reason_code(value: object, *, field_name: str) -> str:
+    """Keep operator-visible reason codes bounded and free of payload text."""
+    normalized = str(value or "").strip()
+    if (
+        not normalized
+        or len(normalized) > 64
+        or any(character not in "abcdefghijklmnopqrstuvwxyz0123456789_" for character in normalized)
+    ):
+        raise ValueError(f"{field_name} must be a bounded reason code")
+    return normalized
 
 
 class GpuAdmissionError(RuntimeError):
@@ -425,6 +438,33 @@ class GpuAdmissionBroker(Generic[T]):
         # Owner revocation is intentionally process-local.  Durable job
         # authority and restart adoption remain outside this admission lease.
         self._revoked_owners: set[str] = set()
+        # Recovery authority is bootstrap state owned by this broker.  Callers
+        # receive an opaque token from register_recovery_authority(); the
+        # reconcile path never trusts a caller-supplied authority name.
+        self._recovery_authority_tokens: dict[str, str] = {}
+        self._recovery_registry_sealed = False
+
+    def register_recovery_authority(self, authority_id: str) -> str:
+        """Register a non-revoked operator/service and issue an opaque token.
+
+        Registration is a trusted broker bootstrap seam.  The returned token
+        is the only recovery credential accepted by ``reconcile`` for a
+        revoked operation owner; authority names are never accepted there.
+        """
+        normalized_authority = str(authority_id or "").strip()
+        if not normalized_authority or len(normalized_authority) > 256:
+            raise ValueError("authority_id is required and must be <= 256 characters")
+        with self._condition:
+            if self._recovery_registry_sealed:
+                raise RuntimeError("recovery authority registration is bootstrap-only")
+            if normalized_authority in self._revoked_owners:
+                raise ValueError("recovery authority is revoked")
+            for token, registered_authority in self._recovery_authority_tokens.items():
+                if registered_authority == normalized_authority:
+                    return token
+            token = secrets.token_urlsafe(32)
+            self._recovery_authority_tokens[token] = normalized_authority
+            return token
 
     async def enqueue(
         self,
@@ -449,6 +489,7 @@ class GpuAdmissionBroker(Generic[T]):
         *,
         clock_offset: float = 0.0,
     ) -> GpuAdmissionReceipt:
+        self._recovery_registry_sealed = True
         self._mark_active_deadline_locked()
         self._expire_locked(observed_at)
         existing = self._operations.get(request.operation_id)
@@ -590,6 +631,8 @@ class GpuAdmissionBroker(Generic[T]):
         """Release one lease, rejecting stale owners and fencing tokens."""
         if outcome not in {"succeeded", "failed", "cancelled"}:
             raise ValueError("GPU release outcome must be succeeded, failed, or cancelled")
+        if reason_code is not None:
+            reason_code = _normalize_reason_code(reason_code, field_name="reason_code")
         with self._condition:
             operation = self._operations.get(lease.operation_id)
             if (
@@ -597,6 +640,7 @@ class GpuAdmissionBroker(Generic[T]):
                 or self._active_operation_id != lease.operation_id
                 or operation.status not in {"running", "blocked"}
                 or operation.request.owner_id != lease.owner_id
+                or operation.request.job_id != lease.job_id
                 or operation.fencing_token != lease.fencing_token
                 or (operation.status == "blocked" and not operation.callback_completed)
             ):
@@ -657,6 +701,7 @@ class GpuAdmissionBroker(Generic[T]):
         """Cancel queued work; active work is marked for cancellation after release."""
         if actual_cost_microusd is not None and int(actual_cost_microusd) < 0:
             raise ValueError("actual_cost_microusd must be non-negative")
+        normalized_reason = _normalize_reason_code(reason_code or "cancelled", field_name="reason_code")
         with self._condition:
             self._mark_active_deadline_locked()
             operation = self._operations.get(str(operation_id or "").strip())
@@ -669,9 +714,9 @@ class GpuAdmissionBroker(Generic[T]):
                     raise GpuAdmissionLeaseError("GPU cancellation owner is stale", receipt=receipt)
                 self._queue.remove(operation.request.operation_id)
                 operation.status = "cancelled"
-                operation.reason_code = reason_code
+                operation.reason_code = normalized_reason
                 operation.finished_at = self._clock()
-                self._last_degraded_reason = reason_code
+                self._last_degraded_reason = normalized_reason
                 self._notify_all_locked()
                 return self._receipt_locked(operation)
             if operation.status == "running":
@@ -685,8 +730,14 @@ class GpuAdmissionBroker(Generic[T]):
                         "GPU cancellation owner or fencing token is stale",
                         receipt=receipt,
                     )
+                if operation.request.owner_id in self._revoked_owners:
+                    receipt = self._receipt_locked(operation, reason_code=GPU_OWNER_REVOCATION_REASON)
+                    raise GpuAdmissionOwnerRevokedError(
+                        "GPU operation owner has been revoked",
+                        receipt=receipt,
+                    )
                 operation.cancel_requested = True
-                operation.reason_code = reason_code
+                operation.reason_code = normalized_reason
                 if self._active_task is not None:
                     self._cancel_active_task()
                 self._notify_all_locked()
@@ -702,6 +753,12 @@ class GpuAdmissionBroker(Generic[T]):
                         "GPU cancellation owner or fencing token is stale",
                         receipt=receipt,
                     )
+                if operation.request.owner_id in self._revoked_owners:
+                    receipt = self._receipt_locked(operation, reason_code=GPU_OWNER_REVOCATION_REASON)
+                    raise GpuAdmissionOwnerRevokedError(
+                        "GPU operation owner has been revoked",
+                        receipt=receipt,
+                    )
                 if not operation.callback_completed:
                     operation.cancel_requested = True
                     self._cancel_active_task()
@@ -714,7 +771,7 @@ class GpuAdmissionBroker(Generic[T]):
                 return self._reconcile_locked(
                     operation,
                     outcome="cancelled",
-                    reason_code=str(reason_code or "cancelled").strip() or "cancelled",
+                    reason_code=normalized_reason,
                     actual_cost_microusd=actual_cost_microusd,
                 )
             return self._receipt_locked(operation)
@@ -1036,6 +1093,8 @@ class GpuAdmissionBroker(Generic[T]):
     ) -> GpuAdmissionReceipt:
         if outcome not in {"succeeded", "failed", "cancelled"}:
             raise ValueError("GPU release outcome must be succeeded, failed, or cancelled")
+        if reason_code is not None:
+            reason_code = _normalize_reason_code(reason_code, field_name="reason_code")
         with self._condition:
             operation = self._operations.get(lease.operation_id)
             if (
@@ -1043,6 +1102,7 @@ class GpuAdmissionBroker(Generic[T]):
                 or self._active_operation_id != lease.operation_id
                 or operation.status not in {"running", "blocked"}
                 or operation.request.owner_id != lease.owner_id
+                or operation.request.job_id != lease.job_id
                 or operation.fencing_token != lease.fencing_token
                 or (operation.status == "blocked" and not operation.callback_completed)
             ):
@@ -1100,6 +1160,7 @@ class GpuAdmissionBroker(Generic[T]):
                 or self._active_operation_id != lease.operation_id
                 or operation.status != "running"
                 or operation.request.owner_id != lease.owner_id
+                or operation.request.job_id != lease.job_id
                 or operation.fencing_token != lease.fencing_token
             ):
                 receipt = self._receipt_for_lease_locked(
@@ -1196,6 +1257,7 @@ class GpuAdmissionBroker(Generic[T]):
                 or self._active_operation_id != lease.operation_id
                 or operation.status not in {"running", "blocked"}
                 or operation.request.owner_id != lease.owner_id
+                or operation.request.job_id != lease.job_id
                 or operation.fencing_token != lease.fencing_token
             ):
                 receipt = self._receipt_for_lease_locked(
@@ -1282,27 +1344,41 @@ class GpuAdmissionBroker(Generic[T]):
         operation_id: str,
         *,
         owner_id: str,
+        job_id: str,
         fencing_token: int,
+        recovery_authority_token: str | None = None,
         outcome: str = "failed",
         reason_code: str = "provider_result_reconciled",
         actual_cost_microusd: int | None = None,
     ) -> GpuAdmissionReceipt:
-        """Resolve a blocked callback before the broker admits follow-on work."""
+        """Resolve a blocked callback before the broker admits follow-on work.
+
+        ``owner_id``, ``job_id``, and ``fencing_token`` identify the exact
+        blocked attempt.  A revoked owner cannot settle its own uncertain
+        result; a broker-registered, non-revoked recovery authority must
+        present its opaque token through ``recovery_authority_token``.
+        """
         if outcome not in {"succeeded", "failed", "cancelled"}:
             raise ValueError("GPU reconciliation outcome is not supported")
         if actual_cost_microusd is not None and int(actual_cost_microusd) < 0:
             raise ValueError("actual_cost_microusd must be non-negative")
         normalized_operation_id = str(operation_id or "").strip()
         normalized_owner = str(owner_id or "").strip()
-        if not normalized_operation_id or not normalized_owner:
+        normalized_job = str(job_id or "").strip()
+        normalized_recovery_token = (
+            None if recovery_authority_token is None else str(recovery_authority_token).strip()
+        )
+        if not normalized_operation_id or not normalized_owner or not normalized_job:
             raise GpuAdmissionLeaseError(
-                "GPU reconciliation requires operation and owner identities",
+                "GPU reconciliation requires operation, job, and owner identities",
                 receipt=self._receipt_for_missing_lease(
                     operation_id=normalized_operation_id,
+                    job_id=normalized_job,
                     owner_id=normalized_owner,
                     fencing_token=fencing_token,
                 ),
             )
+        normalized_reason = _normalize_reason_code(reason_code, field_name="reason_code")
         with self._condition:
             operation = self._operations.get(normalized_operation_id)
             if operation is None:
@@ -1311,6 +1387,7 @@ class GpuAdmissionBroker(Generic[T]):
                 operation.status != "blocked"
                 or self._active_operation_id != normalized_operation_id
                 or operation.request.owner_id != normalized_owner
+                or operation.request.job_id != normalized_job
                 or operation.fencing_token != fencing_token
             ):
                 receipt = self._receipt_locked(
@@ -1319,6 +1396,26 @@ class GpuAdmissionBroker(Generic[T]):
                 )
                 raise GpuAdmissionLeaseError(
                     "GPU reconciliation owner or fencing token is stale",
+                    receipt=receipt,
+                )
+            if operation.request.owner_id in self._revoked_owners:
+                recovery_authority = self._recovery_authority_tokens.get(normalized_recovery_token or "")
+                if recovery_authority is None or recovery_authority in self._revoked_owners:
+                    receipt = self._receipt_locked(
+                        operation,
+                        reason_code=GPU_OWNER_REVOCATION_REASON,
+                    )
+                    raise GpuAdmissionOwnerRevokedError(
+                        "GPU operation owner has been revoked",
+                        receipt=receipt,
+                    )
+            elif normalized_recovery_token is not None:
+                receipt = self._receipt_locked(
+                    operation,
+                    reason_code="stale_owner_or_fencing_token",
+                )
+                raise GpuAdmissionLeaseError(
+                    "GPU reconciliation recovery owner is not required",
                     receipt=receipt,
                 )
             if not operation.callback_completed:
@@ -1334,9 +1431,6 @@ class GpuAdmissionBroker(Generic[T]):
                 raise ValueError(
                     "remote reconciliation requires actual_cost_microusd to settle spend liability"
                 )
-            normalized_reason = str(reason_code or "").strip()
-            if not normalized_reason:
-                raise ValueError("GPU reconciliation reason_code is required")
             return self._reconcile_locked(
                 operation,
                 outcome=outcome,
@@ -1452,6 +1546,8 @@ class GpuAdmissionBroker(Generic[T]):
             self._active_task = None
             self._last_degraded_reason = None
             self._revoked_owners.clear()
+            self._recovery_authority_tokens.clear()
+            self._recovery_registry_sealed = False
             self._notify_all_locked()
 
     async def _cancel_after_wait(
@@ -1463,6 +1559,8 @@ class GpuAdmissionBroker(Generic[T]):
             operation = self._operations.get(request.operation_id)
             if operation is None:
                 return None
+            if operation.request != request:
+                return self._receipt_locked(operation, reason_code="stale_owner_or_fencing_token")
             if operation.status == "queued":
                 self._queue.remove(operation.request.operation_id)
                 operation.status = "cancelled"
@@ -1537,6 +1635,7 @@ class GpuAdmissionBroker(Generic[T]):
                 or self._active_operation_id != lease.operation_id
                 or operation.status != "running"
                 or operation.request.owner_id != lease.owner_id
+                or operation.request.job_id != lease.job_id
                 or operation.fencing_token != lease.fencing_token
             ):
                 receipt = self._receipt_for_lease_locked(
@@ -1756,13 +1855,14 @@ class GpuAdmissionBroker(Generic[T]):
         self,
         *,
         operation_id: str,
+        job_id: str | None = None,
         owner_id: str,
         fencing_token: int | None,
     ) -> GpuAdmissionReceipt:
         """Build a safe error receipt when reconciliation identity is absent."""
         return GpuAdmissionReceipt(
             operation_id=operation_id or "unknown",
-            job_id=operation_id or "unknown",
+            job_id=job_id or operation_id or "unknown",
             owner_id=owner_id or "unknown",
             priority=GpuPriority.REPORTS_RESEARCH_MEMORY,
             status="failed",

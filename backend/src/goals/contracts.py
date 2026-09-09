@@ -154,7 +154,13 @@ class GoalExecutionResult(BaseModel):
 
 
 class GoalOutcomeReceipt(BaseModel):
-    """Separate execution, verification, usefulness, and learning axes."""
+    """Separate execution, verification, usefulness, and learning axes.
+
+    ``decision_input_digest`` and ``strategy_delta_id`` keep a later outcome
+    inspectably linked to the bounded choice that produced it.  They are
+    digests/identifiers only; raw inputs and correction content stay out of
+    the durable receipt.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
@@ -163,6 +169,8 @@ class GoalOutcomeReceipt(BaseModel):
     outcome_id: str
     candidate_id: str
     dedupe_key: str
+    decision_input_digest: str | None = None
+    strategy_delta_id: str | None = None
     goal_id: str
     goal_revision: int = Field(ge=1)
     execution_status: Literal["succeeded", "failed", "blocked"]

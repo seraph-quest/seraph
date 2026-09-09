@@ -175,3 +175,90 @@ async def test_success_requires_readback_and_receipt_redacts_inputs(async_db):
     candidate_receipt = next(item for item in receipts if item["event_type"] == "goal_loop_candidate")
     assert candidate_receipt["input_keys"] == ["api_key", "file_path"]
     assert "do-not-store" not in str(candidate_receipt)
+
+
+async def test_correction_changes_later_choice_and_persists_provenance():
+    from unittest.mock import AsyncMock, patch
+
+    from src.db.models import Goal
+    import src.guardian.goal_conditioned_loop as goal_loop
+
+    old_criterion = GoalSuccessCriterion(
+        description="A readable source brief is present",
+        verifier_kind="artifact_readback",
+        evidence_refs=["operator:source-consent"],
+        target={"query": "old source", "file_path": "briefs/old.md"},
+    )
+    goal = Goal(
+        id="goal-correction",
+        title="Research a source",
+        revision=1,
+        success_criterion_json=old_criterion.model_dump_json(),
+    )
+    old_candidate = build_goal_candidate_decision(
+        goal,
+        GoalCandidateRequest(
+            capability_id="workflow.web-brief-to-file",
+            inputs={"query": "old source", "file_path": "briefs/old.md"},
+        ),
+    )
+
+    async def adapter(**_kwargs):
+        return GoalExecutionResult(
+            execution_status="succeeded",
+            verification="passed",
+            artifact_ref="artifact-old",
+            evidence_refs=["readback:old"],
+        )
+
+    corrected_criterion = old_criterion.model_copy(
+        update={
+            "target": {
+                "query": "new source",
+                "file_path": "briefs/new.md",
+                "strategy_delta_id": "delta-correction-1",
+            }
+        }
+    )
+    corrected_goal = Goal(
+        id=goal.id,
+        title=goal.title,
+        revision=2,
+        success_criterion_json=corrected_criterion.model_dump_json(),
+    )
+    new_candidate = build_goal_candidate_decision(
+        corrected_goal,
+        GoalCandidateRequest(
+            capability_id="workflow.web-brief-to-file",
+            inputs={"query": "new source", "file_path": "briefs/new.md"},
+            evidence_refs=["strategy-delta:delta-correction-1"],
+        ),
+    )
+
+    persisted: list[dict[str, object]] = []
+
+    async def persist(**kwargs):
+        persisted.append(kwargs)
+        return kwargs["details"]
+
+    with (
+        patch.object(goal_loop.goal_repository, "get", new=AsyncMock(side_effect=[goal, corrected_goal])),
+        patch.object(goal_loop, "_existing_receipt", new=AsyncMock(return_value=None)),
+        patch.object(goal_loop, "_persist_receipt", new=persist),
+    ):
+        old_outcome = await dispatch_goal_candidate(old_candidate, adapter=adapter)
+        new_outcome = await dispatch_goal_candidate(candidate=new_candidate, adapter=adapter)
+
+    assert old_outcome.strategy_delta_id is None
+
+    assert new_candidate.candidate_id != old_candidate.candidate_id
+    assert new_outcome.decision_input_digest != old_outcome.decision_input_digest
+    assert new_outcome.strategy_delta_id == "delta-correction-1"
+    later = next(
+        item["details"]
+        for item in persisted
+        if item["event_type"] == "goal_loop_outcome"
+        and item["details"]["candidate_id"] == new_candidate.candidate_id
+    )
+    assert later["strategy_delta_id"] == "delta-correction-1"
+    assert later["decision_input_digest"] == new_outcome.decision_input_digest

@@ -69,6 +69,21 @@ def _safe_digest(value: object) -> str:
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
+def _strategy_delta_id_from_evidence(evidence_refs: list[str] | tuple[str, ...]) -> str | None:
+    """Return one explicit correction id, or ``None`` when provenance is ambiguous."""
+
+    delta_ids = {
+        ref.removeprefix("strategy-delta:").strip()
+        for ref in evidence_refs
+        if isinstance(ref, str) and ref.startswith("strategy-delta:")
+    }
+    delta_ids.discard("")
+    if len(delta_ids) != 1:
+        return None
+    value = next(iter(delta_ids))
+    return value if len(value) <= 128 else None
+
+
 def _candidate_receipt_details(decision: GoalCandidateDecision) -> dict[str, Any]:
     """Return an inspectable receipt without persisting input values."""
 
@@ -88,6 +103,7 @@ def _candidate_receipt_details(decision: GoalCandidateDecision) -> dict[str, Any
         "capability_version": decision.capability_version,
         "input_keys": sorted(str(key) for key in decision.inputs),
         "input_digest": _safe_digest(decision.inputs),
+        "strategy_delta_id": _strategy_delta_id_from_evidence(decision.evidence_refs),
         "expected_outcome": _safe_text(decision.expected_outcome),
         "expires_at": decision.expires_at.isoformat() if decision.expires_at else None,
         "content_redacted": True,
@@ -101,6 +117,8 @@ def _outcome_receipt_details(receipt: GoalOutcomeReceipt) -> dict[str, Any]:
         "outcome_id": receipt.outcome_id,
         "candidate_id": receipt.candidate_id,
         "dedupe_key": receipt.dedupe_key,
+        "decision_input_digest": receipt.decision_input_digest,
+        "strategy_delta_id": receipt.strategy_delta_id,
         "goal_id": receipt.goal_id,
         "goal_revision": receipt.goal_revision,
         "execution_status": receipt.execution_status,
@@ -132,6 +150,8 @@ _SAFE_RECEIPT_FIELDS = frozenset(
         "capability_version",
         "input_keys",
         "input_digest",
+        "decision_input_digest",
+        "strategy_delta_id",
         "expected_outcome",
         "expires_at",
         "execution_status",
@@ -338,6 +358,8 @@ async def _persist_no_learning(
         ).hexdigest()[:24],
         candidate_id=candidate.candidate_id,
         dedupe_key=candidate.dedupe_key,
+        decision_input_digest=_safe_digest(candidate.inputs),
+        strategy_delta_id=_strategy_delta_id_from_evidence(candidate.evidence_refs),
         goal_id=candidate.goal_id,
         goal_revision=candidate.goal_revision,
         execution_status=execution_status,  # type: ignore[arg-type]
@@ -464,6 +486,8 @@ async def dispatch_goal_candidate(
         outcome_id=_outcome_id(candidate, result),
         candidate_id=candidate.candidate_id,
         dedupe_key=candidate.dedupe_key,
+        decision_input_digest=_safe_digest(candidate.inputs),
+        strategy_delta_id=_strategy_delta_id_from_evidence(candidate.evidence_refs),
         goal_id=candidate.goal_id,
         goal_revision=candidate.goal_revision,
         execution_status=result.execution_status,

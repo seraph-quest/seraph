@@ -10,7 +10,7 @@ import pytest
 from config.settings import settings
 from src.api import memory as memory_api
 from src.auth.service import test_bypass_operator
-from src.db.models import MemoryEdgeType, MemoryKind
+from src.db.models import MemoryEdgeType, MemoryKind, MemoryStatus
 from src.memory import control as memory_control
 from src.memory.hybrid_retrieval import retrieve_hybrid_memory
 from src.memory.repository import memory_repository
@@ -59,22 +59,46 @@ def test_memory_actor_rejects_non_operator_or_mismatched_session():
 
 
 @pytest.mark.parametrize(
-    "metadata",
+    "metadata,content,summary",
     [
-        {"archived_reason": "operator_delete_export"},
-        {"operator_control": {"delete_export_state": "canonical_memory_redacted"}},
-        {"delete_export_state": "canonical_memory_redacted"},
+        ({"archived_reason": "operator_delete_export"}, "original", "original"),
+        (
+            {"operator_control": {"delete_export_state": "canonical_memory_redacted"}},
+            "original",
+            "original",
+        ),
+        ({"delete_export_state": "canonical_memory_redacted"}, "original", "original"),
+        (
+            {"operator_control": {"last_action": "propagate_delete_export"}},
+            "original",
+            "original",
+        ),
+        (
+            {"operator_control": {"last_action": "operator_delete_export"}},
+            "original",
+            "original",
+        ),
+        ({}, "[delete/export propagated by operator]", "original"),
+        ({}, "original", "[delete/export propagated by operator]"),
     ],
 )
-def test_memory_rollback_rejects_canonical_tombstone_before_mutation(metadata):
-    deleted = SimpleNamespace(metadata_json=json.dumps(metadata))
+def test_memory_rollback_rejects_canonical_tombstone_before_mutation(
+    metadata,
+    content,
+    summary,
+):
+    deleted = SimpleNamespace(
+        metadata_json=json.dumps(metadata),
+        content=content,
+        summary=summary,
+    )
 
     async def invoke():
         with (
             patch.object(memory_control.memory_repository, "get_memory", return_value=deleted),
             patch.object(
                 memory_control.memory_repository,
-                "update_memory_control_metadata",
+                "rollback_memory_if_unchanged",
                 side_effect=AssertionError("rollback mutated a canonical tombstone"),
             ) as update,
         ):
@@ -95,6 +119,8 @@ def test_memory_rollback_keeps_ordinary_archived_memory_reversible():
         metadata_json="{}",
         content="Ordinary rollback candidate.",
         summary="Ordinary rollback candidate",
+        updated_at="read-version",
+        status=MemoryStatus.archived,
         confidence=0.2,
         importance=0.2,
         reinforcement=0.2,
@@ -106,7 +132,7 @@ def test_memory_rollback_keeps_ordinary_archived_memory_reversible():
             patch.object(memory_control.memory_repository, "get_memory", return_value=existing),
             patch.object(
                 memory_control.memory_repository,
-                "update_memory_control_metadata",
+                "rollback_memory_if_unchanged",
                 return_value=restored,
             ) as update,
             patch.object(
@@ -131,6 +157,59 @@ def test_memory_rollback_keeps_ordinary_archived_memory_reversible():
         update.assert_awaited_once()
         assert result["memory"]["status"] == "active"
         assert result["receipt"]["changed_memory"] is True
+
+    asyncio.run(invoke())
+
+
+def test_memory_rollback_cas_loses_to_delete_export_interleaving():
+    original = SimpleNamespace(
+        metadata_json="{}",
+        content="Original content must stay deleted.",
+        summary="Original content must stay deleted",
+        updated_at="read-version",
+        status=MemoryStatus.archived,
+        confidence=0.2,
+        importance=0.2,
+        reinforcement=0.2,
+    )
+    deleted = SimpleNamespace(
+        metadata_json=json.dumps(
+            {
+                "archived_reason": "operator_delete_export",
+                "operator_control": {"delete_export_state": "canonical_memory_redacted"},
+            }
+        ),
+        content="[delete/export propagated by operator]",
+        summary="[delete/export propagated by operator]",
+        status=MemoryStatus.archived,
+    )
+    state = {"memory": original}
+
+    async def delete_wins(*_args, **_kwargs):
+        state["memory"] = deleted
+        raise ValueError("memory changed before rollback; canonical deletion won")
+
+    async def invoke():
+        with (
+            patch.object(memory_control.memory_repository, "get_memory", return_value=original),
+            patch.object(
+                memory_control.memory_repository,
+                "rollback_memory_if_unchanged",
+                new=AsyncMock(side_effect=delete_wins),
+            ) as rollback,
+        ):
+            with pytest.raises(ValueError, match="canonical deletion"):
+                await memory_control.apply_memory_live_control_action(
+                    action="rollback_memory",
+                    acknowledged=True,
+                    memory_id="interleaved-memory",
+                    privacy_boundary="operator_visible",
+                )
+
+        rollback.assert_awaited_once()
+        assert state["memory"] is deleted
+        assert state["memory"].status is MemoryStatus.archived
+        assert state["memory"].content == "[delete/export propagated by operator]"
 
     asyncio.run(invoke())
 

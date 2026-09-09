@@ -1159,9 +1159,11 @@ async def apply_memory_live_control_action(
                 "cannot rollback canonical memory after operator delete/export "
                 f"redaction ({deletion_marker})"
             )
-        memory = await memory_repository.update_memory_control_metadata(
+        memory = await memory_repository.rollback_memory_if_unchanged(
             memory_id,
-            status=MemoryStatus.active,
+            expected_updated_at=existing.updated_at,
+            expected_metadata_json=existing.metadata_json,
+            expected_status=existing.status,
             confidence=max(float(existing.confidence or 0.0), 0.55),
             importance=max(float(existing.importance or 0.0), 0.55),
             reinforcement=max(float(existing.reinforcement or 0.0), 1.0),

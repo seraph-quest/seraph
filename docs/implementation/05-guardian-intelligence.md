@@ -208,6 +208,8 @@ or audit mutation. Ordinary archived or superseded records remain rollbackable.
 This proves the local no-recall boundary only; advisory-provider remote
 deletion remains asynchronous and receipt-bound, with pending or failed
 propagation still requiring bounded retry and operator-visible reconciliation.
+The separate review-outcome and pin reactivation paths are unchanged and remain
+deferred follow-up scope for the broader deletion ledger.
 
 ## Memory Upgrade Program Record
 

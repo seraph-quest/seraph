@@ -20,6 +20,7 @@ from .hooks import persist_denied_route
 from .remote_inference_admission import (
     RemoteInferenceAdmissionError as GpuAdmissionError,
     RemoteInferenceAdmissionRequest as GpuAdmissionRequest,
+    current_remote_inference_receipt_binding,
     remote_inference_admission_broker as gpu_admission_broker,
 )
 from .selector import select_route
@@ -32,6 +33,39 @@ class SyncAdapterReceiptError(RuntimeError):
     """Raised when a governed sync adapter cannot persist its route receipt."""
 
     code = "route_receipt_persistence_failed"
+
+
+async def _persist_bound_admission_receipt(
+    operation_id: str,
+    *,
+    receipt: Any | None = None,
+    readback: bool = False,
+) -> None:
+    """Adopt one broker receipt into the caller's existing durable job.
+
+    The binding is optional so short-lived request jobs keep their current
+    behavior.  When present, the broker receipt is read back after the
+    provider boundary and forwarded with the caller's separate durable lease
+    fence.  A missing process-local receipt means admission never created an
+    operation and therefore has no durable projection to write.
+    """
+    binding = current_remote_inference_receipt_binding()
+    if binding is None:
+        return
+    persisted_receipt = receipt
+    if persisted_receipt is None and readback:
+        try:
+            persisted_receipt = gpu_admission_broker.receipt_for(operation_id)
+        except (AttributeError, KeyError):
+            return
+    if persisted_receipt is None:
+        return
+    await gpu_admission_broker.persist_receipt(
+        persisted_receipt,
+        repository=binding.repository,
+        owner=binding.owner,
+        fencing_token=binding.fencing_token,
+    )
 
 
 def _run_awaitable_sync(awaitable: Awaitable[_SyncResult]) -> _SyncResult:
@@ -205,6 +239,8 @@ async def execute_streaming(
                     error_code=None,
                 )
 
+        admission_error_receipt = None
+        admission_succeeded = False
         try:
             async for delta in gpu_admission_broker.stream(
                 admission_request,
@@ -212,7 +248,9 @@ async def execute_streaming(
                 now=now,
             ):
                 yield delta
+            admission_succeeded = True
         except Exception as error:
+            admission_error_receipt = getattr(error, "receipt", None)
             if isinstance(error, GpuAdmissionError) and not admission_callback_started:
                 # Admission is a bounded runtime decision.  A rejected,
                 # expired, cancelled, or fenced request did not start this
@@ -244,6 +282,12 @@ async def execute_streaming(
             fallback_reason_code = error_code
             degradation_codes.extend(("fallback_used", f"fallback_{error_code}"))
             continue
+        finally:
+            await _persist_bound_admission_receipt(
+                admission_request.operation_id,
+                receipt=admission_error_receipt,
+                readback=admission_succeeded,
+            )
         if aggregate is not None:
             await aggregate.finalize(
                 outcome="succeeded",
@@ -321,9 +365,14 @@ async def run_preflighted_adapter(
         )
         return result
 
+    admission_error_receipt = None
+    admission_succeeded = False
     try:
-        return await gpu_admission_broker.execute(admission_request, admitted_adapter)
+        result = await gpu_admission_broker.execute(admission_request, admitted_adapter)
+        admission_succeeded = True
+        return result
     except GpuAdmissionError as error:
+        admission_error_receipt = getattr(error, "receipt", None)
         if not admission_callback_started:
             repository = getattr(hooks, "_repository", None)
             denied_kwargs = {
@@ -339,6 +388,12 @@ async def run_preflighted_adapter(
                 denied_kwargs["repository"] = repository
             await persist_denied_route(**denied_kwargs)
         raise
+    finally:
+        await _persist_bound_admission_receipt(
+            admission_request.operation_id,
+            receipt=admission_error_receipt,
+            readback=admission_succeeded,
+        )
 
 
 def execute_sync_adapter(
@@ -392,6 +447,21 @@ def execute_sync_adapter(
     callback_started = False
     attempt_completed = False
 
+    def persist_admission_receipt(
+        receipt: Any | None = None,
+        *,
+        readback: bool = False,
+    ) -> None:
+        if current_remote_inference_receipt_binding() is None:
+            return
+        _run_awaitable_sync(
+            _persist_bound_admission_receipt(
+                admission_request.operation_id,
+                receipt=receipt,
+                readback=readback,
+            )
+        )
+
     def admitted_adapter() -> _SyncResult:
         nonlocal callback_started, attempt_completed
         session.attempt_started(
@@ -441,6 +511,7 @@ def execute_sync_adapter(
                 )
             )
             _require_persisted_receipt(persistence)
+        persist_admission_receipt(getattr(error, "receipt", None))
         raise
     except BaseException:
         if callback_started and attempt_completed:
@@ -454,8 +525,10 @@ def execute_sync_adapter(
                 )
             )
             _require_persisted_receipt(persistence)
+        persist_admission_receipt()
         raise
 
     persistence = _run_awaitable_sync(session.finalize(outcome="succeeded"))
     _require_persisted_receipt(persistence)
+    persist_admission_receipt(readback=True)
     return result

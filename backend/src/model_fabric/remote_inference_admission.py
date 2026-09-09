@@ -13,6 +13,8 @@ and a stricter broker-wide limit always wins over a request-level limit.
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
+from contextvars import ContextVar, Token
+from dataclasses import dataclass
 from typing import Any, NoReturn, Protocol
 
 from .gpu_admission import (
@@ -65,6 +67,46 @@ class RemoteInferenceReceiptRepository(Protocol):
         owner: str | None = None,
         fencing_token: int | None = None,
     ) -> Mapping[str, object]: ...
+
+
+@dataclass(frozen=True, slots=True)
+class RemoteInferenceReceiptBinding:
+    """Durable caller fence carried across one governed inference call.
+
+    The binding is deliberately separate from ``InferenceRequestContext``:
+    repository objects and durable lease credentials are execution plumbing,
+    not model trust payload.  Callers bind it around a request that already
+    owns a canonical durable job row; the broker never creates that row.
+    """
+
+    repository: RemoteInferenceReceiptRepository
+    owner: str | None = None
+    fencing_token: int | None = None
+
+
+_current_receipt_binding: ContextVar[RemoteInferenceReceiptBinding | None] = ContextVar(
+    "remote_inference_receipt_binding",
+    default=None,
+)
+
+
+def set_remote_inference_receipt_binding(
+    binding: RemoteInferenceReceiptBinding | None,
+) -> Token[RemoteInferenceReceiptBinding | None]:
+    """Bind one canonical-job receipt sink to the current execution context."""
+    return _current_receipt_binding.set(binding)
+
+
+def reset_remote_inference_receipt_binding(
+    token: Token[RemoteInferenceReceiptBinding | None],
+) -> None:
+    """Restore the previous durable receipt sink after an inference call."""
+    _current_receipt_binding.reset(token)
+
+
+def current_remote_inference_receipt_binding() -> RemoteInferenceReceiptBinding | None:
+    """Return the caller-owned durable receipt sink, if one is bound."""
+    return _current_receipt_binding.get()
 
 
 class RemoteInferenceAdmissionBroker(GpuAdmissionBroker[Any]):
@@ -256,6 +298,10 @@ __all__ = [
     "REMOTE_INFERENCE_OWNER_REVOCATION_REASON",
     "GPU_OWNER_REVOCATION_REASON",
     "RemoteInferenceReceiptRepository",
+    "RemoteInferenceReceiptBinding",
+    "set_remote_inference_receipt_binding",
+    "reset_remote_inference_receipt_binding",
+    "current_remote_inference_receipt_binding",
     "GPU_ADMISSION_SCHEMA_VERSION",
     "GPU_ADMISSION_STATUSES",
     "RemoteInferenceAdmissionBroker",

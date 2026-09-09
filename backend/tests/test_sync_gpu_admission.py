@@ -28,6 +28,14 @@ from src.model_fabric.gpu_admission import (
     GpuAdmissionUncertainError,
     GpuPriority,
 )
+from src.model_fabric.remote_inference_admission import (
+    RemoteInferenceAdmissionBroker,
+    RemoteInferenceAdmissionUncertainError,
+    RemoteInferenceReceiptBinding,
+    current_remote_inference_receipt_binding,
+    reset_remote_inference_receipt_binding,
+    set_remote_inference_receipt_binding,
+)
 
 
 class _Clock:
@@ -95,6 +103,27 @@ def _capacity_error(operation_id: str = "denied") -> GpuAdmissionCapacityError:
     return GpuAdmissionCapacityError("GPU admission queue is full", receipt=receipt)
 
 
+class _RecordingReceiptRepository:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+
+    async def record_remote_inference_receipt(
+        self,
+        payload: dict[str, object],
+        *,
+        owner: str | None = None,
+        fencing_token: int | None = None,
+    ) -> dict[str, object]:
+        self.calls.append(
+            {
+                "payload": payload,
+                "owner": owner,
+                "fencing_token": fencing_token,
+            }
+        )
+        return {"persisted": True}
+
+
 def test_execute_sync_serializes_blocking_callbacks_across_worker_threads():
     broker = GpuAdmissionBroker()
     state_lock = threading.Lock()
@@ -122,6 +151,85 @@ def test_execute_sync_serializes_blocking_callbacks_across_worker_threads():
     assert sorted(results) == [0, 1, 2, 3]
     assert max_active == 1
     assert broker._active_operation_id is None
+
+
+def test_bound_sync_admission_receipt_is_adopted_and_binding_is_restored():
+    broker = RemoteInferenceAdmissionBroker()
+    repository = _RecordingReceiptRepository()
+    binding = RemoteInferenceReceiptBinding(
+        repository=repository,
+        owner="scheduler:strategist_tick",
+        fencing_token=7,
+    )
+    token = set_remote_inference_receipt_binding(binding)
+    try:
+        assert current_remote_inference_receipt_binding() is binding
+        with patch("src.llm_runtime.gpu_admission_broker", broker):
+            result = _execute_sync_with_gpu_admission(
+                context=_canonical_context(request_id="sync-durable"),
+                decision=SimpleNamespace(
+                    selected=SimpleNamespace(profile=SimpleNamespace(provider_kind="openrouter"))
+                ),
+                operation_id="attempt-sync-durable",
+                operation=lambda: "durable-result",
+            )
+    finally:
+        reset_remote_inference_receipt_binding(token)
+
+    assert result == "durable-result"
+    assert current_remote_inference_receipt_binding() is None
+    assert len(repository.calls) == 1
+    persisted = repository.calls[0]
+    assert persisted["owner"] == "scheduler:strategist_tick"
+    assert persisted["fencing_token"] == 7
+    payload = persisted["payload"]
+    assert payload["operation_id"] == "attempt-sync-durable"
+    assert payload["status"] == "succeeded"
+    assert payload["resource_class"] == "remote_inference"
+
+
+def test_bound_sync_uncertain_receipt_is_adopted_before_error_escapes():
+    clock = _Clock()
+    broker = RemoteInferenceAdmissionBroker(clock=clock)
+    repository = _RecordingReceiptRepository()
+    context = _canonical_context(request_id="sync-durable-uncertain")
+    context.deadline_at = 101.0
+    token = set_remote_inference_receipt_binding(
+        RemoteInferenceReceiptBinding(
+            repository=repository,
+            owner="scheduler:strategist_tick",
+            fencing_token=8,
+        )
+    )
+
+    def late_provider() -> str:
+        clock.advance(1.0)
+        return "late-result"
+
+    try:
+        with patch("src.llm_runtime.gpu_admission_broker", broker):
+            with pytest.raises(RemoteInferenceAdmissionUncertainError) as error:
+                _execute_sync_with_gpu_admission(
+                    context=context,
+                    decision=SimpleNamespace(
+                        selected=SimpleNamespace(profile=SimpleNamespace(provider_kind="openrouter"))
+                    ),
+                    operation_id="attempt-sync-durable-uncertain",
+                    operation=late_provider,
+                )
+    finally:
+        reset_remote_inference_receipt_binding(token)
+
+    assert error.value.receipt.status == "blocked"
+    assert error.value.receipt.reconciliation_required is True
+    assert len(repository.calls) == 1
+    persisted = repository.calls[0]
+    assert persisted["owner"] == "scheduler:strategist_tick"
+    assert persisted["fencing_token"] == 8
+    payload = persisted["payload"]
+    assert payload["status"] == "blocked"
+    assert payload["reconciliation_required"] is True
+    assert current_remote_inference_receipt_binding() is None
 
 
 @pytest.mark.parametrize("terminal", ["cancelled", "expired"])

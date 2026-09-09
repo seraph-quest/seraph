@@ -79,7 +79,11 @@ from .remote_inference_admission import (
     RemoteInferenceAdmissionRequest,
     RemoteInferenceAdmissionUncertainError,
     RemoteInferencePriority,
+    RemoteInferenceReceiptBinding,
+    current_remote_inference_receipt_binding,
     remote_inference_admission_broker,
+    reset_remote_inference_receipt_binding,
+    set_remote_inference_receipt_binding,
 )
 from .proofs import build_model_route_proof, canonical_proof_hash, proof_is_fresh, validate_model_route_proof
 from .receipts import CostEstimate, ReceiptPersistenceResult, RouteAttemptReceipt, RouteReceipt, TokenUsage
@@ -158,6 +162,10 @@ __all__ = [
     "RemoteInferenceAdmissionRequest",
     "RemoteInferenceAdmissionUncertainError",
     "RemoteInferencePriority",
+    "RemoteInferenceReceiptBinding",
+    "current_remote_inference_receipt_binding",
+    "reset_remote_inference_receipt_binding",
+    "set_remote_inference_receipt_binding",
     "remote_inference_admission_broker",
     "build_model_route_proof",
     "canonical_proof_hash",

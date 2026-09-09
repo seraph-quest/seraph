@@ -114,6 +114,10 @@ export interface OutcomeCockpitPanelProps {
   result: OutcomeResultSummary;
   workLoadState?: OutcomeCockpitState;
   approvalLoadState?: "loading" | "ready" | "stale";
+  goalState?: OutcomeCockpitState;
+  goalUnavailableReason?: string | null;
+  approvalStateOverride?: OutcomeCockpitState;
+  approvalUnavailableReason?: string | null;
   onOpenPriorities?: () => void;
   onLoadWork?: () => void;
   onInspectWork?: () => void;
@@ -248,6 +252,10 @@ export function OutcomeCockpitPanel({
   result,
   workLoadState = "partial_metadata",
   approvalLoadState = "ready",
+  goalState,
+  goalUnavailableReason,
+  approvalStateOverride,
+  approvalUnavailableReason,
   onOpenPriorities,
   onLoadWork,
   onInspectWork,
@@ -263,7 +271,10 @@ export function OutcomeCockpitPanel({
   const approvalLocked = approvalLoadState !== "ready"
     || actionLocked(approval?.state ?? "empty", approval?.authorized !== false);
   const approvalCardState: OutcomeCockpitState = approval?.state
+    ?? approvalStateOverride
     ?? (approvalLoadState === "loading" ? "loading" : approvalLoadState === "stale" ? "stale" : "empty");
+  const statusState = approvalCardState !== "empty" ? approvalCardState : work?.state ?? route.state;
+  const goalCardState: OutcomeCockpitState = goal?.state ?? goalState ?? "empty";
   const recoveryLocked = !(
     work?.state
     && !RECOVERY_LOCKED_STATES.includes(work.state)
@@ -289,10 +300,7 @@ export function OutcomeCockpitPanel({
 
       <p className="cockpit-outcome-status" role="status" aria-live="polite">
         Inspect backend receipts before treating a work item as complete. {stateMessage(
-          approval?.state
-            ?? (approvalLoadState === "loading" ? "loading" : approvalLoadState === "stale" ? "stale" : null)
-            ?? work?.state
-            ?? route.state,
+          statusState,
         )}
       </p>
 
@@ -300,7 +308,7 @@ export function OutcomeCockpitPanel({
         <Card
           id="outcome-goal-card"
           label="Current goal"
-          state={goal?.state ?? "empty"}
+          state={goalCardState}
           actions={(
             <ActionButton
               action={{
@@ -324,7 +332,9 @@ export function OutcomeCockpitPanel({
               <ValueRow label="verification" value={display(goal.latestVerification)} />
             </>
           ) : (
-            <div className="cockpit-outcome-empty">No active goal is available from the goals endpoint.</div>
+            <div className="cockpit-outcome-empty">
+              {goalUnavailableReason ?? "No active goal is available from the goals endpoint."}
+            </div>
           )}
         </Card>
 
@@ -407,11 +417,12 @@ export function OutcomeCockpitPanel({
             </>
           ) : (
             <div className="cockpit-outcome-empty">
-              {approvalLoadState === "loading"
+              {approvalUnavailableReason
+                ?? (approvalLoadState === "loading"
                 ? "Loading the current approval endpoint…"
                 : approvalLoadState === "stale"
                   ? "The approvals endpoint is stale or unavailable. Effect controls remain locked until refresh."
-                  : "No pending approval is reported by the approvals endpoint."}
+                  : "No pending approval is reported by the approvals endpoint.")}
             </div>
           )}
         </Card>

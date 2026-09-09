@@ -402,7 +402,7 @@ export const useQuestStore = create<QuestStore>((set, get) => ({
       goalLoopError: null,
     });
     try {
-      const res = await fetch(`${API_URL}/api/goals/${id}/loop`);
+      const res = await fetch(`${API_URL}/api/goals/${id}/loop`, { credentials: "include" });
       const payload = await readResponsePayload(res);
       if (!res.ok) throw goalLoopError(res, payload, "Goal loop could not be loaded");
       const normalizedPayload = normalizeGoalLoopPayload(payload);
@@ -431,6 +431,7 @@ export const useQuestStore = create<QuestStore>((set, get) => ({
     try {
       const res = await fetch(`${API_URL}/api/goals/${id}/snapshot`, {
         method: "POST",
+        credentials: "include",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(input),
       });
@@ -455,6 +456,7 @@ export const useQuestStore = create<QuestStore>((set, get) => ({
     try {
       const res = await fetch(`${API_URL}/api/goals/${id}/strategy-corrections`, {
         method: "POST",
+        credentials: "include",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(input),
       });
@@ -480,6 +482,7 @@ export const useQuestStore = create<QuestStore>((set, get) => ({
     try {
       const res = await fetch(`${API_URL}/api/goals/${id}/strategy-corrections/${deltaId}/rollback`, {
         method: "POST",
+        credentials: "include",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(input),
       });

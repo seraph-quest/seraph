@@ -166,7 +166,10 @@ describe("questStore", () => {
 
     await useQuestStore.getState().loadGoalLoop("g1");
 
-    expect(mockFetch).toHaveBeenCalledWith(expect.stringContaining("/api/goals/g1/loop"));
+    expect(mockFetch).toHaveBeenCalledWith(
+      expect.stringContaining("/api/goals/g1/loop"),
+      expect.objectContaining({ credentials: "include" }),
+    );
     expect(mockFetch.mock.calls.some(([url]) => String(url).includes("/candidates"))).toBe(false);
     expect(useQuestStore.getState().goalLoop).toEqual(payload);
   });
@@ -281,6 +284,7 @@ describe("questStore", () => {
     const [url, options] = mockFetch.mock.calls[0];
     expect(url).toContain("/api/goals/g1/snapshot");
     expect(options.method).toBe("POST");
+    expect(options.credentials).toBe("include");
     expect(JSON.parse(options.body)).toMatchObject({ expected_revision: 4 });
     expect(mockFetch.mock.calls.some(([candidateUrl]) => String(candidateUrl).includes("/candidates"))).toBe(false);
     expect(useQuestStore.getState().goalLoop).toEqual(payload);
@@ -398,6 +402,7 @@ describe("questStore", () => {
       expect.stringContaining("/api/goals/dashboard"),
       expect.stringContaining("/api/goals/g1/loop"),
     ]);
+    expect(mockFetch.mock.calls[0][1]).toEqual(expect.objectContaining({ credentials: "include" }));
     expect(useQuestStore.getState().goalTree).toEqual(refreshedTree);
     expect(useQuestStore.getState().goalLoop?.goal.revision).toBe(5);
   });
@@ -426,6 +431,7 @@ describe("questStore", () => {
       expect.stringContaining("/api/goals/dashboard"),
       expect.stringContaining("/api/goals/g1/loop"),
     ]);
+    expect(mockFetch.mock.calls[0][1]).toEqual(expect.objectContaining({ credentials: "include" }));
     expect(useQuestStore.getState().goalTree).toEqual(refreshedTree);
     expect(useQuestStore.getState().goalLoop?.goal.revision).toBe(6);
   });

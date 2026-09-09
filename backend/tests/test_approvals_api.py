@@ -31,6 +31,52 @@ async def test_list_pending_approvals_empty(client):
 
 
 @pytest.mark.asyncio
+async def test_list_pending_approvals_rejects_anonymous_call(client):
+    with patch(
+        "src.api.approvals._require_approval_operator",
+        side_effect=HTTPException(status_code=401, detail={"code": "authentication_required"}),
+    ):
+        resp = await client.get("/api/approvals/pending")
+
+    assert resp.status_code == 401
+    assert resp.json()["detail"] == {"code": "authentication_required"}
+
+
+@pytest.mark.asyncio
+async def test_list_pending_approvals_filters_rows_to_authenticated_owner(client):
+    owner = _test_bypass_operator()
+    await approval_repository.get_or_create_pending(
+        session_id="owned-conversation",
+        tool_name="shell_execute",
+        risk_level="high",
+        summary="Owned approval",
+        fingerprint="owned-listing",
+        details={
+            "approval_owner_operator_session_id": owner.session_id,
+            "approval_owner_principal_id": owner.principal.principal_id,
+        },
+    )
+    foreign = await approval_repository.get_or_create_pending(
+        session_id="foreign-conversation",
+        tool_name="shell_execute",
+        risk_level="high",
+        summary="Foreign approval",
+        fingerprint="foreign-listing",
+        details={
+            "approval_owner_operator_session_id": "other-auth-session",
+            "approval_owner_principal_id": "operator:other",
+        },
+    )
+
+    resp = await client.get("/api/approvals/pending")
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert any(item["summary"] == "Owned approval" for item in payload)
+    assert all(item["id"] != foreign.id for item in payload)
+
+
+@pytest.mark.asyncio
 async def test_approve_pending_request(client):
     request = await approval_repository.get_or_create_pending(
         session_id="test-auth-bypass",
@@ -176,13 +222,18 @@ async def test_approval_owner_uses_auth_session_separate_from_conversation(async
 
 @pytest.mark.asyncio
 async def test_list_pending_approvals_includes_thread_labels(client):
+    owner = _test_bypass_operator()
     request = await approval_repository.get_or_create_pending(
         session_id="thread-1",
         tool_name="shell_execute",
         risk_level="high",
         summary="Calling tool: shell_execute({\"code\": \"[redacted]\"})",
         fingerprint="threaded",
-        details={"resume_message": "Continue with this shell command"},
+        details={
+            "resume_message": "Continue with this shell command",
+            "approval_owner_operator_session_id": owner.session_id,
+            "approval_owner_principal_id": owner.principal.principal_id,
+        },
     )
 
     with patch(
@@ -201,6 +252,7 @@ async def test_list_pending_approvals_includes_thread_labels(client):
 
 @pytest.mark.asyncio
 async def test_list_pending_approvals_includes_extension_lifecycle_context(client):
+    owner = _test_bypass_operator()
     request = await approval_repository.get_or_create_pending(
         session_id=None,
         tool_name="extension_install",
@@ -233,6 +285,8 @@ async def test_list_pending_approvals_includes_extension_lifecycle_context(clien
                 "risk_level": "high",
                 "execution_boundaries": ["workspace_write"],
             },
+            "approval_owner_operator_session_id": owner.session_id,
+            "approval_owner_principal_id": owner.principal.principal_id,
         },
     )
 

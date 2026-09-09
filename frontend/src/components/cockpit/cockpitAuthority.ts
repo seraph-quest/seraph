@@ -29,6 +29,19 @@ export type OperatorAuthBinding = {
 
 export type ApprovalLoadState = "loading" | "ready" | "stale";
 
+const ACTIONABLE_APPROVAL_STATUSES = new Set([
+  "pending",
+  "awaiting_approval",
+  "awaiting-approval",
+  "approval_required",
+]);
+
+/** Approval rows must explicitly identify a backend pending state. */
+export function isApprovalActionableStatus(status: unknown): boolean {
+  const normalized = text(status).toLowerCase();
+  return ACTIONABLE_APPROVAL_STATUSES.has(normalized);
+}
+
 function text(value: unknown): string {
   return typeof value === "string" ? value.trim() : "";
 }
@@ -59,8 +72,8 @@ function approvalExpiry(approval: ApprovalAuthorityRecord): unknown {
  * Return true only when the API supplied a fresh approval row with an
  * authenticated browser binding that exactly matches its owner metadata.
  * Missing owner/session metadata and malformed supplied expiry values fail
- * closed.  An absent expiry remains explicitly unavailable because the
- * current approval endpoint does not persist one for every approval row.
+ * closed.  A missing expiry remains unavailable because the browser cannot
+ * prove that the owner binding is still fresh.
  */
 export function isApprovalAuthorityReady(
   approval: ApprovalAuthorityRecord | null | undefined,
@@ -70,8 +83,7 @@ export function isApprovalAuthorityReady(
 ): boolean {
   if (!approval || approvalLoadState !== "ready" || auth.status !== "authenticated") return false;
 
-  const status = text(approval.status).toLowerCase();
-  if (status && !["pending", "awaiting_approval", "approval_required"].includes(status)) return false;
+  if (!isApprovalActionableStatus(approval.status)) return false;
 
   const ownerPrincipal = text(approval.approval_owner_principal_id);
   const ownerSession = text(approval.approval_owner_operator_session_id);
@@ -85,9 +97,10 @@ export function isApprovalAuthorityReady(
   if (conversation && (!executionSession || conversation !== executionSession)) return false;
 
   const suppliedExpiry = approvalExpiry(approval);
-  if (suppliedExpiry !== undefined && suppliedExpiry !== null && !expiryMilliseconds(suppliedExpiry)) return false;
+  if (suppliedExpiry === undefined || suppliedExpiry === null) return false;
+  if (!expiryMilliseconds(suppliedExpiry)) return false;
   const expiry = expiryMilliseconds(suppliedExpiry);
-  return expiry === null || expiry > now;
+  return expiry !== null && expiry > now;
 }
 
 /** Keep identifiers useful for inspection without echoing full authority values. */
@@ -123,6 +136,35 @@ export type WorkflowApprovalBinding = {
   pendingApprovalIds?: readonly string[] | null;
   pendingApprovals?: readonly ApprovalCandidate[] | null;
 };
+
+export type GoalWorkflowBindingState = "matched" | "ambiguous" | "unlinked" | "stale";
+
+function integer(value: unknown): number | null {
+  return typeof value === "number" && Number.isInteger(value) && value >= 1 ? value : null;
+}
+
+/**
+ * Match a workflow to the one current goal before composing outcome controls.
+ * Missing identifiers/revisions are metadata gaps, while mismatches are
+ * ambiguous or stale and must never be paired by list order.
+ */
+export function goalWorkflowBindingState(input: {
+  activeGoalCount: number;
+  goalId?: unknown;
+  goalRevision?: unknown;
+  workflowGoalId?: unknown;
+  workflowGoalRevision?: unknown;
+}): GoalWorkflowBindingState {
+  if (input.activeGoalCount > 1) return "ambiguous";
+  const goalId = text(input.goalId);
+  const workflowGoalId = text(input.workflowGoalId);
+  if (!goalId || !workflowGoalId) return "unlinked";
+  if (goalId !== workflowGoalId) return "ambiguous";
+  const goalRevision = integer(input.goalRevision);
+  const workflowGoalRevision = integer(input.workflowGoalRevision);
+  if (goalRevision === null || workflowGoalRevision === null) return "unlinked";
+  return goalRevision === workflowGoalRevision ? "matched" : "stale";
+}
 
 /** Select only an approval explicitly bound to the inspected workflow. */
 export function selectApprovalForWorkflow<T extends ApprovalCandidate>(

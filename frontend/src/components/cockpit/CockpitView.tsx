@@ -50,7 +50,9 @@ import {
 } from "./OutcomeCockpitPanel";
 import {
   displayApprovalOwnerMetadata,
+  goalWorkflowBindingState,
   isApprovalAuthorityReady,
+  isApprovalActionableStatus,
   redactIdentifier,
   selectApprovalForWorkflow,
   type ApprovalLoadState,
@@ -1308,6 +1310,9 @@ interface OperatorContinuityGraph {
 
 interface PendingApproval {
   id: string;
+  goal_id?: string | null;
+  goal_revision?: number | null;
+  workflow_id?: string | null;
   session_id?: string | null;
   thread_id?: string | null;
   approval_conversation_id?: string | null;
@@ -1351,11 +1356,17 @@ function normalizePendingApprovals(value: unknown): PendingApproval[] {
     const optionalTime = (value: unknown): string | number | null => (
       typeof value === "string" || (typeof value === "number" && Number.isFinite(value)) ? value : null
     );
+    const optionalPositiveInteger = (value: unknown): number | null => (
+      typeof value === "number" && Number.isInteger(value) && value >= 1 ? value : null
+    );
     const permissions = record.permissions && typeof record.permissions === "object" && !Array.isArray(record.permissions)
       ? record.permissions as Record<string, unknown>
       : null;
     items.push({
       id: record.id,
+      goal_id: optionalString(record.goal_id),
+      goal_revision: optionalPositiveInteger(record.goal_revision),
+      workflow_id: optionalString(record.workflow_id),
       session_id: optionalString(record.session_id),
       thread_id: optionalString(record.thread_id),
       approval_conversation_id: optionalString(record.approval_conversation_id),
@@ -5923,12 +5934,26 @@ function normalizeWorkflowRun(value: Record<string, unknown>): WorkflowRunRecord
   const actionHandle = actionHandleValue && typeof actionHandleValue === "object" && !Array.isArray(actionHandleValue)
     ? actionHandleValue as Record<string, unknown>
     : null;
+  const workflowArguments = value.arguments && typeof value.arguments === "object" && !Array.isArray(value.arguments)
+    ? value.arguments as Record<string, unknown>
+    : null;
+  const workflowMetadata = value.metadata && typeof value.metadata === "object" && !Array.isArray(value.metadata)
+    ? value.metadata as Record<string, unknown>
+    : null;
+  const workflowGoalId = [value.goal_id, workflowMetadata?.goal_id, workflowArguments?.goal_id]
+    .find((candidate): candidate is string => typeof candidate === "string" && candidate.trim().length > 0)
+    ?.trim() ?? null;
+  const workflowGoalRevision = [value.goal_revision, workflowMetadata?.goal_revision, workflowArguments?.goal_revision]
+    .find((candidate): candidate is number => typeof candidate === "number" && Number.isInteger(candidate) && candidate >= 1)
+    ?? null;
 
   return {
     id: String(value.id ?? ""),
     toolName: String(value.tool_name ?? ""),
     workflowName: String(value.workflow_name ?? value.tool_name ?? ""),
     sessionId: typeof value.session_id === "string" ? value.session_id : null,
+    goalId: workflowGoalId,
+    goalRevision: workflowGoalRevision,
     status: (value.status as WorkflowRunRecord["status"]) ?? "running",
     startedAt: String(value.started_at ?? value.updated_at ?? ""),
     updatedAt: String(value.updated_at ?? value.started_at ?? ""),
@@ -5939,9 +5964,7 @@ function normalizeWorkflowRun(value: Record<string, unknown>): WorkflowRunRecord
     continuedErrorSteps: Array.isArray(value.continued_error_steps)
       ? value.continued_error_steps.filter((item): item is string => typeof item === "string")
       : [],
-    arguments: value.arguments && typeof value.arguments === "object" && !Array.isArray(value.arguments)
-      ? (value.arguments as Record<string, unknown>)
-      : undefined,
+    arguments: workflowArguments ?? undefined,
     artifacts: [],
     riskLevel: typeof value.risk_level === "string" ? value.risk_level : undefined,
     executionBoundaries: Array.isArray(value.execution_boundaries)
@@ -5971,6 +5994,24 @@ function normalizeWorkflowRun(value: Record<string, unknown>): WorkflowRunRecord
             threadId: typeof record.thread_id === "string" ? record.thread_id : null,
             threadLabel: typeof record.thread_label === "string" ? record.thread_label : null,
             resumeMessage: typeof record.resume_message === "string" ? record.resume_message : null,
+            status: typeof record.status === "string" ? record.status : null,
+            goalId: typeof record.goal_id === "string" ? record.goal_id : null,
+            goalRevision: typeof record.goal_revision === "number"
+              && Number.isInteger(record.goal_revision)
+              && record.goal_revision >= 1
+              ? record.goal_revision
+              : null,
+            ownerPrincipalId: typeof record.approval_owner_principal_id === "string"
+              ? record.approval_owner_principal_id
+              : null,
+            ownerSessionId: typeof record.approval_owner_operator_session_id === "string"
+              ? record.approval_owner_operator_session_id
+              : null,
+            ownerSource: typeof record.approval_owner_source === "string" ? record.approval_owner_source : null,
+            ownerExpiresAt: typeof record.approval_owner_expires_at === "string"
+              || (typeof record.approval_owner_expires_at === "number" && Number.isFinite(record.approval_owner_expires_at))
+              ? record.approval_owner_expires_at
+              : null,
           });
           return entries;
         }, [])
@@ -6048,7 +6089,18 @@ function collectGoalTitles(goals: GoalInfo[], limit: number): string[] {
   return titles;
 }
 
-function findCurrentGoal(goals: GoalInfo[]): GoalInfo | null {
+const CURRENT_GOAL_STATUSES = new Set([
+  "active",
+  "in_progress",
+  "in-progress",
+  "running",
+  "paused",
+  "blocked",
+  "awaiting_approval",
+  "awaiting-approval",
+]);
+
+function flattenGoals(goals: GoalInfo[]): GoalInfo[] {
   const candidates: GoalInfo[] = [];
   const visit = (items: GoalInfo[]) => {
     items.forEach((item) => {
@@ -6057,19 +6109,18 @@ function findCurrentGoal(goals: GoalInfo[]): GoalInfo | null {
     });
   };
   visit(goals);
-  const activeStatuses = new Set([
-    "active",
-    "in_progress",
-    "in-progress",
-    "running",
-    "paused",
-    "blocked",
-    "awaiting_approval",
-    "awaiting-approval",
-  ]);
+  return candidates;
+}
+
+function activeGoals(goals: GoalInfo[]): GoalInfo[] {
+  return flattenGoals(goals).filter((goal) => CURRENT_GOAL_STATUSES.has(goal.status.trim().toLowerCase()));
+}
+
+function findCurrentGoal(goals: GoalInfo[]): GoalInfo | null {
+  const candidates = flattenGoals(goals);
   const rank = (goal: GoalInfo) => {
     const normalizedStatus = goal.status.trim().toLowerCase();
-    if (activeStatuses.has(normalizedStatus)) return 0;
+    if (CURRENT_GOAL_STATUSES.has(normalizedStatus)) return 0;
     if (![
       "completed",
       "complete",
@@ -6986,6 +7037,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   });
   const [feedbackState, setFeedbackState] = useState<Record<string, string>>({});
   const [approvalState, setApprovalState] = useState<Record<string, string>>({});
+  const [approvalResolutionByWorkflow, setApprovalResolutionByWorkflow] = useState<Record<string, { id: string; status: string }>>({});
   const [selectedInspector, setSelectedInspector] = useState<InspectorSelection | null>(null);
   const [daemonPresence, setDaemonPresence] = useState<DaemonPresenceState | null>(null);
   const [desktopNotifications, setDesktopNotifications] = useState<ObserverContinuitySnapshot["notifications"]>([]);
@@ -8482,6 +8534,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
         `${API_URL}/api/workflows/runs/${encodeURIComponent(resolved.runIdentity)}/control`,
         {
           method: "POST",
+          credentials: "include",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             action,
@@ -9534,7 +9587,10 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     { label: "artifacts", value: `${m7ArtifactCount} files · ${m7PrimaryOutputPath ?? "no primary output"}` },
     { label: "next action", value: m7NextActionLabel },
   ];
-  const currentGoal = findCurrentGoal(goalTree);
+  const outcomeWorkflow = m7PrimaryWorkflow;
+  const activeGoalCandidates = activeGoals(goalTree);
+  const goalSelectionAmbiguous = activeGoalCandidates.length > 1;
+  const currentGoal = goalSelectionAmbiguous ? null : findCurrentGoal(goalTree);
   useEffect(() => {
     const goalId = currentGoal?.id ?? null;
     const goalRevision = currentGoal?.revision ?? null;
@@ -9549,7 +9605,17 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   }, [currentGoal?.id, currentGoal?.revision, loadGoalLoop]);
   const currentGoalLoop = currentGoal && goalLoopGoalId === currentGoal.id ? goalLoop : null;
   const latestGoalReceipt = currentGoalLoop?.receipts?.[0] ?? null;
+  const outcomeBindingState = outcomeWorkflow
+    ? goalWorkflowBindingState({
+      activeGoalCount: activeGoalCandidates.length,
+      goalId: currentGoal?.id,
+      goalRevision: currentGoal?.revision ?? currentGoalLoop?.goal.revision,
+      workflowGoalId: outcomeWorkflow.goalId,
+      workflowGoalRevision: outcomeWorkflow.goalRevision,
+    })
+    : null;
   const goalOutcomeState: OutcomeCockpitState = (() => {
+    if (goalSelectionAmbiguous) return "partial_metadata";
     if (!currentGoal) return goalTree.length === 0 && loadingGoals ? "loading" : "empty";
     if (loadingGoals || goalLoopLoading) return "loading";
     if (goalLoopError) {
@@ -9559,6 +9625,8 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       return goalLoopError.status === 502 ? "partial_metadata" : "failed";
     }
     if (!currentGoalLoop || currentGoalLoop.goal.revision !== (currentGoal.revision ?? currentGoalLoop.goal.revision)) return "partial_metadata";
+    if (outcomeBindingState === "stale") return "stale";
+    if (outcomeWorkflow && outcomeBindingState !== "matched") return "partial_metadata";
     if (
       latestGoalReceipt?.goal_revision != null
       && (
@@ -9566,17 +9634,20 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
         || latestGoalReceipt.goal_revision !== (currentGoal.revision ?? latestGoalReceipt.goal_revision)
       )
     ) return "stale";
+    if (latestGoalReceipt && latestGoalReceipt.goal_revision == null) return "partial_metadata";
+    if (latestGoalReceipt?.goal_id && latestGoalReceipt.goal_id !== currentGoalLoop.goal.id) return "stale";
     if (!currentGoalLoop.criterion) return "partial_metadata";
     return outcomeStateForReceipt(latestGoalReceipt, true, currentGoal.status);
   })();
   const workflowLoadState = deepPaneLoadState.workflows;
-  const outcomeWorkflow = m7PrimaryWorkflow;
   const workOutcomeState: OutcomeCockpitState = (() => {
     if (workflowLoadState === "loading") return "loading";
     if (workflowLoadState === "stale") return "stale";
     if (workflowLoadState === "failed") return "degraded";
     if (workflowLoadState === "idle") return "partial_metadata";
     if (!outcomeWorkflow) return "empty";
+    if (outcomeBindingState === "stale") return "stale";
+    if (outcomeBindingState !== "matched") return "partial_metadata";
     if (outcomeWorkflow.status === "awaiting_approval") return "awaiting_approval";
     if (outcomeWorkflow.status === "failed") return "failed";
     if (outcomeWorkflow.status === "degraded") return "degraded";
@@ -9588,7 +9659,8 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   const outcomeCheckpoint = outcomeWorkflow
     ? workflowCheckpointActions(outcomeWorkflow).find((action) => action.kind !== "retry_failed_step") ?? null
     : null;
-  const outcomeApproval = outcomeWorkflow ? approvalForWorkflow(outcomeWorkflow) : null;
+  const outcomeApprovalCandidate = outcomeWorkflow ? approvalForWorkflow(outcomeWorkflow) : null;
+  const outcomeApproval = outcomeBindingState === "matched" ? outcomeApprovalCandidate : null;
   const outcomeApprovalActionState = outcomeApproval ? approvalState[outcomeApproval.id] ?? null : null;
   const approvalAuthorityReady = isApprovalAuthorityReady(
     outcomeApproval,
@@ -9601,7 +9673,11 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
         ? "loading"
         : approvalLoadState === "stale"
           ? "stale"
-          : "empty";
+          : outcomeWorkflow && outcomeBindingState === "stale"
+            ? "stale"
+            : outcomeWorkflow && outcomeBindingState !== "matched"
+              ? "partial_metadata"
+              : "empty";
     }
     if (approvalLoadState !== "ready") return approvalLoadState;
     const status = outcomeApproval.status.toLowerCase();
@@ -9660,13 +9736,27 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       latestLearning: latestGoalReceipt?.learning ?? null,
     }
     : null;
+  const outcomeGoalState: OutcomeCockpitState = goalSelectionAmbiguous
+    ? "partial_metadata"
+    : currentGoal ? goalOutcomeState : "empty";
+  const outcomeGoalUnavailableReason = goalSelectionAmbiguous
+    ? "Multiple active goals are present; select one before pairing work or evidence."
+    : null;
+  const outcomeBindingUnavailableReason = outcomeBindingState === "stale"
+    ? "Workflow metadata is from a different goal revision; refresh before acting."
+    : outcomeBindingState === "ambiguous"
+      ? "Goal/workflow metadata is ambiguous; inspect the matching identifiers before acting."
+      : outcomeBindingState === "unlinked"
+        ? "The workflow is not linked to the current goal; consequential controls are locked."
+        : null;
   const outcomeWork: OutcomeWorkSummary | null = outcomeWorkflow
     ? {
       id: outcomeWorkflow.id,
       label: outcomeWorkflow.workflowName,
       status: outcomeWorkflow.status,
       state: workOutcomeState,
-      summary: outcomeWorkflow.summary,
+      summary: outcomeBindingUnavailableReason
+        ?? outcomeWorkflow.summary,
       updatedAt: formatAge(outcomeWorkflow.updatedAt),
       stepLabel: outcomeWorkflow.resumeFromStep
         ?? outcomeWorkflow.stepRecords?.find((step) => step.status !== "succeeded")?.id
@@ -9674,7 +9764,8 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
         ?? null,
       artifactLabel: outcomeWorkflow.artifacts[0]?.filePath ?? outcomeWorkflow.artifactPaths[0] ?? null,
       threadLabel: outcomeWorkflow.threadLabel ?? outcomeWorkflow.threadId ?? outcomeWorkflow.sessionId ?? null,
-      nextAction: outcomeApproval
+      nextAction: outcomeBindingUnavailableReason
+        ?? (outcomeApproval
         ? `Review approval for ${outcomeApproval.tool_name}`
         : outcomeFailedStep
           ? `Inspect failed step ${outcomeFailedStep.id}`
@@ -9682,15 +9773,15 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
             ? "Monitor backend run"
             : workflowCanContinue(outcomeWorkflow)
               ? `Continue ${outcomeWorkflow.resumeCheckpointLabel ?? "from the recorded checkpoint"}`
-              : "Inspect backend receipt",
+              : "Inspect backend receipt"),
       recoveryHint: outcomeWorkflow.approvalRecoveryMessage
         ?? outcomeFailedStep?.recoveryHint
         ?? outcomeWorkflow.resumeCheckpointLabel
         ?? null,
       canInspect: true,
-      canContinue: workflowCanContinue(outcomeWorkflow),
-      canRetry: Boolean(outcomeWorkflow.retryFromStepDraft),
-      canBranch: Boolean(outcomeCheckpoint),
+      canContinue: !outcomeBindingUnavailableReason && workflowCanContinue(outcomeWorkflow),
+      canRetry: !outcomeBindingUnavailableReason && Boolean(outcomeWorkflow.retryFromStepDraft),
+      canBranch: !outcomeBindingUnavailableReason && Boolean(outcomeCheckpoint),
     }
     : null;
   const outcomeApprovalOwner = outcomeApproval ? displayApprovalOwnerMetadata(outcomeApproval) : null;
@@ -9716,15 +9807,27 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   const latestArtifact = [...artifacts].sort((left, right) => new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime())[0] ?? null;
   const latestArtifactLineage = latestArtifact ? resolveArtifactLineage(latestArtifact) : null;
   const artifactEvidenceEntry = operatorEvidenceEntries.find((entry) => entry.artifact) ?? null;
+  const artifactSourceMatchesOutcome = !outcomeWorkflow || Boolean(
+    latestArtifactLineage?.sourceWorkflow
+    && (latestArtifactLineage.sourceWorkflow.runIdentity ?? latestArtifactLineage.sourceWorkflow.id)
+      === (outcomeWorkflow.runIdentity ?? outcomeWorkflow.id),
+  );
+  const artifactLineageBound = outcomeBindingState === "matched" && artifactSourceMatchesOutcome;
   const outcomeEvidence: OutcomeEvidenceSummary = latestArtifact
     ? {
-      state: latestArtifactLineage?.ambiguous || !latestArtifactLineage?.sourceWorkflow ? "partial_metadata" : "active",
+      state: latestArtifactLineage?.ambiguous || !latestArtifactLineage?.sourceWorkflow || !artifactLineageBound
+        ? "partial_metadata"
+        : "active",
       label: latestArtifact.filePath,
       summary: latestArtifact.summary,
       source: latestArtifact.source,
       createdAt: latestArtifact.createdAt,
       provenance: latestArtifactLineage?.ambiguous
         ? "source ambiguous"
+        : !artifactLineageBound
+          ? outcomeWorkflow && latestArtifactLineage?.sourceWorkflow
+            ? "source workflow does not match current work"
+            : "goal/workflow lineage unresolved"
         : latestArtifactLineage?.sourceWorkflow
           ? artifactEvidenceEntry?.detail ?? latestArtifact.source
           : "source unresolved",
@@ -9740,11 +9843,17 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     };
   const outcomeExecution = latestGoalReceipt?.execution_status ?? "unknown";
   const outcomeVerification = latestGoalReceipt?.verification ?? "unknown";
-  const outcomeResultState: OutcomeCockpitState = outcomeStateForReceipt(
-    latestGoalReceipt,
-    Boolean(currentGoalLoop?.criterion),
-    currentGoal?.status,
-  );
+  const outcomeResultState: OutcomeCockpitState = outcomeBindingState === "stale"
+    || goalOutcomeState === "stale"
+    ? "stale"
+    : outcomeBindingState && outcomeBindingState !== "matched"
+      || goalOutcomeState === "partial_metadata"
+        ? "partial_metadata"
+        : outcomeStateForReceipt(
+          latestGoalReceipt,
+          Boolean(currentGoalLoop?.criterion),
+          currentGoal?.status,
+        );
   const outcomeResult: OutcomeResultSummary = {
     state: outcomeResultState,
     label: latestGoalReceipt?.receipt_type ?? latestGoalReceipt?.event_type ?? "No outcome receipt",
@@ -9771,7 +9880,8 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     isApprovalAuthorityReady(approval, operatorAuth, approvalLoadState)
   );
   const approvalActionDisabled = (approval: PendingApproval | null | undefined): boolean => (
-    !approvalActionAllowed(approval) || approvalState[approval?.id ?? ""] === "saving"
+    !approvalActionAllowed(approval)
+    || Boolean(approval && approvalState[approval.id] && !isApprovalActionableStatus(approvalState[approval.id]))
   );
   function inspectOperatorTriageEntry(entry: OperatorTriageEntry | null | undefined) {
     if (!entry) return;
@@ -10655,23 +10765,57 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     ].filter(Boolean).join(" · ");
   }, [governedExtensionRows]);
 
+  function terminalApprovalState(approvalId: string | null | undefined): string | null {
+    const localState = approvalId ? approvalState[approvalId]?.trim().toLowerCase() : "";
+    if (!localState || localState === "saving" || localState === "unauthorized" || isApprovalActionableStatus(localState)) {
+      return null;
+    }
+    return localState;
+  }
+
+  function approvalResolutionForWorkflow(workflow: WorkflowRunRecord): { id: string; status: string } | null {
+    const workflowKey = workflow.runIdentity ?? workflow.id;
+    const recorded = approvalResolutionByWorkflow[workflowKey];
+    if (recorded) return recorded;
+    const ids = [
+      ...(workflow.pendingApprovalIds ?? []),
+      ...(workflow.pendingApprovals ?? []).map((approval) => approval.id),
+    ];
+    for (const id of ids) {
+      const status = terminalApprovalState(id);
+      if (status) return { id, status };
+    }
+    return null;
+  }
+
   function approvalForWorkflow(workflow: WorkflowRunRecord): PendingApproval | null {
     const selected = selectApprovalForWorkflow(pendingApprovals, workflow);
     if (selected && "tool_name" in selected && typeof selected.tool_name === "string") {
+      if (terminalApprovalState(selected.id)) return null;
       return selected;
     }
 
-    const attached = workflow.pendingApprovals?.find((item) => item.id === selected?.id)
-      ?? workflow.pendingApprovals?.[0];
+    const pendingIds = workflow.pendingApprovalIds?.filter((id) => typeof id === "string" && id.trim()) ?? [];
+    const attached = pendingIds.length > 0
+      ? workflow.pendingApprovals?.find((item) => pendingIds.includes(item.id))
+      : workflow.pendingApprovals?.[0];
     if (!attached) return null;
+    if (terminalApprovalState(attached.id)) return null;
     return {
       id: attached.id,
+      goal_id: attached.goalId ?? workflow.goalId ?? null,
+      goal_revision: attached.goalRevision ?? workflow.goalRevision ?? null,
+      workflow_id: workflow.runIdentity ?? workflow.id,
       session_id: workflow.sessionId ?? null,
       thread_id: attached.threadId ?? workflow.threadId ?? workflow.sessionId ?? null,
+      approval_owner_principal_id: attached.ownerPrincipalId ?? null,
+      approval_owner_operator_session_id: attached.ownerSessionId ?? null,
+      approval_owner_source: attached.ownerSource ?? null,
+      approval_owner_expires_at: attached.ownerExpiresAt ?? null,
       thread_label: attached.threadLabel ?? workflow.threadLabel ?? null,
       tool_name: workflow.toolName,
       risk_level: attached.riskLevel ?? workflow.riskLevel ?? "unknown",
-      status: "pending",
+      status: attached.status ?? "unknown",
       summary: attached.summary,
       created_at: attached.createdAt,
       resume_message: attached.resumeMessage ?? workflow.approvalRecoveryMessage ?? null,
@@ -11490,6 +11634,46 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     }
   }
 
+  function reconcileApprovalDecision(approval: PendingApproval, status: string) {
+    setApprovalState((current) => ({ ...current, [approval.id]: status }));
+    const selectedWorkflow = selectedInspector?.kind === "workflow" ? selectedInspector.workflow : null;
+    const workflow = approval.workflow_id
+      ? workflowRunsWithArtifacts.find((entry) => (entry.runIdentity ?? entry.id) === approval.workflow_id)
+      : selectedWorkflow
+        ?? workflowRunsWithArtifacts.find((entry) => (
+          entry.pendingApprovalIds?.includes(approval.id)
+          || entry.pendingApprovals?.some((item) => item.id === approval.id)
+        ));
+    const workflowKey = workflow ? workflow.runIdentity ?? workflow.id : approval.workflow_id ?? null;
+    if (workflowKey) {
+      setApprovalResolutionByWorkflow((current) => ({
+        ...current,
+        [workflowKey]: { id: approval.id, status },
+      }));
+    }
+    setSelectedInspector((current) => {
+      if (!current) return current;
+      if (current.kind === "approval" && current.approval.id === approval.id) {
+        return { ...current, approval: { ...current.approval, status } };
+      }
+      if (current.kind !== "workflow") return current;
+      const hasApproval = current.workflow.pendingApprovalIds?.includes(approval.id)
+        || current.workflow.pendingApprovals?.some((item) => item.id === approval.id);
+      if (!hasApproval) return current;
+      const pendingApprovalIds = current.workflow.pendingApprovalIds?.filter((id) => id !== approval.id);
+      const pendingApprovals = current.workflow.pendingApprovals?.filter((item) => item.id !== approval.id);
+      return {
+        ...current,
+        workflow: {
+          ...current.workflow,
+          pendingApprovalIds,
+          pendingApprovals,
+          pendingApprovalCount: Math.max(0, (current.workflow.pendingApprovalCount ?? 1) - 1),
+        },
+      };
+    });
+  }
+
   async function handleApprovalDecision(approval: PendingApproval, decision: "approve" | "deny") {
     if (approvalActionDisabled(approval)) {
       setApprovalState((current) => ({
@@ -11506,15 +11690,18 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
         credentials: "include",
       });
       if (!response.ok) {
-        setApprovalState((current) => ({ ...current, [approval.id]: "failed" }));
+        reconcileApprovalDecision(approval, "failed");
         setPendingApprovals([]);
         setApprovalLoadState("stale");
         return;
       }
 
       const payload = await response.json();
-      const nextStatus = payload?.status ?? (decision === "approve" ? "approved" : "denied");
-      setApprovalState((current) => ({ ...current, [approval.id]: nextStatus }));
+      const reportedStatus = typeof payload?.status === "string" ? payload.status.trim() : "";
+      const nextStatus = reportedStatus && !isApprovalActionableStatus(reportedStatus)
+        ? reportedStatus
+        : decision === "approve" ? "approved" : "denied";
+      reconcileApprovalDecision(approval, nextStatus);
       setPendingApprovals((current) => current.filter((item) => item.id !== approval.id));
 
       if (decision === "approve" && payload?.resume_message) {
@@ -11527,7 +11714,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
         });
       }
     } catch {
-      setApprovalState((current) => ({ ...current, [approval.id]: "failed" }));
+      reconcileApprovalDecision(approval, "failed");
       setPendingApprovals([]);
       setApprovalLoadState("stale");
     }
@@ -12543,6 +12730,9 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       ? resolveWorkflowRun(selectedInspector.workflow)
       : null;
     const selectedWorkflowApproval = selectedWorkflow ? approvalForWorkflow(selectedWorkflow) : null;
+    const selectedWorkflowApprovalResolution = selectedWorkflow
+      ? approvalResolutionForWorkflow(selectedWorkflow)
+      : null;
     const selectedWorkflowLatestBranch = selectedWorkflow ? workflowLatestBranchRun(selectedWorkflow) : null;
     const selectedWorkflowBestContinuation = selectedWorkflow ? workflowBestContinuationRun(selectedWorkflow) : null;
     const selectedWorkflowCheckpointActions = selectedWorkflow ? workflowCheckpointActions(selectedWorkflow) : [];
@@ -12618,6 +12808,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
         pending_approval_authority: selectedWorkflowApproval && approvalActionAllowed(selectedWorkflowApproval)
           ? "ready"
           : "locked",
+        approval_resolution: selectedWorkflowApprovalResolution ?? "unavailable",
         pending_approval_count: workflow.pendingApprovalCount ?? 0,
         pending_approvals: workflow.pendingApprovals?.map((item) => item.summary).join(" | ") || "none",
         replay_allowed: workflow.replayAllowed ?? false,
@@ -12787,6 +12978,11 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                   Deny
                 </button>
               </>
+            )}
+            {selectedWorkflowApprovalResolution && (
+              <span className="cockpit-feedback-status" role="status">
+                Approval {selectedWorkflowApprovalResolution.id} resolved: {selectedWorkflowApprovalResolution.status}.
+              </span>
             )}
             {selectedWorkflow.threadId && (
               <button
@@ -14602,11 +14798,15 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
             onClose={() => closeWindowPane("guardian_state_pane")}
           >
             <section className="cockpit-panel cockpit-panel--embedded">
-              {currentGoal ? (
+              {currentGoal || goalSelectionAmbiguous ? (
                 <OutcomeCockpitPanel
                   goal={outcomeGoal}
                   work={outcomeWork}
                   approval={outcomeApprovalSummary}
+                  goalState={outcomeGoalState}
+                  goalUnavailableReason={outcomeGoalUnavailableReason}
+                  approvalStateOverride={outcomeApprovalSummary ? undefined : approvalOutcomeState}
+                  approvalUnavailableReason={outcomeApprovalSummary ? null : outcomeBindingUnavailableReason}
                   route={outcomeRoute}
                   evidence={outcomeEvidence}
                   result={outcomeResult}

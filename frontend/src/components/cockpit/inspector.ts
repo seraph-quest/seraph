@@ -62,6 +62,8 @@ export interface WorkflowRunRecord {
   toolName: string;
   workflowName: string;
   sessionId?: string | null;
+  goalId?: string | null;
+  goalRevision?: number | null;
   status: "succeeded" | "failed" | "running" | "awaiting_approval" | "approved" | "denied" | "degraded";
   startedAt: string;
   updatedAt: string;
@@ -85,6 +87,13 @@ export interface WorkflowRunRecord {
     threadId?: string | null;
     threadLabel?: string | null;
     resumeMessage?: string | null;
+    status?: string | null;
+    goalId?: string | null;
+    goalRevision?: number | null;
+    ownerPrincipalId?: string | null;
+    ownerSessionId?: string | null;
+    ownerSource?: string | null;
+    ownerExpiresAt?: string | number | null;
   }>;
   threadId?: string | null;
   threadLabel?: string | null;

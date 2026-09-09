@@ -1959,6 +1959,14 @@ describe("CockpitView", () => {
   it("surfaces active triage for approvals, workflows, queued guardian items, and reach failures", async () => {
     fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
+      if (url.includes("/api/auth/session")) {
+        return Promise.resolve(mockResponse({
+          authenticated: true,
+          principal_id: "operator:test-bypass",
+          session_id: "browser-session-1",
+          absolute_expires_at: "2099-01-01T00:00:00Z",
+        }));
+      }
       if (url.includes("/api/sessions")) {
         return Promise.resolve(mockResponse([
           { id: "session-1", title: "Session 1", created_at: "", updated_at: "", last_message: null, last_message_role: null },
@@ -1985,6 +1993,9 @@ describe("CockpitView", () => {
             summary: "Approve Atlas shell command",
             created_at: "2026-03-18T12:03:00Z",
             resume_message: "Continue Atlas shell approval",
+            approval_owner_principal_id: "operator:test-bypass",
+            approval_owner_operator_session_id: "browser-session-1",
+            approval_owner_expires_at: "2099-01-01T00:00:00Z",
           },
         ]));
       }
@@ -2908,6 +2919,14 @@ describe("CockpitView", () => {
   it("keeps workflow-orchestration controls when the lead run only exists in the orchestration payload", async () => {
     fetchMock.mockImplementation((input: RequestInfo | URL) => {
       const url = String(input);
+      if (url.includes("/api/auth/session")) {
+        return Promise.resolve(mockResponse({
+          authenticated: true,
+          principal_id: "operator:test-bypass",
+          session_id: "browser-session-1",
+          absolute_expires_at: "2099-01-01T00:00:00Z",
+        }));
+      }
       if (url.includes("/api/sessions")) {
         return Promise.resolve(mockResponse([
           { id: "session-2", title: "Atlas thread", created_at: "", updated_at: "", last_message: null, last_message_role: null },
@@ -4109,6 +4128,9 @@ describe("CockpitView", () => {
             status: "pending",
             summary: "Approve Atlas shell command",
             created_at: "2026-03-18T12:03:00Z",
+            approval_owner_principal_id: "operator:test-bypass",
+            approval_owner_operator_session_id: "browser-session-1",
+            approval_owner_expires_at: "2099-01-01T00:00:00Z",
             resume_message: "Continue Atlas shell approval",
           },
         ]));
@@ -6535,6 +6557,14 @@ describe("CockpitView", () => {
   it("uses workflow-attached approvals when the pending sidebar is capped away", async () => {
     fetchMock.mockImplementation((input: RequestInfo | URL) => {
       const url = String(input);
+      if (url.includes("/api/auth/session")) {
+        return Promise.resolve(mockResponse({
+          authenticated: true,
+          principal_id: "operator:test-bypass",
+          session_id: "browser-session-1",
+          absolute_expires_at: "2099-01-01T00:00:00Z",
+        }));
+      }
       if (url.includes("/api/sessions/session-2/messages")) {
         return Promise.resolve(mockResponse([]));
       }
@@ -6546,6 +6576,9 @@ describe("CockpitView", () => {
       if (url.includes("/api/observer/state")) return Promise.resolve(mockResponse({}));
       if (url.includes("/api/audit/events")) return Promise.resolve(mockResponse([]));
       if (url.includes("/api/approvals/pending")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/approvals/approval-run-1/approve")) {
+        return Promise.resolve(mockResponse({ id: "approval-run-1", status: "approved" }));
+      }
       if (url.includes("/api/observer/continuity")) {
         return Promise.resolve(mockResponse({
           daemon: { connected: false, pending_notification_count: 0, capture_mode: "balanced" },
@@ -6595,6 +6628,10 @@ describe("CockpitView", () => {
               id: "approval-run-1",
               summary: "Approve write_file for web brief",
               risk_level: "medium",
+              status: "pending",
+              approval_owner_principal_id: "operator:test-bypass",
+              approval_owner_operator_session_id: "browser-session-1",
+              approval_owner_expires_at: "2099-01-01T00:00:00Z",
               created_at: "2026-03-18T12:01:30Z",
               thread_id: "session-2",
               thread_label: "Approval thread",
@@ -6632,6 +6669,22 @@ describe("CockpitView", () => {
     expect(
       await screen.findByDisplayValue("Continue workflow after approval.", {}, { timeout: 5000 }),
     ).toBeInTheDocument();
+
+    fireEvent.click(screen.getByText("workflow_web_brief_to_file is waiting for approval"));
+    const inspector = document.querySelector(".cockpit-inspector") as HTMLElement;
+    expect(inspector).not.toBeNull();
+    fireEvent.click(within(inspector).getByRole("button", { name: "Approve" }));
+    await waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith(
+        expect.stringContaining("/api/approvals/approval-run-1/approve"),
+        expect.objectContaining({ method: "POST", credentials: "include" }),
+      ),
+    );
+    await waitFor(() => {
+      expect(within(inspector).queryByRole("button", { name: "Approve" })).not.toBeInTheDocument();
+      expect(within(inspector).queryByRole("button", { name: "Approve approval context for web-brief-to-file" })).not.toBeInTheDocument();
+    });
+    expect(within(inspector).getByText("Approval approval-run-1 resolved: approved.")).toBeInTheDocument();
   }, 15000);
 
   it("shows a visible pending state and fresh-thread guidance while the agent is working", async () => {

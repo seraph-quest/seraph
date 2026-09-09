@@ -85,11 +85,17 @@ def _require_approval_owner(request: Request, approval, operator) -> dict:
 
 @router.get("/approvals/pending")
 async def list_pending_approvals(
+    request: Request,
     session_id: str | None = Query(default=None),
     limit: int = Query(default=20, ge=1, le=100),
 ):
-    """List pending approval requests."""
-    approvals = await approval_repository.list_pending(session_id=session_id, limit=limit)
+    """List only pending approvals owned by the authenticated operator session."""
+    operator = _require_approval_operator(request)
+    approvals = await approval_repository.list_pending(
+        session_id=session_id,
+        limit=limit,
+        owner_operator_session_id=operator.session_id,
+    )
     session_titles = {
         str(session["id"]): str(session.get("title") or "Untitled session")
         for session in await session_manager.list_sessions()

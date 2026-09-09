@@ -263,6 +263,25 @@ describe("OutcomeCockpitPanel", () => {
     expect(onApprove).not.toHaveBeenCalled();
   });
 
+  it("renders an explicit partial state when goal/workflow lineage is unavailable", () => {
+    render(<OutcomeCockpitPanel
+      {...fixtureModel()}
+      goal={null}
+      approval={null}
+      goalState="partial_metadata"
+      goalUnavailableReason="Multiple active goals are present; select one before pairing work or evidence."
+      approvalStateOverride="partial_metadata"
+      approvalUnavailableReason="The workflow is not linked to the current goal; consequential controls are locked."
+      onApprove={vi.fn()}
+    />);
+
+    expect(screen.getByTestId("outcome-goal-card")).toHaveAttribute("data-state", "partial_metadata");
+    expect(screen.getByTestId("outcome-approval-card")).toHaveAttribute("data-state", "partial_metadata");
+    expect(screen.getByText(/Multiple active goals/)).toBeInTheDocument();
+    expect(screen.getByText(/workflow is not linked/)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Approve" })).not.toBeInTheDocument();
+  });
+
   it("renders redacted owner metadata alongside an awaiting decision", () => {
     renderFixture({
       approval: {

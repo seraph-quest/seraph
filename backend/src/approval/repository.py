@@ -213,6 +213,7 @@ class ApprovalRepository:
         *,
         session_id: str | None = None,
         limit: int = 20,
+        owner_operator_session_id: str | None = None,
     ) -> list[dict]:
         limit = min(max(limit, 1), 100)
         async with get_session() as db:
@@ -220,13 +221,23 @@ class ApprovalRepository:
                 select(ApprovalRequest)
                 .where(ApprovalRequest.status == "pending")
                 .order_by(col(ApprovalRequest.created_at).desc())
-                .limit(limit)
             )
             if session_id is not None:
                 stmt = stmt.where(ApprovalRequest.session_id == session_id)
+            # Filter legacy/foreign rows after the bounded query so the
+            # authenticated owner cannot see another operator's approval.
+            # The larger cap preserves the requested owner's rows when a
+            # foreign row is newer than it is.
+            stmt = stmt.limit(100 if owner_operator_session_id else limit)
 
             result = await db.execute(stmt)
             requests = result.scalars().all()
+            if owner_operator_session_id:
+                requests = [
+                    request
+                    for request in requests
+                    if _approval_belongs_to_operator_session(request, owner_operator_session_id)
+                ][:limit]
             return [
                 {
                     "id": request.id,

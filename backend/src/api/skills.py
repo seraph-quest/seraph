@@ -3,14 +3,17 @@
 import os
 import re
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
 from config.settings import settings
+from src.approval.runtime import reset_runtime_context, set_runtime_context
 from src.audit.runtime import log_integration_event
 from src.agent.factory import get_base_tools_and_active_skills
+from src.auth.service import bind_operator_principal
 from src.extensions.registry import default_manifest_roots_for_workspace
 from src.extensions.workspace_package import save_workspace_contribution
+from src.observer.manager import context_manager
 from src.skills.loader import parse_skill_content
 from src.skills.manager import skill_manager
 
@@ -95,6 +98,13 @@ def _validate_skill_content(content: str, *, path: str = "<draft>") -> dict[str,
     }
 
 
+def _require_authenticated_capability_operator(request: Request):
+    """Load the shared capability operator gate without an API import cycle."""
+    from src.api.capabilities import _require_authenticated_capability_operator
+
+    return _require_authenticated_capability_operator(request)
+
+
 @router.get("/skills")
 async def list_skills():
     """List all loaded skills with status."""
@@ -131,75 +141,105 @@ async def validate_skill_draft(req: SkillDraftRequest):
 
 
 @router.post("/skills/save")
-async def save_skill_draft(req: SkillDraftRequest):
-    validation = _validate_skill_content(req.content, path=req.file_name or "<draft>")
-    if not bool(validation["valid"]) or not isinstance(validation["skill"], dict):
-        raise HTTPException(status_code=400, detail={"message": "Skill draft is invalid", **validation})
-    file_name = _resolve_skill_file_name(
-        req.file_name,
-        default_name=_safe_markdown_filename(str(validation["skill"]["name"])),
+async def save_skill_draft(req: SkillDraftRequest, request: Request):
+    operator = _require_authenticated_capability_operator(request)
+    active_session_id = operator.session_id
+    tokens = set_runtime_context(
+        active_session_id,
+        context_manager.get_context().approval_mode,
+        trust_principal=bind_operator_principal(operator, active_session_id),
     )
-    _ensure_skill_manager_workspace_extensions_loaded()
-    target_path = str(save_workspace_contribution("skills", file_name=file_name, content=req.content))
-    skills = skill_manager.reload()
-    await log_integration_event(
-        integration_type="skill",
-        name=str(validation["skill"]["name"]),
-        outcome="succeeded",
-        details={
-            "saved_path": target_path,
-            "validation": validation,
-        },
-    )
-    return {
-        "status": "saved",
-        "file_path": target_path,
-        "skills": skills,
-        **_validate_skill_content(req.content, path=target_path),
-    }
+    try:
+        validation = _validate_skill_content(req.content, path=req.file_name or "<draft>")
+        if not bool(validation["valid"]) or not isinstance(validation["skill"], dict):
+            raise HTTPException(status_code=400, detail={"message": "Skill draft is invalid", **validation})
+        file_name = _resolve_skill_file_name(
+            req.file_name,
+            default_name=_safe_markdown_filename(str(validation["skill"]["name"])),
+        )
+        _ensure_skill_manager_workspace_extensions_loaded()
+        target_path = str(save_workspace_contribution("skills", file_name=file_name, content=req.content))
+        skills = skill_manager.reload()
+        await log_integration_event(
+            integration_type="skill",
+            name=str(validation["skill"]["name"]),
+            outcome="succeeded",
+            details={
+                "saved_path": target_path,
+                "validation": validation,
+            },
+        )
+        return {
+            "status": "saved",
+            "file_path": target_path,
+            "skills": skills,
+            **_validate_skill_content(req.content, path=target_path),
+        }
+    finally:
+        reset_runtime_context(tokens)
 
 
 @router.put("/skills/{name}")
-async def update_skill(name: str, req: UpdateSkillRequest):
+async def update_skill(name: str, req: UpdateSkillRequest, request: Request):
     """Enable or disable a skill."""
-    if req.enabled:
-        ok = skill_manager.enable(name)
-    else:
-        ok = skill_manager.disable(name)
-    if not ok:
+    operator = _require_authenticated_capability_operator(request)
+    active_session_id = operator.session_id
+    tokens = set_runtime_context(
+        active_session_id,
+        context_manager.get_context().approval_mode,
+        trust_principal=bind_operator_principal(operator, active_session_id),
+    )
+    try:
+        if req.enabled:
+            ok = skill_manager.enable(name)
+        else:
+            ok = skill_manager.disable(name)
+        if not ok:
+            await log_integration_event(
+                integration_type="skill",
+                name=name,
+                outcome="failed",
+                details={
+                    "status": "not_found",
+                    "enabled": req.enabled,
+                },
+            )
+            raise HTTPException(status_code=404, detail=f"Skill '{name}' not found")
         await log_integration_event(
             integration_type="skill",
             name=name,
-            outcome="failed",
+            outcome="succeeded",
             details={
-                "status": "not_found",
                 "enabled": req.enabled,
             },
         )
-        raise HTTPException(status_code=404, detail=f"Skill '{name}' not found")
-    await log_integration_event(
-        integration_type="skill",
-        name=name,
-        outcome="succeeded",
-        details={
-            "enabled": req.enabled,
-        },
-    )
-    return {"status": "updated", "name": name, "enabled": req.enabled}
+        return {"status": "updated", "name": name, "enabled": req.enabled}
+    finally:
+        reset_runtime_context(tokens)
 
 
 @router.post("/skills/reload")
-async def reload_skills():
+async def reload_skills(request: Request):
     """Re-scan the skills directory."""
-    skills = skill_manager.reload()
-    await log_integration_event(
-        integration_type="skills",
-        name="reload",
-        outcome="succeeded",
-        details={
-            "count": len(skills),
-            "enabled_count": sum(1 for skill in skills if skill.get("enabled", False)),
-            "skill_names": [skill["name"] for skill in skills],
-        },
+    operator = _require_authenticated_capability_operator(request)
+    active_session_id = operator.session_id
+    tokens = set_runtime_context(
+        active_session_id,
+        context_manager.get_context().approval_mode,
+        trust_principal=bind_operator_principal(operator, active_session_id),
     )
-    return {"status": "reloaded", "count": len(skills), "skills": skills}
+    try:
+        skills = skill_manager.reload()
+        await log_integration_event(
+            integration_type="skills",
+            name="reload",
+            outcome="succeeded",
+            details={
+                "count": len(skills),
+                "enabled_count": sum(1 for skill in skills if skill.get("enabled", False)),
+                "skill_names": [skill["name"] for skill in skills],
+            },
+        )
+        return {"status": "reloaded", "count": len(skills), "skills": skills}
+    finally:
+        reset_runtime_context(tokens)

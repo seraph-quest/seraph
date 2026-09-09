@@ -7260,7 +7260,10 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       if (operatorPostureRuntime) {
         const mergedRuntime = mergeRuntimeReadiness(runtimeReceipt?.status ?? null, operatorPostureRuntime);
         storeRuntimeReceipt(mergedRuntime);
-        setRuntimeReceipt({ status: mergedRuntime, source: "operator_posture" });
+        setRuntimeReceipt({
+          status: mergedRuntime,
+          source: runtimeReceipt?.source === "retained" ? "retained" : "operator_posture",
+        });
       }
       markDeepPaneLoaded("control_plane", Boolean(nextOperatorControlPlane));
       return;

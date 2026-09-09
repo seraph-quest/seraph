@@ -205,4 +205,46 @@ describe("OutcomeCockpitPanel", () => {
     expect(screen.getByRole("button", { name: "Approve" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "Deny" })).toBeDisabled();
   });
+
+  it("locks recovery effects while approval or failed work still needs inspection", () => {
+    const onContinue = vi.fn();
+    const onRetry = vi.fn();
+    const onInspectWork = vi.fn();
+    const { rerender } = renderFixture(
+      { work: { state: "awaiting_approval", canContinue: true, canRetry: true } },
+      { onContinue, onRetry, onInspectWork },
+    );
+
+    expect(screen.getByTestId("outcome-recovery-card")).toHaveAttribute("data-state", "awaiting_approval");
+    expect(screen.getByRole("button", { name: "Continue run" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Retry backend step" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Inspect work" })).toBeInTheDocument();
+
+    rerender(<OutcomeCockpitPanel {...fixtureModel({ work: { state: "failed", canContinue: true, canRetry: true } })} {...{ onContinue, onRetry, onInspectWork }} />);
+    expect(screen.getByTestId("outcome-recovery-card")).toHaveAttribute("data-state", "failed");
+    expect(screen.getByRole("button", { name: "Continue run" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Retry backend step" })).toBeDisabled();
+    expect(onContinue).not.toHaveBeenCalled();
+    expect(onRetry).not.toHaveBeenCalled();
+  });
+
+  it("keeps verification uncertainty and artifact lineage explicit", () => {
+    renderFixture({
+      evidence: {
+        state: "partial_metadata",
+        provenance: "source ambiguous",
+        summary: "Two workflow runs could have produced this artifact",
+      },
+      result: {
+        state: "partial_metadata",
+        execution: "succeeded",
+        verification: "unknown",
+      },
+    });
+
+    expect(screen.getByTestId("outcome-evidence-card")).toHaveAttribute("data-state", "partial_metadata");
+    expect(screen.getByText("source ambiguous")).toBeInTheDocument();
+    expect(screen.getByTestId("outcome-result-card")).toHaveAttribute("data-state", "partial_metadata");
+    expect(within(screen.getByTestId("outcome-result-card")).getByText("verification").parentElement).toHaveTextContent("unknown");
+  });
 });

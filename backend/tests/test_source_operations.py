@@ -1,4 +1,4 @@
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import pytest
 from fastapi import HTTPException
@@ -6,6 +6,7 @@ from httpx import ASGITransport, AsyncClient
 from starlette.requests import Request
 
 from src.app import create_app
+from src.auth.cancellation import RuntimeRevokedError
 from src.api.capabilities import SourceEvidenceRequest, source_evidence
 from src.approval.runtime import reset_runtime_context, set_runtime_context
 from src.observer.context import CurrentContext
@@ -223,6 +224,32 @@ def test_source_evidence_adapter_dispatches_with_authenticated_capability_author
     assert bundle["status"] == "ok"
     assert bundle["summary"]["item_count"] == 1
     search.assert_called_once_with("bounded query", max_results=5)
+
+
+def test_source_evidence_adapter_rechecks_revocation_before_provider_dispatch():
+    tokens = set_runtime_context(
+        "source-session",
+        "high_risk",
+        trust_principal=_source_operator_principal(),
+    )
+    try:
+        with (
+            patch(
+                "src.extensions.source_operations.assert_runtime_not_revoked",
+                side_effect=RuntimeRevokedError("authenticated operator session was revoked"),
+            ) as revocation_check,
+            patch("src.extensions.source_operations.search_web_records", new_callable=Mock) as search,
+        ):
+            with pytest.raises(RuntimeRevokedError, match="operator session was revoked"):
+                collect_source_evidence_bundle(
+                    contract="source_discovery.read",
+                    query="bounded query",
+                )
+    finally:
+        reset_runtime_context(tokens)
+
+    revocation_check.assert_called_once()
+    search.assert_not_called()
 
 
 def test_source_evidence_adapter_denies_mutating_managed_contract_before_dispatch():

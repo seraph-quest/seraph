@@ -8,6 +8,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 from src.approval.runtime import get_current_session_id, get_current_trust_principal
+from src.auth.cancellation import assert_runtime_not_revoked
 from src.browser.sessions import browser_session_runtime
 from src.extensions.source_capabilities import list_source_capability_inventory
 from src.audit.runtime import log_integration_event_sync
@@ -1961,6 +1962,7 @@ def collect_source_evidence_bundle(
             response["status"] = "failed"
             response["warnings"].append("web_search evidence collection requires a non-empty query.")
             return response
+        assert_runtime_not_revoked()
         records, blocked = search_web_records(query.strip(), max_results=max_results)
         response["items"] = [_build_search_item(record, source_name) for record in records]
         if blocked:
@@ -1973,6 +1975,7 @@ def collect_source_evidence_bundle(
             response["status"] = "failed"
             response["warnings"].append("browse_webpage evidence collection requires an explicit URL.")
             return response
+        assert_runtime_not_revoked()
         content = browse_webpage(url.strip(), action="extract")
         if _is_error_result(content):
             response["status"] = "failed"
@@ -2002,6 +2005,7 @@ def collect_source_evidence_bundle(
             response["status"] = "failed"
             response["warnings"].append("The requested browser session ref or session_id was not found.")
             return response
+        assert_runtime_not_revoked()
         response["items"] = [_build_browser_item(payload, source_name)]
         response["status"] = "ok"
     elif selected_adapter["source_kind"] == "managed_connector":
@@ -2021,6 +2025,7 @@ def collect_source_evidence_bundle(
             )
             response["next_best_sources"] = list(selected_adapter.get("next_best_sources") or [])
             return response
+        assert_runtime_not_revoked()
         try:
             raw_result = _invoke_mcp_query(
                 tool,

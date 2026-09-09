@@ -32,8 +32,12 @@ from src.approval.runtime import (
     reset_runtime_context,
     set_runtime_context,
 )
-from src.auth.cancellation import RuntimeRevokedError
-from src.auth.service import test_bypass_operator as _test_bypass_operator
+from src.auth.cancellation import (
+    RuntimeRevokedError,
+    reset_revocation_guard,
+    set_revocation_guard,
+)
+from src.auth.service import AuthFailure, test_bypass_operator as _test_bypass_operator
 from src.security.trust_contract import AuthorityGrant, PrincipalType, TrustPrincipal
 from src.agent.factory import get_tools
 from src.agent.session import SessionManager
@@ -4784,31 +4788,417 @@ class TestWorkflowApi:
             patch("src.api.workflows._find_workflow_run_for_control", new_callable=AsyncMock) as find_run,
             patch("src.api.workflows.workflow_state_repository.record_v2_operator_recovery_control", new_callable=AsyncMock) as control,
         ):
-            with pytest.raises(RuntimeRevokedError):
+            with pytest.raises(HTTPException) as update_error:
                 await update_workflow(
                     "example",
                     UpdateWorkflowRequest(enabled=True),
                     _workflow_mutator_request(operator),
                 )
-            with pytest.raises(RuntimeRevokedError):
+            assert update_error.value.status_code == 401
+            assert update_error.value.detail["code"] == "session_revoked"
+            with pytest.raises(HTTPException) as reload_error:
                 await reload_workflows(_workflow_mutator_request(operator))
-            with pytest.raises(RuntimeRevokedError):
+            assert reload_error.value.status_code == 401
+            with pytest.raises(HTTPException) as resume_error:
                 await build_workflow_resume_plan(
                     "session-1:workflow_example:run",
                     _workflow_mutator_request(operator),
                     WorkflowResumePlanRequest(),
                 )
-            with pytest.raises(RuntimeRevokedError):
+            assert resume_error.value.status_code == 401
+            with pytest.raises(HTTPException) as control_error:
                 await control_workflow_run(
                     "session-1:workflow_example:run",
                     WorkflowRunControlRequest(action="audit"),
                     _workflow_mutator_request(operator),
                 )
+            assert control_error.value.status_code == 401
 
         enable.assert_not_called()
         reload_manager.assert_not_called()
         find_run.assert_not_awaited()
         control.assert_not_awaited()
+        assert get_current_session_id() is None
+        assert get_current_trust_principal() is None
+
+    @pytest.mark.asyncio
+    async def test_workflow_revoke_during_lookup_returns_401_without_recovery_effect(self):
+        from src.api.workflows import (
+            WorkflowResumePlanRequest,
+            WorkflowRunControlRequest,
+            build_workflow_resume_plan,
+            control_workflow_run,
+        )
+
+        operator = _test_bypass_operator()
+        run = {
+            "run_identity": "session-1:workflow_example:run",
+            "workflow_name": "example",
+            "tool_name": "workflow_example",
+            "session_id": "session-1",
+            "pending_approvals": [],
+            "replay_allowed": True,
+            "replay_block_reason": None,
+        }
+
+        for route_kind in ("resume", "control"):
+            guard = asyncio.Event()
+            guard_token = set_revocation_guard(guard)
+            try:
+                async def revoked_lookup(*_args, **_kwargs):
+                    await asyncio.sleep(0)
+                    guard.set()
+                    return run
+
+                with (
+                    patch("src.api.workflows._begin_rest_revocation_watch", return_value=None),
+                    patch("src.api.workflows._find_workflow_run_for_control", new_callable=AsyncMock, side_effect=revoked_lookup),
+                    patch("src.api.workflows._workflow_resume_plan", return_value={"requires_manual_execution": True}),
+                    patch("src.api.workflows.workflow_state_repository.acquire_or_renew_v2_lease", new_callable=AsyncMock) as lease,
+                    patch("src.api.workflows.workflow_state_repository.record_v2_operator_recovery_control", new_callable=AsyncMock) as control,
+                ):
+                    with pytest.raises(HTTPException) as raised:
+                        if route_kind == "resume":
+                            await build_workflow_resume_plan(
+                                run["run_identity"],
+                                _workflow_mutator_request(operator, "/api/workflows/runs/resume-plan"),
+                                WorkflowResumePlanRequest(),
+                            )
+                        else:
+                            await control_workflow_run(
+                                run["run_identity"],
+                                WorkflowRunControlRequest(action="retry", target="/tmp/private-output.txt"),
+                                _workflow_mutator_request(operator, "/api/workflows/runs/control"),
+                            )
+                assert raised.value.status_code == 401
+                assert raised.value.detail["code"] == "session_revoked"
+                lease.assert_not_awaited()
+                control.assert_not_awaited()
+            finally:
+                reset_revocation_guard(guard_token)
+
+        assert get_current_session_id() is None
+        assert get_current_trust_principal() is None
+
+    @pytest.mark.asyncio
+    async def test_workflow_rest_watcher_rejects_revocation_during_lookup_before_effect(self, monkeypatch):
+        from src.api.workflows import (
+            WorkflowRunControlRequest,
+            control_workflow_run,
+        )
+
+        operator = _test_bypass_operator()
+        run = {
+            "run_identity": "session-1:workflow_example:run",
+            "workflow_name": "example",
+            "tool_name": "workflow_example",
+            "session_id": "session-1",
+            "pending_approvals": [],
+            "replay_allowed": True,
+            "replay_block_reason": None,
+        }
+        auth_calls = 0
+
+        async def authenticate(_token, *, touch=False):
+            nonlocal auth_calls
+            auth_calls += 1
+            if auth_calls > 1:
+                raise AuthFailure("session_revoked")
+            return operator
+
+        async def delayed_lookup(*_args, **_kwargs):
+            await asyncio.sleep(0.35)
+            return run
+
+        request = Request(
+            {
+                "type": "http",
+                "method": "POST",
+                "path": "/api/workflows/runs/session-1:workflow_example:run/control",
+                "headers": [(b"cookie", b"seraph_operator_session=test-token")],
+                "query_string": b"",
+                "state": {"operator": operator},
+            }
+        )
+        monkeypatch.setattr("src.api.chat.auth_enabled", lambda: True)
+        monkeypatch.setattr("src.api.chat.authenticate_token", authenticate)
+        monkeypatch.setattr("src.api.workflows._find_workflow_run_for_control", delayed_lookup)
+        with patch("src.api.workflows.workflow_state_repository.record_v2_operator_recovery_control", new_callable=AsyncMock) as control:
+            with pytest.raises(HTTPException) as raised:
+                await control_workflow_run(
+                    run["run_identity"],
+                    WorkflowRunControlRequest(action="retry"),
+                    request,
+                )
+
+        assert raised.value.status_code == 401
+        assert raised.value.detail["code"] == "session_revoked"
+        control.assert_not_awaited()
+        assert get_current_session_id() is None
+        assert get_current_trust_principal() is None
+
+    @pytest.mark.asyncio
+    async def test_workflow_current_session_fence_denies_all_mutators_before_effect(self):
+        from src.api.workflows import (
+            UpdateWorkflowRequest,
+            WorkflowDraftRequest,
+            WorkflowResumePlanRequest,
+            WorkflowRunControlRequest,
+            build_workflow_resume_plan,
+            control_workflow_run,
+            reload_workflows,
+            save_workflow_draft,
+            update_workflow,
+        )
+
+        operator = _test_bypass_operator()
+        guard = asyncio.Event()
+        guard_token = set_revocation_guard(guard)
+
+        async def revoke_after_current_session_check(*_args, **_kwargs):
+            guard.set()
+
+        try:
+            with (
+                patch("src.api.workflows._begin_rest_revocation_watch", return_value=None),
+                patch("src.api.workflows._ensure_rest_authorized", side_effect=revoke_after_current_session_check),
+                patch("src.api.workflows.workflow_manager.enable") as enable,
+                patch("src.api.workflows.workflow_manager.reload") as reload_manager,
+                patch("src.api.workflows._validate_workflow_content") as validate,
+                patch("src.api.workflows.save_workspace_contribution") as save,
+                patch("src.api.workflows._find_workflow_run_for_control", new_callable=AsyncMock) as find_run,
+                patch("src.api.workflows.workflow_state_repository.record_v2_operator_recovery_control", new_callable=AsyncMock) as control,
+            ):
+                with pytest.raises(HTTPException) as update_error:
+                    await update_workflow(
+                        "example",
+                        UpdateWorkflowRequest(enabled=True),
+                        _workflow_mutator_request(operator),
+                    )
+                with pytest.raises(HTTPException) as reload_error:
+                    await reload_workflows(_workflow_mutator_request(operator))
+                with pytest.raises(HTTPException) as save_error:
+                    await save_workflow_draft(
+                        WorkflowDraftRequest(content="draft"),
+                        _workflow_draft_save_request(operator),
+                    )
+                with pytest.raises(HTTPException) as resume_error:
+                    await build_workflow_resume_plan(
+                        "session-1:workflow_example:run",
+                        _workflow_mutator_request(operator, "/api/workflows/runs/resume-plan"),
+                        WorkflowResumePlanRequest(),
+                    )
+                with pytest.raises(HTTPException) as control_error:
+                    await control_workflow_run(
+                        "session-1:workflow_example:run",
+                        WorkflowRunControlRequest(action="audit"),
+                        _workflow_mutator_request(operator, "/api/workflows/runs/control"),
+                    )
+
+            for raised in (update_error, reload_error, save_error, resume_error, control_error):
+                assert raised.value.status_code == 401
+                assert raised.value.detail["code"] == "session_revoked"
+        finally:
+            reset_revocation_guard(guard_token)
+
+        enable.assert_not_called()
+        reload_manager.assert_not_called()
+        validate.assert_not_called()
+        save.assert_not_called()
+        find_run.assert_not_awaited()
+        control.assert_not_awaited()
+        assert get_current_session_id() is None
+        assert get_current_trust_principal() is None
+
+    @pytest.mark.asyncio
+    async def test_workflow_control_missing_transition_is_refused_without_success_audit(self):
+        from src.api.workflows import WorkflowRunControlRequest, control_workflow_run
+
+        operator = _test_bypass_operator()
+        run_identity = "session-1:workflow_example:run"
+        run = {
+            "run_identity": run_identity,
+            "workflow_name": "example",
+            "tool_name": "workflow_example",
+            "session_id": "session-1",
+            "pending_approvals": [],
+            "replay_allowed": True,
+            "replay_block_reason": None,
+        }
+        with (
+            patch("src.api.workflows._begin_rest_revocation_watch", return_value=None),
+            patch("src.api.workflows._find_workflow_run_for_control", new_callable=AsyncMock, return_value=run),
+            patch("src.api.workflows._workflow_resume_plan", return_value={"requires_manual_execution": True}),
+            patch(
+                "src.api.workflows.workflow_state_repository.acquire_or_renew_v2_lease",
+                new_callable=AsyncMock,
+                return_value={"receipt": {"status": "acquired"}},
+            ),
+            patch(
+                "src.api.workflows.workflow_state_repository.build_v2_recovery_plan",
+                new_callable=AsyncMock,
+                return_value={"receipt": {"status": "ready"}},
+            ),
+            patch(
+                "src.api.workflows.workflow_state_repository.record_v2_operator_recovery_control",
+                new_callable=AsyncMock,
+                return_value={"receipt": {"status": "recorded"}},
+            ),
+            patch(
+                "src.api.workflows.workflow_state_repository.record_v2_transition",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+            patch("src.api.workflows.audit_repository.log_event", new_callable=AsyncMock) as audit_log,
+        ):
+            with pytest.raises(HTTPException) as raised:
+                await control_workflow_run(
+                    run_identity,
+                    WorkflowRunControlRequest(action="retry", target="/tmp/private-output.txt"),
+                    _workflow_mutator_request(operator, "/api/workflows/runs/control"),
+                )
+
+        assert raised.value.status_code == 404
+        assert raised.value.detail == "workflow_transition_unavailable"
+        assert audit_log.await_count == 1
+        audit_call = audit_log.await_args.kwargs
+        assert audit_call["event_type"] == "workflow_control_refused"
+        assert audit_call["details"]["detail"] == "workflow_transition_unavailable"
+        assert "run_identity" not in audit_call["details"]
+        assert "/tmp/private-output.txt" not in str(audit_call["details"])
+        assert get_current_session_id() is None
+        assert get_current_trust_principal() is None
+
+    @pytest.mark.asyncio
+    async def test_workflow_control_enforces_every_replay_policy_block_before_transition(self):
+        from src.api.workflows import WorkflowRunControlRequest, control_workflow_run
+
+        operator = _test_bypass_operator()
+        replay_block_reasons = (
+            "approval_context_changed",
+            "approval_context_missing",
+            "workflow_disabled",
+            "workflow_unavailable",
+            "pending_approval",
+            "secret_ref_surface",
+            "secret_bearing_boundary",
+            "high_risk_requires_manual_reentry",
+            "durable_projection_missing",
+        )
+        for reason in replay_block_reasons:
+            run_identity = f"session-1:workflow_example:{reason}"
+            run = {
+                "run_identity": run_identity,
+                "workflow_name": "example",
+                "tool_name": "workflow_example",
+                "session_id": "session-1",
+                "pending_approvals": [],
+                "replay_allowed": False,
+                "replay_block_reason": reason,
+            }
+            with (
+                patch("src.api.workflows._begin_rest_revocation_watch", return_value=None),
+                patch("src.api.workflows._find_workflow_run_for_control", new_callable=AsyncMock, return_value=run),
+                patch("src.api.workflows.workflow_state_repository.acquire_or_renew_v2_lease", new_callable=AsyncMock) as lease,
+                patch("src.api.workflows.workflow_state_repository.build_v2_recovery_plan", new_callable=AsyncMock) as recovery,
+                patch("src.api.workflows.workflow_state_repository.record_v2_operator_recovery_control", new_callable=AsyncMock) as control,
+                patch("src.api.workflows.workflow_state_repository.record_v2_transition", new_callable=AsyncMock) as transition,
+                patch("src.api.workflows.audit_repository.log_event", new_callable=AsyncMock) as audit_log,
+            ):
+                with pytest.raises(HTTPException) as raised:
+                    await control_workflow_run(
+                        run_identity,
+                        WorkflowRunControlRequest(action="retry", target="/tmp/private-output.txt"),
+                        _workflow_mutator_request(operator, "/api/workflows/runs/control"),
+                    )
+
+            assert raised.value.status_code == 409
+            assert raised.value.detail in {
+                "Workflow trust boundary changed; start a fresh run instead of applying a live control.",
+                "Workflow predates trust-boundary tracking; start a fresh run instead of applying a live control.",
+                f"workflow_replay_blocked:{reason}",
+            }
+            lease.assert_not_awaited()
+            recovery.assert_not_awaited()
+            control.assert_not_awaited()
+            transition.assert_not_awaited()
+            assert audit_log.await_count == 1
+            details = audit_log.await_args.kwargs["details"]
+            assert details["detail"] in {reason, f"workflow_replay_blocked:{reason}"}
+            assert "/tmp/private-output.txt" not in str(details)
+
+        assert get_current_session_id() is None
+        assert get_current_trust_principal() is None
+
+    @pytest.mark.asyncio
+    async def test_workflow_control_refusal_and_failure_receipts_redact_input_details(self):
+        from src.api.workflows import WorkflowRunControlRequest, control_workflow_run
+
+        operator = _test_bypass_operator()
+        with (
+            patch("src.api.workflows._begin_rest_revocation_watch", return_value=None),
+            patch("src.api.workflows._find_workflow_run_for_control", new_callable=AsyncMock) as find_run,
+            patch("src.api.workflows.audit_repository.log_event", new_callable=AsyncMock) as audit_log,
+        ):
+            with pytest.raises(HTTPException) as unsupported:
+                await control_workflow_run(
+                    "session-1:workflow_example:secret-run",
+                    WorkflowRunControlRequest(action="bad /tmp/private-secret.txt"),
+                    _workflow_mutator_request(operator, "/api/workflows/runs/control"),
+                )
+            assert unsupported.value.status_code == 422
+            assert unsupported.value.detail == "workflow_control_action_unsupported"
+            assert audit_log.await_args.kwargs["details"]["detail"] == "workflow_control_action_unsupported"
+            assert "/tmp/private-secret.txt" not in str(audit_log.await_args.kwargs["details"])
+            find_run.assert_not_awaited()
+
+            find_run.reset_mock(return_value=True)
+            find_run.return_value = None
+            with pytest.raises(HTTPException) as missing:
+                await control_workflow_run(
+                    "session-1:workflow_example:/tmp/private-secret.txt",
+                    WorkflowRunControlRequest(action="audit"),
+                    _workflow_mutator_request(operator, "/api/workflows/runs/control"),
+                )
+            assert missing.value.status_code == 404
+            assert missing.value.detail == "workflow_run_not_found"
+            missing_details = audit_log.await_args.kwargs["details"]
+            assert missing_details["detail"] == "workflow_run_not_found"
+            assert "/tmp/private-secret.txt" not in str(missing_details)
+            assert "run_identity" not in missing_details
+
+            run = {
+                "run_identity": "session-1:workflow_example:secret-run",
+                "workflow_name": "example",
+                "tool_name": "workflow_example",
+                "session_id": "session-1",
+                "pending_approvals": [],
+                "replay_allowed": True,
+                "replay_block_reason": None,
+            }
+            find_run.return_value = run
+            with (
+                patch(
+                    "src.api.workflows._workflow_resume_plan",
+                    side_effect=RuntimeError("provider failed at /tmp/private-secret.txt"),
+                ),
+                patch(
+                    "src.api.workflows.workflow_state_repository.acquire_or_renew_v2_lease",
+                    new_callable=AsyncMock,
+                ),
+            ):
+                with pytest.raises(RuntimeError, match="provider failed"):
+                    await control_workflow_run(
+                        run["run_identity"],
+                        WorkflowRunControlRequest(action="retry", step_id="/tmp/private-step"),
+                        _workflow_mutator_request(operator, "/api/workflows/runs/control"),
+                    )
+            failure_details = audit_log.await_args.kwargs["details"]
+            assert audit_log.await_args.kwargs["event_type"] == "workflow_control_failed"
+            assert failure_details["detail"] == "workflow_control_failed"
+            assert "/tmp/private-secret.txt" not in str(failure_details)
+            assert "/tmp/private-step" not in str(failure_details)
+
         assert get_current_session_id() is None
         assert get_current_trust_principal() is None
 

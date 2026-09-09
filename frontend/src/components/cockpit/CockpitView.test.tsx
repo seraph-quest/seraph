@@ -1087,7 +1087,11 @@ describe("CockpitView", () => {
     fetchMock.mockImplementation((input: RequestInfo | URL) => {
       const url = String(input);
       if (url.includes("/api/workflows/runs/") && url.includes("/control")) {
-        return Promise.resolve(mockResponse({ detail: "approval_context_changed" }, false, 409));
+        return Promise.resolve(mockResponse(
+          { detail: { code: "session_revoked", message: "Operator session was revoked during workflow control." } },
+          false,
+          401,
+        ));
       }
       if (url.includes("/api/sessions")) return Promise.resolve(mockResponse([{ id: "session-2", title: "Atlas thread" }]));
       if (url.includes("/api/goals/tree")) return Promise.resolve(mockResponse([]));
@@ -1155,6 +1159,14 @@ describe("CockpitView", () => {
               run_identity: "root-1",
               root_run_identity: "root-1",
               checkpoint_context_available: true,
+              action_handle: {
+                kind: "workflow_control",
+                action: "retry",
+                run_identity: "root-1",
+                step_id: "redacted_workflow_step_1234567890abcdef",
+                thread_id: "session-2",
+                requires_live_control: true,
+              },
             },
           ],
         }));
@@ -1196,12 +1208,12 @@ describe("CockpitView", () => {
         expect.stringContaining("/api/workflows/runs/root-1/control"),
         expect.objectContaining({
           method: "POST",
-          body: expect.stringContaining('"action":"retry"'),
+          body: expect.stringContaining('"action_handle":{"kind":"workflow_control"'),
         }),
       ),
     );
     await waitFor(() =>
-      expect(screen.getByText("Live recovery control refused web-brief-to-file: approval_context_changed")).toBeInTheDocument(),
+      expect(screen.getByText("Live recovery control refused web-brief-to-file: Operator session was revoked during workflow control.")).toBeInTheDocument(),
     );
     expect(screen.queryByDisplayValue('Retry step "write_file" for workflow "web-brief-to-file".')).not.toBeInTheDocument();
   });

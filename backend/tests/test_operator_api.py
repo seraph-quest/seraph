@@ -1,11 +1,13 @@
 import asyncio
 from contextlib import ExitStack
 from datetime import datetime, timedelta, timezone
+import json
 import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from fastapi import HTTPException
 from sqlalchemy import text
 
 from src.cockpit.production_operator_control import (
@@ -9220,6 +9222,8 @@ async def test_operator_workflow_orchestration_groups_sessions_and_step_focus(cl
                     {
                         "id": "run-1",
                         "run_identity": "session-1:workflow_repo_review:1",
+                        "owner_kind": "user",
+                        "owner_principal_id": "operator:test-bypass",
                         "workflow_name": "repo-review",
                         "summary": "Waiting on guarded approval",
                         "status": "awaiting_approval",
@@ -9274,6 +9278,8 @@ async def test_operator_workflow_orchestration_groups_sessions_and_step_focus(cl
                     {
                         "id": "run-2",
                         "run_identity": "session-2:workflow_daily_brief:1",
+                        "owner_kind": "user",
+                        "owner_principal_id": "operator:test-bypass",
                         "root_run_identity": "session-2:workflow_daily_brief:1",
                         "workflow_name": "daily-brief",
                         "summary": "Failed while drafting follow-up",
@@ -9324,6 +9330,8 @@ async def test_operator_workflow_orchestration_groups_sessions_and_step_focus(cl
                     {
                         "id": "run-4",
                         "run_identity": "session-2:workflow_daily_brief:branch-1",
+                        "owner_kind": "user",
+                        "owner_principal_id": "operator:test-bypass",
                         "root_run_identity": "session-2:workflow_daily_brief:1",
                         "parent_run_identity": "session-2:workflow_daily_brief:1",
                         "branch_kind": "branch_from_checkpoint",
@@ -9350,6 +9358,8 @@ async def test_operator_workflow_orchestration_groups_sessions_and_step_focus(cl
                     {
                         "id": "run-3",
                         "run_identity": "ambient:workflow_cleanup:1",
+                        "owner_kind": "user",
+                        "owner_principal_id": "operator:test-bypass",
                         "workflow_name": "cleanup",
                         "summary": "Currently running cleanup.",
                         "status": "running",
@@ -9496,6 +9506,8 @@ async def test_operator_workflow_orchestration_surfaces_anticipatory_repair_and_
                     {
                         "id": "run-1",
                         "run_identity": "session-1:workflow_release_brief:1",
+                        "owner_kind": "user",
+                        "owner_principal_id": "operator:test-bypass",
                         "root_run_identity": "session-1:workflow_release_brief:1",
                         "workflow_name": "release-brief",
                         "summary": "Preparing release publication.",
@@ -9527,6 +9539,8 @@ async def test_operator_workflow_orchestration_surfaces_anticipatory_repair_and_
                     {
                         "id": "run-2",
                         "run_identity": "session-1:workflow_release_brief:branch-1",
+                        "owner_kind": "user",
+                        "owner_principal_id": "operator:test-bypass",
                         "root_run_identity": "session-1:workflow_release_brief:1",
                         "parent_run_identity": "session-1:workflow_release_brief:1",
                         "branch_kind": "branch_from_checkpoint",
@@ -9870,6 +9884,8 @@ async def test_operator_workflow_orchestration_uses_most_recent_branch_for_debug
                     {
                         "id": "run-root",
                         "run_identity": "session-1:workflow_repo_review:1",
+                        "owner_kind": "user",
+                        "owner_principal_id": "operator:test-bypass",
                         "root_run_identity": "session-1:workflow_repo_review:1",
                         "workflow_name": "repo-review",
                         "summary": "Root review failed",
@@ -9894,6 +9910,8 @@ async def test_operator_workflow_orchestration_uses_most_recent_branch_for_debug
                     {
                         "id": "run-branch-old",
                         "run_identity": "session-1:workflow_repo_review:branch-old",
+                        "owner_kind": "user",
+                        "owner_principal_id": "operator:test-bypass",
                         "root_run_identity": "session-1:workflow_repo_review:1",
                         "parent_run_identity": "session-1:workflow_repo_review:1",
                         "branch_kind": "branch_from_checkpoint",
@@ -9913,6 +9931,8 @@ async def test_operator_workflow_orchestration_uses_most_recent_branch_for_debug
                     {
                         "id": "run-branch-new",
                         "run_identity": "session-1:workflow_repo_review:branch-new",
+                        "owner_kind": "user",
+                        "owner_principal_id": "operator:test-bypass",
                         "root_run_identity": "session-1:workflow_repo_review:1",
                         "parent_run_identity": "session-1:workflow_repo_review:1",
                         "branch_kind": "branch_from_checkpoint",
@@ -9960,6 +9980,8 @@ async def test_operator_workflow_orchestration_attention_sessions_counts_full_po
                     {
                         "id": "run-a",
                         "run_identity": "session-a:workflow_a:1",
+                        "owner_kind": "user",
+                        "owner_principal_id": "operator:test-bypass",
                         "workflow_name": "workflow-a",
                         "summary": "Awaiting approval",
                         "status": "awaiting_approval",
@@ -9974,6 +9996,8 @@ async def test_operator_workflow_orchestration_attention_sessions_counts_full_po
                     {
                         "id": "run-b",
                         "run_identity": "session-b:workflow_b:1",
+                        "owner_kind": "user",
+                        "owner_principal_id": "operator:test-bypass",
                         "workflow_name": "workflow-b",
                         "summary": "Repair ready",
                         "status": "failed",
@@ -9996,6 +10020,8 @@ async def test_operator_workflow_orchestration_attention_sessions_counts_full_po
                     {
                         "id": "run-c",
                         "run_identity": "session-c:workflow_c:1",
+                        "owner_kind": "user",
+                        "owner_principal_id": "operator:test-bypass",
                         "workflow_name": "workflow-c",
                         "summary": "Stalled run",
                         "status": "running",
@@ -10031,6 +10057,124 @@ async def test_operator_workflow_orchestration_attention_sessions_counts_full_po
     payload = resp.json()
     assert payload["summary"]["attention_sessions"] == 3
     assert len(payload["sessions"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_operator_workflow_orchestration_scopes_safe_projection_and_revocation():
+    """Cockpit orchestration must expose only the caller's safe live runs."""
+    from src.auth.service import test_bypass_operator as _test_bypass_operator
+    from src.api.operator import get_operator_workflow_orchestration
+    from src.auth.cancellation import RuntimeRevokedError
+
+    operator = _test_bypass_operator()
+    request = SimpleNamespace(
+        state=SimpleNamespace(operator=operator),
+        cookies={},
+    )
+    secret = "orchestration-secret-never-return"
+    owned_run = {
+        "id": "owned-run",
+        "run_identity": "owned-run",
+        "workflow_name": "owned-workflow",
+        "summary": secret,
+        "status": "failed",
+        "availability": "blocked",
+        "thread_id": "owned-session",
+        "started_at": "2026-04-08T10:00:00Z",
+        "updated_at": "2026-04-08T10:05:00Z",
+        "owner_kind": "user",
+        "owner_principal_id": operator.principal.principal_id,
+        "thread_continue_message": secret,
+        "retry_from_step_draft": secret,
+        "replay_draft": secret,
+        "replay_inputs": {"secret": secret, "path": "/private/owned"},
+        "artifact_paths": [f"/private/{secret}.md", "notes/owned-output.md"],
+        "artifact_registry": [{
+            "artifact_id": "art_0123456789abcdef01234567",
+            "file_path": "notes/owned-output.md",
+            "content_sha256": "sha256:" + "b" * 64,
+            "producer": secret,
+            "recovery_hint": secret,
+        }],
+        "step_records": [{
+            "id": f"private-{secret}",
+            "index": 0,
+            "tool": "write_file",
+            "status": "failed",
+            "result_summary": secret,
+            "error_summary": secret,
+            "recovery_hint": secret,
+            "recovery_actions": [{"type": "retry", "label": "Retry safely"}],
+            "is_recoverable": True,
+        }],
+        "checkpoint_candidates": [{
+            "step_id": f"private-{secret}",
+            "label": "private checkpoint",
+            "kind": "retry_failed_step",
+            "status": "failed",
+            "resume_supported": True,
+            "resume_draft": secret,
+        }],
+    }
+    other_run = {
+        **owned_run,
+        "id": "other-run",
+        "run_identity": "other-run",
+        "owner_principal_id": "operator:other",
+        "thread_id": "other-session",
+    }
+    ownerless_run = {
+        **owned_run,
+        "id": "ownerless-run",
+        "run_identity": "ownerless-run",
+        "owner_kind": None,
+        "owner_principal_id": None,
+        "thread_id": "ownerless-session",
+    }
+
+    with (
+        patch("src.api.operator._begin_rest_revocation_watch", return_value=None),
+        patch("src.api.operator._end_rest_revocation_watch", new_callable=AsyncMock),
+        patch(
+            "src.api.operator._list_workflow_runs",
+            AsyncMock(return_value=[owned_run, other_run, ownerless_run]),
+        ),
+        patch(
+            "src.api.operator.session_manager.list_sessions",
+            AsyncMock(return_value=[{"id": "owned-session", "title": "Owned session"}]),
+        ),
+    ):
+        payload = await get_operator_workflow_orchestration(request, 6, 8)
+
+    assert payload["summary"]["workflow_count"] == 1
+    assert [item["run_identity"] for item in payload["workflows"]] == ["owned-run"]
+    encoded = json.dumps(payload)
+    assert secret not in encoded
+    assert "/private/" not in encoded
+    workflow = payload["workflows"][0]
+    assert workflow["artifact_paths"] == ["notes/owned-output.md"]
+    assert workflow["artifact_registry"] == [{
+        "artifact_id": "art_0123456789abcdef01234567",
+        "file_path": "notes/owned-output.md",
+        "content_sha256": "b" * 64,
+    }]
+    assert workflow["checkpoint_candidates"][0]["resume_draft"] is None
+    assert workflow["checkpoint_candidates"][0]["action_handle"]["run_identity"] == "owned-run"
+    assert workflow["step_records"][0]["id"].startswith("redacted_workflow_step_")
+
+    with (
+        patch("src.api.operator._begin_rest_revocation_watch", return_value=object()),
+        patch("src.api.operator._end_rest_revocation_watch", new_callable=AsyncMock),
+        patch(
+            "src.api.operator._workflow_session_fence",
+            AsyncMock(side_effect=RuntimeRevokedError("revoked")),
+        ),
+    ):
+        with pytest.raises(HTTPException) as exc_info:
+            await get_operator_workflow_orchestration(request, 6, 8)
+
+    assert exc_info.value.status_code == 401
+    assert exc_info.value.detail["code"] == "session_revoked"
 
 
 @pytest.mark.asyncio

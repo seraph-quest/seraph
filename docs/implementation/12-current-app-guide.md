@@ -43,6 +43,7 @@ requires HTTPS. The production command is the private compose path:
 
 ```bash
 python3 backend/production_preflight.py --env-file .env.prod --format json
+./manage.sh -e prod identity
 ./manage.sh -e prod up -d
 ```
 
@@ -54,7 +55,54 @@ The CPU-host preflight reports core/auth/workspace readiness separately from
 OpenRouter configuration. It performs no provider request and does not inspect
 CUDA, model weights, a local model server, or the VLM wrapper. Missing
 OpenRouter credentials or policy are visible as `configuration_required`; no
-local fallback is selected.
+local fallback is selected. When run on the host, its
+`canonical_workspace_mount` check is explicitly `deferred`: only the backend
+container can read `/proc/self/mountinfo`. Compose sets the mount-check flag,
+and the container preflight fails closed before startup when the bind evidence
+is missing.
+
+The production backend's canonical workspace is the host path configured by
+`BACKEND_DATA_PATH_PROD`, mounted only as `WORKSPACE_DIR=/app/data`. The managed
+maintenance commands resolve that bind before doing any work and fail closed on
+missing, symlinked, or ambiguous roots. Container preflight also requires
+`SERAPH_PRODUCTION_MOUNT_SOURCE` to match the `/app/data` mount source reported
+by `/proc/self/mountinfo`, and requires
+`SERAPH_PRODUCTION_BIND_IDENTITY`. Generate the latter after the absolute
+`BACKEND_DATA_PATH_PROD` directory exists; it binds the resolved configured
+path to its device/inode identity so a different directory on the same device
+cannot satisfy the container check. A writable directory or generic volume
+alone is not treated as proof of the configured host bind:
+
+```bash
+./manage.sh -e prod backup
+./manage.sh -e prod restore --archive <archive> --confirm
+```
+
+`./manage.sh -e prod identity` prints the redacted digest to place in
+`SERAPH_PRODUCTION_BIND_IDENTITY`; it never prints the host path or secret
+values. A successful managed `restore` or `rollback` returns the new digest in
+`bind_identity_refresh`, and the next managed `./manage.sh -e prod up -d`
+refreshes it automatically before Compose interpolation. Direct Compose users
+must copy that receipt (or rerun `workspace_cli.py identity`) before starting
+the container after an atomic root replacement.
+
+Archives and restore staging are derived siblings of the host bind and are not
+active workspace roots. Archives contain checksummed canonical files and
+redacted secret metadata; recovery preserves the required vault key but drops
+optional integration tokens. The production preflight requires dedicated
+`/app/data` mount evidence from `/proc/self/mountinfo`, the configured source
+identity match, and the configured path/device/inode identity match. The
+backend holds
+the same bind-local owner lock for its lifetime so backup and restore fail
+closed while writers or the scheduler are active. Restore resets only empty
+declared derived directories; a stored derived index that has no bounded
+rebuild hook blocks promotion. Staged operator sessions and durable workflow
+authority rows are revoked or blocked before promotion. The current slice
+proves deterministic local inventory, archive validation, staged promotion,
+rollback journaling, durable status receipts, and provider-independent
+maintenance. Migration fencing beyond the backend owner lease,
+retention/disk-pressure drills, and live operator receipts remain partial #742
+acceptance work.
 
 ## Historical develop topology
 

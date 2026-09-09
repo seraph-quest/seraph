@@ -14,6 +14,7 @@ BACKEND = ROOT / "backend"
 sys.path.insert(0, str(BACKEND))
 
 from production_preflight import build_preflight_report, main  # noqa: E402
+from src.workspace import ProductionWorkspace  # noqa: E402
 
 
 def _production_env(workspace: Path) -> dict[str, str]:
@@ -48,6 +49,10 @@ def test_missing_gpu_and_vlm_do_not_block_cpu_core(tmp_path):
     assert report["inference"]["live_proof"] == "unknown"
     assert report["inference"]["probe_performed"] is False
     assert all(value == "not_required" for value in report["dependencies"].values())
+    mount_check = next(
+        check for check in report["core"]["checks"] if check["name"] == "canonical_workspace_mount"
+    )
+    assert mount_check["status"] == "deferred"
 
 
 def test_production_core_requires_exactly_one_server_side_auth_credential(tmp_path):
@@ -61,6 +66,14 @@ def test_production_core_requires_exactly_one_server_side_auth_credential(tmp_pa
     both["OPERATOR_AUTH_SECRET_HASH"] = "pbkdf2_sha256$600000$c2FsdA==$ZGlnZXN0"
     report = build_preflight_report(both)
     assert report["core"]["status"] == "invalid"
+
+    malformed = _production_env(tmp_path)
+    malformed["OPERATOR_AUTH_SECRET"] = ""
+    malformed["OPERATOR_AUTH_SECRET_HASH"] = "x"
+    report = build_preflight_report(malformed)
+    assert report["core"]["status"] == "invalid"
+    auth_check = next(check for check in report["core"]["checks"] if check["name"] == "operator_auth")
+    assert auth_check["detail"] == "operator PBKDF2 hash has invalid shape"
 
 
 def test_complete_openrouter_config_remains_unverified_without_live_probe(tmp_path):
@@ -135,6 +148,22 @@ def test_production_compose_keeps_backend_private_and_has_no_gpu_or_vlm_gate():
     assert "8001" not in compose
     assert "LOCAL_LLM_API_BASE: \"\"" in compose
     assert "SERAPH_VLM_BASE_URL: \"\"" in compose
+    assert 'SERAPH_PRODUCTION_MOUNT_CHECK: "true"' in compose
+    assert "SERAPH_PRODUCTION_MOUNT_SOURCE" in compose
+
+
+def test_production_mount_preflight_fails_closed_without_mountinfo(tmp_path):
+    env = _production_env(tmp_path)
+    env["WORKSPACE_DIR"] = "/app/data"
+    env["SERAPH_PRODUCTION_MOUNT_CHECK"] = "true"
+    env["BACKEND_DATA_PATH_PROD"] = str(tmp_path)
+    env["SERAPH_PRODUCTION_MOUNT_SOURCE"] = "/dev/test"
+    env["SERAPH_PRODUCTION_BIND_IDENTITY"] = ProductionWorkspace(host_root=tmp_path).bind_identity_digest
+    report = build_preflight_report(env)
+    mount_check = next(
+        check for check in report["core"]["checks"] if check["name"] == "canonical_workspace_mount"
+    )
+    assert mount_check["status"] == "invalid"
 
 
 def test_managed_local_ports_bind_loopback_and_production_env_uses_prod_paths():
@@ -147,14 +176,19 @@ def test_managed_local_ports_bind_loopback_and_production_env_uses_prod_paths():
     assert "reject_prod_local_stack" in manage
     assert "production authentication requires HTTPS" in manage
     assert 'exit "$LOCAL_EXIT_STATUS"' in manage
-    assert "HOST_DATA_ROOT_PROD=./docker-data/prod" in env
-    assert "BACKEND_DATA_PATH_PROD=${HOST_DATA_ROOT_PROD}/backend/data" in env
-    assert "BACKEND_LOGS_PATH_PROD=${HOST_DATA_ROOT_PROD}/backend/logs" in env
+    assert "HOST_DATA_ROOT_PROD=/srv/seraph/docker-data/prod" in env
+    assert "BACKEND_DATA_PATH_PROD=/srv/seraph/docker-data/prod/backend/data" in env
+    assert "BACKEND_LOGS_PATH_PROD=/srv/seraph/docker-data/prod/backend/logs" in env
+    assert "SERAPH_PRODUCTION_MOUNT_CHECK=false" in env
+    assert "SERAPH_PRODUCTION_BIND_IDENTITY=" in env
     assert "LOCAL_LLM_API_BASE=" in env
     assert "SERAPH_VLM_BASE_URL=" in env
     assert "SERAPH_VLM_BACKEND_URL=" in env
     assert "OPERATOR_AUTH_COOKIE_SECURE=true" in env
     assert "OPERATOR_AUTH_ALLOWED_ORIGINS=https://localhost" in env
+    assert "refresh_production_bind_identity" in manage
+    assert 'COMMAND" = "up"' in manage
+    assert 'export SERAPH_PRODUCTION_BIND_IDENTITY="$identity"' in manage
 
 
 def test_prod_local_up_rejects_plain_http_before_start(tmp_path):

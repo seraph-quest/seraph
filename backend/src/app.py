@@ -291,6 +291,15 @@ def _augment_inference_readiness(
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    workspace_owner = None
+    if settings.deployment_environment.strip().lower() in {"prod", "production"}:
+        # The container preflight proves the /app/data bind.  Hold the same
+        # lock inode for the whole backend lifetime so host backup/restore
+        # cannot observe or replace a live workspace generation.
+        from src.workspace.production import runtime_workspace_owner
+
+        workspace_owner = runtime_workspace_owner(settings.workspace_dir)
+        workspace_owner.__enter__()
     await init_db()
     # Recover expired durable invocation leases before scheduler jobs can
     # observe an old ``running`` occurrence and incorrectly skip it.  Recovery
@@ -379,6 +388,8 @@ async def lifespan(app: FastAPI):
         shutdown_error = exc
     finally:
         await close_db()
+    if workspace_owner is not None:
+        workspace_owner.__exit__(None, None, None)
     if shutdown_error is not None:
         raise shutdown_error
 

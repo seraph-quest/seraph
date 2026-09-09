@@ -26,7 +26,7 @@ import sqlite3
 import stat
 import uuid
 import zipfile
-from typing import Any
+from typing import Any, Callable
 
 from src.workspace.state_registry import (
     WorkspaceStateError,
@@ -47,6 +47,8 @@ PAYLOAD_PREFIX = "payload/"
 SYNTHETIC_MARKER_BYTES = b"seraph-synthetic-workspace-v1\n"
 DEFAULT_RETENTION = 3
 MAX_ARCHIVE_MEMBER_BYTES = 512 * 1024 * 1024
+MAX_ARCHIVE_BYTES = 2 * 1024 * 1024 * 1024
+MAX_ARCHIVE_MEMBERS = 4096
 _SECRET_STATE_CLASSES = frozenset(
     {WorkspaceStateClass.SECRET.value, WorkspaceStateClass.SECRET_RECOVERY.value}
 )
@@ -480,11 +482,19 @@ def _load_archive(
         _assert_not_symlink(archive_path, label="workspace backup archive")
     except WorkspaceLifecycleError as exc:
         raise InvalidWorkspaceArchiveError("workspace backup archive must not be a symlink") from exc
-    if not archive_path.is_file():
+    try:
+        archive_metadata = archive_path.stat()
+    except OSError as exc:
+        raise InvalidWorkspaceArchiveError("workspace backup archive is missing") from exc
+    if not archive_path.is_file() or not stat.S_ISREG(archive_metadata.st_mode):
         raise InvalidWorkspaceArchiveError("workspace backup archive is missing")
+    if archive_metadata.st_size > MAX_ARCHIVE_BYTES:
+        raise InvalidWorkspaceArchiveError("workspace backup archive exceeds bounded size")
     try:
         with zipfile.ZipFile(archive_path, "r") as archive:
             infos = archive.infolist()
+            if len(infos) > MAX_ARCHIVE_MEMBERS:
+                raise InvalidWorkspaceArchiveError("workspace backup archive has too many members")
             names = [_validate_zip_member(info) for info in infos]
             if len(names) != len(set(names)):
                 raise InvalidWorkspaceArchiveError("archive contains duplicate members")
@@ -720,6 +730,8 @@ def _validate_stage(
     stage: Path,
     loaded: _LoadedArchive,
     registry: WorkspaceStateRegistry,
+    *,
+    allow_database_mutation: bool = False,
 ) -> dict[str, Any]:
     source_manifest = loaded.manifest["workspace_manifest"]
     entries = _manifest_entries(source_manifest)
@@ -779,6 +791,11 @@ def _validate_stage(
                 raise MissingSecretMaterialError(f"staged secret material is unavailable: {logical_path}")
             continue
         payload = _regular_file_bytes(target, label=f"staged workspace file {logical_path}")
+        if allow_database_mutation and logical_path == registry.config.database_path:
+            # Restore reconciliation may revoke sessions and block authority
+            # rows.  The schema and row counts remain covered below; payload
+            # bytes are intentionally allowed to differ from the archive.
+            continue
         archive_entry = archive_entries.get(logical_path)
         if not isinstance(archive_entry, dict):
             raise WorkspaceLifecycleError(f"staged canonical archive metadata is missing: {logical_path}")
@@ -847,6 +864,7 @@ def restore_workspace(
     restore_id: str | None = None,
     interrupt_after_active_move: bool = False,
     retention: int | None = DEFAULT_RETENTION,
+    reconcile_restore: Callable[..., dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Stage, verify, and atomically promote a workspace archive.
 
@@ -858,6 +876,13 @@ def restore_workspace(
         raise WorkspaceLifecycleError("restore requires explicit confirm=True")
     resolved_root = canonical_workspace_root(root)
     _registry_root(resolved_root, registry)
+    if (
+        registry.config.identity.root_kind is WorkspaceRootKind.PRODUCTION
+        and reconcile_restore is None
+    ):
+        raise WorkspaceLifecycleError(
+            "production restore requires an authority and derived-state reconciliation hook"
+        )
     recover_interrupted_restore(resolved_root)
     # Keep the lexical path intact until lstat: resolving first would turn a
     # symlinked archive into its target and defeat the fail-closed check.
@@ -882,6 +907,25 @@ def restore_workspace(
             loaded=loaded,
             registry=registry,
         )
+        if reconcile_restore is not None:
+            reconciliation = reconcile_restore(
+                root=resolved_root,
+                stage=stage,
+                source_manifest=loaded.manifest["workspace_manifest"],
+                registry=registry,
+            )
+            if not isinstance(reconciliation, dict) or reconciliation.get("status") != "ready":
+                raise WorkspaceLifecycleError("restore reconciliation did not produce a ready receipt")
+            # Re-check the stage after the hook has changed the database and
+            # intentionally removed stale optional credentials/derived state.
+            validated_receipt = _validate_stage(
+                stage,
+                loaded,
+                registry,
+                allow_database_mutation=True,
+            )
+            stage_receipt.update(validated_receipt)
+            stage_receipt["restore_reconciliation"] = reconciliation
         journal = {
             "journal_version": JOURNAL_VERSION,
             "restore_id": restore_id,
@@ -1152,6 +1196,9 @@ __all__ = [
     "ARCHIVE_FORMAT",
     "ARCHIVE_VERSION",
     "DEFAULT_RETENTION",
+    "MAX_ARCHIVE_BYTES",
+    "MAX_ARCHIVE_MEMBERS",
+    "MAX_ARCHIVE_MEMBER_BYTES",
     "InterruptedWorkspaceRestore",
     "InvalidWorkspaceArchiveError",
     "MissingSecretMaterialError",

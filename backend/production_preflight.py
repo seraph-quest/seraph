@@ -16,11 +16,18 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 import argparse
+import base64
+import binascii
 import json
 import os
 from pathlib import Path
 from typing import Mapping, Sequence
 from urllib.parse import urlsplit
+
+from src.workspace.production import (
+    ProductionWorkspaceMountError,
+    validate_container_workspace_mount,
+)
 
 
 SCHEMA = "seraph.cpu-host-preflight.v1"
@@ -50,6 +57,21 @@ def _secret_configured(value: str) -> bool:
     return bool(value) and value.lower() not in PLACEHOLDER_SECRETS and not value.lower().startswith("your-")
 
 
+def _pbkdf2_hash_shape_valid(value: str) -> bool:
+    """Match the exact encoded shape consumed by ``src.auth.service``."""
+    if not value or not _secret_configured(value):
+        return False
+    parts = value.split("$")
+    if len(parts) != 4 or parts[0] != "pbkdf2_sha256" or parts[1] != "600000":
+        return False
+    try:
+        salt = base64.b64decode(parts[2].encode("ascii"), altchars=b"-_", validate=True)
+        digest = base64.b64decode(parts[3].encode("ascii"), altchars=b"-_", validate=True)
+    except (UnicodeEncodeError, ValueError, binascii.Error):
+        return False
+    return len(salt) == 16 and len(digest) == 32
+
+
 def _csv(value: str) -> list[str]:
     return [item.strip() for item in value.split(",") if item.strip()]
 
@@ -62,7 +84,11 @@ def _bool(value: str, *, default: bool) -> bool:
 
 def _auth_check(env: Mapping[str, str], *, production: bool) -> Check:
     raw_secret = _secret_configured(_value(env, "OPERATOR_AUTH_SECRET"))
-    hashed_secret = _secret_configured(_value(env, "OPERATOR_AUTH_SECRET_HASH"))
+    encoded_hash = _value(env, "OPERATOR_AUTH_SECRET_HASH")
+    hash_present = _secret_configured(encoded_hash)
+    if hash_present and not _pbkdf2_hash_shape_valid(encoded_hash):
+        return Check("operator_auth", "invalid", "operator PBKDF2 hash has invalid shape")
+    hashed_secret = _pbkdf2_hash_shape_valid(encoded_hash)
     configured = int(raw_secret) + int(hashed_secret)
     if not production:
         return Check("operator_auth", "not_required", "development/test auth policy owns this environment")
@@ -91,6 +117,19 @@ def _workspace_check(env: Mapping[str, str]) -> Check:
         return Check("canonical_workspace", "unavailable", f"workspace parent is not writable: {parent}")
     except OSError as exc:
         return Check("canonical_workspace", "unavailable", f"workspace check failed: {exc}")
+
+
+def _production_mount_check(env: Mapping[str, str]) -> Check:
+    """Verify the Compose backend sees the one canonical container mount."""
+    try:
+        validate_container_workspace_mount(env)
+    except ProductionWorkspaceMountError as exc:
+        return Check("canonical_workspace_mount", "invalid", exc.reason_code)
+    return Check(
+        "canonical_workspace_mount",
+        "ready",
+        "production workspace is mounted at /app/data",
+    )
 
 
 def _inference_receipt(env: Mapping[str, str]) -> dict[str, object]:
@@ -154,6 +193,22 @@ def build_preflight_report(env: Mapping[str, str] | None = None) -> dict[str, ob
     values = env if env is not None else os.environ
     production = _value(values, "DEPLOYMENT_ENVIRONMENT").lower() in {"prod", "production"}
     checks = [_auth_check(values, production=production), _workspace_check(values)]
+    if production:
+        if _bool(_value(values, "SERAPH_PRODUCTION_MOUNT_CHECK"), default=False):
+            checks.append(_production_mount_check(values))
+        else:
+            # The documented host invocation cannot inspect a container's
+            # /proc/self/mountinfo. Keep that limitation explicit instead of
+            # silently presenting a host-static receipt as mount proof. The
+            # production Compose command sets this flag and fails closed in
+            # the container before the backend starts.
+            checks.append(
+                Check(
+                    "canonical_workspace_mount",
+                    "deferred",
+                    "container startup performs the /app/data bind identity check",
+                )
+            )
     core_status = "ready"
     if any(check.status == "invalid" for check in checks):
         core_status = "invalid"

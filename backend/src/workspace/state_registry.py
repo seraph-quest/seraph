@@ -1270,6 +1270,7 @@ _RUNTIME_PATH_SPECS = (
     ("local-runtime-profile-receipts", WorkspaceStateClass.DERIVED),
     ("lance", WorkspaceStateClass.DERIVED),
     (".seraph-extension-snapshots", WorkspaceStateClass.DERIVED),
+    (".seraph-workspace-maintenance.lock", WorkspaceStateClass.DERIVED),
     ("seraph.db-wal", WorkspaceStateClass.DERIVED),
     ("seraph.db-shm", WorkspaceStateClass.DERIVED),
     ("seraph.db-journal", WorkspaceStateClass.DERIVED),

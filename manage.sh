@@ -26,6 +26,11 @@
 #   ./manage.sh -e dev proxy start      - Start stdio-to-HTTP MCP proxy.
 #   ./manage.sh -e dev proxy logs       - Tail proxy log file.
 #   ./manage.sh -e prod down            - Stop everything.
+#   ./manage.sh -e prod backup          - Create a verified workspace archive.
+#   ./manage.sh -e prod restore --archive <archive> --confirm
+#   ./manage.sh -e prod status          - Show the durable lifecycle result.
+#   ./manage.sh -e prod identity        - Print the redacted host bind identity.
+#   ./manage.sh -e prod rollback --restore-id <id> --confirm
 #
 # ==============================================================================
 
@@ -80,6 +85,11 @@ function display_help() {
     echo "  $PROG_NAME -e dev proxy start"
     echo "  $PROG_NAME -e dev proxy status"
     echo "  $PROG_NAME -e dev proxy logs"
+    echo "  $PROG_NAME -e prod backup"
+    echo "  $PROG_NAME -e prod restore --archive <archive> --confirm"
+    echo "  $PROG_NAME -e prod status"
+    echo "  $PROG_NAME -e prod identity"
+    echo "  $PROG_NAME -e prod rollback --restore-id <id> --confirm"
 }
 
 function error_exit() {
@@ -602,6 +612,48 @@ function proxy_logs() {
     tail -f "$PROXY_LOG_FILE"
 }
 
+# --- Production workspace lifecycle ---
+function production_workspace_lifecycle() {
+    local lifecycle_command="$1"
+    shift
+    if [ "$ENV" != "prod" ]; then
+        echo "Error: production workspace lifecycle commands are production-only." >&2
+        return 1
+    fi
+
+    # The dependency-free CLI resolves BACKEND_DATA_PATH_PROD on the host,
+    # verifies the one canonical owner, and keeps backup/restore sidecars next
+    # to that bind. It deliberately does not start Docker or contact a
+    # provider.
+    PYTHONPATH="$SCRIPT_DIR/backend${PYTHONPATH:+:$PYTHONPATH}" \
+        python3 "$SCRIPT_DIR/backend/workspace_cli.py" \
+        --base-dir "$SCRIPT_DIR" "$lifecycle_command" "$@"
+}
+
+function refresh_production_bind_identity() {
+    # A restore or rollback atomically replaces the workspace directory and
+    # therefore changes its inode. Derive the current redacted identity on
+    # every managed production start so the container check remains strict
+    # without leaving operators to edit a stale env value by hand.
+    local identity_json identity
+    if ! identity_json=$(
+        PYTHONPATH="$SCRIPT_DIR/backend${PYTHONPATH:+:$PYTHONPATH}" \
+            python3 "$SCRIPT_DIR/backend/workspace_cli.py" \
+            --base-dir "$SCRIPT_DIR" identity
+    ); then
+        echo "Error: unable to derive the production bind identity; workspace startup is blocked." >&2
+        return 1
+    fi
+    identity=$(printf '%s' "$identity_json" | python3 -c \
+        'import json, sys; print(json.load(sys.stdin).get("bind_identity", ""))')
+    if [[ ! "$identity" =~ ^[0-9a-f]{24}$ ]]; then
+        echo "Error: production bind identity receipt is invalid; workspace startup is blocked." >&2
+        return 1
+    fi
+    export SERAPH_PRODUCTION_BIND_IDENTITY="$identity"
+    echo "Production bind identity refreshed for managed startup."
+}
+
 # --- Local Stack Functions ---
 function local_backend_is_running() {
     pid_is_running "$LOCAL_BACKEND_PID_FILE"
@@ -883,6 +935,15 @@ if [ "$COMMAND" = "local" ]; then
             ;;
     esac
     exit "$LOCAL_EXIT_STATUS"
+fi
+
+if [ "$ENV" = "prod" ] && [ "$COMMAND" = "up" ]; then
+    refresh_production_bind_identity || exit $?
+fi
+
+if [ "$COMMAND" = "backup" ] || [ "$COMMAND" = "restore" ] || [ "$COMMAND" = "status" ] || [ "$COMMAND" = "identity" ] || [ "$COMMAND" = "rollback" ]; then
+    production_workspace_lifecycle "$COMMAND" "$@"
+    exit $?
 fi
 
 # Handle proxy subcommand

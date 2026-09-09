@@ -5715,22 +5715,26 @@ interface WorkflowLineageEventEntry {
 
 function workflowCheckpointActions(
   workflow: WorkflowRunRecord,
-): Array<{ stepId: string; draft: string; label: string; kind: string }> {
+): Array<{ stepId: string; draft: string; label: string; kind: string; actionHandle?: Record<string, unknown> }> {
   if (!Array.isArray(workflow.checkpointCandidates)) {
     return [];
   }
-  return workflow.checkpointCandidates.reduce<Array<{ stepId: string; draft: string; label: string; kind: string }>>((actions, candidate) => {
+  return workflow.checkpointCandidates.reduce<Array<{ stepId: string; draft: string; label: string; kind: string; actionHandle?: Record<string, unknown> }>>((actions, candidate) => {
     if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) return actions;
     const record = candidate as Record<string, unknown>;
     const stepId = typeof record.step_id === "string" ? record.step_id : "";
     const draft = typeof record.resume_draft === "string" ? record.resume_draft : "";
-    if (!stepId || !draft) return actions;
+    const actionHandle = record.action_handle && typeof record.action_handle === "object" && !Array.isArray(record.action_handle)
+      ? record.action_handle as Record<string, unknown>
+      : undefined;
+    if (!stepId || (!draft && !actionHandle)) return actions;
     const kind = typeof record.kind === "string" ? record.kind : "branch_from_checkpoint";
     actions.push({
       stepId,
       draft,
       kind,
       label: kind === "retry_failed_step" ? `Retry ${stepId}` : `Branch ${stepId}`,
+      actionHandle,
     });
     return actions;
   }, []);

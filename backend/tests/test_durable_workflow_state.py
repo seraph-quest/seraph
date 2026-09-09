@@ -490,6 +490,68 @@ async def test_workflow_state_repository_v2_rejects_stale_owner_before_transitio
 
 
 @pytest.mark.asyncio
+async def test_workflow_state_repository_control_binds_transition_and_keeps_lease_fence(async_db):
+    run_identity = "session-v2:workflow_control_fence:abc"
+    await workflow_state_repository.create_run(
+        run_identity=run_identity,
+        workflow_name="control-fence-v2",
+        tool_name="workflow_control_fence_v2",
+        session_id="session-v2",
+        run_fingerprint="control-fence",
+        arguments={},
+        approval_context={"risk_level": "medium", "execution_boundaries": ["workspace_filesystem"]},
+    )
+    lease = await workflow_state_repository.acquire_or_renew_v2_lease(
+        run_identity=run_identity,
+        owner="worker-a",
+        lease_id="lease-a",
+    )
+    assert lease is not None
+    transition = await workflow_state_repository.record_v2_transition(
+        run_identity=run_identity,
+        transition_key="operator:retry:redacted-step",
+        transition_type="retry",
+        owner="worker-a",
+        step_id="private/raw-step-id",
+        expected_revision=lease["orchestration_v2"]["revision"],
+    )
+    assert transition is not None
+    transition_revision = transition["orchestration_v2"]["revision"]
+    assert transition["receipt"]["step_id"] == "private/raw-step-id"
+    assert transition["orchestration_v2"]["lease"]["revision"] == transition_revision
+
+    control = await workflow_state_repository.record_v2_operator_recovery_control(
+        run_identity=run_identity,
+        action="retry",
+        target="private/raw-target",
+        owner="worker-a",
+        lease_id="lease-a",
+        expected_revision=transition_revision,
+        transition_key="operator:retry:redacted-step",
+        operator_context={"source": "test"},
+    )
+    assert control is not None
+    assert control["receipt"]["status"] == "recorded"
+    assert control["receipt"]["owner"] == "worker-a"
+    assert control["receipt"]["transition_key"] == "operator:retry:redacted-step"
+    assert control["orchestration_v2"]["lease"]["revision"] == control["orchestration_v2"]["revision"]
+
+    stale_control = await workflow_state_repository.record_v2_operator_recovery_control(
+        run_identity=run_identity,
+        action="retry",
+        target="private/raw-target",
+        owner="worker-a",
+        lease_id="lease-a",
+        expected_revision=transition_revision,
+        transition_key="operator:retry:redacted-step",
+        operator_context={"source": "stale-test"},
+    )
+    assert stale_control is not None
+    assert stale_control["receipt"]["status"] == "blocked"
+    assert stale_control["receipt"]["blocked_reason"] == "revision_mismatch"
+
+
+@pytest.mark.asyncio
 async def test_workflow_state_repository_v2_persists_dq_handoff_guardian_and_side_effect_receipts(async_db):
     await workflow_state_repository.create_run(
         run_identity="session-v2:workflow_dq_receipts:abc",

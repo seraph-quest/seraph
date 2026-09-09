@@ -6696,3 +6696,229 @@ async def test_workflow_resume_plan_response_is_safe_and_failure_is_durable_rece
     failed_receipt.assert_awaited_once()
     assert failed_receipt.await_args.kwargs["event_type"] == "workflow_resume_plan_failed"
     assert failed_receipt.await_args.kwargs["detail"] == "workflow_resume_plan_refused"
+
+
+@pytest.mark.asyncio
+async def test_workflow_control_uses_run_session_raw_step_and_post_transition_fence():
+    """The route handle must be consumable by chat recovery under one fence."""
+    from src.api.workflows import (
+        WorkflowRunControlRequest,
+        _safe_workflow_step_id,
+        _workflow_operator_owner,
+        control_workflow_run,
+    )
+
+    operator = _test_bypass_operator()
+    run_identity = "session-owner:workflow_example:route-draft"
+    raw_step_id = "second"
+    run = {
+        "run_identity": run_identity,
+        "workflow_name": "example",
+        "tool_name": "workflow_example",
+        "session_id": "session-owner",
+        "pending_approvals": [],
+        "replay_allowed": True,
+        "replay_block_reason": None,
+        "owner_kind": "user",
+        "owner_principal_id": operator.principal.principal_id,
+        "arguments": {"secret": "never-return"},
+        "checkpoint_candidates": [{"step_id": raw_step_id, "kind": "retry_failed_step", "resume_supported": True}],
+        "step_records": [{"id": raw_step_id, "index": 0, "tool": "private_tool", "status": "failed"}],
+    }
+    lease_owner = _workflow_operator_owner(operator.principal.principal_id, "session-owner")
+    lease = {
+        "owner": lease_owner,
+        "lease_id": "lease-route",
+        "expires_at": "2099-01-01T00:00:00+00:00",
+        "revision": 7,
+    }
+    raw_plan = {
+        "source_run_identity": run_identity,
+        "parent_run_identity": run_identity,
+        "root_run_identity": run_identity,
+        "thread_id": "session-owner",
+        "branch_kind": "retry_failed_step",
+        "resume_from_step": raw_step_id,
+        "resume_checkpoint_label": "private checkpoint",
+        "replay_allowed": True,
+        "draft": 'Run workflow "example" with secret="never-return".',
+        "replay_inputs": {"secret": "never-return"},
+        "parent_revision": 9,
+        "parent_lease_id": "lease-route",
+        "checkpoint_candidates": [
+            {
+                "step_id": raw_step_id,
+                "label": "private checkpoint",
+                "kind": "retry_failed_step",
+                "resume_supported": True,
+            }
+        ],
+    }
+    transition_kwargs: dict[str, object] = {}
+    control_kwargs: dict[str, object] = {}
+
+    async def record_transition(**kwargs):
+        transition_kwargs.update(kwargs)
+        return {
+            "receipt": {
+                "status": "recorded",
+                "transition_key": kwargs["transition_key"],
+                "revision": 8,
+            },
+            "orchestration_v2": {"revision": 8, "lease": lease},
+        }
+
+    async def record_control(**kwargs):
+        control_kwargs.update(kwargs)
+        return {
+            "receipt": {"status": "recorded", "owner": kwargs["owner"], "lease_id": "lease-route", "revision": 9},
+            "orchestration_v2": {
+                "revision": 9,
+                "lease": {**lease, "revision": 9},
+            },
+        }
+
+    with (
+        patch("src.api.workflows._begin_rest_revocation_watch", return_value=None),
+        patch("src.api.workflows._find_workflow_run_for_control", new_callable=AsyncMock, side_effect=[run, run]),
+        patch("src.api.workflows._workflow_resume_plan", return_value=raw_plan),
+        patch(
+            "src.api.workflows.workflow_state_repository.acquire_or_renew_v2_lease",
+            new_callable=AsyncMock,
+            return_value={"receipt": {"status": "acquired"}, "orchestration_v2": {"revision": 7, "lease": lease}},
+        ),
+        patch(
+            "src.api.workflows.workflow_state_repository.build_v2_recovery_plan",
+            new_callable=AsyncMock,
+            return_value={"receipt": {"status": "ready"}},
+        ),
+        patch(
+            "src.api.workflows.workflow_state_repository.record_v2_transition",
+            new_callable=AsyncMock,
+            side_effect=record_transition,
+        ),
+        patch(
+            "src.api.workflows.workflow_state_repository.record_v2_operator_recovery_control",
+            new_callable=AsyncMock,
+            side_effect=record_control,
+        ),
+        patch("src.api.workflows.audit_repository.log_event", new_callable=AsyncMock),
+    ):
+        payload = await control_workflow_run(
+            run_identity,
+            WorkflowRunControlRequest(
+                action="retry",
+                step_id=_safe_workflow_step_id(raw_step_id),
+            ),
+            _workflow_mutator_request(operator, "/api/workflows/runs/control"),
+        )
+
+    assert transition_kwargs["owner"] == lease_owner
+    assert transition_kwargs["step_id"] == raw_step_id
+    assert transition_kwargs["transition_key"] != raw_step_id
+    assert control_kwargs["owner"] == lease_owner
+    assert control_kwargs["lease_id"] == "lease-route"
+    assert control_kwargs["expected_revision"] == 8
+    assert control_kwargs["transition_key"] == transition_kwargs["transition_key"]
+    assert payload["resume_plan"]["action_handle"]["parent_revision"] == 9
+    assert payload["control_receipt"]["lease_id_digest"]
+    assert payload["control_receipt"]["revision_digest"]
+    assert "lease-route" not in json.dumps(payload["control_receipt"])
+    encoded = json.dumps(payload)
+    assert raw_step_id not in encoded
+    assert "never-return" not in encoded
+
+    workflow = Workflow(
+        name="example",
+        description="route recovery integration",
+        inputs={"value": {"type": "string", "required": True}},
+        steps=[
+            WorkflowStep(id="first", tool="first_tool", arguments={"value": "{{ value }}"}),
+            WorkflowStep(id="second", tool="second_tool", arguments={"value": "{{ steps.first.result }}"}),
+        ],
+    )
+    first = DummyTool("first_tool", lambda **_kwargs: "cached")
+    second = DummyTool("second_tool", lambda **_kwargs: "continued")
+    workflow_tool = WorkflowTool(workflow, {"first_tool": first, "second_tool": second})
+    details = {
+        "workflow_name": "example",
+        "session_id": "session-owner",
+        "owner_kind": "user",
+        "owner_principal_id": operator.principal.principal_id,
+        "state_source": "durable_workflow_state",
+        "durable_run_identity": run_identity,
+        "checkpoint_context": {
+            "first": {"tool": "first_tool", "arguments": {"value": "cached"}, "result": "cached"},
+        },
+        "step_records": [{"id": "first", "tool": "first_tool", "status": "succeeded"}],
+        "orchestration_v2": {
+            "revision": 9,
+            "lease": {
+                "owner": lease_owner,
+                "lease_id": "lease-route",
+                "expires_at": "2099-01-01T00:00:00+00:00",
+                "revision": 9,
+            },
+        },
+    }
+    principal = replace(operator.principal, session_id="session-owner")
+    tokens = set_runtime_context("session-owner", "balanced", trust_principal=principal)
+    try:
+        with (
+            patch("src.workflows.manager._load_workflow_checkpoint_payload", AsyncMock(return_value=details)),
+            patch("src.workflows.manager._run_required_durable_state_write", return_value=None),
+            patch("src.workflows.manager._run_durable_state_write", return_value=None),
+            patch("src.workflows.manager.flush_session_memory_sync"),
+        ):
+            workflow_tool(
+                value="requested",
+                _seraph_resume_from_step=raw_step_id,
+                _seraph_parent_run_identity=run_identity,
+                _seraph_parent_revision=payload["resume_plan"]["action_handle"]["parent_revision"],
+                _seraph_parent_lease_id="lease-route",
+            )
+    finally:
+        reset_runtime_context(tokens)
+    assert first.calls == []
+    assert second.calls
+
+
+def test_workflow_safe_projection_preserves_cockpit_handles_without_raw_inputs():
+    from src.api.workflows import _safe_workflow_run_projection
+
+    projection = _safe_workflow_run_projection({
+        "run_identity": "session-owner:workflow_example:projection",
+        "workflow_name": "example",
+        "tool_name": "workflow_example",
+        "session_id": "session-owner",
+        "thread_id": "session-owner",
+        "status": "failed",
+        "replay_allowed": True,
+        "replay_draft": 'Run workflow "example" with secret="never-return".',
+        "replay_inputs": {"secret": "never-return", "file_path": "/tmp/private"},
+        "continued_error_steps": ["checkpoint/private-step"],
+        "step_records": [{
+            "id": "checkpoint/private-step",
+            "index": 0,
+            "tool": "private_tool",
+            "status": "failed",
+            "arguments": {"secret": "never-return"},
+        }],
+        "checkpoint_candidates": [{
+            "step_id": "checkpoint/private-step",
+            "label": "private checkpoint",
+            "kind": "retry_failed_step",
+            "resume_supported": True,
+            "resume_draft": 'Run workflow "example" with secret="never-return".',
+        }],
+    })
+
+    assert projection is not None
+    assert projection["thread_id"] == "session-owner"
+    assert projection["step_records"][0]["id"].startswith("redacted_workflow_step_")
+    assert projection["checkpoint_candidates"][0]["action_handle"]["requires_live_control"] is True
+    assert projection["replay_inputs"]["redacted"] is True
+    encoded = json.dumps(projection)
+    assert "never-return" not in encoded
+    assert "/tmp/private" not in encoded
+    assert "checkpoint/private-step" not in encoded

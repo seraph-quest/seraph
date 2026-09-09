@@ -153,6 +153,13 @@ def _lease_active(lease: dict[str, Any], now: datetime | None = None) -> bool:
     return bool(lease.get("lease_id") and expires_at and expires_at > (now or _utc_now()))
 
 
+def _sync_lease_revision(v2: dict[str, Any]) -> None:
+    """Keep an active fencing lease at the revision it currently fences."""
+    lease = _as_dict(v2.get("lease"))
+    if lease.get("lease_id"):
+        v2["lease"] = {**lease, "revision": int(v2.get("revision") or 0)}
+
+
 def _stable_id(prefix: str, *parts: Any) -> str:
     seed = "|".join(str(part) for part in parts)
     return f"{prefix}_{hashlib.sha256(seed.encode('utf-8')).hexdigest()[:20]}"
@@ -872,6 +879,7 @@ class WorkflowStateRepository:
                 ledger.append(receipt)
                 v2["transition_ledger"] = ledger
                 v2["revision"] = revision + 1
+                _sync_lease_revision(v2)
                 run.heartbeat_at = now
                 run.updated_at = now
                 run.metadata_json = _dumps(metadata)
@@ -922,6 +930,7 @@ class WorkflowStateRepository:
                 }
                 ledger.append(receipt)
                 v2["trigger_ledger"] = ledger
+                _sync_lease_revision(v2)
                 run.heartbeat_at = now
                 run.updated_at = now
                 run.metadata_json = _dumps(metadata)
@@ -1271,6 +1280,10 @@ class WorkflowStateRepository:
         target: str,
         operator_context: dict[str, Any] | None = None,
         enabled: bool = True,
+        owner: str | None = None,
+        expected_revision: int | None = None,
+        lease_id: str | None = None,
+        transition_key: str | None = None,
     ) -> dict[str, Any] | None:
         now = _utc_now()
         async with get_session() as db:
@@ -1281,6 +1294,31 @@ class WorkflowStateRepository:
                 return None
             metadata = _workflow_v2_metadata(_loads(run.metadata_json, {}))
             v2 = metadata["orchestration_v2"]
+            revision = int(v2.get("revision") or 0)
+            lease = _as_dict(v2.get("lease"))
+            transition = next(
+                (
+                    item
+                    for item in _as_list(v2.get("transition_ledger"))
+                    if isinstance(item, dict) and item.get("transition_key") == transition_key
+                ),
+                None,
+            ) if transition_key else None
+            blocked_reason = None
+            if owner is not None:
+                if not _lease_active(lease, now) or lease.get("owner") != owner:
+                    blocked_reason = "active_owner_lease_required"
+                elif lease_id is not None and str(lease.get("lease_id") or "") != str(lease_id):
+                    blocked_reason = "lease_mismatch"
+                elif expected_revision is not None and int(expected_revision) != revision:
+                    blocked_reason = "revision_mismatch"
+                elif transition_key is not None and not isinstance(transition, dict):
+                    blocked_reason = "transition_binding_missing"
+                elif (
+                    isinstance(transition, dict)
+                    and transition.get("owner") != owner
+                ):
+                    blocked_reason = "transition_owner_mismatch"
             safe_target = _safe_operator_recovery_target(target)
             receipt = {
                 "kind": "operator_recovery_control",
@@ -1293,6 +1331,15 @@ class WorkflowStateRepository:
                 "receipt_after_action": (
                     f"operator-control:{action}:{_stable_id('recovery_control', run_identity, target)}"
                 ),
+                "status": "blocked" if blocked_reason else "recorded",
+                "blocked_reason": blocked_reason,
+                "owner": owner,
+                "lease_id_digest": _stable_digest(lease_id) if lease_id is not None else None,
+                "expected_revision": expected_revision,
+                "actual_revision": revision,
+                "transition_key": transition_key,
+                "transition_revision": transition.get("revision") if isinstance(transition, dict) else None,
+                "fence_binding": "owner_lease_revision_transition" if owner is not None else "unbound_legacy",
                 "external_action_allowed": False,
                 "recorded_at": now.isoformat(),
                 "operator_visible": True,
@@ -1305,6 +1352,9 @@ class WorkflowStateRepository:
             ]
             receipts.append(receipt)
             v2["operator_recovery_control_receipts"] = receipts[-10:]
+            if not blocked_reason and owner is not None:
+                v2["revision"] = revision + 1
+                _sync_lease_revision(v2)
             run.metadata_json = _dumps(metadata)
             run.updated_at = now
             await db.flush()
@@ -1403,6 +1453,7 @@ class WorkflowStateRepository:
             receipts.append(receipt)
             v2["artifact_adoption_receipts"] = receipts[-10:]
             v2["revision"] = int(v2.get("revision") or 0) + 1
+            _sync_lease_revision(v2)
             run.metadata_json = _dumps(metadata)
             run.updated_at = now
             await db.flush()

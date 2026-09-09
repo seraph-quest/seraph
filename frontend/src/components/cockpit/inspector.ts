@@ -81,6 +81,9 @@ export interface WorkflowRunRecord {
   pendingApprovalIds?: string[];
   pendingApprovals?: Array<{
     id: string;
+    workflow_id?: string | null;
+    tool_name?: string | null;
+    session_id?: string | null;
     summary: string;
     riskLevel?: string;
     createdAt: string;

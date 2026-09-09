@@ -134,7 +134,35 @@ async def test_missing_or_expired_deadline_cannot_resolve_or_consume(async_db):
     async with db_engine.get_session() as db:
         stored = await db.get(ApprovalRequest, missing.id)
         assert stored is not None
-        assert stored.status == "approved"
+    assert stored.status == "approved"
+
+
+@pytest.mark.asyncio
+async def test_resolution_owner_predicate_blocks_foreign_terminal_transition(async_db):
+    request = await approval_repository.get_or_create_pending(
+        session_id="conversation-owner",
+        tool_name="shell_execute",
+        risk_level="high",
+        summary="Bounded shell action",
+        fingerprint="owner-predicate",
+        details={
+            "approval_owner_operator_session_id": "operator-owner",
+            "approval_owner_principal_id": "operator:owner",
+        },
+    )
+
+    resolution = await approval_repository.resolve_with_metadata(
+        request.id,
+        "approved",
+        owner_operator_session_id="operator-foreign",
+        owner_principal_id="operator:foreign",
+    )
+
+    assert resolution.transitioned is False
+    assert resolution.reason == "owner_mismatch"
+    current = await approval_repository.get(request.id)
+    assert current is not None
+    assert current.status == "pending"
 
 
 @pytest.mark.asyncio

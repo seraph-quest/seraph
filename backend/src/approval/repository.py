@@ -120,6 +120,45 @@ def _approval_belongs_to_operator_session(
     )
 
 
+def _approval_matches_resolution_owner(
+    request: ApprovalRequest,
+    owner_operator_session_id: str,
+) -> bool:
+    """Mirror the API owner contract immediately before a terminal write."""
+    owner_operator_session_id = str(owner_operator_session_id or "").strip()
+    if not owner_operator_session_id:
+        return False
+    try:
+        details = json.loads(request.details_json) if request.details_json else {}
+    except (TypeError, ValueError):
+        details = {}
+    if not isinstance(details, dict):
+        details = {}
+    explicit_owner = str(
+        details.get("approval_owner_operator_session_id")
+        or details.get("approval_owner_auth_session_id")
+        or ""
+    ).strip()
+    if explicit_owner:
+        return explicit_owner == owner_operator_session_id
+    legacy_owner = str(details.get("approval_owner_session_id") or "").strip()
+    if legacy_owner:
+        return legacy_owner == owner_operator_session_id and request.session_id == owner_operator_session_id
+    # Preserve the pre-migration auth-session-only contract.  Conversation
+    # rows with a different session remain refused by this exact predicate.
+    return bool(request.session_id) and request.session_id == owner_operator_session_id
+
+
+def _approval_principal_id(request: ApprovalRequest) -> str:
+    try:
+        details = json.loads(request.details_json) if request.details_json else {}
+    except (TypeError, ValueError):
+        details = {}
+    if not isinstance(details, dict):
+        return ""
+    return str(details.get("approval_owner_principal_id") or "").strip()
+
+
 class ApprovalRepository:
     async def get(self, approval_id: str) -> ApprovalRequest | None:
         """Fetch an approval without resolving it."""
@@ -197,6 +236,8 @@ class ApprovalRepository:
         decision: str,
         *,
         now: datetime | None = None,
+        owner_operator_session_id: str | None = None,
+        owner_principal_id: str | None = None,
     ) -> ApprovalResolution:
         if decision not in {"approved", "denied"}:
             raise ValueError("approval decision must be approved or denied")
@@ -218,6 +259,17 @@ class ApprovalRepository:
             if expiry <= now:
                 db.expunge(request)
                 return ApprovalResolution(request, False, "expired")
+            if owner_operator_session_id is not None and not _approval_matches_resolution_owner(
+                request,
+                owner_operator_session_id,
+            ):
+                db.expunge(request)
+                return ApprovalResolution(request, False, "owner_mismatch")
+            if owner_principal_id is not None:
+                recorded_principal_id = _approval_principal_id(request)
+                if recorded_principal_id and recorded_principal_id != str(owner_principal_id).strip():
+                    db.expunge(request)
+                    return ApprovalResolution(request, False, "owner_mismatch")
 
             # Status and fresh deadline are part of one conditional write. A
             # concurrent decision therefore becomes a no-op rather than a

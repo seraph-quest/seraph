@@ -201,6 +201,16 @@ def _safe_workflow_token(value: Any, *, fallback: str) -> str:
     return fallback
 
 
+def _safe_workflow_message(value: Any, *, fallback: str | None = None) -> str | None:
+    """Keep short operator copy while bounding untrusted approval metadata."""
+    if not isinstance(value, str):
+        return fallback
+    candidate = value.strip()
+    if not candidate or len(candidate) > 512:
+        return fallback
+    return candidate
+
+
 def _safe_workflow_count(value: Any) -> int:
     try:
         return max(0, int(value or 0))
@@ -502,6 +512,125 @@ def _safe_workflow_artifact_projection(value: Any) -> dict[str, Any]:
     }
 
 
+def _bind_pending_approvals_to_run(
+    approvals: list[dict[str, Any]],
+    *,
+    run: dict[str, Any],
+    run_identity: str,
+) -> list[dict[str, Any]]:
+    """Attach only the lineage already proven by the run/approval join.
+
+    ``_list_workflow_runs`` joins approvals by session, tool, and fingerprint.
+    That join is the authority for the run identity when older approval rows
+    predate an explicit ``workflow_id`` field.  Goal lineage is copied only
+    when the durable run or approval already carries it; list position is
+    never used to invent a binding.
+    """
+    bound: list[dict[str, Any]] = []
+    run_goal_id = run.get("goal_id")
+    run_goal_revision = run.get("goal_revision")
+    for approval in approvals:
+        if not isinstance(approval, dict):
+            continue
+        candidate = dict(approval)
+        recorded_workflow_id = candidate.get("workflow_id")
+        if recorded_workflow_id not in (None, "", run_identity):
+            # A durable approval explicitly tied to a different workflow must
+            # remain visible as an unresolved/degraded row, never re-bound.
+            continue
+        candidate["workflow_id"] = run_identity
+        if not isinstance(candidate.get("goal_id"), str) and isinstance(run_goal_id, str):
+            candidate["goal_id"] = run_goal_id
+        if not (
+            isinstance(candidate.get("goal_revision"), int)
+            and not isinstance(candidate.get("goal_revision"), bool)
+            and candidate["goal_revision"] >= 1
+        ) and isinstance(run_goal_revision, int) and not isinstance(run_goal_revision, bool) and run_goal_revision >= 1:
+            candidate["goal_revision"] = run_goal_revision
+        if not isinstance(candidate.get("session_id"), str) and isinstance(run.get("session_id"), str):
+            candidate["session_id"] = run["session_id"]
+        if not isinstance(candidate.get("thread_id"), str) and isinstance(candidate.get("session_id"), str):
+            candidate["thread_id"] = candidate["session_id"]
+        if not isinstance(candidate.get("tool_name"), str) and isinstance(run.get("tool_name"), str):
+            candidate["tool_name"] = run["tool_name"]
+        bound.append(candidate)
+    return bound
+
+
+def _safe_workflow_approval_projection(
+    value: Any,
+    *,
+    run: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Project a pending approval without exposing details or credentials."""
+    if not isinstance(value, dict):
+        return None
+    approval_id = _safe_workflow_token(value.get("id"), fallback="")
+    if not approval_id:
+        return None
+    workflow_id = _safe_workflow_identity(
+        value.get("workflow_id") or run.get("run_identity") or run.get("id"),
+        fallback="",
+    )
+    if not workflow_id:
+        return None
+    recorded_workflow_id = value.get("workflow_id")
+    expected_workflow_id = run.get("run_identity") or run.get("id")
+    if recorded_workflow_id not in (None, "", expected_workflow_id, workflow_id):
+        return None
+    created_at = value.get("created_at")
+    if not isinstance(created_at, str) or not created_at.strip():
+        return None
+    session_id = _safe_workflow_token(
+        value.get("session_id") or run.get("session_id"),
+        fallback="",
+    ) or None
+    thread_id = _safe_workflow_token(value.get("thread_id") or session_id, fallback="") or None
+    tool_name = _safe_workflow_token(
+        value.get("tool_name") or run.get("tool_name"),
+        fallback="workflow_tool",
+    )
+    goal_id = _safe_workflow_token(value.get("goal_id") or run.get("goal_id"), fallback="") or None
+    goal_revision = value.get("goal_revision")
+    if not (isinstance(goal_revision, int) and not isinstance(goal_revision, bool) and goal_revision >= 1):
+        goal_revision = run.get("goal_revision")
+    if not (isinstance(goal_revision, int) and not isinstance(goal_revision, bool) and goal_revision >= 1):
+        goal_revision = None
+    safe: dict[str, Any] = {
+        "id": approval_id,
+        "workflow_id": workflow_id,
+        "session_id": session_id,
+        "thread_id": thread_id,
+        "tool_name": tool_name,
+        "goal_id": goal_id,
+        "goal_revision": goal_revision,
+        "summary": _safe_workflow_message(
+            value.get("summary"),
+            fallback="Approval pending for this workflow",
+        ),
+        "risk_level": _safe_workflow_token(value.get("risk_level"), fallback="unknown"),
+        "status": _safe_workflow_token(value.get("status"), fallback="pending"),
+        "created_at": created_at.strip(),
+        "resume_message": _safe_workflow_message(value.get("resume_message")),
+        "approval_owner_principal_id": _safe_workflow_token(
+            value.get("approval_owner_principal_id"), fallback=""
+        ) or None,
+        "approval_owner_operator_session_id": _safe_workflow_token(
+            value.get("approval_owner_operator_session_id"), fallback=""
+        ) or None,
+        "approval_owner_source": _safe_workflow_token(
+            value.get("approval_owner_source"), fallback=""
+        ) or None,
+        "approval_owner_expires_at": (
+            value.get("approval_owner_expires_at")
+            if isinstance(value.get("approval_owner_expires_at"), (str, int, float))
+            and not isinstance(value.get("approval_owner_expires_at"), bool)
+            else None
+        ),
+    }
+    return safe
+
+
 def _safe_workflow_action_handle(
     value: Any,
     *,
@@ -683,6 +812,12 @@ def _safe_workflow_run_projection(value: Any) -> dict[str, Any] | None:
     )
     raw_resume_step = value.get("resume_from_step") or value.get("last_completed_step_id")
     action_kind = "retry" if value.get("continued_error_steps") else "resume"
+    raw_pending_approvals = value.get("pending_approvals")
+    safe_pending_approvals = [
+        safe_approval
+        for approval in (raw_pending_approvals if isinstance(raw_pending_approvals, list) else [])
+        if (safe_approval := _safe_workflow_approval_projection(approval, run=value)) is not None
+    ]
     projection: dict[str, Any] = {
         "id": _safe_workflow_identity(value.get("id") or value.get("run_identity")),
         "run_identity": _safe_workflow_identity(value.get("run_identity") or value.get("id")),
@@ -739,7 +874,9 @@ def _safe_workflow_run_projection(value: Any) -> dict[str, Any] | None:
         "started_at": value.get("started_at") if isinstance(value.get("started_at"), str) else None,
         "updated_at": value.get("updated_at") if isinstance(value.get("updated_at"), str) else None,
         "finished_at": value.get("finished_at") if isinstance(value.get("finished_at"), str) else None,
-        "pending_approval_count": _safe_workflow_count(value.get("pending_approval_count")),
+        "pending_approval_count": len(safe_pending_approvals),
+        "pending_approval_ids": [approval["id"] for approval in safe_pending_approvals],
+        "pending_approvals": safe_pending_approvals,
         "checkpoint_context_available": bool(value.get("checkpoint_context_available")),
         "artifact_count": len(artifact_projection["artifact_paths"]),
         "artifact_paths": artifact_projection["artifact_paths"],
@@ -2301,6 +2438,12 @@ async def _list_workflow_runs(
             (run.get("session_id"), tool_name),
             [],
         )
+        run_identity = event_projection_key
+        approvals = _bind_pending_approvals_to_run(
+            approvals,
+            run=run,
+            run_identity=run_identity,
+        )
         recorded_approval_context = (
             _normalize_approval_context(
                 details.get("approval_context"),
@@ -2449,7 +2592,6 @@ async def _list_workflow_runs(
                     step["recovery_actions"] = []
                     step["recovery_hint"] = None
                     step["is_recoverable"] = False
-        run_identity = event_projection_key
         lineage = _workflow_branch_lineage(
             run_identity=run_identity,
             details=details,
@@ -2568,6 +2710,21 @@ async def _list_workflow_runs(
                 (run.get("session_id"), str(run["tool_name"])),
                 [],
             )
+            run_identity = build_workflow_run_identity(
+                run.get("session_id") if isinstance(run.get("session_id"), str) else None,
+                str(run["tool_name"]),
+                str(run.get("run_fingerprint") or "none"),
+                run_discriminator=(
+                    str(run.get("id"))
+                    if isinstance(run.get("id"), str) and str(run.get("id")).strip()
+                    else None
+                ),
+            )
+            approvals = _bind_pending_approvals_to_run(
+                approvals,
+                run=run,
+                run_identity=run_identity,
+            )
             recorded_approval_context = _normalize_approval_context(
                 run.get("approval_context"),
                 workflow_name=str(run["workflow_name"]),
@@ -2669,16 +2826,6 @@ async def _list_workflow_runs(
                         step["recovery_actions"] = []
                         step["recovery_hint"] = None
                         step["is_recoverable"] = False
-            run_identity = build_workflow_run_identity(
-                run.get("session_id") if isinstance(run.get("session_id"), str) else None,
-                str(run["tool_name"]),
-                str(run.get("run_fingerprint") or "none"),
-                run_discriminator=(
-                    str(run.get("id"))
-                    if isinstance(run.get("id"), str) and str(run.get("id")).strip()
-                    else None
-                ),
-            )
             lineage = _workflow_branch_lineage(
                 run_identity=run_identity,
                 details={},

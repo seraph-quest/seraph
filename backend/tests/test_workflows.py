@@ -14,6 +14,7 @@ import pytest
 from starlette.requests import Request
 
 from src.approval.repository import fingerprint_tool_call
+from src.api.workflows import _safe_workflow_run_projection
 from src.extensions.governance import governance_signature_value
 from src.extensions.registry import default_manifest_roots_for_workspace
 from src.workflows.loader import Workflow, WorkflowStep, _parse_workflow_file, load_workflows
@@ -64,6 +65,57 @@ class DummyTool:
 
     def forward(self, *args, **kwargs):
         return self.__call__(*args, **kwargs)
+
+
+def test_safe_workflow_projection_preserves_bound_approval_lineage_without_details():
+    run = {
+        "id": "event-1",
+        "run_identity": "session-1:workflow_web_brief_to_file:fingerprint-1",
+        "workflow_name": "web-brief-to-file",
+        "tool_name": "workflow_web_brief_to_file",
+        "session_id": "session-1",
+        "goal_id": "goal-1",
+        "goal_revision": 3,
+        "pending_approval_count": 2,
+        "pending_approvals": [
+            {
+                "id": "approval-1",
+                "workflow_id": "session-1:workflow_web_brief_to_file:fingerprint-1",
+                "session_id": "session-1",
+                "tool_name": "workflow_web_brief_to_file",
+                "goal_id": "goal-1",
+                "goal_revision": 3,
+                "summary": "Approve the bounded workflow",
+                "risk_level": "medium",
+                "status": "pending",
+                "created_at": "2026-09-10T10:00:00Z",
+                "resume_message": "Continue the workflow once approved",
+                "details_json": "{\"secret\":\"must-not-leak\"}",
+            },
+            {
+                "id": "approval-foreign",
+                "workflow_id": "another-run",
+                "session_id": "session-1",
+                "summary": "Foreign approval",
+                "created_at": "2026-09-10T10:01:00Z",
+            },
+        ],
+    }
+
+    projection = _safe_workflow_run_projection(run)
+
+    assert projection is not None
+    assert projection["pending_approval_count"] == 1
+    assert projection["pending_approval_ids"] == ["approval-1"]
+    approval = projection["pending_approvals"][0]
+    assert approval["workflow_id"] == run["run_identity"]
+    assert approval["goal_id"] == "goal-1"
+    assert approval["goal_revision"] == 3
+    assert approval["session_id"] == "session-1"
+    assert approval["tool_name"] == "workflow_web_brief_to_file"
+    assert approval["resume_message"] == "Continue the workflow once approved"
+    assert "details_json" not in approval
+    assert "must-not-leak" not in str(projection)
 
 
 def _write_manifest_workflow_package(

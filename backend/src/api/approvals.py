@@ -18,6 +18,37 @@ def _require_approval_operator(request: Request):
     return _require_authenticated_capability_operator(request)
 
 
+async def _recheck_approval_operator(request: Request, expected_operator):
+    """Revalidate the browser session after an approval row was read.
+
+    Middleware authority is a snapshot.  A decision can await database work
+    between that snapshot and the terminal transition, so a real cookie is
+    authenticated again immediately before the repository's owner predicate.
+    Test-bypass requests have no cookie and still pass through the normal
+    in-memory operator gate.
+    """
+    from config.settings import settings
+    from src.auth.service import AuthFailure, authenticate_token
+
+    auth_cookie = request.cookies.get(settings.operator_auth_cookie_name)
+    if not auth_cookie:
+        return _require_approval_operator(request)
+    try:
+        refreshed = await authenticate_token(auth_cookie, touch=False)
+    except AuthFailure as exc:
+        raise HTTPException(
+            status_code=401,
+            detail={"code": "authentication_required"},
+        ) from exc
+    if refreshed.session_id != expected_operator.session_id:
+        raise HTTPException(
+            status_code=401,
+            detail={"code": "authentication_required"},
+        )
+    request.state.operator = refreshed
+    return _require_approval_operator(request)
+
+
 def _approval_details(request) -> dict:
     if not request.details_json:
         return {}
@@ -85,6 +116,16 @@ def _require_approval_owner(request: Request, approval, operator) -> dict:
 
 def _raise_resolution_conflict(resolution) -> None:
     approval = resolution.request
+    if resolution.reason == "owner_mismatch":
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "code": "approval_owner_mismatch",
+                "id": approval.id if approval is not None else None,
+                "status": approval.status if approval is not None else None,
+                "transitioned": False,
+            },
+        )
     status = approval.status if approval is not None else None
     code = {
         "already_terminal": "approval_already_resolved",
@@ -155,8 +196,14 @@ async def approve_request(approval_id: str, request: Request):
     pending = await approval_repository.get(approval_id)
     if pending is None:
         raise HTTPException(status_code=404, detail="Approval request not found")
+    operator = await _recheck_approval_operator(request, operator)
     details = _require_approval_owner(request, pending, operator)
-    resolution = await approval_repository.resolve_with_metadata(approval_id, "approved")
+    resolution = await approval_repository.resolve_with_metadata(
+        approval_id,
+        "approved",
+        owner_operator_session_id=operator.session_id,
+        owner_principal_id=getattr(operator.principal, "principal_id", None),
+    )
     resolved = resolution.request
     if resolved is None:
         raise HTTPException(status_code=404, detail="Approval request not found")
@@ -194,8 +241,14 @@ async def deny_request(approval_id: str, request: Request):
     pending = await approval_repository.get(approval_id)
     if pending is None:
         raise HTTPException(status_code=404, detail="Approval request not found")
+    operator = await _recheck_approval_operator(request, operator)
     _require_approval_owner(request, pending, operator)
-    resolution = await approval_repository.resolve_with_metadata(approval_id, "denied")
+    resolution = await approval_repository.resolve_with_metadata(
+        approval_id,
+        "denied",
+        owner_operator_session_id=operator.session_id,
+        owner_principal_id=getattr(operator.principal, "principal_id", None),
+    )
     resolved = resolution.request
     if resolved is None:
         raise HTTPException(status_code=404, detail="Approval request not found")

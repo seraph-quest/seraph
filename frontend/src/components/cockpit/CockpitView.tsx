@@ -5988,6 +5988,9 @@ function normalizeWorkflowRun(value: Record<string, unknown>): WorkflowRunRecord
           }
           entries.push({
             id: record.id,
+            workflow_id: typeof record.workflow_id === "string" ? record.workflow_id : null,
+            tool_name: typeof record.tool_name === "string" ? record.tool_name : null,
+            session_id: typeof record.session_id === "string" ? record.session_id : null,
             summary: record.summary,
             riskLevel: typeof record.risk_level === "string" ? record.risk_level : undefined,
             createdAt: record.created_at,

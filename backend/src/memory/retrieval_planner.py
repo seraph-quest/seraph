@@ -226,6 +226,27 @@ def _normalize_provider_claim_value(value: object) -> str:
     return " ".join(value.split())
 
 
+def _normalize_provider_context_records(provider_context: str) -> tuple[str, ...]:
+    """Keep multiline provider claims attached to their record boundary."""
+
+    records: list[str] = []
+    current: list[str] = []
+    for raw_line in provider_context.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        if line.startswith("- ["):
+            if current:
+                records.append(" ".join(current))
+            current = [line]
+            continue
+        if current:
+            current.append(line)
+    if current:
+        records.append(" ".join(current))
+    return tuple(record for record in records if _provider_context_hit(record) is not None)
+
+
 def _suppress_provider_context_conflicts(
     *,
     canonical_context: str,
@@ -234,17 +255,19 @@ def _suppress_provider_context_conflicts(
     """Keep provider context advisory when it does not contradict local canon."""
 
     canonical_hits = _canonical_context_hits(canonical_context)
-    if not canonical_hits or not provider_context.strip():
-        return provider_context, ()
+    provider_records = _normalize_provider_context_records(provider_context)
+    normalized_context = "\n".join(provider_records)
+    if not canonical_hits or not normalized_context:
+        return normalized_context, ()
 
     retained_lines: list[str] = []
     suppressed: list[tuple[str, str]] = []
-    for raw_line in provider_context.splitlines():
-        line = raw_line.strip()
+    for line in provider_records:
         provider_hit = _provider_context_hit(line)
-        if provider_hit is None or not _provider_conflicts_with_canonical(provider_hit, canonical_hits):
-            if line:
-                retained_lines.append(line)
+        if provider_hit is None:
+            continue
+        if not _provider_conflicts_with_canonical(provider_hit, canonical_hits):
+            retained_lines.append(line)
             continue
         suppressed.append((provider_hit.bucket, provider_hit.text))
     return "\n".join(retained_lines), tuple(suppressed)

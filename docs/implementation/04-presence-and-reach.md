@@ -8,6 +8,49 @@
 
 - primary design doc: [06. Presence And Reach](/research/presence-and-reach)
 
+## Branch-local #751 Audio Preflight Contract
+
+The `feat/751-audio-contract` branch adds a **Partial** provider-free
+push-to-talk (PTT) ingress contract in
+[`backend/src/guardian/audio_ingress.py`](../../backend/src/guardian/audio_ingress.py).
+This is branch-local work and is not shipped `develop` truth. It accepts
+server-owned session, message, attachment, and request identities from the
+canonical ingress owner (for example, the #750 web ingress slice), then
+returns typed `accepted`, `blocked`, `degraded`, or `duplicate` results with
+stable reason codes. The pure validator checks standard base64 shape and
+metadata-reported byte count, the 10 MiB audio cap, one stream, the
+MIME/container/codec allowlist, metadata-reported duration up to 60 seconds,
+normalized-WAV metadata up to 2 MiB, separate current capture and cloud-upload
+consent, a raw-audio retention deadline no more than 15 minutes after capture,
+request/attachment identity conflicts, and transcript confirmation before
+non-chat capabilities.
+
+The payload builder emits only the documented OpenRouter `input_audio` content
+shape. It performs no network call, decoding, codec inspection, shell command,
+Whisper/Piper/VLM invocation, local-model fallback, or canonical persistence.
+The default provider state is `unverified`, so an API key, model capability,
+route health, and live consent/runtime proof are required before a later
+adapter can treat a request as accepted for execution. Receipts contain IDs,
+digests, bounded metadata, consent handles, and provider state; raw audio and
+transcripts are explicitly excluded. Duration and normalized-WAV limits remain
+metadata assertions until a governed decoder/attachment owner supplies the
+runtime proof.
+
+`trusted_adapter_id`, `provider_proof_reference`, and
+`consent_proof_reference` are handles supplied by that later trusted adapter;
+the pure validator checks their shape but cannot establish their authenticity
+or perform a live provider/consent check. A `ready` provider without all three
+handles returns `degraded` with `trusted_adapter_proof_required`, so callers
+cannot treat caller-asserted provider or consent metadata as execution proof.
+
+The remaining work is the #750/#751 integration with canonical session,
+attachment, and outbox persistence, governed OpenRouter admission and key/model
+capability checks, actual codec/duration verification, deletion/retention
+execution, browser PTT capture, and live operator receipts. The input shape is
+based on the [OpenRouter audio guide](https://openrouter.ai/docs/guides/overview/multimodal/audio)
+and [speech-to-text input contract](https://openrouter.ai/docs/guides/overview/multimodal/stt),
+accessed 2026-09-10.
+
 ## Shipped On `develop`
 
 - [x] browser-based guardian cockpit as the only supported browser shell

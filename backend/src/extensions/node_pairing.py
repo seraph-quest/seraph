@@ -488,6 +488,61 @@ def _record_matches(entry: PairingReplayEntry, request: NodePairingRequest, dige
     )
 
 
+def _valid_state_shape(state: NodePairingState, policy: NodePairingPolicy) -> bool:
+    """Check the immutable state boundary before reading replay data.
+
+    State normally comes from a typed constructor, but a persisted snapshot or
+    an adapter can still contain malformed runtime values.  Validation must
+    fail closed before iterating ``replay_entries`` or comparing state fields;
+    otherwise a corrupt snapshot can become a server error or a replay bypass.
+    """
+
+    if not isinstance(state, NodePairingState):
+        return False
+    if not _is_identifier(state.device_id) or not _is_identifier(state.pairing_id):
+        return False
+    if not isinstance(state.lifecycle, PairingLifecycleState):
+        return False
+    if state.credential_fingerprint is not None and not _is_fingerprint(state.credential_fingerprint):
+        return False
+    if state.credential_scope_digest is not None and not _is_fingerprint(state.credential_scope_digest):
+        return False
+    if not _is_policy_version(state.policy_version):
+        return False
+    if isinstance(state.last_sequence, bool) or not isinstance(state.last_sequence, int) or state.last_sequence < 0:
+        return False
+    if not isinstance(state.replay_entries, tuple) or len(state.replay_entries) > policy.replay_window:
+        return False
+    seen_request_ids: set[str] = set()
+    seen_digests: set[str] = set()
+    for entry in state.replay_entries:
+        if not isinstance(entry, PairingReplayEntry):
+            return False
+        if not _is_identifier(entry.request_id) or entry.request_id in seen_request_ids:
+            return False
+        if isinstance(entry.sequence, bool) or not isinstance(entry.sequence, int) or not 1 <= entry.sequence <= state.last_sequence:
+            return False
+        if not _is_fingerprint(entry.request_digest) or entry.request_digest in seen_digests:
+            return False
+        if _utc_datetime(entry.accepted_at) is None:
+            return False
+        seen_request_ids.add(entry.request_id)
+        seen_digests.add(entry.request_digest)
+    if not isinstance(state.retired_credential_fingerprints, tuple):
+        return False
+    if len(state.retired_credential_fingerprints) > _MAX_RETIRED_FINGERPRINTS:
+        return False
+    retired = state.retired_credential_fingerprints
+    if any(not _is_fingerprint(value) for value in retired) or len(set(retired)) != len(retired):
+        return False
+    if isinstance(state.generation, bool) or not isinstance(state.generation, int) or state.generation < 0:
+        return False
+    for timestamp in (state.paired_at, state.expires_at, state.revoked_at):
+        if timestamp is not None and _utc_datetime(timestamp) is None:
+            return False
+    return True
+
+
 def validate_pairing_request(
     request: NodePairingRequest,
     state: NodePairingState,
@@ -511,7 +566,7 @@ def validate_pairing_request(
             request, NodePairingRequest
         ) and isinstance(request.content_size, int) and not isinstance(request.content_size, bool) and request.content_size > effective_policy.max_content_bytes else PairingIngressStatus.BLOCKED
         return _result(status, structural_error)
-    if not isinstance(state, NodePairingState):
+    if not isinstance(state, NodePairingState) or not _valid_state_shape(state, effective_policy):
         return _result(PairingIngressStatus.BLOCKED, "invalid_pairing_state")
     digest = canonical_request_digest(request)
     if request.policy_version != effective_policy.policy_version or request.policy_version != state.policy_version:
@@ -688,6 +743,8 @@ def apply_pairing_transition(
         return _transition_result(PairingIngressStatus.BLOCKED, "unknown_pairing_transition", state)
     if not _valid_policy(effective_policy):
         return _transition_result(PairingIngressStatus.BLOCKED, "invalid_policy", state)
+    if not _valid_state_shape(state, effective_policy):
+        return _transition_result(PairingIngressStatus.BLOCKED, "invalid_pairing_state", state)
     if not _is_identifier(state.device_id) or not _is_identifier(state.pairing_id):
         return _transition_result(PairingIngressStatus.BLOCKED, "invalid_pairing_identity", state)
 

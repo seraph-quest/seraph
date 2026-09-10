@@ -172,6 +172,23 @@ def test_replayed_request_id_with_changed_metadata_is_blocked():
     assert conflict.reason_code == "request_id_conflict"
 
 
+@pytest.mark.parametrize(
+    "attribute, value",
+    [
+        ("replay_entries", None),
+        ("replay_entries", (None,)),
+        ("last_sequence", -1),
+        ("last_sequence", True),
+    ],
+)
+def test_malformed_state_is_blocked_before_replay_access(attribute, value):
+    malformed = _state()
+    object.__setattr__(malformed, attribute, value)
+    result = validate_pairing_request(_request(), malformed, now=NOW)
+    assert result.status is PairingIngressStatus.BLOCKED
+    assert result.reason_code == "invalid_pairing_state"
+
+
 def test_revoked_expired_and_unknown_credentials_fail_closed():
     revoked = validate_pairing_request(_request(), _state(lifecycle=PairingLifecycleState.REVOKED), now=NOW)
     assert revoked.status is PairingIngressStatus.REVOKED

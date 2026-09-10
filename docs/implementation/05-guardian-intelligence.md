@@ -156,7 +156,10 @@ adaptation with explicit no-learning execution receipts; it is not silent
 prompt, tool, authority, or harness self-modification.
 The scheduler effect receipt likewise copies the delta identity only from that
 verified service result, so blocked or revoked corrections cannot appear as
-positive provenance merely because a goal target contains an ID.
+positive provenance merely because a goal target contains an ID. A higher
+priority brief blocked specifically by an unresolved correction records its
+blocked admission and yields to the next sorted eligible goal; other blocked
+or failed outcomes stop the bounded tick.
 
 Scheduled child admission binds the work to the strategist occurrence's live
 durable fence before creating or replaying work. The child identity is stable

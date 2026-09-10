@@ -324,3 +324,94 @@ async def test_web_brief_scheduler_uses_corrected_priority_and_evidence():
     assert jobs.record_effect.await_args.kwargs["details"]["priority"] == 90
     assert jobs.record_effect.await_args.kwargs["details"]["strategy_delta_id"] == "delta-high"
     assert jobs.record_effect.await_args.kwargs["details"]["strategy_delta_provenance"] == "verified"
+
+
+@pytest.mark.asyncio
+async def test_web_brief_scheduler_yields_after_unresolved_correction_and_redacts_id():
+    high_criterion = _criterion(
+        {
+            "query": "high corrected priority",
+            "file_path": "briefs/high.md",
+            "priority": 90,
+            "strategy_delta_id": "delta-unresolved",
+        }
+    )
+    low_criterion = _criterion(
+        {
+            "query": "lower valid priority",
+            "file_path": "briefs/low.md",
+            "priority": 10,
+        }
+    )
+    high = SimpleNamespace(
+        id="goal-high-unresolved",
+        revision=2,
+        proactive_enabled=True,
+        success_criterion_json=high_criterion.model_dump_json(),
+        due_date=None,
+        sort_order=0,
+    )
+    low = SimpleNamespace(
+        id="goal-low-valid",
+        revision=2,
+        proactive_enabled=True,
+        success_criterion_json=low_criterion.model_dump_json(),
+        due_date=None,
+        sort_order=1,
+    )
+    jobs = MagicMock()
+    jobs.record_effect = AsyncMock()
+    blocked = WebBriefToFileResult(
+        goal_id=high.id,
+        goal_revision=2,
+        query="high corrected priority",
+        file_path="briefs/high.md",
+        execution_status="blocked",
+        verification="unknown",
+        learning="no_learning",
+        strategy_delta_id="delta-unresolved",
+        strategy_delta_provenance="unresolved",
+        reason="strategy_delta_unresolved",
+    )
+    succeeded = WebBriefToFileResult(
+        goal_id=low.id,
+        goal_revision=2,
+        query="lower valid priority",
+        file_path="briefs/low.md",
+        execution_status="succeeded",
+        verification="passed",
+        learning="no_learning",
+        source_read=True,
+        query_read_back=True,
+        job_id="child-low",
+        artifact_ref="artifact-low",
+        reason="verified",
+    )
+    service = MagicMock()
+    service.run = AsyncMock(side_effect=[blocked, succeeded])
+
+    with (
+        patch(
+            "src.scheduler.jobs.strategist_tick.goal_repository.list_goals",
+            new=AsyncMock(return_value=[low, high]),
+        ),
+        patch("src.scheduler.jobs.strategist_tick.durable_job_repository", jobs),
+        patch("src.scheduler.jobs.strategist_tick.WebBriefToFileService", return_value=service),
+    ):
+        receipt = await _run_opted_in_goal_web_brief(
+            parent_job_id="parent-correction-fallback",
+            parent_fencing_token=3,
+        )
+
+    assert receipt["goal_id"] == low.id
+    assert [call.args[0].query for call in service.run.await_args_list] == [
+        "high corrected priority",
+        "lower valid priority",
+    ]
+    first_details = jobs.record_effect.await_args_list[0].kwargs["details"]
+    assert first_details["status"] == "blocked"
+    assert first_details["reason"] == "strategy_delta_unresolved"
+    assert first_details["strategy_delta_id"] is None
+    assert first_details["strategy_delta_provenance"] == "unresolved"
+    assert first_details["strategy_delta_evidence_ref"] is None
+    assert len(jobs.record_effect.await_args_list) == 2

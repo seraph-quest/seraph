@@ -1,3 +1,4 @@
+from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
@@ -224,6 +225,30 @@ def test_gate_a_baseline_blocks_measurement_when_frozen_corpus_drifts():
     assert receipt["summary"]["measurement_status"] == "blocked"
     assert receipt["summary"]["measurement_binding_status"] == "blocked"
     assert "frozen_corpus_hash_mismatch" in receipt["blocked_reasons"]
+    assert all(item["fixture_status"] == "blocked" for item in receipt["metrics"])
+    assert all(item["observed_status"] == "blocked" for item in receipt["metrics"])
+    assert all(item["observed_value"] is None for item in receipt["metrics"])
+
+
+def test_gate_a_baseline_blocks_metric_fixture_status_when_metric_schema_drifts():
+    metric_names = [item["name"] for item in build_gate_a_baseline_receipt()["metrics"]]
+    original_metrics = gate_a_baseline_module._GATE_A_METRICS
+    drifted_metrics = (
+        replace(original_metrics[0], description="drifted metric description"),
+        *original_metrics[1:],
+    )
+
+    with patch.object(gate_a_baseline_module, "_GATE_A_METRICS", drifted_metrics):
+        receipt = build_gate_a_baseline_receipt(
+            observed_metrics={name: 1.0 for name in metric_names},
+            measurement_receipt=_valid_measurement_receipt(),
+        )
+
+    assert receipt["summary"]["status"] == "blocked"
+    assert receipt["summary"]["artifact_status"] == "blocked"
+    assert receipt["summary"]["measurement_status"] == "blocked"
+    assert "frozen_metric_contract_hash_mismatch" in receipt["blocked_reasons"]
+    assert all(item["fixture_status"] == "blocked" for item in receipt["metrics"])
     assert all(item["observed_status"] == "blocked" for item in receipt["metrics"])
     assert all(item["observed_value"] is None for item in receipt["metrics"])
 

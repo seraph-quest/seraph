@@ -558,7 +558,11 @@ def build_gate_a_baseline_receipt(
         )
         if metric.name == "provenance_coverage":
             item["fixture_coverage"] = float(fixture_coverage["safe_receipt_field_coverage"])
-        item["fixture_status"] = "pass" if item["fixture_coverage"] >= metric.threshold else "blocked"
+        item["fixture_status"] = (
+            "pass"
+            if artifact_valid and item["fixture_coverage"] >= metric.threshold
+            else "blocked"
+        )
         item["observed_value"] = None if measurement_blocked else observed_values.get(metric.name)
         item["observed_status"] = (
             "not_run"

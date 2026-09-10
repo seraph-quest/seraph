@@ -341,6 +341,46 @@ async def test_legacy_projection_cannot_mutate_typed_durable_job(async_db):
         await workflow_state_repository.finish_run(run_identity=typed["job_id"], status="succeeded")
     with pytest.raises(RuntimeError, match="DurableJobRepository"):
         await workflow_state_repository.mark_heartbeat(typed["job_id"])
+    with pytest.raises(RuntimeError, match="DurableJobRepository"):
+        await workflow_state_repository.acquire_or_renew_v2_lease(
+            run_identity=typed["job_id"],
+            owner="legacy-v2-worker",
+            lease_id="legacy-v2-lease",
+        )
+    with pytest.raises(RuntimeError, match="DurableJobRepository"):
+        await workflow_state_repository.build_v2_recovery_plan(
+            run_identity=typed["job_id"],
+            owner="legacy-recovery-worker",
+        )
+
+
+@pytest.mark.asyncio
+async def test_legacy_stale_recovery_skips_typed_jobs(async_db):
+    typed = await durable_job_repository.admit_job(
+        DurableJobSpec(
+            identity=DurableJobIdentity(
+                job_id="typed-stale-recovery-guard",
+                owner_kind="service",
+                owner_principal_id="service:test",
+                job_kind="test_job",
+                capability_version="1",
+                idempotency_scope="test",
+                idempotency_key="typed-stale-recovery-guard",
+            ),
+            inputs={"test": True},
+            declared_authority={"principal": "service:test", "service_id": "service:test"},
+            service_id="service:test",
+        )
+    )
+    await durable_job_repository.queue_job(typed["job_id"])
+    await durable_job_repository.claim_job(typed["job_id"], owner="typed-runner", lease_seconds=1)
+
+    interrupted = await workflow_state_repository.mark_stale_runs_interrupted(older_than_seconds=-1)
+    current = await durable_job_repository.get_job(typed["job_id"])
+
+    assert all(item["run_identity"] != typed["job_id"] for item in interrupted)
+    assert current is not None
+    assert current["status"] == "running"
 
 
 @pytest.mark.asyncio

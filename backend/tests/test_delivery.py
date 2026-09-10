@@ -239,7 +239,10 @@ async def test_native_channel_adapter_can_deliver_queued_bundle_without_websocke
 
         assert delivered == 1
         mock_ws.broadcast.assert_not_called()
-        mock_iq.delete_many.assert_called_once_with(["queued-1"])
+        # Native bundle cleanup is performed by the outbox transaction so a
+        # crash between enqueue and deletion cannot duplicate or lose source
+        # insights.
+        mock_iq.delete_many.assert_not_called()
         notification = await native_notification_queue.peek()
         assert notification is not None
         assert "Queued update" in notification.body
@@ -324,7 +327,7 @@ async def test_native_bundle_delivery_partitions_mixed_sessions_into_separate_no
         assert len(notifications) == 2
         assert {notification.thread_id for notification in notifications} == {"session-123", "session-456"}
         assert {notification.continuation_mode for notification in notifications} == {"resume_thread"}
-        assert mock_iq.delete_many.await_count == 1
+        assert mock_iq.delete_many.await_count == 0
     finally:
         await native_notification_queue.clear()
         for p in patches:
@@ -667,14 +670,15 @@ async def test_deliver_uses_procedural_memory_guidance_when_heuristic_signal_is_
 
         events = await audit_repository.list_events(limit=10)
         assert any(
-            event["event_type"] == "observer_delivery_delivered"
+            event["event_type"] == "observer_delivery_queued"
             and event["details"]["learning_signal_source"] == "heuristic_plus_procedural_memory"
             and event["details"]["learning_channel_bias"] == "prefer_native_notification"
             and event["details"]["learning_blocked_state_bias"] == "prefer_async_for_blocked_state"
             and event["details"]["policy_reason"] == "learned_blocked_state_async"
             and event["details"]["procedural_learning_lesson_types"] == ["channel", "blocked_state"]
             and event["details"]["attempted_connections"] == 1
-            and event["details"]["delivered_connections"] == 1
+            and event["details"]["delivered_connections"] == 0
+            and event["details"]["queued_connections"] == 1
             and event["details"]["failed_connections"] == 0
             for event in events
         )
@@ -751,13 +755,14 @@ async def test_deliver_prefers_native_transport_when_procedural_memory_promotes_
 
         events = await audit_repository.list_events(limit=10)
         assert any(
-            event["event_type"] == "observer_delivery_delivered"
+            event["event_type"] == "observer_delivery_queued"
             and event["details"]["transport"] == "native_notification"
             and event["details"]["learning_signal_source"] == "heuristic_plus_procedural_memory"
             and event["details"]["transport_order"] == ["native_notification", "websocket"]
             and event["details"]["transport_order_adjustment"] == "learned_native_channel_preference"
             and event["details"]["attempted_connections"] == 1
-            and event["details"]["delivered_connections"] == 1
+            and event["details"]["delivered_connections"] == 0
+            and event["details"]["queued_connections"] == 1
             and event["details"]["failed_connections"] == 0
             for event in events
         )
@@ -1392,10 +1397,11 @@ async def test_acknowledged_native_feedback_can_lower_notification_threshold(asy
 
         events = await audit_repository.list_events(limit=10)
         assert any(
-            event["event_type"] == "observer_delivery_delivered"
+            event["event_type"] == "observer_delivery_queued"
             and event["details"]["transport"] == "native_notification"
             and event["details"]["learning_channel_bias"] == "prefer_native_notification"
-            and event["details"]["delivered_connections"] == 1
+            and event["details"]["delivered_connections"] == 0
+            and event["details"]["queued_connections"] == 1
             for event in events
         )
     finally:
@@ -1570,21 +1576,22 @@ async def test_delivery_reroutes_to_native_notification_when_daemon_connected(as
         assert decision.action == InterventionAction.act
         assert await native_notification_queue.count() == 1
         mock_iq.enqueue.assert_not_called()
-        mock_cm.decrement_attention_budget.assert_called_once()
+        mock_cm.decrement_attention_budget.assert_not_called()
         assert intervention is not None
         assert intervention.transport == "native_notification"
-        assert intervention.latest_outcome == "delivered"
+        assert intervention.latest_outcome == "queued"
         assert intervention.notification_id is not None
 
         events = await audit_repository.list_events(limit=10)
         assert any(
-            event["event_type"] == "observer_delivery_delivered"
+            event["event_type"] == "observer_delivery_queued"
             and event["tool_name"] == "observer_delivery_gate"
             and event["details"]["transport"] == "native_notification"
             and event["details"]["notification_id"] is not None
             and event["details"]["intervention_id"] == msg.intervention_id
             and event["details"]["attempted_connections"] == 1
-            and event["details"]["delivered_connections"] == 1
+            and event["details"]["delivered_connections"] == 0
+            and event["details"]["queued_connections"] == 1
             and event["details"]["failed_connections"] == 0
             for event in events
         )

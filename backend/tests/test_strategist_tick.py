@@ -278,7 +278,18 @@ async def test_strategist_tick_logs_skip(async_db):
 async def test_strategist_tick_logs_success(async_db):
     mock_cm = MagicMock()
     mock_cm.refresh = AsyncMock(return_value=_make_context())
-    mock_deliver = AsyncMock(return_value=DeliveryDecision.deliver)
+
+    async def assert_delivery_has_durable_intent(_message, **_kwargs):
+        current = await durable_job_repository.get_job(_occurrence_identity())
+        assert current is not None
+        delivery_intent = next(
+            item for item in current["effects"] if item.get("effect_type") == "proactive_delivery"
+        )
+        assert delivery_intent["status"] == "intent"
+        assert delivery_intent["adapter_idempotency_key"] == f"strategist-delivery:{_occurrence_identity()}"
+        return DeliveryDecision.deliver
+
+    mock_deliver = AsyncMock(side_effect=assert_delivery_has_durable_intent)
 
     with (
         patch("src.scheduler.jobs.strategist_tick.build_guardian_state", AsyncMock(return_value=_make_guardian_state())),

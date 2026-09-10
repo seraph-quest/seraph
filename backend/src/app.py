@@ -15,7 +15,11 @@ from src.extensions.registry import default_manifest_roots_for_workspace
 from src.llm_logger import init_llm_logging
 from src.llm_runtime import effective_runtime_model_id, provider_profile_statuses, provider_profiles, resolve_runtime_profile
 from src.memory.soul import ensure_soul_exists
-from src.model_fabric.configuration import effective_workload_policy
+from src.model_fabric.configuration import (
+    OPENROUTER_VAULT_CREDENTIAL_REF,
+    effective_workload_policy,
+    read_model_fabric_configuration,
+)
 from src.model_fabric.remote_inference_admission import remote_inference_admission_broker
 from src.operators.local_codex import ExternalAgentRuntimeRemovedError, reject_legacy_external_agent_model
 from src.runbooks.manager import runbook_manager
@@ -184,23 +188,68 @@ def _effective_runtime_route_status(runtime: dict[str, str], vlm_status: dict[st
 
     provider_label = provider or "unknown"
     policy = effective_workload_policy("chat_agent")
+    persisted = read_model_fabric_configuration()
+    setup = persisted.openrouter_setup if persisted.status == "ready" else None
+    # Once the operator has saved the canonical setup, its controls own the
+    # readiness receipt.  Legacy environment/settings values remain useful for
+    # historical readback but cannot make an active persisted route appear
+    # ready or blocked.
+    provider_only = True if setup is not None else bool(
+        getattr(settings, "openrouter_provider_only", True)
+    )
+    configured_key = (
+        str(settings.openrouter_api_key or "").strip()
+        if setup is not None and setup.credential_ref == OPENROUTER_VAULT_CREDENTIAL_REF
+        else str(settings.openrouter_api_key or os.getenv("OPENROUTER_API_KEY", "") or "").strip()
+    )
+    allowed_upstreams = (
+        tuple(setup.allowed_upstreams)
+        if setup is not None
+        else tuple(
+            item.strip()
+            for item in str(getattr(settings, "openrouter_allowed_upstreams", "") or "").split(",")
+            if item.strip()
+        )
+    )
+    allow_fallbacks = (
+        bool(setup.allow_fallbacks)
+        if setup is not None
+        else bool(getattr(settings, "openrouter_allow_fallbacks", False))
+    )
+    require_parameters = (
+        bool(setup.require_parameters)
+        if setup is not None
+        else bool(getattr(settings, "openrouter_require_parameters", True))
+    )
+    data_collection = (
+        setup.data_collection
+        if setup is not None
+        else str(getattr(settings, "openrouter_data_collection", "deny") or "deny")
+    )
+    data_retention_policy = (
+        setup.data_retention_policy
+        if setup is not None
+        else str(getattr(settings, "openrouter_data_retention_policy", "deny") or "deny")
+    )
     readiness_reasons: list[str] = []
-    if not bool(getattr(settings, "openrouter_provider_only", True)):
+    if not provider_only:
         readiness_reasons.append("openrouter_only_mode_disabled")
     if provider != "openrouter":
         readiness_reasons.append("openrouter_profile_not_active")
     if str(runtime.get("api_base") or "").rstrip("/") != "https://openrouter.ai/api/v1":
         readiness_reasons.append("openrouter_api_base_not_canonical")
-    if not settings.openrouter_api_key.strip():
+    if not configured_key:
         readiness_reasons.append("openrouter_api_key_missing")
-    if not settings.openrouter_allowed_upstreams.strip():
+    if not allowed_upstreams:
         readiness_reasons.append("openrouter_upstream_allowlist_missing")
-    if settings.openrouter_allow_fallbacks:
+    if allow_fallbacks:
         readiness_reasons.append("openrouter_fallbacks_enabled")
-    if not settings.openrouter_require_parameters:
+    if not require_parameters:
         readiness_reasons.append("openrouter_parameter_requirement_disabled")
-    if settings.openrouter_data_collection != "deny":
+    if data_collection != "deny":
         readiness_reasons.append("openrouter_data_policy_not_deny")
+    if data_retention_policy != "deny":
+        readiness_reasons.append("openrouter_retention_policy_not_deny")
     if policy.egress_class is EgressClass.LOCAL_ONLY:
         readiness_reasons.append("chat_cloud_egress_not_allowed")
     if not policy.cloud_egress_acknowledged:
@@ -228,7 +277,7 @@ def _effective_runtime_route_status(runtime: dict[str, str], vlm_status: dict[st
             "status": "ready" if inference_ready else "configuration_required",
             "reasons": readiness_reasons,
             "provider": "openrouter",
-            "active_only": bool(getattr(settings, "openrouter_provider_only", True)),
+            "active_only": provider_only,
             "cloud_egress": policy.egress_class.value,
             "cloud_consent": bool(policy.cloud_egress_acknowledged),
             "cost_ceiling_microusd": policy.max_cost_microusd,
@@ -301,6 +350,19 @@ async def lifespan(app: FastAPI):
         workspace_owner = runtime_workspace_owner(settings.workspace_dir)
         workspace_owner.__enter__()
     await init_db()
+    # Hydrate the trusted OpenRouter vault credential before any scheduler or
+    # canonical inference path resolves a provider profile.  Failure remains
+    # visible as configuration_required through the normal status surfaces;
+    # the exception is never allowed to trigger a provider call.
+    try:
+        from src.model_fabric.configuration import hydrate_openrouter_credential
+
+        await hydrate_openrouter_credential()
+    except Exception:
+        logging.getLogger(__name__).warning(
+            "OpenRouter credential hydration failed; inference remains fail-closed",
+            exc_info=True,
+        )
     # Recover expired durable invocation leases before scheduler jobs can
     # observe an old ``running`` occurrence and incorrectly skip it.  Recovery
     # is fail-closed and operator-visible; a failed recovery is not hidden as

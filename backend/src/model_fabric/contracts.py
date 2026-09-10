@@ -171,6 +171,10 @@ class InferenceRequestContext:
     allowed_provider_kinds: tuple[str, ...] = ()
     requested_profile_id: str = ""
     redaction_applied: bool = False
+    # Admission metadata is derived by the trusted caller from the effective
+    # persisted policy.  It never comes from model payload or browser input.
+    estimated_cost_microusd: int | None = None
+    owner_budget_microusd: int | None = None
 
 
 @dataclass(frozen=True)
@@ -333,7 +337,7 @@ def finalized_openai_compatible_body(
     body = {
         key: value
         for key, value in (options or {}).items()
-        if key not in _OPENAI_COMPATIBLE_RESERVED_FIELDS
+        if key not in _OPENAI_COMPATIBLE_RESERVED_FIELDS and not str(key).startswith("_seraph_")
     }
     body.update(
         {
@@ -365,7 +369,7 @@ def finalized_openai_compatible_embeddings_body(
     body = {
         key: value
         for key, value in (options or {}).items()
-        if key not in _OPENAI_COMPATIBLE_EMBEDDING_RESERVED_FIELDS
+        if key not in _OPENAI_COMPATIBLE_EMBEDDING_RESERVED_FIELDS and not str(key).startswith("_seraph_")
     }
     body.update(
         {

@@ -68,6 +68,38 @@ export interface ModelFabricRuntimeStatus {
   topology: { text: string[]; vlm: string[] };
   runtime_paths: Record<string, ModelFabricWorkloadStatus>;
   workloads: Record<string, ModelFabricWorkloadStatus>;
+  openrouter_setup?: OpenRouterSetupStatus | null;
+}
+
+export interface OpenRouterSetupStatus {
+  schema_version: string;
+  profile_id: string;
+  api_base: string;
+  provider_kind: string;
+  model_ids: string[];
+  capabilities: string[];
+  temperature: number;
+  max_output_tokens: number;
+  timeout_seconds: number;
+  allowed_upstreams: string[];
+  allow_fallbacks: boolean;
+  require_parameters: boolean;
+  data_collection: string;
+  data_retention_policy: string;
+  zero_data_retention: boolean;
+  egress_class: string;
+  cloud_egress_acknowledged: boolean;
+  spend_ceiling_microusd: number | null;
+  max_queued: number;
+  max_inflight: number;
+  max_outstanding_per_owner: number;
+  max_retries: number;
+  credential_ref: string;
+  credential_fingerprint: string | null;
+  credential_configured: boolean;
+  status: string;
+  error_code: string | null;
+  provider_calls: string;
 }
 
 export interface ModelFabricSettingsStatus {
@@ -89,6 +121,7 @@ export interface ModelFabricSettingsStatus {
   }>;
   defaults: { egress_class: string; fallback_allowed: boolean };
   canary_endpoint: string;
+  openrouter_setup?: OpenRouterSetupStatus | null;
 }
 
 export interface ModelFabricCanaryResult {
@@ -135,6 +168,47 @@ function recordOf(value: unknown): Record<string, unknown> | null {
 
 function stringArray(value: unknown): string[] {
   return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
+}
+
+function normalizeOpenRouterSetup(value: unknown): OpenRouterSetupStatus | null {
+  const record = recordOf(value);
+  if (!record || typeof record.profile_id !== "string") return null;
+  return {
+    schema_version: typeof record.schema_version === "string" ? record.schema_version : "unknown",
+    profile_id: record.profile_id,
+    api_base: typeof record.api_base === "string" ? record.api_base : "",
+    provider_kind: typeof record.provider_kind === "string" ? record.provider_kind : "openrouter",
+    model_ids: stringArray(record.model_ids),
+    capabilities: stringArray(record.capabilities),
+    temperature: typeof record.temperature === "number" ? record.temperature : 0.7,
+    max_output_tokens: typeof record.max_output_tokens === "number" ? record.max_output_tokens : 4096,
+    timeout_seconds: typeof record.timeout_seconds === "number" ? record.timeout_seconds : 120,
+    allowed_upstreams: stringArray(record.allowed_upstreams),
+    allow_fallbacks: record.allow_fallbacks === true,
+    require_parameters: record.require_parameters !== false,
+    data_collection: typeof record.data_collection === "string" ? record.data_collection : "unknown",
+    data_retention_policy: typeof record.data_retention_policy === "string" ? record.data_retention_policy : "unknown",
+    zero_data_retention: record.zero_data_retention === true,
+    egress_class: typeof record.egress_class === "string" ? record.egress_class : "unknown",
+    cloud_egress_acknowledged: record.cloud_egress_acknowledged === true,
+    spend_ceiling_microusd: typeof record.spend_ceiling_microusd === "number"
+      ? record.spend_ceiling_microusd
+      : null,
+    max_queued: typeof record.max_queued === "number" ? record.max_queued : 64,
+    max_inflight: typeof record.max_inflight === "number" ? record.max_inflight : 1,
+    max_outstanding_per_owner: typeof record.max_outstanding_per_owner === "number"
+      ? record.max_outstanding_per_owner
+      : 16,
+    max_retries: typeof record.max_retries === "number" ? record.max_retries : 2,
+    credential_ref: typeof record.credential_ref === "string" ? record.credential_ref : "vault:openrouter_api_key",
+    credential_fingerprint: typeof record.credential_fingerprint === "string"
+      ? record.credential_fingerprint
+      : null,
+    credential_configured: record.credential_configured === true,
+    status: typeof record.status === "string" ? record.status : "configuration_required",
+    error_code: typeof record.error_code === "string" ? record.error_code : null,
+    provider_calls: typeof record.provider_calls === "string" ? record.provider_calls : "manual_canary_only",
+  };
 }
 
 function normalizeProfile(value: unknown): ModelFabricProfileStatus | null {
@@ -254,6 +328,7 @@ export function normalizeModelFabricRuntime(value: unknown): ModelFabricRuntimeS
     },
     runtime_paths,
     workloads,
+    openrouter_setup: normalizeOpenRouterSetup(record.openrouter_setup),
   };
 }
 
@@ -294,6 +369,7 @@ export function normalizeModelFabricSettings(value: unknown): ModelFabricSetting
     canary_endpoint: typeof record.canary_endpoint === "string"
       ? record.canary_endpoint
       : "/api/settings/model-fabric/canary",
+    openrouter_setup: normalizeOpenRouterSetup(record.openrouter_setup),
   };
 }
 

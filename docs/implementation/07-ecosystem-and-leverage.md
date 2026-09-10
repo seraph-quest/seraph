@@ -146,6 +146,54 @@
 
 ## Extension Platform Execution Rules
 
+### Branch-local capability-pack v2 contract (#755)
+
+The #755 branch adds a local, review-gated capability-pack v2 contract behind
+the existing extension package seam.  A v2 manifest declares provider-neutral
+`resources.inference_priority`, a nonnegative finite
+`resources.max_inference_cost_microusd`, typed contribution paths, dependency
+constraints, authority scopes, data egress, and declarative lifecycle hooks.
+`resources.gpu_class` is migration-only: the explicit v1 migration maps known
+values, defaults remote spend and cloud egress to zero/empty, and always
+requires fresh review.  Unknown or mixed v1/v2 fields are rejected.
+
+Review records bind one immutable package digest, version, goal, compatibility,
+dependency digest set, authority digest, and local review ID.  Every lifecycle
+action requires a durable operator approval bound to the exact action, goal,
+digest, and authority/egress delta.  Activation, pause, update, revoke,
+uninstall, rollback, bounded job cancellation, and the atomic active-version
+pointer retain canonical lifecycle receipts.  The state transaction uses an
+OS lock and atomic replacement; platforms without that lock fail closed.
+Initial activation binds the complete authority/egress delta from an empty
+baseline; update and rollback bind the exact current-to-target delta.  Pack jobs
+also require `authority.approval: always` at execution-contract admission.
+Local signature metadata is compared with the package digest when available;
+it provides integrity/provenance bookkeeping and does not establish publisher
+trust.
+
+The production primary/secondary canary entry points are explicitly blocked
+with `governed_runtime_adapter_unavailable` because this branch has no wired
+#743 durable-job/#744 admission/#747 capability-runtime adapter.  The
+`run_deterministic_*_canary` methods are test-only proof seams: they use no
+runner callback, write bounded readback artifacts, and report
+`provider_calls: 0`, `live_network_calls: 0`, and `memory.status: no_learning`.
+They never invoke a provider or a live OpenRouter endpoint.  This remains
+branch-local and experimental until the Epic review and merge receipts land
+on `develop`.
+
+Validate the v2 example with:
+
+```bash
+python3 scripts/extensions/validate_pack.py examples/extensions/research-pack-v2
+```
+
+The exact #755 focused backend command remains the owner of the legacy
+extension regression suites and the branch-local v2 tests.  No API key or
+provider credential is required for those tests.  A future runtime adapter
+must consume the emitted priority, finite cost ceiling, artifact limit,
+deadline, cancellation, and idempotency fields through the canonical durable
+job repository before any provider work is admitted.
+
 - every numbered item below is an internal PR-sized slice, even if multiple slices are later batched into one GitHub PR
 - each slice must end with a subagent review pass for bugs, missing tests, design drift, and hallucinated assumptions before it is marked complete
 - public docs, scaffolding scripts, validation tooling, and a canonical example pack are part of the architecture transition itself, not follow-up polish

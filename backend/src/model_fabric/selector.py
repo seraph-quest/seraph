@@ -57,6 +57,7 @@ OPENROUTER_PROVIDER_POLICY_REASON = "openrouter_provider_policy_missing"
 OPENROUTER_UPSTREAMS_REASON = "openrouter_upstream_allowlist_missing"
 OPENROUTER_PARAMETERS_REASON = "openrouter_parameters_required"
 OPENROUTER_DATA_POLICY_REASON = "openrouter_data_policy_missing"
+OPENROUTER_RETENTION_POLICY_REASON = "openrouter_retention_policy_missing"
 OPENROUTER_ZDR_REASON = "openrouter_zdr_required_for_vision"
 OPENROUTER_MODEL_REASON = "openrouter_model_not_qualified"
 OPENROUTER_TARGET_MODEL_REASON = "openrouter_model_not_allowed"
@@ -146,6 +147,8 @@ def active_provider_exclusion_reason(profile: ProviderProfile) -> str | None:
         return OPENROUTER_PARAMETERS_REASON
     if provider_policy.get("data_collection") != "deny":
         return OPENROUTER_DATA_POLICY_REASON
+    if provider_policy.get("data_retention_policy", "deny") != "deny":
+        return OPENROUTER_RETENTION_POLICY_REASON
     if "vision" in profile.capabilities and provider_policy.get("zdr") is not True:
         return OPENROUTER_ZDR_REASON
     return None

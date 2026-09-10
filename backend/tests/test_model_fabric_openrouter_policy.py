@@ -225,6 +225,20 @@ def test_active_openrouter_profile_rejects_redirect_following():
             },
             "openrouter_data_policy_missing",
         ),
+        (
+            {
+                "options": {
+                    "provider": {
+                        "only": ["anthropic"],
+                        "allow_fallbacks": False,
+                        "require_parameters": True,
+                        "data_collection": "deny",
+                        "data_retention_policy": "allow",
+                    }
+                }
+            },
+            "openrouter_retention_policy_missing",
+        ),
     ],
 )
 def test_active_openrouter_profile_requires_explicit_route_policy(changes, reason):

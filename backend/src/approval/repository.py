@@ -3,8 +3,9 @@
 import hashlib
 import json
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Mapping
 
+from sqlalchemy import update
 from sqlmodel import select, col
 
 from src.db.engine import get_session
@@ -184,6 +185,178 @@ class ApprovalRepository:
             request.resolved_at = datetime.now(timezone.utc)
             db.add(request)
             return True
+
+    async def consume_approved_for_resume(
+        self,
+        *,
+        approval_id: str,
+        owner_operator_session_id: str,
+        operator_principal_id: str,
+        job_id: str,
+        owner_kind: str,
+        owner_principal_id: str,
+        service_id: str | None,
+        authority_digest: str,
+        goal_id: str | None,
+        goal_revision: int | None,
+        plan_revision: int | None,
+        capability_version: str,
+        budget_digest: str,
+        expires_at: float,
+        db: Any | None = None,
+    ) -> dict[str, Any] | None:
+        """Consume one current, authenticated approval for durable resume.
+
+        The durable resume route must use the actual ``ApprovalRequest`` row.
+        Caller-supplied approval fields are only a proposed binding; every
+        immutable job/authority field is compared with the typed details that
+        were persisted on that row before the conditional approved->consumed
+        write.  Missing durable fields fail closed instead of becoming a
+        synthetic approval mapping.
+        """
+        if db is None:
+            async with get_session() as session:
+                return await self._consume_approved_for_resume_in_session(
+                    session,
+                    approval_id=approval_id,
+                    owner_operator_session_id=owner_operator_session_id,
+                    operator_principal_id=operator_principal_id,
+                    job_id=job_id,
+                    owner_kind=owner_kind,
+                    owner_principal_id=owner_principal_id,
+                    service_id=service_id,
+                    authority_digest=authority_digest,
+                    goal_id=goal_id,
+                    goal_revision=goal_revision,
+                    plan_revision=plan_revision,
+                    capability_version=capability_version,
+                    budget_digest=budget_digest,
+                    expires_at=expires_at,
+                )
+        return await self._consume_approved_for_resume_in_session(
+            db,
+            approval_id=approval_id,
+            owner_operator_session_id=owner_operator_session_id,
+            operator_principal_id=operator_principal_id,
+            job_id=job_id,
+            owner_kind=owner_kind,
+            owner_principal_id=owner_principal_id,
+            service_id=service_id,
+            authority_digest=authority_digest,
+            goal_id=goal_id,
+            goal_revision=goal_revision,
+            plan_revision=plan_revision,
+            capability_version=capability_version,
+            budget_digest=budget_digest,
+            expires_at=expires_at,
+        )
+
+    async def _consume_approved_for_resume_in_session(
+        self,
+        db: Any,
+        *,
+        approval_id: str,
+        owner_operator_session_id: str,
+        operator_principal_id: str,
+        job_id: str,
+        owner_kind: str,
+        owner_principal_id: str,
+        service_id: str | None,
+        authority_digest: str,
+        goal_id: str | None,
+        goal_revision: int | None,
+        plan_revision: int | None,
+        capability_version: str,
+        budget_digest: str,
+        expires_at: float,
+    ) -> dict[str, Any] | None:
+        try:
+            expires_at = float(expires_at)
+        except (TypeError, ValueError, OverflowError):
+            return None
+        if not approval_id or not owner_operator_session_id or not operator_principal_id:
+            return None
+        result = await db.execute(
+                select(ApprovalRequest).where(
+                    ApprovalRequest.id == approval_id,
+                    ApprovalRequest.status == "approved",
+                )
+            )
+        request = result.scalars().first()
+        if request is None or not _approval_belongs_to_operator_session(
+            request,
+            owner_operator_session_id,
+        ):
+            return None
+        try:
+            details = json.loads(request.details_json) if request.details_json else {}
+        except (TypeError, ValueError):
+            return None
+        if not isinstance(details, Mapping):
+            return None
+
+        def detail(*names: str) -> Any:
+            for name in names:
+                if name in details:
+                    return details[name]
+            return None
+
+        required_bindings = (
+            ("job_id", job_id, ("durable_job_id", "job_id")),
+            ("owner_kind", owner_kind, ("durable_owner_kind", "owner_kind")),
+            ("owner_principal_id", owner_principal_id, ("durable_owner_principal_id", "owner_principal_id")),
+            ("service_id", service_id, ("durable_service_id", "service_id")),
+            ("authority_digest", authority_digest, ("durable_authority_digest", "authority_digest")),
+            ("goal_id", goal_id, ("durable_goal_id", "goal_id")),
+            ("goal_revision", goal_revision, ("durable_goal_revision", "goal_revision")),
+            ("plan_revision", plan_revision, ("durable_plan_revision", "plan_revision")),
+            ("capability_version", capability_version, ("durable_capability_version", "capability_version")),
+            ("budget_digest", budget_digest, ("durable_budget_digest", "budget_digest")),
+        )
+        for _field_name, expected, names in required_bindings:
+            observed = detail(*names)
+            if observed is None:
+                return None
+            if _field_name in {"goal_revision", "plan_revision"}:
+                try:
+                    observed = int(observed)
+                except (TypeError, ValueError):
+                    return None
+            if observed != expected:
+                return None
+        observed_operator = str(
+            detail("approval_operator_principal_id", "operator_principal_id") or ""
+        ).strip()
+        if observed_operator != str(operator_principal_id).strip():
+            return None
+        observed_approval_id = str(detail("durable_approval_id", "approval_id") or "").strip()
+        if observed_approval_id != approval_id:
+            return None
+        try:
+            observed_expires = float(detail("approval_expires_at", "expires_at"))
+        except (TypeError, ValueError, OverflowError):
+            return None
+        if observed_expires != expires_at or observed_expires <= datetime.now(timezone.utc).timestamp():
+            return None
+
+        consumed = await db.execute(
+            update(ApprovalRequest)
+            .where(
+                ApprovalRequest.id == approval_id,
+                ApprovalRequest.status == "approved",
+            )
+            .values(status="consumed", resolved_at=datetime.now(timezone.utc))
+        )
+        if getattr(consumed, "rowcount", None) != 1:
+            return None
+        return {
+            "approval_id": request.id,
+            "status": "consumed",
+            "session_id": request.session_id,
+            "tool_name": request.tool_name,
+            "fingerprint": request.fingerprint,
+            "details": dict(details),
+        }
 
     async def has_approved(
         self,

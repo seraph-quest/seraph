@@ -1467,6 +1467,47 @@ class GoalSnapshotToFileAdapter:
                 fencing_token=fencing_token,
             )
 
+        # The governed workflow includes ``write_file``. Persist one stable
+        # external-effect identity before invoking it so a crash between the
+        # tool's write and its result cannot leave an empty durable ledger.
+        workflow_effect_id = "workflow_invocation:" + _safe_digest(
+            {
+                "job_id": job_id,
+                "workflow": self._workflow_identifier(),
+                "target_path": path,
+            }
+        )[:24]
+        workflow_target_digest = _safe_digest(
+            {
+                "workflow": self._workflow_identifier(),
+                "target_path": path,
+                "goal_id": candidate.goal_id,
+                "goal_revision": candidate.goal_revision,
+            }
+        )
+        workflow_intent = await self._record_effect(
+            job_id,
+            effect_id=workflow_effect_id,
+            effect_type="workflow_invocation",
+            target_path=path,
+            target_digest=workflow_target_digest,
+            status="intent",
+            details={
+                "workflow_name": self._workflow_identifier(),
+                "workflow_binding": workflow_binding,
+                "target_digest_kind": "workflow_request_binding",
+            },
+            owner=runner_owner,
+            fencing_token=fencing_token,
+        )
+        if workflow_intent is None:
+            return await self._block_job(
+                job_id,
+                reason="workflow_intent_receipt_failed",
+                owner=runner_owner,
+                fencing_token=fencing_token,
+            )
+
         try:
             raw_result, workflow_audit = await self._invoke_workflow(
                 workflow_tool,
@@ -1479,8 +1520,11 @@ class GoalSnapshotToFileAdapter:
             if type(exc).__name__ == "ApprovalRequired":
                 approval_effect = await self._record_effect(
                     job_id,
+                    effect_id=workflow_effect_id,
                     effect_type="workflow_invocation",
-                    status="blocked",
+                    target_path=path,
+                    target_digest=workflow_target_digest,
+                    status="unknown",
                     details={
                         "workflow_name": self._workflow_identifier(),
                         "reason": "approval_required",
@@ -1513,8 +1557,11 @@ class GoalSnapshotToFileAdapter:
             workflow_failure_reason = f"workflow_failed:{type(exc).__name__}"
             failure_effect = await self._record_effect(
                 job_id,
+                effect_id=workflow_effect_id,
                 effect_type="workflow_invocation",
-                status="failed",
+                target_path=path,
+                target_digest=workflow_target_digest,
+                status="unknown",
                 details={
                     "workflow_name": self._workflow_identifier(),
                     "error_type": type(exc).__name__,
@@ -1539,8 +1586,11 @@ class GoalSnapshotToFileAdapter:
 
         invocation_effect = await self._record_effect(
             job_id,
+            effect_id=workflow_effect_id,
             effect_type="workflow_invocation",
-            status="failed" if _text(raw_result).startswith("Error:") else "succeeded",
+            target_path=path,
+            target_digest=workflow_target_digest,
+            status="unknown" if _text(raw_result).startswith("Error:") else "dispatched",
             details={
                 "workflow_name": self._workflow_identifier(),
                 "workflow_binding": workflow_binding,
@@ -1573,6 +1623,9 @@ class GoalSnapshotToFileAdapter:
                 readback,
                 owner=runner_owner,
                 fencing_token=fencing_token,
+                effect_id=workflow_effect_id,
+                effect_type="workflow_invocation",
+                target_digest=workflow_target_digest,
             )
             reason = readback.reason or "output_readback_failed"
             if readback_receipt is None:
@@ -1632,6 +1685,9 @@ class GoalSnapshotToFileAdapter:
             readback,
             owner=runner_owner,
             fencing_token=fencing_token,
+            effect_id=workflow_effect_id,
+            effect_type="workflow_invocation",
+            target_digest=workflow_target_digest,
         )
         if readback_receipt is None:
             return await self._block_job(
@@ -1957,6 +2013,12 @@ class GoalSnapshotToFileAdapter:
             "goal_id_read_back": readback.goal_id_read_back,
             "reason": readback.reason,
             "goal_id_digest": _safe_digest({"goal_id": self.request.goal_id}),
+            "verified": bool(
+                readback.output_exists
+                and readback.workspace_contained
+                and readback.goal_id_read_back
+                and readback.content is not None
+            ),
         }
         try:
             if hasattr(self.jobs, "record_readback"):

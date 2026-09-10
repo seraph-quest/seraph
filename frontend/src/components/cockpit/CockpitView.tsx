@@ -5700,7 +5700,7 @@ interface WorkflowCheckpointHistoryEntry {
   sourceWorkflow: WorkflowRunRecord;
   scopeLabel: string;
   draft: string;
-  actionHandle?: Record<string, unknown>;
+  actionHandle?: Record<string, unknown> | null;
 }
 
 interface WorkflowLineageEventEntry {

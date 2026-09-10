@@ -432,6 +432,9 @@ def _openrouter_policy_options(*, vision: bool = False) -> dict[str, object]:
             "allow_fallbacks": bool(getattr(settings, "openrouter_allow_fallbacks", False)),
             "require_parameters": bool(getattr(settings, "openrouter_require_parameters", True)),
             "data_collection": str(getattr(settings, "openrouter_data_collection", "deny") or "deny"),
+            "data_retention_policy": str(
+                getattr(settings, "openrouter_data_retention_policy", "deny") or "deny"
+            ),
             "zdr": bool(getattr(settings, "openrouter_zero_data_retention", False)) if vision else True,
         }
     }
@@ -1284,6 +1287,40 @@ def _profile_options(profile: str) -> dict[str, Any]:
     return dict(provider_profile.options or {})
 
 
+def _openrouter_runtime_controls(profile: str | None) -> dict[str, Any]:
+    """Return private, persisted controls for the active OpenRouter profile."""
+    provider_profile = _provider_profile(profile)
+    if provider_profile is None or provider_profile.provider_kind != "openrouter":
+        return {}
+    options = provider_profile.options or {}
+    controls = options.get("_seraph_openrouter")
+    return dict(controls) if isinstance(controls, dict) else {}
+
+
+def _apply_openrouter_runtime_controls(
+    kwargs: dict[str, Any],
+    *,
+    profile: str | None,
+    requested_max_tokens: int,
+) -> dict[str, Any]:
+    """Make setup values actual request authority, with caller limits narrowing."""
+    controls = _openrouter_runtime_controls(profile)
+    if not controls:
+        return kwargs
+    effective_model = str(_profile_model_id(str(profile)) or "")
+    if "model" in kwargs:
+        kwargs["model"] = effective_model
+    else:
+        kwargs["model_id"] = effective_model
+    kwargs["temperature"] = float(controls["temperature"])
+    kwargs["max_tokens"] = min(
+        int(requested_max_tokens),
+        int(controls["output_limit"]),
+    )
+    kwargs["timeout"] = float(controls["timeout_seconds"])
+    return kwargs
+
+
 def fallback_model_ids(*, runtime_path: str | None = None) -> list[str]:
     """Return the ordered list of configured fallback model ids."""
     runtime_override_ids: list[str] = []
@@ -1373,6 +1410,11 @@ def build_model_kwargs(
         "runtime_path": runtime_path,
     }
     kwargs.update(_transport_options(_profile_options(resolved_profile)))
+    _apply_openrouter_runtime_controls(
+        kwargs,
+        profile=resolved_profile,
+        requested_max_tokens=max_tokens,
+    )
     _apply_local_runtime_request_metadata(kwargs, resolved_profile)
     api_key = _profile_api_key(resolved_profile)
     if api_key:
@@ -1437,6 +1479,11 @@ def build_completion_kwargs(
             "max_tokens": _effective_max_tokens_for_profile(max_tokens, resolved_profile),
         }
         kwargs.update(_transport_options(_profile_options(resolved_profile)))
+        _apply_openrouter_runtime_controls(
+            kwargs,
+            profile=resolved_profile,
+            requested_max_tokens=max_tokens,
+        )
         _apply_local_runtime_request_metadata(kwargs, resolved_profile)
         api_key = _profile_api_key(resolved_profile)
         api_base = _profile_api_base(resolved_profile)
@@ -1482,7 +1529,17 @@ def _transport_json_value(value: Any) -> Any:
 
 
 _TRANSPORT_RESERVED_KWARGS = frozenset(
-    {"model", "model_id", "messages", "api_key", "api_base", "temperature", "max_tokens", "stream"}
+    {
+        "model",
+        "model_id",
+        "messages",
+        "api_key",
+        "api_base",
+        "temperature",
+        "max_tokens",
+        "stream",
+        "timeout",
+    }
 )
 
 
@@ -1490,7 +1547,7 @@ def _transport_options(kwargs: dict[str, Any]) -> dict[str, Any]:
     return {
         key: value
         for key, value in kwargs.items()
-        if key not in _TRANSPORT_RESERVED_KWARGS
+        if key not in _TRANSPORT_RESERVED_KWARGS and not str(key).startswith("_seraph_")
     }
 
 
@@ -2851,13 +2908,18 @@ def _build_routing_decision_details(
 
 def _attemptable_targets(
     ordered_targets: list[dict[str, Any]],
+    *,
+    max_retries: int | None = None,
 ) -> list[dict[str, Any]]:
     """Return only compliant targets; absence of one is a fail-closed route."""
-    return [
+    targets = [
         target
         for target in ordered_targets
         if target["policy_assessment"]["policy_compliant"]
     ]
+    if max_retries is None:
+        return targets
+    return targets[: max(int(max_retries), 0) + 1]
 
 
 async def _governed_preflight_target_async(
@@ -3388,6 +3450,15 @@ class FallbackLiteLLMModel(BaseLiteLLMModel):
         primary_model = self.model_id
         reject_legacy_external_agent_model(primary_model)
         runtime_path = self._runtime_path or "agent_generate"
+        runtime_controls = _openrouter_runtime_controls(self._runtime_profile)
+        if runtime_controls:
+            kwargs["temperature"] = float(runtime_controls["temperature"])
+            kwargs["max_tokens"] = min(
+                int(kwargs.get("max_tokens", getattr(self, "_seraph_max_tokens", 1) or 1)),
+                int(runtime_controls["output_limit"]),
+            )
+            kwargs["timeout"] = float(runtime_controls["timeout_seconds"])
+            primary_model = _profile_model_id(self._runtime_profile)
         reserved_output_tokens = _reserved_output_tokens_from_kwargs(
             kwargs=kwargs,
             fallback=getattr(self, "_seraph_max_tokens", None),
@@ -3417,7 +3488,11 @@ class FallbackLiteLLMModel(BaseLiteLLMModel):
                         "options": _transport_json_value(kwargs),
                     },
                     output_tokens=reserved_output_tokens,
-                    timeout_seconds=float(settings.agent_chat_timeout),
+                    timeout_seconds=(
+                        float(runtime_controls["timeout_seconds"])
+                        if runtime_controls
+                        else float(settings.agent_chat_timeout)
+                    ),
                     principal=principal,
                     session_id=principal.session_id,
                     job_id=principal.job_id,
@@ -3515,7 +3590,10 @@ class FallbackLiteLLMModel(BaseLiteLLMModel):
 
         last_error: Exception = RuntimeError("No fallback targets available")
 
-        attempt_targets = _attemptable_targets(ordered_targets)
+        attempt_targets = _attemptable_targets(
+            ordered_targets,
+            max_retries=getattr(gpu_admission_broker, "max_retries", None),
+        )
         receipt_session = _new_route_receipt_session(request_context)
         governed_attempted = False
         denied_decision = None
@@ -3884,6 +3962,23 @@ def completion_with_fallback_sync(
     import litellm
 
     assert_runtime_not_revoked()
+    resolved_profile = resolve_runtime_profile(runtime_path=runtime_path, profile=profile)
+    runtime_controls = _openrouter_runtime_controls(resolved_profile)
+    effective_temperature = (
+        float(runtime_controls["temperature"])
+        if runtime_controls
+        else float(temperature)
+    )
+    effective_max_tokens = (
+        min(int(max_tokens), int(runtime_controls["output_limit"]))
+        if runtime_controls
+        else int(max_tokens)
+    )
+    effective_timeout = (
+        float(runtime_controls["timeout_seconds"])
+        if runtime_controls
+        else float(settings.agent_chat_timeout)
+    )
     if request_context is None:
         from src.model_fabric.caller_context import (
             build_canonical_inference_context,
@@ -3898,13 +3993,13 @@ def completion_with_fallback_sync(
                 runtime_path,
                 payload={
                     "messages": _transport_json_value(messages),
-                    "temperature": temperature,
-                    "max_tokens": max_tokens,
+                    "temperature": effective_temperature,
+                    "max_tokens": effective_max_tokens,
                     "requested_model": model_id,
                     "requested_profile": profile,
                 },
-                output_tokens=max_tokens,
-                timeout_seconds=float(settings.agent_chat_timeout),
+                output_tokens=effective_max_tokens,
+                timeout_seconds=effective_timeout,
                 principal=principal,
                 session_id=principal.session_id,
                 job_id=principal.job_id,
@@ -3916,11 +4011,10 @@ def completion_with_fallback_sync(
                 )
 
     try:
-        resolved_profile = resolve_runtime_profile(runtime_path=runtime_path, profile=profile)
         primary_kwargs = build_completion_kwargs(
             messages=messages,
-            temperature=temperature,
-            max_tokens=max_tokens,
+            temperature=effective_temperature,
+            max_tokens=effective_max_tokens,
             model_id=model_id,
             runtime_path=runtime_path,
             profile=profile,
@@ -4041,7 +4135,10 @@ def completion_with_fallback_sync(
 
         last_error: Exception = RuntimeError("No fallback targets available")
 
-        attempt_targets = _attemptable_targets(ordered_targets)
+        attempt_targets = _attemptable_targets(
+            ordered_targets,
+            max_retries=getattr(gpu_admission_broker, "max_retries", None),
+        )
         receipt_session = _new_route_receipt_session(request_context)
         governed_attempted = False
         denied_decision = None
@@ -4058,14 +4155,14 @@ def completion_with_fallback_sync(
                     messages,
                     target=target,
                     runtime_path=runtime_path,
-                    reserved_output_tokens=max_tokens,
+                    reserved_output_tokens=effective_max_tokens,
                 )
                 transport_body = finalized_openai_compatible_body(
                     model_id=_target_transport_model(target),
                     messages=[_openai_message_payload(message) for message in target_messages],
                     options=_transport_json_value(dict(target.get("options") or {})),
-                    temperature=temperature,
-                    max_tokens=max_tokens,
+                    temperature=effective_temperature,
+                    max_tokens=effective_max_tokens,
                 )
                 governed_context = request_context
                 if request_context is not None:
@@ -4157,8 +4254,8 @@ def completion_with_fallback_sync(
 
                 fallback_kwargs = build_completion_kwargs(
                     messages=target_messages,
-                    temperature=temperature,
-                    max_tokens=max_tokens,
+                    temperature=effective_temperature,
+                    max_tokens=effective_max_tokens,
                     use_fallback=True,
                     fallback_model_id=str(target["model_id"]),
                     fallback_api_key=target["api_key"],

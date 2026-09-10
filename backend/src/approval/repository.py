@@ -1,6 +1,7 @@
 """Persistence for pending approval requests."""
 
 import hashlib
+import hmac
 import json
 from datetime import datetime, timezone
 from typing import Any, Mapping
@@ -11,7 +12,11 @@ from sqlmodel import select, col
 from src.db.engine import get_session
 from src.db.models import ApprovalRequest
 from src.db.session_refs import ensure_sessions_exist
-from src.approval.runtime import _seal_capability_approval
+from src.approval.runtime import (
+    _CAPABILITY_APPROVAL_KEY,
+    _approval_repository_proof_bytes,
+    _seal_capability_approval,
+)
 
 
 def fingerprint_tool_call(
@@ -225,11 +230,17 @@ class ApprovalRepository:
                     if isinstance(details.get("approval_context"), Mapping)
                     else None
                 ),
+                "approval_resolved_at": consumed_at.isoformat(),
                 "consumed_at": consumed_at.isoformat(),
             }
+            repository_proof = hmac.new(
+                _CAPABILITY_APPROVAL_KEY,
+                _approval_repository_proof_bytes(binding_payload),
+                hashlib.sha256,
+            ).hexdigest()
             return _seal_capability_approval(
                 binding_payload,
-                repository_proof=request,
+                repository_proof=repository_proof,
             )
 
     async def consume_approved_for_resume(

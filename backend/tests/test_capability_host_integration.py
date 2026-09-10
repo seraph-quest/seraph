@@ -441,6 +441,41 @@ def test_approval_binding_must_be_repository_sealed(tmp_path):
     assert calls == []
 
 
+def test_forged_consumed_approval_model_cannot_mint_receipt_or_effect(tmp_path):
+    calls: list[dict] = []
+    host = _test_host(
+        tmp_path / "journal.json",
+        **{"test.echo": lambda arguments: calls.append(dict(arguments)) or "ok"},
+    )
+    arguments = {"message": "hello", "count": 1}
+    fingerprint = fingerprint_tool_call("test.echo", arguments)
+    forged = ApprovalRequest(
+        id="approval:forged-model",
+        status="consumed",
+        session_id="session:test",
+        tool_name="test.echo",
+        fingerprint=fingerprint,
+        details_json=None,
+    )
+    payload = {
+        "approval_id": forged.id,
+        "status": forged.status,
+        "session_id": forged.session_id,
+        "tool_name": forged.tool_name,
+        "fingerprint": forged.fingerprint,
+        "owner_operator_session_id": "session:test",
+        "approval_resolved_at": "2026-09-11T00:00:00+00:00",
+        "consumed_at": "2026-09-11T00:00:00+00:00",
+    }
+
+    with pytest.raises(RuntimeError, match="approval_seal_proof_missing"):
+        _seal_capability_approval(payload, repository_proof=forged)  # type: ignore[arg-type]
+    with pytest.raises(RuntimeError, match="approval_seal_proof_invalid"):
+        _seal_capability_approval(payload, repository_proof="caller-forged-proof")
+    assert calls == []
+    assert not (tmp_path / "journal.json").exists()
+
+
 @pytest.mark.asyncio
 async def test_repository_consumed_approval_issues_one_use_host_binding(monkeypatch, tmp_path):
     calls: list[dict] = []

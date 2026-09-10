@@ -43,6 +43,31 @@ def _approval_payload_body(payload: Mapping[str, Any]) -> tuple[dict[str, Any], 
     return body, encoded
 
 
+def _approval_repository_proof_bytes(payload: Mapping[str, Any]) -> bytes:
+    """Canonicalize the consumed row and exact binding for repository proof.
+
+    This helper only defines the bytes covered by the repository provenance
+    MAC.  It does not issue a receipt or mutate the process-local registry.
+    The row fields are repeated explicitly so mutable caller fields cannot be
+    substituted for the row identity that was conditionally consumed.
+    """
+    body, _ = _approval_payload_body(payload)
+    row = {
+        "approval_id": body.get("approval_id"),
+        "status": body.get("status"),
+        "session_id": body.get("session_id"),
+        "tool_name": body.get("tool_name"),
+        "fingerprint": body.get("fingerprint"),
+        "resolved_at": body.get("approval_resolved_at"),
+    }
+    return json.dumps(
+        {"row": row, "binding": body},
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    ).encode("utf-8")
+
+
 def seal_capability_approval(payload: Mapping[str, Any]) -> dict[str, Any]:
     """Reject caller-side approval fabrication.
 
@@ -57,29 +82,34 @@ def seal_capability_approval(payload: Mapping[str, Any]) -> dict[str, Any]:
 def _seal_capability_approval(
     payload: Mapping[str, Any],
     *,
-    repository_proof: object | None = None,
+    repository_proof: str | None = None,
 ) -> dict[str, Any]:
     """Issue an opaque binding for a repository-consumed approval row.
 
     The public helper above cannot mint an approval.  This seam accepts only
-    the actual, database-loaded ``ApprovalRequest`` instance after the
-    repository's conditional approved->consumed update.  A payload-only call
-    therefore cannot manufacture a repository receipt, even though this
-    module-local helper remains available to the repository implementation.
+    a MAC computed by ``ApprovalRepository`` after its conditional
+    approved->consumed update.  The MAC covers the exact row identity,
+    ``resolved_at``, and binding payload.  A payload or caller-constructed
+    model therefore cannot manufacture a repository receipt.
     """
-    if repository_proof is None:
+    if not isinstance(repository_proof, str) or not repository_proof:
         raise RuntimeError("approval_seal_proof_missing")
-    proof_type = type(repository_proof)
-    if proof_type.__name__ != "ApprovalRequest" or proof_type.__module__ != "src.db.models":
-        raise RuntimeError("approval_seal_proof_invalid")
     body, encoded = _approval_payload_body(payload)
     if (
-        str(getattr(repository_proof, "status", "")) != "consumed"
-        or str(getattr(repository_proof, "id", "")) != str(body.get("approval_id", ""))
-        or str(getattr(repository_proof, "session_id", "")) != str(body.get("session_id", ""))
-        or str(getattr(repository_proof, "tool_name", "")) != str(body.get("tool_name", ""))
-        or str(getattr(repository_proof, "fingerprint", "")) != str(body.get("fingerprint", ""))
+        body.get("status") != "consumed"
+        or not body.get("approval_id")
+        or not body.get("session_id")
+        or not body.get("tool_name")
+        or not body.get("fingerprint")
+        or not body.get("approval_resolved_at")
     ):
+        raise RuntimeError("approval_seal_proof_invalid")
+    expected_proof = hmac.new(
+        _CAPABILITY_APPROVAL_KEY,
+        _approval_repository_proof_bytes(payload),
+        hashlib.sha256,
+    ).hexdigest()
+    if not hmac.compare_digest(repository_proof, expected_proof):
         raise RuntimeError("approval_seal_proof_invalid")
     receipt_token = secrets.token_urlsafe(32)
     body["receipt_token"] = receipt_token

@@ -250,6 +250,34 @@ and fails closed with an explicit degraded/no-learning receipt if the local
 authority check is unavailable. External provider deletion remains
 asynchronous and receipt-bound; the review-outcome and pin reactivation paths
 remain deferred follow-up scope for broader provider and restore orchestration.
+## Branch-local #753 Gate A frozen baseline contract
+
+**Status:** Partial on the milestone branch; the deterministic baseline contract
+is shipped on this branch and is not Shipped on `develop`.
+
+`backend/src/memory/gate_a_baseline.py` now freezes the content-free
+`guardian-memory-gate-a-v1` corpus and `guardian-memory-metrics-v1` threshold
+contract before any runtime or provider measurement. The 14 cases cover exact
+and semantic recall, freshness, contradiction suppression, provenance,
+deletion/export, restore/rebuild tombstone safety, provider outage continuity,
+malformed advisory input, untrusted observation isolation, and unknown derived
+identities. Cases contain handles and classifications only; they do not embed
+user memory text, credentials, private paths, or provider payloads. The artifact
+records a stable corpus SHA-256 and a canonical/derived record schema so a
+future measurement cannot silently change its input set.
+
+`GET /api/operator/memory-benchmark` and `GET /api/memory/providers` now expose
+the same `gate_a_baseline` receipt. It reports fixture coverage separately from
+runtime measurement: the current receipt has `artifact_status=pass` and
+`measurement_status=blocked` with `runtime_measurement_not_supplied`, so its
+overall status is `degraded`. A complete ratio mapping can be evaluated against
+the frozen thresholds and yields an explicit `pass`, `degraded`, or `blocked`
+measurement. The receipt is metadata-only and carries the claim boundary
+`frozen_deterministic_memory_contract_and_fixture_coverage_not_runtime_quality_or_provider_superiority`.
+
+This slice does not claim semantic quality, latency, cost, live provider
+quality, or later #745 decision usefulness. Runtime measurement, real restore
+and reindex receipts, provider deletion propagation, and Gate B remain open.
 
 ## Memory Upgrade Program Record
 

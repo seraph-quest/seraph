@@ -11,7 +11,9 @@ from src.approval.runtime import get_current_trust_principal
 from src.agent.strategist import parse_strategist_response, run_strategist_decision_completion
 from src.audit.runtime import log_scheduler_job_event
 from src.db.models import Goal
+from src.goals.contracts import GoalCandidateRequest
 from src.goals.repository import deserialize_success_criterion, goal_repository
+from src.guardian.goal_conditioned_loop import propose_goal_candidate
 from src.guardian.goal_snapshot_to_file import (
     GoalSnapshotToFileRequest,
     GoalSnapshotToFileResult,
@@ -299,6 +301,22 @@ def _has_explicit_web_brief_target(criterion: object) -> bool:
     return isinstance(target, dict) and any(key in target for key in ("query", "file_path"))
 
 
+async def _persist_scheduled_candidate(
+    goal: Goal,
+    request: GoalCandidateRequest,
+) -> None:
+    """Persist the strategist's candidate before admitting its child job.
+
+    Scheduler tests may use lightweight goal-shaped objects to exercise
+    ordering without a database.  The real repository always returns the
+    canonical ``Goal`` model, where candidate persistence is a required part
+    of admission and failures remain visible to the surrounding tick.
+    """
+
+    if isinstance(goal, Goal):
+        await propose_goal_candidate(goal.id, request)
+
+
 async def _run_opted_in_goal_web_brief(
     *,
     parent_job_id: str,
@@ -374,6 +392,22 @@ async def _run_opted_in_goal_web_brief(
             reason="scheduled_proactive_web_brief",
             expected_outcome=criterion.description,
             priority=priority,
+        )
+        await _persist_scheduled_candidate(
+            goal,
+            GoalCandidateRequest(
+                capability_id="workflow.web-brief-to-file",
+                capability_version=request.capability_version,
+                inputs={
+                    "query": request.query,
+                    "file_path": request.file_path,
+                    "priority": request.priority,
+                },
+                evidence_refs=request.evidence_refs,
+                reason=request.reason,
+                expected_outcome=request.expected_outcome,
+                expires_at=request.deadline_at,
+            ),
         )
         result = await WebBriefToFileService(authority_principal=principal).run(request)
         if not isinstance(result, WebBriefToFileResult):
@@ -506,6 +540,18 @@ async def _run_opted_in_goal_snapshot(
         evidence_refs=list(criterion.evidence_refs),
         reason="scheduled_proactive_goal_snapshot",
         expected_outcome=criterion.description,
+    )
+    await _persist_scheduled_candidate(
+        goal,
+        GoalCandidateRequest(
+            capability_id="workflow.goal-snapshot-to-file",
+            capability_version=request.capability_version,
+            inputs={"file_path": request.file_path},
+            evidence_refs=request.evidence_refs,
+            reason=request.reason,
+            expected_outcome=request.expected_outcome,
+            expires_at=request.deadline_at,
+        ),
     )
     result = await GoalSnapshotToFileService(authority_principal=principal).run(request)
     if not isinstance(result, GoalSnapshotToFileResult):

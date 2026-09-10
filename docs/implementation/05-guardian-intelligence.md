@@ -169,14 +169,26 @@ replays the same goal/revision candidate instead of creating another workspace
 write; operator-triggered runs use a separate scope. A stale, expired, or
 non-running parent is rejected before child admission.
 
-**Live/runtime limits:** This is a partial branch-local slice, not the full
-guardian brief journey. Its provider requires the app-started workflow
-registry, governed tool wrappers, and a migrated durable-state database; the
-focused tests monkeypatch only that existing tool boundary and perform a real
-temporary-file readback, including a source-URL predicate for the brief. No
-live service, scheduler run, operator approval, external public-source
-readback, or full #736 journey receipt was produced here, and no completion or
-learning claim is made.
+The file-backed local journey now exercises both scheduler-selected domains
+against one temporary SQLite database and workspace. It creates distinct
+snapshot and web-brief jobs, artifacts, and independent readbacks, proves a
+duplicate tick and a worker restart replay without a second file write, and
+persists candidate, outcome, and no-learning receipts. The web-brief leg reads
+from a deterministic localhost HTTP source, then applies an authenticated
+query/path/priority correction and verifies the next artifact uses it; a
+durable rollback makes a later run use the original target again. The replay
+path rehydrates the typed outcome from redacted audit details and confirms the
+durable job identity before returning scheduler receipts.
+
+**Live/runtime limits:** This remains a partial branch-local slice, not the
+full guardian brief journey. The proof uses a deterministic injected workflow
+tool at the existing governed boundary and a localhost-only source; it makes
+no paid or live OpenRouter/provider request and does not establish public-source
+quality, model usefulness, broad autonomous planning, or learned preference
+quality. Production still requires the app-started workflow registry, governed
+tool wrappers, and migrated durable-state database, while missing/corrupt
+readback, stale/revoked authority, and unavailable workflow paths remain
+blocked or failed with explicit no-learning receipts.
 
 ## Branch-local #753 canonical memory actor boundary
 

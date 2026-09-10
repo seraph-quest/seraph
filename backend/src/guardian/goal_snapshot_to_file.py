@@ -2380,6 +2380,24 @@ class GoalSnapshotToFileService:
         if not isinstance(outcome, GoalOutcomeReceipt):
             outcome = GoalOutcomeReceipt.model_validate(outcome)
         receipt = adapter.last_receipt or {}
+        # A persisted goal-loop outcome is intentionally redacted and may not
+        # retain the raw durable job id in its evidence references.  Rehydrate
+        # the stable capability job identity from the actual durable repository
+        # on audit replay so scheduler receipts keep their job/artifact
+        # lineage across a process restart without executing the workflow
+        # again.
+        if not receipt.get("job_id") and hasattr(adapter, "_job_identifier"):
+            try:
+                replay_job_id = adapter._job_identifier(candidate)
+                replay_projection = await adapter.jobs.get_job(replay_job_id)
+            except Exception:
+                replay_projection = None
+            if isinstance(replay_projection, dict):
+                receipt = {
+                    **receipt,
+                    "job_id": replay_job_id,
+                    "durable_status": replay_projection.get("status"),
+                }
         return self._result_for_outcome(
             request=request,
             candidate=candidate,

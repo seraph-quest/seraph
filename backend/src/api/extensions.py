@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import re
 from threading import RLock
+import time
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
@@ -98,6 +99,7 @@ _BUILTIN_CHANNEL_ADAPTERS = (
 )
 _REDACTED_CONFIG_SENTINEL = "__SERAPH_STORED_SECRET__"
 _NEW_SECRET_CONFIG_SENTINEL = "__SERAPH_NEW_SECRET_VALUE__"
+_LIFECYCLE_APPROVAL_TTL_SECONDS = 5 * 60.0
 _SENSITIVE_DIAGNOSTIC_KEY_TOKENS = (
     "auth",
     "config",
@@ -1284,6 +1286,12 @@ async def _require_extension_lifecycle_approval(
     details.update(owner_details)
     if isinstance(safe_fingerprint_context, dict):
         details.update(safe_fingerprint_context)
+    # Lifecycle approvals are effect authorizations.  Give every pending row
+    # the same bounded window used by tool approvals so an unattended request
+    # cannot remain valid indefinitely.
+    approval_expires_at = time.time() + _LIFECYCLE_APPROVAL_TTL_SECONDS
+    details["approval_expires_at"] = approval_expires_at
+    details["expires_at"] = approval_expires_at
     request = await approval_repository.get_or_create_pending(
         session_id=session_id,
         tool_name=tool_name,

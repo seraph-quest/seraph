@@ -61,6 +61,65 @@ def _approval_attachment_refs(request: ApprovalRequest) -> list[dict[str, Any]]:
         return []
 
 
+def _validated_approval_attachment_refs(request: ApprovalRequest) -> list[dict[str, Any]]:
+    """Revalidate persisted attachment receipts at the point of execution.
+
+    Approval rows deliberately retain only signed receipt metadata.  A row can
+    outlive that receipt, so read-time redaction is insufficient for an effect
+    path: every execution must prove that each stored handoff is still valid.
+    """
+    try:
+        parsed = json.loads(request.attachment_refs_json or "[]")
+    except (TypeError, ValueError) as exc:
+        raise ConversationIdentityError(
+            "attachment_reference_invalid",
+            "Stored approval attachment references are invalid.",
+        ) from exc
+    if not isinstance(parsed, list):
+        raise ConversationIdentityError(
+            "attachment_reference_invalid",
+            "Stored approval attachment references are invalid.",
+        )
+    return validate_attachment_refs(
+        parsed,
+        owner_principal_id=request.owner_principal_id,
+    )
+
+
+async def _expire_approval_for_attachment_failure(
+    db: Any,
+    request: ApprovalRequest,
+    *,
+    now: datetime,
+    error: ConversationIdentityError,
+) -> None:
+    """Fence an approved row when its attachment handoff is no longer valid."""
+    try:
+        details = json.loads(request.details_json) if request.details_json else {}
+    except (TypeError, ValueError):
+        details = {}
+    if not isinstance(details, dict):
+        details = {}
+    details["attachment_refs"] = []
+    details["attachment_refs_status"] = (
+        "expired" if error.code == "attachment_receipt_expired" else "unavailable"
+    )
+    await db.execute(
+        update(ApprovalRequest)
+        .execution_options(synchronize_session=False)
+        .where(
+            ApprovalRequest.id == request.id,
+            ApprovalRequest.status == "approved",
+        )
+        .values(
+            status="expired",
+            resolved_at=now,
+            attachment_refs_json="[]",
+            details_json=json.dumps(details, sort_keys=True),
+        )
+    )
+
+
 def fingerprint_tool_call(
     tool_name: str,
     arguments: dict[str, Any],
@@ -368,6 +427,16 @@ class ApprovalRepository:
             ):
                 return False
             now = datetime.now(timezone.utc)
+            try:
+                _validated_approval_attachment_refs(request)
+            except ConversationIdentityError as exc:
+                await _expire_approval_for_attachment_failure(
+                    db,
+                    request,
+                    now=now,
+                    error=exc,
+                )
+                return False
             if _approval_is_expired(request.expires_at, now=now):
                 await db.execute(
                     update(ApprovalRequest)
@@ -495,7 +564,18 @@ class ApprovalRepository:
             owner_operator_session_id,
         ):
             return None
-        if _approval_is_expired(request.expires_at):
+        now = datetime.now(timezone.utc)
+        try:
+            _validated_approval_attachment_refs(request)
+        except ConversationIdentityError as exc:
+            await _expire_approval_for_attachment_failure(
+                db,
+                request,
+                now=now,
+                error=exc,
+            )
+            return None
+        if _approval_is_expired(request.expires_at, now=now):
             await db.execute(
                 update(ApprovalRequest)
                 .execution_options(synchronize_session=False)
@@ -503,7 +583,7 @@ class ApprovalRepository:
                     ApprovalRequest.id == approval_id,
                     ApprovalRequest.status == "approved",
                 )
-                .values(status="expired", resolved_at=datetime.now(timezone.utc))
+                .values(status="expired", resolved_at=now)
             )
             return None
         try:
@@ -559,11 +639,13 @@ class ApprovalRepository:
 
         consumed = await db.execute(
             update(ApprovalRequest)
+            .execution_options(synchronize_session=False)
             .where(
                 ApprovalRequest.id == approval_id,
                 ApprovalRequest.status == "approved",
+                or_(ApprovalRequest.expires_at.is_(None), ApprovalRequest.expires_at > now),
             )
-            .values(status="consumed", resolved_at=datetime.now(timezone.utc))
+            .values(status="consumed", resolved_at=now)
         )
         if getattr(consumed, "rowcount", None) != 1:
             return None

@@ -606,6 +606,174 @@ async def test_approval_expiry_and_atomic_consume_replay(file_db, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_approved_consume_revalidates_attachment_receipt_at_execution(file_db, monkeypatch):
+    get_session, _ = file_db
+    monkeypatch.setattr("src.approval.repository.get_session", get_session)
+    await _add_owner(
+        get_session,
+        session_id="conversation-approval-attachment-expiry",
+        owner_id="operator:approval-attachment",
+        operator_session_id="operator-session-approval-attachment",
+    )
+    now = datetime.now(timezone.utc)
+    receipt = issue_attachment_quarantine_receipt(
+        attachment_id="approval-expiring-attachment",
+        owner_principal_id="operator:approval-attachment",
+        content_hash="sha256:approval-expiring",
+        media_type="text/plain",
+        issued_at=now - timedelta(seconds=1),
+        expires_at=now + timedelta(milliseconds=250),
+    )
+    attachment_refs = validate_attachment_refs(
+        [{
+            "attachment_id": "approval-expiring-attachment",
+            "owner_principal_id": "operator:approval-attachment",
+            "content_hash": "sha256:approval-expiring",
+            "media_type": "text/plain",
+            "quarantine_status": "quarantined",
+            "quarantine_receipt": receipt,
+        }],
+        owner_principal_id="operator:approval-attachment",
+    )
+    approval_id = "approval-attachment-expiry"
+    async with get_session() as db:
+        db.add(
+            ApprovalRequest(
+                id=approval_id,
+                session_id="conversation-approval-attachment-expiry",
+                owner_principal_id="operator:approval-attachment",
+                operator_session_id="operator-session-approval-attachment",
+                attachment_refs_json=json.dumps(attachment_refs),
+                status="approved",
+                tool_name="attachment-tool",
+                fingerprint="approval-attachment-expiry-fingerprint",
+                summary="Attachment approval",
+                expires_at=now + timedelta(minutes=5),
+                details_json=json.dumps({
+                    "owner_principal_id": "operator:approval-attachment",
+                    "approval_owner_operator_session_id": "operator-session-approval-attachment",
+                    "attachment_refs": attachment_refs,
+                }),
+            )
+        )
+
+    await asyncio.sleep(0.4)
+    assert not await approval_repository.consume_approved(
+        session_id="conversation-approval-attachment-expiry",
+        tool_name="attachment-tool",
+        fingerprint="approval-attachment-expiry-fingerprint",
+        owner_operator_session_id="operator-session-approval-attachment",
+    )
+    async with get_session() as db:
+        row = (
+            await db.execute(
+                select(ApprovalRequest).where(ApprovalRequest.id == approval_id)
+            )
+        ).scalar_one()
+        details = json.loads(row.details_json or "{}")
+        assert row.status == "expired"
+        assert row.attachment_refs_json == "[]"
+        assert details["attachment_refs"] == []
+        assert details["attachment_refs_status"] == "expired"
+
+
+@pytest.mark.asyncio
+async def test_resume_consume_revalidates_attachment_receipt_at_execution(file_db, monkeypatch):
+    get_session, _ = file_db
+    monkeypatch.setattr("src.approval.repository.get_session", get_session)
+    await _add_owner(
+        get_session,
+        session_id="conversation-resume-attachment-expiry",
+        owner_id="operator:resume-attachment",
+        operator_session_id="operator-session-resume-attachment",
+    )
+    now = datetime.now(timezone.utc)
+    receipt = issue_attachment_quarantine_receipt(
+        attachment_id="resume-expiring-attachment",
+        owner_principal_id="operator:resume-attachment",
+        content_hash="sha256:resume-expiring",
+        media_type="text/plain",
+        issued_at=now - timedelta(seconds=1),
+        expires_at=now + timedelta(milliseconds=250),
+    )
+    attachment_refs = validate_attachment_refs(
+        [{
+            "attachment_id": "resume-expiring-attachment",
+            "owner_principal_id": "operator:resume-attachment",
+            "content_hash": "sha256:resume-expiring",
+            "media_type": "text/plain",
+            "quarantine_status": "quarantined",
+            "quarantine_receipt": receipt,
+        }],
+        owner_principal_id="operator:resume-attachment",
+    )
+    approval_id = "approval-resume-attachment-expiry"
+    approval_expires_at = (now + timedelta(minutes=5)).timestamp()
+    details = {
+        "approval_owner_operator_session_id": "operator-session-resume-attachment",
+        "approval_operator_principal_id": "operator:resume-attachment",
+        "durable_job_id": "job-resume-attachment",
+        "durable_owner_kind": "operator",
+        "durable_owner_principal_id": "operator:resume-attachment",
+        "durable_service_id": "service:resume-attachment",
+        "durable_approval_id": approval_id,
+        "durable_authority_digest": "authority-resume-attachment",
+        "durable_goal_id": "goal-resume-attachment",
+        "durable_goal_revision": 1,
+        "durable_plan_revision": 1,
+        "durable_capability_version": "capability-resume-attachment-v1",
+        "durable_budget_digest": "budget-resume-attachment",
+        "approval_expires_at": approval_expires_at,
+        "attachment_refs": attachment_refs,
+    }
+    async with get_session() as db:
+        db.add(
+            ApprovalRequest(
+                id=approval_id,
+                session_id="conversation-resume-attachment-expiry",
+                owner_principal_id="operator:resume-attachment",
+                operator_session_id="operator-session-resume-attachment",
+                attachment_refs_json=json.dumps(attachment_refs),
+                status="approved",
+                tool_name="resume-tool",
+                fingerprint="resume-attachment-expiry-fingerprint",
+                summary="Resume attachment approval",
+                expires_at=now + timedelta(minutes=5),
+                details_json=json.dumps(details),
+            )
+        )
+
+    await asyncio.sleep(0.4)
+    assert await approval_repository.consume_approved_for_resume(
+        approval_id=approval_id,
+        owner_operator_session_id="operator-session-resume-attachment",
+        operator_principal_id="operator:resume-attachment",
+        job_id="job-resume-attachment",
+        owner_kind="operator",
+        owner_principal_id="operator:resume-attachment",
+        service_id="service:resume-attachment",
+        authority_digest="authority-resume-attachment",
+        goal_id="goal-resume-attachment",
+        goal_revision=1,
+        plan_revision=1,
+        capability_version="capability-resume-attachment-v1",
+        budget_digest="budget-resume-attachment",
+        expires_at=approval_expires_at,
+    ) is None
+    async with get_session() as db:
+        row = (
+            await db.execute(
+                select(ApprovalRequest).where(ApprovalRequest.id == approval_id)
+            )
+        ).scalar_one()
+        stored_details = json.loads(row.details_json or "{}")
+        assert row.status == "expired"
+        assert row.attachment_refs_json == "[]"
+        assert stored_details["attachment_refs"] == []
+        assert stored_details["attachment_refs_status"] == "expired"
+
+
+@pytest.mark.asyncio
 async def test_expired_outbox_attachment_is_cancelled_before_claim(file_db):
     get_session, _ = file_db
     await _add_owner(

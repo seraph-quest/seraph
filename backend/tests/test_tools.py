@@ -307,7 +307,7 @@ class TestFilesystemTool:
         monkeypatch.setattr("src.tools.filesystem_tool.settings.workspace_dir", str(tmp_path))
         (tmp_path / "broken.txt").write_text("hello", encoding="utf-8")
 
-        with patch("src.tools.filesystem_tool._open_workspace_text", side_effect=OSError("boom")):
+        with patch("src.tools.filesystem_tool._read_workspace_text_bounded", side_effect=OSError("boom")):
             result = read_file.forward("broken.txt")
 
         assert "Failed to read file" in result

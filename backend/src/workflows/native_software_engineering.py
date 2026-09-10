@@ -42,6 +42,7 @@ from src.approval.runtime import (
 from src.artifacts.registry import build_artifact_record
 from src.extensions.capability_execution import (
     CapabilityExecutionError,
+    _RAW_RESULT_TOKEN,
     build_capability_request,
     current_capability_execution_host,
 )
@@ -698,6 +699,7 @@ def _execute_native_capability(
     arguments: dict[str, Any],
     *,
     destination: str,
+    _return_raw_result: bool = False,
 ) -> Any:
     """Route native SWE effects through the same fixed capability host."""
     principal = get_current_trust_principal()
@@ -713,7 +715,14 @@ def _execute_native_capability(
         destination=destination,
     )
     try:
-        receipt = current_capability_execution_host().execute(request)
+        host = current_capability_execution_host()
+        if _return_raw_result:
+            _, receipt = host._execute_adopted_internal_result(  # noqa: SLF001 - module-owned native seam
+                request,
+                _token=_RAW_RESULT_TOKEN,
+            )
+        else:
+            receipt = host.execute(request)
     except CapabilityExecutionError as exc:
         raise NativeSoftwareEngineeringError(f"capability_{exc.reason_code}") from exc
     if receipt.state != "succeeded":
@@ -740,9 +749,9 @@ def _process_result(
                 "cwd": cwd,
                 "timeout_seconds": timeout_seconds,
                 "cancel_event": cancel_event,
-                "__seraph_raw_result": True,
             },
             destination=f"workspace-process:{cwd or '.'}",
+            _return_raw_result=True,
         )
     except ValueError as exc:
         return {

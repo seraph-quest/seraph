@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import signal
 import stat
@@ -17,6 +18,7 @@ from src.approval.runtime import reset_runtime_context, set_runtime_context
 from src.audit.repository import audit_repository
 from src.tools.audit import wrap_tools_for_audit
 from src.tools import process_tools as process_tools_module
+from src.tools.filesystem_tool import read_file
 from src.tools.process_tools import (
     _ProcessDescendantIdentity,
     _ProcessLeaderIdentity,
@@ -52,6 +54,78 @@ def _write_workspace_file(name: str, body: str) -> str:
     file_path.parent.mkdir(parents=True, exist_ok=True)
     file_path.write_text(body, encoding="utf-8")
     return name
+
+
+@pytest.mark.parametrize(
+    ("command", "args"),
+    [
+        ("git", subcommand)
+        for subcommand in (("fetch",), ("push",), ("pull",), ("clone",), ("remote",), ("submodule",))
+    ]
+    + [
+        ("npm", subcommand)
+        for subcommand in (("install",), ("ci",), ("update",), ("publish",), ("pack",), ("link",))
+    ]
+    + [
+        ("uv", subcommand)
+        for subcommand in (("sync",), ("add",), ("remove",), ("pip",), ("tool",), ("lock",))
+    ]
+    + [
+        ("git", ("-c", "remote.origin.url=https://example.invalid/repo.git", "status")),
+        ("git", ("--upload-pack", "ssh", "status")),
+        ("npm", ("--registry=https://registry.example.invalid", "--version")),
+        ("uv", ("--index-url", "https://pypi.example.invalid/simple", "--version")),
+    ],
+)
+def test_process_runtime_rejects_network_capable_package_operations(command, args):
+    with pytest.raises(ValueError, match="network|blocked"):
+        process_runtime_manager.run_command(command=command, args_json=json.dumps(list(args)))
+
+
+def test_process_runtime_allows_local_git_status(tmp_path, monkeypatch):
+    monkeypatch.setattr(settings, "workspace_dir", str(tmp_path))
+    result = process_runtime_manager.run_command(command="git", args_json=json.dumps(["status", "--short"]))
+    assert result["exit_code"] == 128  # no repository; the command was admitted locally
+
+
+def test_process_runtime_allows_git_identity_config_but_not_arbitrary_config(tmp_path, monkeypatch):
+    monkeypatch.setattr(settings, "workspace_dir", str(tmp_path))
+    result = process_runtime_manager.run_command(
+        command="git",
+        args_json=json.dumps(["-c", "user.name=Seraph", "-c", "user.email=seraph@example.invalid", "status"]),
+    )
+    assert result["exit_code"] == 128
+    with pytest.raises(ValueError, match="network-capable config"):
+        process_runtime_manager.run_command(
+            command="git",
+            args_json=json.dumps(["-c", "alias.sync=!curl https://example.invalid", "status"]),
+        )
+
+
+def test_read_file_bounds_bytes_before_decoding(tmp_path, monkeypatch):
+    monkeypatch.setattr(settings, "workspace_dir", str(tmp_path))
+    path = tmp_path / "large-output.txt"
+    path.write_bytes(b"x" * (process_tools_module._PROCESS_OUTPUT_BYTES * 2))
+
+    result = read_file(path.name)
+
+    assert len(result.encode("utf-8")) <= 1 * 1024 * 1024
+    assert "...[truncated]..." in result
+
+
+def test_foreground_process_pipe_capture_is_bounded_before_return(tmp_path, monkeypatch):
+    monkeypatch.setattr(settings, "workspace_dir", str(tmp_path))
+    script = tmp_path / "large-pipe-output.py"
+    script.write_text("import sys\nsys.stdout.write('x' * (2 * 1024 * 1024))\n", encoding="utf-8")
+
+    result = process_runtime_manager.run_command(
+        command="python3",
+        args_json=json.dumps([script.name]),
+        timeout_seconds=5,
+    )
+
+    assert result["exit_code"] == 0
+    assert len(result["stdout"].encode("utf-8")) <= process_tools_module._PROCESS_OUTPUT_BYTES
 
 
 def test_run_command_success():

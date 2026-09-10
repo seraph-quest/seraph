@@ -61,6 +61,11 @@ class Settings(BaseSettings):
     deployment_environment: str = "development"
     operator_auth_secret: str = ""
     operator_auth_secret_hash: str = ""
+    # Secret material for the local adopted-capability journal MAC. Keep this
+    # separate from the auth cookie secret when possible; the hash form is
+    # accepted for deployments that only provision a verifier-like secret.
+    capability_journal_secret: str = ""
+    capability_journal_secret_hash: str = ""
     operator_auth_cookie_name: str = "seraph_operator_session"
     operator_auth_cookie_secure: bool = False
     operator_auth_idle_seconds: int = 3600

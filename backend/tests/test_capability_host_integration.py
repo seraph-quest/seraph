@@ -19,6 +19,7 @@ from src.extensions.capability_execution import (
     CapabilityExecutionLimits,
     CapabilityExecutionRequest,
     _REGISTRY_TOKEN,
+    build_capability_request,
     current_capability_execution_host,
 )
 from src.security.trust_contract import AuthorityGrant, PrincipalType, TrustPrincipal
@@ -41,7 +42,9 @@ def _request(**overrides) -> CapabilityExecutionRequest:
 
 
 @pytest.fixture(autouse=True)
-def _authenticated_capability_runtime():
+def _authenticated_capability_runtime(monkeypatch):
+    monkeypatch.setattr(settings, "capability_journal_secret", "test-capability-journal-secret")
+    monkeypatch.setattr(settings, "capability_journal_secret_hash", "")
     principal = TrustPrincipal(
         principal_id="operator:test",
         principal_type=PrincipalType.OPERATOR,
@@ -218,6 +221,40 @@ def test_journal_tamper_is_rejected(tmp_path):
         host.journal_records()
 
 
+def test_journal_mac_uses_server_secret_and_rejects_wrong_key(tmp_path, monkeypatch):
+    journal = tmp_path / "journal.json"
+    host = _test_host(journal, **{"test.echo": lambda _: "ok"})
+    host.execute(_request())
+
+    monkeypatch.setattr(settings, "capability_journal_secret", "wrong-server-secret")
+    restarted = CapabilityExecutionHost(journal_path=journal)
+    assert restarted.recovery_status()["status"] == "blocked"
+    with pytest.raises(CapabilityJournalError, match="integrity"):
+        restarted.journal_records()
+
+
+def test_journal_mac_fails_closed_without_server_secret(tmp_path, monkeypatch):
+    for name in (
+        "capability_journal_secret",
+        "capability_journal_secret_hash",
+        "operator_auth_secret",
+        "operator_auth_secret_hash",
+    ):
+        monkeypatch.setattr(settings, name, "")
+    host = CapabilityExecutionHost(journal_path=tmp_path / "journal.json")
+    assert host.recovery_status()["error_code"] == "journal_mac_key_unavailable"
+    with pytest.raises(CapabilityExecutionError, match="journal_mac_key_unavailable"):
+        host.execute(_request())
+
+
+def test_public_capability_builder_rejects_raw_result_escape_hatch():
+    with pytest.raises(CapabilityExecutionError, match="raw_result_internal_only"):
+        build_capability_request(
+            capability_id="run_command",
+            arguments={"command": "pwd", "__seraph_raw_result": True},
+        )
+
+
 def test_network_destination_is_rejected_at_request_boundary():
     with pytest.raises(ValueError, match="network destinations"):
         _request(destination="https://example.invalid/connector")
@@ -282,9 +319,9 @@ def test_native_swe_effect_paths_use_the_governed_host(monkeypatch):
     captured = []
 
     class FakeHost:
-        def execute(self, request):
+        def _execute_adopted_internal_result(self, request, *, _token):
             captured.append(request)
-            return SimpleNamespace(
+            return None, SimpleNamespace(
                 state="succeeded",
                 result={
                     "ok": True,
@@ -321,7 +358,7 @@ def test_native_swe_effect_paths_use_the_governed_host(monkeypatch):
         reset_runtime_context(tokens)
     assert result["ok"] is True
     assert captured and captured[0].capability_id == "run_command"
-    assert captured[0].arguments["__seraph_raw_result"] is True
+    assert "__seraph_raw_result" not in captured[0].arguments
 
 
 def test_authority_and_approval_expiry_fail_closed(tmp_path):

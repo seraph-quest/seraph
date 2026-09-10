@@ -47,6 +47,9 @@ _SECRET_FILE_SUFFIXES = {
     ".pem",
     ".pfx",
 }
+_MAX_FILE_READ_BYTES = 1 * 1024 * 1024
+_FILE_READ_CHUNK_BYTES = 64 * 1024
+_TRUNCATION_MARKER = b"\n...[truncated]..."
 
 
 def _filesystem_details(file_path: str, operation: str, **extra: object) -> dict[str, object]:
@@ -151,6 +154,54 @@ def _open_workspace_text(
     ) as file_fd:
         with os.fdopen(file_fd, "r+" if write else "r", encoding="utf-8") as stream:
             yield stream
+
+
+def _read_workspace_text_bounded(
+    resolved: Path,
+    *,
+    max_bytes: int = _MAX_FILE_READ_BYTES,
+) -> tuple[str, bool]:
+    """Read at most ``max_bytes`` from a workspace file before decoding it."""
+    limit = max(1, int(max_bytes))
+    data = bytearray()
+    with _open_workspace_file(resolved, flags=os.O_RDONLY) as file_fd:
+        while len(data) <= limit:
+            chunk = os.read(file_fd, min(_FILE_READ_CHUNK_BYTES, limit + 1 - len(data)))
+            if not chunk:
+                break
+            data.extend(chunk)
+    return _decode_bounded_text(data, limit=limit)
+
+
+def _read_text_stream_bounded(
+    stream: object,
+    *,
+    max_bytes: int = _MAX_FILE_READ_BYTES,
+) -> tuple[str, bool]:
+    """Bound a read on an already-open descriptor before text decoding."""
+    limit = max(1, int(max_bytes))
+    buffer = getattr(stream, "buffer", None)
+    if buffer is None:
+        raw = str(stream.read(limit + 1)).encode("utf-8", errors="replace")  # type: ignore[attr-defined]
+        return _decode_bounded_text(raw, limit=limit)
+    data = bytearray()
+    while len(data) <= limit:
+        chunk = buffer.read(min(_FILE_READ_CHUNK_BYTES, limit + 1 - len(data)))
+        if not chunk:
+            break
+        data.extend(chunk)
+    return _decode_bounded_text(data, limit=limit)
+
+
+def _decode_bounded_text(data: bytes | bytearray, *, limit: int) -> tuple[str, bool]:
+    truncated = len(data) > limit
+    if truncated:
+        marker = _TRUNCATION_MARKER
+        if len(marker) >= limit:
+            data = bytearray(marker[:limit])
+        else:
+            data = data[: limit - len(marker)] + marker
+    return bytes(data).decode("utf-8", errors="replace"), truncated
 
 
 def _is_secret_like_workspace_path(file_path: str) -> bool:
@@ -292,13 +343,12 @@ def read_file(file_path: str) -> str:
         return f"Error: Not a file: {file_path}"
 
     try:
-        with _open_workspace_text(resolved) as stream:
-            content = stream.read()
+        content, truncated = _read_workspace_text_bounded(resolved)
         log_integration_event_sync(
             integration_type="filesystem",
             name="workspace",
             outcome="succeeded",
-            details=_filesystem_details(file_path, "read", length=len(content)),
+            details=_filesystem_details(file_path, "read", length=len(content), truncated=truncated),
         )
         return content
     except Exception as exc:
@@ -381,8 +431,9 @@ def preview_workspace_patch(
     try:
         _assert_not_secret_like_path(file_path, "preview_patch")
         resolved = _safe_resolve(file_path)
-        with _open_workspace_text(resolved) as stream:
-            before = stream.read()
+        before, truncated = _read_workspace_text_bounded(resolved)
+        if truncated:
+            raise ValueError("File exceeds the bounded workspace read policy")
         after, occurrence_count = _replace_once(before, old_text, new_text, expected_occurrences)
         diff = _replacement_diff(file_path, before, after)
         log_integration_event_sync(
@@ -449,7 +500,9 @@ def apply_workspace_patch(
         _assert_not_secret_like_path(file_path, "apply_patch")
         resolved = _safe_resolve(file_path)
         with _open_workspace_text(resolved, write=True) as stream:
-            before = stream.read()
+            before, truncated = _read_text_stream_bounded(stream)
+            if truncated:
+                raise ValueError("File exceeds the bounded workspace read policy")
             before_sha256 = _sha256_text(before)
             if expected_before_sha256 and expected_before_sha256 != before_sha256:
                 raise ValueError("Current file content does not match expected_before_sha256")

@@ -115,7 +115,9 @@ async def test_native_cancel_forwards_dispatch_revision_fence():
 
 
 @pytest.fixture(autouse=True)
-def _native_service_principal():
+def _native_service_principal(monkeypatch):
+    monkeypatch.setattr(settings, "capability_journal_secret", "test-capability-journal-secret")
+    monkeypatch.setattr(settings, "capability_journal_secret_hash", "")
     tokens = set_runtime_context(
         "native-swe-fixture-session",
         "high_risk",

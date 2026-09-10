@@ -24,6 +24,7 @@ import posixpath
 import tempfile
 import threading
 import time
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from contextlib import contextmanager
 from pathlib import Path
@@ -34,7 +35,7 @@ from uuid import uuid4
 from src.audit.formatting import redact_for_audit
 from src.security.trust_contract import canonical_digest
 
-_JOURNAL_VERSION = 2
+_JOURNAL_VERSION = 3
 _DEFAULT_MAX_RECORDS = 256
 _DEFAULT_MAX_BYTES = 1_048_576
 _DEFAULT_OUTPUT_BYTES = 1_048_576
@@ -68,7 +69,8 @@ _ADOPTED_CAPABILITIES = frozenset(
 _JOURNAL_LOCKS: dict[Path, threading.RLock] = {}
 _JOURNAL_LOCKS_GUARD = threading.Lock()
 _REGISTRY_TOKEN = object()
-_EFFECT_MAC_KEY = hashlib.sha256(b"seraph-capability-effect-key-v2").digest()
+_RAW_RESULT_TOKEN = object()
+_INTERNAL_RAW_RESULT = ContextVar("capability_internal_raw_result", default=None)
 
 try:
     import fcntl
@@ -176,10 +178,56 @@ def normalize_destination(destination: str) -> str:
     return posixpath.normpath(value.replace("\\", "/"))
 
 
+def _journal_mac_secret() -> str:
+    """Return configured server secret material without exposing it in errors."""
+    try:
+        from config.settings import settings
+    except Exception as exc:  # pragma: no cover - settings is available in-app.
+        raise CapabilityJournalError("execution journal MAC key unavailable") from exc
+
+    for name in (
+        "capability_journal_secret",
+        "capability_journal_secret_hash",
+        "operator_auth_secret",
+        "operator_auth_secret_hash",
+    ):
+        value = str(getattr(settings, name, "") or "").strip()
+        if value:
+            return value
+    raise CapabilityJournalError("execution journal MAC key unavailable")
+
+
+def _server_secret_key() -> bytes:
+    """Derive MAC material from a configured server secret, never source text."""
+    return hashlib.sha256(
+        b"seraph-capability-server-key-v1:" + _journal_mac_secret().encode("utf-8")
+    ).digest()
+
+
+def _effect_mac_key() -> bytes:
+    """Return the configured server-derived key for effect identities/records."""
+    return hmac.new(
+        _server_secret_key(),
+        b"effect-identity-and-records-v1",
+        hashlib.sha256,
+    ).digest()
+
+
 def _journal_mac_key(path: Path) -> bytes:
-    """Derive a stable per-journal MAC key without putting secrets in records."""
+    """Derive a per-journal MAC key from server secret material and identity."""
     identity = str(path.resolve()).encode("utf-8")
-    return hashlib.sha256(b"seraph-capability-journal-key-v2:" + identity).digest()
+    return hmac.new(
+        _server_secret_key(),
+        b"journal-v3:" + identity,
+        hashlib.sha256,
+    ).digest()
+
+
+def _journal_error_code(exc: CapabilityJournalError) -> str:
+    """Map journal failures to bounded operator-visible reason codes."""
+    if "MAC key unavailable" in str(exc):
+        return "journal_mac_key_unavailable"
+    return "journal_recovery_required"
 
 
 def _mac(value: Any, *, key: bytes) -> str:
@@ -371,7 +419,7 @@ class CapabilityExecutionRequest:
             "request_digest": self.request_digest,
             "idempotency_key": self.idempotency_key.strip(),
         }
-        return f"effect:{_mac(material, key=_EFFECT_MAC_KEY)}"
+        return f"effect:{_mac(material, key=_effect_mac_key())}"
 
     def journal_binding(self) -> dict[str, str]:
         return {
@@ -444,8 +492,9 @@ def _native_adapter_registry() -> dict[str, CapabilityHandler]:
 
     def run_command_adapter(arguments: Mapping[str, Any]) -> Any:
         payload = dict(arguments)
-        raw_result = bool(payload.pop("__seraph_raw_result", False))
-        if raw_result:
+        if "__seraph_raw_result" in payload:
+            raise CapabilityExecutionError("raw_result_internal_only")
+        if _INTERNAL_RAW_RESULT.get() is _RAW_RESULT_TOKEN:
             return process_runtime_manager.run_command(**payload)
         return run_command(**payload)
 
@@ -470,7 +519,7 @@ def _default_journal_path() -> Path:
     except Exception:
         workspace = "seraph-default-workspace"
     workspace_tag = hashlib.sha256(workspace.encode("utf-8")).hexdigest()[:24]
-    return Path(tempfile.gettempdir()) / "seraph_runtime" / workspace_tag / "capability-executions-v2.json"
+    return Path(tempfile.gettempdir()) / "seraph_runtime" / workspace_tag / "capability-executions-v3.json"
 
 
 class CapabilityExecutionHost:
@@ -497,11 +546,17 @@ class CapabilityExecutionHost:
         with _JOURNAL_LOCKS_GUARD:
             self._lock = _JOURNAL_LOCKS.setdefault(self.journal_path, threading.RLock())
         try:
+            # Resolve the key at host creation so an unconfigured server never
+            # presents an apparently ready execution boundary. The secret is
+            # deliberately never included in the operator-facing error code.
+            _journal_mac_key(self.journal_path)
             self._recover_incomplete()
-        except (CapabilityJournalError, OSError):
+        except CapabilityJournalError as exc:
             # A corrupt, unreadable, or over-bound journal must not take down
             # the whole backend, but this host remains fail-closed until an
             # operator can inspect or repair the durable record.
+            self._journal_recovery_error = _journal_error_code(exc)
+        except OSError:
             self._journal_recovery_error = "journal_recovery_required"
 
     @property
@@ -557,12 +612,14 @@ class CapabilityExecutionHost:
         try:
             with self._journal_guard():
                 records = self._read_records()
-        except (CapabilityJournalError, OSError):
+        except (CapabilityJournalError, OSError) as exc:
             self._journal_recovery_error = "journal_recovery_required"
+            if isinstance(exc, CapabilityJournalError):
+                self._journal_recovery_error = _journal_error_code(exc)
             return {
                 "status": "blocked",
                 "recovery_required": True,
-                "error_code": "journal_recovery_required",
+                "error_code": self._journal_recovery_error,
                 "journal_version": _JOURNAL_VERSION,
                 "uncertain_count": 0,
                 "record_count": 0,
@@ -599,12 +656,36 @@ class CapabilityExecutionHost:
 
     def _execute_adopted(self, request: CapabilityExecutionRequest) -> tuple[Any, CapabilityExecutionReceipt]:
         """Invoke one fixed native adapter after the wrapper authority check."""
+        if self._journal_recovery_error is not None:
+            raise CapabilityExecutionError(self._journal_recovery_error, recoverable=True)
         if request.capability_id not in _ADOPTED_CAPABILITIES:
             raise CapabilityExecutionError("capability_not_adopted")
         handler = self._resolve_handler(request.capability_id)
         if handler is None:
             raise CapabilityExecutionError("capability_handler_unregistered")
         return self._execute(request, handler)
+
+    def _execute_adopted_internal_result(
+        self,
+        request: CapabilityExecutionRequest,
+        *,
+        _token: object,
+    ) -> tuple[Any, CapabilityExecutionReceipt]:
+        """Return a native adapter result only to a module-owned server path."""
+        if _token is not _RAW_RESULT_TOKEN:
+            raise CapabilityExecutionError("raw_result_internal_only")
+        if self._journal_recovery_error is not None:
+            raise CapabilityExecutionError(self._journal_recovery_error, recoverable=True)
+        if request.capability_id not in _ADOPTED_CAPABILITIES:
+            raise CapabilityExecutionError("capability_not_adopted")
+        handler = self._resolve_handler(request.capability_id)
+        if handler is None:
+            raise CapabilityExecutionError("capability_handler_unregistered")
+        token = _INTERNAL_RAW_RESULT.set(_token)
+        try:
+            return self._execute(request, handler, return_raw_result=True)
+        finally:
+            _INTERNAL_RAW_RESULT.reset(token)
 
     @contextmanager
     def _journal_guard(self):
@@ -623,7 +704,13 @@ class CapabilityExecutionHost:
                     fcntl.flock(fd, fcntl.LOCK_UN)
                 os.close(fd)
 
-    def _execute(self, request: CapabilityExecutionRequest, handler: CapabilityHandler) -> tuple[Any, CapabilityExecutionReceipt]:
+    def _execute(
+        self,
+        request: CapabilityExecutionRequest,
+        handler: CapabilityHandler,
+        *,
+        return_raw_result: bool = False,
+    ) -> tuple[Any, CapabilityExecutionReceipt]:
         now = time.time()
         self._validate_authority(request, now=now)
         if request.duplicate_key in self._uncertain_keys:
@@ -784,6 +871,10 @@ class CapabilityExecutionHost:
             completed_at=completed_at,
             result=bounded_result,
         )
+        if return_raw_result:
+            return result, CapabilityExecutionReceipt(
+                **{**receipt.as_dict(), "result": result}
+            )
         return bounded_result, receipt
 
     def _validate_authority(self, request: CapabilityExecutionRequest, *, now: float) -> None:
@@ -996,7 +1087,7 @@ class CapabilityExecutionHost:
         sealed = dict(record)
         sealed["record_mac"] = _mac(
             {key: value for key, value in sealed.items() if key != "record_mac"},
-            key=_EFFECT_MAC_KEY,
+            key=_effect_mac_key(),
         )
         return sealed
 
@@ -1042,7 +1133,7 @@ class CapabilityExecutionHost:
         record_mac = record.get("record_mac")
         if not isinstance(record_mac, str) or not hmac.compare_digest(
             record_mac,
-            _mac({key: value for key, value in record.items() if key != "record_mac"}, key=_EFFECT_MAC_KEY),
+            _mac({key: value for key, value in record.items() if key != "record_mac"}, key=_effect_mac_key()),
         ):
             raise CapabilityJournalError("execution journal record integrity check failed")
 
@@ -1135,6 +1226,8 @@ def build_capability_request(
     bindings are accepted only as repository-issued, MACed receipts and are
     checked again by the host immediately before effect dispatch.
     """
+    if "__seraph_raw_result" in arguments:
+        raise CapabilityExecutionError("raw_result_internal_only")
     from src.approval.runtime import (
         get_current_fencing_token,
         get_current_session_id,

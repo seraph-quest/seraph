@@ -30,7 +30,7 @@ from src.db.models import (
 from src.db.session_refs import ensure_sessions_exist
 from src.memory.episodes import build_message_episode
 from src.memory.flush import flush_session_memory
-from src.tools.process_tools import process_runtime_manager
+from src.tools.process_tools import SessionProcessCleanupError, process_runtime_manager
 
 logger = logging.getLogger(__name__)
 
@@ -190,13 +190,35 @@ class SessionManager:
             return session
 
     async def delete(self, session_id: str) -> bool:
+        cleanup_fence_acquired = process_runtime_manager.begin_session_cleanup(session_id)
+        if not cleanup_fence_acquired:
+            return False
+        try:
+            return await self._delete_session_records(session_id)
+        finally:
+            if cleanup_fence_acquired:
+                process_runtime_manager.end_session_cleanup(session_id)
+
+    async def _delete_session_records(self, session_id: str) -> bool:
         await flush_session_memory(session_id, trigger="session_end", manager=self)
         async with get_session() as db:
             result = await db.execute(select(Session).where(Session.id == session_id))
             session = result.scalars().first()
             if not session:
                 return False
-            process_runtime_manager.stop_processes_for_session(session_id)
+            try:
+                process_runtime_manager.stop_processes_for_session(
+                    session_id,
+                    cleanup_fence_held=True,
+                    fail_closed=True,
+                )
+            except SessionProcessCleanupError as exc:
+                logger.warning(
+                    "Session deletion blocked because process cleanup is incomplete for %s: %s",
+                    session_id,
+                    exc,
+                )
+                return False
             msgs = await db.execute(
                 select(Message).where(Message.session_id == session_id)
             )

@@ -300,6 +300,8 @@ async def test_runner_timeout_fails_closed_and_keeps_recoverable_workspace(async
             return {
                 "ok": False, "blocked": False, "reason_code": "process_failed", "exit_code": None,
                 "timed_out": True, "stdout_sha256": "", "stderr_sha256": "", "stdout_chars": 0, "stderr_chars": 0,
+                "cleanup_status": "unknown", "remaining_descendants": 2,
+                "worker_root": "/tmp/native-swe-retained-worker",
             }
         return original_process_result(command, args, cwd, timeout_seconds=timeout_seconds, include_output=include_output)
 
@@ -321,7 +323,16 @@ async def test_runner_timeout_fails_closed_and_keeps_recoverable_workspace(async
     assert source_before == (source / "calculator.py").read_bytes()
     artifact_paths = list((workspace / ".seraph" / "native-software-engineering" / "jobs").glob("*/artifacts/test.json"))
     assert len(artifact_paths) == 1
-    assert '"success_eligible": false' in artifact_paths[0].read_text(encoding="utf-8")
+    test_artifact = artifact_paths[0].read_text(encoding="utf-8")
+    assert '"success_eligible": false' in test_artifact
+    assert '"cleanup_status": "unknown"' in test_artifact
+    assert '"remaining_descendants": 2' in test_artifact
+    assert '"worker_root": "/tmp/native-swe-retained-worker"' in test_artifact
+    assert result["process_cleanup"] == {
+        "cleanup_status": "unknown",
+        "remaining_descendants": 2,
+        "worker_root": "/tmp/native-swe-retained-worker",
+    }
 
 
 @pytest.mark.asyncio
@@ -372,6 +383,9 @@ async def test_cancellation_during_test_cannot_report_success(tmp_path, monkeypa
                 "stderr_sha256": "",
                 "stdout_chars": 0,
                 "stderr_chars": 0,
+                "cleanup_status": "unknown",
+                "remaining_descendants": 1,
+                "worker_root": "/tmp/native-swe-cancel-retained-worker",
             }
         return original_process_result(command, args, cwd, timeout_seconds=timeout_seconds, include_output=include_output)
 
@@ -403,6 +417,11 @@ async def test_cancellation_during_test_cannot_report_success(tmp_path, monkeypa
     assert result["reason_code"] == "operator_cancelled_during_test"
     assert result["durable_job"]["status"] == "cancelled"
     assert result["cancellation"]["success_eligible"] is False
+    assert result["process_cleanup"] == {
+        "cleanup_status": "unknown",
+        "remaining_descendants": 1,
+        "worker_root": "/tmp/native-swe-cancel-retained-worker",
+    }
     assert result["workspace"]["recoverable"] is True
     assert not list((workspace / ".seraph" / "native-software-engineering" / "jobs").glob("*/artifacts/readback.json"))
 

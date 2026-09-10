@@ -56,6 +56,7 @@ DURABLE_JOB_STATUSES = (
     "unknown_external_effect",
     "cost_liability",
     "failed",
+    "degraded",
     "succeeded",
     "cancelled",
 )
@@ -84,6 +85,7 @@ DURABLE_JOB_TRANSITIONS: dict[str, frozenset[str]] = {
         "unknown_external_effect",
         "cost_liability",
         "failed",
+        "degraded",
         "succeeded",
         "cancelled",
     }),
@@ -109,10 +111,11 @@ DURABLE_JOB_TRANSITIONS: dict[str, frozenset[str]] = {
     "unknown_external_effect": frozenset({"blocked", "failed", "cancelled"}),
     "cost_liability": frozenset({"blocked", "failed", "cancelled"}),
     "failed": frozenset({"queued"}),
+    "degraded": frozenset(),
     "succeeded": frozenset(),
     "cancelled": frozenset(),
 }
-DURABLE_JOB_TERMINAL_STATUSES = frozenset({"succeeded", "cancelled"})
+DURABLE_JOB_TERMINAL_STATUSES = frozenset({"succeeded", "degraded", "cancelled"})
 UNCERTAIN_EXTERNAL_EFFECT_STATUSES = frozenset({"unknown_external_effect", "cost_liability"})
 UNRESOLVED_EFFECT_STATUSES = frozenset({"unknown", "intent", "dispatched"})
 DEPENDENCY_FAILURE_STATUSES = frozenset({"failed", "cancelled"})
@@ -611,6 +614,16 @@ def _admission_conflicts(
         "plan_revision": spec.plan_revision,
         "candidate_id": spec.candidate_id,
     }
+    if spec.run_fingerprint is not None or hasattr(existing, "run_fingerprint"):
+        expected["run_fingerprint"] = _text(spec.run_fingerprint, input_digest)
+    if hasattr(existing, "budget_digest"):
+        expected_budget = spec.budget_microusd
+        if expected_budget is None:
+            expected_budget = _authority_budget_microusd(spec.declared_authority)
+        expected["budget_digest"] = _text(
+            spec.budget_digest,
+            _digest({"budget_microusd": expected_budget}),
+        )
     actual = {
         "job_id": getattr(existing, "run_identity", None),
         "input_digest": getattr(existing, "input_digest", None),
@@ -633,6 +646,13 @@ def _admission_conflicts(
         "plan_revision": getattr(existing, "plan_revision", None),
         "candidate_id": getattr(existing, "candidate_id", None),
     }
+    if "run_fingerprint" in expected:
+        actual["run_fingerprint"] = getattr(existing, "run_fingerprint", None) or input_digest
+    if "budget_digest" in expected:
+        authority = _json_load(getattr(existing, "declared_authority_json", None), {})
+        actual["budget_digest"] = getattr(existing, "budget_digest", None) or _digest(
+            {"budget_microusd": _authority_budget_microusd(authority)}
+        )
     # Scheduled child work is deliberately deduped across strategist parent
     # occurrences.  The first admitted child retains its original lineage;
     # a later parent may replay that same child only after its own fence has
@@ -1078,6 +1098,7 @@ def _serialize(run: WorkflowRunState, *, receipt: dict[str, Any] | None = None) 
         "workflow_name": run.workflow_name,
         "tool_name": run.tool_name,
         "session_id": run.session_id,
+        "run_fingerprint": getattr(run, "run_fingerprint", None),
         "goal_id": getattr(run, "goal_id", None),
         "goal_revision": getattr(run, "goal_revision", None),
         "plan_revision": getattr(run, "plan_revision", None),
@@ -1088,6 +1109,7 @@ def _serialize(run: WorkflowRunState, *, receipt: dict[str, Any] | None = None) 
         "resource_claims": _json_load(getattr(run, "resource_claims_json", None), []),
         "input_digest": getattr(run, "input_digest", None),
         "authority_digest": getattr(run, "authority_digest", None),
+        "budget_digest": getattr(run, "budget_digest", None),
         "declared_authority": _json_load(getattr(run, "declared_authority_json", None), {}),
         "idempotency": {
             "scope": getattr(run, "idempotency_scope", None),
@@ -1107,6 +1129,9 @@ def _serialize(run: WorkflowRunState, *, receipt: dict[str, Any] | None = None) 
         "result": {
             "digest": getattr(run, "result_digest", None),
             "summary": getattr(run, "result_summary", None),
+            # Keep a degraded execution distinguishable from a failed or
+            # successful goal in every operator readback projection.
+            "status": run.status,
         },
         "checkpoints": _json_load(getattr(run, "checkpoint_receipts_json", None), []),
         "artifacts": _json_load(getattr(run, "artifact_receipts_json", None), []),
@@ -1184,6 +1209,12 @@ class DurableJobSpec:
     deadline_at: datetime | str | None = None
     max_attempts: int = 1
     service_id: str | None = None
+    # ``run_fingerprint`` is the caller's complete immutable execution
+    # contract fingerprint.  Older callers omit it and retain the input
+    # digest fallback; canonical workflow admission always supplies it.
+    run_fingerprint: str | None = None
+    budget_microusd: int | None = None
+    budget_digest: str | None = None
 
 
 class DurableJobRepository:
@@ -1203,6 +1234,31 @@ class DurableJobRepository:
         deadline = _as_utc(spec.deadline_at)
         now = _utc_now()
         input_digest, safe_inputs = _safe_inputs_digest(spec.inputs)
+        run_fingerprint = _bounded_identifier(
+            spec.run_fingerprint or input_digest,
+            field_name="run_fingerprint",
+        )
+        authority_budget = _authority_budget_microusd(spec.declared_authority)
+        if spec.budget_microusd is not None and authority_budget is not None:
+            if int(spec.budget_microusd) != authority_budget:
+                raise DurableJobIdempotencyConflict(
+                    "budget_microusd conflicts with declared authority"
+                )
+        budget_microusd = (
+            spec.budget_microusd
+            if spec.budget_microusd is not None
+            else authority_budget
+        )
+        if budget_microusd is not None:
+            if isinstance(budget_microusd, bool) or int(budget_microusd) < 0:
+                raise ValueError("budget_microusd must be a nonnegative integer")
+            budget_microusd = int(budget_microusd)
+        budget_digest = _text(
+            spec.budget_digest,
+            _digest({"budget_microusd": budget_microusd}),
+        )
+        if budget_digest != _digest({"budget_microusd": budget_microusd}):
+            raise DurableJobIdempotencyConflict("budget_digest does not match the durable budget")
         binding = _binding(
             owner_principal_id=identity.owner_principal_id,
             goal_id=spec.goal_id,
@@ -1286,7 +1342,7 @@ class DurableJobRepository:
                 tool_name=identity.job_kind,
                 session_id=spec.session_id,
                 status=status,
-                run_fingerprint=input_digest,
+                run_fingerprint=run_fingerprint,
                 arguments_json=_canonical(safe_inputs),
                 approval_context_json=_canonical(_safe_structure(spec.declared_authority)),
                 record_schema_version=DURABLE_JOB_RECORD_SCHEMA_VERSION,
@@ -1301,6 +1357,7 @@ class DurableJobRepository:
                 capability_version=identity.capability_version,
                 input_digest=input_digest,
                 authority_digest=authority_digest,
+                budget_digest=budget_digest,
                 idempotency_scope=identity.idempotency_scope,
                 idempotency_key=identity.idempotency_key,
                 idempotency_binding=binding,
@@ -1528,12 +1585,13 @@ class DurableJobRepository:
             if current == "running" and to_status in {
                 "failed",
                 "cancelled",
+                "degraded",
                 "succeeded",
             }:
                 try:
                     effect_ledger = _effect_ledger_or_raise(run.effect_receipts_json)
                 except DurableJobTransitionError:
-                    if to_status == "succeeded":
+                    if to_status in {"succeeded", "degraded"}:
                         raise
                     to_status = "blocked"
                     reason = "malformed_effect_history_requires_reconciliation"
@@ -1541,17 +1599,17 @@ class DurableJobRepository:
                     if to_status == "cancelled":
                         to_status, recovery_reason = _effect_recovery_state(effect_ledger)
                         reason = reason or f"{recovery_reason}_pending_before_transition"
-            if to_status == "succeeded":
+            if to_status in {"succeeded", "degraded"}:
                 if _deadline_expired(run):
                     raise DurableJobTransitionError("job deadline has expired")
                 effect_ledger = effect_ledger or _effect_ledger_or_raise(run.effect_receipts_json)
                 if _job_has_unsafe_effects(effect_ledger):
                     raise DurableJobTransitionError(
-                        "cannot mark durable job succeeded: unresolved external effect"
+                        "cannot mark durable job terminal: unresolved external effect"
                     )
                 if not _verified_readback_exists(effect_ledger):
                     raise DurableJobTransitionError(
-                        "cannot mark durable job succeeded: verified capability readback is required"
+                        "cannot mark durable job terminal: verified capability readback is required"
                     )
             now = _utc_now()
             values: dict[str, Any] = {
@@ -1574,6 +1632,7 @@ class DurableJobRepository:
                 "unknown_external_effect",
                 "cost_liability",
                 "failed",
+                "degraded",
                 "succeeded",
                 "cancelled",
             }:

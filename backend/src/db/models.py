@@ -236,6 +236,10 @@ class WorkflowRunState(SQLModel, table=True):
     capability_version: str = Field(default="workflow-v1", index=True)
     input_digest: Optional[str] = Field(default=None, index=True)
     authority_digest: Optional[str] = Field(default=None, index=True)
+    # A digest binds the execution budget without retaining a raw allowance
+    # in the durable projection.  ``None`` is represented by the canonical
+    # digest for an absent budget by the typed repository.
+    budget_digest: Optional[str] = Field(default=None, index=True)
     idempotency_scope: Optional[str] = Field(default=None, index=True)
     idempotency_key: Optional[str] = Field(default=None, index=True)
     idempotency_binding: Optional[str] = Field(default=None, index=True)

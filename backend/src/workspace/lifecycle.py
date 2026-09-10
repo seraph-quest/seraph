@@ -24,7 +24,7 @@ from datetime import datetime, timezone
 import hashlib
 import json
 import os
-from pathlib import Path, PurePosixPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 import re
 import shutil
 import sqlite3
@@ -39,6 +39,7 @@ from src.workspace.state_registry import (
     WorkspaceStateRegistry,
     WorkspaceRootKind,
     canonical_workspace_root,
+    canonical_workspace_root_identity,
     _canonical_json,
     _sha256_bytes,
 )
@@ -269,6 +270,71 @@ def _workspace_root_digest(root: Path) -> str:
     return hashlib.sha256(str(root).encode("utf-8")).hexdigest()
 
 
+_ROOT_IDENTITY_KEYS = frozenset({"path_digest", "device", "inode"})
+
+
+def _root_identity(root: Path, *, label: str) -> dict[str, int | str]:
+    """Capture a directory's lexical, device, and inode identity."""
+    try:
+        identity = canonical_workspace_root_identity(root)
+    except WorkspaceStateError as exc:
+        raise WorkspaceLifecycleError(f"{label} identity is unavailable") from exc
+    if set(identity) != _ROOT_IDENTITY_KEYS:
+        raise WorkspaceLifecycleError(f"{label} identity is incomplete")
+    return identity
+
+
+def _validate_root_identity(value: object, *, label: str) -> dict[str, int | str]:
+    if not isinstance(value, dict) or set(value) != _ROOT_IDENTITY_KEYS:
+        raise WorkspaceLifecycleError(f"{label} identity is invalid")
+    path_digest = value.get("path_digest")
+    if not isinstance(path_digest, str) or not _DIGEST_PATTERN.fullmatch(path_digest):
+        raise WorkspaceLifecycleError(f"{label} path identity is invalid")
+    identity: dict[str, int | str] = {"path_digest": path_digest}
+    for field in ("device", "inode"):
+        field_value = value.get(field)
+        if isinstance(field_value, bool) or not isinstance(field_value, int) or field_value < 0:
+            raise WorkspaceLifecycleError(f"{label} {field} identity is invalid")
+        identity[field] = field_value
+    return identity
+
+
+def _assert_root_identity(
+    root: Path,
+    expected: object,
+    *,
+    label: str,
+    check_path_digest: bool = True,
+) -> dict[str, int | str]:
+    """Fail closed when the canonical root was replaced at the same path."""
+    expected_identity = _validate_root_identity(expected, label=label)
+    actual_identity = _root_identity(root, label=label)
+    if (
+        actual_identity["device"] != expected_identity["device"]
+        or actual_identity["inode"] != expected_identity["inode"]
+        or (
+            check_path_digest
+            and actual_identity["path_digest"] != expected_identity["path_digest"]
+        )
+    ):
+        raise WorkspaceLifecycleError(f"{label} identity changed")
+    return actual_identity
+
+
+def _replace_root(source: Path, destination: Path, *, label: str) -> None:
+    """Rename one verified directory without following or replacing a link."""
+    _assert_no_symlink_components(source, label=f"{label} source")
+    _assert_no_symlink_components(destination, label=f"{label} destination")
+    _assert_not_symlink(source, label=f"{label} source")
+    _assert_not_symlink(destination, label=f"{label} destination")
+    if _path_present(destination):
+        raise WorkspaceLifecycleError(f"{label} destination already exists")
+    try:
+        os.replace(source, destination)
+    except OSError as exc:
+        raise WorkspaceLifecycleError(f"{label} could not be completed") from exc
+
+
 def _bounded_identifier_list(value: object, *, label: str) -> None:
     """Allow only short logical identifiers in durable operator receipts."""
     if not isinstance(value, list) or len(value) > MAX_ARCHIVE_MEMBERS:
@@ -421,6 +487,13 @@ def _validate_journal(
         raise WorkspaceLifecycleError("restore journal root identity is invalid")
     if expected_root_digest is not None and root_digest != expected_root_digest:
         raise WorkspaceLifecycleError("restore journal root identity does not match target")
+    _validate_root_identity(journal.get("workspace_root_identity"), label="workspace root")
+    _validate_root_identity(journal.get("stage_root_identity"), label="restore staging root")
+    promoted_identity = journal.get("promoted_root_identity")
+    if promoted_identity is not None:
+        _validate_root_identity(promoted_identity, label="promoted workspace root")
+        if promoted_identity != journal.get("stage_root_identity"):
+            raise WorkspaceLifecycleError("promoted workspace root identity does not match staging")
     if journal.get("previous_name") != f"{restore_id}/previous-workspace":
         raise WorkspaceLifecycleError("restore journal previous-root binding is invalid")
     if journal.get("stage_name") != restore_id:
@@ -466,11 +539,16 @@ def _safe_logical_path(value: object, *, field: str) -> str:
     if not isinstance(value, str) or not value:
         raise InvalidWorkspaceArchiveError(f"{field} must be a non-empty logical path")
     normalized = value.replace("\\", "/")
+    if "\x00" in normalized or PurePosixPath(normalized).is_absolute():
+        raise InvalidWorkspaceArchiveError(f"{field} contains an unsafe absolute path")
+    windows_path = PureWindowsPath(normalized)
+    if windows_path.is_absolute() or windows_path.drive or normalized.startswith("//"):
+        raise InvalidWorkspaceArchiveError(f"{field} contains an unsafe absolute path")
     parts = PurePosixPath(normalized).parts
     if (
         not parts
-        or normalized.startswith("/")
         or any(part in {"", ".", ".."} for part in parts)
+        or any(":" in part for part in parts)
         or normalized != "/".join(parts)
     ):
         raise InvalidWorkspaceArchiveError(f"{field} contains unsafe path traversal")
@@ -639,7 +717,13 @@ def backup_workspace(
     """Create an atomic, versioned archive from the registry inventory."""
     resolved_root = canonical_workspace_root(root)
     _registry_root(resolved_root, registry)
+    root_identity = _root_identity(resolved_root, label="active workspace root")
     source_manifest = registry.build_manifest()
+    _assert_root_identity(
+        resolved_root,
+        root_identity,
+        label="active workspace root before backup",
+    )
     archive_manifest = _archive_manifest(source_manifest, registry)
     destination = _archive_path(resolved_root, archive_path)
     _ensure_directory(destination.parent, label="backup archive directory")
@@ -653,6 +737,11 @@ def backup_workspace(
     payloads: dict[str, bytes] = {}
     try:
         for logical_path in sorted(archive_entries):
+            _assert_root_identity(
+                resolved_root,
+                root_identity,
+                label="active workspace root during backup",
+            )
             entry = archive_entries[logical_path]
             source_path = _safe_entry_path(resolved_root, logical_path, registry)
             payload = _regular_file_bytes(source_path, label=f"workspace file {logical_path}")
@@ -684,6 +773,11 @@ def backup_workspace(
                     payloads[logical_path],
                 )
         _fsync_file(temporary)
+        _assert_root_identity(
+            resolved_root,
+            root_identity,
+            label="active workspace root before backup publish",
+        )
         os.replace(temporary, destination)
         _fsync_directory(destination.parent)
     except WorkspaceLifecycleError:
@@ -739,6 +833,8 @@ def _validate_zip_member(info: zipfile.ZipInfo, *, expected_prefix: str | None =
     mode = (info.external_attr >> 16) & 0o170000
     if mode == stat.S_IFLNK:
         raise InvalidWorkspaceArchiveError("archive symlink members are not allowed")
+    if mode not in {0, stat.S_IFREG}:
+        raise InvalidWorkspaceArchiveError("archive special-file members are not allowed")
     if expected_prefix is not None and not name.startswith(expected_prefix):
         raise InvalidWorkspaceArchiveError("archive contains an unexpected member")
     return name
@@ -769,6 +865,9 @@ def _load_archive(
             names = [_validate_zip_member(info) for info in infos]
             if len(names) != len(set(names)):
                 raise InvalidWorkspaceArchiveError("archive contains duplicate members")
+            folded_names = [name.casefold() for name in names]
+            if len(folded_names) != len(set(folded_names)):
+                raise InvalidWorkspaceArchiveError("archive contains case-colliding members")
             if names.count(MANIFEST_MEMBER) != 1:
                 raise InvalidWorkspaceArchiveError("archive must contain exactly one manifest.json")
             manifest = _read_json_member(archive, MANIFEST_MEMBER)
@@ -1221,6 +1320,62 @@ def _recovery_action(
     raise WorkspaceLifecycleError(f"restore {restore_id} has an unsupported recovery state")
 
 
+def _validate_recovery_root_bindings(
+    journal: dict[str, Any],
+    *,
+    active: Path,
+    previous: Path,
+    current: Path,
+    stage: Path,
+    active_present: bool,
+    previous_present: bool,
+    current_present: bool,
+    stage_present: bool,
+) -> None:
+    """Check every present rename endpoint against the journal identities."""
+    original_identity = journal["workspace_root_identity"]
+    stage_identity = journal["stage_root_identity"]
+    promoted_identity = journal.get("promoted_root_identity", stage_identity)
+    if previous_present:
+        _assert_root_identity(
+            previous,
+            original_identity,
+            label="pre-restore workspace root",
+            check_path_digest=False,
+        )
+    if stage_present:
+        _assert_root_identity(stage, stage_identity, label="restore staging root")
+    if current_present:
+        _assert_root_identity(
+            current,
+            promoted_identity,
+            label="rollback workspace root",
+            check_path_digest=False,
+        )
+    if not active_present:
+        return
+    status = journal["status"]
+    if status == "staged":
+        expected_active = original_identity
+    elif status == "active_moved":
+        expected_active = stage_identity if not stage_present else original_identity
+    elif status in {"promoted", "recovered_promoted"}:
+        expected_active = promoted_identity
+    elif status == "rollback_active_moved":
+        expected_active = original_identity
+    else:
+        # A completed rollback may retain either generation, depending on
+        # which rename was durable when recovery was interrupted. The sidecar
+        # identities above still prevent an unrelated directory replacement.
+        return
+    _assert_root_identity(
+        active,
+        expected_active,
+        label="active workspace root",
+        check_path_digest=expected_active is original_identity,
+    )
+
+
 def restore_workspace(
     root: str | os.PathLike[str],
     archive_path: str | os.PathLike[str],
@@ -1250,6 +1405,7 @@ def restore_workspace(
             "production restore requires an authority and derived-state reconciliation hook"
         )
     recover_interrupted_restore(resolved_root, registry=registry)
+    root_identity = _root_identity(resolved_root, label="active workspace root")
     # Keep the lexical path intact until lstat: resolving first would turn a
     # symlinked archive into its target and defeat the fail-closed check.
     loaded = _load_archive(Path(archive_path).expanduser(), registry)
@@ -1273,6 +1429,7 @@ def restore_workspace(
             loaded=loaded,
             registry=registry,
         )
+        staged_root_identity = _root_identity(stage, label="restore staging root")
         if reconcile_restore is not None:
             reconciliation = reconcile_restore(
                 root=resolved_root,
@@ -1298,22 +1455,49 @@ def restore_workspace(
             "status": "staged",
             "workspace_id": registry.config.identity.workspace_id,
             "workspace_root_digest": _workspace_root_digest(resolved_root),
+            "workspace_root_identity": root_identity,
+            "stage_root_identity": staged_root_identity,
             "archive_manifest_sha256": loaded.manifest["manifest_sha256"],
             "previous_name": f"{restore_id}/previous-workspace",
             "stage_name": f"{restore_id}",
             "created_at": _utc_timestamp(),
             "stage_receipt": stage_receipt,
         }
+        _assert_root_identity(
+            resolved_root,
+            root_identity,
+            label="active workspace root before promotion",
+        )
         _write_journal(journal_file, journal)
-        os.replace(resolved_root, previous)
+        _replace_root(resolved_root, previous, label="pre-restore root move")
+        _assert_root_identity(
+            previous,
+            root_identity,
+            label="pre-restore workspace root",
+            check_path_digest=False,
+        )
         _fsync_directory(resolved_root.parent)
         journal["status"] = "active_moved"
         _write_journal(journal_file, journal)
         if interrupt_after_active_move:
             raise InterruptedWorkspaceRestore("restore interrupted after active workspace move")
-        os.replace(stage, resolved_root)
+        _assert_root_identity(
+            stage,
+            staged_root_identity,
+            label="restore staging root before promotion",
+        )
+        if _path_present(resolved_root):
+            raise WorkspaceLifecycleError("active workspace root reappeared during promotion")
+        _replace_root(stage, resolved_root, label="staged workspace promotion")
+        _assert_root_identity(
+            resolved_root,
+            staged_root_identity,
+            label="promoted workspace root",
+            check_path_digest=False,
+        )
         _fsync_directory(resolved_root.parent)
         journal["status"] = "promoted"
+        journal["promoted_root_identity"] = staged_root_identity
         journal["completed_at"] = _utc_timestamp()
         _write_journal(journal_file, journal)
         cleanup_receipt = (
@@ -1422,6 +1606,21 @@ def recover_interrupted_restore(
         ):
             _assert_no_symlink_components(path, label=label)
             _assert_not_symlink(path, label=label)
+        active_present = _path_present(resolved_root)
+        previous_present = _path_present(previous)
+        current_present = _path_present(current)
+        stage_present = _path_present(stage)
+        _validate_recovery_root_bindings(
+            journal,
+            active=resolved_root,
+            previous=previous,
+            current=current,
+            stage=stage,
+            active_present=active_present,
+            previous_present=previous_present,
+            current_present=current_present,
+            stage_present=stage_present,
+        )
         preflight_candidates.append(
             {
                 "record_root": record_root,
@@ -1431,10 +1630,10 @@ def recover_interrupted_restore(
                 "previous": previous,
                 "current": current,
                 "stage": stage,
-                "active_present": _path_present(resolved_root),
-                "previous_present": _path_present(previous),
-                "current_present": _path_present(current),
-                "stage_present": _path_present(stage),
+                "active_present": active_present,
+                "previous_present": previous_present,
+                "current_present": current_present,
+                "stage_present": stage_present,
             }
         )
 
@@ -1528,18 +1727,43 @@ def recover_interrupted_restore(
             (current, "rollback workspace root"),
             (stage, "restore staging root"),
         ):
+            _assert_no_symlink_components(path, label=label)
             _assert_not_symlink(path, label=label)
+        active_present = _path_present(resolved_root)
+        previous_present = _path_present(previous)
+        current_present = _path_present(current)
+        stage_present = _path_present(stage)
+        _validate_recovery_root_bindings(
+            journal,
+            active=resolved_root,
+            previous=previous,
+            current=current,
+            stage=stage,
+            active_present=active_present,
+            previous_present=previous_present,
+            current_present=current_present,
+            stage_present=stage_present,
+        )
         if status == "staged":
-            active_present = _path_present(resolved_root)
-            previous_present = _path_present(previous)
-            stage_present = _path_present(stage)
             if not active_present and previous_present and stage_present:
-                os.replace(stage, resolved_root)
+                _replace_root(stage, resolved_root, label="recovered staged workspace promotion")
+                _assert_root_identity(
+                    resolved_root,
+                    journal["stage_root_identity"],
+                    label="recovered promoted workspace root",
+                    check_path_digest=False,
+                )
                 _fsync_directory(resolved_root.parent)
                 journal["status"] = "recovered_promoted"
+                journal["promoted_root_identity"] = journal["stage_root_identity"]
                 action = "promoted_staging"
             elif not active_present and previous_present and not stage_present:
-                os.replace(previous, resolved_root)
+                _replace_root(previous, resolved_root, label="recovered pre-restore rollback")
+                _assert_root_identity(
+                    resolved_root,
+                    journal["workspace_root_identity"],
+                    label="recovered restored workspace root",
+                )
                 _fsync_directory(resolved_root.parent)
                 journal["status"] = "recovered_rollback"
                 action = "restored_previous"
@@ -1554,11 +1778,17 @@ def recover_interrupted_restore(
             recovered.append({"restore_id": restore_id, "action": action})
             continue
         if status == "active_moved":
-            active_present = _path_present(resolved_root)
-            previous_present = _path_present(previous)
-            stage_present = _path_present(stage)
             if active_present and previous_present and not stage_present:
+                _assert_root_identity(
+                    resolved_root,
+                    journal.get("promoted_root_identity", journal["stage_root_identity"]),
+                    label="confirmed promoted workspace root",
+                    check_path_digest=False,
+                )
                 journal["status"] = "recovered_promoted"
+                journal["promoted_root_identity"] = journal.get(
+                    "promoted_root_identity", journal["stage_root_identity"]
+                )
                 journal["recovered_at"] = _utc_timestamp()
                 _write_journal(journal_file, journal)
                 recovered.append({"restore_id": restore_id, "action": "confirmed_promotion"})
@@ -1568,12 +1798,24 @@ def recover_interrupted_restore(
                     f"interrupted restore {restore_id} has an ambiguous active root"
                 )
             if stage_present:
-                os.replace(stage, resolved_root)
+                _replace_root(stage, resolved_root, label="recovered staged workspace promotion")
+                _assert_root_identity(
+                    resolved_root,
+                    journal["stage_root_identity"],
+                    label="recovered promoted workspace root",
+                    check_path_digest=False,
+                )
                 _fsync_directory(resolved_root.parent)
                 journal["status"] = "recovered_promoted"
+                journal["promoted_root_identity"] = journal["stage_root_identity"]
                 action = "promoted_staging"
             elif previous_present:
-                os.replace(previous, resolved_root)
+                _replace_root(previous, resolved_root, label="recovered pre-restore rollback")
+                _assert_root_identity(
+                    resolved_root,
+                    journal["workspace_root_identity"],
+                    label="recovered restored workspace root",
+                )
                 _fsync_directory(resolved_root.parent)
                 journal["status"] = "recovered_rollback"
                 action = "restored_previous"
@@ -1584,9 +1826,6 @@ def recover_interrupted_restore(
             recovered.append({"restore_id": restore_id, "action": action})
             continue
         if status == "rollback_active_moved":
-            active_present = _path_present(resolved_root)
-            previous_present = _path_present(previous)
-            current_present = _path_present(current)
             if active_present and current_present and not previous_present:
                 journal["status"] = "recovered_rollback"
                 journal["recovered_at"] = _utc_timestamp()
@@ -1598,14 +1837,25 @@ def recover_interrupted_restore(
                     f"rollback {restore_id} has an ambiguous active root"
                 )
             if previous_present:
-                os.replace(previous, resolved_root)
+                _replace_root(previous, resolved_root, label="recovered workspace rollback")
+                _assert_root_identity(
+                    resolved_root,
+                    journal["workspace_root_identity"],
+                    label="recovered rolled-back workspace root",
+                )
                 _fsync_directory(resolved_root.parent)
                 journal["status"] = "recovered_rollback"
                 journal["recovered_at"] = _utc_timestamp()
                 _write_journal(journal_file, journal)
                 recovered.append({"restore_id": restore_id, "action": "restored_previous"})
             elif current_present:
-                os.replace(current, resolved_root)
+                _replace_root(current, resolved_root, label="recovered current workspace rollback")
+                _assert_root_identity(
+                    resolved_root,
+                    journal.get("promoted_root_identity", journal["stage_root_identity"]),
+                    label="recovered current workspace root",
+                    check_path_digest=False,
+                )
                 _fsync_directory(resolved_root.parent)
                 journal["status"] = "recovered_rollback"
                 journal["recovered_at"] = _utc_timestamp()
@@ -1617,8 +1867,13 @@ def recover_interrupted_restore(
             # A rollback may have moved the promoted root before its journal
             # update was durably written.  Restore the retained pre-restore
             # root only when both rename endpoints make that state explicit.
-            if _path_present(previous) and _path_present(current):
-                os.replace(previous, resolved_root)
+            if previous_present and current_present:
+                _replace_root(previous, resolved_root, label="recovered promoted rollback")
+                _assert_root_identity(
+                    resolved_root,
+                    journal["workspace_root_identity"],
+                    label="recovered rolled-back workspace root",
+                )
                 _fsync_directory(resolved_root.parent)
                 journal["status"] = "recovered_rollback"
                 journal["recovered_at"] = _utc_timestamp()
@@ -1634,6 +1889,7 @@ def rollback_workspace(
     restore_id: str,
     *,
     registry: WorkspaceStateRegistry | None = None,
+    reconcile_rollback: Callable[..., dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Atomically swap the current root with a retained pre-restore root.
 
@@ -1656,20 +1912,67 @@ def rollback_workspace(
     if journal.get("status") not in {"promoted", "recovered_promoted"}:
         raise WorkspaceLifecycleError("restore is not in a rollback-capable state")
     _record_root, previous, current, stage = _journal_paths(resolved_root, restore_id)
-    if not resolved_root.is_dir() or resolved_root.is_symlink():
-        raise WorkspaceLifecycleError("active workspace root is not a safe directory")
-    if not previous.is_dir() or previous.is_symlink():
-        raise WorkspaceLifecycleError("pre-restore workspace is unavailable")
+    _assert_no_symlink_components(resolved_root, label="active workspace root")
+    _assert_no_symlink_components(previous, label="pre-restore workspace root")
+    _assert_root_identity(
+        resolved_root,
+        journal.get("promoted_root_identity", journal["stage_root_identity"]),
+        label="active workspace root before rollback",
+        check_path_digest=False,
+    )
+    _assert_root_identity(
+        previous,
+        journal["workspace_root_identity"],
+        label="pre-restore workspace root",
+        check_path_digest=False,
+    )
     _assert_not_symlink(current, label="rollback workspace root")
     _assert_not_symlink(stage, label="restore staging root")
     if _path_present(current) or _path_present(stage):
         raise WorkspaceLifecycleError("rollback target has an ambiguous sidecar")
-    os.replace(resolved_root, current)
+    rollback_reconciliation = None
+    if reconcile_rollback is not None:
+        rollback_reconciliation = reconcile_rollback(
+            active=resolved_root,
+            target=previous,
+            registry=registry,
+        )
+        if (
+            not isinstance(rollback_reconciliation, dict)
+            or rollback_reconciliation.get("status") != "ready"
+        ):
+            raise WorkspaceLifecycleError("rollback reconciliation did not produce a ready receipt")
+        _assert_root_identity(
+            previous,
+            journal["workspace_root_identity"],
+            label="pre-restore workspace root after reconciliation",
+            check_path_digest=False,
+        )
+    _replace_root(resolved_root, current, label="rollback active root move")
+    _assert_root_identity(
+        current,
+        journal.get("promoted_root_identity", journal["stage_root_identity"]),
+        label="rollback workspace root",
+        check_path_digest=False,
+    )
     _fsync_directory(resolved_root.parent)
     journal["status"] = "rollback_active_moved"
     _write_journal(journal_file, journal)
     try:
-        os.replace(previous, resolved_root)
+        _assert_root_identity(
+            previous,
+            journal["workspace_root_identity"],
+            label="pre-restore workspace root",
+            check_path_digest=False,
+        )
+        if _path_present(resolved_root):
+            raise WorkspaceLifecycleError("active workspace root reappeared during rollback")
+        _replace_root(previous, resolved_root, label="rollback workspace promotion")
+        _assert_root_identity(
+            resolved_root,
+            journal["workspace_root_identity"],
+            label="rolled-back workspace root",
+        )
         _fsync_directory(resolved_root.parent)
     except Exception:
         raise
@@ -1680,6 +1983,7 @@ def rollback_workspace(
         "status": "rolled_back",
         "restore_id": restore_id,
         "rollback_available": False,
+        "rollback_reconciliation": rollback_reconciliation,
         "secret_values_included": False,
     }
 

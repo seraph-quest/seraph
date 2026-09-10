@@ -132,9 +132,16 @@ rebuild hook blocks promotion. Staged operator sessions and durable workflow
 authority rows are revoked or blocked before promotion. The current slice
 proves deterministic local inventory, archive validation, staged promotion,
 rollback journaling, durable status receipts, and provider-independent
-maintenance. Migration fencing beyond the backend owner lease,
-retention/disk-pressure drills, and live operator receipts remain partial #742
-acceptance work.
+maintenance. The owner fence is exercised by a competing subprocess, and
+restore journals bind the active, staged, previous, and promoted roots to
+device/inode identity. Root replacement, symlink endpoints, archive traversal,
+special-file members, and promotion disk errors fail closed while retaining a
+recoverable journal. Rollback carries tombstones, revocations, configuration
+history, unresolved cost liabilities, session invalidation, and workflow
+authority blocking into the retained generation. The checked-in drill is an
+isolated temporary workspace; it does not prove a live production-data restore,
+retention/disk-pressure capacity, or an interrupted CLI recovery when the
+active root is absent.
 
 ## Historical develop topology
 

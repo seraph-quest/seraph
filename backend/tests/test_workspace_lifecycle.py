@@ -229,6 +229,83 @@ def test_backup_restore_round_trip_and_rollback_preserve_secret_boundary(tmp_pat
     assert (root / "soul.md").read_text(encoding="utf-8") == "changed soul\n"
 
 
+def test_restore_rejects_replaced_active_root_before_promotion(tmp_path):
+    root, registry = _workspace(tmp_path)
+    archive = Path(backup_workspace(root, registry=registry)["archive_path"])
+    replacement = tmp_path / "original-root-after-replacement"
+
+    def replace_active_root(**_kwargs):
+        root.rename(replacement)
+        root.mkdir()
+        (root / "replacement-sentinel").write_text("must remain", encoding="utf-8")
+        return {"status": "ready"}
+
+    with pytest.raises(WorkspaceLifecycleError, match="identity"):
+        restore_workspace(
+            root,
+            archive,
+            registry=registry,
+            confirm=True,
+            restore_id="restore-root-replacement-01",
+            reconcile_restore=replace_active_root,
+        )
+
+    assert (root / "replacement-sentinel").read_text(encoding="utf-8") == "must remain"
+    assert (replacement / "soul.md").read_text(encoding="utf-8") == "original soul\n"
+    assert not (workspace_restore_staging_dir(root) / "restore-root-replacement-01").exists()
+
+
+def test_rollback_rejects_replaced_active_root_before_rename(tmp_path):
+    root, registry = _workspace(tmp_path)
+    archive = Path(backup_workspace(root, registry=registry)["archive_path"])
+    restore_id = "restore-rollback-root-replacement-01"
+    restore_workspace(root, archive, registry=registry, confirm=True, restore_id=restore_id)
+    replacement = tmp_path / "promoted-root-after-replacement"
+    root.rename(replacement)
+    root.mkdir()
+    (root / "replacement-sentinel").write_text("must remain", encoding="utf-8")
+
+    with pytest.raises(WorkspaceLifecycleError, match="identity"):
+        rollback_workspace(root, restore_id, registry=registry)
+
+    assert (root / "replacement-sentinel").read_text(encoding="utf-8") == "must remain"
+    assert (replacement / "soul.md").read_text(encoding="utf-8") == "original soul\n"
+    assert (workspace_backup_dir(root) / restore_id / "previous-workspace").is_dir()
+
+
+def test_promotion_disk_error_keeps_journal_for_safe_recovery(tmp_path, monkeypatch):
+    root, registry = _workspace(tmp_path)
+    archive = Path(backup_workspace(root, registry=registry)["archive_path"])
+    restore_id = "restore-disk-pressure-01"
+    stage = workspace_restore_staging_dir(root) / restore_id
+    original_replace = workspace_lifecycle.os.replace
+
+    def fail_stage_promotion(source, destination):
+        if Path(source) == stage:
+            raise OSError(28, "No space left on device")
+        return original_replace(source, destination)
+
+    monkeypatch.setattr(workspace_lifecycle.os, "replace", fail_stage_promotion)
+    with pytest.raises(WorkspaceLifecycleError, match="could not be completed"):
+        restore_workspace(
+            root,
+            archive,
+            registry=registry,
+            confirm=True,
+            restore_id=restore_id,
+        )
+    monkeypatch.setattr(workspace_lifecycle.os, "replace", original_replace)
+
+    assert not root.exists()
+    assert (workspace_backup_dir(root) / restore_id / "previous-workspace").is_dir()
+    assert stage.is_dir()
+    recovered = recover_interrupted_restore(root, registry=registry)
+    assert recovered["recovered"] == [
+        {"restore_id": restore_id, "action": "promoted_staging"}
+    ]
+    assert (root / "soul.md").read_text(encoding="utf-8") == "original soul\n"
+
+
 @pytest.mark.parametrize("archive_kind", ["corrupt", "missing-manifest"])
 def test_restore_rejects_corrupt_or_incomplete_archive(tmp_path, archive_kind):
     root, registry = _workspace(tmp_path)

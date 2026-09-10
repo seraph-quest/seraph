@@ -24,6 +24,7 @@ from src.workspace import (
     maintenance_fence,
     read_lifecycle_receipt,
     reconcile_production_restore,
+    reconcile_production_rollback,
     resolve_production_workspace,
     rollback_workspace,
     restore_workspace,
@@ -230,6 +231,7 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
                     workspace.host_root,
                     args.restore_id,
                     registry=registry,
+                    reconcile_rollback=reconcile_production_rollback,
                 )
             else:  # pragma: no cover - argparse enforces the command set.
                 raise WorkspaceLifecycleError("unsupported workspace lifecycle command")

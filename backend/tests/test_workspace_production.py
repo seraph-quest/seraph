@@ -194,6 +194,63 @@ def test_runtime_owner_blocks_maintenance_until_backend_releases_bind(tmp_path):
         pass
 
 
+def test_managed_lifecycle_is_fenced_across_processes(tmp_path):
+    """A second process cannot begin a lifecycle operation under the owner lease."""
+    root = _workspace(tmp_path)
+    environment = os.environ.copy()
+    environment.update(_env(root))
+    environment["PYTHONPATH"] = str(ROOT / "backend")
+    holder_code = """
+import sys
+from pathlib import Path
+from src.workspace import maintenance_fence, resolve_production_workspace
+
+root = Path(sys.argv[1])
+workspace = resolve_production_workspace(
+    {
+        "BACKEND_DATA_PATH_PROD": str(root),
+        "WORKSPACE_DIR": str(root),
+    },
+    base_dir=root.parent,
+)
+with maintenance_fence(workspace):
+    print("owner-ready", flush=True)
+    sys.stdin.read(1)
+"""
+    holder = subprocess.Popen(
+        [sys.executable, "-c", holder_code, str(root)],
+        env=environment,
+        cwd=ROOT,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        assert holder.stdout is not None
+        assert holder.stdout.readline().strip() == "owner-ready"
+        blocked = subprocess.run(
+            [sys.executable, str(CLI), "--base-dir", str(tmp_path), "backup"],
+            env=environment,
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert blocked.returncode == 78
+        receipt = json.loads(blocked.stdout)
+        assert receipt["reason_code"] == "production_workspace_owner_busy"
+        assert "SECRET-SENTINEL" not in blocked.stdout
+    finally:
+        if holder.stdin is not None:
+            holder.stdin.write("x")
+            holder.stdin.close()
+        holder.wait(timeout=10)
+        if holder.returncode != 0:
+            assert holder.stderr is not None
+            raise AssertionError(holder.stderr.read())
+
+
 def test_managed_cli_backup_restore_is_redacted_and_staged(tmp_path):
     root = _workspace(tmp_path)
     environment = os.environ.copy()
@@ -537,6 +594,153 @@ def test_managed_cli_blocks_unknown_entries_and_missing_secret(tmp_path):
     assert blocked.returncode == 78
     assert json.loads(blocked.stdout)["reason_code"] == "workspace_state_invalid"
     assert "SECRET-SENTINEL" not in blocked.stdout
+
+
+def test_isolated_backup_restore_restart_and_rollback_drill_preserves_state(tmp_path):
+    """Exercise the managed path with representative durable state and readback."""
+    root = _workspace(tmp_path)
+    (root / "google_calendar_token.json").write_text("OPTIONAL-TOKEN\n", encoding="utf-8")
+    with sqlite3.connect(root / "seraph.db") as database:
+        database.executescript(
+            """
+            CREATE TABLE goals (id TEXT PRIMARY KEY, title TEXT NOT NULL);
+            CREATE TABLE memory_items (id TEXT PRIMARY KEY, body TEXT NOT NULL);
+            CREATE TABLE artifact_registry (artifact_id TEXT PRIMARY KEY, logical_path TEXT NOT NULL);
+            CREATE TABLE tombstones (id TEXT PRIMARY KEY, reason TEXT NOT NULL);
+            CREATE TABLE revocations (id TEXT PRIMARY KEY, revoked_at TEXT NOT NULL);
+            CREATE TABLE config_versions (id TEXT PRIMARY KEY, value TEXT NOT NULL);
+            CREATE TABLE cost_liabilities (id TEXT PRIMARY KEY, amount INTEGER NOT NULL);
+            CREATE TABLE operator_sessions (id TEXT PRIMARY KEY, revoked_at TEXT);
+            CREATE TABLE production_workflow_authority_states (
+                id TEXT PRIMARY KEY,
+                workflow_phase TEXT,
+                safe_replay_decision TEXT,
+                blocked_replay_reason TEXT
+            );
+            INSERT INTO goals VALUES ('goal-1', 'recover the workspace');
+            INSERT INTO memory_items VALUES ('memory-1', 'durable memory');
+            INSERT INTO artifact_registry VALUES ('artifact-1', 'artifacts/report.md');
+            INSERT INTO tombstones VALUES ('tombstone-1', 'operator deleted item');
+            INSERT INTO revocations VALUES ('grant-1', '2026-09-01T00:00:00Z');
+            INSERT INTO config_versions VALUES ('config-1', 'v1');
+            INSERT INTO cost_liabilities VALUES ('liability-1', 17);
+            INSERT INTO operator_sessions VALUES ('session-1', NULL);
+            INSERT INTO production_workflow_authority_states VALUES
+                ('run-1', 'running', 'unsafe', NULL);
+            """
+        )
+    environment = os.environ.copy()
+    environment.update(_env(root))
+    environment["PYTHONPATH"] = str(ROOT / "backend")
+
+    def run(*arguments: str) -> dict[str, object]:
+        completed = subprocess.run(
+            [sys.executable, str(CLI), "--base-dir", str(tmp_path), *arguments],
+            env=environment,
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert completed.returncode == 0, completed.stderr or completed.stdout
+        assert "SECRET-SENTINEL" not in completed.stdout
+        assert "OPTIONAL-TOKEN" not in completed.stdout
+        return json.loads(completed.stdout)
+
+    def digest(path: Path) -> str:
+        import hashlib
+
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+
+    source_hashes = {
+        "soul": digest(root / "soul.md"),
+        "report": digest(root / "artifacts" / "report.md"),
+    }
+    with sqlite3.connect(root / "seraph.db") as database:
+        source_counts = {
+            table: int(database.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
+            for table in (
+                "goals",
+                "memory_items",
+                "artifact_registry",
+                "tombstones",
+                "revocations",
+                "config_versions",
+                "cost_liabilities",
+            )
+        }
+        artifact_ids = [
+            row[0]
+            for row in database.execute(
+                "SELECT artifact_id FROM artifact_registry ORDER BY artifact_id"
+            ).fetchall()
+        ]
+
+    backup = run("backup", "--archive", "isolated-drill.zip")
+    archive = Path(str(backup["archive_path"]))
+    assert backup["member_count"] > 0
+    assert archive.exists()
+    assert "OPTIONAL-TOKEN" not in archive.read_bytes().decode("latin1")
+
+    (root / "soul.md").write_text("mutated soul\n", encoding="utf-8")
+    (root / "artifacts" / "report.md").write_text("mutated report\n", encoding="utf-8")
+    with sqlite3.connect(root / "seraph.db") as database:
+        database.execute("UPDATE records SET value = 'mutated' WHERE id = 'r1'")
+        database.execute("DELETE FROM tombstones WHERE id = 'tombstone-1'")
+        database.execute("DELETE FROM revocations WHERE id = 'grant-1'")
+        database.execute("DELETE FROM config_versions WHERE id = 'config-1'")
+        database.execute("DELETE FROM cost_liabilities WHERE id = 'liability-1'")
+        database.execute(
+            "INSERT INTO artifact_registry VALUES ('artifact-mutated', 'artifacts/report.md')"
+        )
+
+    restored = run("restore", "--archive", str(archive), "--confirm")
+    restore_id = str(restored["restore_id"])
+    assert restored["stage_receipt"]["database_verified"] is True
+    assert restored["stage_receipt"]["restore_reconciliation"]["status"] == "ready"
+    assert digest(root / "soul.md") == source_hashes["soul"]
+    assert digest(root / "artifacts" / "report.md") == source_hashes["report"]
+    with sqlite3.connect(root / "seraph.db") as database:
+        assert {
+            table: int(database.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
+            for table in source_counts
+        } == source_counts
+        assert [
+            row[0]
+            for row in database.execute(
+                "SELECT artifact_id FROM artifact_registry ORDER BY artifact_id"
+            ).fetchall()
+        ] == artifact_ids
+        assert database.execute(
+            "SELECT revoked_at FROM operator_sessions WHERE id = 'session-1'"
+        ).fetchone()[0]
+        assert database.execute(
+            "SELECT workflow_phase FROM production_workflow_authority_states WHERE id = 'run-1'"
+        ).fetchone()[0] == "blocked"
+    assert not (root / "google_calendar_token.json").exists()
+
+    restarted_status = run("status")
+    assert restarted_status["status"] == "ready"
+    assert restarted_status["last_result"]["operation"] == "restore"
+
+    rolled_back = run("rollback", "--restore-id", restore_id, "--confirm")
+    assert rolled_back["status"] == "rolled_back"
+    assert rolled_back["rollback_reconciliation"]["status"] == "ready"
+    assert (root / "soul.md").read_text(encoding="utf-8") == "mutated soul\n"
+    assert (root / "artifacts" / "report.md").read_text(encoding="utf-8") == "mutated report\n"
+    with sqlite3.connect(root / "seraph.db") as database:
+        assert database.execute("SELECT value FROM records WHERE id = 'r1'").fetchone()[0] == "mutated"
+        assert database.execute("SELECT COUNT(*) FROM tombstones WHERE id = 'tombstone-1'").fetchone()[0] == 1
+        assert database.execute("SELECT COUNT(*) FROM revocations WHERE id = 'grant-1'").fetchone()[0] == 1
+        assert database.execute("SELECT COUNT(*) FROM config_versions WHERE id = 'config-1'").fetchone()[0] == 1
+        assert database.execute("SELECT COUNT(*) FROM cost_liabilities WHERE id = 'liability-1'").fetchone()[0] == 1
+        assert database.execute(
+            "SELECT revoked_at FROM operator_sessions WHERE id = 'session-1'"
+        ).fetchone()[0]
+        assert database.execute(
+            "SELECT workflow_phase FROM production_workflow_authority_states WHERE id = 'run-1'"
+        ).fetchone()[0] == "blocked"
+    assert not (root / "google_calendar_token.json").exists()
 
 
 def workspace_backup_dir_for(root: Path) -> Path:

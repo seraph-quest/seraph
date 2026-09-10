@@ -233,6 +233,34 @@ def test_pair_rotate_revoke_and_expire_transitions_are_deterministic():
     assert apply_pairing_transition(revoked.state, "pair", new_credential_fingerprint=FINGERPRINT, now=NOW).accepted is False
 
 
+def test_pairing_requires_canonical_scope_and_rejects_cross_scope_reuse():
+    unpaired = NodePairingState(device_id=DEVICE_ID, pairing_id=PAIRING_ID)
+    missing_scope = apply_pairing_transition(
+        unpaired,
+        "pair",
+        new_credential_fingerprint=FINGERPRINT,
+        now=NOW,
+    )
+    assert missing_scope.status is PairingIngressStatus.BLOCKED
+    assert missing_scope.reason_code == "credential_scope_required"
+    assert missing_scope.state.lifecycle is PairingLifecycleState.UNPAIRED
+
+    paired = apply_pairing_transition(
+        unpaired,
+        "pair",
+        new_credential_fingerprint=FINGERPRINT,
+        credential_scope=SCOPE,
+        now=NOW,
+    ).state
+    cross_scope = validate_pairing_request(
+        _request(capability_scope="media.ingest", data_purpose="media_analysis"),
+        paired,
+        now=NOW,
+    )
+    assert cross_scope.status is PairingIngressStatus.BLOCKED
+    assert cross_scope.reason_code == "credential_scope_mismatch"
+
+
 def test_receipts_redact_path_and_credentials_and_state_has_no_raw_token():
     request = _request()
     outcome = ingest_pairing_request(_state(), request, now=NOW)

@@ -372,6 +372,35 @@ def _scope_digest(scope_key: str) -> str:
     return hashlib.sha256(scope_key.encode("utf-8")).hexdigest()
 
 
+def _is_canonical_scope_key(value: Any) -> bool:
+    """Require the scope binding to be the canonical request scope encoding."""
+
+    if not isinstance(value, str) or not value or len(value.encode("utf-8")) > _MAX_SCOPE_BYTES:
+        return False
+    try:
+        decoded = json.loads(value)
+    except (TypeError, ValueError):
+        return False
+    if not isinstance(decoded, list) or len(decoded) != 4 or not all(isinstance(item, str) for item in decoded):
+        return False
+    device_id, pairing_id, capability_scope, data_purpose = decoded
+    if not _is_identifier(device_id) or not _is_identifier(pairing_id):
+        return False
+    if (
+        not capability_scope
+        or not data_purpose
+        or any(char.isspace() for char in capability_scope)
+        or any(char.isspace() for char in data_purpose)
+    ):
+        return False
+    return value == _scope_key(
+        device_id=device_id,
+        pairing_id=pairing_id,
+        capability_scope=capability_scope,
+        data_purpose=data_purpose,
+    )
+
+
 def scoped_credential_fingerprint(raw_token: str, scope: str) -> str:
     """Derive a non-reversible, scope-bound credential fingerprint.
 
@@ -506,6 +535,10 @@ def _valid_state_shape(state: NodePairingState, policy: NodePairingPolicy) -> bo
     if state.credential_fingerprint is not None and not _is_fingerprint(state.credential_fingerprint):
         return False
     if state.credential_scope_digest is not None and not _is_fingerprint(state.credential_scope_digest):
+        return False
+    if state.lifecycle is PairingLifecycleState.PAIRED and (
+        not _is_fingerprint(state.credential_fingerprint) or not _is_fingerprint(state.credential_scope_digest)
+    ):
         return False
     if not _is_policy_version(state.policy_version):
         return False
@@ -755,11 +788,9 @@ def apply_pairing_transition(
             return _transition_result(PairingIngressStatus.BLOCKED, "revoked_pairing_requires_new_identity", state)
         if not _is_fingerprint(new_credential_fingerprint):
             return _transition_result(PairingIngressStatus.BLOCKED, "invalid_new_credential_fingerprint", state)
-        scope_digest = None
-        if credential_scope is not None:
-            if not isinstance(credential_scope, str) or not credential_scope or len(credential_scope.encode("utf-8")) > _MAX_SCOPE_BYTES:
-                return _transition_result(PairingIngressStatus.BLOCKED, "invalid_credential_scope", state)
-            scope_digest = _scope_digest(credential_scope)
+        if not _is_canonical_scope_key(credential_scope):
+            return _transition_result(PairingIngressStatus.BLOCKED, "credential_scope_required", state)
+        scope_digest = _scope_digest(credential_scope)
         updated = replace(
             state,
             lifecycle=PairingLifecycleState.PAIRED,
@@ -788,7 +819,7 @@ def apply_pairing_transition(
             return _transition_result(PairingIngressStatus.BLOCKED, "rotation_requires_new_fingerprint", state)
         scope_digest = state.credential_scope_digest
         if credential_scope is not None:
-            if not isinstance(credential_scope, str) or not credential_scope or len(credential_scope.encode("utf-8")) > _MAX_SCOPE_BYTES:
+            if not _is_canonical_scope_key(credential_scope):
                 return _transition_result(PairingIngressStatus.BLOCKED, "invalid_credential_scope", state)
             scope_digest = _scope_digest(credential_scope)
         updated = replace(

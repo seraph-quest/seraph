@@ -167,6 +167,40 @@ def test_valid_degraded_result_preserves_status_and_canonical_metadata_digest():
     assert receipt["provider"]["name"] == "openrouter"
 
 
+def test_non_blocked_result_digest_is_bound_to_the_supplied_request():
+    request_a = _request()
+    request_b = _request(request_id="audio-request-2")
+    result_a = validate_audio_ingress(request_a, policy=_policy(), now=NOW)
+
+    receipt = serialize_audio_ingress_receipt(request_b, result_a, policy=_policy()).as_payload()
+
+    assert result_a.status is AudioIngressStatus.ACCEPTED
+    assert receipt["status"] == AudioIngressStatus.BLOCKED.value
+    assert receipt["reason_code"] == "invalid_result_provenance"
+    assert receipt["request_digest"] is None
+    assert receipt["identity"] == {
+        "session_id": None,
+        "message_id": None,
+        "attachment_id": None,
+        "request_id": None,
+    }
+
+
+def test_blocked_result_without_digest_keeps_reason_but_remains_redacted():
+    request = _request(audio_base64="YQ=")
+    result = validate_audio_ingress(request, policy=_policy(), now=NOW)
+
+    receipt = serialize_audio_ingress_receipt(request, result, policy=_policy()).as_payload()
+
+    assert result.status is AudioIngressStatus.BLOCKED
+    assert result.request_digest is None
+    assert receipt["status"] == AudioIngressStatus.BLOCKED.value
+    assert receipt["reason_code"] == "invalid_base64_payload"
+    assert receipt["request_digest"] is None
+    assert receipt["identity"]["request_id"] is None
+    assert receipt["capability"] is None
+
+
 def test_receipt_redacts_malformed_request_metadata_including_payload_and_capability():
     request = _request(audio_base64="deadbeef", audio_size_bytes=6, requested_capability="deadbeef")
     result = validate_audio_ingress(request, policy=_policy(), now=NOW)

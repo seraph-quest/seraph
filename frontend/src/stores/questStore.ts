@@ -183,6 +183,67 @@ function isAllowedReceiptEnum(value: unknown, allowed: readonly string[]): boole
   return value === undefined || value === null || (typeof value === "string" && allowed.includes(value));
 }
 
+function hasNonEmptyReceiptString(value: unknown): value is string {
+  return typeof value === "string" && value.trim().length > 0;
+}
+
+function hasReceiptStringList(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every((entry) => typeof entry === "string");
+}
+
+/**
+ * A positive redaction marker is not enough to make an evidence row usable.
+ * Candidate and outcome rows have different required identities and axes;
+ * incomplete rows stay out of the active state rather than rendering an
+ * apparently successful but unjoinable receipt.
+ */
+function hasRequiredGoalLoopReceiptFields(record: Record<string, unknown>): boolean {
+  const receiptType = record.receipt_type;
+  const hasCommonIdentity =
+    hasNonEmptyReceiptString(record.receipt_version) &&
+    hasNonEmptyReceiptString(record.goal_id) &&
+    typeof record.goal_revision === "number" &&
+    Number.isInteger(record.goal_revision) &&
+    record.goal_revision >= 1;
+
+  if (!hasCommonIdentity) return false;
+
+  if (receiptType === "candidate") {
+    return (
+      record.proposal_only === true &&
+      hasNonEmptyReceiptString(record.candidate_id) &&
+      hasNonEmptyReceiptString(record.dedupe_key) &&
+      typeof record.action === "string" &&
+      RECEIPT_ENUM_FIELDS.action.includes(record.action) &&
+      typeof record.reason === "string" &&
+      hasNonEmptyReceiptString(record.input_digest) &&
+      hasReceiptStringList(record.evidence_refs) &&
+      hasReceiptStringList(record.input_keys) &&
+      typeof record.expected_outcome === "string"
+    );
+  }
+
+  if (receiptType === "outcome" || receiptType === "no_learning") {
+    return (
+      hasNonEmptyReceiptString(record.outcome_id) &&
+      hasNonEmptyReceiptString(record.candidate_id) &&
+      hasNonEmptyReceiptString(record.dedupe_key) &&
+      typeof record.execution_status === "string" &&
+      RECEIPT_ENUM_FIELDS.execution_status.includes(record.execution_status) &&
+      typeof record.verification === "string" &&
+      RECEIPT_ENUM_FIELDS.verification.includes(record.verification) &&
+      typeof record.usefulness === "string" &&
+      RECEIPT_ENUM_FIELDS.usefulness.includes(record.usefulness) &&
+      typeof record.learning === "string" &&
+      RECEIPT_ENUM_FIELDS.learning.includes(record.learning) &&
+      typeof record.reason === "string" &&
+      hasReceiptStringList(record.evidence_refs)
+    );
+  }
+
+  return false;
+}
+
 /**
  * Keep receipt metadata renderable even when a backend or proxy returns an
  * unexpected shape.  Receipts are evidence, so silently stringifying an
@@ -242,6 +303,10 @@ export function normalizeGoalLoopReceipt(value: unknown): GoalLoopReceipt | null
   }
 
   if (record.content_redacted !== true) {
+    return null;
+  }
+
+  if (!hasRequiredGoalLoopReceiptFields(record)) {
     return null;
   }
 

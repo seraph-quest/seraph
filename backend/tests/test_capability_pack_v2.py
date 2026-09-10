@@ -5,6 +5,8 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
 import io
 import json
+import multiprocessing
+import os
 from pathlib import Path
 import stat
 import tarfile
@@ -13,6 +15,7 @@ import zipfile
 import pytest
 
 from src.extensions.capability_pack import (
+    CAPABILITY_PACK_RUNTIME_BLOCKED_REASON,
     CapabilityPackLifecycle,
     CapabilityPackLifecycleError,
     CapabilityPackManifestError,
@@ -98,6 +101,42 @@ def _package(tmp_path: Path, *, manifest_text: str | None = None, extra_file: st
     return root, parse_capability_pack_manifest(text)
 
 
+def _approve(
+    store: CapabilityPackLifecycle,
+    pack,
+    review: dict,
+    *,
+    action: str,
+    goal_id: str,
+    current_digest: str | None = None,
+    delta: dict | None = None,
+) -> str:
+    return store.create_operator_approval(
+        pack.id,
+        action=action,
+        goal_id=goal_id,
+        digest=review["digest"],
+        version=review["version"],
+        current_digest=current_digest,
+        authority_delta_payload=delta or {},
+    )["approval"]["approval_id"]
+
+
+def _activate_in_process(request: tuple[str, dict, str, str, str, str]) -> str:
+    state_path, manifest, root_path, goal_id, review_id, approval_id = request
+    store = CapabilityPackLifecycle(state_path)
+    try:
+        return store.activate(
+            manifest,
+            root_path=root_path,
+            goal_id=goal_id,
+            review_id=review_id,
+            approval_id=approval_id,
+        )["status"]
+    except CapabilityPackLifecycleError:
+        return "rejected"
+
+
 def test_v2_schema_normalizes_priority_and_rejects_unsafe_limits():
     pack = parse_capability_pack_manifest(_manifest())
 
@@ -159,7 +198,7 @@ def test_v1_parser_and_migration_are_explicit_and_keyless():
         migrate_capability_pack_v1({**payload, "resources": {"gpu_class": "background", "inference_priority": "background"}})
 
     with pytest.raises(CapabilityPackManifestError, match="cannot depend on itself"):
-        parse_capability_pack_manifest({**migrated, "dependencies": [{"id": migrated["id"]}]})
+        parse_capability_pack_manifest({**migrated, "dependencies": [{"id": migrated["id"], "digest": "0" * 64}]})
 
 
 def test_archive_validation_rejects_traversal_links_and_oversized_members(tmp_path: Path):
@@ -184,6 +223,16 @@ def test_archive_validation_rejects_traversal_links_and_oversized_members(tmp_pa
     link_report = validate_capability_pack_archive(link_archive)
     assert link_report.ok is False
     assert any("link" in error for error in link_report.errors)
+
+    hook_archive = tmp_path / "hook.zip"
+    with zipfile.ZipFile(hook_archive, "w") as archive:
+        archive.writestr("manifest.yaml", _manifest())
+        hook = zipfile.ZipInfo("hooks/run")
+        hook.external_attr = (0o100755 << 16)
+        archive.writestr(hook, "echo unsafe")
+    hook_report = validate_capability_pack_archive(hook_archive)
+    assert hook_report.ok is False
+    assert any("hooks" in error for error in hook_report.errors)
 
     oversized = tmp_path / "oversized.zip"
     with zipfile.ZipFile(oversized, "w") as archive:
@@ -239,13 +288,18 @@ def test_recomputed_fake_signature_never_becomes_publisher_trust(tmp_path: Path)
     assert trust["integrity_checked"] is True
     assert trust["publisher_verified"] is False
     assert "publisher label" in trust["reason"]
+    unavailable = parse_capability_pack_manifest({**pack.model_dump(mode="json"), "signature": {"state": "cryptographic-unavailable"}})
+    assert publisher_trust_status(unavailable)["integrity_checked"] is False
 
 
 def test_review_binds_digest_version_goal_and_authority_delta(tmp_path: Path):
     root, first = _package(tmp_path, extra_file="first")
     store = CapabilityPackLifecycle(tmp_path / "state.json")
     review = store.review(first, root_path=root, goal_id="goal-1")["review"]
-    active = store.activate(first, root_path=root, goal_id="goal-1", review_id=review["review_id"])
+    with pytest.raises(CapabilityPackLifecycleError, match="durable operator approval"):
+        store.activate(first, root_path=root, goal_id="goal-1", review_id=review["review_id"])
+    activation_approval = _approve(store, first, review, action="activate", goal_id="goal-1")
+    active = store.activate(first, root_path=root, goal_id="goal-1", review_id=review["review_id"], approval_id=activation_approval)
     assert active["pointer"]["digest"] == review["digest"]
     assert "root_path" not in active["pointer"]
     assert all("root_path" not in receipt.get("details", {}) for receipt in store.status(first.id)["receipts"])
@@ -257,10 +311,11 @@ def test_review_binds_digest_version_goal_and_authority_delta(tmp_path: Path):
     assert authority_delta(first, expanded)["requires_approval"] is True
     expanded_root, _ = _package(tmp_path / "expanded", manifest_text=_manifest(extra_authority=["write_file"]))
     expanded_review = store.review(expanded, root_path=expanded_root, goal_id="goal-1")["review"]
-    with pytest.raises(CapabilityPackLifecycleError, match="expansion"):
+    delta = authority_delta(first, expanded)
+    with pytest.raises(CapabilityPackLifecycleError, match="durable operator approval"):
         store.update(expanded, root_path=expanded_root, goal_id="goal-1", review_id=expanded_review["review_id"])
-    approved = store.review(expanded, root_path=expanded_root, goal_id="goal-1", authority_expansion_approved=True)["review"]
-    store.update(expanded, root_path=expanded_root, goal_id="goal-1", review_id=approved["review_id"])
+    update_approval = _approve(store, expanded, expanded_review, action="update", goal_id="goal-1", current_digest=review["digest"], delta=delta)
+    store.update(expanded, root_path=expanded_root, goal_id="goal-1", review_id=expanded_review["review_id"], approval_id=update_approval)
     assert store.status(first.id)["active"]["version"] == expanded.version
 
 
@@ -270,24 +325,27 @@ def test_concurrent_activation_has_one_pointer_and_atomic_write_failure_keeps_ol
     store = CapabilityPackLifecycle(tmp_path / "state.json")
     first_review = store.review(first, root_path=first_root, goal_id="goal-1")["review"]
     second_review = store.review(second, root_path=second_root, goal_id="goal-1")["review"]
+    first_approval = _approve(store, first, first_review, action="activate", goal_id="goal-1")
+    second_approval = _approve(store, second, second_review, action="activate", goal_id="goal-1")
 
     def activate(item):
-        pack, root, review = item
+        pack, root, review, approval = item
         try:
-            return store.activate(pack, root_path=root, goal_id="goal-1", review_id=review["review_id"])["status"]
+            return store.activate(pack, root_path=root, goal_id="goal-1", review_id=review["review_id"], approval_id=approval)["status"]
         except CapabilityPackLifecycleError:
             return "rejected"
 
     with ThreadPoolExecutor(max_workers=2) as executor:
-        outcomes = list(executor.map(activate, [(first, first_root, first_review), (second, second_root, second_review)]))
+        outcomes = list(executor.map(activate, [(first, first_root, first_review, first_approval), (second, second_root, second_review, second_approval)]))
     assert sorted(outcomes) == ["active", "rejected"]
     assert store.status(first.id)["active"]["status"] == "active"
 
     before = store.status(first.id)["active"]
+    pause_approval = _approve(store, first, first_review, action="pause", goal_id="goal-1")
     original_save = store._atomic_save
     monkeypatch.setattr(store, "_atomic_save", lambda _state: (_ for _ in ()).throw(OSError("simulated crash")))
     with pytest.raises(OSError, match="simulated crash"):
-        store.pause(first.id)
+        store.pause(first.id, approval_id=pause_approval)
     assert store.status(first.id)["active"] == before
     monkeypatch.setattr(store, "_atomic_save", original_save)
 
@@ -299,27 +357,63 @@ def test_concurrent_activation_has_one_pointer_and_atomic_write_failure_keeps_ol
         store.run_secondary_canary(first.id, goal_id="goal-1")
 
 
+@pytest.mark.skipif(
+    os.name != "posix" or "fork" not in multiprocessing.get_all_start_methods(),
+    reason="multiprocess lock proof requires POSIX fork and fcntl",
+)
+def test_multiprocess_activation_uses_durable_lock(tmp_path: Path):
+    first_root, first = _package(tmp_path / "first")
+    second_root, second = _package(tmp_path / "second", manifest_text=_manifest(version="2.0.0"))
+    state_path = tmp_path / "state.json"
+    store = CapabilityPackLifecycle(state_path)
+    first_review = store.review(first, root_path=first_root, goal_id="goal-1")["review"]
+    second_review = store.review(second, root_path=second_root, goal_id="goal-1")["review"]
+    first_approval = _approve(store, first, first_review, action="activate", goal_id="goal-1")
+    second_approval = _approve(store, second, second_review, action="activate", goal_id="goal-1")
+    requests = [
+        (str(state_path), first.model_dump(mode="json"), str(first_root), "goal-1", first_review["review_id"], first_approval),
+        (str(state_path), second.model_dump(mode="json"), str(second_root), "goal-1", second_review["review_id"], second_approval),
+    ]
+
+    context = multiprocessing.get_context("fork")
+    with context.Pool(2) as pool:
+        outcomes = pool.map(_activate_in_process, requests)
+
+    assert sorted(outcomes) == ["active", "rejected"]
+    assert store.status(first.id)["active"]["status"] == "active"
+    assert state_path.with_name("state.json.lock").stat().st_mode & 0o777 == 0o600
+
+
 def test_revoke_rollback_uninstall_and_canaries_preserve_receipts(tmp_path: Path):
     first_root, first = _package(tmp_path / "first", extra_file="first")
     second_root, second = _package(tmp_path / "second", manifest_text=_manifest(version="2.0.0"), extra_file="second")
     remote_root, remote = _package(tmp_path / "remote", manifest_text=_manifest(pack_id="seraph.remote-pack", network=True, cost=25), extra_file="remote")
     store = CapabilityPackLifecycle(tmp_path / "state.json")
     first_review = store.review(first, root_path=first_root, goal_id="goal-1")["review"]
-    store.activate(first, root_path=first_root, goal_id="goal-1", review_id=first_review["review_id"])
+    first_approval = _approve(store, first, first_review, action="activate", goal_id="goal-1")
+    store.activate(first, root_path=first_root, goal_id="goal-1", review_id=first_review["review_id"], approval_id=first_approval)
     second_review = store.review(second, root_path=second_root, goal_id="goal-1")["review"]
-    store.update(second, root_path=second_root, goal_id="goal-1", review_id=second_review["review_id"])
+    update_approval = _approve(store, second, second_review, action="update", goal_id="goal-1", current_digest=first_review["digest"], delta=authority_delta(first, second))
+    store.update(second, root_path=second_root, goal_id="goal-1", review_id=second_review["review_id"], approval_id=update_approval)
 
-    store.revoke(first.id, digest=first_review["digest"])
+    revoke_approval = _approve(store, first, first_review, action="revoke", goal_id="goal-1")
+    store.revoke(first.id, digest=first_review["digest"], approval_id=revoke_approval)
     with pytest.raises(CapabilityPackLifecycleError, match="revoked"):
         store.rollback(first.id)
-    uninstalled = store.uninstall(first.id)
+    current = store.status(first.id)["active"]
+    uninstall_review = {"digest": current["digest"], "version": current["version"]}
+    uninstall_approval = _approve(store, first, uninstall_review, action="uninstall", goal_id="goal-1")
+    uninstalled = store.uninstall(first.id, approval_id=uninstall_approval)
     assert uninstalled["status"] == "uninstalled"
     assert len(store.status(first.id)["receipts"]) >= 4
 
     remote_review = store.review(remote, root_path=remote_root, goal_id="goal-remote")["review"]
-    store.activate(remote, root_path=remote_root, goal_id="goal-remote", review_id=remote_review["review_id"])
-    primary = store.run_primary_canary(remote.id, goal_id="goal-remote", artifact_root=tmp_path / "artifacts")
-    secondary = store.run_secondary_canary(remote.id, goal_id="goal-remote", artifact_root=tmp_path / "artifacts")
+    remote_approval = _approve(store, remote, remote_review, action="activate", goal_id="goal-remote")
+    store.activate(remote, root_path=remote_root, goal_id="goal-remote", review_id=remote_review["review_id"], approval_id=remote_approval)
+    production = store.run_primary_canary(remote.id, goal_id="goal-remote", artifact_root=tmp_path / "artifacts")
+    assert production["status"] == "blocked"
+    primary = store.run_deterministic_primary_canary(remote.id, goal_id="goal-remote", artifact_root=tmp_path / "artifacts")
+    secondary = store.run_deterministic_secondary_canary(remote.id, goal_id="goal-remote", artifact_root=tmp_path / "artifacts")
     assert primary["status"] == "succeeded"
     assert primary["provider_calls"] == 0
     assert primary["artifact"]["readback_ok"] is True
@@ -328,7 +422,8 @@ def test_revoke_rollback_uninstall_and_canaries_preserve_receipts(tmp_path: Path
 
     local_root, local = _package(tmp_path / "local")
     local_review = store.review(local, root_path=local_root, goal_id="goal-local")["review"]
-    store.activate(local, root_path=local_root, goal_id="goal-local", review_id=local_review["review_id"])
+    local_approval = _approve(store, local, local_review, action="activate", goal_id="goal-local")
+    store.activate(local, root_path=local_root, goal_id="goal-local", review_id=local_review["review_id"], approval_id=local_approval)
     blocked = store.run_primary_canary(local.id, goal_id="goal-local")
     assert blocked["status"] == "blocked"
     assert blocked["provider_calls"] == 0
@@ -338,7 +433,8 @@ def test_canary_runner_is_local_and_artifact_result_is_bounded(tmp_path: Path, m
     root, pack = _package(tmp_path / "pack")
     store = CapabilityPackLifecycle(tmp_path / "state.json")
     review = store.review(pack, root_path=root, goal_id="goal-1")["review"]
-    store.activate(pack, root_path=root, goal_id="goal-1", review_id=review["review_id"])
+    activation_approval = _approve(store, pack, review, action="activate", goal_id="goal-1")
+    store.activate(pack, root_path=root, goal_id="goal-1", review_id=review["review_id"], approval_id=activation_approval)
 
     def fail_transport(*_args, **_kwargs):
         raise AssertionError("capability-pack canary attempted provider transport")
@@ -346,21 +442,90 @@ def test_canary_runner_is_local_and_artifact_result_is_bounded(tmp_path: Path, m
     import httpx
 
     monkeypatch.setattr(httpx, "request", fail_transport)
-    canary = store.run_secondary_canary(
-        pack.id,
-        goal_id="goal-1",
-        artifact_root=tmp_path / "artifacts",
-        runner=lambda _request: {
-            "outcome": "fixture-ok",
-            "secret": "sk-live-inline",
-            "sources": ["fixture://local"],
-        },
-    )
+    canary = store.run_deterministic_secondary_canary(pack.id, goal_id="goal-1", artifact_root=tmp_path / "artifacts")
     assert canary["provider_calls"] == 0
     artifact = next((tmp_path / "artifacts").glob("*.json"))
     assert "sk-live-inline" not in artifact.read_text(encoding="utf-8")
     assert json.loads(artifact.read_text(encoding="utf-8"))["result"] == {
-        "outcome": "fixture-ok",
+        "outcome": "deterministic_fixture_passed",
         "readback": True,
-        "sources": ["fixture://local"],
+        "sources": [],
     }
+
+
+def test_compatibility_dependency_and_egress_contradictions_fail_closed(tmp_path: Path):
+    incompatible = _manifest().replace('seraph: ">=1"', 'seraph: ">=9999"')
+    root, pack = _package(tmp_path / "incompatible", manifest_text=incompatible)
+    store = CapabilityPackLifecycle(tmp_path / "state.json")
+    with pytest.raises(CapabilityPackLifecycleError, match="excludes Seraph"):
+        store.review(pack, root_path=root, goal_id="goal-1")
+
+    with pytest.raises(CapabilityPackManifestError, match="Field required"):
+        parse_capability_pack_manifest(_manifest().replace("dependencies: []", "dependencies: [{id: seraph.other}]") )
+    with pytest.raises(CapabilityPackManifestError, match="requires authority.network"):
+        parse_capability_pack_manifest(_manifest().replace("egress: []", "egress: [cloud_openrouter]"))
+
+
+def test_bounded_scanner_rejects_missing_declared_files_and_executables(tmp_path: Path):
+    root, _ = _package(tmp_path / "directory")
+    executable = root / "notes.sh"
+    executable.write_text("echo unsafe", encoding="utf-8")
+    executable.chmod(0o700)
+    report = validate_capability_pack_path(root)
+    assert report["ok"] is False
+    assert any("executable" in error for error in report["errors"])
+
+    missing_text = _manifest().replace("capabilities: [research-brief]", "capabilities: []").replace("  skills: []", "  skills: [skills/missing.md]", 1)
+    missing = parse_capability_pack_manifest(missing_text)
+    missing_report = validate_capability_pack_path(root, missing)
+    assert missing_report["ok"] is False
+    assert any("missing" in error for error in missing_report["errors"])
+
+    archive = tmp_path / "missing.zip"
+    with zipfile.ZipFile(archive, "w") as handle:
+        handle.writestr("manifest.yaml", missing_text)
+    archive_report = validate_capability_pack_package(archive)
+    assert archive_report["ok"] is False
+    assert any("missing" in error for error in archive_report["errors"])
+
+
+def test_operator_approval_binds_rollback_delta_and_jobs_cancel(tmp_path: Path):
+    first_root, first = _package(tmp_path / "first")
+    second_root, second = _package(tmp_path / "second", manifest_text=_manifest(version="2.0.0", extra_authority=["write_file"]))
+    store = CapabilityPackLifecycle(tmp_path / "state.json")
+    first_review = store.review(first, root_path=first_root, goal_id="goal-1")["review"]
+    first_approval = _approve(store, first, first_review, action="activate", goal_id="goal-1")
+    store.activate(first, root_path=first_root, goal_id="goal-1", review_id=first_review["review_id"], approval_id=first_approval)
+    job = store.register_job(pack_id=first.id, goal_id="goal-1", job_id="job-1")
+    assert job["job"]["max_artifact_bytes"] == first.resources.max_artifact_bytes
+    assert job["job"]["max_inference_cost_microusd"] == first.resources.max_inference_cost_microusd
+    second_review = store.review(second, root_path=second_root, goal_id="goal-1")["review"]
+    update_approval = _approve(store, second, second_review, action="update", goal_id="goal-1", current_digest=first_review["digest"], delta=authority_delta(first, second))
+    store.update(second, root_path=second_root, goal_id="goal-1", review_id=second_review["review_id"], approval_id=update_approval)
+
+    rollback_delta = authority_delta(second, first)
+    with pytest.raises(CapabilityPackLifecycleError, match="durable operator approval"):
+        store.rollback(first.id)
+    rollback_approval = _approve(store, first, first_review, action="rollback", goal_id="goal-1", current_digest=second_review["digest"], delta=rollback_delta)
+    restored = store.rollback(first.id, approval_id=rollback_approval)
+    assert restored["pointer"]["digest"] == first_review["digest"]
+
+    pause_approval = _approve(store, first, first_review, action="pause", goal_id="goal-1")
+    store.pause(first.id, approval_id=pause_approval)
+    assert store.status(first.id)["jobs"][0]["status"] == "cancelled"
+    uninstall_approval = _approve(store, first, first_review, action="uninstall", goal_id="goal-1")
+    assert store.uninstall(first.id, approval_id=uninstall_approval)["status"] == "uninstalled"
+
+
+def test_production_canary_is_blocked_and_retry_ids_are_unique(tmp_path: Path):
+    root, pack = _package(tmp_path / "pack")
+    store = CapabilityPackLifecycle(tmp_path / "state.json")
+    review = store.review(pack, root_path=root, goal_id="goal-1")["review"]
+    approval = _approve(store, pack, review, action="activate", goal_id="goal-1")
+    store.activate(pack, root_path=root, goal_id="goal-1", review_id=review["review_id"], approval_id=approval)
+    first = store.run_secondary_canary(pack.id, goal_id="goal-1")
+    second = store.run_secondary_canary(pack.id, goal_id="goal-1")
+    assert first["status"] == second["status"] == "blocked"
+    assert first["failure_reason"] == CAPABILITY_PACK_RUNTIME_BLOCKED_REASON
+    assert first["id"] != second["id"]
+    assert [first["attempt"], second["attempt"]] == [1, 2]

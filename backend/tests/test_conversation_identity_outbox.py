@@ -15,10 +15,12 @@ from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker
 from sqlmodel import SQLModel, select
 
+from config.settings import settings
 from src.conversation.identity import (
     ConversationIdentityError,
     build_conversation_identity,
     build_lineage,
+    issue_attachment_quarantine_receipt,
     redact_attachment_refs,
     validate_attachment_refs,
 )
@@ -28,10 +30,48 @@ from src.db.models import (
     OperatorSession,
     Session,
 )
+from src.approval.repository import approval_repository
 from src.models.schemas import WSResponse
 from src.observer.delivery import _resolve_delivery_identity
 from src.observer.native_notification_queue import NativeNotificationQueue
 from src.security.trust_contract import TrustPrincipal
+
+
+@pytest.fixture(autouse=True)
+def _attachment_receipt_secret(monkeypatch):
+    """Give this isolated proof suite a deterministic server-owned receipt key."""
+
+    monkeypatch.setattr(settings, "operator_auth_secret", "conversation-750-test-secret")
+    monkeypatch.setattr(settings, "operator_auth_secret_hash", "")
+    monkeypatch.setattr(settings, "deployment_environment", "test")
+    monkeypatch.setattr(settings, "operator_auth_allow_unauthenticated_tests", True)
+
+
+def _attachment_ref(
+    *,
+    attachment_id: str,
+    owner_principal_id: str,
+    content_hash: str,
+    media_type: str,
+    **extra,
+) -> dict:
+    receipt = issue_attachment_quarantine_receipt(
+        attachment_id=attachment_id,
+        owner_principal_id=owner_principal_id,
+        content_hash=content_hash,
+        media_type=media_type,
+        size_bytes=extra.get("size_bytes"),
+        duration_seconds=extra.get("duration_seconds"),
+        voice_note=extra.get("voice_note"),
+    )
+    return {
+        "attachment_id": attachment_id,
+        "media_type": media_type,
+        "content_hash": content_hash,
+        "quarantine_status": "quarantined",
+        "quarantine_receipt": receipt,
+        **extra,
+    }
 
 
 def test_conversation_identity_is_single_session_and_attachment_refs_are_public_metadata():
@@ -49,27 +89,26 @@ def test_conversation_identity_is_single_session_and_attachment_refs_are_public_
         identity,
         message_id="assistant-750",
         attachment_refs=[
-            {
-                "attachment_id": "attachment-1",
-                "media_type": "image/png",
-                "content_hash": "sha256:abc",
-                "size_bytes": 42,
-                "file_path": "/private/should-not-persist.png",
-                "token": "provider-secret",
-            }
+            _attachment_ref(
+                attachment_id="attachment-1",
+                owner_principal_id="operator:750",
+                media_type="image/png",
+                content_hash="sha256:abc",
+                size_bytes=42,
+                file_path="/private/should-not-persist.png",
+                token="provider-secret",
+            )
         ],
     )
 
     assert identity.conversation_id == identity.thread_id == "conversation-750"
     assert lineage["conversation_id"] == lineage["thread_id"] == "conversation-750"
-    assert lineage["attachment_refs"] == [
-        {
-            "attachment_id": "attachment-1",
-            "content_hash": "sha256:abc",
-            "media_type": "image/png",
-            "size_bytes": 42,
-        }
-    ]
+    attachment = lineage["attachment_refs"][0]
+    assert attachment["attachment_id"] == "attachment-1"
+    assert attachment["owner_principal_id"] == "operator:750"
+    assert attachment["content_hash"] == "sha256:abc"
+    assert attachment["quarantine_status"] == "quarantined"
+    assert attachment["quarantine_receipt_digest"]
     assert "file_path" not in json.dumps(lineage)
     assert "provider-secret" not in json.dumps(lineage)
 
@@ -125,7 +164,14 @@ def test_attachment_owner_conflict_and_forged_delivery_identity_are_rejected():
         )
     with pytest.raises(ConversationIdentityError, match="quarantine"):
         validate_attachment_refs(
-            [{"attachment_id": "unknown-attachment", "media_type": "text/plain"}],
+            [
+                {
+                    "attachment_id": "unknown-attachment",
+                    "content_hash": "sha256:forged",
+                    "quarantine_status": "quarantined",
+                    "media_type": "text/plain",
+                }
+            ],
             owner_principal_id="operator:750",
         )
     with pytest.raises(ConversationIdentityError, match="quarantine"):
@@ -139,6 +185,111 @@ def test_attachment_owner_conflict_and_forged_delivery_identity_are_rejected():
             session_id="conversation-750",
             trusted_principal=trusted,
         )
+
+    valid = _attachment_ref(
+        attachment_id="attachment-750",
+        owner_principal_id="operator:750",
+        content_hash="sha256:valid",
+        media_type="text/plain",
+    )
+    tampered = {**valid, "content_hash": "sha256:forged"}
+    with pytest.raises(ConversationIdentityError, match="receipt"):
+        validate_attachment_refs([tampered], owner_principal_id="operator:750")
+    wrong_key = valid["quarantine_receipt"][:-1] + ("0" if valid["quarantine_receipt"][-1] != "0" else "1")
+    with pytest.raises(ConversationIdentityError, match="receipt"):
+        validate_attachment_refs(
+            [{**valid, "quarantine_receipt": wrong_key}],
+            owner_principal_id="operator:750",
+        )
+
+
+def test_delivery_preserves_source_adapter_channel_and_transport_lineage():
+    trusted = TrustPrincipal(
+        principal_id="operator:telegram",
+        principal_type="operator",
+        session_id="conversation-telegram",
+        operator_session_id="operator-session-telegram",
+    )
+    message = WSResponse(
+        type="proactive",
+        session_id="conversation-telegram",
+        conversation_id="conversation-telegram",
+        thread_id="conversation-telegram",
+        owner_principal_id="operator:telegram",
+        operator_session_id="operator-session-telegram",
+        channel="telegram",
+        transport="telegram",
+        correlation_id="telegram:corr-1",
+    )
+    identity, conversation_id, owner, operator_session_id = _resolve_delivery_identity(
+        message,
+        session_id="conversation-telegram",
+        trusted_principal=trusted,
+    )
+    assert identity is not None
+    assert identity.channel == "telegram"
+    assert identity.transport == "telegram"
+    assert conversation_id == identity.conversation_id == "conversation-telegram"
+    assert owner == "operator:telegram"
+    assert operator_session_id == "operator-session-telegram"
+
+
+def test_attachment_receipt_rejects_a_server_key_change(monkeypatch):
+    valid = _attachment_ref(
+        attachment_id="attachment-key-750",
+        owner_principal_id="operator:750",
+        content_hash="sha256:key-check",
+        media_type="text/plain",
+    )
+    monkeypatch.setattr(settings, "operator_auth_secret", "different-server-secret")
+    with pytest.raises(ConversationIdentityError, match="signature"):
+        validate_attachment_refs([valid], owner_principal_id="operator:750")
+
+
+@pytest.mark.asyncio
+async def test_approval_persistence_rejects_forged_attachment_metadata(async_db):
+    common = dict(
+        session_id="conversation-approval-750",
+        tool_name="attachment_tool",
+        risk_level="medium",
+        summary="Attachment approval",
+        fingerprint="approval-fingerprint-750",
+        details={
+            "owner_principal_id": "operator:750",
+            "operator_session_id": "operator-session-750",
+            "attachment_refs": [
+                {
+                    "attachment_id": "forged-attachment",
+                    "content_hash": "sha256:forged",
+                    "quarantine_status": "quarantined",
+                }
+            ],
+        },
+    )
+    with pytest.raises(ConversationIdentityError, match="receipt"):
+        await approval_repository.get_or_create_pending(**common)
+
+    valid = _attachment_ref(
+        attachment_id="approved-attachment",
+        owner_principal_id="operator:750",
+        content_hash="sha256:approved",
+        media_type="text/plain",
+    )
+    accepted = await approval_repository.get_or_create_pending(
+        **{
+            **common,
+            "fingerprint": "approval-fingerprint-accepted-750",
+            "details": {
+                **common["details"],
+                "attachment_refs": [valid],
+            },
+        }
+    )
+    persisted = json.loads(accepted.attachment_refs_json)
+    assert persisted[0]["attachment_id"] == "approved-attachment"
+    assert persisted[0]["quarantine_receipt_digest"]
+    assert '"quarantine_receipt":' not in accepted.attachment_refs_json
+    assert "forged-attachment" not in accepted.attachment_refs_json
 
 
 @pytest.mark.asyncio
@@ -160,6 +311,7 @@ async def test_rest_payload_persists_the_same_identity_and_redacted_attachment_r
     agent = MagicMock()
     agent.run.return_value = "Identity is durable"
     with (
+        patch("src.auth.middleware.auth_enabled", return_value=False),
         patch("src.api.chat.create_onboarding_agent", return_value=agent),
         patch("src.api.chat.should_use_direct_local_chat", return_value=False),
     ):
@@ -169,14 +321,14 @@ async def test_rest_payload_persists_the_same_identity_and_redacted_attachment_r
                 "message": "Cross surface identity",
                 "message_id": "cross-surface-message-750",
                 "attachments": [
-                    {
-                        "attachment_id": "attachment-750",
-                        "media_type": "text/plain",
-                        "content_hash": "sha256:attachment-750",
-                        "quarantine_status": "quarantined",
-                        "file_path": "/private/file.txt",
-                        "token": "private-token",
-                    }
+                        _attachment_ref(
+                            attachment_id="attachment-750",
+                            owner_principal_id="operator:test-bypass",
+                        media_type="text/plain",
+                        content_hash="sha256:attachment-750",
+                        file_path="/private/file.txt",
+                        token="private-token",
+                    )
                 ],
             },
         )
@@ -184,15 +336,11 @@ async def test_rest_payload_persists_the_same_identity_and_redacted_attachment_r
     payload = response.json()
     assert payload["conversation_id"] == payload["thread_id"] == payload["session_id"]
     assert payload["owner_principal_id"]
-    assert payload["attachment_refs"] == [
-        {
-            "attachment_id": "attachment-750",
-            "content_hash": "sha256:attachment-750",
-            "media_type": "text/plain",
-            "quarantine_status": "quarantined",
-        }
-    ]
-    history = await client.get(f"/api/sessions/{payload['session_id']}/messages")
+    assert payload["attachment_refs"][0]["attachment_id"] == "attachment-750"
+    assert payload["attachment_refs"][0]["owner_principal_id"] == "operator:test-bypass"
+    assert payload["attachment_refs"][0]["quarantine_receipt_digest"]
+    with patch("src.auth.middleware.auth_enabled", return_value=False):
+        history = await client.get(f"/api/sessions/{payload['session_id']}/messages")
     assert history.status_code == 200
     history_message = history.json()[-1]
     assert history_message["conversation_id"] == payload["conversation_id"]
@@ -268,14 +416,14 @@ async def test_file_outbox_replay_is_idempotent_and_keeps_canonical_lineage(file
         causation_id="message-750",
         idempotency_key="conversation-750:notification-1",
         attachment_refs=[
-            {
-                "attachment_id": "attachment-1",
-                "media_type": "text/plain",
-                "content_hash": "sha256:attachment-1",
-                "quarantine_status": "quarantined",
-                "file_path": "/private/secret.txt",
-                "token": "secret-token",
-            }
+            _attachment_ref(
+                attachment_id="attachment-1",
+                owner_principal_id="operator:750",
+                media_type="text/plain",
+                content_hash="sha256:attachment-1",
+                file_path="/private/secret.txt",
+                token="secret-token",
+            )
         ],
     )
     first = await queue.enqueue(**kwargs)
@@ -284,14 +432,9 @@ async def test_file_outbox_replay_is_idempotent_and_keeps_canonical_lineage(file
     assert first.id == second.id
     assert first.conversation_id == first.thread_id == first.session_id == "conversation-750"
     assert first.owner_principal_id == "operator:750"
-    assert first.attachment_refs == [
-        {
-            "attachment_id": "attachment-1",
-            "content_hash": "sha256:attachment-1",
-            "media_type": "text/plain",
-            "quarantine_status": "quarantined",
-        }
-    ]
+    assert first.attachment_refs[0]["attachment_id"] == "attachment-1"
+    assert first.attachment_refs[0]["owner_principal_id"] == "operator:750"
+    assert first.attachment_refs[0]["quarantine_receipt_digest"]
     assert database_path.exists()
     async with get_session() as db:
         row = (await db.execute(select(NativeNotificationOutbox).where(NativeNotificationOutbox.id == first.id))).scalar_one()

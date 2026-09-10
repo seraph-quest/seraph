@@ -48,6 +48,7 @@ from src.db.models import (
 from src.conversation.identity import (
     ConversationIdentityError,
     build_conversation_identity,
+    redact_attachment_refs,
     validate_attachment_refs,
 )
 
@@ -194,7 +195,12 @@ def _attachment_refs_from_json(value: str | None) -> list[dict[str, Any]]:
         parsed = json.loads(value or "[]")
     except (TypeError, ValueError):
         return []
-    return parsed if isinstance(parsed, list) else []
+    if not isinstance(parsed, list):
+        return []
+    try:
+        return redact_attachment_refs(parsed)
+    except ConversationIdentityError:
+        return []
 
 
 def _valid_worker(value: object) -> str:

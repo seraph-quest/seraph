@@ -482,6 +482,7 @@ async def websocket_chat(websocket: WebSocket):
                         ws_msg.message,
                         message_id=ingress.message_id,
                         metadata_json=chat_ingress_metadata(ingress),
+                        attachment_refs=ws_msg.attachments,
                     )
                 except MessageIngressConflictError as exc:
                     await log_chat_ingress_event(
@@ -497,6 +498,13 @@ async def websocket_chat(websocket: WebSocket):
                             content="This message identity is already bound to another request.",
                             session_id=session.id,
                             reason="chat_message_identity_conflict",
+                            **_ws_lineage_kwargs(
+                                session.id,
+                                operator,
+                                ingress,
+                                message_id=ingress.message_id,
+                                degraded_state="identity_conflict",
+                            ),
                             seq=_next_seq(),
                         ).model_dump_json()
                     )
@@ -515,6 +523,13 @@ async def websocket_chat(websocket: WebSocket):
                             content="This message was already accepted for this session.",
                             session_id=session.id,
                             reason="chat_message_duplicate",
+                            **_ws_lineage_kwargs(
+                                session.id,
+                                operator,
+                                ingress,
+                                message_id=ingress.message_id,
+                                degraded_state="duplicate_rejected",
+                            ),
                             seq=_next_seq(),
                         ).model_dump_json()
                     )

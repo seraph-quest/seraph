@@ -13,7 +13,7 @@ from sqlmodel import select, col
 from config.settings import settings
 from src.approval.runtime import get_current_trust_principal, reset_runtime_context, set_runtime_context
 from src.audit.runtime import log_background_task_event
-from src.conversation.identity import redact_attachment_refs
+from src.conversation.identity import redact_attachment_refs, validate_attachment_refs
 from src.model_fabric.caller_context import build_canonical_inference_context
 from src.db.engine import get_session
 from src.db.models import (
@@ -809,6 +809,7 @@ class SessionManager:
                 "channel",
                 "transport",
                 "correlation_id",
+                "attachment_refs",
             )
         )
 
@@ -819,6 +820,7 @@ class SessionManager:
         *,
         message_id: str,
         metadata_json: str,
+        attachment_refs: object = None,
     ) -> tuple[Message, bool]:
         """Persist one user ingress before dispatch and detect safe retries.
 
@@ -842,6 +844,7 @@ class SessionManager:
                 content,
                 metadata_json=metadata_json,
                 message_id=message_id,
+                attachment_refs=attachment_refs,
             )
         except IntegrityError:
             # A concurrent request won the primary-key reservation.  Read its
@@ -867,6 +870,7 @@ class SessionManager:
         tool_used: str | None = None,
         metadata_json: str | None = None,
         message_id: str | None = None,
+        attachment_refs: object = None,
     ) -> Message:
         # Truncate oversized content (50 KB)
         if len(content) > 50_000:
@@ -890,13 +894,16 @@ class SessionManager:
         lineage_owner_principal_id = str(
             lineage.get("owner_principal_id") or lineage.get("principal_id") or ""
         ).strip() or None
-        try:
-            safe_attachment_refs = redact_attachment_refs(
-                lineage.get("attachment_refs"),
-                owner_principal_id=lineage_owner_principal_id,
-            )
-        except Exception:
-            safe_attachment_refs = []
+        lineage_attachment_refs = lineage.get("attachment_refs")
+        attachment_input = (
+            attachment_refs
+            if attachment_refs is not None
+            else lineage_attachment_refs
+        )
+        safe_attachment_refs = validate_attachment_refs(
+            attachment_input,
+            owner_principal_id=lineage_owner_principal_id,
+        )
         lineage_conversation_id = str(
             lineage.get("conversation_id") or lineage.get("session_id") or session_id
         ).strip() or session_id

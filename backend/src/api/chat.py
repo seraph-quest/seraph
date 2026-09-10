@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from dataclasses import replace
 from threading import Event
 from time import perf_counter
+from typing import Any
 from uuid import NAMESPACE_URL, uuid4, uuid5
 
 from fastapi import APIRouter, HTTPException, Request as HttpRequest
@@ -408,6 +409,40 @@ def chat_ingress_metadata(envelope: ChatIngressEnvelope) -> str:
     )
 
 
+def chat_ingress_continuity(envelope: ChatIngressEnvelope) -> dict[str, Any]:
+    """Return safe canonical identifiers for a rejected duplicate/retry."""
+
+    return {
+        "schema_version": envelope.conversation_schema_version,
+        "message_id": envelope.message_id,
+        "session_id": envelope.session_id,
+        "conversation_id": envelope.conversation_id,
+        "thread_id": envelope.thread_id,
+        "owner_principal_id": envelope.principal_id,
+        "operator_session_id": envelope.operator_session_id,
+        "device_id": envelope.device_id,
+        "channel": envelope.channel,
+        "transport": envelope.transport,
+        "correlation_id": envelope.correlation_id,
+        "causation_id": envelope.message_id,
+        "idempotency_key_digest": envelope.idempotency_key_digest,
+        "content_digest": envelope.content_digest,
+        "attachment_refs": envelope.attachment_refs,
+    }
+
+
+def chat_ingress_rejection_detail(
+    envelope: ChatIngressEnvelope,
+    *,
+    code: str,
+    message: str,
+) -> dict[str, Any]:
+    """Build the canonical continuity payload for REST error responses."""
+
+    continuity = chat_ingress_continuity(envelope)
+    return {"code": code, "message": message, **continuity, "continuity": continuity}
+
+
 async def log_chat_ingress_event(
     *,
     session_id: str,
@@ -528,6 +563,7 @@ async def chat(request: ChatRequest, http_request: HttpRequest):
             request.message,
             message_id=ingress.message_id,
             metadata_json=chat_ingress_metadata(ingress),
+            attachment_refs=request.attachments,
         )
     except MessageIngressConflictError as exc:
         await log_chat_ingress_event(
@@ -537,11 +573,11 @@ async def chat(request: ChatRequest, http_request: HttpRequest):
         )
         raise HTTPException(
             status_code=409,
-            detail={
-                "code": "chat_message_identity_conflict",
-                "message": "This message identity is already bound to another request.",
-                "message_id": exc.message_id,
-            },
+            detail=chat_ingress_rejection_detail(
+                ingress,
+                code="chat_message_identity_conflict",
+                message="This message identity is already bound to another request.",
+            ),
         ) from exc
     if duplicate:
         await log_chat_ingress_event(
@@ -551,11 +587,11 @@ async def chat(request: ChatRequest, http_request: HttpRequest):
         )
         raise HTTPException(
             status_code=409,
-            detail={
-                "code": "chat_message_duplicate",
-                "message": "This message was already accepted for this session.",
-                "message_id": ingress.message_id,
-            },
+            detail=chat_ingress_rejection_detail(
+                ingress,
+                code="chat_message_duplicate",
+                message="This message was already accepted for this session.",
+            ),
         )
     await log_chat_ingress_event(
         session_id=session.id,

@@ -309,14 +309,16 @@ def _resolve_delivery_identity(
 
     identity = None
     if requested_conversation_id:
+        source_channel = str(message.channel or "web").strip()
+        source_transport = str(message.transport or "websocket").strip()
         identity = build_conversation_identity(
             conversation_id=requested_conversation_id,
             thread_id=message.thread_id or requested_conversation_id,
             owner_principal_id=owner_principal_id,
             operator_session_id=operator_session_id,
             device_id=message.device_id,
-            channel="web",
-            transport="websocket",
+            channel=source_channel,
+            transport=source_transport,
             correlation_id=message.correlation_id,
             causation_id=message.causation_id,
             require_owner=True,

@@ -15,6 +15,7 @@ from src.conversation.identity import (
     ConversationIdentityError,
     build_conversation_identity,
     redact_attachment_refs,
+    validate_attachment_refs,
 )
 
 
@@ -141,12 +142,19 @@ class ApprovalRepository:
             or details.get("approval_owner_auth_session_id")
             or ""
         ).strip() or None
-        try:
-            safe_attachment_refs = redact_attachment_refs(
-                details.get("attachment_refs", details.get("attachments"))
+        attachment_value = details.get("attachment_refs", details.get("attachments"))
+        if ("attachment_refs" in details or "attachments" in details) and attachment_value:
+            if supplied_owner is None:
+                raise ConversationIdentityError(
+                    "conversation_owner_missing",
+                    "Attachment approval metadata requires an owner principal.",
+                )
+            safe_attachment_refs = validate_attachment_refs(
+                attachment_value,
+                owner_principal_id=supplied_owner,
             )
-        except ConversationIdentityError:
-            raise
+        else:
+            safe_attachment_refs = []
         if "attachment_refs" in details or "attachments" in details:
             details["attachment_refs"] = safe_attachment_refs
             details.pop("attachments", None)
@@ -259,7 +267,26 @@ class ApprovalRepository:
             if request is None:
                 return None
 
+            details = dict(details)
+            if "attachment_refs" in details or "attachments" in details:
+                raw_attachment_refs = details.get("attachment_refs", details.get("attachments"))
+                owner_principal_id = str(request.owner_principal_id or "").strip() or None
+                if raw_attachment_refs:
+                    if owner_principal_id is None:
+                        raise ConversationIdentityError(
+                            "conversation_owner_missing",
+                            "Attachment approval metadata requires an owner principal.",
+                        )
+                    details["attachment_refs"] = validate_attachment_refs(
+                        raw_attachment_refs,
+                        owner_principal_id=owner_principal_id,
+                    )
+                else:
+                    details["attachment_refs"] = []
+                details.pop("attachments", None)
             existing = json.loads(request.details_json) if request.details_json else {}
+            if not isinstance(existing, dict):
+                existing = {}
             existing.update(details)
             request.details_json = json.dumps(existing)
             db.add(request)

@@ -295,6 +295,8 @@ async def test_web_brief_scheduler_uses_corrected_priority_and_evidence():
         query_read_back=True,
         job_id="child-high",
         artifact_ref="artifact-high",
+        strategy_delta_id="delta-high",
+        strategy_delta_provenance="verified",
         reason="verified",
     )
     service = MagicMock()
@@ -320,3 +322,5 @@ async def test_web_brief_scheduler_uses_corrected_priority_and_evidence():
     assert request.priority == 90
     assert "strategy-delta:delta-high" in request.evidence_refs
     assert jobs.record_effect.await_args.kwargs["details"]["priority"] == 90
+    assert jobs.record_effect.await_args.kwargs["details"]["strategy_delta_id"] == "delta-high"
+    assert jobs.record_effect.await_args.kwargs["details"]["strategy_delta_provenance"] == "verified"

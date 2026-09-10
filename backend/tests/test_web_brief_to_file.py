@@ -19,6 +19,7 @@ from src.guardian.web_brief_to_file import (
     WebBriefToFileRequest,
     WebBriefToFileService,
 )
+from src.memory.control import StrategyDeltaReceipt
 from src.security.trust_contract import AuthorityGrant, PrincipalType, TrustPrincipal
 
 
@@ -169,6 +170,208 @@ def _principal() -> TrustPrincipal:
         grants=(AuthorityGrant.CAPABILITY_EXECUTE,),
         session_id="brief-session",
     )
+
+
+def _applied_delta(
+    goal: Goal,
+    *,
+    status: str = "applied",
+    revision_after: int = 2,
+) -> StrategyDeltaReceipt:
+    delta_id = "delta-correction-1"
+    return StrategyDeltaReceipt(
+        delta_id=delta_id,
+        goal_id=goal.id,
+        scope="goal",
+        field_name="web_brief_target",
+        before={
+            "query": "Seraph project",
+            "file_path": "briefs/goal-brief.md",
+            "priority": 0,
+        },
+        after={
+            "query": "Seraph project corrected",
+            "file_path": "briefs/goal-brief.md",
+            "priority": 80,
+            "strategy_delta_id": delta_id,
+        },
+        source_event_id="operator-correction-1",
+        author_id="operator:test-bypass",
+        evaluator_id=None,
+        goal_revision_before=1,
+        goal_revision_after=revision_after,
+        status=status,
+        rollback_target_id=None,
+        reason="Use the corrected source and timing.",
+        created_at=datetime.now(timezone.utc).isoformat(),
+        updated_at=datetime.now(timezone.utc).isoformat(),
+    )
+
+
+def test_web_brief_candidate_keeps_corrected_priority_in_decision_inputs():
+    goal = _goal().model_copy(
+        update={
+            "revision": 2,
+            "success_criterion_json": serialize_success_criterion(
+                GoalSuccessCriterion(
+                    criterion_id="brief-present",
+                    description="A source-backed brief is readable",
+                    verifier_kind="artifact_readback",
+                    evidence_refs=["operator:source-consent"],
+                    target={
+                        "query": "Seraph project corrected",
+                        "file_path": "briefs/goal-brief.md",
+                        "priority": 80,
+                        "strategy_delta_id": "delta-correction-1",
+                    },
+                )
+            ),
+        }
+    )
+    request = _request(
+        goal_revision=2,
+        query="Seraph project corrected",
+        priority=80,
+        evidence_refs=["operator:source-consent", "strategy-delta:delta-correction-1"],
+    )
+
+    candidate = WebBriefToFileService()._candidate_for_request(goal, request)
+
+    assert candidate.inputs == {
+        "query": "Seraph project corrected",
+        "file_path": "briefs/goal-brief.md",
+        "priority": 80,
+    }
+
+
+def _corrected_goal() -> Goal:
+    return _goal().model_copy(
+        update={
+            "success_criterion_json": serialize_success_criterion(
+                GoalSuccessCriterion(
+                    criterion_id="brief-present",
+                    description="A source-backed brief is readable",
+                    verifier_kind="artifact_readback",
+                    evidence_refs=["operator:source-consent"],
+                    target={
+                        "query": "Seraph project corrected",
+                        "file_path": "briefs/goal-brief.md",
+                        "priority": 80,
+                        "strategy_delta_id": "delta-correction-1",
+                    },
+                )
+            )
+        }
+    )
+
+
+@pytest.mark.asyncio
+async def test_applied_correction_influences_later_web_brief_with_verified_provenance(monkeypatch, tmp_path):
+    monkeypatch.setattr(settings, "workspace_dir", str(tmp_path))
+    goal = _corrected_goal()
+    goals = _Goals(goal)
+    jobs = _Jobs()
+    workflow = _BriefWorkflow(tmp_path)
+    delta = _applied_delta(goal)
+    persisted: list[dict[str, Any]] = []
+
+    async def no_existing(**_kwargs):
+        return None
+
+    async def persist(**kwargs):
+        persisted.append(kwargs)
+        return kwargs["details"]
+
+    async def get_delta(delta_id: str):
+        return delta if delta_id == delta.delta_id else None
+
+    monkeypatch.setattr(goal_conditioned_loop, "goal_repository", goals)
+    monkeypatch.setattr(goal_conditioned_loop, "get_strategy_delta", get_delta)
+    monkeypatch.setattr(goal_conditioned_loop, "_existing_receipt", no_existing)
+    monkeypatch.setattr(goal_conditioned_loop, "_persist_receipt", persist)
+
+    result = await WebBriefToFileService(
+        goals=goals,
+        jobs=jobs,
+        workflow_tool_provider=lambda _name: workflow,
+        authority_principal=_principal(),
+    ).run(
+        _request(
+            goal_revision=2,
+            query="Seraph project corrected",
+            priority=80,
+            evidence_refs=["operator:source-consent", "strategy-delta:delta-correction-1"],
+        )
+    )
+
+    assert result.execution_status == "succeeded"
+    assert result.verification == "passed"
+    assert result.strategy_delta_id == delta.delta_id
+    assert result.strategy_delta_provenance == "verified"
+    assert workflow.calls == [
+        {"query": "Seraph project corrected", "file_path": "briefs/goal-brief.md"}
+    ]
+    outcome = next(item["details"] for item in persisted if item["event_type"] == "goal_loop_outcome")
+    assert outcome["strategy_delta_id"] == delta.delta_id
+    assert outcome["strategy_delta_provenance"] == "verified"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status", "revision_after"),
+    [("rolled_back", 2), ("applied", 1)],
+)
+async def test_unreliable_correction_blocks_web_brief_before_workflow(
+    monkeypatch,
+    tmp_path,
+    status,
+    revision_after,
+):
+    monkeypatch.setattr(settings, "workspace_dir", str(tmp_path))
+    goal = _corrected_goal()
+    goals = _Goals(goal)
+    jobs = _Jobs()
+    workflow = _BriefWorkflow(tmp_path)
+    delta = _applied_delta(goal, status=status, revision_after=revision_after)
+    persisted: list[dict[str, Any]] = []
+
+    async def no_existing(**_kwargs):
+        return None
+
+    async def persist(**kwargs):
+        persisted.append(kwargs)
+        return kwargs["details"]
+
+    async def get_delta(_delta_id: str):
+        return delta
+
+    monkeypatch.setattr(goal_conditioned_loop, "goal_repository", goals)
+    monkeypatch.setattr(goal_conditioned_loop, "get_strategy_delta", get_delta)
+    monkeypatch.setattr(goal_conditioned_loop, "_existing_receipt", no_existing)
+    monkeypatch.setattr(goal_conditioned_loop, "_persist_receipt", persist)
+
+    result = await WebBriefToFileService(
+        goals=goals,
+        jobs=jobs,
+        workflow_tool_provider=lambda _name: workflow,
+        authority_principal=_principal(),
+    ).run(
+        _request(
+            goal_revision=2,
+            query="Seraph project corrected",
+            priority=80,
+            evidence_refs=["operator:source-consent", "strategy-delta:delta-correction-1"],
+        )
+    )
+
+    assert result.execution_status == "blocked"
+    assert result.verification == "unknown"
+    assert result.learning == "no_learning"
+    assert result.strategy_delta_id is None
+    assert result.strategy_delta_provenance == "unresolved"
+    assert workflow.calls == []
+    no_learning = next(item["details"] for item in persisted if item["event_type"] == "goal_loop_no_learning")
+    assert no_learning["reason"] == "strategy_delta_unresolved"
 
 
 @pytest.mark.asyncio

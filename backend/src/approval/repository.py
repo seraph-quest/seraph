@@ -11,7 +11,7 @@ from sqlmodel import select, col
 from src.db.engine import get_session
 from src.db.models import ApprovalRequest
 from src.db.session_refs import ensure_sessions_exist
-from src.approval.runtime import seal_capability_approval
+from src.approval.runtime import _seal_capability_approval
 
 
 def fingerprint_tool_call(
@@ -207,7 +207,7 @@ class ApprovalRepository:
             except (TypeError, ValueError):
                 parsed_details = {}
             details = dict(parsed_details) if isinstance(parsed_details, Mapping) else {}
-            return seal_capability_approval(
+            return _seal_capability_approval(
                 {
                     "approval_id": str(request.id),
                     "status": "consumed",

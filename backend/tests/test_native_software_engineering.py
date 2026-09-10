@@ -26,6 +26,23 @@ from src.workflows.native_software_engineering import (
 )
 
 
+def test_native_artifact_writer_rejects_symlink_and_oversized_payload(tmp_path, monkeypatch):
+    monkeypatch.setattr(settings, "workspace_dir", str(tmp_path))
+    artifact_dir = tmp_path / ".seraph" / "native-software-engineering" / "jobs" / "job" / "artifacts"
+    artifact_dir.mkdir(parents=True)
+    outside = tmp_path / "outside.json"
+    outside.write_text("keep", encoding="utf-8")
+    link = artifact_dir / "result.json"
+    link.symlink_to(outside)
+
+    with pytest.raises(native_swe.NativeSoftwareEngineeringError, match="artifact_write_blocked"):
+        native_swe._write_json(link, {"status": "forged"})
+    assert outside.read_text(encoding="utf-8") == "keep"
+
+    with pytest.raises(native_swe.NativeSoftwareEngineeringError, match="artifact_size_exceeded"):
+        native_swe._write_json(artifact_dir / "large.json", {"payload": "x" * (1 * 1024 * 1024)})
+
+
 class _FakeNativeJobRepository:
     """Small in-memory durable contract for the cancellation race proof."""
 

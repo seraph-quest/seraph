@@ -47,6 +47,7 @@ from src.extensions.capability_execution import (
     current_capability_execution_host,
 )
 from src.security.trust_contract import AuthorityGrant, PrincipalType
+from src.tools.filesystem_tool import _safe_resolve, _write_workspace_text_bounded
 from src.workflows.job_runtime import (
     DurableJobIdentity,
     DurableJobSpec,
@@ -74,6 +75,7 @@ _MAX_FIXTURE_TOTAL_BYTES = 8_000_000
 _MAX_FIXTURE_DEPTH = 16
 _MAX_FIXTURE_DIRECTORIES = 200
 _MAX_TEST_TIMEOUT_SECONDS = 120
+_MAX_ARTIFACT_BYTES = 1 * 1024 * 1024
 _GENERATED_FIXTURE_DIRS = frozenset({".git", "__pycache__", ".pytest_cache"})
 _SAFE_JOB_ID = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
 _SHELL_META_CHARS = set("|&;<>()`$\\\n\r\t")
@@ -684,13 +686,36 @@ def _relative_workspace_path(path: Path) -> str:
 
 
 def _safe_json(payload: Any) -> str:
-    return json.dumps(payload, ensure_ascii=True, sort_keys=True, indent=2) + "\n"
+    # Stream encoder chunks into a bounded buffer.  In particular, do not
+    # create an unbounded ``json.dumps`` result before checking its size.
+    encoder = json.JSONEncoder(ensure_ascii=True, sort_keys=True, indent=2).iterencode(payload)
+    chunks: list[str] = []
+    total_bytes = 0
+    for chunk in encoder:
+        total_bytes += len(chunk.encode("utf-8"))
+        if total_bytes + 1 > _MAX_ARTIFACT_BYTES:
+            raise NativeSoftwareEngineeringError("artifact_size_exceeded")
+        chunks.append(chunk)
+    return "".join(chunks) + "\n"
 
 
 def _write_json(path: Path, payload: dict[str, Any]) -> str:
     content = _safe_json(payload)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(content, encoding="utf-8")
+    root = _workspace_root()
+    try:
+        relative = path.absolute().relative_to(root.absolute()).as_posix()
+    except ValueError as exc:
+        raise NativeSoftwareEngineeringError("artifact_path_outside_workspace") from exc
+    try:
+        resolved = _safe_resolve(relative)
+        _write_workspace_text_bounded(
+            resolved,
+            content,
+            max_bytes=_MAX_ARTIFACT_BYTES,
+            create_parents=True,
+        )
+    except (OSError, ValueError) as exc:
+        raise NativeSoftwareEngineeringError("artifact_write_blocked") from exc
     return content
 
 

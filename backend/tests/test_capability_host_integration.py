@@ -11,7 +11,12 @@ from types import SimpleNamespace
 import pytest
 
 from config.settings import settings
-from src.approval.runtime import reset_runtime_context, seal_capability_approval, set_runtime_context
+from src.approval.runtime import (
+    _seal_capability_approval,
+    reset_runtime_context,
+    seal_capability_approval,
+    set_runtime_context,
+)
 from src.extensions.capability_execution import (
     CapabilityExecutionError,
     CapabilityJournalError,
@@ -153,6 +158,22 @@ def test_execution_is_bounded_redacted_and_deduplicated(tmp_path):
     assert "do-not-persist" not in journal
     assert "secret_token" not in journal
     assert (tmp_path / "journal.json").stat().st_mode & 0o077 == 0
+
+
+def test_internal_raw_result_path_still_returns_bounded_data(tmp_path):
+    host = _test_host(tmp_path / "journal.json", **{"test.echo": lambda _: {"payload": "x" * 4096}})
+    request = _request(limits=CapabilityExecutionLimits(output_bytes=64))
+
+    result, receipt = host._execute(
+        request,
+        lambda _: {"payload": "x" * 4096},
+        return_raw_result=True,
+    )
+
+    assert result == receipt.result
+    assert result["output_truncated"] is True
+    assert result["output_bytes"] > 64
+    assert len(json.dumps(result).encode("utf-8")) <= 256
 
 
 def test_restart_marks_started_effect_uncertain_and_refuses_replay(tmp_path):
@@ -408,7 +429,12 @@ def test_approval_binding_must_be_repository_sealed(tmp_path):
             )
         )
 
-    binding = seal_capability_approval(forged)
+    with pytest.raises(RuntimeError, match="approval_seal_internal_only"):
+        seal_capability_approval(forged)
+
+    # The repository-only seam can issue a short-lived opaque receipt.  The
+    # public helper above cannot mint this binding.
+    binding = _seal_capability_approval(forged)
     result = host.execute(
         _request(
             approval_id="approval:forged",
@@ -418,6 +444,14 @@ def test_approval_binding_must_be_repository_sealed(tmp_path):
     )
     assert result.state == "succeeded"
     assert calls == [{"message": "hello", "count": 1}]
+    with pytest.raises(CapabilityExecutionError, match="approval_binding_missing"):
+        host.execute(
+            _request(
+                approval_id="approval:forged",
+                approval_digest="fingerprint",
+                approval_binding=binding,
+            )
+        )
 
 
 def test_corrupt_journal_is_operator_visible_and_blocks_restart_execution(tmp_path):

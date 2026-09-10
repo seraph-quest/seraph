@@ -371,6 +371,19 @@ def test_run_command_rejects_workspace_escape():
     assert result == "Error: cwd must stay within the workspace."
 
 
+def test_run_command_rejects_arbitrary_workspace_executable(tmp_path, monkeypatch):
+    monkeypatch.setattr(settings, "workspace_dir", str(tmp_path))
+    executable = tmp_path / "workspace-executable"
+    executable.write_text("#!/bin/sh\npython3 -c 'print(1)'\n", encoding="utf-8")
+    executable.chmod(0o700)
+
+    result = run_command(command="./workspace-executable", args_json="[]")
+
+    assert result == (
+        "Error: workspace executable paths are not adopted; use an allowlisted command name."
+    )
+
+
 def test_run_command_rejects_workspace_escape_via_git_path_flag():
     result = run_command(command="git", args_json='["-C","/","status"]')
     assert result == "Error: -C path must stay within the workspace."

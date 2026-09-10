@@ -24,6 +24,7 @@ import posixpath
 import tempfile
 import threading
 import time
+from collections.abc import Sequence
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from contextlib import contextmanager
@@ -32,7 +33,7 @@ from typing import Any, Callable, Mapping
 from urllib.parse import urlsplit, urlunsplit
 from uuid import uuid4
 
-from src.audit.formatting import redact_for_audit
+from src.audit.formatting import _is_sensitive_key, redact_for_audit
 from src.security.trust_contract import canonical_digest
 
 _JOURNAL_VERSION = 3
@@ -256,6 +257,91 @@ def _digest(value: Any) -> str:
     return canonical_digest(_canonical_value(value))
 
 
+def _iter_json_string(value: str):
+    """Yield an ASCII JSON string in small chunks.
+
+    ``json.dumps`` emits a whole string as one allocation.  Capability output
+    can be supplied by an adapter, so chunking here keeps the bounded result
+    path from materializing a large nested string before the limit is known.
+    """
+    yield '"'
+    for offset in range(0, len(value), 4096):
+        encoded = json.dumps(
+            value[offset : offset + 4096],
+            ensure_ascii=True,
+            separators=(",", ":"),
+        )
+        yield encoded[1:-1]
+    yield '"'
+
+
+def _iter_json_chunks(value: Any, *, key_hint: str | None = None, redact: bool = False):
+    """Stream the canonical JSON representation used for result receipts."""
+    if redact and key_hint and _is_sensitive_key(key_hint):
+        yield from _iter_json_string("[redacted]")
+        return
+    if isinstance(value, Mapping):
+        yield "{"
+        for index, (key, inner) in enumerate(sorted(value.items(), key=lambda item: str(item[0]))):
+            if index:
+                yield ","
+            key_text = str(key)
+            yield from _iter_json_string(key_text)
+            yield ":"
+            yield from _iter_json_chunks(inner, key_hint=key_text, redact=redact)
+        yield "}"
+        return
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        yield "["
+        for index, inner in enumerate(value):
+            if index:
+                yield ","
+            yield from _iter_json_chunks(inner, key_hint=key_hint, redact=redact)
+        yield "]"
+        return
+    if isinstance(value, (bytes, bytearray)):
+        yield "{"
+        yield from _iter_json_string("__bytes_sha256__")
+        yield ":"
+        yield from _iter_json_string(hashlib.sha256(bytes(value)).hexdigest())
+        yield ","
+        yield from _iter_json_string("length")
+        yield ":"
+        yield str(len(value))
+        yield "}"
+        return
+    if isinstance(value, threading.Event):
+        yield '{"__cancel_event__":true}'
+        return
+    if isinstance(value, Path):
+        yield from _iter_json_string(str(value))
+        return
+    if isinstance(value, str):
+        text = value
+        if redact and len(text) > 200:
+            text = f"{text[:197]}..."
+        yield from _iter_json_string(text)
+        return
+    if isinstance(value, (int, float, bool)) or value is None:
+        yield json.dumps(value, ensure_ascii=True, separators=(",", ":"))
+        return
+    yield from _iter_json_string(str(value))
+
+
+def _json_stats(value: Any, *, redact: bool = False, keep_bytes: int = 0) -> tuple[int, str, bytes]:
+    """Return byte count/digest and a bounded prefix without full serialization."""
+    digest = hashlib.sha256()
+    prefix = bytearray()
+    total = 0
+    for chunk in _iter_json_chunks(value, redact=redact):
+        encoded = chunk.encode("utf-8", errors="replace")
+        digest.update(encoded)
+        total += len(encoded)
+        if len(prefix) < keep_bytes:
+            prefix.extend(encoded[: keep_bytes - len(prefix)])
+    return total, digest.hexdigest(), bytes(prefix)
+
+
 def _bounded_json(value: Any, *, limit: int) -> tuple[Any, bool]:
     """Bound a result for the caller while retaining its basic shape."""
     if isinstance(value, str):
@@ -272,18 +358,15 @@ def _bounded_json(value: Any, *, limit: int) -> tuple[Any, bool]:
         if len(value) <= limit:
             return value, False
         return value[:limit], True
-    try:
-        encoded = json.dumps(_canonical_value(value), sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
-    except (TypeError, ValueError):
-        encoded = str(value).encode("utf-8", errors="replace")
-    if len(encoded) <= limit:
+    output_bytes, output_sha256, _ = _json_stats(value)
+    if output_bytes <= limit:
         return value, False
     # Structured outputs are retained as a bounded, explicit receipt.  This
     # prevents a large provider/tool object from crossing the final boundary.
     return {
         "output_truncated": True,
-        "output_bytes": len(encoded),
-        "output_sha256": hashlib.sha256(encoded).hexdigest(),
+        "output_bytes": output_bytes,
+        "output_sha256": output_sha256,
     }, True
 
 
@@ -296,14 +379,33 @@ def _safe_summary(value: Any, *, output_bytes: int) -> dict[str, Any]:
         encoded = value
         bounded, truncated = _bounded_json(value, limit=min(output_bytes, 4096))
     else:
-        safe_value = redact_for_audit(value)
-        bounded, truncated = _bounded_json(safe_value, limit=min(output_bytes, 4096))
-        try:
-            encoded = json.dumps(
-                _canonical_value(value), sort_keys=True, separators=(",", ":"), ensure_ascii=True
-            ).encode()
-        except (TypeError, ValueError):
-            encoded = str(value).encode("utf-8", errors="replace")
+        encoded_length, encoded_digest, _ = _json_stats(value)
+        summary_limit = min(output_bytes, 4096)
+        safe_length, safe_digest, safe_prefix = _json_stats(
+            value,
+            redact=True,
+            keep_bytes=summary_limit,
+        )
+        if safe_length <= summary_limit:
+            try:
+                bounded = json.loads(safe_prefix.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                bounded = {"output_sha256": safe_digest, "output_bytes": safe_length}
+            truncated = False
+        else:
+            bounded = {
+                "output_truncated": True,
+                "output_bytes": safe_length,
+                "output_sha256": safe_digest,
+            }
+            truncated = True
+        return {
+            "type": type(value).__name__,
+            "output_bytes": encoded_length,
+            "output_sha256": encoded_digest,
+            "output_truncated": truncated,
+            "summary": bounded,
+        }
     return {
         "type": type(value).__name__,
         "output_bytes": len(encoded),
@@ -815,7 +917,9 @@ class CapabilityExecutionHost:
         try:
             bounded_result, truncated = _bounded_json(result, limit=request.limits.output_bytes)
             summary = _safe_summary(result, output_bytes=request.limits.output_bytes)
-            output_digest = _digest(result)
+            # Digest the canonical result incrementally; the raw-result seam
+            # must not first build an unbounded JSON byte string.
+            _, output_digest, _ = _json_stats(result)
         except Exception as exc:
             self._uncertain_keys.add(request.duplicate_key)
             self._mark_uncertain(request.duplicate_key, error_code="receipt_serialization_failed")
@@ -872,8 +976,13 @@ class CapabilityExecutionHost:
             result=bounded_result,
         )
         if return_raw_result:
-            return result, CapabilityExecutionReceipt(
-                **{**receipt.as_dict(), "result": result}
+            # The internal native seam may preserve structured fields, but it
+            # must still receive the same bounded value as every other caller.
+            # Returning the handler's raw object here would bypass the output
+            # limit and let an adapter cross the host boundary with an
+            # unbounded result.
+            return bounded_result, CapabilityExecutionReceipt(
+                **{**receipt.as_dict(), "result": bounded_result}
             )
         return bounded_result, receipt
 
@@ -936,9 +1045,7 @@ class CapabilityExecutionHost:
 
         if request.approval_id or request.approval_digest or request.approval_binding is not None:
             binding = request.approval_binding
-            from src.approval.runtime import verify_capability_approval
-
-            if not isinstance(binding, Mapping) or not verify_capability_approval(binding):
+            if not isinstance(binding, Mapping):
                 raise CapabilityExecutionError("approval_binding_missing")
             if (
                 str(binding.get("approval_id") or "") != request.approval_id
@@ -966,6 +1073,10 @@ class CapabilityExecutionHost:
                         raise CapabilityExecutionError("approval_expired")
                 except (TypeError, ValueError, OverflowError) as exc:
                     raise CapabilityExecutionError("approval_expiry_invalid") from exc
+            from src.approval.runtime import _consume_capability_approval
+
+            if not _consume_capability_approval(binding):
+                raise CapabilityExecutionError("approval_binding_missing")
 
     def _find_record(self, duplicate_key: str) -> dict[str, Any] | None:
         for record in self._read_records():

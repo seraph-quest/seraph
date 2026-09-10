@@ -394,14 +394,14 @@ def _normalize_command(command: str) -> str:
         raise ValueError("command must be a single executable token without shell metacharacters.")
 
     if "/" in normalized:
-        resolved = (_workspace_root() / normalized).resolve() if not Path(normalized).is_absolute() else Path(normalized).resolve()
-        try:
-            resolved.relative_to(_workspace_root())
-        except ValueError as exc:
-            raise ValueError("command paths must stay within the workspace.") from exc
-        if not resolved.exists() or resolved.is_dir():
-            raise ValueError("command path must point to an existing executable file.")
-        return str(resolved)
+        # A workspace executable is still arbitrary code: a shebang, dynamic
+        # import, or child process can open a socket after the marker checks
+        # below have run.  Until the runtime has an OS-level egress boundary,
+        # only the named command allowlist is adopted.  Workspace scripts may
+        # still be passed as arguments to the allowlisted interpreters.
+        raise ValueError(
+            "workspace executable paths are not adopted; use an allowlisted command name."
+        )
 
     lowered = normalized.lower()
     if lowered in _COMMAND_NAME_BLOCKLIST:
@@ -766,6 +766,7 @@ def _process_approval_context(
         "recursive_secret_like_search_paths_blocked": True,
         "dangerous_find_actions_blocked": True,
         "script_network_client_markers_blocked": True,
+        "arbitrary_workspace_executables": False,
         "runtime_log_storage": "temp_runtime_outside_workspace",
         "runtime_worker_storage": "temp_runtime_outside_workspace",
         "disposable_worker_runtime": True,
@@ -2052,7 +2053,7 @@ class RunCommandTool(Tool):
             "Run an approved workspace-scoped command inside the Seraph runtime container and return its output."
         )
         self.inputs = {
-            "command": {"type": "string", "description": "Executable name or workspace-relative script path."},
+            "command": {"type": "string", "description": "Allowlisted executable name; workspace scripts must be interpreter arguments."},
             "args_json": {"type": "string", "description": "JSON array of command arguments.", "nullable": True},
             "cwd": {"type": "string", "description": "Workspace-relative working directory.", "nullable": True},
             "timeout_seconds": {"type": "integer", "description": "Execution timeout in seconds.", "nullable": True},
@@ -2157,7 +2158,7 @@ class StartProcessTool(Tool):
         self.name = "start_process"
         self.description = "Start an approved workspace-scoped background process inside the Seraph runtime container."
         self.inputs = {
-            "command": {"type": "string", "description": "Executable name or workspace-relative script path."},
+            "command": {"type": "string", "description": "Allowlisted executable name; workspace scripts must be interpreter arguments."},
             "args_json": {"type": "string", "description": "JSON array of command arguments.", "nullable": True},
             "cwd": {"type": "string", "description": "Workspace-relative working directory.", "nullable": True},
         }

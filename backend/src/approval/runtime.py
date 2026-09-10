@@ -5,6 +5,8 @@ import hashlib
 import hmac
 import json
 import secrets
+import threading
+import time
 from typing import Any, Mapping
 
 from src.security.trust_contract import (
@@ -24,29 +26,101 @@ _current_fencing_token: ContextVar[str | None] = ContextVar("capability_fencing_
 
 # Approval rows are consumed by the async repository and then handed to the
 # synchronous capability host.  The short-lived binding below is an opaque
-# repository receipt rather than a caller-controlled ``approved`` flag.  A
-# process-local key keeps a hand-built mapping from crossing the host boundary;
-# the durable approval row remains the source of authority.
+# repository receipt rather than a caller-controlled ``approved`` flag.  The
+# durable approval row remains the source of authority; the process-local
+# registry prevents a caller from manufacturing a valid binding by merely
+# importing a signing helper.
 _CAPABILITY_APPROVAL_KEY = secrets.token_bytes(32)
+_CAPABILITY_APPROVAL_RECEIPT_TTL_SECONDS = 300.0
+_CAPABILITY_APPROVAL_RECEIPT_LIMIT = 1024
+_CAPABILITY_APPROVAL_RECEIPTS: dict[str, tuple[str, float]] = {}
+_CAPABILITY_APPROVAL_RECEIPTS_LOCK = threading.Lock()
 
 
 def seal_capability_approval(payload: Mapping[str, Any]) -> dict[str, Any]:
-    """Seal the exact approval row consumed immediately before an effect."""
+    """Reject caller-side approval fabrication.
+
+    Approval bindings are issued only by ``ApprovalRepository`` after an
+    approved database row has been conditionally changed to ``consumed``.
+    Keeping this historical name as a failing shim makes accidental use
+    visible while avoiding a public signing primitive.
+    """
+    raise RuntimeError("approval_seal_internal_only")
+
+
+def _seal_capability_approval(payload: Mapping[str, Any]) -> dict[str, Any]:
+    """Issue an opaque binding for a repository-consumed approval row.
+
+    This is intentionally an underscored module seam.  The public helper
+    above cannot mint an approval, and the opaque receipt token must also be
+    present in this process's issued-receipt registry before the capability
+    host accepts it.  The durable consumed row is still checked by the async
+    repository before this function is called.
+    """
     body = {str(key): value for key, value in payload.items() if key != "binding_mac"}
+    receipt_token = secrets.token_urlsafe(32)
+    body["receipt_token"] = receipt_token
     encoded = json.dumps(body, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
     body["binding_mac"] = hmac.new(_CAPABILITY_APPROVAL_KEY, encoded, hashlib.sha256).hexdigest()
+    issued_at = time.monotonic()
+    with _CAPABILITY_APPROVAL_RECEIPTS_LOCK:
+        cutoff = issued_at - _CAPABILITY_APPROVAL_RECEIPT_TTL_SECONDS
+        for token, (_, token_time) in list(_CAPABILITY_APPROVAL_RECEIPTS.items()):
+            if token_time < cutoff:
+                _CAPABILITY_APPROVAL_RECEIPTS.pop(token, None)
+        while len(_CAPABILITY_APPROVAL_RECEIPTS) >= _CAPABILITY_APPROVAL_RECEIPT_LIMIT:
+            _CAPABILITY_APPROVAL_RECEIPTS.pop(next(iter(_CAPABILITY_APPROVAL_RECEIPTS)))
+        _CAPABILITY_APPROVAL_RECEIPTS[receipt_token] = (
+            hashlib.sha256(encoded).hexdigest(),
+            issued_at,
+        )
     return body
 
 
 def verify_capability_approval(payload: Mapping[str, Any]) -> bool:
-    """Verify a repository-issued approval binding without exposing its key."""
+    """Verify a currently issued repository approval binding.
+
+    Verification is deliberately process-local and short lived.  A binding
+    from a prior process cannot authorize an effect after restart, while the
+    durable approval row remains auditable as consumed.
+    """
+    verified, _ = _approval_binding_record(payload)
+    return verified
+
+
+def _approval_binding_record(payload: Mapping[str, Any]) -> tuple[bool, str | None]:
     supplied = payload.get("binding_mac")
-    if not isinstance(supplied, str):
-        return False
+    receipt_token = payload.get("receipt_token")
+    if not isinstance(supplied, str) or not isinstance(receipt_token, str):
+        return False, None
     body = {str(key): value for key, value in payload.items() if key != "binding_mac"}
     encoded = json.dumps(body, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
     expected = hmac.new(_CAPABILITY_APPROVAL_KEY, encoded, hashlib.sha256).hexdigest()
-    return hmac.compare_digest(supplied, expected)
+    if not hmac.compare_digest(supplied, expected):
+        return False, None
+    with _CAPABILITY_APPROVAL_RECEIPTS_LOCK:
+        issued = _CAPABILITY_APPROVAL_RECEIPTS.get(receipt_token)
+        if issued is None:
+            return False, None
+        digest, issued_at = issued
+        if time.monotonic() - issued_at > _CAPABILITY_APPROVAL_RECEIPT_TTL_SECONDS:
+            _CAPABILITY_APPROVAL_RECEIPTS.pop(receipt_token, None)
+            return False, None
+        return hmac.compare_digest(digest, hashlib.sha256(encoded).hexdigest()), receipt_token
+
+
+def _consume_capability_approval(payload: Mapping[str, Any]) -> bool:
+    """Consume one repository-issued receipt at the host boundary."""
+    verified, receipt_token = _approval_binding_record(payload)
+    if not verified or receipt_token is None:
+        return False
+    with _CAPABILITY_APPROVAL_RECEIPTS_LOCK:
+        # Re-check under the write lock so two concurrent effects cannot use
+        # one consumed approval receipt.
+        if receipt_token not in _CAPABILITY_APPROVAL_RECEIPTS:
+            return False
+        _CAPABILITY_APPROVAL_RECEIPTS.pop(receipt_token, None)
+    return True
 
 
 def set_runtime_context(

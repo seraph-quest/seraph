@@ -48,6 +48,11 @@ _SECRET_FILE_SUFFIXES = {
     ".pfx",
 }
 _MAX_FILE_READ_BYTES = 1 * 1024 * 1024
+_MAX_FILE_WRITE_BYTES = 1 * 1024 * 1024
+_MAX_PATCH_INPUT_BYTES = 1 * 1024 * 1024
+_MAX_PATCH_RESULT_BYTES = 1 * 1024 * 1024
+_MAX_PATCH_DIFF_BYTES = 1 * 1024 * 1024
+_MAX_PATCH_RECEIPT_BYTES = 4 * 1024 * 1024
 _FILE_READ_CHUNK_BYTES = 64 * 1024
 _TRUNCATION_MARKER = b"\n...[truncated]..."
 
@@ -156,6 +161,34 @@ def _open_workspace_text(
             yield stream
 
 
+def _assert_bounded_text(content: str, *, limit: int, label: str) -> int:
+    """Validate text size before it reaches a workspace write or receipt."""
+    if not isinstance(content, str):
+        raise ValueError(f"{label} must be text")
+    encoded_length = len(content.encode("utf-8"))
+    if encoded_length > limit:
+        raise ValueError(f"{label} exceeds the bounded workspace policy ({limit} bytes)")
+    return encoded_length
+
+
+def _write_workspace_text_bounded(
+    resolved: Path,
+    content: str,
+    *,
+    max_bytes: int = _MAX_FILE_WRITE_BYTES,
+    create_parents: bool = True,
+) -> int:
+    """Write bounded text through the descriptor-relative no-follow seam."""
+    encoded_length = _assert_bounded_text(content, limit=max_bytes, label="workspace content")
+    with _open_workspace_text(resolved, write=True, create_parents=create_parents) as stream:
+        stream.seek(0)
+        stream.truncate()
+        stream.write(content)
+        stream.flush()
+        os.fsync(stream.fileno())
+    return encoded_length
+
+
 def _read_workspace_text_bounded(
     resolved: Path,
     *,
@@ -244,6 +277,9 @@ def _patch_receipt(
     applied: bool,
     before_hash_guarded: bool,
 ) -> str:
+    _assert_bounded_text(before, limit=_MAX_FILE_READ_BYTES, label="patch source")
+    _assert_bounded_text(after, limit=_MAX_PATCH_RESULT_BYTES, label="patch result")
+    _assert_bounded_text(diff, limit=_MAX_PATCH_DIFF_BYTES, label="patch diff")
     changed_lines = sum(1 for line in diff.splitlines() if line.startswith(("+", "-")) and not line.startswith(("+++", "---")))
     artifact = build_artifact_record(
         file_path=file_path,
@@ -253,7 +289,7 @@ def _patch_receipt(
         recovery_hint="Apply the rollback restore_text hash through apply_workspace_patch after checking expected_before_sha256.",
         content=after,
     )
-    return json.dumps(
+    receipt = json.dumps(
         {
             "artifact_id": artifact["artifact_id"],
             "artifact": artifact,
@@ -277,6 +313,8 @@ def _patch_receipt(
         },
         sort_keys=True,
     )
+    _assert_bounded_text(receipt, limit=_MAX_PATCH_RECEIPT_BYTES, label="patch receipt")
+    return receipt
 
 
 def _replacement_diff(file_path: str, before: str, after: str) -> str:
@@ -374,6 +412,7 @@ def write_file(file_path: str, content: str) -> str:
         A confirmation message.
     """
     try:
+        _assert_bounded_text(content, limit=_MAX_FILE_WRITE_BYTES, label="file content")
         _assert_not_secret_like_path(file_path, "write")
         resolved = _safe_resolve(file_path)
     except ValueError as exc:
@@ -386,12 +425,7 @@ def write_file(file_path: str, content: str) -> str:
         raise
 
     try:
-        with _open_workspace_text(resolved, write=True, create_parents=True) as stream:
-            stream.seek(0)
-            stream.truncate()
-            stream.write(content)
-            stream.flush()
-            os.fsync(stream.fileno())
+        _write_workspace_text_bounded(resolved, content, max_bytes=_MAX_FILE_WRITE_BYTES)
         log_integration_event_sync(
             integration_type="filesystem",
             name="workspace",
@@ -429,13 +463,17 @@ def preview_workspace_patch(
         A JSON receipt containing the diff, hashes, and application status.
     """
     try:
+        _assert_bounded_text(old_text, limit=_MAX_PATCH_INPUT_BYTES, label="old_text")
+        _assert_bounded_text(new_text, limit=_MAX_PATCH_INPUT_BYTES, label="new_text")
         _assert_not_secret_like_path(file_path, "preview_patch")
         resolved = _safe_resolve(file_path)
         before, truncated = _read_workspace_text_bounded(resolved)
         if truncated:
             raise ValueError("File exceeds the bounded workspace read policy")
         after, occurrence_count = _replace_once(before, old_text, new_text, expected_occurrences)
+        _assert_bounded_text(after, limit=_MAX_PATCH_RESULT_BYTES, label="patch result")
         diff = _replacement_diff(file_path, before, after)
+        _assert_bounded_text(diff, limit=_MAX_PATCH_DIFF_BYTES, label="patch diff")
         log_integration_event_sync(
             integration_type="filesystem",
             name="workspace",
@@ -497,6 +535,8 @@ def apply_workspace_patch(
         A JSON receipt containing the diff, hashes, and application status.
     """
     try:
+        _assert_bounded_text(old_text, limit=_MAX_PATCH_INPUT_BYTES, label="old_text")
+        _assert_bounded_text(new_text, limit=_MAX_PATCH_INPUT_BYTES, label="new_text")
         _assert_not_secret_like_path(file_path, "apply_patch")
         resolved = _safe_resolve(file_path)
         with _open_workspace_text(resolved, write=True) as stream:
@@ -507,7 +547,9 @@ def apply_workspace_patch(
             if expected_before_sha256 and expected_before_sha256 != before_sha256:
                 raise ValueError("Current file content does not match expected_before_sha256")
             after, occurrence_count = _replace_once(before, old_text, new_text, expected_occurrences)
+            _assert_bounded_text(after, limit=_MAX_PATCH_RESULT_BYTES, label="patch result")
             diff = _replacement_diff(file_path, before, after)
+            _assert_bounded_text(diff, limit=_MAX_PATCH_DIFF_BYTES, label="patch diff")
             stream.seek(0)
             stream.truncate()
             stream.write(after)

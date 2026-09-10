@@ -460,6 +460,142 @@ def test_recovery_rejects_journal_record_identity_mismatch(tmp_path):
     assert (workspace_restore_staging_dir(root) / restore_id).is_dir()
 
 
+def test_recovery_preflights_all_records_before_moving_any_root(tmp_path):
+    root, registry = _workspace(tmp_path)
+    archive = Path(backup_workspace(root, registry=registry)["archive_path"])
+    valid_id = "restore-a-valid-01"
+    with pytest.raises(InterruptedWorkspaceRestore):
+        restore_workspace(
+            root,
+            archive,
+            registry=registry,
+            confirm=True,
+            restore_id=valid_id,
+            interrupt_after_active_move=True,
+        )
+
+    corrupt_id = "restore-z-corrupt-01"
+    corrupt_record = workspace_backup_dir(root) / corrupt_id
+    corrupt_record.mkdir()
+    (corrupt_record / "restore-journal.json").write_bytes(b"{not-json")
+
+    with pytest.raises(WorkspaceLifecycleError, match="unreadable"):
+        recover_interrupted_restore(root, registry=registry)
+    assert not root.exists()
+    assert (workspace_backup_dir(root) / valid_id / "previous-workspace").is_dir()
+    assert (workspace_restore_staging_dir(root) / valid_id).is_dir()
+
+
+def test_recovery_binds_journal_to_the_target_workspace_identity(tmp_path):
+    root, registry = _workspace(tmp_path)
+    archive = Path(backup_workspace(root, registry=registry)["archive_path"])
+    restore_id = "restore-identity-bound-01"
+    with pytest.raises(InterruptedWorkspaceRestore):
+        restore_workspace(
+            root,
+            archive,
+            registry=registry,
+            confirm=True,
+            restore_id=restore_id,
+            interrupt_after_active_move=True,
+        )
+
+    config = registry.config
+    other_registry = WorkspaceStateRegistry(
+        WorkspaceConfig(
+            identity=WorkspaceIdentity("workspace-other", root),
+            declared_paths=config.declared_paths,
+            database_path=config.database_path,
+            workspace_version=config.workspace_version,
+            external_references=config.external_references,
+            expected_database_objects=config.expected_database_objects,
+        )
+    )
+    with pytest.raises(WorkspaceLifecycleError, match="workspace identity"):
+        recover_interrupted_restore(root, registry=other_registry)
+    assert not root.exists()
+    assert (workspace_backup_dir(root) / restore_id / "previous-workspace").is_dir()
+    assert (workspace_restore_staging_dir(root) / restore_id).is_dir()
+
+
+def test_recovery_rejects_legacy_v1_journal_before_moving_any_root(tmp_path):
+    root, registry = _workspace(tmp_path)
+    archive = Path(backup_workspace(root, registry=registry)["archive_path"])
+    restore_id = "restore-legacy-journal-01"
+    with pytest.raises(InterruptedWorkspaceRestore):
+        restore_workspace(
+            root,
+            archive,
+            registry=registry,
+            confirm=True,
+            restore_id=restore_id,
+            interrupt_after_active_move=True,
+        )
+
+    journal_path = workspace_backup_dir(root) / restore_id / "restore-journal.json"
+    journal = json.loads(journal_path.read_text(encoding="utf-8"))
+    journal["journal_version"] = 1
+    journal.pop("journal_sha256")
+    journal_path.write_text(json.dumps(journal), encoding="utf-8")
+
+    with pytest.raises(WorkspaceLifecycleError, match="unsupported restore journal version"):
+        recover_interrupted_restore(root, registry=registry)
+    assert not root.exists()
+    assert (workspace_backup_dir(root) / restore_id / "previous-workspace").is_dir()
+    assert (workspace_restore_staging_dir(root) / restore_id).is_dir()
+
+
+def test_oversized_journal_write_leaves_existing_record_unchanged(tmp_path, monkeypatch):
+    root, registry = _workspace(tmp_path)
+    archive = Path(backup_workspace(root, registry=registry)["archive_path"])
+    restore_id = "restore-journal-size-01"
+    with pytest.raises(InterruptedWorkspaceRestore):
+        restore_workspace(
+            root,
+            archive,
+            registry=registry,
+            confirm=True,
+            restore_id=restore_id,
+            interrupt_after_active_move=True,
+        )
+
+    journal_path = workspace_backup_dir(root) / restore_id / "restore-journal.json"
+    original = journal_path.read_bytes()
+    journal = json.loads(original)
+    monkeypatch.setattr(workspace_lifecycle, "MAX_JOURNAL_BYTES", len(original) - 1)
+    with pytest.raises(WorkspaceLifecycleError, match="bounded size"):
+        workspace_lifecycle._write_journal(journal_path, journal)
+    assert journal_path.read_bytes() == original
+    assert not list(journal_path.parent.glob("*.tmp"))
+
+
+def test_recovery_rejects_free_form_stage_receipt_data(tmp_path):
+    root, registry = _workspace(tmp_path)
+    archive = Path(backup_workspace(root, registry=registry)["archive_path"])
+    restore_id = "restore-receipt-shape-01"
+    with pytest.raises(InterruptedWorkspaceRestore):
+        restore_workspace(
+            root,
+            archive,
+            registry=registry,
+            confirm=True,
+            restore_id=restore_id,
+            interrupt_after_active_move=True,
+        )
+
+    journal_path = workspace_backup_dir(root) / restore_id / "restore-journal.json"
+    journal = json.loads(journal_path.read_text(encoding="utf-8"))
+    journal["stage_receipt"]["raw_output"] = "SECRET-SHOULD-NOT-PERSIST"
+    workspace_lifecycle._refresh_journal_digest(journal)
+    journal_path.write_text(json.dumps(journal), encoding="utf-8")
+
+    with pytest.raises(WorkspaceLifecycleError, match="unsupported fields"):
+        recover_interrupted_restore(root, registry=registry)
+    assert not root.exists()
+    assert (workspace_backup_dir(root) / restore_id / "previous-workspace").is_dir()
+    assert (workspace_restore_staging_dir(root) / restore_id).is_dir()
+
+
 def test_restore_requires_existing_secret_material_and_rejects_secret_symlink(tmp_path):
     root, registry = _workspace(tmp_path)
     archive = Path(backup_workspace(root, registry=registry)["archive_path"])

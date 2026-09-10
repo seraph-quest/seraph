@@ -102,6 +102,7 @@ _EMPTY_TOMBSTONE_REVISION = hashlib.sha256(b"[]").hexdigest()
 _MEMORY_EXPORT_SCHEMA_VERSION = "guardian.memory.export.v1"
 _MEMORY_INDEX_SCHEMA_VERSION = "guardian.memory.derived_index.v1"
 _MAX_RECOVERY_RECORDS = 10_000
+_MAX_RECOVERY_SOURCE_RECORDS = 10_000
 
 
 async def _begin_canonical_write(db) -> None:
@@ -1734,19 +1735,27 @@ class MemoryRepository:
                 db.expunge(memory)
             return list(memories)
 
-    async def get_memory(self, memory_id: str) -> Memory | None:
+    async def get_memory(
+        self,
+        memory_id: str,
+        *,
+        include_deleted: bool = False,
+    ) -> Memory | None:
         normalized_memory_id = str(memory_id or "").strip()
         if not normalized_memory_id:
             return None
         async with get_session() as db:
-            stmt = select(Memory).where(
-                Memory.id == normalized_memory_id,
-                _canonical_memory_without_tombstone_clause(),
-            )
+            stmt = select(Memory).where(Memory.id == normalized_memory_id)
+            if not include_deleted:
+                stmt = stmt.where(_canonical_memory_without_tombstone_clause())
             memory = (
                 await db.execute(stmt)
             ).scalars().first()
-            if memory is not None and _canonical_memory_deletion_marker(memory) is not None:
+            if (
+                memory is not None
+                and not include_deleted
+                and _canonical_memory_deletion_marker(memory) is not None
+            ):
                 return None
             if memory is not None:
                 db.expunge(memory)
@@ -1861,8 +1870,19 @@ class MemoryRepository:
                         select(MemorySource)
                         .where(MemorySource.memory_id.in_(memory_ids))
                         .order_by(col(MemorySource.created_at).asc(), col(MemorySource.id).asc())
+                        .limit(_MAX_RECOVERY_SOURCE_RECORDS + 1)
                     )
-                    for source in source_result.scalars().all():
+                    sources = source_result.scalars().all()
+                    if len(sources) > _MAX_RECOVERY_SOURCE_RECORDS:
+                        raise ValueError(
+                            "memory recovery source provenance exceeds the recovery limit"
+                        )
+                    for source in sources:
+                        source_owner = str(source.source_session_id or "").strip()
+                        if source_owner != normalized_owner:
+                            raise PermissionError(
+                                "memory recovery source provenance does not match the authenticated owner"
+                            )
                         source_rows.setdefault(source.memory_id, []).append(source)
                 memory_payloads = [
                     _archive_memory_payload(memory, source_rows.get(memory.id, []))

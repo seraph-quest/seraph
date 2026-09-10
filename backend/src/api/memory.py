@@ -189,16 +189,32 @@ def _live_control_acknowledgement(request: MemoryLiveControlActionRequest) -> bo
     return request.acknowledged or request.acknowledge_rollback_boundary
 
 
-@router.get("/memory/providers")
-async def list_memory_providers():
+async def list_memory_providers(*, owner_session_id: str | None = None):
+    """Build the provider inventory with an optional reconciliation scope.
+
+    Internal maintenance and benchmark callers may omit the owner scope and
+    retain the existing global diagnostic summary.  The HTTP route below
+    always supplies the authenticated operator session, so its reconciliation
+    payload is owner-filtered and content-free.
+    """
+
     payload = list_memory_provider_inventory()
-    reconciliation = await summarize_memory_reconciliation_state()
+    reconciliation = await summarize_memory_reconciliation_state(
+        owner_session_id=owner_session_id,
+        content_free=owner_session_id is not None,
+    )
     payload["canonical_memory_reconciliation"] = reconciliation
     payload["guardian_memory_benchmark"] = await build_guardian_memory_benchmark_report(
         run_suite=False,
         reconciliation=reconciliation,
     )
     return payload
+
+
+@router.get("/memory/providers")
+async def list_memory_providers_route(http_request: Request):
+    context = authenticated_memory_context(http_request)
+    return await list_memory_providers(owner_session_id=context.session_id)
 
 
 @router.get("/memory/operator-policy")

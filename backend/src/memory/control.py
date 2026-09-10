@@ -1074,6 +1074,34 @@ def _scope_memories_to_owner(memories: list[Memory], owner_session_id: str | Non
     return [memory for memory in memories if memory.source_session_id == normalized_owner]
 
 
+async def _verify_live_control_memory_owner(
+    *,
+    memory_id: str,
+    owner_session_id: str,
+) -> None:
+    """Fence a direct live-control call to the authenticated memory owner."""
+
+    normalized_memory_id = str(memory_id or "").strip()
+    normalized_owner = str(owner_session_id or "").strip()
+    if not normalized_memory_id or not normalized_owner:
+        return
+    memory = await memory_repository.get_memory(
+        normalized_memory_id,
+        include_deleted=True,
+    )
+    if memory is None:
+        raise ValueError(f"Unknown memory id: {normalized_memory_id}")
+    bound_owner = str(memory.source_session_id or "").strip()
+    if not bound_owner:
+        raise PermissionError(
+            f"memory {normalized_memory_id} has no owner session"
+        )
+    if bound_owner != normalized_owner:
+        raise PermissionError(
+            f"memory {normalized_memory_id} belongs to another owner session"
+        )
+
+
 def _live_provider_control_payload(provider: dict[str, Any]) -> dict[str, Any]:
     name = str(provider.get("name") or "")
     runtime_state = str(provider.get("runtime_state") or "unknown")
@@ -1155,7 +1183,11 @@ async def get_memory_live_controls_snapshot(
                 limit=bounded_limit,
                 owner_session_id=owner_session_id,
             )
-            reconciliation = await summarize_memory_reconciliation_state(limit=min(bounded_limit, 10))
+            reconciliation = await summarize_memory_reconciliation_state(
+                limit=min(bounded_limit, 10),
+                owner_session_id=owner_session_id,
+                content_free=owner_session_id is not None,
+            )
             operator_status = "guardian_memory_live_controls_visible"
     except SQLAlchemyError:
         active = []
@@ -1297,6 +1329,12 @@ async def apply_memory_live_control_action(
     changed_memory = False
     changed_provider = False
     result: dict[str, Any] = {}
+
+    if memory_id and owner_session_id:
+        await _verify_live_control_memory_owner(
+            memory_id=memory_id,
+            owner_session_id=owner_session_id,
+        )
 
     if normalized_action == "review_outcome":
         if not memory_id:

@@ -46,6 +46,7 @@ from src.memory.repository import (
 )
 from src.memory.pipeline.merge import EmbeddingWriteResult, persist_extracted_memories
 from src.memory.types import ConsolidatedMemoryItem
+from src.memory import control as memory_control
 from src.memory.control import memory_recovery_status
 from src.auth.service import test_bypass_operator as make_test_bypass_operator
 
@@ -514,6 +515,78 @@ async def test_live_control_rejects_memory_bound_to_another_owner(local_memory_d
 
 
 @pytest.mark.asyncio
+async def test_direct_memory_live_control_rejects_other_owner_before_mutation(local_memory_db):
+    _get_session, _database_path = local_memory_db
+    operator = make_test_bypass_operator()
+    other_memory = await memory_repository.create_memory(
+        content="OTHER_OWNER_SECRET direct-control content",
+        source_session_id="other-owner-session",
+        source_type="operator",
+    )
+
+    with patch.object(
+        memory_control.memory_repository,
+        "mark_memory_tombstoned",
+        new=AsyncMock(side_effect=AssertionError("cross-owner tombstone was attempted")),
+    ) as tombstone:
+        with pytest.raises(PermissionError, match="another owner session"):
+            await memory_control.apply_memory_live_control_action(
+                action="propagate_delete_export",
+                acknowledged=True,
+                actor=operator.principal.principal_id,
+                owner_session_id=operator.session_id,
+                memory_id=other_memory.memory_id,
+                privacy_boundary="operator_visible",
+            )
+
+    tombstone.assert_not_awaited()
+    stored = await memory_repository.get_memory(other_memory.memory_id)
+    assert stored is not None
+    assert stored.content == "OTHER_OWNER_SECRET direct-control content"
+
+
+@pytest.mark.asyncio
+async def test_owner_memory_surfaces_redact_other_owner_reconciliation_content(local_memory_db):
+    get_session, _database_path = local_memory_db
+    operator = make_test_bypass_operator()
+    owner_session = operator.session_id
+    await memory_repository.create_memory(
+        content="OTHER_OWNER_SECRET should never cross the memory owner boundary.",
+        summary="OTHER_OWNER_SECRET reconciliation summary",
+        status=MemoryStatus.archived,
+        source_session_id="other-owner-session",
+        source_type="operator",
+        metadata={"archived_reason": "OTHER_OWNER_SECRET metadata reason"},
+    )
+    await memory_repository.create_memory(
+        content="Owner live-control candidate.",
+        source_session_id=owner_session,
+        source_type="operator",
+    )
+    request = SimpleNamespace(state=SimpleNamespace(operator=operator))
+
+    with patch("src.memory.decay.get_session", get_session):
+        snapshot = await memory_control.get_memory_live_controls_snapshot(
+            limit=8,
+            owner_session_id=owner_session,
+        )
+        providers = await memory_api.list_memory_providers_route(request)
+
+    serialized = json.dumps({"snapshot": snapshot, "providers": providers}, sort_keys=True)
+    assert "OTHER_OWNER_SECRET" not in serialized
+    snapshot_reconciliation = snapshot["reconciliation"]
+    provider_reconciliation = providers["canonical_memory_reconciliation"]
+    assert snapshot_reconciliation["scope"] == "owner"
+    assert snapshot_reconciliation["owner_session_id"] == owner_session
+    assert snapshot_reconciliation["content_free"] is True
+    assert provider_reconciliation["scope"] == "owner"
+    assert provider_reconciliation["owner_session_id"] == owner_session
+    assert provider_reconciliation["content_free"] is True
+    assert provider_reconciliation["recent_conflicts"] == []
+    assert provider_reconciliation["recent_archivals"] == []
+
+
+@pytest.mark.asyncio
 async def test_restore_rejects_record_without_owner_session(local_memory_db):
     _get_session, _database_path = local_memory_db
     operator = make_test_bypass_operator()
@@ -639,6 +712,33 @@ async def test_export_scopes_tombstones_to_authenticated_owner(local_memory_db):
         tombstone["memory_id"] != other_memory.memory_id
         for tombstone in archive["tombstones"]
     )
+
+
+@pytest.mark.asyncio
+async def test_export_rejects_cross_owner_source_provenance(local_memory_db):
+    _get_session, _database_path = local_memory_db
+    operator = make_test_bypass_operator()
+    owner_session = operator.session_id
+    owner_memory = await memory_repository.create_memory(
+        content="Owner recovery memory.",
+        source_session_id=owner_session,
+        source_type="operator",
+    )
+    await memory_repository.add_memory_source(
+        memory_id=owner_memory.memory_id,
+        source_type="message",
+        source_session_id="other-owner-session",
+        source_message_id="other-owner-message",
+        snippet="OTHER_OWNER_SECRET source provenance",
+    )
+
+    with _runtime_operator(operator):
+        with pytest.raises(PermissionError, match="source provenance"):
+            await memory_repository.export_canonical_memory_state(
+                actor=operator.principal.principal_id,
+                owner_session_id=owner_session,
+                authenticated_session_id=owner_session,
+            )
 
 
 @pytest.mark.asyncio

@@ -150,27 +150,44 @@ def memory_reconciliation_policy_payload() -> dict[str, object]:
     }
 
 
-async def summarize_memory_reconciliation_state(*, limit: int = 5) -> dict[str, object]:
+async def summarize_memory_reconciliation_state(
+    *,
+    limit: int = 5,
+    owner_session_id: str | None = None,
+    content_free: bool = False,
+) -> dict[str, object]:
+    """Return reconciliation state for either the global or one owner scope.
+
+    Global callers retain the existing diagnostic rows for trusted internal
+    maintenance and benchmark surfaces.  Operator-facing owner scopes use a
+    content-free preview so a reconciliation receipt cannot become a side
+    channel for another memory's summary, content, or metadata reason.
+    """
+
+    bounded_limit = min(max(int(limit or 5), 1), 50)
+    normalized_owner = str(owner_session_id or "").strip() or None
+
+    def _owner_filter(statement):
+        if normalized_owner:
+            return statement.where(Memory.source_session_id == normalized_owner)
+        return statement
+
     try:
         async with get_session() as db:
-            superseded_memories = (
-                await db.execute(
-                    select(Memory)
-                    .where(Memory.status == MemoryStatus.superseded)
-                    .where(_canonical_memory_without_tombstone_clause())
-                    .order_by(col(Memory.updated_at).desc(), col(Memory.created_at).desc())
-                    .limit(limit)
-                )
-            ).scalars().all()
-            archived_memories = (
-                await db.execute(
-                    select(Memory)
-                    .where(Memory.status == MemoryStatus.archived)
-                    .where(_canonical_memory_without_tombstone_clause())
-                    .order_by(col(Memory.updated_at).desc(), col(Memory.created_at).desc())
-                    .limit(limit)
-                )
-            ).scalars().all()
+            superseded_statement = _owner_filter(
+                select(Memory)
+                .where(Memory.status == MemoryStatus.superseded)
+                .where(_canonical_memory_without_tombstone_clause())
+                .order_by(col(Memory.updated_at).desc(), col(Memory.created_at).desc())
+            ).limit(bounded_limit)
+            superseded_memories = (await db.execute(superseded_statement)).scalars().all()
+            archived_statement = _owner_filter(
+                select(Memory)
+                .where(Memory.status == MemoryStatus.archived)
+                .where(_canonical_memory_without_tombstone_clause())
+                .order_by(col(Memory.updated_at).desc(), col(Memory.created_at).desc())
+            ).limit(bounded_limit)
+            archived_memories = (await db.execute(archived_statement)).scalars().all()
             superseded_memories = [
                 memory
                 for memory in superseded_memories
@@ -183,53 +200,48 @@ async def summarize_memory_reconciliation_state(*, limit: int = 5) -> dict[str, 
             ]
             for memory in (*superseded_memories, *archived_memories):
                 db.expunge(memory)
-            active_count = int(
-                (
-                    await db.execute(
-                        select(func.count()).select_from(Memory).where(
-                            Memory.status == MemoryStatus.active
-                        ).where(_canonical_memory_without_tombstone_clause())
+
+            async def _count_status(status: MemoryStatus) -> int:
+                statement = _owner_filter(
+                    select(func.count())
+                    .select_from(Memory)
+                    .where(Memory.status == status)
+                    .where(_canonical_memory_without_tombstone_clause())
+                )
+                return int((await db.execute(statement)).scalar_one() or 0)
+
+            active_count = await _count_status(MemoryStatus.active)
+            superseded_count = await _count_status(MemoryStatus.superseded)
+            archived_count = await _count_status(MemoryStatus.archived)
+            contradiction_statement = (
+                select(func.count())
+                .select_from(MemoryEdge)
+                .where(MemoryEdge.edge_type == MemoryEdgeType.contradicts)
+                .where(
+                    ~exists().where(
+                        MemoryTombstone.memory_id == MemoryEdge.from_memory_id
                     )
-                ).scalar_one()
-                or 0
-            )
-            superseded_count = int(
-                (
-                    await db.execute(
-                        select(func.count()).select_from(Memory).where(
-                            Memory.status == MemoryStatus.superseded
-                        ).where(_canonical_memory_without_tombstone_clause())
+                )
+                .where(
+                    ~exists().where(
+                        MemoryTombstone.memory_id == MemoryEdge.to_memory_id
                     )
-                ).scalar_one()
-                or 0
+                )
             )
-            archived_count = int(
-                (
-                    await db.execute(
-                        select(func.count()).select_from(Memory).where(
-                            Memory.status == MemoryStatus.archived
-                        ).where(_canonical_memory_without_tombstone_clause())
+            if normalized_owner:
+                contradiction_statement = contradiction_statement.where(
+                    exists().where(
+                        Memory.id == MemoryEdge.from_memory_id,
+                        Memory.source_session_id == normalized_owner,
                     )
-                ).scalar_one()
-                or 0
-            )
+                ).where(
+                    exists().where(
+                        Memory.id == MemoryEdge.to_memory_id,
+                        Memory.source_session_id == normalized_owner,
+                    )
+                )
             contradiction_edge_count = int(
-                (
-                    await db.execute(
-                        select(func.count()).select_from(MemoryEdge).where(
-                            MemoryEdge.edge_type == MemoryEdgeType.contradicts
-                        ).where(
-                            ~exists().where(
-                                MemoryTombstone.memory_id == MemoryEdge.from_memory_id
-                            )
-                        ).where(
-                            ~exists().where(
-                                MemoryTombstone.memory_id == MemoryEdge.to_memory_id
-                            )
-                        )
-                    )
-                ).scalar_one()
-                or 0
+                (await db.execute(contradiction_statement)).scalar_one() or 0
             )
     except Exception:
         return {
@@ -242,40 +254,47 @@ async def summarize_memory_reconciliation_state(*, limit: int = 5) -> dict[str, 
             "recent_archivals": [],
             "policy": memory_reconciliation_policy_payload(),
             "error": "memory_repository_unavailable",
+            "scope": "owner" if normalized_owner else "global",
+            "owner_session_id": normalized_owner,
+            "content_free": bool(content_free),
         }
 
     recent_conflicts: list[dict[str, object]] = []
-    for memory in superseded_memories[:limit]:
-        metadata = json.loads(memory.metadata_json or "{}")
-        if not isinstance(metadata, dict):
-            metadata = {}
-        recent_conflicts.append(
-            {
-                "summary": (memory.summary or memory.content or "").strip(),
-                "kind": memory.kind.value,
-                "reason": str(metadata.get("superseded_reason") or "superseded"),
-                "superseded_by_memory_id": metadata.get("superseded_by_memory_id"),
-            }
-        )
+    if not content_free:
+        for memory in superseded_memories[:bounded_limit]:
+            metadata = json.loads(memory.metadata_json or "{}")
+            if not isinstance(metadata, dict):
+                metadata = {}
+            recent_conflicts.append(
+                {
+                    "summary": (memory.summary or memory.content or "").strip(),
+                    "kind": memory.kind.value,
+                    "reason": str(metadata.get("superseded_reason") or "superseded"),
+                    "superseded_by_memory_id": metadata.get("superseded_by_memory_id"),
+                }
+            )
 
     recent_archivals: list[dict[str, object]] = []
-    for memory in archived_memories[:limit]:
-        metadata = json.loads(memory.metadata_json or "{}")
-        if not isinstance(metadata, dict):
-            metadata = {}
-        recent_archivals.append(
-            {
-                "summary": (memory.summary or memory.content or "").strip(),
-                "kind": memory.kind.value,
-                "reason": str(metadata.get("archived_reason") or "archived"),
-            }
-        )
+    if not content_free:
+        for memory in archived_memories[:bounded_limit]:
+            metadata = json.loads(memory.metadata_json or "{}")
+            if not isinstance(metadata, dict):
+                metadata = {}
+            recent_archivals.append(
+                {
+                    "summary": (memory.summary or memory.content or "").strip(),
+                    "kind": memory.kind.value,
+                    "reason": str(metadata.get("archived_reason") or "archived"),
+                }
+            )
 
-    if recent_conflicts and recent_archivals:
+    has_conflicts = bool(recent_conflicts) if not content_free else superseded_count > 0
+    has_archivals = bool(recent_archivals) if not content_free else archived_count > 0
+    if has_conflicts and has_archivals:
         state = "conflict_and_forgetting_active"
-    elif recent_conflicts:
+    elif has_conflicts:
         state = "conflict_reconciled"
-    elif recent_archivals:
+    elif has_archivals:
         state = "selective_forgetting_active"
     else:
         state = "steady"
@@ -289,6 +308,9 @@ async def summarize_memory_reconciliation_state(*, limit: int = 5) -> dict[str, 
         "recent_conflicts": recent_conflicts,
         "recent_archivals": recent_archivals,
         "policy": memory_reconciliation_policy_payload(),
+        "scope": "owner" if normalized_owner else "global",
+        "owner_session_id": normalized_owner,
+        "content_free": bool(content_free),
     }
 
 

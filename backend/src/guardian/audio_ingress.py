@@ -903,8 +903,11 @@ def _safe_receipt_request_metadata(
     return redacted
 
 
-def _trusted_result_for_receipt(result: AudioIngressResult) -> AudioIngressResult:
-    """Fail closed when a caller forges or hand-builds a preflight result."""
+def _trusted_result_for_receipt(
+    result: AudioIngressResult,
+    request: AudioIngressRequest | None,
+) -> AudioIngressResult:
+    """Fail closed when a result is forged or bound to another request."""
 
     if (
         isinstance(result, AudioIngressResult)
@@ -915,6 +918,15 @@ def _trusted_result_for_receipt(result: AudioIngressResult) -> AudioIngressResul
         and result.accepted is (result.status is AudioIngressStatus.ACCEPTED)
         and result.retryable is (result.status is AudioIngressStatus.DEGRADED)
     ):
+        canonical_digest = _safe_canonical_request_digest(request)
+        supplied_digest = _safe_request_digest(result.request_digest)
+        if result.status is not AudioIngressStatus.BLOCKED:
+            if canonical_digest is None or supplied_digest != canonical_digest:
+                return _result(AudioIngressStatus.BLOCKED, "invalid_result_provenance")
+        elif result.request_digest is not None and (
+            canonical_digest is None or supplied_digest != canonical_digest
+        ):
+            return _result(AudioIngressStatus.BLOCKED, "invalid_result_provenance")
         return result
     return _result(AudioIngressStatus.BLOCKED, "invalid_result_provenance")
 
@@ -929,7 +941,7 @@ def serialize_audio_ingress_receipt(
 
     if not isinstance(result, AudioIngressResult):
         raise TypeError("result must be an AudioIngressResult")
-    safe_result = _trusted_result_for_receipt(result)
+    safe_result = _trusted_result_for_receipt(result, request)
     effective_policy = policy if policy is not None else AudioIngressPolicy()
     safe_reason_code = _safe_reason_code(safe_result.reason_code)
     if request is None:

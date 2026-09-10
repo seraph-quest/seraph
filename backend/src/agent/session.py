@@ -190,13 +190,24 @@ class SessionManager:
             return session
 
     async def delete(self, session_id: str) -> bool:
+        cleanup_fence_acquired = process_runtime_manager.begin_session_cleanup(session_id)
+        try:
+            return await self._delete_session_records(session_id)
+        finally:
+            if cleanup_fence_acquired:
+                process_runtime_manager.end_session_cleanup(session_id)
+
+    async def _delete_session_records(self, session_id: str) -> bool:
         await flush_session_memory(session_id, trigger="session_end", manager=self)
         async with get_session() as db:
             result = await db.execute(select(Session).where(Session.id == session_id))
             session = result.scalars().first()
             if not session:
                 return False
-            process_runtime_manager.stop_processes_for_session(session_id)
+            process_runtime_manager.stop_processes_for_session(
+                session_id,
+                cleanup_fence_held=True,
+            )
             msgs = await db.execute(
                 select(Message).where(Message.session_id == session_id)
             )

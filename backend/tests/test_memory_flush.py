@@ -12,6 +12,7 @@ from src.memory.consolidator import ConsolidationResult
 from src.db.models import MemoryKind
 from src.memory.flush import flush_session_memory
 from src.memory.repository import memory_repository
+from src.tools.process_tools import process_runtime_manager
 from src.workflows.loader import Workflow, WorkflowStep
 from src.workflows.manager import WorkflowTool
 
@@ -231,6 +232,47 @@ async def test_delete_triggers_session_end_flush(async_db):
     assert deleted is True
     mock_flush.assert_awaited_once()
     assert mock_flush.await_args.kwargs["trigger"] == "session_end"
+
+
+async def test_delete_holds_process_cleanup_fence_through_database_teardown(async_db):
+    manager = SessionManager()
+    await manager.get_or_create("delete-fence-session")
+    events = []
+
+    original_begin = process_runtime_manager.begin_session_cleanup
+    original_end = process_runtime_manager.end_session_cleanup
+
+    def begin(session_id):
+        events.append("begin")
+        acquired = original_begin(session_id)
+        assert acquired is True
+        return acquired
+
+    def end(session_id):
+        events.append("end")
+        original_end(session_id)
+
+    async def flush(*_args, **_kwargs):
+        events.append("flush")
+        assert "delete-fence-session" in process_runtime_manager._stopping_sessions
+
+    def stop(session_id, *, cleanup_fence_held):
+        events.append("stop")
+        assert session_id == "delete-fence-session"
+        assert cleanup_fence_held is True
+        assert session_id in process_runtime_manager._stopping_sessions
+        return 0
+
+    with (
+        patch("src.agent.session.flush_session_memory", side_effect=flush),
+        patch.object(process_runtime_manager, "begin_session_cleanup", side_effect=begin),
+        patch.object(process_runtime_manager, "end_session_cleanup", side_effect=end),
+        patch.object(process_runtime_manager, "stop_processes_for_session", side_effect=stop),
+    ):
+        assert await manager.delete("delete-fence-session") is True
+
+    assert events == ["begin", "flush", "stop", "end"]
+    assert "delete-fence-session" not in process_runtime_manager._stopping_sessions
 
 
 def test_workflow_completion_triggers_memory_flush():

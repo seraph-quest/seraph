@@ -30,6 +30,18 @@ from src.db.session_refs import ensure_sessions_exist
 
 DURABLE_JOB_RECORD_SCHEMA_VERSION = 2
 
+
+def get_session():
+    """Resolve the shared session factory through the durable-state module.
+
+    Keeping this narrow proxy makes the canonical repository's database
+    dependency explicit and patchable in isolated process/database fixtures
+    while preserving the runtime migration hook that owns the session factory.
+    """
+    from src.workflows import durable_state
+
+    return durable_state.get_session()
+
 # Higher priority values are selected first by a future broker.  The contract
 # itself only persists the value and never starts a second scheduler.
 DURABLE_JOB_STATUSES = (
@@ -44,6 +56,7 @@ DURABLE_JOB_STATUSES = (
     "unknown_external_effect",
     "cost_liability",
     "failed",
+    "degraded",
     "succeeded",
     "cancelled",
 )
@@ -72,6 +85,7 @@ DURABLE_JOB_TRANSITIONS: dict[str, frozenset[str]] = {
         "unknown_external_effect",
         "cost_liability",
         "failed",
+        "degraded",
         "succeeded",
         "cancelled",
     }),
@@ -97,10 +111,11 @@ DURABLE_JOB_TRANSITIONS: dict[str, frozenset[str]] = {
     "unknown_external_effect": frozenset({"blocked", "failed", "cancelled"}),
     "cost_liability": frozenset({"blocked", "failed", "cancelled"}),
     "failed": frozenset({"queued"}),
+    "degraded": frozenset(),
     "succeeded": frozenset(),
     "cancelled": frozenset(),
 }
-DURABLE_JOB_TERMINAL_STATUSES = frozenset({"succeeded", "cancelled"})
+DURABLE_JOB_TERMINAL_STATUSES = frozenset({"succeeded", "degraded", "cancelled"})
 UNCERTAIN_EXTERNAL_EFFECT_STATUSES = frozenset({"unknown_external_effect", "cost_liability"})
 UNRESOLVED_EFFECT_STATUSES = frozenset({"unknown", "intent", "dispatched"})
 DEPENDENCY_FAILURE_STATUSES = frozenset({"failed", "cancelled"})
@@ -239,6 +254,32 @@ def _canonical(value: Any) -> str:
 
 def _digest(value: Any) -> str:
     return hashlib.sha256(_canonical(value).encode("utf-8")).hexdigest()
+
+
+def durable_lease_id(job_id: str, fencing_token: int) -> str:
+    """Derive the stable identity for one persisted lease epoch.
+
+    ``WorkflowRunState`` predates an explicit lease-id column.  The job
+    identity and fencing token are both durable and immutable for a lease
+    epoch, so their digest gives recovery a stable, non-secret lease handle
+    without introducing another mutable source of truth.
+    """
+    normalized_job_id = str(job_id or "").strip()
+    if not normalized_job_id:
+        raise ValueError("job_id is required to derive a lease id")
+    try:
+        normalized_fencing_token = int(fencing_token)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError("fencing_token is required to derive a lease id") from exc
+    if normalized_fencing_token < 0:
+        raise ValueError("fencing_token must be nonnegative")
+    digest = _digest(
+        {
+            "job_id": normalized_job_id,
+            "fencing_token": normalized_fencing_token,
+        }
+    )
+    return f"lease:{digest[:32]}"
 
 
 def _text(value: Any, default: str = "") -> str:
@@ -684,6 +725,16 @@ def _admission_conflicts(
         "plan_revision": spec.plan_revision,
         "candidate_id": spec.candidate_id,
     }
+    if spec.run_fingerprint is not None or hasattr(existing, "run_fingerprint"):
+        expected["run_fingerprint"] = _text(spec.run_fingerprint, input_digest)
+    if hasattr(existing, "budget_digest"):
+        expected_budget = spec.budget_microusd
+        if expected_budget is None:
+            expected_budget = _authority_budget_microusd(spec.declared_authority)
+        expected["budget_digest"] = _text(
+            spec.budget_digest,
+            _digest({"budget_microusd": expected_budget}),
+        )
     actual = {
         "job_id": getattr(existing, "run_identity", None),
         "input_digest": getattr(existing, "input_digest", None),
@@ -706,6 +757,13 @@ def _admission_conflicts(
         "plan_revision": getattr(existing, "plan_revision", None),
         "candidate_id": getattr(existing, "candidate_id", None),
     }
+    if "run_fingerprint" in expected:
+        actual["run_fingerprint"] = getattr(existing, "run_fingerprint", None) or input_digest
+    if "budget_digest" in expected:
+        authority = _json_load(getattr(existing, "declared_authority_json", None), {})
+        actual["budget_digest"] = getattr(existing, "budget_digest", None) or _digest(
+            {"budget_microusd": _authority_budget_microusd(authority)}
+        )
     # Scheduled child work is deliberately deduped across strategist parent
     # occurrences.  The first admitted child retains its original lineage;
     # a later parent may replay that same child only after its own fence has
@@ -1151,6 +1209,7 @@ def _serialize(run: WorkflowRunState, *, receipt: dict[str, Any] | None = None) 
         "workflow_name": run.workflow_name,
         "tool_name": run.tool_name,
         "session_id": run.session_id,
+        "run_fingerprint": getattr(run, "run_fingerprint", None),
         "goal_id": getattr(run, "goal_id", None),
         "goal_revision": getattr(run, "goal_revision", None),
         "plan_revision": getattr(run, "plan_revision", None),
@@ -1161,6 +1220,7 @@ def _serialize(run: WorkflowRunState, *, receipt: dict[str, Any] | None = None) 
         "resource_claims": _json_load(getattr(run, "resource_claims_json", None), []),
         "input_digest": getattr(run, "input_digest", None),
         "authority_digest": getattr(run, "authority_digest", None),
+        "budget_digest": getattr(run, "budget_digest", None),
         "declared_authority": _json_load(getattr(run, "declared_authority_json", None), {}),
         "idempotency": {
             "scope": getattr(run, "idempotency_scope", None),
@@ -1172,6 +1232,11 @@ def _serialize(run: WorkflowRunState, *, receipt: dict[str, Any] | None = None) 
             "owner": getattr(run, "lease_owner", None),
             "expires_at": run.lease_expires_at.isoformat() if getattr(run, "lease_expires_at", None) else None,
             "fencing_token": int(getattr(run, "fencing_token", 0) or 0),
+            "lease_id": durable_lease_id(
+                run.run_identity,
+                int(getattr(run, "fencing_token", 0) or 0),
+            ),
+            "revision": _revision(run),
         },
         "revision": _revision(run),
         "attempt_count": int(getattr(run, "attempt_count", 0) or 0),
@@ -1180,6 +1245,9 @@ def _serialize(run: WorkflowRunState, *, receipt: dict[str, Any] | None = None) 
         "result": {
             "digest": getattr(run, "result_digest", None),
             "summary": getattr(run, "result_summary", None),
+            # Keep a degraded execution distinguishable from a failed or
+            # successful goal in every operator readback projection.
+            "status": run.status,
         },
         "checkpoints": _json_load(getattr(run, "checkpoint_receipts_json", None), []),
         "artifacts": _json_load(getattr(run, "artifact_receipts_json", None), []),
@@ -1257,6 +1325,12 @@ class DurableJobSpec:
     deadline_at: datetime | str | None = None
     max_attempts: int = 1
     service_id: str | None = None
+    # ``run_fingerprint`` is the caller's complete immutable execution
+    # contract fingerprint.  Older callers omit it and retain the input
+    # digest fallback; canonical workflow admission always supplies it.
+    run_fingerprint: str | None = None
+    budget_microusd: int | None = None
+    budget_digest: str | None = None
 
 
 class DurableJobRepository:
@@ -1276,6 +1350,31 @@ class DurableJobRepository:
         deadline = _as_utc(spec.deadline_at)
         now = _utc_now()
         input_digest, safe_inputs = _safe_inputs_digest(spec.inputs)
+        run_fingerprint = _bounded_identifier(
+            spec.run_fingerprint or input_digest,
+            field_name="run_fingerprint",
+        )
+        authority_budget = _authority_budget_microusd(spec.declared_authority)
+        if spec.budget_microusd is not None and authority_budget is not None:
+            if int(spec.budget_microusd) != authority_budget:
+                raise DurableJobIdempotencyConflict(
+                    "budget_microusd conflicts with declared authority"
+                )
+        budget_microusd = (
+            spec.budget_microusd
+            if spec.budget_microusd is not None
+            else authority_budget
+        )
+        if budget_microusd is not None:
+            if isinstance(budget_microusd, bool) or int(budget_microusd) < 0:
+                raise ValueError("budget_microusd must be a nonnegative integer")
+            budget_microusd = int(budget_microusd)
+        budget_digest = _text(
+            spec.budget_digest,
+            _digest({"budget_microusd": budget_microusd}),
+        )
+        if budget_digest != _digest({"budget_microusd": budget_microusd}):
+            raise DurableJobIdempotencyConflict("budget_digest does not match the durable budget")
         binding = _binding(
             owner_principal_id=identity.owner_principal_id,
             goal_id=spec.goal_id,
@@ -1291,9 +1390,9 @@ class DurableJobRepository:
                 try:
                     parent_fence = int(spec.parent_fencing_token)
                 except (TypeError, ValueError) as exc:
-                    raise DurableJobLeaseError("parent fencing token is malformed") from exc
+                    raise DurableJobLeaseError("parent job fence is malformed") from exc
                 if parent_fence <= 0:
-                    raise DurableJobLeaseError("parent fencing token is malformed")
+                    raise DurableJobLeaseError("parent job fence is malformed")
                 if spec.parent_job_id == identity.job_id:
                     raise DurableJobTransitionError("a durable job cannot parent itself")
                 parent = (
@@ -1359,7 +1458,7 @@ class DurableJobRepository:
                 tool_name=identity.job_kind,
                 session_id=spec.session_id,
                 status=status,
-                run_fingerprint=input_digest,
+                run_fingerprint=run_fingerprint,
                 arguments_json=_canonical(safe_inputs),
                 approval_context_json=_canonical(_safe_structure(spec.declared_authority)),
                 record_schema_version=DURABLE_JOB_RECORD_SCHEMA_VERSION,
@@ -1374,6 +1473,7 @@ class DurableJobRepository:
                 capability_version=identity.capability_version,
                 input_digest=input_digest,
                 authority_digest=authority_digest,
+                budget_digest=budget_digest,
                 idempotency_scope=identity.idempotency_scope,
                 idempotency_key=identity.idempotency_key,
                 idempotency_binding=binding,
@@ -1457,6 +1557,37 @@ class DurableJobRepository:
                 return None
             db.expunge(run)
             return _serialize(run)
+
+    async def list_jobs(
+        self,
+        *,
+        limit: int = 20,
+        session_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """List canonical typed jobs for operator projections and recovery.
+
+        The workflows API historically queried ``WorkflowStateRepository``;
+        that serializer intentionally owns only legacy step rows.  Keep this
+        read path beside the typed writes so schema-v2 receipt ledgers are
+        projected without asking the legacy repository to mutate or interpret
+        them.
+        """
+        bounded_limit = max(1, min(int(limit), 100))
+        async with self._session() as db:
+            stmt = (
+                select(WorkflowRunState)
+                .where(WorkflowRunState.record_schema_version >= DURABLE_JOB_RECORD_SCHEMA_VERSION)
+                .order_by(WorkflowRunState.updated_at.desc())
+                .limit(bounded_limit)
+            )
+            if session_id:
+                stmt = stmt.where(WorkflowRunState.session_id == session_id)
+            runs = (await db.execute(stmt)).scalars().all()
+            serialized: list[dict[str, Any]] = []
+            for run in runs:
+                db.expunge(run)
+                serialized.append(_serialize(run))
+            return serialized
 
     async def transition_job(
         self,
@@ -1601,12 +1732,13 @@ class DurableJobRepository:
             if current == "running" and to_status in {
                 "failed",
                 "cancelled",
+                "degraded",
                 "succeeded",
             }:
                 try:
                     effect_ledger = _effect_ledger_or_raise(run.effect_receipts_json)
                 except DurableJobTransitionError:
-                    if to_status == "succeeded":
+                    if to_status in {"succeeded", "degraded"}:
                         raise
                     to_status = "blocked"
                     reason = "malformed_effect_history_requires_reconciliation"
@@ -1614,17 +1746,17 @@ class DurableJobRepository:
                     if to_status == "cancelled":
                         to_status, recovery_reason = _effect_recovery_state(effect_ledger)
                         reason = reason or f"{recovery_reason}_pending_before_transition"
-            if to_status == "succeeded":
+            if to_status in {"succeeded", "degraded"}:
                 if _deadline_expired(run):
                     raise DurableJobTransitionError("job deadline has expired")
                 effect_ledger = effect_ledger or _effect_ledger_or_raise(run.effect_receipts_json)
                 if _job_has_unsafe_effects(effect_ledger):
                     raise DurableJobTransitionError(
-                        "cannot mark durable job succeeded: unresolved external effect"
+                        "cannot mark durable job terminal: unresolved external effect"
                     )
                 if not _verified_readback_exists(effect_ledger):
                     raise DurableJobTransitionError(
-                        "cannot mark durable job succeeded: verified capability readback is required"
+                        "cannot mark durable job terminal: verified capability readback is required"
                     )
             now = _utc_now()
             values: dict[str, Any] = {
@@ -1647,6 +1779,7 @@ class DurableJobRepository:
                 "unknown_external_effect",
                 "cost_liability",
                 "failed",
+                "degraded",
                 "succeeded",
                 "cancelled",
             }:
@@ -1795,6 +1928,15 @@ class DurableJobRepository:
         """
         if not isinstance(approval_receipt, Mapping):
             raise DurableJobTransitionError("approval resume requires a typed approval receipt")
+        current = await self.get_job(job_id)
+        if current is not None and current.get("status") != "awaiting_approval":
+            # Check the one-shot approval capability before the generic CAS
+            # state error.  A replay after a successful resume must make the
+            # consumed ApprovalRequest visible to the operator rather than
+            # looking like an unexplained revision race.
+            raise DurableJobTransitionError(
+                "approval resume requires the current authenticated ApprovalRequest"
+            )
         receipt_fields = dict(approval_receipt)
         if _text(receipt_fields.get("status")) != "approved" or receipt_fields.get("authenticated") is not True:
             raise DurableJobTransitionError(
@@ -2521,6 +2663,7 @@ class DurableJobRepository:
         *,
         checkpoint_id: str,
         state: Any,
+        checkpoint_payload: Any | None = None,
         owner: str,
         fencing_token: int,
         safe: bool = True,
@@ -2549,6 +2692,11 @@ class DurableJobRepository:
                 "recorded_at": _utc_now().isoformat(),
                 "fencing_token": fencing_token,
             }
+            if safe and checkpoint_payload is not None:
+                # A caller that has already passed its capability-specific
+                # checkpoint policy may retain a bounded, JSON-safe payload
+                # for recovery.  The legacy/default path remains digest-only.
+                receipt["payload"] = _safe_structure(checkpoint_payload)
             existing = _json_load(run.checkpoint_receipts_json, [])
             existing = [item for item in existing if isinstance(item, dict) and item.get("checkpoint_id") != checkpoint_id]
             existing.append(receipt)
@@ -2789,6 +2937,13 @@ class DurableJobRepository:
                 raise DurableJobIdempotencyConflict(
                     "effect_id already identifies a different effect target"
                 )
+            if previous is not None:
+                # A readback is an observation of the original effect.  Keep
+                # its stable authority and adapter identity when the caller
+                # only supplies the target and verification fields.
+                for field_name in ("approval_id", "adapter_idempotency_key"):
+                    if not receipt.get(field_name):
+                        receipt[field_name] = previous.get(field_name)
             previous_status = _text(previous.get("status")) if previous is not None else ""
             remote_terminal_settlement = (
                 effect_type == "remote_inference_admission"
@@ -3378,7 +3533,6 @@ class DurableJobRepository:
                     and _text(item.get("status")) in {"unknown", "intent", "dispatched"}
                 ):
                     receipt_status = _text(receipt_payload.get("status"))
-                    _reconciliation_matches_effect(item, receipt_payload)
                     details = item.get("details") if isinstance(item.get("details"), dict) else {}
                     nested_receipt = details.get("receipt") if isinstance(details, dict) else None
                     cost_outstanding = bool(
@@ -3392,6 +3546,7 @@ class DurableJobRepository:
                         raise DurableJobTransitionError(
                             "cost liability requires a settled receipt with actual cost and operation binding"
                         )
+                    _reconciliation_matches_effect(item, receipt_payload)
                     matched_effect = True
                     item = {
                         **item,
@@ -3606,11 +3761,10 @@ class DurableJobRepository:
 
     @staticmethod
     def _session():
-        # Resolve dynamically so the existing durable_state DB fixture and
-        # migration shims can patch one canonical session factory.
-        from src.workflows import durable_state
-
-        return durable_state.get_session()
+        # Resolve dynamically so DB fixtures and migration shims can patch the
+        # canonical job runtime session factory without changing production
+        # persistence behavior.
+        return get_session()
 
 
 durable_job_repository = DurableJobRepository()
@@ -3637,5 +3791,6 @@ __all__ = [
     "DurableJobSpec",
     "DurableJobRepository",
     "_canonical_remote_inference_receipt",
+    "get_session",
     "durable_job_repository",
 ]

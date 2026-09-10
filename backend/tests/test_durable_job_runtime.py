@@ -138,6 +138,9 @@ def test_admission_binds_authority_and_all_immutable_identity_fields():
         goal_revision=spec.goal_revision,
         plan_revision=spec.plan_revision,
         candidate_id=spec.candidate_id,
+        run_fingerprint=input_digest,
+        budget_digest=_digest({"budget_microusd": None}),
+        declared_authority_json=json.dumps(spec.declared_authority),
     )
     assert _admission_conflicts(
         existing,
@@ -146,6 +149,24 @@ def test_admission_binds_authority_and_all_immutable_identity_fields():
         authority_digest=_digest(spec.declared_authority),
         deadline=None,
     ) == []
+    existing.run_fingerprint = "changed-fingerprint"
+    assert "run_fingerprint" in _admission_conflicts(
+        existing,
+        spec=spec,
+        input_digest=input_digest,
+        authority_digest=_digest(spec.declared_authority),
+        deadline=None,
+    )
+    existing.run_fingerprint = input_digest
+    existing.budget_digest = _digest({"budget_microusd": 1})
+    assert "budget_digest" in _admission_conflicts(
+        existing,
+        spec=spec,
+        input_digest=input_digest,
+        authority_digest=_digest(spec.declared_authority),
+        deadline=None,
+    )
+    existing.budget_digest = _digest({"budget_microusd": None})
     existing.priority = 1
     assert _admission_conflicts(
         existing,

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import signal
 import stat
 import textwrap
 import threading
@@ -19,6 +20,7 @@ from src.tools import process_tools as process_tools_module
 from src.tools.process_tools import (
     _ProcessDescendantIdentity,
     _ProcessLeaderIdentity,
+    SessionProcessCleanupError,
     list_processes,
     process_runtime_manager,
     read_process_output,
@@ -508,10 +510,14 @@ def test_start_list_read_and_stop_process():
     assert not worker_root.exists()
 
 
-def test_stop_process_reports_unknown_after_parent_exit_and_retains_receipt():
+def test_stop_process_reports_unknown_after_parent_exit_and_retains_receipt(monkeypatch):
     survivor_marker = Path(settings.workspace_dir) / "process-stop-survivor.marker"
+    child_ready_marker = Path(settings.workspace_dir) / "process-stop-child-ready.marker"
+    child_pid_marker = Path(settings.workspace_dir) / "process-stop-child.pid"
     parent_marker = Path(settings.workspace_dir) / "process-stop-parent.marker"
     survivor_marker.unlink(missing_ok=True)
+    child_ready_marker.unlink(missing_ok=True)
+    child_pid_marker.unlink(missing_ok=True)
     parent_marker.unlink(missing_ok=True)
     script_name = _write_script(
         "wave_process_stop_parent_exit.py",
@@ -519,23 +525,60 @@ def test_stop_process_reports_unknown_after_parent_exit_and_retains_receipt():
         import pathlib
         import subprocess
         import sys
+        import time
 
         subprocess.Popen(
             [
                 sys.executable,
                 "-c",
-                "import pathlib,time; time.sleep(1.5); pathlib.Path('process-stop-survivor.marker').write_text('survived')",
+                "import os,pathlib,time; pathlib.Path('process-stop-child.pid').write_text(str(os.getpid())); pathlib.Path('process-stop-child-ready.marker').write_text('ready'); pathlib.Path('process-stop-survivor.marker').write_text('survived'); time.sleep(5)",
             ],
             stdout=sys.stdout,
             stderr=sys.stderr,
         )
+        for _ in range(100):
+            if pathlib.Path("process-stop-child-ready.marker").is_file():
+                break
+            time.sleep(0.01)
         pathlib.Path("process-stop-parent.marker").write_text("parent-exited")
+        time.sleep(2)
         """,
     )
 
+    original_snapshot = process_tools_module._snapshot_process_descendants
+
+    def snapshot_live_child(process, leader_identity):
+        if process.poll() is None and child_pid_marker.is_file():
+            try:
+                child_pid = int(child_pid_marker.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                child_pid = None
+            if child_pid is not None:
+                child_identity = process_tools_module._read_process_identity(child_pid)
+                if child_identity is not None:
+                    return (
+                        _ProcessDescendantIdentity(
+                            pid=child_identity.pid,
+                            process_group_id=child_identity.process_group_id,
+                            start_time=child_identity.start_time,
+                        ),
+                    )
+        return original_snapshot(process, leader_identity)
+
+    monkeypatch.setattr(process_tools_module, "_snapshot_process_descendants", snapshot_live_child)
     started = start_process(command="python3", args_json=f'["{script_name}"]')
     process_id = started.split("process=")[1].split(",")[0]
-    for _ in range(40):
+    managed = process_runtime_manager._processes[process_id]
+    for _ in range(100):
+        process_runtime_manager.list_processes()
+        if managed.descendant_identities:
+            break
+        time.sleep(0.05)
+    else:
+        raise AssertionError("live descendant snapshot was not persisted")
+    persisted_descendant = managed.descendant_identities
+    assert persisted_descendant
+    for _ in range(100):
         listed = process_runtime_manager.list_processes()
         if parent_marker.is_file() and any(
             process["process_id"] == process_id and process["status"] == "exited"
@@ -554,7 +597,8 @@ def test_stop_process_reports_unknown_after_parent_exit_and_retains_receipt():
     assert stopped is not None
     assert stopped["stopped"] is False
     assert stopped["cleanup_status"] == "unknown"
-    assert stopped["remaining_descendants"] is None
+    assert stopped["remaining_descendants"] is not None
+    assert stopped["remaining_descendants"] >= 1
     assert stopped["registry_removed"] is False
     assert stopped["artifacts_removed"] is False
     assert any(
@@ -563,8 +607,23 @@ def test_stop_process_reports_unknown_after_parent_exit_and_retains_receipt():
     )
     assert output_path.exists()
     assert worker_root.exists()
-    time.sleep(1.7)
+    child_identity = persisted_descendant[0]
     assert survivor_marker.read_text(encoding="utf-8") == "survived"
+    os.kill(child_identity.pid, signal.SIGKILL)
+    reconciled = None
+    for _ in range(8):
+        time.sleep(0.1)
+        reconciled = process_runtime_manager.stop_process(process_id=process_id)
+        if reconciled is not None and reconciled["cleanup_status"] == "stopped":
+            break
+    assert reconciled is not None
+    assert reconciled["cleanup_status"] == "stopped"
+    assert reconciled["stopped"] is True
+    assert reconciled["registry_removed"] is True
+    assert reconciled["artifacts_removed"] is True
+    assert survivor_marker.read_text(encoding="utf-8") == "survived"
+    assert not output_path.exists()
+    assert not worker_root.exists()
 
 
 def test_stop_process_rejects_stale_leader_identity_without_signaling(monkeypatch):
@@ -593,7 +652,7 @@ def test_stop_process_rejects_stale_leader_identity_without_signaling(monkeypatc
     assert stopped is not None
     assert stopped["cleanup_status"] == "unknown"
     assert stopped["stopped"] is False
-    assert stopped["remaining_descendants"] is None
+    assert stopped["remaining_descendants"] is None or stopped["remaining_descendants"] >= 1
     assert stopped["registry_removed"] is False
     assert stopped["artifacts_removed"] is False
     assert signal_calls == []
@@ -708,6 +767,8 @@ def test_session_cleanup_fences_new_process_and_records_receipt(monkeypatch):
     try:
         with pytest.raises(ValueError, match="session cleanup is in progress"):
             process_runtime_manager.start_process(command="python3", args_json=f'["{script_name}"]')
+        with pytest.raises(RuntimeError, match="session cleanup is in progress"):
+            process_runtime_manager.stop_process(process_id=process_id, force=True)
     finally:
         reset_runtime_context(tokens)
 
@@ -786,6 +847,76 @@ def test_session_cleanup_removes_process_registry_and_artifacts():
     )
     assert not output_path.exists()
     assert not worker_root.exists()
+
+
+def test_session_cleanup_fail_closed_retains_unknown_process(monkeypatch):
+    script_name = _write_script(
+        "wave_process_session_unknown.py",
+        """
+        import time
+        time.sleep(30)
+        """,
+    )
+    tokens = set_runtime_context("session-cleanup-unknown", "high_risk")
+    try:
+        started = start_process(command="python3", args_json=f'["{script_name}"]')
+        process_id = started.split("process=")[1].split(",")[0]
+    finally:
+        reset_runtime_context(tokens)
+
+    current_identity = process_tools_module._read_process_identity(os.getpid())
+    assert current_identity is not None
+    monkeypatch.setattr(
+        process_tools_module,
+        "_snapshot_process_descendants",
+        lambda _process, _leader: (
+            _ProcessDescendantIdentity(
+                pid=current_identity.pid,
+                process_group_id=current_identity.process_group_id,
+                start_time=current_identity.start_time,
+            ),
+        ),
+    )
+
+    with pytest.raises(SessionProcessCleanupError) as exc_info:
+        process_runtime_manager.stop_processes_for_session(
+            "session-cleanup-unknown",
+            fail_closed=True,
+        )
+
+    assert exc_info.value.receipt["unknown"] == 1
+    assert any(
+        process["process_id"] == process_id
+        for process in process_runtime_manager.list_all_processes()
+    )
+
+
+def test_stop_process_reconciles_exited_leader_without_signal(monkeypatch):
+    script_name = _write_script(
+        "wave_process_exited_leader_reconcile.py",
+        """
+        import time
+        time.sleep(0.05)
+        """,
+    )
+    started = start_process(command="python3", args_json=f'["{script_name}"]')
+    process_id = started.split("process=")[1].split(",")[0]
+    managed = process_runtime_manager._processes[process_id]
+    managed.popen.wait(timeout=2)
+
+    monkeypatch.setattr(
+        process_tools_module,
+        "_snapshot_process_descendants",
+        lambda _process, _leader: (),
+    )
+
+    stopped = process_runtime_manager.stop_process(process_id=process_id, force=True)
+
+    assert stopped is not None
+    assert stopped["cleanup_status"] == "stopped"
+    assert stopped["stopped"] is True
+    assert stopped["registry_removed"] is True
+    assert stopped["artifacts_removed"] is True
 
 
 def test_reset_for_tests_clears_session_cleanup_state():

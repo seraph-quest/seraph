@@ -646,7 +646,10 @@ def _read_process_stat(pid: int) -> _ProcessTreeEntry | None:
         start_time = int(fields[19])
     except (IndexError, ValueError):
         return None
-    if parent_pid < 0 or process_group_id <= 0 or start_time < 0:
+    # Kernel threads report process-group ID 0.  Retain those entries in a
+    # complete scan so their expected, non-descendant presence does not make
+    # every ordinary user-process snapshot permanently unknown.
+    if parent_pid < 0 or process_group_id < 0 or start_time < 0:
         return None
     return _ProcessTreeEntry(
         pid=pid,
@@ -738,7 +741,19 @@ def _snapshot_process_descendants(
                 continue
             stat_entry = _read_process_stat(pid)
             if stat_entry is None:
-                complete = False
+                # A proc entry can disappear between the directory listing
+                # and stat read.  Treat that race as gone; keep the snapshot
+                # unknown only when the PID is still live but unreadable.
+                try:
+                    os.kill(pid, 0)
+                except ProcessLookupError:
+                    continue
+                except PermissionError:
+                    complete = False
+                except OSError:
+                    continue
+                else:
+                    complete = False
                 continue
             process_entries[pid] = stat_entry
 
@@ -888,8 +903,12 @@ def _kill_process_group(
             process.wait(timeout=max(0.01, float(wait_timeout)))
         except subprocess.TimeoutExpired:
             pass
+    # Keep the originally captured PGID for bounded liveness reconciliation
+    # even when the leader disappeared before the ownership check.  This value
+    # is used only for observation here; no signal is sent without a fresh
+    # leader identity match.
     return _GroupTerminationResult(
-        process_group_id=group_id,
+        process_group_id=group_id or (leader_identity.process_group_id if leader_identity else None),
         ownership_verified=ownership_verified,
         group_signal_sent=group_signal_sent,
         group_signal_failed=group_signal_failed,
@@ -933,7 +952,17 @@ def _remaining_process_group_members(
                         if len(fields) >= 3 and fields[0] != "Z" and int(fields[2]) == process_group_id:
                             member_count += 1
                     except (OSError, ValueError):
-                        continue
+                        try:
+                            os.kill(int(entry.name), 0)
+                        except ProcessLookupError:
+                            continue
+                        except PermissionError:
+                            member_count = None
+                            break
+                        except OSError:
+                            continue
+                        member_count = None
+                        break
 
         if member_count == 0:
             return 0
@@ -965,7 +994,17 @@ def _remaining_process_descendants(
         remaining = 0
         for identity in descendant_identities:
             current = _read_process_identity(identity.pid)
-            if current is not None and current.start_time == identity.start_time:
+            if current is None:
+                try:
+                    os.kill(identity.pid, 0)
+                except ProcessLookupError:
+                    continue
+                except PermissionError:
+                    return None
+                except OSError:
+                    continue
+                return None
+            if current.start_time == identity.start_time:
                 remaining += 1
         if remaining == 0:
             return 0
@@ -979,7 +1018,19 @@ def _termination_cleanup_status(
 ) -> tuple[str, int | None]:
     """Translate verified group/tree termination into status and survivor count."""
     if not termination.ownership_verified:
-        return "unknown", None
+        # The leader may have exited between the pre-stop snapshot and the
+        # ownership check.  A no-signal path can still complete safely when
+        # the captured descendant identities and the original group both
+        # prove empty.  Keep the result unknown while either observation is
+        # unavailable or a captured identity remains live.
+        group_remaining = _remaining_process_group_members(termination.process_group_id)
+        descendant_remaining = _remaining_process_descendants(termination.descendant_identities)
+        if group_remaining is None or descendant_remaining is None:
+            return "unknown", None
+        remaining = max(group_remaining, descendant_remaining)
+        if termination.parent_reaped and remaining == 0:
+            return "stopped", 0
+        return "unknown", remaining
     if termination.group_signal_failed:
         return "failed", _remaining_process_group_members(termination.process_group_id)
     if not (termination.group_signal_sent or termination.group_missing):
@@ -1069,6 +1120,11 @@ class ManagedProcess:
     stop_claimed: bool = False
     stop_requested: bool = False
     cleanup_status: str | None = None
+    # Persist the last complete pre-stop process-tree snapshot.  If the
+    # leader exits before a later stop/reconciliation call, this lets cleanup
+    # check the original descendants by PID and start time without signaling
+    # an unverified, potentially recycled process group.
+    descendant_identities: tuple[_ProcessDescendantIdentity, ...] | None = None
 
     def status_payload(self) -> dict[str, Any]:
         exit_code = self.popen.poll()
@@ -1091,6 +1147,23 @@ class ManagedProcess:
             "stop_requested": self.stop_requested,
             "cleanup_status": self.cleanup_status,
         }
+
+
+class SessionProcessCleanupError(RuntimeError):
+    """Raised when session teardown cannot prove all owned processes stopped."""
+
+    def __init__(self, receipt: dict[str, Any]):
+        self.receipt = dict(receipt)
+        super().__init__(
+            "session process cleanup did not complete: "
+            f"unknown={self.receipt.get('unknown', 0)}, "
+            f"failed={self.receipt.get('failed', 0)}, "
+            f"conflict={self.receipt.get('conflict', 0)}"
+        )
+
+
+class SessionCleanupInProgressError(RuntimeError):
+    """Raised when a direct process stop races session teardown."""
 
 
 class ProcessRuntimeManager:
@@ -1125,9 +1198,16 @@ class ProcessRuntimeManager:
     @staticmethod
     def _stop_managed_process(process: ManagedProcess, *, force: bool) -> dict[str, Any]:
         process_group_id = process.process_group_id
-        descendant_identities = _snapshot_process_descendants(
+        current_descendant_identities = _snapshot_process_descendants(
             process.popen,
             process.leader_identity,
+        )
+        if current_descendant_identities is not None:
+            process.descendant_identities = current_descendant_identities
+        descendant_identities = (
+            current_descendant_identities
+            if current_descendant_identities is not None
+            else process.descendant_identities
         )
         group_signal_sent = False
         group_signal_failed = False
@@ -1221,7 +1301,13 @@ class ProcessRuntimeManager:
         # Keep the worker root while its handle remains registered.  A leader
         # can exit before stop recovery runs, and deleting the root here would
         # make an identity-unknown handle less recoverable.
-        process.popen.poll()
+        if process.popen.poll() is None:
+            descendant_identities = _snapshot_process_descendants(
+                process.popen,
+                process.leader_identity,
+            )
+            if descendant_identities is not None:
+                process.descendant_identities = descendant_identities
 
     def begin_session_cleanup(self, session_id: str) -> bool:
         with self._lock:
@@ -1415,6 +1501,7 @@ class ProcessRuntimeManager:
                     start_new_session=True,
                 )
             leader_identity = _capture_process_identity(popen)
+            descendant_identities = _snapshot_process_descendants(popen, leader_identity)
             managed = ManagedProcess(
                 process_id=process_id,
                 popen=popen,
@@ -1427,6 +1514,7 @@ class ProcessRuntimeManager:
                 owner_session_id=owner_session_id,
                 process_group_id=leader_identity.process_group_id if leader_identity else None,
                 leader_identity=leader_identity,
+                descendant_identities=descendant_identities,
             )
             self._processes[process_id] = managed
         return managed.status_payload()
@@ -1475,6 +1563,11 @@ class ProcessRuntimeManager:
             process = self._processes.get(process_id)
             if process is None or not self._is_visible_to_session(process, session_id):
                 return None
+            if (
+                process.owner_session_id is not None
+                and process.owner_session_id in self._stopping_sessions
+            ):
+                raise SessionCleanupInProgressError("session cleanup is in progress")
             if process.stop_claimed:
                 payload = process.status_payload()
                 payload.update(
@@ -1556,12 +1649,16 @@ class ProcessRuntimeManager:
         session_id: str,
         *,
         cleanup_fence_held: bool = False,
+        fail_closed: bool = False,
     ) -> int:
         """Stop session-owned processes while retaining a teardown fence.
 
         ``SessionManager.delete`` holds the fence across memory flush and the
         database transaction, so it passes ``cleanup_fence_held=True``.  Direct
-        callers acquire and release their own fence.  The optional argument is
+        callers acquire and release their own fence.  ``fail_closed`` is used
+        by session deletion to turn an unknown, failed, or conflicting process
+        stop into a transaction failure rather than deleting the session while
+        a retained handle may still be live.  The optional arguments are
         intentionally keyword-only to preserve the existing public call shape.
         """
         fence_acquired = False
@@ -1660,6 +1757,8 @@ class ProcessRuntimeManager:
                 self._last_session_cleanup_receipt = receipt
             if fence_acquired:
                 self.end_session_cleanup(session_id)
+        if fail_closed and (unknown_count or failed_count or conflicts):
+            raise SessionProcessCleanupError(receipt)
         return len(processes)
 
 
@@ -1986,7 +2085,23 @@ class StopProcessTool(Tool):
 
     def __call__(self, *args, sanitize_inputs_outputs: bool = False, **kwargs):
         arguments = self._normalize_invocation(args, kwargs)
-        payload = process_runtime_manager.stop_process(**arguments)
+        try:
+            payload = process_runtime_manager.stop_process(**arguments)
+        except SessionCleanupInProgressError as exc:
+            _stop_process_audit_payload.set((
+                f"stop_process conflict {arguments['process_id']}",
+                {
+                    "process_id": arguments["process_id"],
+                    "forced": bool(arguments.get("force", False)),
+                    "stopped": False,
+                    "cleanup_status": "conflict",
+                    "cleanup_conflict": "session_cleanup_in_progress",
+                    "remaining_descendants": None,
+                    "registry_removed": False,
+                    "artifacts_removed": False,
+                },
+            ))
+            return f"Stop for process '{arguments['process_id']}' blocked: {exc}."
         if payload is None:
             _stop_process_audit_payload.set(None)
             return f"Error: Process '{arguments['process_id']}' was not found."
@@ -2000,6 +2115,7 @@ class StopProcessTool(Tool):
                 "forced": bool(arguments.get("force", False)),
                 "stopped": payload["stopped"],
                 "cleanup_status": payload["cleanup_status"],
+                "cleanup_conflict": payload.get("cleanup_conflict"),
                 "remaining_descendants": payload["remaining_descendants"],
                 "registry_removed": payload["registry_removed"],
                 "artifacts_removed": payload["artifacts_removed"],

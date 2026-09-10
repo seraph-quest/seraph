@@ -709,6 +709,9 @@ def _process_result(
             "stderr_sha256": _digest_text(str(exc)),
             "stdout_chars": 0,
             "stderr_chars": len(str(exc)),
+            "cleanup_status": "not_requested",
+            "remaining_descendants": None,
+            "worker_root": None,
         }
     except (OSError, RuntimeError):
         return {
@@ -722,6 +725,9 @@ def _process_result(
             "stderr_sha256": _digest_text(""),
             "stdout_chars": 0,
             "stderr_chars": 0,
+            "cleanup_status": "not_requested",
+            "remaining_descendants": None,
+            "worker_root": None,
         }
     payload = {
         "ok": bool(result.get("ok")),
@@ -738,6 +744,9 @@ def _process_result(
         "stderr_sha256": _digest_text(str(result.get("stderr") or "")),
         "stdout_chars": len(str(result.get("stdout") or "")),
         "stderr_chars": len(str(result.get("stderr") or "")),
+        "cleanup_status": result.get("cleanup_status", "not_requested"),
+        "remaining_descendants": result.get("remaining_descendants"),
+        "worker_root": result.get("worker_root"),
     }
     if include_output:
         payload["_stdout"] = str(result.get("stdout") or "")
@@ -752,6 +761,15 @@ def _workspace_receipt(job_workspace: _JobWorkspace) -> dict[str, Any]:
         "recoverable": True,
         "artifact_relative_path": job_workspace.relative_artifact_dir,
         "owner_scope": "durable_job",
+    }
+
+
+def _process_cleanup_receipt(result: dict[str, Any] | None) -> dict[str, Any]:
+    """Carry bounded process-cleanup truth into higher-level workflow receipts."""
+    return {
+        "cleanup_status": result.get("cleanup_status", "not_requested") if result else "not_requested",
+        "remaining_descendants": result.get("remaining_descendants") if result else None,
+        "worker_root": result.get("worker_root") if result else None,
     }
 
 
@@ -850,6 +868,7 @@ def _cancellation_result(
         "reason_code": reason_code,
         "phase": "test" if test_result is not None else "apply",
         "test": test_result or None,
+        "process_cleanup": _process_cleanup_receipt(test_result),
         "success_eligible": False,
         "workspace_recoverable": True,
     }
@@ -868,6 +887,7 @@ def _cancellation_result(
         "workspace": _workspace_receipt(job_workspace),
         "durable_job": durable_job,
         "cancellation": cancellation_payload,
+        "process_cleanup": _process_cleanup_receipt(test_result),
         "original_fixture_immutable": _fixture_tree_digest(prepared.source) == prepared.source_digest,
         "operator_visible": True,
     }
@@ -926,6 +946,8 @@ async def _record_test_failure_evidence(
         "failed_phase": "test",
         "test_reason": "test_timeout" if test_result.get("timed_out") else "test_process_failed",
         "test_exit_code": test_result.get("exit_code"),
+        "test_process": test_result,
+        "process_cleanup": _process_cleanup_receipt(test_result),
         "git_diff_check": diff_check,
         "git_status": status_process,
         "changed_paths": sorted(changed_paths),
@@ -952,7 +974,11 @@ async def _record_test_failure_evidence(
         "new_text_present": FIXTURE_AFTER_TEXT in patched_body,
         "original_fixture_immutable": source_immutable,
         "exact_workspace_scope": exact_scope,
-        "processes": {"git_diff_check": diff_check, "git_status": status_process},
+        "processes": {
+            "test": test_result,
+            "git_diff_check": diff_check,
+            "git_status": status_process,
+        },
         "verified": readback_ok,
         "test_success": False,
     }
@@ -974,6 +1000,7 @@ async def _record_test_failure_evidence(
             "diagnose_artifact": _relative_workspace_path(job_workspace.artifact_dir / "diagnose.json"),
             "readback_artifact": _relative_workspace_path(job_workspace.artifact_dir / "readback.json"),
             "test_exit_code": test_result.get("exit_code"),
+            "process_cleanup": _process_cleanup_receipt(test_result),
             "exact_workspace_scope": exact_scope,
             "original_fixture_immutable": source_immutable,
         },
@@ -1429,6 +1456,9 @@ async def run_native_software_engineering_fixture(
                 "stderr_sha256": _digest_text(""),
                 "stdout_chars": 0,
                 "stderr_chars": 0,
+                "cleanup_status": "unknown",
+                "remaining_descendants": None,
+                "worker_root": None,
             }
         if (
             execution_control is not None
@@ -1527,6 +1557,7 @@ async def run_native_software_engineering_fixture(
                 "provider": None,
                 "workspace": _workspace_receipt(job_workspace),
                 "durable_job": durable_job,
+                "process_cleanup": _process_cleanup_receipt(test_result),
                 "original_fixture_immutable": _fixture_tree_digest(prepared.source) == prepared.source_digest,
                 "operator_visible": True,
             }

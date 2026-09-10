@@ -41,7 +41,58 @@ _MEDIA_TYPE_RE: Final = re.compile(r"^audio/[a-z0-9][a-z0-9.+-]{0,62}$")
 _CONTAINER_RE: Final = re.compile(r"^[a-z0-9][a-z0-9._-]{0,31}$")
 _CODEC_RE: Final = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
 _DIGEST_RE: Final = re.compile(r"^[0-9a-f]{64}$")
-_REASON_CODE_RE: Final = re.compile(r"^[a-z0-9][a-z0-9_:-]{0,127}$")
+_CONSENT_REASON_CODES: Final = frozenset(
+    f"{boundary}_consent_{suffix}"
+    for boundary in ("capture", "cloud_upload")
+    for suffix in ("missing", "invalid", "reference_invalid", "revoked", "stale", "not_current")
+)
+_ALLOWED_REASON_CODES: Final = frozenset(
+    {
+        "invalid_request_type",
+        "invalid_policy",
+        "invalid_server_owned_id",
+        "server_owned_identity_required",
+        "invalid_capture_timestamp",
+        "invalid_base64_payload",
+        "invalid_audio_size",
+        "audio_size_exceeds_limit",
+        "audio_size_metadata_mismatch",
+        "invalid_duration",
+        "duration_exceeds_limit",
+        "invalid_normalized_wav_size",
+        "normalized_wav_size_exceeds_limit",
+        "invalid_audio_format",
+        "audio_format_not_allowed",
+        "multiple_streams_not_allowed",
+        "invalid_channel_count",
+        "invalid_sample_rate",
+        "invalid_requested_capability",
+        "invalid_transcript_confirmation",
+        "invalid_transcript_confirmation_ref",
+        "invalid_authority_flags",
+        "provider_not_openrouter",
+        "local_fallback_forbidden",
+        "invalid_validation_clock",
+        "capture_consent_after_capture",
+        "capture_consent_expired_before_capture",
+        "consent_references_not_separate",
+        "raw_audio_retention_deadline_missing",
+        "raw_audio_retention_expired",
+        "raw_audio_retention_before_capture",
+        "raw_audio_retention_exceeds_limit",
+        "requested_capability_not_allowed",
+        "transcript_confirmation_required",
+        "openrouter_route_unavailable",
+        "openrouter_capability_unverified",
+        "trusted_adapter_proof_required",
+        "identity_lookup_invalid",
+        "request_already_recorded",
+        "request_identity_conflict",
+        "attachment_identity_conflict",
+        "audio_ingress_preflight_accepted",
+        "invalid_receipt_reason_code",
+    }
+) | _CONSENT_REASON_CODES
 
 
 class AudioIngressStatus(str, Enum):
@@ -567,9 +618,31 @@ def _safe_request_digest(value: Any) -> str | None:
 
 
 def _safe_reason_code(value: Any) -> str:
-    """Keep attacker-controlled result objects from placing content in receipts."""
+    """Keep result receipts on the finite, documented reason-code contract."""
 
-    return value if isinstance(value, str) and _REASON_CODE_RE.fullmatch(value) else "invalid_receipt_reason_code"
+    return value if isinstance(value, str) and value in _ALLOWED_REASON_CODES else "invalid_receipt_reason_code"
+
+
+def _safe_canonical_request_digest(request: AudioIngressRequest) -> str | None:
+    """Derive a digest for a receipt only when the request shape is usable."""
+
+    if not isinstance(request, AudioIngressRequest):
+        return None
+    try:
+        return canonical_audio_request_digest(request)
+    except (AttributeError, TypeError, UnicodeError, ValueError, OverflowError):
+        return None
+
+
+def _receipt_request_digest(
+    request: AudioIngressRequest,
+    result: AudioIngressResult,
+) -> str | None:
+    """Include a result digest only when it matches this request exactly."""
+
+    canonical_digest = _safe_canonical_request_digest(request)
+    candidate = _safe_request_digest(result.request_digest)
+    return candidate if canonical_digest is not None and candidate == canonical_digest else None
 
 
 def _consent_reason(
@@ -689,6 +762,8 @@ def validate_audio_ingress(
         return _result(AudioIngressStatus.BLOCKED, "raw_audio_retention_deadline_missing", request_digest=request_digest)
     if retention_deadline <= current:
         return _result(AudioIngressStatus.BLOCKED, "raw_audio_retention_expired", request_digest=request_digest)
+    if retention_deadline <= captured_at:
+        return _result(AudioIngressStatus.BLOCKED, "raw_audio_retention_before_capture", request_digest=request_digest)
     max_deadline = captured_at + timedelta(seconds=effective_policy.max_raw_retention_seconds)
     if retention_deadline > max_deadline:
         return _result(AudioIngressStatus.BLOCKED, "raw_audio_retention_exceeds_limit", request_digest=request_digest)
@@ -737,7 +812,7 @@ def serialize_audio_ingress_receipt(
             schema_version=AUDIO_INGRESS_RECEIPT_SCHEMA_VERSION,
             status=result.status,
             reason_code=_safe_reason_code(result.reason_code),
-            request_digest=_safe_request_digest(result.request_digest),
+            request_digest=None,
             session_id=None,
             message_id=None,
             attachment_id=None,
@@ -766,7 +841,7 @@ def serialize_audio_ingress_receipt(
         schema_version=AUDIO_INGRESS_RECEIPT_SCHEMA_VERSION,
         status=result.status,
         reason_code=_safe_reason_code(result.reason_code),
-        request_digest=_safe_request_digest(result.request_digest),
+        request_digest=_receipt_request_digest(request, result),
         session_id=request.session_id,
         message_id=request.message_id,
         attachment_id=request.attachment_id,

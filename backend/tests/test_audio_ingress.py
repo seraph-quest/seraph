@@ -109,6 +109,7 @@ def test_ready_openrouter_preflight_accepts_chat_and_receipt_never_contains_audi
     assert "raw transcript" not in encoded.lower()
     assert payload["privacy"] == {"raw_audio_in_receipt": False, "transcript_in_receipt": False}
     assert payload["provider"]["live_call_claimed"] is False
+    assert receipt.request_digest == result.request_digest
 
 
 def test_ready_provider_and_consents_require_explicit_trusted_adapter_proof():
@@ -121,18 +122,19 @@ def test_ready_provider_and_consents_require_explicit_trusted_adapter_proof():
 
 def test_receipt_omits_untrusted_result_digest_and_reason_content():
     request = _request()
-    result = AudioIngressResult(
-        status=AudioIngressStatus.BLOCKED,
-        reason_code="YQ==",
-        accepted=False,
-        retryable=False,
-        request_digest="YQ==",
-    )
-    receipt = serialize_audio_ingress_receipt(request, result, policy=_policy()).as_payload()
-    encoded = json.dumps(receipt, sort_keys=True)
-    assert receipt["request_digest"] is None
-    assert receipt["reason_code"] == "invalid_receipt_reason_code"
-    assert "YQ==" not in encoded
+    for crafted_digest in ("YQ==", "0" * 64):
+        result = AudioIngressResult(
+            status=AudioIngressStatus.BLOCKED,
+            reason_code="YQ==",
+            accepted=False,
+            retryable=False,
+            request_digest=crafted_digest,
+        )
+        receipt = serialize_audio_ingress_receipt(request, result, policy=_policy()).as_payload()
+        encoded = json.dumps(receipt, sort_keys=True)
+        assert receipt["request_digest"] is None
+        assert receipt["reason_code"] == "invalid_receipt_reason_code"
+        assert crafted_digest not in encoded
 
 
 def test_unverified_or_unavailable_provider_is_degraded_without_local_fallback():
@@ -197,6 +199,17 @@ def test_raw_audio_retention_deadline_is_required_and_capped_at_fifteen_minutes(
     assert too_long.reason_code == "raw_audio_retention_exceeds_limit"
     missing = validate_audio_ingress(_request(raw_audio_retention_deadline=None), policy=_policy(), now=NOW)
     assert missing.reason_code == "raw_audio_retention_deadline_missing"
+
+
+@pytest.mark.parametrize("deadline_offset_seconds", [0, -1])
+def test_raw_audio_retention_deadline_must_follow_capture_timestamp(deadline_offset_seconds):
+    request = _request(
+        captured_at=NOW + timedelta(seconds=20),
+        raw_audio_retention_deadline=NOW + timedelta(seconds=20 + deadline_offset_seconds),
+    )
+    result = validate_audio_ingress(request, policy=_policy(), now=NOW)
+    assert result.status is AudioIngressStatus.BLOCKED
+    assert result.reason_code == "raw_audio_retention_before_capture"
 
 
 @pytest.mark.parametrize(

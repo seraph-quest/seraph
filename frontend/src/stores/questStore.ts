@@ -241,7 +241,7 @@ export function normalizeGoalLoopReceipt(value: unknown): GoalLoopReceipt | null
     return null;
   }
 
-  if (record.content_redacted !== undefined && typeof record.content_redacted !== "boolean") {
+  if (record.content_redacted !== true) {
     return null;
   }
 

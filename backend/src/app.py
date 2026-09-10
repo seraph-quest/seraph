@@ -477,13 +477,11 @@ def create_app() -> FastAPI:
     ]
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=list(dict.fromkeys([
-            "http://localhost:3000",
-            "http://localhost:5173",
-            "http://127.0.0.1:3000",
-            "http://127.0.0.1:5173",
-            *configured_origins,
-        ])),
+        # Credentialed browser access is restricted to the operator-declared
+        # origins.  Do not add a wildcard-like localhost development set here:
+        # the frontend port and host are deployment configuration, and an
+        # unconfigured origin must not receive a session cookie.
+        allow_origins=list(dict.fromkeys(configured_origins)),
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],

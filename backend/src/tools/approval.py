@@ -435,11 +435,15 @@ def _invoke_adopted_tool(
     approval_id: str = "",
 ) -> Any:
     """Cross the durable host for adopted local filesystem/process tools."""
-    if tool_name not in _ADOPTED_CAPABILITIES or not _is_native_adopted_tool(wrapped_tool):
+    if tool_name not in _ADOPTED_CAPABILITIES:
         return wrapped_tool(
             *args,
             sanitize_inputs_outputs=sanitize_inputs_outputs,
             **kwargs,
+        )
+    if not _is_native_adopted_tool(wrapped_tool, tool_name):
+        raise PermissionError(
+            f"Tool '{tool_name}' is blocked because its adapter is not registered as a native capability."
         )
     if principal is None or session_id is None:
         # The authority check above normally catches this; keeping the guard
@@ -462,29 +466,46 @@ def _invoke_adopted_tool(
         approval_id=approval_id,
     )
     host = current_capability_execution_host()
-    _, receipt = host._execute_adopted(  # noqa: SLF001 - wrapper-owned adapter hook
-        request,
-        lambda _request_arguments: wrapped_tool(
-            *args,
-            sanitize_inputs_outputs=sanitize_inputs_outputs,
-            **kwargs,
-        ),
-    )
+    _, receipt = host._execute_adopted(request)  # noqa: SLF001 - wrapper-owned adapter hook
     if receipt.state != "succeeded":
         raise PermissionError(f"Tool '{tool_name}' execution did not complete ({receipt.state}).")
     return receipt.result
 
 
-def _is_native_adopted_tool(tool: Tool) -> bool:
-    """Recognize the real bundled adapter through audit/secret wrappers."""
+def _is_native_adopted_tool(tool: Tool, tool_name: str) -> bool:
+    """Recognize the exact bundled adapter through audit/secret wrappers."""
+    from src.tools.filesystem_tool import (
+        apply_workspace_patch,
+        preview_workspace_patch,
+        read_file,
+        write_file,
+    )
+    from src.tools.process_tools import (
+        list_processes,
+        read_process_output,
+        run_command,
+        start_process,
+        stop_process,
+    )
+
+    native = {
+        "read_file": read_file,
+        "write_file": write_file,
+        "preview_workspace_patch": preview_workspace_patch,
+        "apply_workspace_patch": apply_workspace_patch,
+        "run_command": run_command,
+        "start_process": start_process,
+        "list_processes": list_processes,
+        "read_process_output": read_process_output,
+        "stop_process": stop_process,
+    }.get(tool_name)
+    if native is None:
+        return False
     current: object | None = tool
     visited: set[int] = set()
     while current is not None and id(current) not in visited:
         visited.add(id(current))
-        module_name = getattr(type(current), "__module__", "")
-        if module_name == "src.tools.process_tools" or bool(
-            getattr(current, "seraph_native_capability", False)
-        ):
+        if current is native:
             return True
         current = getattr(current, "wrapped_tool", None)
     return False

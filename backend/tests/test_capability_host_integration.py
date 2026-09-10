@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import json
+import inspect
+import multiprocessing
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -11,9 +14,11 @@ from config.settings import settings
 from src.approval.runtime import reset_runtime_context, set_runtime_context
 from src.extensions.capability_execution import (
     CapabilityExecutionError,
+    CapabilityJournalError,
     CapabilityExecutionHost,
     CapabilityExecutionLimits,
     CapabilityExecutionRequest,
+    _REGISTRY_TOKEN,
     current_capability_execution_host,
 )
 from src.security.trust_contract import AuthorityGrant, PrincipalType, TrustPrincipal
@@ -37,6 +42,37 @@ def _request(**overrides) -> CapabilityExecutionRequest:
     return CapabilityExecutionRequest(**payload)
 
 
+def _test_host(path: Path, **handlers):
+    host = CapabilityExecutionHost(journal_path=path)
+    for capability_id, handler in handlers.items():
+        host._register_handler(capability_id, handler, _token=_REGISTRY_TOKEN)
+    return host
+
+
+def _native_write_worker(journal: str, workspace: str, barrier, results) -> None:
+    from config.settings import settings as child_settings
+    from src.extensions.capability_execution import CapabilityExecutionHost, CapabilityExecutionRequest
+
+    child_settings.workspace_dir = workspace
+    host = CapabilityExecutionHost(journal_path=journal)
+    request = CapabilityExecutionRequest(
+        owner_principal_id="operator:multi-process",
+        capability_id="write_file",
+        capability_version="native-v1",
+        destination="workspace:multi-process.txt",
+        arguments={"file_path": "multi-process.txt", "content": "one\n"},
+        principal_authenticated=True,
+        authority_granted=True,
+        session_id="session:multi-process",
+        idempotency_key="same-request-key",
+    )
+    barrier.wait(timeout=10)
+    try:
+        results.put(host.execute(request).state)
+    except CapabilityExecutionError as exc:
+        results.put(exc.reason_code)
+
+
 def test_request_and_effect_identity_is_stable_and_owner_scoped(tmp_path):
     first = _request(arguments={"count": 1, "message": "hello"}, request_id="attempt-a")
     retry = _request(arguments={"message": "hello", "count": 1}, request_id="attempt-b")
@@ -58,13 +94,19 @@ def test_public_host_has_no_arbitrary_callback_bypass(tmp_path):
         host.execute(request)
     with pytest.raises(TypeError):
         host.execute(request, lambda _arguments: "bypass")  # type: ignore[call-arg]
+    with pytest.raises(CapabilityExecutionError, match="handler_injection_forbidden") as excinfo:
+        CapabilityExecutionHost(
+            journal_path=tmp_path / "injected.json",
+            handlers={"test.echo": lambda _arguments: "bypass"},
+        )
+    assert excinfo.value.reason_code == "handler_injection_forbidden"
 
 
 def test_execution_is_bounded_redacted_and_deduplicated(tmp_path):
     calls: list[dict] = []
-    host = CapabilityExecutionHost(
-        journal_path=tmp_path / "journal.json",
-        handlers={"test.echo": lambda arguments: calls.append(dict(arguments)) or ("x" * 512)},
+    host = _test_host(
+        tmp_path / "journal.json",
+        **{"test.echo": lambda arguments: calls.append(dict(arguments)) or ("x" * 512)},
     )
     request = _request(
         arguments={"message": "x" * 512, "secret_token": "do-not-persist"},
@@ -88,9 +130,9 @@ def test_execution_is_bounded_redacted_and_deduplicated(tmp_path):
 
 def test_restart_marks_started_effect_uncertain_and_refuses_replay(tmp_path):
     journal = tmp_path / "journal.json"
-    host = CapabilityExecutionHost(
-        journal_path=journal,
-        handlers={"test.echo": lambda _arguments: (_ for _ in ()).throw(KeyboardInterrupt())},
+    host = _test_host(
+        journal,
+        **{"test.echo": lambda _arguments: (_ for _ in ()).throw(KeyboardInterrupt())},
     )
     request = _request()
     with pytest.raises(KeyboardInterrupt):
@@ -98,9 +140,9 @@ def test_restart_marks_started_effect_uncertain_and_refuses_replay(tmp_path):
     assert host.journal_records()[0]["state"] == "uncertain"
 
     restarted_calls: list[dict] = []
-    restarted = CapabilityExecutionHost(
-        journal_path=journal,
-        handlers={"test.echo": lambda arguments: restarted_calls.append(dict(arguments)) or "replayed"},
+    restarted = _test_host(
+        journal,
+        **{"test.echo": lambda arguments: restarted_calls.append(dict(arguments)) or "replayed"},
     )
     recovered = restarted.recover()
     assert recovered[0].state == "uncertain"
@@ -111,9 +153,9 @@ def test_restart_marks_started_effect_uncertain_and_refuses_replay(tmp_path):
 
 def test_failed_effect_is_durable_and_explicit_key_cannot_change_owner(tmp_path):
     journal = tmp_path / "journal.json"
-    host = CapabilityExecutionHost(
-        journal_path=journal,
-        handlers={"test.echo": lambda _arguments: (_ for _ in ()).throw(RuntimeError("private detail"))},
+    host = _test_host(
+        journal,
+        **{"test.echo": lambda _arguments: (_ for _ in ()).throw(RuntimeError("private detail"))},
     )
     request = _request(idempotency_key="shared-key")
     result = host.execute(request)
@@ -125,12 +167,128 @@ def test_failed_effect_is_durable_and_explicit_key_cannot_change_owner(tmp_path)
         host.execute(request)
 
     other = _request(owner_principal_id="operator:other", idempotency_key="shared-key")
-    with pytest.raises(CapabilityExecutionError, match="duplicate_key_conflict"):
-        host.execute(other)
+    assert other.duplicate_key != request.duplicate_key
+    assert host.execute(other).state == "failed"
+
+
+def test_journal_tamper_is_rejected(tmp_path):
+    host = _test_host(tmp_path / "journal.json", **{"test.echo": lambda _: "ok"})
+    host.execute(_request())
+    payload = json.loads((tmp_path / "journal.json").read_text(encoding="utf-8"))
+    payload["records"][0]["state"] = "uncertain"
+    (tmp_path / "journal.json").write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(CapabilityJournalError, match="integrity"):
+        host.journal_records()
+
+
+def test_network_destination_is_rejected_at_request_boundary():
+    with pytest.raises(ValueError, match="network destinations"):
+        _request(destination="https://example.invalid/connector")
+
+
+def test_post_effect_receipt_failure_is_uncertain_and_denies_retry(tmp_path, monkeypatch):
+    calls: list[dict] = []
+    host = _test_host(
+        tmp_path / "journal.json",
+        **{"test.echo": lambda arguments: calls.append(dict(arguments)) or "ok"},
+    )
+    original = host._write_records_unlocked
+    writes = 0
+
+    def fail_completion(records):
+        nonlocal writes
+        writes += 1
+        if writes == 3:
+            raise OSError("simulated receipt write failure")
+        return original(records)
+
+    monkeypatch.setattr(host, "_write_records_unlocked", fail_completion)
+    with pytest.raises(CapabilityExecutionError, match="effect_uncertain"):
+        host.execute(_request())
+    assert host.journal_records()[0]["state"] == "uncertain"
+    with pytest.raises(CapabilityExecutionError, match="effect_uncertain"):
+        host.execute(_request())
+    assert len(calls) == 1
+
+
+def test_multi_process_journal_claim_is_atomic(tmp_path, monkeypatch):
+    from config.settings import settings as parent_settings
+
+    monkeypatch.setattr(parent_settings, "workspace_dir", str(tmp_path))
+    ctx = multiprocessing.get_context("fork")
+    barrier = ctx.Barrier(2)
+    results = ctx.Queue()
+    journal = tmp_path / "journal.json"
+    workers = [
+        ctx.Process(target=_native_write_worker, args=(str(journal), str(tmp_path), barrier, results))
+        for _ in range(2)
+    ]
+    for worker in workers:
+        worker.start()
+    states = [results.get(timeout=15) for _ in workers]
+    for worker in workers:
+        worker.join(timeout=15)
+    assert all(worker.exitcode == 0 for worker in workers)
+    assert sorted(states) == ["effect_uncertain", "succeeded"]
+    assert (tmp_path / "multi-process.txt").read_text(encoding="utf-8") == "one\n"
+    assert len(json.loads(journal.read_text(encoding="utf-8"))["records"]) == 1
+
+
+def test_native_swe_effect_paths_use_the_governed_host(monkeypatch):
+    import src.workflows.native_software_engineering as native_swe
+
+    source = inspect.getsource(native_swe)
+    assert "process_runtime_manager.run_command" not in source
+    assert "preview_workspace_patch(" not in source
+    assert "apply_workspace_patch(" not in source
+
+    captured = []
+
+    class FakeHost:
+        def execute(self, request):
+            captured.append(request)
+            return SimpleNamespace(
+                state="succeeded",
+                result={
+                    "ok": True,
+                    "blocked": False,
+                    "cancelled": False,
+                    "stdout": "",
+                    "stderr": "",
+                    "stdout_sha256": "",
+                    "stderr_sha256": "",
+                    "stdout_chars": 0,
+                    "stderr_chars": 0,
+                    "exit_code": 0,
+                    "timed_out": False,
+                    "cleanup_status": "stopped",
+                    "remaining_descendants": 0,
+                    "worker_root": None,
+                    "display_command": "pwd",
+                    "cwd": ".",
+                    "timeout_seconds": 1,
+                },
+            )
+
+    principal = TrustPrincipal(
+        principal_id="service:native-software-engineering",
+        principal_type=PrincipalType.SERVICE,
+        grants=(AuthorityGrant.CAPABILITY_EXECUTE,),
+        session_id="session:swe-host",
+    )
+    tokens = set_runtime_context("session:swe-host", "off", trust_principal=principal)
+    monkeypatch.setattr(native_swe, "current_capability_execution_host", lambda: FakeHost())
+    try:
+        result = native_swe._process_result("pwd", [], ".", timeout_seconds=1)
+    finally:
+        reset_runtime_context(tokens)
+    assert result["ok"] is True
+    assert captured and captured[0].capability_id == "run_command"
+    assert captured[0].arguments["__seraph_raw_result"] is True
 
 
 def test_authority_and_approval_expiry_fail_closed(tmp_path):
-    host = CapabilityExecutionHost(journal_path=tmp_path / "journal.json", handlers={"test.echo": lambda _: "ok"})
+    host = _test_host(tmp_path / "journal.json", **{"test.echo": lambda _: "ok"})
     with pytest.raises(CapabilityExecutionError, match="authority_expired"):
         host.execute(_request(expires_at=0))
     with pytest.raises(CapabilityExecutionError, match="approval_required"):

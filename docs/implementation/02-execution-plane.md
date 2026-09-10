@@ -128,9 +128,11 @@
 
 ### `capability-execution-host-v1` (#747 remediation on this branch)
 
-- [x] Adopted local filesystem and process calls cross one authority-wrapper-owned execution host after the existing principal, session, revocation, and approval checks. The public host API resolves registered adapters and accepts no caller-supplied effect callback.
-- [x] The host binds owner, capability/version, normalized destination, request digest, limits, and fencing material into a stable effect identity. Retries with the same binding are deduplicated; a conflicting reuse of an explicit idempotency key is denied.
-- [x] A `0600` atomic local journal records prepared, started, succeeded, failed, and uncertain states with digest-only arguments and bounded output summaries. Restart reconciliation marks unfinished effects uncertain and refuses automatic replay.
+- [x] Adopted local filesystem and process calls cross one authority-wrapper-owned execution host after the existing principal, session, revocation, and approval checks. The public host resolves fixed module-owned adapters, rejects constructor handler injection, and rejects an adopted-name wrapper that is not the exact bundled adapter.
+- [x] The host binds owner, capability/version, normalized local destination, request digest, limits, and fencing material into a bounded HMAC effect identity. Retries with the same binding are deduplicated without persisting caller-controlled idempotency keys; cross-owner reuse produces a distinct effect key.
+- [x] A `0600` atomic local journal records prepared, started, succeeded, failed, and uncertain states with digest-only arguments and bounded output summaries. An OS lock serializes claims across processes, integrity/schema checks fail closed, and post-effect receipt failures become uncertain and deny retry. Restart reconciliation marks unfinished effects uncertain and refuses automatic replay.
+- [x] Native software-engineering process and workspace-patch paths use the same governed host, including the durable job owner and lease fence in their effect binding.
+- [x] The local host accepts only `local://`, `workspace://`, and `seraph://` destinations; browser and connector network effects remain outside this adopted set and are denied at this boundary.
 - [x] Process children retain the existing workspace/path and process-group controls, with CPU, address-space, PID, file-output, timeout, bounded foreground display, and bounded background-log reads applied at the child boundary.
 - [ ] Full database-backed multi-process lease/fencing proof and host/container-grade isolation remain deferred. Detached descendants can still produce an operator-visible `unknown` cleanup state under the existing process contract.
 

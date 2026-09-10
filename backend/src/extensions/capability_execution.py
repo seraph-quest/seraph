@@ -16,6 +16,7 @@ registered handler and cannot supply an arbitrary callback.
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import math
 import os
@@ -24,6 +25,7 @@ import tempfile
 import threading
 import time
 from dataclasses import dataclass, field
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Callable, Mapping
 from urllib.parse import urlsplit, urlunsplit
@@ -31,15 +33,24 @@ from urllib.parse import urlsplit, urlunsplit
 from src.audit.formatting import redact_for_audit
 from src.security.trust_contract import canonical_digest
 
-_JOURNAL_VERSION = 1
+_JOURNAL_VERSION = 2
 _DEFAULT_MAX_RECORDS = 256
 _DEFAULT_MAX_BYTES = 1_048_576
 _DEFAULT_OUTPUT_BYTES = 1_048_576
 _DEFAULT_CPU_SECONDS = 300.0
 _DEFAULT_MEMORY_BYTES = 512 * 1024 * 1024
 _DEFAULT_PROCESS_COUNT = 64
+_MAX_IDEMPOTENCY_BYTES = 256
+_MAX_DESTINATION_BYTES = 512
+_MAX_OUTPUT_BYTES = 1 * 1024 * 1024
+_MAX_CPU_SECONDS = 300.0
+_MAX_MEMORY_BYTES = 512 * 1024 * 1024
+_MAX_PROCESS_COUNT = 64
 _TERMINAL_STATES = frozenset({"succeeded", "failed"})
 _RECOVERABLE_STATES = frozenset({"prepared", "started", "uncertain", "failed"})
+_VALID_STATES = _TERMINAL_STATES | _RECOVERABLE_STATES
+_DIGEST_LENGTH = 64
+_ALLOWED_LOCAL_DESTINATION_SCHEMES = frozenset({"local", "workspace", "seraph"})
 _ADOPTED_CAPABILITIES = frozenset(
     {
         "read_file",
@@ -55,6 +66,13 @@ _ADOPTED_CAPABILITIES = frozenset(
 )
 _JOURNAL_LOCKS: dict[Path, threading.RLock] = {}
 _JOURNAL_LOCKS_GUARD = threading.Lock()
+_REGISTRY_TOKEN = object()
+_EFFECT_MAC_KEY = hashlib.sha256(b"seraph-capability-effect-key-v2").digest()
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - the runtime is currently POSIX-only.
+    fcntl = None  # type: ignore[assignment]
 
 
 class CapabilityExecutionError(PermissionError):
@@ -85,14 +103,30 @@ class CapabilityExecutionLimits:
             (self.cpu_seconds, "cpu_seconds"),
             (self.deadline_seconds, "deadline_seconds"),
         ):
-            if not isinstance(value, (int, float)) or not math.isfinite(float(value)) or value <= 0:
+            maximum = _MAX_CPU_SECONDS
+            if (
+                not isinstance(value, (int, float))
+                or not math.isfinite(float(value))
+                or value <= 0
+                or value > maximum
+            ):
                 raise ValueError(f"{name} must be a finite positive number")
         for value, name in (
             (self.memory_bytes, "memory_bytes"),
             (self.process_count, "process_count"),
             (self.output_bytes, "output_bytes"),
         ):
-            if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+            maximum = {
+                "memory_bytes": _MAX_MEMORY_BYTES,
+                "process_count": _MAX_PROCESS_COUNT,
+                "output_bytes": _MAX_OUTPUT_BYTES,
+            }[name]
+            if (
+                not isinstance(value, int)
+                or isinstance(value, bool)
+                or value <= 0
+                or value > maximum
+            ):
                 raise ValueError(f"{name} must be a positive integer")
 
     def as_dict(self) -> dict[str, int | float]:
@@ -113,12 +147,22 @@ CapabilityLimits = CapabilityExecutionLimits
 
 
 def normalize_destination(destination: str) -> str:
-    """Return a stable destination representation without retaining secrets."""
+    """Return a bounded local destination representation without retaining secrets."""
     value = str(destination or "").strip()
     if not value:
         raise ValueError("destination is required")
+    if len(value.encode("utf-8")) > _MAX_DESTINATION_BYTES:
+        raise ValueError("destination exceeds the bounded local policy")
     if "://" in value:
         parsed = urlsplit(value)
+        if parsed.scheme.lower() not in _ALLOWED_LOCAL_DESTINATION_SCHEMES:
+            raise ValueError("network destinations are not adopted by the local capability host")
+        if parsed.username or parsed.password or parsed.fragment:
+            raise ValueError("destination credentials and fragments are not allowed")
+        try:
+            parsed.port
+        except ValueError as exc:
+            raise ValueError("destination port is invalid") from exc
         return urlunsplit(
             (
                 parsed.scheme.lower(),
@@ -131,8 +175,21 @@ def normalize_destination(destination: str) -> str:
     return posixpath.normpath(value.replace("\\", "/"))
 
 
+def _journal_mac_key(path: Path) -> bytes:
+    """Derive a stable per-journal MAC key without putting secrets in records."""
+    identity = str(path.resolve()).encode("utf-8")
+    return hashlib.sha256(b"seraph-capability-journal-key-v2:" + identity).digest()
+
+
+def _mac(value: Any, *, key: bytes) -> str:
+    payload = json.dumps(_canonical_value(value), sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
+    return hmac.new(key, payload, hashlib.sha256).hexdigest()
+
+
 def _canonical_value(value: Any) -> Any:
     """Make request identity deterministic without serializing object reprs."""
+    if isinstance(value, threading.Event):
+        return {"__cancel_event__": True}
     if isinstance(value, Mapping):
         return {str(key): _canonical_value(inner) for key, inner in sorted(value.items(), key=lambda item: str(item[0]))}
     if isinstance(value, (list, tuple)):
@@ -182,12 +239,22 @@ def _bounded_json(value: Any, *, limit: int) -> tuple[Any, bool]:
 
 
 def _safe_summary(value: Any, *, output_bytes: int) -> dict[str, Any]:
-    safe_value = redact_for_audit(value)
-    bounded, truncated = _bounded_json(safe_value, limit=min(output_bytes, 4096))
-    try:
-        encoded = json.dumps(_canonical_value(value), sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
-    except (TypeError, ValueError):
-        encoded = str(value).encode("utf-8", errors="replace")
+    if isinstance(value, str):
+        encoded = value.encode("utf-8", errors="replace")
+        safe_value: Any = redact_for_audit(value)
+        bounded, truncated = _bounded_json(safe_value, limit=min(output_bytes, 4096))
+    elif isinstance(value, bytes):
+        encoded = value
+        bounded, truncated = _bounded_json(value, limit=min(output_bytes, 4096))
+    else:
+        safe_value = redact_for_audit(value)
+        bounded, truncated = _bounded_json(safe_value, limit=min(output_bytes, 4096))
+        try:
+            encoded = json.dumps(
+                _canonical_value(value), sort_keys=True, separators=(",", ":"), ensure_ascii=True
+            ).encode()
+        except (TypeError, ValueError):
+            encoded = str(value).encode("utf-8", errors="replace")
     return {
         "type": type(value).__name__,
         "output_bytes": len(encoded),
@@ -235,6 +302,8 @@ class CapabilityExecutionRequest:
                 raise ValueError(f"{name} is required")
         if self.capability_id not in _ADOPTED_CAPABILITIES and not self.capability_id.startswith("test."):
             raise ValueError(f"capability '{self.capability_id}' is not adopted by the local host")
+        if len(self.idempotency_key.strip().encode("utf-8")) > _MAX_IDEMPOTENCY_BYTES:
+            raise ValueError("idempotency_key exceeds the bounded local policy")
         normalize_destination(self.destination)
 
     @property
@@ -288,9 +357,18 @@ class CapabilityExecutionRequest:
 
     @property
     def duplicate_key(self) -> str:
-        # An explicit key is scoped by the journal record's binding. A key can
-        # therefore never be reused by another owner/capability/destination.
-        return self.idempotency_key.strip() if self.idempotency_key.strip() else f"effect:{self.effect_digest}"
+        # Never persist a caller-controlled key. HMAC binds an optional caller
+        # key to the complete owner/capability/destination request identity,
+        # so the same key from another owner cannot collide or disclose input.
+        material = {
+            "owner_principal_id": self.owner_principal_id,
+            "capability_id": self.capability_id,
+            "capability_version": self.capability_version,
+            "destination": self.normalized_destination,
+            "request_digest": self.request_digest,
+            "idempotency_key": self.idempotency_key.strip(),
+        }
+        return f"effect:{_mac(material, key=_EFFECT_MAC_KEY)}"
 
     def journal_binding(self) -> dict[str, str]:
         return {
@@ -344,6 +422,43 @@ class CapabilityExecutionReceipt:
 CapabilityHandler = Callable[[Mapping[str, Any]], Any]
 
 
+def _native_adapter_registry() -> dict[str, CapabilityHandler]:
+    """Resolve the fixed module-owned native adapters lazily to avoid cycles."""
+    from src.tools.filesystem_tool import (
+        apply_workspace_patch,
+        preview_workspace_patch,
+        read_file,
+        write_file,
+    )
+    from src.tools.process_tools import (
+        list_processes,
+        process_runtime_manager,
+        read_process_output,
+        run_command,
+        start_process,
+        stop_process,
+    )
+
+    def run_command_adapter(arguments: Mapping[str, Any]) -> Any:
+        payload = dict(arguments)
+        raw_result = bool(payload.pop("__seraph_raw_result", False))
+        if raw_result:
+            return process_runtime_manager.run_command(**payload)
+        return run_command(**payload)
+
+    return {
+        "read_file": lambda arguments: read_file(**dict(arguments)),
+        "write_file": lambda arguments: write_file(**dict(arguments)),
+        "preview_workspace_patch": lambda arguments: preview_workspace_patch(**dict(arguments)),
+        "apply_workspace_patch": lambda arguments: apply_workspace_patch(**dict(arguments)),
+        "run_command": run_command_adapter,
+        "start_process": lambda arguments: start_process(**dict(arguments)),
+        "list_processes": lambda arguments: list_processes(**dict(arguments)),
+        "read_process_output": lambda arguments: read_process_output(**dict(arguments)),
+        "stop_process": lambda arguments: stop_process(**dict(arguments)),
+    }
+
+
 def _default_journal_path() -> Path:
     try:
         from config.settings import settings
@@ -352,7 +467,7 @@ def _default_journal_path() -> Path:
     except Exception:
         workspace = "seraph-default-workspace"
     workspace_tag = hashlib.sha256(workspace.encode("utf-8")).hexdigest()[:24]
-    return Path(tempfile.gettempdir()) / "seraph_runtime" / workspace_tag / "capability-executions.json"
+    return Path(tempfile.gettempdir()) / "seraph_runtime" / workspace_tag / "capability-executions-v2.json"
 
 
 class CapabilityExecutionHost:
@@ -368,8 +483,11 @@ class CapabilityExecutionHost:
     ) -> None:
         if max_records < 1 or max_bytes < 4096:
             raise ValueError("journal retention bounds are invalid")
+        if handlers:
+            raise CapabilityExecutionError("handler_injection_forbidden")
         self.journal_path = Path(journal_path) if journal_path is not None else _default_journal_path()
-        self._handlers = dict(handlers or {})
+        self._test_handlers: dict[str, CapabilityHandler] = {}
+        self._uncertain_keys: set[str] = set()
         self._max_records = max_records
         self._max_bytes = max_bytes
         with _JOURNAL_LOCKS_GUARD:
@@ -378,20 +496,26 @@ class CapabilityExecutionHost:
 
     @property
     def handlers(self) -> tuple[str, ...]:
-        return tuple(sorted(self._handlers))
+        return tuple(sorted(set(_ADOPTED_CAPABILITIES) | set(self._test_handlers)))
 
-    def _register_handler(self, capability_id: str, handler: CapabilityHandler) -> None:
-        """Register an adapter from module-owned construction code."""
-        if capability_id not in _ADOPTED_CAPABILITIES and not capability_id.startswith("test."):
+    def _register_handler(
+        self,
+        capability_id: str,
+        handler: CapabilityHandler,
+        *,
+        _token: object | None = None,
+    ) -> None:
+        """Register a private test adapter; native adapters are fixed below."""
+        if _token is not _REGISTRY_TOKEN or not capability_id.startswith("test."):
             raise CapabilityExecutionError("capability_not_adopted")
         if not callable(handler):
             raise TypeError("capability handler must be callable")
         with self._lock:
-            self._handlers[capability_id] = handler
+            self._test_handlers[capability_id] = handler
 
     def execute(self, request: CapabilityExecutionRequest) -> CapabilityExecutionReceipt:
         """Execute a registered adapter through the durable effect boundary."""
-        handler = self._handlers.get(request.capability_id)
+        handler = self._resolve_handler(request.capability_id)
         if handler is None:
             raise CapabilityExecutionError("capability_handler_unregistered")
         result, receipt = self._execute(request, handler)
@@ -399,36 +523,54 @@ class CapabilityExecutionHost:
 
     def recover(self) -> list[CapabilityExecutionReceipt]:
         """Return unresolved effects without replaying them."""
-        with self._lock:
+        with self._journal_guard():
             records = self._read_records()
             return [self._receipt_from_record(record) for record in records if record.get("state") == "uncertain"]
 
     def journal_records(self) -> list[dict[str, Any]]:
         """Expose bounded records for local tests/operator diagnostics."""
-        with self._lock:
+        with self._journal_guard():
             return self._read_records()
 
-    def _execute_adopted(
-        self,
-        request: CapabilityExecutionRequest,
-        handler: CapabilityHandler,
-    ) -> tuple[Any, CapabilityExecutionReceipt]:
-        """Invoke an existing trusted Tool adapter after authority approval.
+    def _resolve_handler(self, capability_id: str) -> CapabilityHandler | None:
+        if capability_id.startswith("test."):
+            return self._test_handlers.get(capability_id)
+        if capability_id not in _ADOPTED_CAPABILITIES:
+            return None
+        return _native_adapter_registry().get(capability_id)
 
-        This method is intentionally private. The public host API has no
-        callback argument, preventing an arbitrary caller from using the host
-        as a way around capability registration.
-        """
+    def _execute_adopted(self, request: CapabilityExecutionRequest) -> tuple[Any, CapabilityExecutionReceipt]:
+        """Invoke one fixed native adapter after the wrapper authority check."""
         if request.capability_id not in _ADOPTED_CAPABILITIES:
             raise CapabilityExecutionError("capability_not_adopted")
-        if not callable(handler):
-            raise CapabilityExecutionError("capability_handler_invalid")
+        handler = self._resolve_handler(request.capability_id)
+        if handler is None:
+            raise CapabilityExecutionError("capability_handler_unregistered")
         return self._execute(request, handler)
+
+    @contextmanager
+    def _journal_guard(self):
+        """Serialize journal read/claim/write operations across processes."""
+        with self._lock:
+            self.journal_path.parent.mkdir(parents=True, exist_ok=True)
+            lock_path = self.journal_path.with_name(self.journal_path.name + ".lock")
+            fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+            try:
+                os.fchmod(fd, 0o600)
+                if fcntl is not None:
+                    fcntl.flock(fd, fcntl.LOCK_EX)
+                yield
+            finally:
+                if fcntl is not None:
+                    fcntl.flock(fd, fcntl.LOCK_UN)
+                os.close(fd)
 
     def _execute(self, request: CapabilityExecutionRequest, handler: CapabilityHandler) -> tuple[Any, CapabilityExecutionReceipt]:
         now = time.time()
         self._validate_authority(request, now=now)
-        with self._lock:
+        if request.duplicate_key in self._uncertain_keys:
+            raise CapabilityExecutionError("effect_uncertain", recoverable=True)
+        with self._journal_guard():
             records = self._read_records()
             existing = next((item for item in records if item.get("duplicate_key") == request.duplicate_key), None)
             if existing is not None:
@@ -467,9 +609,9 @@ class CapabilityExecutionHost:
                 "completed_at": None,
             }
             records.append(record)
-            self._write_records(records)
+            self._write_records_unlocked(records)
             record["state"] = "started"
-            self._write_records(records)
+            self._write_records_unlocked(records)
 
         try:
             result = handler(request.arguments)
@@ -478,7 +620,7 @@ class CapabilityExecutionHost:
             # caller has repaired the input/environment. Keep the error code
             # type-only so exception text cannot become a secret sink.
             completed_at = time.time()
-            with self._lock:
+            with self._journal_guard():
                 records = self._read_records()
                 current = next(
                     (item for item in records if item.get("duplicate_key") == request.duplicate_key),
@@ -495,7 +637,7 @@ class CapabilityExecutionHost:
                         "completed_at": completed_at,
                     }
                 )
-                self._write_records(records)
+                self._write_records_unlocked(records)
             return None, CapabilityExecutionReceipt(
                 effect_id=str(record["effect_id"]),
                 duplicate_key=request.duplicate_key,
@@ -511,7 +653,7 @@ class CapabilityExecutionHost:
         except BaseException:
             # A process crash or cancellation after the started marker is
             # recoverable, but the host must never silently retry the effect.
-            with self._lock:
+            with self._journal_guard():
                 records = self._read_records()
                 current = next(
                     (item for item in records if item.get("duplicate_key") == request.duplicate_key),
@@ -522,39 +664,52 @@ class CapabilityExecutionHost:
                     current["replay_blocked"] = True
                     current["error_code"] = "handler_interrupted"
                     current["completed_at"] = time.time()
-                    self._write_records(records)
+                    self._write_records_unlocked(records)
             raise
 
-        bounded_result, truncated = _bounded_json(result, limit=request.limits.output_bytes)
-        summary = _safe_summary(result, output_bytes=request.limits.output_bytes)
-        output_digest = _digest(result)
+        try:
+            bounded_result, truncated = _bounded_json(result, limit=request.limits.output_bytes)
+            summary = _safe_summary(result, output_bytes=request.limits.output_bytes)
+            output_digest = _digest(result)
+        except Exception as exc:
+            self._uncertain_keys.add(request.duplicate_key)
+            self._mark_uncertain(request.duplicate_key, error_code="receipt_serialization_failed")
+            raise CapabilityExecutionError("effect_uncertain", recoverable=True) from exc
         completed_at = time.time()
-        with self._lock:
-            records = self._read_records()
-            current = next(
-                (item for item in records if item.get("duplicate_key") == request.duplicate_key),
-                None,
-            )
-            if current is None:
-                raise CapabilityJournalError("execution record disappeared before completion")
-            current.update(
-                {
-                    "state": "succeeded",
-                    "recoverable": False,
-                    "replay_blocked": False,
-                    "output_digest": output_digest,
-                    "output_bytes": summary["output_bytes"],
-                    "output_truncated": truncated,
-                    "output_summary": {
-                        "type": summary["type"],
-                        "output_sha256": summary["output_sha256"],
+        try:
+            with self._journal_guard():
+                records = self._read_records()
+                current = next(
+                    (item for item in records if item.get("duplicate_key") == request.duplicate_key),
+                    None,
+                )
+                if current is None:
+                    raise CapabilityJournalError("execution record disappeared before completion")
+                current.update(
+                    {
+                        "state": "succeeded",
+                        "recoverable": False,
+                        "replay_blocked": False,
+                        "output_digest": output_digest,
                         "output_bytes": summary["output_bytes"],
-                        "output_truncated": summary["output_truncated"],
-                    },
-                    "completed_at": completed_at,
-                }
-            )
-            self._write_records(records)
+                        "output_truncated": truncated,
+                        "output_summary": {
+                            "type": summary["type"],
+                            "output_sha256": summary["output_sha256"],
+                            "output_bytes": summary["output_bytes"],
+                            "output_truncated": summary["output_truncated"],
+                        },
+                        "completed_at": completed_at,
+                    }
+                )
+                self._write_records_unlocked(records)
+        except Exception as exc:
+            # The handler may already have produced a real effect. A receipt
+            # write failure therefore becomes an uncertain effect and is
+            # denied on every retry, including in this process.
+            self._uncertain_keys.add(request.duplicate_key)
+            self._mark_uncertain(request.duplicate_key, error_code="receipt_persistence_failed")
+            raise CapabilityExecutionError("effect_uncertain", recoverable=True) from exc
         receipt = CapabilityExecutionReceipt(
             effect_id=str(record["effect_id"]),
             duplicate_key=request.duplicate_key,
@@ -597,7 +752,7 @@ class CapabilityExecutionHost:
         return None
 
     def _recover_incomplete(self) -> None:
-        with self._lock:
+        with self._journal_guard():
             records = self._read_records()
             changed = False
             for record in records:
@@ -608,32 +763,85 @@ class CapabilityExecutionHost:
                     record["error_code"] = "restart_reconciliation_required"
                     record["completed_at"] = time.time()
                     changed = True
+                    self._uncertain_keys.add(str(record.get("duplicate_key", "")))
             if changed:
-                self._write_records(records)
+                self._write_records_unlocked(records)
+
+    def _mark_uncertain(self, duplicate_key: str, *, error_code: str) -> None:
+        """Best-effort durable uncertainty marker after an effect boundary error."""
+        try:
+            with self._journal_guard():
+                records = self._read_records()
+                current = next((item for item in records if item.get("duplicate_key") == duplicate_key), None)
+                if current is None:
+                    return
+                current.update(
+                    {
+                        "state": "uncertain",
+                        "recoverable": True,
+                        "replay_blocked": True,
+                        "error_code": error_code,
+                        "completed_at": time.time(),
+                    }
+                )
+                self._write_records_unlocked(records)
+        except Exception:
+            # The in-memory deny set remains authoritative for this process;
+            # a failed durable write is itself surfaced to the caller.
+            return
 
     def _read_records(self) -> list[dict[str, Any]]:
         if not self.journal_path.exists():
             return []
         try:
+            if self.journal_path.stat().st_size > self._max_bytes:
+                raise CapabilityJournalError("execution journal exceeds configured bounds")
             payload = json.loads(self.journal_path.read_text(encoding="utf-8"))
         except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise CapabilityJournalError("execution journal is unreadable") from exc
         if not isinstance(payload, dict) or payload.get("journal_version") != _JOURNAL_VERSION:
             raise CapabilityJournalError("execution journal version is unsupported")
         records = payload.get("records")
-        if not isinstance(records, list) or any(not isinstance(item, dict) for item in records):
+        if not isinstance(records, list) or len(records) > self._max_records or any(
+            not isinstance(item, dict) for item in records
+        ):
             raise CapabilityJournalError("execution journal records are invalid")
-        return [dict(item) for item in records]
+        core = {"journal_version": payload["journal_version"], "records": records}
+        journal_mac = payload.get("journal_mac")
+        if not isinstance(journal_mac, str) or not hmac.compare_digest(
+            journal_mac,
+            _mac(core, key=_journal_mac_key(self.journal_path)),
+        ):
+            raise CapabilityJournalError("execution journal integrity check failed")
+        validated: list[dict[str, Any]] = []
+        duplicate_keys: set[str] = set()
+        for raw_record in records:
+            record = dict(raw_record)
+            self._validate_record(record)
+            duplicate_key = str(record["duplicate_key"])
+            if duplicate_key in duplicate_keys:
+                raise CapabilityJournalError("execution journal contains duplicate effect keys")
+            duplicate_keys.add(duplicate_key)
+            validated.append(record)
+        return validated
 
     def _write_records(self, records: list[dict[str, Any]]) -> None:
+        with self._journal_guard():
+            self._write_records_unlocked(records)
+
+    def _write_records_unlocked(self, records: list[dict[str, Any]]) -> None:
         retained = self._retain_records(records)
         self.journal_path.parent.mkdir(parents=True, exist_ok=True)
         try:
             self.journal_path.parent.chmod(0o700)
         except OSError:
             pass
-        payload = {"journal_version": _JOURNAL_VERSION, "records": retained}
+        sealed_records = [self._seal_record(item) for item in retained]
+        core = {"journal_version": _JOURNAL_VERSION, "records": sealed_records}
+        payload = {**core, "journal_mac": _mac(core, key=_journal_mac_key(self.journal_path))}
         encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
+        if len(encoded) > self._max_bytes:
+            raise CapabilityJournalError("execution journal exceeds configured bounds")
         fd, temporary = tempfile.mkstemp(prefix=f".{self.journal_path.name}.", dir=str(self.journal_path.parent))
         temporary_path = Path(temporary)
         try:
@@ -649,6 +857,61 @@ class CapabilityExecutionHost:
                 pass
         finally:
             temporary_path.unlink(missing_ok=True)
+
+    @staticmethod
+    def _seal_record(record: Mapping[str, Any]) -> dict[str, Any]:
+        sealed = dict(record)
+        sealed["record_mac"] = _mac(
+            {key: value for key, value in sealed.items() if key != "record_mac"},
+            key=_EFFECT_MAC_KEY,
+        )
+        return sealed
+
+    def _validate_record(self, record: Mapping[str, Any]) -> None:
+        required = {
+            "journal_version",
+            "duplicate_key",
+            "effect_id",
+            "binding",
+            "state",
+            "recoverable",
+            "replay_blocked",
+            "started_at",
+            "completed_at",
+            "record_mac",
+        }
+        if set(record) < required or record.get("journal_version") != _JOURNAL_VERSION:
+            raise CapabilityJournalError("execution journal record schema is invalid")
+        duplicate_key = record.get("duplicate_key")
+        if (
+            not isinstance(duplicate_key, str)
+            or len(duplicate_key) != len("effect:") + _DIGEST_LENGTH
+            or not duplicate_key.startswith("effect:")
+        ):
+            raise CapabilityJournalError("execution journal effect key is invalid")
+        if record.get("state") not in _VALID_STATES:
+            raise CapabilityJournalError("execution journal state is invalid")
+        if not isinstance(record.get("recoverable"), bool) or not isinstance(record.get("replay_blocked"), bool):
+            raise CapabilityJournalError("execution journal flags are invalid")
+        binding = record.get("binding")
+        if not isinstance(binding, Mapping):
+            raise CapabilityJournalError("execution journal binding is invalid")
+        for key in (
+            "owner_principal_digest",
+            "destination_digest",
+            "request_digest",
+            "binding_digest",
+            "effect_digest",
+        ):
+            value = binding.get(key)
+            if not isinstance(value, str) or len(value) != _DIGEST_LENGTH:
+                raise CapabilityJournalError("execution journal binding digest is invalid")
+        record_mac = record.get("record_mac")
+        if not isinstance(record_mac, str) or not hmac.compare_digest(
+            record_mac,
+            _mac({key: value for key, value in record.items() if key != "record_mac"}, key=_EFFECT_MAC_KEY),
+        ):
+            raise CapabilityJournalError("execution journal record integrity check failed")
 
     def _retain_records(self, records: list[dict[str, Any]]) -> list[dict[str, Any]]:
         # Never evict unresolved work. Completed records are dropped oldest

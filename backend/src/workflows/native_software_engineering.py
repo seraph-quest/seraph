@@ -33,9 +33,12 @@ from typing import Any, Iterable
 from config.settings import settings
 from src.approval.runtime import get_current_session_id, get_current_trust_principal
 from src.artifacts.registry import build_artifact_record
+from src.extensions.capability_execution import (
+    CapabilityExecutionError,
+    build_capability_request,
+    current_capability_execution_host,
+)
 from src.security.trust_contract import AuthorityGrant, PrincipalType
-from src.tools.filesystem_tool import apply_workspace_patch, preview_workspace_patch
-from src.tools.process_tools import process_runtime_manager
 from src.workflows.job_runtime import (
     DurableJobIdentity,
     DurableJobSpec,
@@ -120,6 +123,10 @@ _UNTRUSTED_INSTRUCTION_MARKERS = (
 _NATIVE_CANCEL_EVENT: contextvars.ContextVar[threading.Event | None] = contextvars.ContextVar(
     "native_software_engineering_cancel_event",
     default=None,
+)
+_NATIVE_JOB_ID: contextvars.ContextVar[str] = contextvars.ContextVar("native_software_engineering_job_id", default="")
+_NATIVE_FENCING_TOKEN: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "native_software_engineering_fencing_token", default=""
 )
 _NATIVE_EXECUTION_LOCK = threading.Lock()
 _NATIVE_EXECUTIONS: dict[str, "_NativeExecutionControl"] = {}
@@ -679,6 +686,39 @@ def _write_json(path: Path, payload: dict[str, Any]) -> str:
     return content
 
 
+def _execute_native_capability(
+    capability_id: str,
+    arguments: dict[str, Any],
+    *,
+    destination: str,
+) -> Any:
+    """Route native SWE effects through the same fixed capability host."""
+    principal = get_current_trust_principal()
+    session_id = get_current_session_id()
+    if principal is None or session_id is None:
+        raise NativeSoftwareEngineeringError("runtime_principal_missing")
+    grants = {str(getattr(grant, "value", grant)) for grant in principal.grants}
+    request = build_capability_request(
+        capability_id=capability_id,
+        arguments=arguments,
+        owner_principal_id=principal.principal_id,
+        principal_authenticated=principal.authenticated,
+        principal_revoked=principal.revoked,
+        authority_granted=AuthorityGrant.CAPABILITY_EXECUTE.value in grants,
+        session_id=session_id,
+        job_id=_NATIVE_JOB_ID.get() or principal.job_id,
+        fencing_token=_NATIVE_FENCING_TOKEN.get(),
+        destination=destination,
+    )
+    try:
+        receipt = current_capability_execution_host().execute(request)
+    except CapabilityExecutionError as exc:
+        raise NativeSoftwareEngineeringError(f"capability_{exc.reason_code}") from exc
+    if receipt.state != "succeeded":
+        raise NativeSoftwareEngineeringError(f"capability_{receipt.state}")
+    return receipt.result
+
+
 def _process_result(
     command: str,
     args: Iterable[str],
@@ -690,12 +730,17 @@ def _process_result(
     args_list = list(args)
     cancel_event = _NATIVE_CANCEL_EVENT.get()
     try:
-        result = process_runtime_manager.run_command(
-            command=command,
-            args_json=json.dumps(args_list),
-            cwd=cwd,
-            timeout_seconds=timeout_seconds,
-            cancel_event=cancel_event,
+        result = _execute_native_capability(
+            "run_command",
+            {
+                "command": command,
+                "args_json": json.dumps(args_list),
+                "cwd": cwd,
+                "timeout_seconds": timeout_seconds,
+                "cancel_event": cancel_event,
+                "__seraph_raw_result": True,
+            },
+            destination=f"workspace-process:{cwd or '.'}",
         )
     except ValueError as exc:
         return {
@@ -1131,6 +1176,8 @@ async def run_native_software_engineering_fixture(
     durable_job: dict[str, Any] | None = admitted
     execution_control: _NativeExecutionControl | None = None
     cancel_context_token: Any = None
+    job_context_token: Any = None
+    fencing_context_token: Any = None
     try:
         try:
             await durable_job_repository.queue_job(request.job_id)
@@ -1158,6 +1205,8 @@ async def run_native_software_engineering_fixture(
             }
         durable_job = claimed
         fencing_token = int(claimed["lease"]["fencing_token"])
+        job_context_token = _NATIVE_JOB_ID.set(request.job_id)
+        fencing_context_token = _NATIVE_FENCING_TOKEN.set(str(fencing_token))
         execution_control = _NativeExecutionControl(
             owner=worker_owner,
             fencing_token=fencing_token,
@@ -1238,11 +1287,15 @@ async def run_native_software_engineering_fixture(
             fencing_token=fencing_token,
         )
 
-        preview_raw = preview_workspace_patch(
-            file_path=relative_bug_path,
-            old_text=FIXTURE_BEFORE_TEXT,
-            new_text=FIXTURE_AFTER_TEXT,
-            expected_occurrences=1,
+        preview_raw = _execute_native_capability(
+            "preview_workspace_patch",
+            {
+                "file_path": relative_bug_path,
+                "old_text": FIXTURE_BEFORE_TEXT,
+                "new_text": FIXTURE_AFTER_TEXT,
+                "expected_occurrences": 1,
+            },
+            destination=f"workspace:{relative_bug_path}",
         )
         preview_payload = json.loads(preview_raw)
         if not isinstance(preview_payload, dict) or preview_payload.get("applied"):
@@ -1495,12 +1548,16 @@ async def run_native_software_engineering_fixture(
             request.job_id,
             **boundary_kwargs,
         )
-        applied_raw = apply_workspace_patch(
-            file_path=relative_bug_path,
-            old_text=FIXTURE_BEFORE_TEXT,
-            new_text=FIXTURE_AFTER_TEXT,
-            expected_occurrences=1,
-            expected_before_sha256=preview_payload["before_sha256"],
+        applied_raw = _execute_native_capability(
+            "apply_workspace_patch",
+            {
+                "file_path": relative_bug_path,
+                "old_text": FIXTURE_BEFORE_TEXT,
+                "new_text": FIXTURE_AFTER_TEXT,
+                "expected_occurrences": 1,
+                "expected_before_sha256": preview_payload["before_sha256"],
+            },
+            destination=f"workspace:{relative_bug_path}",
         )
         applied_payload = json.loads(applied_raw)
         if not isinstance(applied_payload, dict) or applied_payload.get("applied") is not True:
@@ -1874,6 +1931,10 @@ async def run_native_software_engineering_fixture(
     finally:
         if cancel_context_token is not None:
             _NATIVE_CANCEL_EVENT.reset(cancel_context_token)
+        if job_context_token is not None:
+            _NATIVE_JOB_ID.reset(job_context_token)
+        if fencing_context_token is not None:
+            _NATIVE_FENCING_TOKEN.reset(fencing_context_token)
         _unregister_native_execution(request.job_id, execution_control)
 
 

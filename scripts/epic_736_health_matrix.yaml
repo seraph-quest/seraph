@@ -9,10 +9,10 @@ description: >-
   receipt from the owning runner; source presence never satisfies that gate.
 status_vocabulary: [pass, degraded, blocked, skipped, unknown, failed]
 evidence_mode_vocabulary: [configuration, static, integration, external_unverified, excluded]
-overall_status_precedence: [failed, blocked, unknown, degraded, skipped, pass]
+overall_status_precedence: [hard_failed, required_integration_nonpass, required_blocked_or_unknown, required_degraded, optional_nonpass, pass]
 overall_status_rules:
-  - failed always returns exit 4
-  - required integration evidence that is missing, invalid, stale, mismatched, ambiguous, or non-pass returns visibly degraded with exit 2
+  - configuration or static failures, and failed statuses outside a required integration receipt, return failed with exit 4
+  - required integration evidence that is missing, invalid, stale, mismatched, ambiguous, or any non-pass result including failed returns visibly degraded with exit 2
   - required blocked or unknown returns blocked with exit 3
   - required degraded returns degraded with exit 3
   - optional blocked, degraded, skipped, or unknown returns degraded with exit 2
@@ -26,10 +26,10 @@ exit_codes:
   internal: 70
 child_evidence:
   schema_version: 1
-  directory: operator-receipts/epic-736-child-evidence
+  directory: operator-receipts/epic-736-child-evidence (server-owned canonical workspace path)
   accepted_results: [pass, degraded, blocked, skipped, unknown, failed]
   required_fields: [schema_version, child_issue, criterion_id, commit, command, result, timestamp, hash]
-  hash: sha256 of canonical JSON object with the hash field omitted
+  hash: sha256 of canonical JSON object with the hash field omitted; path ownership and privacy are enforced before validation
   max_age_seconds: 86400
   current_revision_required: true
   required_criteria:

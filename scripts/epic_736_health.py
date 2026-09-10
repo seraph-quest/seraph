@@ -233,12 +233,35 @@ def _validate_child_evidence(
 
 def _evidence_path(path: Path | str | None) -> tuple[Path | None, str]:
     if path is not None:
-        requested = Path(path).expanduser()
-        if not requested.is_absolute():
-            requested = Path.cwd() / requested
-        return requested, "explicit"
+        raise RuntimeError(
+            "child evidence is server-owned; explicit evidence paths are not accepted"
+        )
     canonical = _workspace_root() / CHILD_EVIDENCE_DIRECTORY
     return (canonical, "canonical") if canonical.exists() else (None, "none")
+
+
+def _validate_server_owned_child_evidence(path: Path) -> None:
+    """Require the canonical, private child-evidence directory.
+
+    The health gate is allowed to consume receipts only from the production
+    workspace it resolves itself.  Caller-selected paths would let a local
+    invocation turn an arbitrary writable file into a release-gate pass.
+    """
+
+    workspace = _workspace_root()
+    canonical = workspace / CHILD_EVIDENCE_DIRECTORY
+    if os.path.normpath(str(path.absolute())) != os.path.normpath(str(canonical.absolute())):
+        raise RuntimeError("child evidence must use the server-owned canonical directory")
+    current = workspace
+    for component in CHILD_EVIDENCE_DIRECTORY.parts:
+        current = current / component
+        if not current.exists():
+            continue
+        metadata = current.lstat()
+        if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
+            raise RuntimeError("child evidence directory must be a regular directory")
+        if metadata.st_uid != os.getuid() or metadata.st_mode & 0o022:
+            raise RuntimeError("child evidence directory is not server-owned and private")
 
 
 def _load_child_evidence(path: Path | str | None, *, expected_commit: str) -> ChildEvidenceBundle:
@@ -248,6 +271,7 @@ def _load_child_evidence(path: Path | str | None, *, expected_commit: str) -> Ch
         return bundle
     try:
         _reject_symlink_components(requested.absolute())
+        _validate_server_owned_child_evidence(requested)
         if not requested.exists() or requested.is_symlink():
             bundle.errors["__global__"] = ["evidence path is missing or unsafe"]
             return bundle
@@ -264,7 +288,13 @@ def _load_child_evidence(path: Path | str | None, *, expected_commit: str) -> Ch
     for candidate in candidates:
         payload: Any = None
         try:
-            if candidate.is_symlink() or candidate.stat().st_size > CHILD_EVIDENCE_MAX_BYTES:
+            metadata = candidate.stat()
+            if (
+                candidate.is_symlink()
+                or metadata.st_uid != os.getuid()
+                or metadata.st_mode & 0o022
+                or metadata.st_size > CHILD_EVIDENCE_MAX_BYTES
+            ):
                 raise ChildEvidenceError("evidence file is unsafe or too large")
             payload = json.loads(candidate.read_text(encoding="utf-8"))
             evidence = _validate_child_evidence(payload, expected_commit=expected_commit)
@@ -483,16 +513,24 @@ def _excluded_check(criterion: Criterion) -> dict[str, Any]:
 
 
 def _overall(checks: list[dict[str, Any]]) -> tuple[str, int]:
-    statuses = {str(item["status"]) for item in checks}
-    if "failed" in statuses:
+    def _is_required_integration(item: dict[str, Any]) -> bool:
+        return bool(item.get("required")) and item.get("evidence_mode") == "integration"
+
+    # A child runner's ``failed`` result is a valid, trusted integration
+    # receipt. It reports that the child behavior failed; it does not mean
+    # that the collector itself hit a hard configuration or static-contract
+    # failure. Keep that result visibly degraded with the child-evidence exit
+    # code while preserving exit 4 for hard failures.
+    if any(
+        item["status"] == "failed" and not _is_required_integration(item)
+        for item in checks
+    ):
         return "failed", EXIT_FAILED
     # The offline collector may be run before child runners have emitted their
     # receipts.  Keep that state visibly degraded (never healthy) while using
     # the optional-evidence exit so an operator can collect the missing proof.
     if any(
-        item["required"]
-        and item["evidence_mode"] == "integration"
-        and item["status"] in {"unknown", "blocked", "degraded", "skipped"}
+        _is_required_integration(item) and item["status"] != "pass"
         for item in checks
     ):
         return "degraded", EXIT_OPTIONAL_DEGRADED
@@ -676,7 +714,7 @@ def _parser() -> argparse.ArgumentParser:
         dest="evidence_path",
         type=Path,
         default=None,
-        help="approved child receipt file or directory (defaults to the canonical child-evidence directory)",
+        help="deprecated compatibility option; child receipts must be in the server-owned canonical directory",
     )
     return parser
 

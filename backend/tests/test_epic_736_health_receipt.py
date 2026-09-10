@@ -215,10 +215,17 @@ def _child_evidence_payload(criterion_id: str, *, timestamp: datetime | None = N
 
 
 def _write_child_evidence(directory: Path, payload: object, name: str = "child.json") -> Path:
-    directory.mkdir()
+    directory.mkdir(parents=True)
+    directory.parent.chmod(0o700)
+    directory.chmod(0o700)
     path = directory / name
     path.write_text(json.dumps(payload), encoding="utf-8")
+    path.chmod(0o600)
     return path
+
+
+def _canonical_child_evidence(workspace: Path) -> Path:
+    return workspace / "operator-receipts" / "epic-736-child-evidence"
 
 
 def _integration_check(receipt: dict[str, object], criterion_id: str) -> dict[str, object]:
@@ -242,9 +249,9 @@ def test_missing_child_evidence_is_unknown_and_never_source_pass(tmp_path: Path,
 
 def test_malformed_child_evidence_is_unknown(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _configured(monkeypatch, tmp_path)
-    evidence_dir = tmp_path / "child-evidence"
+    evidence_dir = _canonical_child_evidence(tmp_path)
     _write_child_evidence(evidence_dir, "not-json")
-    receipt, exit_code, _ = health.build_receipt(evidence_dir)
+    receipt, exit_code, _ = health.build_receipt()
     behavior = _integration_check(receipt, "native_software.loop")
     assert behavior["status"] == "unknown"
     assert receipt["child_evidence"]["invalid_count"] >= 1
@@ -263,19 +270,19 @@ def test_stale_or_wrong_commit_child_evidence_is_unknown(tmp_path: Path, monkeyp
         payload["hash"] = health._child_evidence_digest(payload)
     elif case == "tampered_hash":
         payload["hash"] = "0" * 64
-    evidence_dir = tmp_path / "child-evidence"
+    evidence_dir = _canonical_child_evidence(tmp_path)
     _write_child_evidence(evidence_dir, payload)
-    receipt, exit_code, _ = health.build_receipt(evidence_dir)
+    receipt, exit_code, _ = health.build_receipt()
     assert _integration_check(receipt, "native_software.loop")["status"] == "unknown"
     assert exit_code == 2
 
 
 def test_current_passing_child_evidence_satisfies_only_behavior_gate(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _configured(monkeypatch, tmp_path)
-    evidence_dir = tmp_path / "child-evidence"
+    evidence_dir = _canonical_child_evidence(tmp_path)
     payload = _child_evidence_payload("native_software.loop")
     _write_child_evidence(evidence_dir, payload)
-    receipt, exit_code, _ = health.build_receipt(evidence_dir)
+    receipt, exit_code, _ = health.build_receipt()
     behavior = _integration_check(receipt, "native_software.loop")
     source = next(item for item in receipt["checks"] if item["id"] == "native_software.loop.source")
     assert behavior["status"] == "pass"
@@ -285,16 +292,45 @@ def test_current_passing_child_evidence_satisfies_only_behavior_gate(tmp_path: P
     assert exit_code == 2
 
 
+def test_recomputed_hash_receipt_outside_server_owned_path_is_rejected(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _configured(monkeypatch, tmp_path)
+    forged_path = tmp_path / "forged-child-evidence"
+    _write_child_evidence(forged_path, _child_evidence_payload("native_software.loop"))
+    with pytest.raises(RuntimeError, match="server-owned"):
+        health.build_receipt(forged_path)
+
+
 def test_nonpassing_child_result_cannot_become_pass(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _configured(monkeypatch, tmp_path)
-    evidence_dir = tmp_path / "child-evidence"
+    evidence_dir = _canonical_child_evidence(tmp_path)
     payload = _child_evidence_payload("native_software.loop")
     payload["result"] = "degraded"
     payload["hash"] = health._child_evidence_digest(payload)
     _write_child_evidence(evidence_dir, payload)
-    receipt, exit_code, _ = health.build_receipt(evidence_dir)
+    receipt, exit_code, _ = health.build_receipt()
     assert _integration_check(receipt, "native_software.loop")["status"] == "degraded"
     assert exit_code == 2
+
+
+def test_failed_child_result_is_degraded_with_child_exit_code(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _configured(monkeypatch, tmp_path)
+    evidence_dir = _canonical_child_evidence(tmp_path)
+    payload = _child_evidence_payload("native_software.loop")
+    payload["result"] = "failed"
+    payload["hash"] = health._child_evidence_digest(payload)
+    _write_child_evidence(evidence_dir, payload)
+    receipt, exit_code, _ = health.build_receipt()
+    behavior = _integration_check(receipt, "native_software.loop")
+    assert behavior["status"] == "failed"
+    assert receipt["overall_status"] == "degraded"
+    assert exit_code == 2
+
+
+def test_hard_static_failure_remains_failed_with_hard_exit_code() -> None:
+    assert health._overall([{"required": True, "evidence_mode": "static", "status": "failed"}]) == ("failed", 4)
 
 
 def test_optional_blocked_status_cannot_be_healthy() -> None:

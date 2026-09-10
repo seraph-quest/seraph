@@ -46,10 +46,14 @@ Required child criteria map #750 conversation identity/outbox, #748 native
 software, #749 paired edge, #751 audio capture/decode/persistence, #752
 Telegram transport, and #755 capability-pack lifecycle. Static source checks
 are informational; each behavioral gate requires one current schema-v1,
-ownership- and revision-bound child receipt under
-`operator-receipts/epic-736-child-evidence` (or `--child-evidence`). Missing,
-malformed, stale, tampered, wrong-revision, or ambiguous evidence is visibly
-`unknown`/`degraded` with exit 2, so source presence cannot satisfy behavior.
+ownership- and revision-bound child receipt under the server-resolved,
+server-owned `operator-receipts/epic-736-child-evidence` directory. Receipt
+files and directories must be private to the health process user; caller-
+selected `--child-evidence` paths are rejected. Missing, malformed, stale,
+tampered, wrong-revision, or ambiguous evidence is visibly `unknown`/`degraded`
+with exit 2, and a child-reported non-pass result, including `failed`, is
+visibly `degraded` with exit 2; hard configuration or static failures remain
+`failed` with exit 4. Source presence cannot satisfy behavior.
 
 ## Legend
 

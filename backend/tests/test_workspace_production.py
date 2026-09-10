@@ -15,7 +15,11 @@ from src.workspace import (
     ProductionWorkspaceConfigurationError,
     ProductionWorkspaceError,
     ProductionWorkspaceMountError,
+    WorkspaceLifecycleError,
+    backup_workspace,
+    canonical_workspace_registry,
     maintenance_fence,
+    reconcile_production_rollback,
     read_lifecycle_receipt,
     runtime_workspace_owner,
     resolve_production_workspace,
@@ -30,6 +34,25 @@ CLI = ROOT / "backend" / "workspace_cli.py"
 def _workspace(tmp_path: Path) -> Path:
     root = tmp_path / "production-data"
     (root / "artifacts").mkdir(parents=True)
+    for directory in (
+        "extensions",
+        "skills",
+        "workflows",
+        "runbooks",
+        "plans",
+        "reports",
+        "notes",
+    ):
+        (root / directory).mkdir()
+    for filename in (
+        "mcp-servers.json",
+        "stdio-proxies.json",
+        "extensions-state.json",
+        "starter-packs.json",
+        "model-fabric-settings.json",
+        "screen-analysis-settings.json",
+    ):
+        (root / filename).write_text("{}\n", encoding="utf-8")
     (root / ".vault-key").write_text("SECRET-SENTINEL\n", encoding="utf-8")
     (root / "soul.md").write_text("canonical\n", encoding="utf-8")
     (root / "artifacts" / "report.md").write_text("report\n", encoding="utf-8")
@@ -183,6 +206,13 @@ def test_maintenance_fence_rejects_duplicate_owner(tmp_path):
                 pass
 
 
+def test_production_lifecycle_requires_maintenance_fence(tmp_path):
+    root = _workspace(tmp_path)
+    registry = canonical_workspace_registry(root)
+    with pytest.raises(WorkspaceLifecycleError, match="maintenance fence"):
+        backup_workspace(root, registry=registry)
+
+
 def test_runtime_owner_blocks_maintenance_until_backend_releases_bind(tmp_path):
     root = _workspace(tmp_path)
     workspace = resolve_production_workspace(_env(root), base_dir=tmp_path)
@@ -291,6 +321,134 @@ def test_managed_cli_backup_restore_is_redacted_and_staged(tmp_path):
         host_root=root
     ).bind_identity_digest
     assert (root / "soul.md").read_text(encoding="utf-8") == "canonical\n"
+
+
+def test_managed_restore_hands_off_owner_lock_inode(tmp_path):
+    root = _workspace(tmp_path)
+    environment = os.environ.copy()
+    environment.update(_env(root))
+    environment["PYTHONPATH"] = str(ROOT / "backend")
+
+    backup = subprocess.run(
+        [sys.executable, str(CLI), "--base-dir", str(tmp_path), "backup", "--archive", "lock.zip"],
+        env=environment,
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert backup.returncode == 0, backup.stderr
+    lock = root / ".seraph-workspace-maintenance.lock"
+    before = lock.stat()
+    restore = subprocess.run(
+        [
+            sys.executable,
+            str(CLI),
+            "--base-dir",
+            str(tmp_path),
+            "restore",
+            "--archive",
+            json.loads(backup.stdout)["archive_path"],
+            "--confirm",
+        ],
+        env=environment,
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert restore.returncode == 0, restore.stderr
+    after = lock.stat()
+    assert (after.st_dev, after.st_ino) == (before.st_dev, before.st_ino)
+    assert after.st_nlink >= 2
+
+
+def test_managed_backup_rejects_missing_required_canonical_path(tmp_path):
+    root = _workspace(tmp_path)
+    (root / "soul.md").unlink()
+    environment = os.environ.copy()
+    environment.update(_env(root))
+    environment["PYTHONPATH"] = str(ROOT / "backend")
+    blocked = subprocess.run(
+        [sys.executable, str(CLI), "--base-dir", str(tmp_path), "backup"],
+        env=environment,
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert blocked.returncode == 78
+    assert json.loads(blocked.stdout)["reason_code"] == "workspace_state_invalid"
+    assert not workspace_backup_dir_for(root).exists()
+
+
+def test_rollback_reconciliation_preserves_existing_safety_row(tmp_path):
+    root = _workspace(tmp_path)
+    target = tmp_path / "rollback-target"
+    target.mkdir()
+    with sqlite3.connect(root / "seraph.db") as database:
+        database.executescript(
+            """
+            CREATE TABLE tombstones (id TEXT PRIMARY KEY, reason TEXT NOT NULL);
+            INSERT INTO tombstones VALUES ('same', 'archive');
+            INSERT INTO tombstones VALUES ('source-only', 'source');
+            """
+        )
+    with sqlite3.connect(target / "seraph.db") as database:
+        database.executescript(
+            """
+            CREATE TABLE tombstones (id TEXT PRIMARY KEY, reason TEXT NOT NULL);
+            INSERT INTO tombstones VALUES ('same', 'newer');
+            """
+        )
+    registry = canonical_workspace_registry(root)
+    workspace = resolve_production_workspace(_env(root), base_dir=tmp_path)
+    with maintenance_fence(workspace):
+        receipt = reconcile_production_rollback(
+            active=root,
+            target=target,
+            registry=registry,
+        )
+    with sqlite3.connect(target / "seraph.db") as database:
+        assert database.execute(
+            "SELECT reason FROM tombstones WHERE id = 'same'"
+        ).fetchone()[0] == "newer"
+        assert database.execute(
+            "SELECT reason FROM tombstones WHERE id = 'source-only'"
+        ).fetchone()[0] == "source"
+    assert receipt["rows_merged"]["tombstones"] == 1
+    assert receipt["rows_preserved"]["tombstones"] == 1
+
+
+def test_managed_status_blocks_replaced_root_identity(tmp_path):
+    root = _workspace(tmp_path)
+    environment = os.environ.copy()
+    environment.update(_env(root))
+    environment["PYTHONPATH"] = str(ROOT / "backend")
+    backup = subprocess.run(
+        [sys.executable, str(CLI), "--base-dir", str(tmp_path), "backup"],
+        env=environment,
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert backup.returncode == 0, backup.stderr
+    root.rename(tmp_path / "replaced-production-data")
+    _workspace(tmp_path)
+    status = subprocess.run(
+        [sys.executable, str(CLI), "--base-dir", str(tmp_path), "status"],
+        env=environment,
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert status.returncode == 0
+    payload = json.loads(status.stdout)
+    assert payload["status"] == "blocked"
+    assert payload["reason_code"] == "production_workspace_root_changed"
+    assert payload["root_identity_match"] is False
 
 
 def test_managed_cli_identity_is_redacted_and_reproducible(tmp_path):

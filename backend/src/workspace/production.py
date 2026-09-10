@@ -24,7 +24,12 @@ from pathlib import Path
 import stat
 from typing import Any, Iterator, Mapping
 
-from src.workspace.lifecycle import workspace_backup_dir, workspace_restore_staging_dir
+from src.workspace.lifecycle import (
+    _require_production_fence,
+    lifecycle_fence_marker,
+    workspace_backup_dir,
+    workspace_restore_staging_dir,
+)
 from src.workspace.state_registry import (
     WorkspaceStateError,
     canonical_workspace_root,
@@ -543,6 +548,7 @@ def reconcile_production_restore(
     authority rows are invalidated in the staged SQLite database; the optional
     calendar credential is dropped so it must be re-provisioned.
     """
+    _require_production_fence(registry)
     import sqlite3
 
     entries = source_manifest.get("entries")
@@ -557,8 +563,8 @@ def reconcile_production_restore(
         if not isinstance(logical_path, str):
             raise ProductionWorkspaceReconciliationError("derived restore path is invalid")
         if logical_path == MAINTENANCE_LOCK_NAME:
-            # The owner lock is recreated by the next backend or maintenance
-            # process and must never be copied into a staged generation.
+            # The owner lock is handed off by lifecycle code as a hard link;
+            # it is never treated as archive payload or authority state.
             continue
         if entry.get("file_type") == "directory":
             derived_directories.append(logical_path)
@@ -688,6 +694,7 @@ def reconcile_production_rollback(
     while reapplying those safety transitions and unioning durable tombstones,
     revocations, configuration history, and unresolved cost liabilities.
     """
+    _require_production_fence(registry)
     import sqlite3
 
     active_db = active / registry.config.database_path
@@ -720,6 +727,7 @@ def reconcile_production_rollback(
         return '"' + identifier.replace('"', '""') + '"'
 
     merged_rows: dict[str, int] = {}
+    preserved_rows: dict[str, int] = {}
     invalidated_sessions = 0
     blocked_authority = 0
     try:
@@ -742,12 +750,15 @@ def reconcile_production_rollback(
                     f"FROM {quote(table)}"
                 ).fetchall()
                 placeholders = ", ".join("?" for _ in columns)
+                before_changes = target_connection.total_changes
                 target_connection.executemany(
-                    f"INSERT OR REPLACE INTO {quote(table)} "
+                    f"INSERT OR IGNORE INTO {quote(table)} "
                     f"({', '.join(quote(column) for column in columns)}) VALUES ({placeholders})",
                     values,
                 )
-                merged_rows[table] = len(values)
+                inserted = target_connection.total_changes - before_changes
+                merged_rows[table] = inserted
+                preserved_rows[table] = max(0, len(values) - inserted)
 
             if "operator_sessions" in target_tables:
                 columns = set(table_columns(target_connection, "operator_sessions"))
@@ -807,6 +818,7 @@ def reconcile_production_rollback(
     return {
         "status": "ready",
         "rows_merged": merged_rows,
+        "rows_preserved": preserved_rows,
         "operator_sessions_invalidated": invalidated_sessions,
         "workflow_authority_rows_blocked": blocked_authority,
         "optional_credentials_invalidated": ["google_calendar_token.json"]
@@ -827,7 +839,8 @@ def maintenance_fence(workspace: ProductionWorkspace) -> Iterator[None]:
     descriptor = _open_fenced_lock(workspace, exclusive=True)
     try:
         try:
-            yield
+            with lifecycle_fence_marker():
+                yield
         finally:
             fcntl.flock(descriptor, fcntl.LOCK_UN)
     finally:

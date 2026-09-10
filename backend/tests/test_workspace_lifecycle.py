@@ -28,6 +28,8 @@ from src.workspace import (
     WorkspaceStateRegistry,
     backup_workspace,
     cleanup_workspace_backups,
+    maintenance_fence,
+    ProductionWorkspace,
     recover_interrupted_restore,
     restore_workspace,
     rollback_workspace,
@@ -145,8 +147,9 @@ def test_production_backup_stops_when_required_secret_is_missing(tmp_path):
     (root / ".vault-key").unlink()
     archive_path = tmp_path / "production-backup.zip"
 
-    with pytest.raises(WorkspaceStateError, match="required secret workspace path"):
-        backup_workspace(root, registry=production_registry, archive_path=archive_path)
+    with maintenance_fence(ProductionWorkspace(host_root=root)):
+        with pytest.raises(WorkspaceStateError, match="required secret workspace path"):
+            backup_workspace(root, registry=production_registry, archive_path=archive_path)
 
     assert not archive_path.exists()
     assert not workspace_backup_dir(root).exists()
@@ -438,6 +441,15 @@ def test_archive_member_bound_is_checked_before_payload_read(tmp_path, monkeypat
         restore_workspace(root, archive, registry=registry, confirm=True, restore_id="restore-size-01")
 
 
+def test_backup_rejects_cumulative_uncompressed_archive_bound(tmp_path, monkeypatch):
+    root, registry = _workspace(tmp_path)
+    monkeypatch.setattr(workspace_lifecycle, "MAX_ARCHIVE_UNCOMPRESSED_BYTES", 4)
+
+    with pytest.raises(WorkspaceLifecycleError, match="uncompressed payload"):
+        backup_workspace(root, registry=registry)
+    assert not workspace_backup_dir(root).exists()
+
+
 def test_interrupted_restore_is_recovered_from_journal(tmp_path):
     root, registry = _workspace(tmp_path)
     archive = Path(backup_workspace(root, registry=registry)["archive_path"])
@@ -452,7 +464,7 @@ def test_interrupted_restore_is_recovered_from_journal(tmp_path):
             interrupt_after_active_move=True,
         )
     assert not root.exists()
-    recovery = recover_interrupted_restore(root)
+    recovery = recover_interrupted_restore(root, registry=registry)
     assert recovery["status"] == "recovered"
     assert recovery["recovered"] == [
         {"restore_id": "restore-interrupted-01", "action": "promoted_staging"}
@@ -481,7 +493,7 @@ def test_recovery_rejects_tampered_journal_before_moving_roots(tmp_path):
     journal_path.write_text(json.dumps(journal), encoding="utf-8")
 
     with pytest.raises(WorkspaceLifecycleError, match="checksum"):
-        recover_interrupted_restore(root)
+        recover_interrupted_restore(root, registry=registry)
     assert not root.exists()
     assert (workspace_backup_dir(root) / restore_id / "previous-workspace").is_dir()
     assert (workspace_restore_staging_dir(root) / restore_id).is_dir()
@@ -508,7 +520,7 @@ def test_recovery_rejects_valid_but_unknown_journal_state(tmp_path):
     journal_path.write_text(json.dumps(journal), encoding="utf-8")
 
     with pytest.raises(WorkspaceLifecycleError, match="unknown state"):
-        recover_interrupted_restore(root)
+        recover_interrupted_restore(root, registry=registry)
     assert not root.exists()
     assert (workspace_backup_dir(root) / restore_id / "previous-workspace").is_dir()
     assert (workspace_restore_staging_dir(root) / restore_id).is_dir()
@@ -535,7 +547,7 @@ def test_recovery_rejects_journal_record_identity_mismatch(tmp_path):
     journal_path.write_text(json.dumps(journal), encoding="utf-8")
 
     with pytest.raises(WorkspaceLifecycleError, match="identity"):
-        recover_interrupted_restore(root)
+        recover_interrupted_restore(root, registry=registry)
     assert not root.exists()
     assert (workspace_backup_dir(root) / restore_id / "previous-workspace").is_dir()
     assert (workspace_restore_staging_dir(root) / restore_id).is_dir()
@@ -835,7 +847,7 @@ def test_recovery_keeps_evidence_for_unjournaled_moved_root(tmp_path):
 
 
 def test_cleanup_preserves_nonempty_unjournaled_restore_record(tmp_path):
-    root, _registry = _workspace(tmp_path)
+    root, registry = _workspace(tmp_path)
     restore_id = "restore-unjournaled-retention-01"
     record_root = workspace_backup_dir(root) / restore_id
     previous = record_root / "previous-workspace"
@@ -844,7 +856,7 @@ def test_cleanup_preserves_nonempty_unjournaled_restore_record(tmp_path):
     sentinel = previous / "soul.md"
     sentinel.write_text("preserve this recovery evidence\n", encoding="utf-8")
 
-    cleanup_workspace_backups(root, keep=0)
+    cleanup_workspace_backups(root, registry=registry, keep=0)
 
     assert sentinel.read_text(encoding="utf-8") == "preserve this recovery evidence\n"
     assert record_root.is_dir()
@@ -930,7 +942,7 @@ def test_cleanup_retention_is_bounded_to_derived_backup_sidecar(tmp_path):
         Path(backup_workspace(root, registry=registry)["archive_path"])
         for _ in range(4)
     ]
-    receipt = cleanup_workspace_backups(root, keep=1)
+    receipt = cleanup_workspace_backups(root, registry=registry, keep=1)
     assert receipt["retention"] == 1
     assert len(receipt["retained"]) == 1
     assert len(receipt["removed"]) == 3

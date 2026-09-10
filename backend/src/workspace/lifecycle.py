@@ -19,6 +19,8 @@ as an already-completed operation.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import hashlib
@@ -55,7 +57,13 @@ DEFAULT_RETENTION = 3
 MAX_ARCHIVE_MEMBER_BYTES = 512 * 1024 * 1024
 MAX_ARCHIVE_BYTES = 2 * 1024 * 1024 * 1024
 MAX_ARCHIVE_MEMBERS = 4096
+MAX_ARCHIVE_UNCOMPRESSED_BYTES = 512 * 1024 * 1024
 MAX_JOURNAL_BYTES = 1024 * 1024
+_OWNER_LOCK_LOGICAL_PATH = ".seraph-workspace-maintenance.lock"
+_LIFECYCLE_FENCE_DEPTH: ContextVar[int] = ContextVar(
+    "workspace_lifecycle_fence_depth",
+    default=0,
+)
 _SECRET_STATE_CLASSES = frozenset(
     {WorkspaceStateClass.SECRET.value, WorkspaceStateClass.SECRET_RECOVERY.value}
 )
@@ -99,6 +107,26 @@ class MissingSecretMaterialError(WorkspaceLifecycleError):
 
 class InterruptedWorkspaceRestore(WorkspaceLifecycleError):
     """Raised by the testable interruption hook after the active root moved."""
+
+
+@contextmanager
+def lifecycle_fence_marker():
+    """Mark lifecycle code as running under the production maintenance fence."""
+    token = _LIFECYCLE_FENCE_DEPTH.set(_LIFECYCLE_FENCE_DEPTH.get() + 1)
+    try:
+        yield
+    finally:
+        _LIFECYCLE_FENCE_DEPTH.reset(token)
+
+
+def _require_production_fence(registry: WorkspaceStateRegistry) -> None:
+    if (
+        registry.config.identity.root_kind is WorkspaceRootKind.PRODUCTION
+        and _LIFECYCLE_FENCE_DEPTH.get() <= 0
+    ):
+        raise WorkspaceLifecycleError(
+            "production workspace lifecycle requires the maintenance fence"
+        )
 
 
 @dataclass(frozen=True)
@@ -321,8 +349,22 @@ def _assert_root_identity(
     return actual_identity
 
 
-def _replace_root(source: Path, destination: Path, *, label: str) -> None:
-    """Rename one verified directory without following or replacing a link."""
+def _replace_root(
+    source: Path,
+    destination: Path,
+    *,
+    label: str,
+    expected_identity: object | None = None,
+    check_path_digest: bool = True,
+) -> None:
+    """Rename a root after a final identity check immediately before replace."""
+    if expected_identity is not None:
+        _assert_root_identity(
+            source,
+            expected_identity,
+            label=f"{label} source",
+            check_path_digest=check_path_digest,
+        )
     _assert_no_symlink_components(source, label=f"{label} source")
     _assert_no_symlink_components(destination, label=f"{label} destination")
     _assert_not_symlink(source, label=f"{label} source")
@@ -622,6 +664,93 @@ def _manifest_entries(manifest: dict[str, Any]) -> dict[str, dict[str, Any]]:
     return entries
 
 
+def _required_canonical_paths(registry: WorkspaceStateRegistry) -> set[str]:
+    return {
+        spec.logical_path
+        for spec in registry.config.declared_paths
+        if spec.required and spec.state_class is WorkspaceStateClass.CANONICAL
+    }
+
+
+def _assert_required_canonical_paths(
+    entries: dict[str, dict[str, Any]],
+    registry: WorkspaceStateRegistry,
+    *,
+    error_type: type[WorkspaceLifecycleError] = WorkspaceLifecycleError,
+) -> None:
+    """Require every declared required canonical root in a source manifest."""
+    missing = sorted(_required_canonical_paths(registry) - set(entries))
+    if missing:
+        raise error_type(
+            "workspace manifest is incomplete; missing required canonical paths: "
+            + ", ".join(missing)
+        )
+
+
+def _owner_lock_path(root: Path) -> Path:
+    return root / _OWNER_LOCK_LOGICAL_PATH
+
+
+def _ensure_owner_lock_handoff(
+    source_root: Path,
+    destination_root: Path,
+    registry: WorkspaceStateRegistry,
+) -> None:
+    """Carry the owner-lock inode into the next root generation.
+
+    Production ownership is bound to the lock inode inside the bind.  A hard
+    link is installed before a root rename so the descriptor already held by
+    the maintenance fence remains the descriptor used by the promoted root.
+    """
+    if registry.config.identity.root_kind is not WorkspaceRootKind.PRODUCTION:
+        return
+    source_lock = _owner_lock_path(source_root)
+    destination_lock = _owner_lock_path(destination_root)
+    _assert_no_symlink_components(source_lock, label="production owner lock source")
+    _assert_no_symlink_components(destination_lock, label="production owner lock destination")
+    try:
+        source_metadata = source_lock.lstat()
+    except OSError as exc:
+        raise WorkspaceLifecycleError("production owner lock source is unavailable") from exc
+    if not stat.S_ISREG(source_metadata.st_mode):
+        raise WorkspaceLifecycleError("production owner lock source must be a regular file")
+    try:
+        destination_metadata = destination_lock.lstat()
+    except FileNotFoundError:
+        destination_metadata = None
+    except OSError as exc:
+        raise WorkspaceLifecycleError("production owner lock destination is unreadable") from exc
+    if destination_metadata is not None:
+        if stat.S_ISLNK(destination_metadata.st_mode) or not stat.S_ISREG(destination_metadata.st_mode):
+            raise WorkspaceLifecycleError("production owner lock destination is unsafe")
+        if (
+            destination_metadata.st_dev == source_metadata.st_dev
+            and destination_metadata.st_ino == source_metadata.st_ino
+        ):
+            return
+
+    temporary = destination_lock.with_name(f".{destination_lock.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        os.link(source_lock, temporary, follow_symlinks=False)
+        os.replace(temporary, destination_lock)
+        _fsync_directory(destination_root)
+    except OSError as exc:
+        try:
+            temporary.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise WorkspaceLifecycleError("production owner lock handoff could not be completed") from exc
+    try:
+        linked_metadata = destination_lock.lstat()
+    except OSError as exc:
+        raise WorkspaceLifecycleError("production owner lock handoff cannot be verified") from exc
+    if (
+        linked_metadata.st_dev != source_metadata.st_dev
+        or linked_metadata.st_ino != source_metadata.st_ino
+    ):
+        raise WorkspaceLifecycleError("production owner lock handoff identity mismatch")
+
+
 def _archive_manifest(
     source_manifest: dict[str, Any],
     registry: WorkspaceStateRegistry,
@@ -717,8 +846,11 @@ def backup_workspace(
     """Create an atomic, versioned archive from the registry inventory."""
     resolved_root = canonical_workspace_root(root)
     _registry_root(resolved_root, registry)
+    _require_production_fence(registry)
     root_identity = _root_identity(resolved_root, label="active workspace root")
     source_manifest = registry.build_manifest()
+    source_entries = _manifest_entries(source_manifest)
+    _assert_required_canonical_paths(source_entries, registry)
     _assert_root_identity(
         resolved_root,
         root_identity,
@@ -726,14 +858,17 @@ def backup_workspace(
     )
     archive_manifest = _archive_manifest(source_manifest, registry)
     destination = _archive_path(resolved_root, archive_path)
-    _ensure_directory(destination.parent, label="backup archive directory")
     temporary = destination.with_name(f".{destination.name}.{uuid.uuid4().hex}.tmp")
-    source_entries = _manifest_entries(source_manifest)
     archive_entries = {
         item["logical_path"]: item
         for item in archive_manifest["archive_entries"]
         if item["archived"]
     }
+    archived_bytes = 0
+    archive_total_limit = min(
+        MAX_ARCHIVE_UNCOMPRESSED_BYTES,
+        registry.config.max_total_bytes,
+    )
     payloads: dict[str, bytes] = {}
     try:
         for logical_path in sorted(archive_entries):
@@ -761,9 +896,15 @@ def backup_workspace(
                             raise WorkspaceLifecycleError(f"workspace changed during backup: {logical_path}")
             elif digest_scope != "redacted_metadata":
                 raise WorkspaceLifecycleError(f"unsupported workspace digest scope: {logical_path}")
+            archived_bytes += len(payload)
+            if archived_bytes > archive_total_limit:
+                raise WorkspaceLifecycleError(
+                    "archive uncompressed payload exceeds bounded total size"
+                )
             entry["payload_sha256"] = _sha256_bytes(payload)
             payloads[logical_path] = payload
         _refresh_manifest_digest(archive_manifest)
+        _ensure_directory(destination.parent, label="backup archive directory")
         with zipfile.ZipFile(temporary, "w", compression=zipfile.ZIP_STORED) as archive:
             archive.writestr(_zip_info(MANIFEST_MEMBER, 0o600), _canonical_json(archive_manifest).encode("utf-8"))
             for logical_path in sorted(archive_entries):
@@ -888,11 +1029,31 @@ def _load_archive(
                 or manifest.get("workspace_version") != source_manifest.get("workspace_version")
             ):
                 raise InvalidWorkspaceArchiveError("archive workspace identity metadata mismatch")
+            if source_manifest.get("workspace_id") != registry.config.identity.workspace_id:
+                raise InvalidWorkspaceArchiveError("archive workspace identity does not match target")
+            if source_manifest.get("workspace_version") != registry.config.workspace_version:
+                raise InvalidWorkspaceArchiveError("archive workspace version does not match target")
+            if source_manifest.get("root_kind") != registry.config.identity.root_kind.value:
+                raise InvalidWorkspaceArchiveError("archive workspace root kind does not match target")
             source_entries = _manifest_entries(source_manifest)
+            if len(source_entries) > registry.config.max_entries:
+                raise InvalidWorkspaceArchiveError("archive source manifest has too many entries")
+            _assert_required_canonical_paths(
+                source_entries,
+                registry,
+                error_type=InvalidWorkspaceArchiveError,
+            )
             archive_entries = manifest.get("archive_entries")
             if not isinstance(archive_entries, list):
                 raise InvalidWorkspaceArchiveError("archive entry index is missing")
+            if len(archive_entries) > registry.config.max_entries:
+                raise InvalidWorkspaceArchiveError("archive entry index has too many entries")
             indexed: dict[str, dict[str, Any]] = {}
+            archived_bytes = 0
+            archive_total_limit = min(
+                MAX_ARCHIVE_UNCOMPRESSED_BYTES,
+                registry.config.max_total_bytes,
+            )
             for raw in archive_entries:
                 if not isinstance(raw, dict):
                     raise InvalidWorkspaceArchiveError("archive entry index is invalid")
@@ -923,6 +1084,24 @@ def _load_archive(
                 for field in ("file_type", "mode", "size_bytes", "sha256", "digest_scope"):
                     if raw.get(field) != source_entry.get(field):
                         raise InvalidWorkspaceArchiveError(f"archive metadata drift: {logical_path}")
+                source_size = source_entry.get("size_bytes")
+                raw_size = raw.get("size_bytes")
+                if (
+                    isinstance(source_size, bool)
+                    or not isinstance(source_size, int)
+                    or source_size < 0
+                    or isinstance(raw_size, bool)
+                    or not isinstance(raw_size, int)
+                    or raw_size != source_size
+                    or source_size > registry.config.max_file_bytes
+                ):
+                    raise InvalidWorkspaceArchiveError(f"archive size metadata is invalid: {logical_path}")
+                if raw.get("archived"):
+                    archived_bytes += source_size
+                    if archived_bytes > archive_total_limit:
+                        raise InvalidWorkspaceArchiveError(
+                            "archive uncompressed payload exceeds bounded total size"
+                        )
                 source_has_required = "required" in source_entry
                 raw_has_required = "required" in raw
                 source_required = source_entry.get("required", path_spec.required)
@@ -976,10 +1155,15 @@ def _load_archive(
                 logical_path = _safe_logical_path(logical_path, field="archive payload path")
                 if info.file_size < 0 or info.file_size > MAX_ARCHIVE_MEMBER_BYTES:
                     raise InvalidWorkspaceArchiveError("archive member exceeds bounded size")
+                entry = indexed[logical_path]
+                expected_size = entry.get("size_bytes")
+                if not isinstance(expected_size, int) or isinstance(expected_size, bool):
+                    raise InvalidWorkspaceArchiveError(f"archive size metadata is invalid: {logical_path}")
+                if info.file_size != expected_size:
+                    raise InvalidWorkspaceArchiveError(f"archive payload size mismatch: {logical_path}")
                 payload = archive.read(info)
                 if len(payload) > MAX_ARCHIVE_MEMBER_BYTES:
                     raise InvalidWorkspaceArchiveError("archive member exceeds bounded size")
-                entry = indexed[logical_path]
                 payload_digest = entry.get("payload_sha256")
                 if not isinstance(payload_digest, str):
                     raise InvalidWorkspaceArchiveError(f"archive payload digest is missing: {logical_path}")
@@ -1101,6 +1285,7 @@ def _materialize_stage(
         marker_path = _safe_entry_path(stage, marker, registry)
         marker_mode = int(entries.get(marker, {}).get("mode", 0o600)) & 0o7777
         _write_regular(marker_path, SYNTHETIC_MARKER_BYTES, marker_mode)
+    _ensure_owner_lock_handoff(root, stage, registry)
     for current, _dirs, _files in os.walk(stage, topdown=False, followlinks=False):
         _fsync_directory(Path(current))
     return _validate_stage(stage, loaded, registry)
@@ -1122,6 +1307,7 @@ def _validate_stage(
 ) -> dict[str, Any]:
     source_manifest = loaded.manifest["workspace_manifest"]
     entries = _manifest_entries(source_manifest)
+    _assert_required_canonical_paths(entries, registry)
     archive_entries = {
         item["logical_path"]: item
         for item in loaded.manifest.get("archive_entries", [])
@@ -1156,6 +1342,8 @@ def _validate_stage(
         dirs.sort()
         files.sort()
     allowed_extra = {registry.config.identity.synthetic_marker}
+    if registry.config.identity.root_kind is WorkspaceRootKind.PRODUCTION:
+        allowed_extra.add(_OWNER_LOCK_LOGICAL_PATH)
     if not actual_paths.issubset(expected_paths | allowed_extra):
         unknown = sorted(actual_paths - expected_paths - allowed_extra)
         raise WorkspaceLifecycleError("staged workspace contains unknown entries: " + ", ".join(unknown))
@@ -1397,6 +1585,7 @@ def restore_workspace(
         raise WorkspaceLifecycleError("restore requires explicit confirm=True")
     resolved_root = canonical_workspace_root(root)
     _registry_root(resolved_root, registry)
+    _require_production_fence(registry)
     if (
         registry.config.identity.root_kind is WorkspaceRootKind.PRODUCTION
         and reconcile_restore is None
@@ -1469,7 +1658,12 @@ def restore_workspace(
             label="active workspace root before promotion",
         )
         _write_journal(journal_file, journal)
-        _replace_root(resolved_root, previous, label="pre-restore root move")
+        _replace_root(
+            resolved_root,
+            previous,
+            label="pre-restore root move",
+            expected_identity=root_identity,
+        )
         _assert_root_identity(
             previous,
             root_identity,
@@ -1488,7 +1682,12 @@ def restore_workspace(
         )
         if _path_present(resolved_root):
             raise WorkspaceLifecycleError("active workspace root reappeared during promotion")
-        _replace_root(stage, resolved_root, label="staged workspace promotion")
+        _replace_root(
+            stage,
+            resolved_root,
+            label="staged workspace promotion",
+            expected_identity=staged_root_identity,
+        )
         _assert_root_identity(
             resolved_root,
             staged_root_identity,
@@ -1501,7 +1700,7 @@ def restore_workspace(
         journal["completed_at"] = _utc_timestamp()
         _write_journal(journal_file, journal)
         cleanup_receipt = (
-            cleanup_workspace_backups(resolved_root, keep=retention)
+            cleanup_workspace_backups(resolved_root, registry=registry, keep=retention)
             if retention is not None
             else {"status": "skipped"}
         )
@@ -1529,19 +1728,18 @@ def restore_workspace(
 def recover_interrupted_restore(
     root: str | os.PathLike[str],
     *,
-    registry: WorkspaceStateRegistry | None = None,
+    registry: WorkspaceStateRegistry,
 ) -> dict[str, Any]:
     """Recover journaled staged/half-promoted restores without guessing.
 
     Every candidate journal and sidecar state is preflighted before the first
-    recovery transition.  ``registry`` is optional for direct callers; the
-    journal's root binding is always checked, and a supplied registry adds its
-    workspace identity to that binding.
+    recovery transition.  The registry is required so the journal's workspace
+    identity and production maintenance fence policy are always explicit.
     """
     resolved_root = canonical_workspace_root(root)
-    if registry is not None:
-        _registry_root(resolved_root, registry)
-    expected_workspace_id = registry.config.identity.workspace_id if registry is not None else None
+    _registry_root(resolved_root, registry)
+    _require_production_fence(registry)
+    expected_workspace_id = registry.config.identity.workspace_id
     expected_root_digest = _workspace_root_digest(resolved_root)
     backup_root = workspace_backup_dir(resolved_root)
     staging_root = workspace_restore_staging_dir(resolved_root)
@@ -1746,7 +1944,13 @@ def recover_interrupted_restore(
         )
         if status == "staged":
             if not active_present and previous_present and stage_present:
-                _replace_root(stage, resolved_root, label="recovered staged workspace promotion")
+                _ensure_owner_lock_handoff(previous, stage, registry)
+                _replace_root(
+                    stage,
+                    resolved_root,
+                    label="recovered staged workspace promotion",
+                    expected_identity=journal["stage_root_identity"],
+                )
                 _assert_root_identity(
                     resolved_root,
                     journal["stage_root_identity"],
@@ -1758,7 +1962,13 @@ def recover_interrupted_restore(
                 journal["promoted_root_identity"] = journal["stage_root_identity"]
                 action = "promoted_staging"
             elif not active_present and previous_present and not stage_present:
-                _replace_root(previous, resolved_root, label="recovered pre-restore rollback")
+                _replace_root(
+                    previous,
+                    resolved_root,
+                    label="recovered pre-restore rollback",
+                    expected_identity=journal["workspace_root_identity"],
+                    check_path_digest=False,
+                )
                 _assert_root_identity(
                     resolved_root,
                     journal["workspace_root_identity"],
@@ -1798,7 +2008,14 @@ def recover_interrupted_restore(
                     f"interrupted restore {restore_id} has an ambiguous active root"
                 )
             if stage_present:
-                _replace_root(stage, resolved_root, label="recovered staged workspace promotion")
+                if previous_present:
+                    _ensure_owner_lock_handoff(previous, stage, registry)
+                _replace_root(
+                    stage,
+                    resolved_root,
+                    label="recovered staged workspace promotion",
+                    expected_identity=journal["stage_root_identity"],
+                )
                 _assert_root_identity(
                     resolved_root,
                     journal["stage_root_identity"],
@@ -1810,7 +2027,13 @@ def recover_interrupted_restore(
                 journal["promoted_root_identity"] = journal["stage_root_identity"]
                 action = "promoted_staging"
             elif previous_present:
-                _replace_root(previous, resolved_root, label="recovered pre-restore rollback")
+                _replace_root(
+                    previous,
+                    resolved_root,
+                    label="recovered pre-restore rollback",
+                    expected_identity=journal["workspace_root_identity"],
+                    check_path_digest=False,
+                )
                 _assert_root_identity(
                     resolved_root,
                     journal["workspace_root_identity"],
@@ -1837,7 +2060,15 @@ def recover_interrupted_restore(
                     f"rollback {restore_id} has an ambiguous active root"
                 )
             if previous_present:
-                _replace_root(previous, resolved_root, label="recovered workspace rollback")
+                if current_present:
+                    _ensure_owner_lock_handoff(current, previous, registry)
+                _replace_root(
+                    previous,
+                    resolved_root,
+                    label="recovered workspace rollback",
+                    expected_identity=journal["workspace_root_identity"],
+                    check_path_digest=False,
+                )
                 _assert_root_identity(
                     resolved_root,
                     journal["workspace_root_identity"],
@@ -1849,7 +2080,15 @@ def recover_interrupted_restore(
                 _write_journal(journal_file, journal)
                 recovered.append({"restore_id": restore_id, "action": "restored_previous"})
             elif current_present:
-                _replace_root(current, resolved_root, label="recovered current workspace rollback")
+                _replace_root(
+                    current,
+                    resolved_root,
+                    label="recovered current workspace rollback",
+                    expected_identity=journal.get(
+                        "promoted_root_identity", journal["stage_root_identity"]
+                    ),
+                    check_path_digest=False,
+                )
                 _assert_root_identity(
                     resolved_root,
                     journal.get("promoted_root_identity", journal["stage_root_identity"]),
@@ -1868,7 +2107,14 @@ def recover_interrupted_restore(
             # update was durably written.  Restore the retained pre-restore
             # root only when both rename endpoints make that state explicit.
             if previous_present and current_present:
-                _replace_root(previous, resolved_root, label="recovered promoted rollback")
+                _ensure_owner_lock_handoff(current, previous, registry)
+                _replace_root(
+                    previous,
+                    resolved_root,
+                    label="recovered promoted rollback",
+                    expected_identity=journal["workspace_root_identity"],
+                    check_path_digest=False,
+                )
                 _assert_root_identity(
                     resolved_root,
                     journal["workspace_root_identity"],
@@ -1900,6 +2146,7 @@ def rollback_workspace(
         raise WorkspaceLifecycleError("rollback requires a workspace registry identity")
     resolved_root = canonical_workspace_root(root)
     _registry_root(resolved_root, registry)
+    _require_production_fence(registry)
     restore_id = _safe_restore_id(restore_id)
     backup_root = workspace_backup_dir(resolved_root)
     journal_file = _journal_path(backup_root, restore_id)
@@ -1948,7 +2195,13 @@ def rollback_workspace(
             label="pre-restore workspace root after reconciliation",
             check_path_digest=False,
         )
-    _replace_root(resolved_root, current, label="rollback active root move")
+    _replace_root(
+        resolved_root,
+        current,
+        label="rollback active root move",
+        expected_identity=journal.get("promoted_root_identity", journal["stage_root_identity"]),
+        check_path_digest=False,
+    )
     _assert_root_identity(
         current,
         journal.get("promoted_root_identity", journal["stage_root_identity"]),
@@ -1967,7 +2220,14 @@ def rollback_workspace(
         )
         if _path_present(resolved_root):
             raise WorkspaceLifecycleError("active workspace root reappeared during rollback")
-        _replace_root(previous, resolved_root, label="rollback workspace promotion")
+        _ensure_owner_lock_handoff(current, previous, registry)
+        _replace_root(
+            previous,
+            resolved_root,
+            label="rollback workspace promotion",
+            expected_identity=journal["workspace_root_identity"],
+            check_path_digest=False,
+        )
         _assert_root_identity(
             resolved_root,
             journal["workspace_root_identity"],
@@ -1991,12 +2251,15 @@ def rollback_workspace(
 def cleanup_workspace_backups(
     root: str | os.PathLike[str],
     *,
+    registry: WorkspaceStateRegistry,
     keep: int = DEFAULT_RETENTION,
 ) -> dict[str, Any]:
     """Remove only old derived backup records/archives, with bounded retention."""
     if not isinstance(keep, int) or keep < 0 or keep > 100:
         raise WorkspaceLifecycleError("backup retention must be an integer from 0 through 100")
     resolved_root = canonical_workspace_root(root)
+    _registry_root(resolved_root, registry)
+    _require_production_fence(registry)
     backup_root = workspace_backup_dir(resolved_root)
     if not backup_root.exists():
         return {"status": "clean", "retained": [], "removed": []}
@@ -2059,6 +2322,7 @@ __all__ = [
     "MAX_ARCHIVE_BYTES",
     "MAX_ARCHIVE_MEMBERS",
     "MAX_ARCHIVE_MEMBER_BYTES",
+    "MAX_ARCHIVE_UNCOMPRESSED_BYTES",
     "MAX_JOURNAL_BYTES",
     "InterruptedWorkspaceRestore",
     "InvalidWorkspaceArchiveError",

@@ -254,7 +254,11 @@ async def websocket_chat(websocket: WebSocket):
         await websocket.close(code=4401, reason=exc.code)
         return
     await websocket.accept()
-    ws_manager.connect(websocket)
+    ws_manager.connect(
+        websocket,
+        owner_principal_id=operator.principal.principal_id,
+        operator_session_id=operator.session_id,
+    )
     auth_revoked = asyncio.Event()
     revocation_guard = Event()
     auth_cookie = websocket.cookies.get(settings.operator_auth_cookie_name) if auth_enabled() else None
@@ -337,6 +341,11 @@ async def websocket_chat(websocket: WebSocket):
                     auth_revoked.set()
                     revocation_guard.set()
                     raise _OperatorSessionRevoked
+                ws_manager.bind_operator(
+                    websocket,
+                    owner_principal_id=operator.principal.principal_id,
+                    operator_session_id=operator.session_id,
+                )
             try:
                 data = json.loads(raw)
                 ws_msg = WSMessage(**data)
@@ -408,6 +417,7 @@ async def websocket_chat(websocket: WebSocket):
                     ws_msg.session_id,
                     owner_principal_id=operator.principal.principal_id,
                 )
+                ws_manager.bind_conversation(websocket, session.id)
             except SessionNotFoundError as exc:
                 active_turn_session_id = exc.session_id
                 active_turn_completed = True

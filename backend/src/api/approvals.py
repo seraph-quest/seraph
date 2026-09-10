@@ -5,7 +5,7 @@ from src.approval.repository import approval_repository
 from src.approval.surfaces import approval_surface_metadata
 from src.agent.session import session_manager
 from src.audit.repository import audit_repository
-from src.conversation.identity import redact_attachment_refs
+from src.conversation.identity import validate_attachment_refs
 from src.tools.policy import get_current_tool_policy_mode
 
 router = APIRouter()
@@ -36,7 +36,7 @@ def _approval_attachment_refs(request) -> list[dict]:
         owner_principal_id = str(
             getattr(request, "owner_principal_id", None) or ""
         ).strip() or None
-        return redact_attachment_refs(parsed, owner_principal_id=owner_principal_id)
+        return validate_attachment_refs(parsed, owner_principal_id=owner_principal_id)
     except Exception:
         return []
 
@@ -201,6 +201,11 @@ async def approve_request(approval_id: str, request: Request):
     request = await approval_repository.resolve(approval_id, "approved")
     if request is None:
         raise HTTPException(status_code=404, detail="Approval request not found")
+    if request.status != "approved":
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "approval_expired", "status": request.status},
+        )
 
     await audit_repository.log_event(
         session_id=request.session_id,
@@ -246,6 +251,11 @@ async def deny_request(approval_id: str, request: Request):
     request = await approval_repository.resolve(approval_id, "denied")
     if request is None:
         raise HTTPException(status_code=404, detail="Approval request not found")
+    if request.status != "denied":
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "approval_expired", "status": request.status},
+        )
 
     await audit_repository.log_event(
         session_id=request.session_id,

@@ -48,7 +48,6 @@ from src.db.models import (
 from src.conversation.identity import (
     ConversationIdentityError,
     build_conversation_identity,
-    redact_attachment_refs,
     validate_attachment_refs,
 )
 
@@ -185,21 +184,44 @@ def _row_to_notification(row: NativeNotificationOutbox) -> NativeNotification:
         transport=row.transport,
         correlation_id=row.correlation_id,
         causation_id=row.causation_id,
-        attachment_refs=_attachment_refs_from_json(row.attachment_refs_json),
+        attachment_refs=_attachment_refs_from_json(
+            row.attachment_refs_json,
+            owner_principal_id=row.owner_principal_id,
+        ),
         degraded_state=row.degraded_state,
     )
 
 
-def _attachment_refs_from_json(value: str | None) -> list[dict[str, Any]]:
+def _attachment_refs_from_json(
+    value: str | None,
+    *,
+    owner_principal_id: str | None = None,
+    raise_on_error: bool = False,
+) -> list[dict[str, Any]]:
     try:
         parsed = json.loads(value or "[]")
-    except (TypeError, ValueError):
+    except (TypeError, ValueError) as exc:
+        if raise_on_error:
+            raise ConversationIdentityError(
+                "attachment_reference_invalid",
+                "Stored attachment references are malformed.",
+            ) from exc
         return []
     if not isinstance(parsed, list):
+        if raise_on_error:
+            raise ConversationIdentityError(
+                "attachment_reference_invalid",
+                "Stored attachment references are malformed.",
+            )
         return []
     try:
-        return redact_attachment_refs(parsed)
+        # Stored rows contain the signed digest/timestamp proof rather than a
+        # bearer receipt. Revalidate it on every read so an expired quarantine
+        # reference is never returned to a daemon or operator surface.
+        return validate_attachment_refs(parsed, owner_principal_id=owner_principal_id)
     except ConversationIdentityError:
+        if raise_on_error:
+            raise
         return []
 
 
@@ -707,6 +729,47 @@ class NativeNotificationQueue:
                 continue
             await db.refresh(row)
             await self._finish_attempt(db, row, status="unknown", now=now, error_code=reason)
+
+        # Quarantine receipts are short lived. A worker may have persisted a
+        # valid reference and then remained offline until its proof expired;
+        # make that intent terminal before claim/read can expose it.
+        attachment_result = await db.execute(
+            select(NativeNotificationOutbox).where(
+                NativeNotificationOutbox.status.in_(ACTIVE_STATUSES),
+            )
+        )
+        for row in attachment_result.scalars().all():
+            try:
+                _attachment_refs_from_json(
+                    row.attachment_refs_json,
+                    owner_principal_id=row.owner_principal_id,
+                    raise_on_error=True,
+                )
+            except ConversationIdentityError as exc:
+                reason = exc.code if exc.code == "attachment_receipt_expired" else "attachment_reference_invalid"
+                transition = await db.execute(
+                    update(NativeNotificationOutbox)
+                    .execution_options(synchronize_session=False)
+                    .where(
+                        NativeNotificationOutbox.id == row.id,
+                        NativeNotificationOutbox.status.in_(ACTIVE_STATUSES),
+                        NativeNotificationOutbox.fencing_token == row.fencing_token,
+                    )
+                    .values(
+                        status="cancelled",
+                        cancelled_at=now,
+                        last_error=reason,
+                        degraded_state=reason,
+                        lease_owner=None,
+                        lease_expires_at=None,
+                        attachment_refs_json="[]",
+                        updated_at=now,
+                    )
+                )
+                if transition.rowcount != 1:
+                    continue
+                await db.refresh(row)
+                await self._finish_attempt(db, row, status="cancelled", now=now, error_code=reason)
 
         # A notification bound to an operator/session is an authorized intent,
         # not an ambient broadcast. Re-check both bindings on every queue

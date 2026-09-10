@@ -13,7 +13,7 @@ from sqlmodel import select, col
 from config.settings import settings
 from src.approval.runtime import get_current_trust_principal, reset_runtime_context, set_runtime_context
 from src.audit.runtime import log_background_task_event
-from src.conversation.identity import redact_attachment_refs, validate_attachment_refs
+from src.conversation.identity import ConversationIdentityError, validate_attachment_refs
 from src.model_fabric.caller_context import build_canonical_inference_context
 from src.db.engine import get_session
 from src.db.models import (
@@ -1049,10 +1049,20 @@ class SessionManager:
                     metadata = json.loads(message.metadata_json) if message.metadata_json else None
                 except (TypeError, json.JSONDecodeError):
                     metadata = None
+                attachment_refs_status = "available"
                 try:
-                    attachment_refs = redact_attachment_refs(message.attachment_refs_json and json.loads(message.attachment_refs_json))
+                    attachment_refs = validate_attachment_refs(
+                        message.attachment_refs_json and json.loads(message.attachment_refs_json),
+                        owner_principal_id=message.owner_principal_id,
+                    )
+                except ConversationIdentityError as exc:
+                    attachment_refs = []
+                    attachment_refs_status = (
+                        "expired" if exc.code == "attachment_receipt_expired" else "unavailable"
+                    )
                 except Exception:
                     attachment_refs = []
+                    attachment_refs_status = "unavailable"
                 output.append(
                     {
                         "id": message.id,
@@ -1072,6 +1082,7 @@ class SessionManager:
                         "correlation_id": message.correlation_id,
                         "causation_id": message.causation_id,
                         "attachment_refs": attachment_refs,
+                        "attachment_refs_status": attachment_refs_status,
                     }
                 )
             return output

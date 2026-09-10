@@ -2,6 +2,7 @@
 
 import hashlib
 import logging
+from dataclasses import replace
 
 from src.audit.runtime import log_observer_delivery_event
 from src.conversation.identity import (
@@ -257,6 +258,12 @@ def _resolve_delivery_identity(
         getattr(trusted_principal, "operator_session_id", "") or ""
     ).strip() or None
     trusted_conversation = str(getattr(trusted_principal, "session_id", "") or "").strip() or None
+    trusted_is_bound_service = (
+        trusted_principal is not None
+        and str(getattr(getattr(trusted_principal, "principal_type", None), "value", getattr(trusted_principal, "principal_type", ""))).lower()
+        == "service"
+        and bool(str(getattr(trusted_principal, "job_id", "") or "").strip())
+    )
 
     if trusted_principal is not None and (
         not getattr(trusted_principal, "authenticated", False)
@@ -282,9 +289,26 @@ def _resolve_delivery_identity(
         and trusted_principal is not None
         and requested_conversation_id != trusted_conversation
     ):
+        # APScheduler establishes a service principal before invoking a
+        # scheduled job. That envelope is intentionally session-less at the
+        # outer wrapper; the job's canonical session argument binds it for the
+        # delivery boundary. A user principal can never take this path.
+        if trusted_is_bound_service and trusted_conversation is None:
+            trusted_conversation = requested_conversation_id
+        else:
+            raise ConversationIdentityError(
+                "conversation_session_mismatch",
+                "Delivery conversation does not match the authenticated runtime conversation.",
+            )
+    if trusted_principal is None and (
+        requested_conversation_id
+        or supplied_owner
+        or supplied_operator_session
+        or message.attachment_refs
+    ):
         raise ConversationIdentityError(
-            "conversation_session_mismatch",
-            "Delivery conversation does not match the authenticated runtime conversation.",
+            "conversation_authority_missing",
+            "Bound delivery requires a server-authenticated runtime principal.",
         )
 
     owner_principal_id = trusted_owner or supplied_owner
@@ -346,6 +370,38 @@ def _apply_native_channel_preference(
     if transport_order[0] == "native_notification":
         return transport_order
     return ["native_notification", *[transport for transport in transport_order if transport != "native_notification"]]
+
+
+def _canonical_delivery_message(
+    message: WSResponse,
+    *,
+    identity,
+    requested_conversation_id: str | None,
+    owner_principal_id: str | None,
+) -> WSResponse:
+    """Attach canonical lineage and safe attachment refs to a transport frame."""
+    updates: dict[str, object] = {}
+    if identity is not None:
+        updates.update(
+            {
+                "session_id": identity.conversation_id or requested_conversation_id or "",
+                "conversation_id": identity.conversation_id or "",
+                "thread_id": identity.thread_id or "",
+                "owner_principal_id": identity.owner_principal_id,
+                "operator_session_id": identity.operator_session_id,
+                "channel": identity.channel,
+                "transport": identity.transport,
+                "device_id": identity.device_id,
+                "correlation_id": identity.correlation_id,
+                "causation_id": identity.causation_id,
+            }
+        )
+    if message.attachment_refs:
+        updates["attachment_refs"] = validate_attachment_refs(
+            message.attachment_refs,
+            owner_principal_id=owner_principal_id,
+        )
+    return message.model_copy(update=updates) if updates else message
 
 
 def _should_offer_native_notification(
@@ -467,12 +523,53 @@ async def deliver_or_queue(
     # or by an ambient scheduler. Bound identity is resolved before any
     # intervention or delivery receipt is persisted.
     trusted_principal = _current_trust_principal()
+    # The scheduler wrapper carries a service job envelope before it knows the
+    # conversation's user owner. Resolve that owner from the canonical session
+    # row before identity validation; never let the scheduled action's payload
+    # supply it. This also gives the native outbox the same owner fence as the
+    # browser/WebSocket surface.
+    principal_for_delivery = trusted_principal
+    trusted_type = str(
+        getattr(getattr(trusted_principal, "principal_type", None), "value", getattr(trusted_principal, "principal_type", ""))
+    ).lower()
+    if (
+        trusted_principal is not None
+        and trusted_type == "service"
+        and str(getattr(trusted_principal, "job_id", "") or "").strip()
+        and (session_id or message.conversation_id or message.session_id)
+    ):
+        from src.agent.session import session_manager
+
+        service_session_id = str(
+            session_id or message.conversation_id or message.session_id or ""
+        ).strip()
+        canonical_session = await session_manager.get(service_session_id)
+        canonical_owner = str(getattr(canonical_session, "owner_principal_id", "") or "").strip()
+        if canonical_session is None or not canonical_owner:
+            raise ConversationIdentityError(
+                "conversation_owner_missing",
+                "Scheduled delivery requires an owner on the canonical conversation session.",
+            )
+        principal_for_delivery = replace(
+            trusted_principal,
+            principal_id=canonical_owner,
+            session_id=service_session_id,
+        )
     identity, requested_conversation_id, owner_principal_id, operator_session_id = (
         _resolve_delivery_identity(
             message,
             session_id=session_id,
-            trusted_principal=trusted_principal,
+            trusted_principal=principal_for_delivery,
         )
+    )
+    # Normalize once at the transport boundary. Persisted receipts and WS
+    # frames contain only the signed canonical metadata; the ingress bearer
+    # token is never forwarded to a daemon or browser.
+    delivery_message = _canonical_delivery_message(
+        message,
+        identity=identity,
+        requested_conversation_id=requested_conversation_id,
+        owner_principal_id=owner_principal_id,
     )
     # Preserve one normalized session id for all downstream paths.
     session_id = requested_conversation_id
@@ -604,6 +701,12 @@ async def deliver_or_queue(
         )
         message.intervention_id = intervention_id
         if intervention_id is not None:
+            # The canonical transport copy is made before the intervention
+            # row exists; carry its durable id into the actual frame/receipt.
+            delivery_message = delivery_message.model_copy(
+                update={"intervention_id": intervention_id}
+            )
+        if intervention_id is not None:
             event_details["intervention_id"] = intervention_id
         if procedural_lesson_types:
             event_details["procedural_learning_lesson_types"] = list(procedural_lesson_types)
@@ -648,7 +751,7 @@ async def deliver_or_queue(
                 if transport == "websocket":
                     websocket_enabled = "websocket" in active_channel_adapters
                     if websocket_enabled:
-                        broadcast_result = await ws_manager.broadcast(message)
+                        broadcast_result = await ws_manager.broadcast(delivery_message)
                     else:
                         from src.scheduler.connection_manager import BroadcastResult
 
@@ -720,7 +823,7 @@ async def deliver_or_queue(
                         conversation_id=identity.conversation_id if identity is not None else None,
                         correlation_id=message.correlation_id,
                         causation_id=message.causation_id,
-                        attachment_refs=message.attachment_refs,
+                        attachment_refs=delivery_message.attachment_refs,
                     )
                     context_manager.record_native_notification(
                         title=notification.title,

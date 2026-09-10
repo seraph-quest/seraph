@@ -5,7 +5,7 @@ import json
 from datetime import datetime, timezone
 from typing import Any, Mapping
 
-from sqlalchemy import update
+from sqlalchemy import or_, update
 from sqlmodel import select, col
 
 from src.db.engine import get_session
@@ -14,7 +14,6 @@ from src.db.session_refs import ensure_sessions_exist
 from src.conversation.identity import (
     ConversationIdentityError,
     build_conversation_identity,
-    redact_attachment_refs,
     validate_attachment_refs,
 )
 
@@ -23,7 +22,7 @@ def _approval_expiry(value: object) -> datetime | None:
     if value is None:
         return None
     if isinstance(value, datetime):
-        return value
+        return value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
     try:
         return datetime.fromtimestamp(float(value), tz=timezone.utc)
     except (TypeError, ValueError, OverflowError):
@@ -33,12 +32,33 @@ def _approval_expiry(value: object) -> datetime | None:
             return None
 
 
+def _approval_is_expired(value: object, *, now: datetime | None = None) -> bool:
+    """Treat malformed or elapsed approval expiry as unusable."""
+    if value is None:
+        return False
+    expiry = _approval_expiry(value)
+    if expiry is None:
+        return True
+    current = now or datetime.now(timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    return expiry <= current
+
+
 def _approval_attachment_refs(request: ApprovalRequest) -> list[dict[str, Any]]:
     try:
         parsed = json.loads(request.attachment_refs_json or "[]")
     except (TypeError, ValueError):
         return []
-    return parsed if isinstance(parsed, list) else []
+    if not isinstance(parsed, list):
+        return []
+    try:
+        return validate_attachment_refs(
+            parsed,
+            owner_principal_id=request.owner_principal_id,
+        )
+    except ConversationIdentityError:
+        return []
 
 
 def fingerprint_tool_call(
@@ -249,11 +269,39 @@ class ApprovalRepository:
             if request.status != "pending":
                 db.expunge(request)
                 return request
+            now = datetime.now(timezone.utc)
+            if _approval_is_expired(request.expires_at, now=now):
+                transition = await db.execute(
+                    update(ApprovalRequest)
+                    .execution_options(synchronize_session=False)
+                    .where(
+                        ApprovalRequest.id == approval_id,
+                        ApprovalRequest.status == "pending",
+                    )
+                    .values(status="expired", resolved_at=now)
+                )
+                if transition.rowcount == 1:
+                    await db.refresh(request)
+                db.expunge(request)
+                return request
 
-            request.status = decision
-            request.resolved_at = datetime.now(timezone.utc)
-            db.add(request)
-            await db.flush()
+            # CAS prevents two decision callers from both resolving the same
+            # pending row after a race or process restart.
+            transition = await db.execute(
+                update(ApprovalRequest)
+                .execution_options(synchronize_session=False)
+                .where(
+                    ApprovalRequest.id == approval_id,
+                    ApprovalRequest.status == "pending",
+                    or_(ApprovalRequest.expires_at.is_(None), ApprovalRequest.expires_at > now),
+                )
+                .values(status=decision, resolved_at=now)
+            )
+            if transition.rowcount != 1:
+                await db.refresh(request)
+                db.expunge(request)
+                return request
+            await db.refresh(request)
             db.expunge(request)
             return request
 
@@ -319,11 +367,31 @@ class ApprovalRepository:
                 owner_operator_session_id,
             ):
                 return False
-
-            request.status = "consumed"
-            request.resolved_at = datetime.now(timezone.utc)
-            db.add(request)
-            return True
+            now = datetime.now(timezone.utc)
+            if _approval_is_expired(request.expires_at, now=now):
+                await db.execute(
+                    update(ApprovalRequest)
+                    .execution_options(synchronize_session=False)
+                    .where(
+                        ApprovalRequest.id == request.id,
+                        ApprovalRequest.status == "approved",
+                    )
+                    .values(status="expired", resolved_at=now)
+                )
+                return False
+            # Conditional update is the one-use fence. A concurrent caller
+            # sees rowcount zero and cannot replay the approved action.
+            consumed = await db.execute(
+                update(ApprovalRequest)
+                .execution_options(synchronize_session=False)
+                .where(
+                    ApprovalRequest.id == request.id,
+                    ApprovalRequest.status == "approved",
+                    or_(ApprovalRequest.expires_at.is_(None), ApprovalRequest.expires_at > now),
+                )
+                .values(status="consumed", resolved_at=now)
+            )
+            return consumed.rowcount == 1
 
     async def consume_approved_for_resume(
         self,
@@ -427,6 +495,17 @@ class ApprovalRepository:
             owner_operator_session_id,
         ):
             return None
+        if _approval_is_expired(request.expires_at):
+            await db.execute(
+                update(ApprovalRequest)
+                .execution_options(synchronize_session=False)
+                .where(
+                    ApprovalRequest.id == approval_id,
+                    ApprovalRequest.status == "approved",
+                )
+                .values(status="expired", resolved_at=datetime.now(timezone.utc))
+            )
+            return None
         try:
             details = json.loads(request.details_json) if request.details_json else {}
         except (TypeError, ValueError):
@@ -515,10 +594,23 @@ class ApprovalRepository:
                 .order_by(col(ApprovalRequest.created_at).desc())
             )
             request = result.scalars().first()
-            return request is not None and (
-                owner_operator_session_id is None
-                or _approval_belongs_to_operator_session(request, owner_operator_session_id)
-            )
+            if request is None:
+                return False
+            if owner_operator_session_id is not None and not _approval_belongs_to_operator_session(
+                request, owner_operator_session_id
+            ):
+                return False
+            if _approval_is_expired(request.expires_at):
+                await db.execute(
+                    update(ApprovalRequest)
+                    .where(
+                        ApprovalRequest.id == request.id,
+                        ApprovalRequest.status == "approved",
+                    )
+                    .values(status="expired", resolved_at=datetime.now(timezone.utc))
+                )
+                return False
+            return True
 
     async def list_pending(
         self,
@@ -541,20 +633,37 @@ class ApprovalRepository:
             requests = result.scalars().all()
             output: list[dict[str, Any]] = []
             for request in requests:
+                if _approval_is_expired(request.expires_at):
+                    await db.execute(
+                        update(ApprovalRequest)
+                        .execution_options(synchronize_session=False)
+                        .where(
+                            ApprovalRequest.id == request.id,
+                            ApprovalRequest.status == "pending",
+                        )
+                        .values(status="expired", resolved_at=datetime.now(timezone.utc))
+                    )
+                    continue
                 try:
                     details = json.loads(request.details_json) if request.details_json else {}
                 except (TypeError, ValueError):
                     details = {}
                 if not isinstance(details, dict):
                     details = {}
+                owner_principal_id = request.owner_principal_id or details.get("approval_owner_principal_id")
                 if "attachment_refs" in details:
                     try:
-                        details["attachment_refs"] = redact_attachment_refs(details["attachment_refs"])
-                    except ConversationIdentityError:
+                        details["attachment_refs"] = validate_attachment_refs(
+                            details["attachment_refs"],
+                            owner_principal_id=owner_principal_id,
+                        )
+                    except ConversationIdentityError as exc:
                         details["attachment_refs"] = []
+                        details["attachment_refs_status"] = (
+                            "expired" if exc.code == "attachment_receipt_expired" else "unavailable"
+                        )
                 conversation_id = request.conversation_id or details.get("approval_conversation_id") or request.session_id
                 thread_id = request.thread_id or details.get("thread_id") or conversation_id
-                owner_principal_id = request.owner_principal_id or details.get("approval_owner_principal_id")
                 operator_session_id = (
                     request.operator_session_id
                     or details.get("approval_owner_operator_session_id")

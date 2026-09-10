@@ -2,6 +2,7 @@
 
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
+import asyncio
 import json
 import os
 import subprocess
@@ -26,14 +27,16 @@ from src.conversation.identity import (
 )
 from src.db import engine as db_engine
 from src.db.models import (
+    ApprovalRequest,
     NativeNotificationOutbox,
     OperatorSession,
     Session,
 )
 from src.approval.repository import approval_repository
 from src.models.schemas import WSResponse
-from src.observer.delivery import _resolve_delivery_identity
+from src.observer.delivery import _canonical_delivery_message, _resolve_delivery_identity
 from src.observer.native_notification_queue import NativeNotificationQueue
+from src.scheduler.connection_manager import ConnectionManager
 from src.security.trust_contract import TrustPrincipal
 
 
@@ -162,6 +165,16 @@ def test_attachment_owner_conflict_and_forged_delivery_identity_are_rejected():
             session_id="conversation-750",
             trusted_principal=trusted,
         )
+    with pytest.raises(ConversationIdentityError, match="authenticated runtime principal"):
+        _resolve_delivery_identity(
+            WSResponse(
+                type="proactive",
+                session_id="conversation-750",
+                owner_principal_id="operator:750",
+            ),
+            session_id="conversation-750",
+            trusted_principal=None,
+        )
     with pytest.raises(ConversationIdentityError, match="quarantine"):
         validate_attachment_refs(
             [
@@ -234,6 +247,59 @@ def test_delivery_preserves_source_adapter_channel_and_transport_lineage():
     assert operator_session_id == "operator-session-telegram"
 
 
+def test_scheduler_service_envelope_can_bind_an_explicit_session():
+    service = TrustPrincipal(
+        principal_id="service:scheduler:test",
+        principal_type="service",
+        job_id="scheduler:test:run",
+    )
+    message = WSResponse(type="proactive", session_id="conversation-scheduled")
+    identity, conversation_id, owner, _ = _resolve_delivery_identity(
+        message,
+        session_id="conversation-scheduled",
+        trusted_principal=service,
+    )
+    assert identity is not None
+    assert conversation_id == "conversation-scheduled"
+    assert owner == "service:scheduler:test"
+
+
+def test_transport_frame_uses_canonical_lineage_and_never_forwards_receipt_token():
+    trusted = TrustPrincipal(
+        principal_id="operator:750",
+        principal_type="operator",
+        session_id="conversation-750",
+        operator_session_id="operator-session-750",
+    )
+    raw_ref = _attachment_ref(
+        attachment_id="attachment-frame-750",
+        owner_principal_id="operator:750",
+        content_hash="sha256:frame",
+        media_type="text/plain",
+    )
+    message = WSResponse(
+        type="proactive",
+        content="safe frame",
+        session_id="conversation-750",
+        owner_principal_id="operator:750",
+        attachment_refs=[raw_ref],
+    )
+    identity, conversation_id, owner, _ = _resolve_delivery_identity(
+        message,
+        session_id="conversation-750",
+        trusted_principal=trusted,
+    )
+    frame = _canonical_delivery_message(
+        message,
+        identity=identity,
+        requested_conversation_id=conversation_id,
+        owner_principal_id=owner,
+    )
+    assert frame.session_id == frame.conversation_id == frame.thread_id == "conversation-750"
+    assert frame.attachment_refs[0]["attachment_id"] == "attachment-frame-750"
+    assert '"quarantine_receipt":' not in json.dumps(frame.model_dump())
+
+
 def test_attachment_receipt_rejects_a_server_key_change(monkeypatch):
     valid = _attachment_ref(
         attachment_id="attachment-key-750",
@@ -244,6 +310,74 @@ def test_attachment_receipt_rejects_a_server_key_change(monkeypatch):
     monkeypatch.setattr(settings, "operator_auth_secret", "different-server-secret")
     with pytest.raises(ConversationIdentityError, match="signature"):
         validate_attachment_refs([valid], owner_principal_id="operator:750")
+
+
+def test_expired_attachment_receipt_is_rejected_on_revalidation():
+    now = datetime.now(timezone.utc)
+    receipt = issue_attachment_quarantine_receipt(
+        attachment_id="expired-attachment",
+        owner_principal_id="operator:750",
+        content_hash="sha256:expired",
+        media_type="text/plain",
+        issued_at=now - timedelta(minutes=10),
+        expires_at=now - timedelta(minutes=1),
+    )
+    with pytest.raises(ConversationIdentityError, match="expired"):
+        validate_attachment_refs(
+            [{
+                "attachment_id": "expired-attachment",
+                "owner_principal_id": "operator:750",
+                "content_hash": "sha256:expired",
+                "quarantine_status": "quarantined",
+                "quarantine_receipt": receipt,
+            }],
+            owner_principal_id="operator:750",
+        )
+
+
+def test_bound_websocket_broadcast_filters_owner_conversation_and_redacts_receipt():
+    class FakeWebSocket:
+        def __init__(self):
+            self.payloads = []
+
+        async def send_text(self, payload):
+            self.payloads.append(payload)
+
+    async def exercise():
+        manager = ConnectionManager()
+        owner_a = FakeWebSocket()
+        owner_b = FakeWebSocket()
+        manager.connect(owner_a, owner_principal_id="operator:a", operator_session_id="auth:a")
+        manager.connect(owner_b, owner_principal_id="operator:b", operator_session_id="auth:b")
+        manager.bind_conversation(owner_a, "conversation:a")
+        manager.bind_conversation(owner_b, "conversation:b")
+        raw_ref = _attachment_ref(
+            attachment_id="attachment-ws-750",
+            owner_principal_id="operator:a",
+            content_hash="sha256:ws",
+            media_type="text/plain",
+        )
+        result = await manager.broadcast(
+            WSResponse(
+                type="proactive",
+                content="private",
+                session_id="conversation:a",
+                conversation_id="conversation:a",
+                thread_id="conversation:a",
+                owner_principal_id="operator:a",
+                operator_session_id="auth:a",
+                attachment_refs=[raw_ref],
+            )
+        )
+        return result, owner_a, owner_b, raw_ref
+
+    result, owner_a, owner_b, raw_ref = asyncio.run(exercise())
+    assert result.attempted_connections == 1
+    assert result.delivered_connections == 1
+    assert len(owner_a.payloads) == 1
+    assert owner_b.payloads == []
+    assert raw_ref["quarantine_receipt"] not in owner_a.payloads[0]
+    assert "quarantine_receipt_digest" in owner_a.payloads[0]
 
 
 @pytest.mark.asyncio
@@ -390,6 +524,131 @@ async def _add_owner(get_session, *, session_id: str, owner_id: str, operator_se
                 revoked_at=revoked_at,
             )
         )
+
+
+@pytest.mark.asyncio
+async def test_approval_expiry_and_atomic_consume_replay(file_db, monkeypatch):
+    get_session, _ = file_db
+    monkeypatch.setattr("src.approval.repository.get_session", get_session)
+    await _add_owner(
+        get_session,
+        session_id="conversation-approval-expiry",
+        owner_id="operator:approval",
+        operator_session_id="operator-session-approval",
+    )
+    expires_at = (datetime.now(timezone.utc) + timedelta(minutes=5)).timestamp()
+    request = await approval_repository.get_or_create_pending(
+        session_id="conversation-approval-expiry",
+        tool_name="approval-tool",
+        risk_level="high",
+        summary="One-use approval",
+        fingerprint="approval-expiry-fingerprint",
+        details={
+            "owner_principal_id": "operator:approval",
+            "approval_owner_operator_session_id": "operator-session-approval",
+            "expires_at": expires_at,
+        },
+    )
+    approved = await approval_repository.resolve(request.id, "approved")
+    assert approved is not None and approved.status == "approved"
+    assert await approval_repository.has_approved(
+        session_id=request.session_id,
+        tool_name=request.tool_name,
+        fingerprint=request.fingerprint,
+        owner_operator_session_id="operator-session-approval",
+    )
+    results = await asyncio.gather(
+        approval_repository.consume_approved(
+            session_id=request.session_id,
+            tool_name=request.tool_name,
+            fingerprint=request.fingerprint,
+            owner_operator_session_id="operator-session-approval",
+        ),
+        approval_repository.consume_approved(
+            session_id=request.session_id,
+            tool_name=request.tool_name,
+            fingerprint=request.fingerprint,
+            owner_operator_session_id="operator-session-approval",
+        ),
+    )
+    assert sum(bool(result) for result in results) == 1
+    assert not await approval_repository.has_approved(
+        session_id=request.session_id,
+        tool_name=request.tool_name,
+        fingerprint=request.fingerprint,
+        owner_operator_session_id="operator-session-approval",
+    )
+
+    expired_request = await approval_repository.get_or_create_pending(
+        session_id="conversation-approval-expiry",
+        tool_name="approval-tool",
+        risk_level="high",
+        summary="Expired approval",
+        fingerprint="approval-expired-fingerprint",
+        details={
+            "owner_principal_id": "operator:approval",
+            "approval_owner_operator_session_id": "operator-session-approval",
+            "expires_at": (datetime.now(timezone.utc) + timedelta(minutes=5)).timestamp(),
+        },
+    )
+    await approval_repository.resolve(expired_request.id, "approved")
+    async with get_session() as db:
+        row = (await db.execute(
+            select(ApprovalRequest).where(ApprovalRequest.id == expired_request.id)
+        )).scalar_one()
+        row.expires_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+    assert not await approval_repository.consume_approved(
+        session_id=expired_request.session_id,
+        tool_name=expired_request.tool_name,
+        fingerprint=expired_request.fingerprint,
+        owner_operator_session_id="operator-session-approval",
+    )
+
+
+@pytest.mark.asyncio
+async def test_expired_outbox_attachment_is_cancelled_before_claim(file_db):
+    get_session, _ = file_db
+    await _add_owner(
+        get_session,
+        session_id="conversation-attachment-expiry",
+        owner_id="operator:attachment",
+        operator_session_id="operator-session-attachment",
+    )
+    now = datetime.now(timezone.utc)
+    receipt = issue_attachment_quarantine_receipt(
+        attachment_id="outbox-expiring",
+        owner_principal_id="operator:attachment",
+        content_hash="sha256:outbox-expiring",
+        media_type="text/plain",
+        issued_at=now - timedelta(seconds=1),
+        expires_at=now + timedelta(milliseconds=500),
+    )
+    queue = NativeNotificationQueue(lease_seconds=5, ttl_seconds=60)
+    notification = await queue.enqueue(
+        intervention_id="intervention-attachment-expiry",
+        title="Expiring attachment",
+        body="Must not dispatch",
+        intervention_type="alert",
+        urgency=4,
+        session_id="conversation-attachment-expiry",
+        owner_principal_id="operator:attachment",
+        operator_session_id="operator-session-attachment",
+        idempotency_key="attachment-expiry-notification",
+        attachment_refs=[{
+            "attachment_id": "outbox-expiring",
+            "content_hash": "sha256:outbox-expiring",
+            "media_type": "text/plain",
+            "quarantine_status": "quarantined",
+            "quarantine_receipt": receipt,
+        }],
+    )
+    await asyncio.sleep(0.8)
+    assert await queue.claim_next(worker_id="expired-attachment-worker") is None
+    stored = await queue.get(notification.id)
+    assert stored is not None
+    assert stored.delivery_status == "cancelled"
+    assert stored.degraded_state == "attachment_receipt_expired"
+    assert stored.attachment_refs == []
 
 
 @pytest.mark.asyncio

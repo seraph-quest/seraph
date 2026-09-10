@@ -151,9 +151,37 @@ const RECEIPT_STRING_FIELDS = [
   "capability_id",
   "capability_version",
   "input_digest",
+  "decision_input_digest",
   "expected_outcome",
   "expires_at",
+  "strategy_delta_id",
+  "strategy_delta_provenance",
 ] as const;
+
+const RECEIPT_ENUM_FIELDS: Record<string, readonly string[]> = {
+  event_type: ["goal_loop_candidate", "goal_loop_outcome", "goal_loop_no_learning"],
+  receipt_version: ["goal_conditioned_loop_v1"],
+  receipt_type: ["candidate", "outcome", "no_learning"],
+  action: ["act", "clarify", "defer", "silent"],
+  execution_status: [
+    "succeeded",
+    "failed",
+    "blocked",
+    // These statuses are retained for the cockpit's approval-gated view
+    // state when an upstream integration includes that state on a receipt.
+    "awaiting_approval",
+    "pending_approval",
+    "approval_required",
+  ],
+  verification: ["passed", "failed", "unknown"],
+  usefulness: ["helpful", "harmful", "ignored", "corrected", "unknown"],
+  learning: ["applied", "proposed", "no_learning"],
+  strategy_delta_provenance: ["verified", "unresolved", "not_present"],
+};
+
+function isAllowedReceiptEnum(value: unknown, allowed: readonly string[]): boolean {
+  return value === undefined || value === null || (typeof value === "string" && allowed.includes(value));
+}
 
 /**
  * Keep receipt metadata renderable even when a backend or proxy returns an
@@ -170,6 +198,10 @@ export function normalizeGoalLoopReceipt(value: unknown): GoalLoopReceipt | null
     if (fieldValue !== undefined && fieldValue !== null && typeof fieldValue !== "string") {
       return null;
     }
+  }
+
+  for (const [field, allowed] of Object.entries(RECEIPT_ENUM_FIELDS)) {
+    if (!isAllowedReceiptEnum(record[field], allowed)) return null;
   }
 
   const auditEventId = record.audit_event_id;

@@ -125,27 +125,66 @@ export interface GoalLoopGoal {
   proactive_enabled?: boolean;
 }
 
+export type GoalLoopReceiptEventType =
+  | "goal_loop_candidate"
+  | "goal_loop_outcome"
+  | "goal_loop_no_learning";
+
+export type GoalLoopReceiptType = "candidate" | "outcome" | "no_learning";
+
+/** Actions emitted by the goal-conditioned candidate contract. */
+export type GoalLoopCandidateAction = "act" | "clarify" | "defer" | "silent";
+
+/** Execution statuses emitted by the outcome contract or its approval gate. */
+export type GoalLoopExecutionStatus =
+  | "succeeded"
+  | "failed"
+  | "blocked"
+  | "awaiting_approval"
+  | "pending_approval"
+  | "approval_required";
+
+export type GoalLoopVerification = "passed" | "failed" | "unknown";
+
+export type GoalLoopUsefulness = "helpful" | "harmful" | "ignored" | "corrected" | "unknown";
+
+export type GoalLoopLearning = "applied" | "proposed" | "no_learning";
+
+export type GoalLoopStrategyDeltaProvenance = "verified" | "unresolved" | "not_present";
+
 /** Redacted candidate/outcome/no-learning receipt from the governed loop. */
 export interface GoalLoopReceipt {
   audit_event_id?: string | number | null;
-  event_type?: string;
+  event_type?: GoalLoopReceiptEventType;
   created_at?: string | null;
-  receipt_version?: string;
-  receipt_type?: string;
+  receipt_version?: "goal_conditioned_loop_v1";
+  receipt_type?: GoalLoopReceiptType;
   proposal_only?: boolean;
   candidate_id?: string | null;
   outcome_id?: string | null;
-  goal_id?: string;
+  dedupe_key?: string | null;
+  goal_id?: string | null;
   goal_revision?: number | null;
-  execution_status?: string | null;
-  verification?: string | null;
-  usefulness?: string | null;
-  learning?: string | null;
+  criterion_id?: string | null;
+  action?: GoalLoopCandidateAction | null;
+  capability_id?: string | null;
+  capability_version?: string | null;
+  input_keys?: string[];
+  input_digest?: string | null;
+  decision_input_digest?: string | null;
+  expected_outcome?: string | null;
+  expires_at?: string | null;
+  strategy_delta_id?: string | null;
+  strategy_delta_provenance?: GoalLoopStrategyDeltaProvenance | null;
+  execution_status?: GoalLoopExecutionStatus | null;
+  verification?: GoalLoopVerification | null;
+  usefulness?: GoalLoopUsefulness | null;
+  learning?: GoalLoopLearning | null;
   learning_record_id?: string | null;
   artifact_ref?: string | null;
   evidence_refs?: string[];
   reason?: string | null;
-  [key: string]: unknown;
+  content_redacted?: boolean;
 }
 
 export interface GoalStrategyDelta {

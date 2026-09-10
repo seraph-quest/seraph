@@ -220,6 +220,7 @@ async def test_memory_correction_creates_receipt_and_suppresses_corrected_memory
         content="Atlas launch is delayed.",
         kind=MemoryKind.project,
         summary="Atlas launch delayed",
+        source_session_id="test-auth-bypass",
         confidence=0.55,
         importance=0.55,
     )
@@ -304,6 +305,7 @@ async def test_memory_pin_and_forget_are_audited_and_change_active_recall(client
         content="User prefers detailed implementation receipts.",
         kind=MemoryKind.communication_preference,
         summary="Prefers detailed implementation receipts",
+        source_session_id="test-auth-bypass",
         confidence=0.4,
         importance=0.4,
     )
@@ -356,6 +358,7 @@ async def test_memory_redaction_and_audit_receipts_are_queryable_without_leaking
         content="The deployment token is seraph-secret-token.",
         kind=MemoryKind.fact,
         summary="Deployment token is stored in memory",
+        source_session_id="test-auth-bypass",
         confidence=0.8,
         importance=0.8,
     )
@@ -428,11 +431,12 @@ async def test_memory_retrieval_decision_receipt_reports_suppression_and_capabil
 
 @pytest.mark.asyncio
 async def test_memory_live_controls_snapshot_and_review_action_emit_real_receipts(client):
+    owner_session = test_bypass_operator().session_id
     created = await memory_repository.create_memory(
         content="Guardian should prefer concise checkpoint updates.",
         kind=MemoryKind.communication_preference,
         summary="Prefers concise checkpoints",
-        source_session_id="session-live-controls",
+        source_session_id=owner_session,
         confidence=0.45,
         importance=0.5,
     )
@@ -451,7 +455,7 @@ async def test_memory_live_controls_snapshot_and_review_action_emit_real_receipt
     snapshot = snapshot_response.json()
     operator_snapshot_response = await client.get(
         "/api/operator/guardian-memory-live-control",
-        params={"owner_session_id": "session-live-controls"},
+        params={"owner_session_id": owner_session},
     )
     assert operator_snapshot_response.status_code == 200
     operator_snapshot = operator_snapshot_response.json()
@@ -512,6 +516,7 @@ async def test_memory_live_controls_decay_and_delete_export_are_bounded_operator
         content="The legacy export token is seraph-delete-me.",
         kind=MemoryKind.fact,
         summary="Legacy export token",
+        source_session_id="test-auth-bypass",
         confidence=0.8,
         importance=0.8,
     )
@@ -583,6 +588,7 @@ async def test_memory_live_controls_rollback_requires_specific_boundary_acknowle
         content="Rollback candidate memory.",
         kind=MemoryKind.fact,
         summary="Rollback candidate",
+        source_session_id="test-auth-bypass",
         confidence=0.2,
         importance=0.2,
     )
@@ -611,7 +617,6 @@ async def test_memory_live_controls_rollback_requires_specific_boundary_acknowle
         json={
             "action": "rollback_memory",
             "acknowledge_rollback_boundary": True,
-            "owner_session_id": "session-rollback",
             "memory_id": created.memory_id,
             "reason": "Operator acknowledged rollback boundary.",
         },
@@ -620,7 +625,7 @@ async def test_memory_live_controls_rollback_requires_specific_boundary_acknowle
     assert refused.status_code == 400
     assert "explicit acknowledgement" in refused.json()["detail"]
     assert accepted.status_code == 200
-    assert accepted.json()["receipt"]["owner_session_id"] == "session-rollback"
+    assert accepted.json()["receipt"]["owner_session_id"] == test_bypass_operator().session_id
     assert accepted.json()["memory"]["status"] == "active"
 
 
@@ -677,6 +682,7 @@ async def test_memory_mutation_routes_bind_authenticated_principal_and_ignore_bo
         content="Principal-bound memory control candidate.",
         kind=MemoryKind.fact,
         summary="Principal-bound candidate",
+        source_session_id="test-auth-bypass",
         confidence=0.6,
         importance=0.6,
     )

@@ -275,23 +275,28 @@ the same identity and content digests, filters current tombstones, and reports
 this slice does not invoke an embedding or provider service. Restore requires
 and verifies the archive export hash, then validates schema, owner/source
 sessions, IDs, timestamps, metadata, sources, and bounded numeric fields before
-`BEGIN IMMEDIATE`; it is additive, preserves newer rows, and current tombstones
-suppress older archive rows. Restored metadata receives fresh operator
-provenance rather than trusting archive authority fields.
+`BEGIN IMMEDIATE`; every restored record is owner-bound, archived tombstones
+are reinstated and redacted before row writes, and current tombstones suppress
+older archive rows. Restored metadata receives fresh operator provenance rather
+than trusting archive authority fields. Live-control and compatibility aliases
+derive owner/session identity from the authenticated runtime and reject caller
+supplied owner spoofing; canonical mutation targets without an owner binding are
+rejected before the control action.
 
 The focused proof uses a real temporary file-backed SQLite database and proves
 artifact readback, source/hash preservation, tombstone precedence after an
 older restore, missing-row repair, deterministic reindex filtering, concurrent
 merge/delete behavior, missing/forged archive-hash rejection, runtime
-principal/session/revocation enforcement, restart-instance recovery, forged
-authority rejection, and inferred-extraction provenance sanitization. The
-host's async SQLite fixture stalled at the 120
-second bound, so this slice does not claim a full async test-suite receipt or a
-separate multi-process drill. The existing StrategyDelta goal-loop contract
-still owns correction-to-later-decision and rollback behavior; this recovery
-seam emits explicit no-learning/degraded state and does not synthesize a
-StrategyDelta. Production backup restore, episodic retention deletion, semantic
-quality, and external-provider deletion propagation remain open.
+principal/session/revocation enforcement, forged live-control owner rejection,
+restart-instance recovery, archived-tombstone reapplication, missing-owner
+restore rejection, and inferred-extraction provenance sanitization. The host's
+async SQLite fixture stalled at the 120 second bound, so this slice does not
+claim a full async test-suite receipt or a separate multi-process drill. The
+existing StrategyDelta goal-loop contract still owns correction-to-later-
+decision and rollback behavior; this recovery seam emits explicit
+no-learning/degraded state and does not synthesize a StrategyDelta. Production
+backup restore, episodic retention deletion, semantic quality, and
+external-provider deletion propagation remain open.
 
 ## Branch-local #753 Gate A frozen baseline contract
 

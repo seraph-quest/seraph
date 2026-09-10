@@ -949,8 +949,13 @@ async def list_memory_audit_receipts(
     *,
     memory_id: str | None = None,
     limit: int = 20,
+    owner_session_id: str | None = None,
 ) -> dict[str, Any]:
-    events = await audit_repository.list_events(limit=max(limit, 1) * 3)
+    normalized_owner = str(owner_session_id or "").strip() or None
+    events = await audit_repository.list_events(
+        limit=max(limit, 1) * 3,
+        session_id=normalized_owner,
+    )
     filtered: list[dict[str, Any]] = []
     for event in events:
         event_type = str(event.get("event_type") or "")
@@ -967,6 +972,7 @@ async def list_memory_audit_receipts(
         "summary": {
             "event_count": len(filtered),
             "memory_id": memory_id,
+            "owner_session_id": normalized_owner,
             "audit_surface": "operator_memory_control",
         },
         "policy": memory_operator_policy_payload(),
@@ -1139,7 +1145,10 @@ async def get_memory_live_controls_snapshot(
                 await memory_repository.list_memories(status=MemoryStatus.archived, limit=fetch_limit),
                 owner_session_id,
             )[:bounded_limit]
-            receipts = await list_memory_audit_receipts(limit=bounded_limit)
+            receipts = await list_memory_audit_receipts(
+                limit=bounded_limit,
+                owner_session_id=owner_session_id,
+            )
             reconciliation = await summarize_memory_reconciliation_state(limit=min(bounded_limit, 10))
             operator_status = "guardian_memory_live_controls_visible"
     except SQLAlchemyError:
@@ -1256,7 +1265,20 @@ async def apply_memory_live_control_action(
     provider_name: str | None = None,
     outcome: str | None = None,
     privacy_boundary: str | None = None,
+    authenticated_session_id: str | None = None,
+    source_role: str = "operator",
 ) -> dict[str, Any]:
+    if authenticated_session_id is not None:
+        # API routes pass the middleware-bound session here.  Keep direct
+        # internal calls backwards-compatible, while making every externally
+        # reachable live-control route prove the same runtime authority as
+        # canonical recovery.
+        _recovery_authority(
+            actor=actor,
+            owner_session_id=owner_session_id,
+            authenticated_session_id=authenticated_session_id,
+            source_role=source_role,
+        )
     _require_acknowledged(acknowledged)
     normalized_action = str(action or "").strip().lower()
     if normalized_action not in _LIVE_CONTROL_ACTIONS:
@@ -1452,6 +1474,9 @@ async def apply_memory_live_control_action(
     return {
         "memory": _memory_payload(memory) if memory is not None else None,
         "receipt": receipt,
-        "snapshot": await get_memory_live_controls_snapshot(limit=8),
+        "snapshot": await get_memory_live_controls_snapshot(
+            limit=8,
+            owner_session_id=owner_session_id,
+        ),
         "policy": memory_operator_policy_payload(),
     }

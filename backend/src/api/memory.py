@@ -171,7 +171,12 @@ async def _require_memory_owner(memory_id: str, session_id: str) -> None:
     if memory is None:
         return
     bound_session = str(memory.source_session_id or "").strip()
-    if bound_session and bound_session != session_id:
+    if not bound_session:
+        raise HTTPException(
+            status_code=403,
+            detail={"code": "memory_owner_session_unbound"},
+        )
+    if bound_session != session_id:
         raise HTTPException(
             status_code=403,
             detail={"code": "memory_owner_session_forbidden"},
@@ -202,13 +207,35 @@ async def get_memory_operator_policy():
 
 
 @router.get("/memory/live-controls")
-async def get_memory_live_controls(limit: int = 8, owner_session_id: str | None = None):
-    return await get_memory_live_controls_snapshot(limit=limit, owner_session_id=owner_session_id)
+async def get_memory_live_controls(
+    http_request: Request,
+    limit: int = 8,
+    owner_session_id: str | None = None,
+):
+    context = authenticated_memory_context(
+        http_request,
+        requested_owner_session_id=owner_session_id,
+    )
+    return await get_memory_live_controls_snapshot(
+        limit=limit,
+        owner_session_id=context.session_id,
+    )
 
 
 @router.get("/memory/guardian-memory-live-control")
-async def get_guardian_memory_live_control(limit: int = 8, owner_session_id: str | None = None):
-    return await get_memory_live_controls_snapshot(limit=limit, owner_session_id=owner_session_id)
+async def get_guardian_memory_live_control(
+    http_request: Request,
+    limit: int = 8,
+    owner_session_id: str | None = None,
+):
+    context = authenticated_memory_context(
+        http_request,
+        requested_owner_session_id=owner_session_id,
+    )
+    return await get_memory_live_controls_snapshot(
+        limit=limit,
+        owner_session_id=context.session_id,
+    )
 
 
 @router.post("/memory/live-controls/actions")
@@ -217,17 +244,33 @@ async def post_memory_live_control_action(
     request: MemoryLiveControlActionRequest,
 ):
     try:
-        return await apply_memory_live_control_action(
-            action=request.action,
-            acknowledged=_live_control_acknowledgement(request),
-            actor=authenticated_memory_actor(http_request),
-            reason=request.reason,
-            owner_session_id=request.owner_session_id,
-            memory_id=request.memory_id,
-            provider_name=request.provider_name,
-            outcome=request.outcome,
-            privacy_boundary=request.privacy_boundary,
+        context = authenticated_memory_context(
+            http_request,
+            requested_owner_session_id=request.owner_session_id,
         )
+        if request.memory_id:
+            await _require_memory_owner(request.memory_id, context.session_id)
+        async with _bound_recovery_runtime(http_request, context):
+            return await apply_memory_live_control_action(
+                action=request.action,
+                acknowledged=_live_control_acknowledgement(request),
+                actor=context.actor,
+                reason=request.reason,
+                owner_session_id=context.session_id,
+                memory_id=request.memory_id,
+                provider_name=request.provider_name,
+                outcome=request.outcome,
+                privacy_boundary=request.privacy_boundary,
+                authenticated_session_id=context.session_id,
+                source_role=context.source_role,
+            )
+    except HTTPException:
+        raise
+    except PermissionError as exc:
+        raise HTTPException(
+            status_code=403,
+            detail={"code": "memory_authority_forbidden", "reason": str(exc)},
+        ) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -325,8 +368,19 @@ async def audit_memory_item(memory_id: str, http_request: Request, request: Memo
 
 
 @router.get("/memory/audit")
-async def get_memory_audit(memory_id: str | None = None, limit: int = 20):
-    return await list_memory_audit_receipts(memory_id=memory_id, limit=limit)
+async def get_memory_audit(
+    http_request: Request,
+    memory_id: str | None = None,
+    limit: int = 20,
+):
+    context = authenticated_memory_context(http_request)
+    if memory_id:
+        await _require_memory_owner(memory_id, context.session_id)
+    return await list_memory_audit_receipts(
+        memory_id=memory_id,
+        limit=limit,
+        owner_session_id=context.session_id,
+    )
 
 
 def _recovery_request_context(

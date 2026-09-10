@@ -13,7 +13,7 @@ import json
 from pathlib import Path
 import sqlite3
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from fastapi import HTTPException
@@ -37,7 +37,7 @@ from src.db.models import (
     MemoryTombstone,
     Session as SessionModel,
 )
-from src.memory.repository import memory_repository
+from src.memory.repository import _recovery_json_hash, memory_repository
 from src.memory.pipeline.merge import EmbeddingWriteResult, persist_extracted_memories
 from src.memory.types import ConsolidatedMemoryItem
 from src.auth.service import test_bypass_operator as make_test_bypass_operator
@@ -373,6 +373,249 @@ async def test_recovery_authority_and_archive_validation_fail_closed_before_writ
     assert route_result["status"] == "ready"
     assert route_result["provenance"]["actor"] == operator.principal.principal_id
     assert route_result["audit_event_id"]
+
+
+@pytest.mark.asyncio
+async def test_live_control_aliases_reject_forged_owner_before_mutation():
+    operator = make_test_bypass_operator()
+    request = SimpleNamespace(state=SimpleNamespace(operator=operator))
+    forged = memory_api.MemoryLiveControlActionRequest(
+        action="propagate_delete_export",
+        acknowledged=True,
+        owner_session_id="forged-owner-session",
+        memory_id="memory-under-another-owner",
+    )
+
+    with patch("src.api.memory.apply_memory_live_control_action", new_callable=AsyncMock) as canonical_action:
+        with pytest.raises(HTTPException) as canonical_error:
+            await memory_api.post_memory_live_control_action(request, forged)
+    assert canonical_error.value.status_code == 403
+    canonical_action.assert_not_awaited()
+
+    from src.api import operator as operator_api
+
+    operator_request = operator_api.MemoryLiveControlActionRequest(
+        action="propagate_delete_export",
+        acknowledged=True,
+        owner_session_id="forged-owner-session",
+        memory_id="memory-under-another-owner",
+    )
+    with patch("src.api.operator.apply_memory_live_control_action", new_callable=AsyncMock) as alias_action:
+        with pytest.raises(HTTPException) as alias_error:
+            await operator_api.post_operator_memory_live_control_action(request, operator_request)
+    assert alias_error.value.status_code == 403
+    alias_action.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_live_control_reads_always_scope_to_authenticated_owner():
+    operator = make_test_bypass_operator()
+    request = SimpleNamespace(state=SimpleNamespace(operator=operator))
+
+    with patch(
+        "src.api.memory.get_memory_live_controls_snapshot",
+        new_callable=AsyncMock,
+        return_value={},
+    ) as canonical_snapshot:
+        await memory_api.get_memory_live_controls(request)
+    canonical_snapshot.assert_awaited_once_with(
+        limit=8,
+        owner_session_id=operator.session_id,
+    )
+
+    from src.api import operator as operator_api
+
+    with patch(
+        "src.api.operator.get_memory_live_controls_snapshot",
+        new_callable=AsyncMock,
+        return_value={},
+    ) as operator_snapshot:
+        await operator_api.get_operator_memory_live_controls(request, owner_session_id=None)
+    operator_snapshot.assert_awaited_once_with(
+        limit=8,
+        owner_session_id=operator.session_id,
+    )
+
+    with patch(
+        "src.api.memory.list_memory_audit_receipts",
+        new_callable=AsyncMock,
+        return_value={},
+    ) as audit_receipts:
+        await memory_api.get_memory_audit(request, limit=12)
+    audit_receipts.assert_awaited_once_with(
+        memory_id=None,
+        limit=12,
+        owner_session_id=operator.session_id,
+    )
+
+
+@pytest.mark.asyncio
+async def test_live_control_rejects_memory_bound_to_another_owner(local_memory_db):
+    _get_session, _database_path = local_memory_db
+    operator = make_test_bypass_operator()
+    other_owner_memory = await memory_repository.create_memory(
+        content="A different owner memory must not be changed.",
+        source_session_id="another-owner-session",
+        source_type="operator",
+    )
+    request = SimpleNamespace(state=SimpleNamespace(operator=operator))
+    action = memory_api.MemoryLiveControlActionRequest(
+        action="propagate_delete_export",
+        acknowledged=True,
+        memory_id=other_owner_memory.memory_id,
+    )
+
+    with pytest.raises(HTTPException) as error:
+        await memory_api.post_memory_live_control_action(request, action)
+    assert error.value.status_code == 403
+    assert await memory_repository.get_memory(other_owner_memory.memory_id) is not None
+
+    unbound_memory = await memory_repository.create_memory(
+        content="An unbound memory must not be changed through an owner route.",
+        source_type="operator",
+    )
+    unbound_action = memory_api.MemoryLiveControlActionRequest(
+        action="propagate_delete_export",
+        acknowledged=True,
+        memory_id=unbound_memory.memory_id,
+    )
+    with pytest.raises(HTTPException) as unbound_error:
+        await memory_api.post_memory_live_control_action(request, unbound_action)
+    assert unbound_error.value.status_code == 403
+    assert unbound_error.value.detail["code"] == "memory_owner_session_unbound"
+    assert await memory_repository.get_memory(unbound_memory.memory_id) is not None
+
+
+@pytest.mark.asyncio
+async def test_restore_rejects_record_without_owner_session(local_memory_db):
+    _get_session, _database_path = local_memory_db
+    operator = make_test_bypass_operator()
+    owner_session = operator.session_id
+    created = await memory_repository.create_memory(
+        content="Owner-bound restore record.",
+        source_session_id=owner_session,
+        source_type="operator",
+    )
+    with _runtime_operator(operator):
+        archive = await memory_repository.export_canonical_memory_state(
+            actor=operator.principal.principal_id,
+            owner_session_id=owner_session,
+            authenticated_session_id=owner_session,
+        )
+    archive = json.loads(json.dumps(archive))
+    archive["memories"][0].pop("source_session_id", None)
+    archive["export_hash"] = _recovery_json_hash(
+        {
+            "schema_version": archive["schema_version"],
+            "owner_session_id": archive["owner_session_id"],
+            "canonical_tombstone_revision": archive["canonical_tombstone_revision"],
+            "memories": archive["memories"],
+            "tombstones": archive["tombstones"],
+        }
+    )
+    with _runtime_operator(operator):
+        with pytest.raises(PermissionError, match="requires an owner session"):
+            await memory_repository.restore_canonical_memory_state(
+                archive,
+                actor=operator.principal.principal_id,
+                owner_session_id=owner_session,
+                authenticated_session_id=owner_session,
+            )
+    assert await memory_repository.get_memory(created.memory_id) is not None
+
+
+@pytest.mark.asyncio
+async def test_restore_reapplies_archived_tombstone_before_writes(local_memory_db):
+    get_session, database_path = local_memory_db
+    operator = make_test_bypass_operator()
+    owner_session = operator.session_id
+    created = await memory_repository.create_memory(
+        content="This content must remain deleted after a stale database restore.",
+        source_session_id=owner_session,
+        source_type="operator",
+        source_snippet="secret source snippet",
+    )
+    await memory_repository.mark_memory_tombstoned(
+        created.memory_id,
+        actor=operator.principal.principal_id,
+        reason="archive deletion authority",
+    )
+    with _runtime_operator(operator):
+        archive = await memory_repository.export_canonical_memory_state(
+            actor=operator.principal.principal_id,
+            owner_session_id=owner_session,
+            authenticated_session_id=owner_session,
+        )
+    assert archive["tombstones"]
+    assert created.memory_id not in archive["memory_ids"]
+
+    stale_connection = sqlite3.connect(database_path)
+    try:
+        stale_connection.execute("DELETE FROM memory_tombstones WHERE memory_id = ?", (created.memory_id,))
+        stale_connection.execute(
+            "UPDATE memories SET content = ?, summary = ?, status = ?, confidence = ?, importance = ?, "
+            "reinforcement = ?, metadata_json = ? WHERE id = ?",
+            (
+                "stale restored content",
+                "stale restored content",
+                "active",
+                0.9,
+                0.9,
+                1.0,
+                "{}",
+                created.memory_id,
+            ),
+        )
+        stale_connection.commit()
+    finally:
+        stale_connection.close()
+
+    with _runtime_operator(operator):
+        restored = await memory_repository.restore_canonical_memory_state(
+            archive,
+            actor=operator.principal.principal_id,
+            owner_session_id=owner_session,
+            authenticated_session_id=owner_session,
+        )
+    assert restored["applied_archive_tombstone_ids"]
+    assert await memory_repository.get_memory(created.memory_id) is None
+    assert await memory_repository.get_memory_tombstone(created.memory_id) is not None
+    assert await memory_repository.list_memories_for_reindex() == []
+
+
+@pytest.mark.asyncio
+async def test_export_scopes_tombstones_to_authenticated_owner(local_memory_db):
+    _get_session, _database_path = local_memory_db
+    operator = make_test_bypass_operator()
+    owner_session = operator.session_id
+    owner_memory = await memory_repository.create_memory(
+        content="Owner export row.",
+        source_session_id=owner_session,
+        source_type="operator",
+    )
+    other_memory = await memory_repository.create_memory(
+        content="Other owner export row.",
+        source_session_id="other-owner-session",
+        source_type="operator",
+    )
+    await memory_repository.mark_memory_tombstoned(
+        other_memory.memory_id,
+        actor="operator:other",
+        reason="other owner deletion",
+    )
+    with _runtime_operator(operator):
+        archive = await memory_repository.export_canonical_memory_state(
+            actor=operator.principal.principal_id,
+            owner_session_id=owner_session,
+            authenticated_session_id=owner_session,
+        )
+    assert archive["memory_ids"] == [owner_memory.memory_id]
+    assert archive["tombstone_ids"] == []
+    assert other_memory.memory_id not in archive["memories"]
+    assert all(
+        tombstone["memory_id"] != other_memory.memory_id
+        for tombstone in archive["tombstones"]
+    )
 
 
 @pytest.mark.asyncio

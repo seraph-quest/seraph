@@ -116,18 +116,30 @@ async def _begin_canonical_write(db) -> None:
     await db.execute(text("BEGIN IMMEDIATE"))
 
 
-async def _memory_tombstone_revision(db) -> str:
-    """Return a content-free revision for the durable delete ledger."""
+async def _memory_tombstone_revision(
+    db,
+    *,
+    owner_session_id: str | None = None,
+) -> str:
+    """Return a content-free revision for the durable delete ledger.
 
-    rows = (
-        await db.execute(
-            select(
-                MemoryTombstone.id,
-                MemoryTombstone.memory_id,
-                MemoryTombstone.created_at,
-            ).order_by(MemoryTombstone.created_at.asc(), MemoryTombstone.id.asc())
-        )
-    ).all()
+    Recovery exports use an owner-scoped revision so one operator session does
+    not learn that another session's delete ledger changed.  Internal
+    reconciliation callers omit the owner and retain the global authority.
+    """
+
+    statement = select(
+        MemoryTombstone.id,
+        MemoryTombstone.memory_id,
+        MemoryTombstone.created_at,
+    ).select_from(MemoryTombstone).outerjoin(
+        Memory,
+        Memory.id == MemoryTombstone.memory_id,
+    )
+    normalized_owner = str(owner_session_id or "").strip()
+    if normalized_owner:
+        statement = statement.where(Memory.source_session_id == normalized_owner)
+    rows = (await db.execute(statement.order_by(MemoryTombstone.created_at.asc(), MemoryTombstone.id.asc()))).all()
     payload = [
         {
             "id": str(row[0]),
@@ -1757,10 +1769,16 @@ class MemoryRepository:
         async with self._canonical_memory_lock:
             async with get_session() as db:
                 await _begin_canonical_write(db)
-                current_revision = await _memory_tombstone_revision(db)
+                current_revision = await _memory_tombstone_revision(
+                    db,
+                    owner_session_id=normalized_owner,
+                )
                 tombstones = (
                     await db.execute(
-                        select(MemoryTombstone).order_by(
+                        select(MemoryTombstone)
+                        .join(Memory, Memory.id == MemoryTombstone.memory_id)
+                        .where(Memory.source_session_id == normalized_owner)
+                        .order_by(
                             col(MemoryTombstone.created_at).asc(),
                             col(MemoryTombstone.id).asc(),
                         )
@@ -1967,7 +1985,7 @@ class MemoryRepository:
         if archive.get("schema_version") != _MEMORY_EXPORT_SCHEMA_VERSION:
             raise ValueError("unknown memory restore archive version")
         archive_owner = str(archive.get("owner_session_id") or "").strip()
-        if archive_owner and archive_owner != normalized_owner:
+        if archive_owner != normalized_owner:
             raise PermissionError("memory archive owner does not match the authenticated session")
         records = archive.get("memories")
         if not isinstance(records, list):
@@ -1977,6 +1995,8 @@ class MemoryRepository:
         archive_tombstones = archive.get("tombstones", [])
         if not isinstance(archive_tombstones, list):
             raise ValueError("memory restore archive tombstones must be a list")
+        if len(archive_tombstones) > _MAX_RECOVERY_RECORDS:
+            raise ValueError("memory restore archive tombstones are too large")
         supplied_archive_hash = archive.get("export_hash")
         if not isinstance(supplied_archive_hash, str) or not re.fullmatch(
             r"[0-9a-f]{64}", supplied_archive_hash
@@ -1993,6 +2013,46 @@ class MemoryRepository:
         )
         if not hmac.compare_digest(supplied_archive_hash, expected_archive_hash):
             raise ValueError("memory restore archive hash mismatch")
+        normalized_tombstones: list[dict[str, Any]] = []
+        seen_tombstone_ids: set[str] = set()
+        seen_tombstone_memory_ids: set[str] = set()
+        for tombstone in archive_tombstones:
+            if not isinstance(tombstone, dict):
+                raise ValueError("memory restore archive contains an invalid tombstone")
+            tombstone_id = str(tombstone.get("id") or "").strip()
+            tombstone_memory_id = str(tombstone.get("memory_id") or "").strip()
+            if (
+                not tombstone_id
+                or len(tombstone_id) > 255
+                or "\x00" in tombstone_id
+                or not tombstone_memory_id
+                or len(tombstone_memory_id) > 255
+                or "\x00" in tombstone_memory_id
+            ):
+                raise ValueError("memory restore archive contains an invalid tombstone identity")
+            if tombstone_id in seen_tombstone_ids or tombstone_memory_id in seen_tombstone_memory_ids:
+                raise ValueError("memory restore archive contains duplicate tombstones")
+            seen_tombstone_ids.add(tombstone_id)
+            seen_tombstone_memory_ids.add(tombstone_memory_id)
+            tombstone_actor = str(tombstone.get("actor") or "").strip()
+            tombstone_reason = str(tombstone.get("reason") or "").strip()
+            if not tombstone_actor or len(tombstone_actor) > 255 or len(tombstone_reason) > 255:
+                raise ValueError("memory restore archive contains an invalid tombstone audit field")
+            tombstone_created_at = _parse_recovery_timestamp(
+                tombstone.get("created_at"),
+                field_name="tombstone.created_at",
+            )
+            if tombstone_created_at is None:
+                raise ValueError("memory restore archive tombstone is missing created_at")
+            normalized_tombstones.append(
+                {
+                    "id": tombstone_id,
+                    "memory_id": tombstone_memory_id,
+                    "actor": tombstone_actor,
+                    "reason": tombstone_reason,
+                    "created_at": tombstone_created_at,
+                }
+            )
         normalized_records: list[dict[str, Any]] = []
         seen_ids: set[str] = set()
         for record in records:
@@ -2009,8 +2069,12 @@ class MemoryRepository:
                 raise ValueError(f"memory restore record {memory_id} has invalid content")
             if len(content) > 1_000_000:
                 raise ValueError(f"memory restore record {memory_id} is too large")
-            source_session_id = str(record.get("source_session_id") or "").strip() or None
-            if source_session_id is not None and source_session_id != normalized_owner:
+            source_session_id = str(record.get("source_session_id") or "").strip()
+            if not source_session_id:
+                raise PermissionError(
+                    f"memory restore record {memory_id} requires an owner session"
+                )
+            if source_session_id != normalized_owner:
                 raise PermissionError(
                     f"memory restore record {memory_id} belongs to another owner session"
                 )
@@ -2045,8 +2109,8 @@ class MemoryRepository:
                 source_id = str(source.get("id") or "").strip() or None
                 if source_id is not None and (len(source_id) > 255 or "\x00" in source_id):
                     raise ValueError(f"memory restore record {memory_id} has an invalid source id")
-                source_session = str(source.get("source_session_id") or "").strip() or None
-                if source_session is not None and source_session != normalized_owner:
+                source_session = str(source.get("source_session_id") or "").strip() or normalized_owner
+                if source_session != normalized_owner:
                     raise PermissionError(
                         f"memory restore source for {memory_id} belongs to another owner session"
                     )
@@ -2130,11 +2194,104 @@ class MemoryRepository:
         suppressed_ids: list[str] = []
         conflict_ids: list[str] = []
         source_count = 0
+        applied_tombstone_ids: list[str] = []
+
+        async def _redact_memory_for_tombstone(db, memory: Memory, tombstone: MemoryTombstone) -> None:
+            try:
+                metadata = json.loads(memory.metadata_json or "{}")
+            except (TypeError, json.JSONDecodeError):
+                metadata = {}
+            if not isinstance(metadata, dict):
+                metadata = {}
+            operator_control = metadata.get("operator_control")
+            if not isinstance(operator_control, dict):
+                operator_control = {}
+            operator_control.update(
+                {
+                    "last_action": "propagate_delete_export",
+                    "last_actor": tombstone.actor,
+                    "last_reason": tombstone.reason,
+                    "last_action_at": _recovery_timestamp(tombstone.created_at),
+                    "delete_export_state": _CANONICAL_MEMORY_REDACTED_STATE,
+                    "provider_propagation_state": "runtime_receipt_only_no_full_provider_parity_claim",
+                }
+            )
+            metadata["operator_control"] = operator_control
+            metadata["archived_reason"] = _CANONICAL_MEMORY_DELETE_EXPORT_REASON
+            metadata["canonical_tombstone_id"] = tombstone.id
+            metadata["provenance"] = {
+                "kind": "operator_propagate_delete_export",
+                "actor": tombstone.actor,
+                "source": "canonical_tombstone_ledger",
+                "recorded_at": _recovery_timestamp(tombstone.created_at),
+            }
+            memory.status = MemoryStatus.archived
+            memory.content = _CANONICAL_MEMORY_DELETE_CONTENT
+            memory.summary = _CANONICAL_MEMORY_DELETE_CONTENT
+            memory.confidence = 0.0
+            memory.importance = 0.0
+            memory.reinforcement = 0.0
+            memory.metadata_json = json.dumps(metadata, sort_keys=True)
+            memory.updated_at = tombstone.created_at
+            db.add(memory)
+            await db.execute(
+                update(MemorySource)
+                .where(MemorySource.memory_id == memory.id)
+                .where(MemorySource.snippet.is_not(None))
+                .values(snippet=None)
+            )
+
         async with self._canonical_memory_lock:
             async with get_session() as db:
                 await _begin_canonical_write(db)
-                tombstone_result = await db.execute(select(MemoryTombstone))
-                tombstoned_ids = {tombstone.memory_id for tombstone in tombstone_result.scalars().all()}
+                current_tombstone_result = await db.execute(select(MemoryTombstone))
+                current_tombstones = current_tombstone_result.scalars().all()
+                current_by_memory = {
+                    tombstone.memory_id: tombstone for tombstone in current_tombstones
+                }
+                current_by_id = {tombstone.id: tombstone for tombstone in current_tombstones}
+                archive_tombstones_applied = False
+                for candidate in normalized_tombstones:
+                    memory = (
+                        await db.execute(
+                            select(Memory).where(Memory.id == candidate["memory_id"])
+                        )
+                    ).scalars().first()
+                    if memory is None:
+                        raise ValueError(
+                            f"memory restore tombstone {candidate['memory_id']} has no canonical row"
+                        )
+                    memory_owner = str(memory.source_session_id or "").strip()
+                    if not memory_owner:
+                        raise PermissionError(
+                            f"memory restore tombstone {candidate['memory_id']} has no owner session"
+                        )
+                    if memory_owner != normalized_owner:
+                        raise PermissionError(
+                            f"memory restore tombstone {candidate['memory_id']} belongs to another owner session"
+                        )
+                    existing_by_id = current_by_id.get(candidate["id"])
+                    if existing_by_id is not None and existing_by_id.memory_id != candidate["memory_id"]:
+                        raise ValueError(
+                            f"memory restore tombstone id {candidate['id']} belongs to another memory"
+                        )
+                    tombstone = current_by_memory.get(candidate["memory_id"])
+                    if tombstone is None:
+                        tombstone = MemoryTombstone(**candidate)
+                        db.add(tombstone)
+                        await db.flush()
+                        current_by_memory[candidate["memory_id"]] = tombstone
+                        current_by_id[tombstone.id] = tombstone
+                        applied_tombstone_ids.append(tombstone.id)
+                    await _redact_memory_for_tombstone(db, memory, tombstone)
+                    archive_tombstones_applied = True
+                if archive_tombstones_applied:
+                    await db.execute(
+                        update(MemorySnapshot)
+                        .values(content="", source_hash=None, updated_at=_now())
+                    )
+                    await db.flush()
+                tombstoned_ids = set(current_by_memory)
                 for record in normalized_records:
                     memory_id = record["id"]
                     if memory_id in tombstoned_ids:
@@ -2256,6 +2413,7 @@ class MemoryRepository:
             "tombstone_suppressed_count": len(suppressed_ids),
             "newer_conflict_count": len(conflict_ids),
             "restored_source_count": source_count,
+            "applied_archive_tombstone_ids": applied_tombstone_ids,
             "current_tombstone_revision": await self.get_memory_tombstone_revision(),
             "reconciliation": reconciliation,
         }

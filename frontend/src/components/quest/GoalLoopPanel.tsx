@@ -11,6 +11,7 @@ import type {
   GoalLoopReceipt,
   GoalStrategyDelta,
 } from "../../types";
+import { GoalLoopReceiptDetails } from "./GoalLoopReceiptDetails";
 
 type GoalLoopViewState =
   | "loading"
@@ -404,6 +405,8 @@ export function GoalLoopPanel({ goal, onEdit }: Props) {
               {typeof latest.artifact_ref === "string" && latest.artifact_ref && <div className="text-retro-text/40">artifact: {latest.artifact_ref}</div>}
             </div>
           )}
+
+          {latest && <GoalLoopReceiptDetails receipt={latest} />}
 
           <div className="flex flex-wrap gap-1 mt-2">
             <button

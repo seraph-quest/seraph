@@ -186,12 +186,23 @@ starting the backend:
 ```bash
 python3 backend/production_preflight.py --env-file .env.prod --format json
 ./manage.sh -e prod up -d
+./manage.sh -e prod health --format json
 ```
 
 `/health` is the core process check. `/api/runtime/status` is the authenticated
 runtime receipt and may report OpenRouter `configuration_required` while the
 local core remains healthy. A live provider or host receipt requires a separate
 operator-approved probe and is outside this offline launch check.
+
+The managed health command is a read-only, keyless release-gate collector. It
+writes a redacted JSON receipt to the canonical workspace under
+`operator-receipts/epic-736-health/` and reports stable exit codes. It checks
+OpenRouter policy, remote admission, durable/guardian/security/memory/evolution
+source contracts, and the absence of configured local inference routes. It does
+not call OpenRouter, a GPU/VLM service, Whisper, Piper, or a connector. Live
+provider, embedding, edge, voice, and Telegram evidence is reported as
+`skipped`/`degraded` until a separately authorised canary supplies a receipt;
+those omissions never become a superiority claim.
 
 Production API access is authenticated with a server-side, single-operator
 session. Generate a PBKDF2 password hash in the backend environment, store it

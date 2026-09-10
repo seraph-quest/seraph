@@ -16,6 +16,7 @@
 #   ./manage.sh -e [dev|prod] logs      - View Docker logs.
 #   ./manage.sh -e [dev|prod] build     - Build or rebuild Docker services.
 #   ./manage.sh -e dev local up|down|status|logs|run - Manage the direct local frontend/backend stack.
+#   ./manage.sh -e prod health --format json - Emit a redacted Epic #736 health receipt.
 #   ./manage.sh -e [dev|prod] daemon start|stop|status|logs - Manage screen daemon.
 #   ./manage.sh -e [dev|prod] proxy start|stop|status|logs  - Manage stdio MCP proxy.
 #
@@ -69,6 +70,7 @@ function display_help() {
     echo "  logs    Follow log output (e.g., 'logs -f backend')."
     echo "  build   Build or rebuild services."
     echo "  local   Manage the direct local frontend/backend stack (dev only): up, down, status, logs, run."
+    echo "  health  Emit the redacted Epic #736 health receipt (prod only)."
     echo "  daemon  Manage screen daemon: start, stop, status, logs."
     echo "  proxy   Manage stdio-to-HTTP MCP proxy: start, stop, status, logs."
     echo
@@ -906,6 +908,16 @@ REPORT_ARCHIVE_DIR="${REPORT_ARCHIVE_DIR:-$LOCAL_WORKSPACE_DIR/artifacts/reports
 export SCREEN_CAPTURE_ARCHIVE_DIR SERAPH_SCREEN_CAPTURE_ARCHIVE_DIR SERAPH_DAEMON_STATUS_FILE REPORT_ARCHIVE_DIR
 if [ "$COMMAND" = "local" ]; then
     DEFAULT_MODEL="$LOCAL_DEFAULT_MODEL"
+fi
+
+# The health collector is intentionally outside Docker Compose.  It only reads
+# deployment configuration/source contracts and writes a redacted receipt; it
+# never contacts OpenRouter, the GPU/VLM edge, or a connector.
+if [ "$COMMAND" = "health" ]; then
+    if [ "$ENV" != "prod" ]; then
+        error_exit "'health' is supported only with '-e prod'."
+    fi
+    exec python3 "$SCRIPT_DIR/scripts/epic_736_health.py" "$@"
 fi
 
 # --- Execution ---

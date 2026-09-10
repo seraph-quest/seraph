@@ -31,6 +31,14 @@ reviewed PR merges and its required live text, vision, and embedding receipts
 are recorded. GPU/VLM entries below remain historical baseline evidence unless
 they are explicitly marked as branch-local migration behavior.
 
+The final integration branch also provides the managed, keyless health receipt
+command `./manage.sh -e prod health --format json`. It writes only redacted
+logical receipts under `operator-receipts/epic-736-health/`, makes no provider,
+GPU/VLM, speech, or connector calls, and records unprobed live evidence as
+`skipped`/`degraded` with recovery guidance. Source-contract checks are evidence
+of the checked revision, not claims of live execution or competitive
+superiority.
+
 ## Legend
 
 - `[x]` shipped on `develop`

@@ -31,7 +31,10 @@ from src.goals.contracts import (
 )
 from src.goals.repository import deserialize_success_criterion, goal_repository
 from src.memory.control import get_strategy_delta
-from src.memory.gate_b_provider_decision import build_gate_b_canonical_decision_record
+from src.memory.gate_b_provider_decision import (
+    GateBCanonicalDecisionRecord,
+    build_gate_b_canonical_decision_record,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -276,12 +279,10 @@ def _candidate_receipt_details(
     }
 
 
-def _outcome_receipt_details(
+def _canonical_decision_for_outcome(
     receipt: GoalOutcomeReceipt,
-    *,
-    capability_id: str | None = None,
-) -> dict[str, Any]:
-    canonical_decision = build_gate_b_canonical_decision_record(
+) -> GateBCanonicalDecisionRecord:
+    return build_gate_b_canonical_decision_record(
         goal_id=receipt.goal_id,
         goal_revision=receipt.goal_revision,
         # The goal-loop receipt has no authoritative plan revision or
@@ -296,8 +297,18 @@ def _outcome_receipt_details(
         recovery_state="restart_unverified",
         decision="act",
         verification=receipt.verification,
+        usefulness=receipt.usefulness,
+        learning_writeback_id=receipt.learning_record_id,
         requested_learning=receipt.learning,
     )
+
+
+def _outcome_receipt_details(
+    receipt: GoalOutcomeReceipt,
+    *,
+    capability_id: str | None = None,
+) -> dict[str, Any]:
+    canonical_decision = _canonical_decision_for_outcome(receipt)
     details = {
         "receipt_version": GOAL_LOOP_RECEIPT_VERSION,
         "receipt_type": receipt.receipt_type,
@@ -377,7 +388,7 @@ def _redact_receipt_details(details: dict[str, Any]) -> dict[str, Any]:
         safe_details["canonical_decision_record"] = _sanitize_canonical_decision_record(
             safe_details.get("canonical_decision_record")
         )
-    return safe_details
+    return _sanitize_strategy_delta_receipt(safe_details)
 
 
 def _sanitize_canonical_decision_record(value: object) -> dict[str, Any] | None:
@@ -399,6 +410,8 @@ def _sanitize_canonical_decision_record(value: object) -> dict[str, Any] | None:
             recovery_state=value.get("recovery_state"),
             decision=value.get("decision"),
             verification=value.get("verification"),
+            usefulness=value.get("usefulness"),
+            learning_writeback_id=value.get("learning_writeback_id"),
             requested_learning=value.get("learning"),
         )
     except Exception:
@@ -433,6 +446,8 @@ def _downgrade_canonical_decision_record(value: object) -> dict[str, Any] | None
             recovery_state="restart_unverified",
             decision=safe_record.get("decision"),
             verification=safe_record.get("verification"),
+            usefulness="unknown",
+            learning_writeback_id=None,
             requested_learning="no_learning",
         )
     except Exception:
@@ -441,9 +456,13 @@ def _downgrade_canonical_decision_record(value: object) -> dict[str, Any] | None
 
 
 def _sanitize_strategy_delta_receipt(details: dict[str, Any]) -> dict[str, Any]:
-    """Keep legacy audit rows from exposing an unverified correction ID."""
+    """Keep legacy audit rows from exposing unverified correction/learning claims."""
 
     safe_details = dict(details)
+    has_strategy_binding = (
+        "strategy_delta_id" in safe_details
+        or "strategy_delta_provenance" in safe_details
+    )
     if "canonical_decision_record" in safe_details:
         safe_details["canonical_decision_record"] = _sanitize_canonical_decision_record(
             safe_details.get("canonical_decision_record")
@@ -454,6 +473,20 @@ def _sanitize_strategy_delta_receipt(details: dict[str, Any]) -> dict[str, Any]:
             safe_details["evidence_refs"] = list(_safe_evidence_refs(*evidence_refs))
         else:
             safe_details["evidence_refs"] = []
+    if "learning" in safe_details:
+        learning = safe_details.get("learning")
+        safe_details["learning"] = (
+            learning
+            if isinstance(learning, str) and learning in {"applied", "no_learning"}
+            else "no_learning"
+        )
+    if "learning_record_id" in safe_details:
+        learning_record_id = safe_details.get("learning_record_id")
+        if not (
+            isinstance(learning_record_id, str)
+            and _SAFE_OPAQUE_ID.fullmatch(learning_record_id.strip()) is not None
+        ):
+            safe_details["learning_record_id"] = None
     delta_id = safe_details.get("strategy_delta_id")
     provenance = safe_details.get("strategy_delta_provenance")
     outer_verified = (
@@ -461,15 +494,66 @@ def _sanitize_strategy_delta_receipt(details: dict[str, Any]) -> dict[str, Any]:
         and isinstance(delta_id, str)
         and _SAFE_OPAQUE_ID.fullmatch(delta_id.strip()) is not None
     )
-    if not outer_verified:
+    if has_strategy_binding and not outer_verified:
         safe_details["strategy_delta_id"] = None
         safe_details["strategy_delta_provenance"] = (
             "not_present" if provenance is None and delta_id is None else "unresolved"
         )
-    if "canonical_decision_record" in safe_details and not outer_verified:
-        safe_details["canonical_decision_record"] = _downgrade_canonical_decision_record(
-            safe_details.get("canonical_decision_record")
-        )
+    if not outer_verified:
+        if "learning" in safe_details:
+            safe_details["learning"] = "no_learning"
+        if "learning_record_id" in safe_details:
+            safe_details["learning_record_id"] = None
+        if "canonical_decision_record" in safe_details:
+            safe_details["canonical_decision_record"] = _downgrade_canonical_decision_record(
+                safe_details.get("canonical_decision_record")
+            )
+        return safe_details
+
+    nested = safe_details.get("canonical_decision_record")
+    if nested is not None:
+        nested_mismatch = not isinstance(nested, dict)
+        if not nested_mismatch:
+            nested_mismatch = (
+                nested.get("memory_delta_id") != delta_id
+                or nested.get("memory_delta_provenance") != "verified"
+            )
+            outer_goal_id = safe_details.get("goal_id")
+            outer_goal_revision = safe_details.get("goal_revision")
+            if outer_goal_id is None or nested.get("goal_id") != outer_goal_id:
+                nested_mismatch = True
+            if outer_goal_revision is None or nested.get("goal_revision") != outer_goal_revision:
+                nested_mismatch = True
+            outer_digest = safe_details.get("decision_input_digest")
+            if outer_digest is None:
+                outer_digest = safe_details.get("input_digest")
+            if outer_digest is None or nested.get("decision_input_digest") != outer_digest:
+                nested_mismatch = True
+            top_learning = safe_details.get("learning", "no_learning")
+            nested_learning = nested.get("learning")
+            if top_learning == "applied":
+                nested_mismatch = nested_mismatch or not (
+                    nested.get("status") == "verified"
+                    and nested_learning == "applied"
+                    and nested.get("learning_writeback_id")
+                    == safe_details.get("learning_record_id")
+                )
+            elif nested_learning == "applied":
+                nested_mismatch = True
+        if nested_mismatch:
+            safe_details["strategy_delta_id"] = None
+            safe_details["strategy_delta_provenance"] = "unresolved"
+            if "learning" in safe_details:
+                safe_details["learning"] = "no_learning"
+            if "learning_record_id" in safe_details:
+                safe_details["learning_record_id"] = None
+            safe_details["canonical_decision_record"] = _downgrade_canonical_decision_record(
+                nested
+            )
+    elif safe_details.get("learning") == "applied":
+        safe_details["learning"] = "no_learning"
+        if "learning_record_id" in safe_details:
+            safe_details["learning_record_id"] = None
     return safe_details
 
 
@@ -940,6 +1024,11 @@ async def dispatch_goal_candidate(
         evidence_refs=list(evidence_refs),
         reason=_safe_text(result.reason or "goal_candidate_outcome"),
     )
+    canonical_decision = _canonical_decision_for_outcome(outcome)
+    if outcome.learning == "applied" and not (
+        canonical_decision.status == "verified" and canonical_decision.learning == "applied"
+    ):
+        outcome = outcome.model_copy(update={"learning": "no_learning", "learning_record_id": None})
     await _persist_receipt(
         event_type=_OUTCOME_EVENT,
         summary=f"Goal candidate {candidate.candidate_id} outcome recorded",

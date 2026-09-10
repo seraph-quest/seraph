@@ -26,7 +26,7 @@ def test_gate_b_records_a_deterministic_no_pilot_decision():
         "reason_code": "openrouter_pilot_deferred_credential_not_provided",
         "measurement_status": "blocked",
         "pilot_status": "not_run",
-        "operator_status": "gate_b_provider_pilot_deferred_canonical_memory_usable",
+        "operator_status": "gate_b_provider_pilot_deferred_canonical_memory_contract_covered_unmeasured",
         "claim_boundary": GATE_B_PROVIDER_DECISION_CLAIM_BOUNDARY,
     }
     assert first["provider"] == {
@@ -37,7 +37,7 @@ def test_gate_b_records_a_deterministic_no_pilot_decision():
         "retrieval_payload_sent": False,
         "observed_quality": None,
     }
-    assert first["canonical_memory"]["status"] == "usable"
+    assert first["canonical_memory"]["status"] == "contract_covered_unmeasured"
     assert first["canonical_memory"]["provider_override"] == "blocked"
     assert first["contract_evidence"] == [
         "gate_a_frozen_canonical_memory_contract",
@@ -171,6 +171,47 @@ def test_canonical_verified_binding_defaults_missing_state_fail_closed():
     assert record.memory_state == "unknown"
     assert record.recovery_state == "restart_unverified"
     assert record.reason_code == "canonical_restart_reconciliation_unverified"
+
+
+def test_canonical_learning_requires_helpful_outcome_and_writeback_binding():
+    incomplete = build_gate_b_canonical_decision_record(
+        goal_id="goal-learning",
+        goal_revision=1,
+        plan_revision=1,
+        decision_input_digest="1" * 64,
+        memory_delta_id="delta-learning",
+        memory_delta_provenance="verified",
+        memory_control_owner="operator:test",
+        memory_state="available",
+        recovery_state="steady",
+        decision="act",
+        verification="passed",
+        usefulness="unknown",
+        learning_writeback_id="writeback-1",
+        requested_learning="applied",
+    )
+    complete = build_gate_b_canonical_decision_record(
+        goal_id="goal-learning",
+        goal_revision=1,
+        plan_revision=1,
+        decision_input_digest="1" * 64,
+        memory_delta_id="delta-learning",
+        memory_delta_provenance="verified",
+        memory_control_owner="operator:test",
+        memory_state="available",
+        recovery_state="steady",
+        decision="act",
+        verification="passed",
+        usefulness="helpful",
+        learning_writeback_id="writeback-1",
+        requested_learning="applied",
+    )
+
+    assert incomplete.status == "verified"
+    assert incomplete.learning == "no_learning"
+    assert incomplete.reason_code == "canonical_learning_evidence_incomplete"
+    assert complete.status == "verified"
+    assert complete.learning == "applied"
 
 
 def test_tombstone_revocation_and_restart_state_fail_closed():

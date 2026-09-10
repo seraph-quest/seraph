@@ -52,6 +52,7 @@ GateBCanonicalDecisionStatus = Literal["verified", "no_learning", "blocked"]
 GateBCanonicalMemoryState = Literal["available", "tombstoned", "revoked", "unknown"]
 GateBRecoveryState = Literal["steady", "restart_reconciled", "restart_unverified"]
 GateBCanonicalLearning = Literal["applied", "no_learning"]
+GateBCanonicalUsefulness = Literal["helpful", "harmful", "ignored", "corrected", "unknown"]
 
 
 @dataclass(frozen=True)
@@ -72,6 +73,8 @@ class GateBCanonicalDecisionRecord:
     recovery_state: GateBRecoveryState
     decision: str | None
     verification: str
+    usefulness: GateBCanonicalUsefulness
+    learning_writeback_id: str | None
     learning: GateBCanonicalLearning
     status: GateBCanonicalDecisionStatus
     reason_code: str
@@ -97,6 +100,8 @@ class GateBCanonicalDecisionRecord:
             "recovery_state": self.recovery_state,
             "decision": self.decision,
             "verification": self.verification,
+            "usefulness": self.usefulness,
+            "learning_writeback_id": self.learning_writeback_id,
             "learning": self.learning,
             "status": self.status,
             "reason_code": self.reason_code,
@@ -122,6 +127,8 @@ def gate_b_canonical_decision_contract_payload() -> dict[str, Any]:
             "memory_state",
             "tombstone_ledger_revision",
             "recovery_state",
+            "usefulness",
+            "learning_writeback_id",
         ],
         "status_values": ["verified", "no_learning", "blocked"],
         "learning_policy": "unresolved_or_unverified_canonical_evidence_forces_no_learning",
@@ -170,6 +177,8 @@ def build_gate_b_canonical_decision_record(
     recovery_state: object = "restart_unverified",
     decision: object = "act",
     verification: object = "unknown",
+    usefulness: object = "unknown",
+    learning_writeback_id: object = None,
     requested_learning: object = "no_learning",
 ) -> GateBCanonicalDecisionRecord:
     """Build a fail-closed canonical decision binding.
@@ -180,6 +189,9 @@ def build_gate_b_canonical_decision_record(
     tombstone/restart state.  The memory/recovery defaults are deliberately
     unknown/unreconciled, so omitting those bindings becomes an explicit
     no-learning or blocked record; it never becomes a positive memory update.
+    A positive result is a caller-attested contract record: this pure helper
+    does not authenticate the owner or write memory, so a trusted adapter must
+    provide the owner proof before a runtime caller supplies its bounded handle.
     """
 
     safe_goal_id = _safe_opaque_id(goal_id)
@@ -219,11 +231,23 @@ def build_gate_b_canonical_decision_record(
         else None
     )
     safe_verification = _safe_choice(verification, {"passed", "failed", "unknown"}, "unknown")
+    safe_usefulness: GateBCanonicalUsefulness = (
+        _safe_choice(
+            usefulness,
+            {"helpful", "harmful", "ignored", "corrected", "unknown"},
+            "unknown",
+        )
+    )
+    safe_learning_writeback_id = (
+        _safe_opaque_id(learning_writeback_id) if learning_writeback_id is not None else None
+    )
     safe_requested_learning = _safe_choice(
         requested_learning,
         {"applied", "no_learning"},
         "no_learning",
     )
+    if safe_requested_learning != "applied":
+        safe_learning_writeback_id = None
 
     binding_values = {
         "goal_id": safe_goal_id,
@@ -238,6 +262,8 @@ def build_gate_b_canonical_decision_record(
         "recovery_state": safe_recovery_state,
         "decision": safe_decision,
         "verification": safe_verification,
+        "usefulness": safe_usefulness,
+        "learning_writeback_id": safe_learning_writeback_id,
     }
     record_id = _decision_record_id(binding_values)
 
@@ -275,8 +301,15 @@ def build_gate_b_canonical_decision_record(
             if safe_provenance == "unresolved"
             else "canonical_memory_delta_not_present"
         )
-    elif safe_requested_learning == "applied" and safe_verification == "passed":
-        learning = "applied"
+    elif safe_requested_learning == "applied":
+        if (
+            safe_verification == "passed"
+            and safe_usefulness == "helpful"
+            and safe_learning_writeback_id is not None
+        ):
+            learning = "applied"
+        else:
+            reason_code = "canonical_learning_evidence_incomplete"
 
     if status in {"blocked", "no_learning"}:
         learning = "no_learning"
@@ -295,6 +328,8 @@ def build_gate_b_canonical_decision_record(
         recovery_state=safe_recovery_state,
         decision=safe_decision,
         verification=safe_verification,
+        usefulness=safe_usefulness,
+        learning_writeback_id=safe_learning_writeback_id,
         learning=learning,
         status=status,
         reason_code=reason_code,
@@ -348,7 +383,7 @@ class GateBProviderDecisionReceipt:
                 "measurement_status": self.measurement_status,
                 "pilot_status": self.pilot_status,
                 "operator_status": (
-                    "gate_b_provider_pilot_deferred_canonical_memory_usable"
+                    "gate_b_provider_pilot_deferred_canonical_memory_contract_covered_unmeasured"
                     if self.status == "degraded"
                     else "gate_b_provider_decision_blocked"
                 ),
@@ -382,7 +417,7 @@ class GateBProviderDecisionReceipt:
                 "admission": "credential_capability_egress_and_consent_proof_required_before_pilot",
                 "pilot": "at_most_one_bounded_advisory_pilot_after_admission_proof",
                 "canonical_first": "provider_evidence_is_advisory_and_cannot_override_canonical_memory",
-                "outage": "canonical_memory_remains_usable_and_provider_state_is_visible",
+                "outage": "canonical_contract_remains_covered_and_provider_state_is_visible",
                 "learning": "no_learning_without_verified_outcome_and_governed_writeback",
                 "blocked_claims": list(self.blocked_claims),
                 "receipt_surfaces": [
@@ -439,8 +474,8 @@ def _gate_a_binding() -> tuple[dict[str, Any], bool]:
 def build_gate_b_provider_decision_receipt() -> dict[str, Any]:
     """Build the current no-pilot decision without touching OpenRouter.
 
-    ``status=degraded`` means the canonical local contract remains usable while
-    the provider lane is blocked.  If the frozen Gate A artifact is invalid,
+    ``status=degraded`` means the canonical contract is covered but unmeasured
+    while the provider lane is blocked.  If the frozen Gate A artifact is invalid,
     the whole receipt becomes ``blocked`` so a drifted corpus cannot be used as
     an apparently healthy provider baseline.
     """
@@ -474,7 +509,9 @@ def build_gate_b_provider_decision_receipt() -> dict[str, Any]:
         provider_call_attempted=False,
         retrieval_payload_sent=False,
         observed_quality=None,
-        canonical_memory_status="usable" if artifact_valid else "blocked",
+        canonical_memory_status=(
+            "contract_covered_unmeasured" if artifact_valid else "blocked"
+        ),
         canonical_decision_contract_status="covered",
         canonical_decision_runtime_status="not_run",
         gate_a_artifact_status=binding["artifact_status"],

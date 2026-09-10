@@ -294,8 +294,9 @@ The existing operator-readable memory report now includes a frozen
 corpus and metric-contract versions and SHA-256 values, reports
 `status=degraded` with `provider_status=blocked`, `decision=deferred`,
 `measurement_status=blocked`, and `pilot_status=not_run`, and makes the
-canonical-memory status visible. The degraded status means the local
-canonical path remains usable; it is not a provider-quality result.
+canonical-memory status visible. The degraded status means the frozen
+canonical contract is covered but unmeasured; it is not a provider-quality or
+live-memory-readback result.
 
 This deterministic boundary intentionally does not read or persist an
 OpenRouter credential, probe the network, send retrieval payloads, invoke a
@@ -322,11 +323,17 @@ state. The current goal-loop seam does not own an authoritative plan revision,
 control-owner handle, or reconciled memory/restart state, so it emits those
 records as blocked with `learning=no_learning` rather than manufacturing
 positive bindings. A governed caller that supplies the complete current state
-may produce the verified later-decision binding; unresolved evidence records
-`no_learning`, while tombstoned or revoked memory and an unreconciled restart
-are `blocked`. The owner field is a bounded attestation handle; the
+may produce the verified later-decision binding. `learning=applied` additionally
+requires a helpful verified outcome and an opaque governed-writeback handle;
+otherwise the record remains `learning=no_learning`. Unresolved evidence
+records `no_learning`, while tombstoned or revoked memory and an unreconciled
+restart are `blocked`. The owner field is a bounded attestation handle; the
 authoritative owner identity remains on the existing `StrategyDelta` record
-and is validated before a caller emits the handle.
+and is validated before a caller emits the handle. The pure contract helper
+does not authenticate that handle or perform writeback, so only a trusted
+adapter may supply an authenticated owner proof to a runtime caller.
+Stored/readback receipts cross-check their outer and nested bindings and clear
+learning claims when the outer provenance cannot be revalidated.
 
 Remaining Gate B work requires a trusted OpenRouter adapter with explicit
 credential, capability, consent, egress, serial-admission, and budget proof;

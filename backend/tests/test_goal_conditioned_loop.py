@@ -602,6 +602,8 @@ def test_unresolved_outer_receipt_downgrades_nested_canonical_record():
         recovery_state="steady",
         decision="act",
         verification="passed",
+        usefulness="helpful",
+        learning_writeback_id="writeback-readback",
         requested_learning="applied",
     )
 
@@ -642,6 +644,8 @@ async def test_list_readback_downgrades_nested_canonical_record_with_outer_prove
         recovery_state="steady",
         decision="act",
         verification="passed",
+        usefulness="helpful",
+        learning_writeback_id="writeback-list",
         requested_learning="applied",
     )
     event = {
@@ -650,8 +654,12 @@ async def test_list_readback_downgrades_nested_canonical_record_with_outer_prove
         "created_at": datetime.now(timezone.utc).isoformat(),
         "details": {
             "goal_id": "goal-list-readback",
+            "goal_revision": 1,
+            "decision_input_digest": "b" * 64,
             "strategy_delta_id": "delta-list-readback",
             "strategy_delta_provenance": "verified",
+            "learning": "applied",
+            "learning_record_id": "writeback-list",
             "canonical_decision_record": nested.as_payload(),
         },
     }
@@ -671,11 +679,112 @@ async def test_list_readback_downgrades_nested_canonical_record_with_outer_prove
     record = listed[0]["canonical_decision_record"]
     assert listed[0]["strategy_delta_id"] is None
     assert listed[0]["strategy_delta_provenance"] == "unresolved"
+    assert listed[0]["learning"] == "no_learning"
+    assert listed[0]["learning_record_id"] is None
     assert record["status"] == "blocked"
     assert record["learning"] == "no_learning"
     assert record["memory_delta_id"] is None
     assert record["memory_state"] == "unknown"
     assert record["recovery_state"] == "restart_unverified"
+
+
+def test_mismatched_nested_canonical_record_clears_outer_learning_claim():
+    from src.memory.gate_b_provider_decision import build_gate_b_canonical_decision_record
+
+    nested = build_gate_b_canonical_decision_record(
+        goal_id="goal-cross-check",
+        goal_revision=1,
+        plan_revision=1,
+        decision_input_digest="c" * 64,
+        memory_delta_id="delta-other",
+        memory_delta_provenance="verified",
+        memory_control_owner="operator:test",
+        memory_state="available",
+        recovery_state="steady",
+        decision="act",
+        verification="passed",
+        usefulness="helpful",
+        learning_writeback_id="writeback-1",
+        requested_learning="applied",
+    )
+
+    safe = _sanitize_strategy_delta_receipt(
+        {
+            "goal_id": "goal-cross-check",
+            "goal_revision": 1,
+            "decision_input_digest": "c" * 64,
+            "strategy_delta_id": "delta-outer",
+            "strategy_delta_provenance": "verified",
+            "learning": "applied",
+            "learning_record_id": "writeback-1",
+            "canonical_decision_record": nested.as_payload(),
+        }
+    )
+
+    assert safe["strategy_delta_id"] is None
+    assert safe["strategy_delta_provenance"] == "unresolved"
+    assert safe["learning"] == "no_learning"
+    assert safe["learning_record_id"] is None
+    assert safe["canonical_decision_record"]["status"] == "blocked"
+    assert safe["canonical_decision_record"]["learning"] == "no_learning"
+    assert safe["canonical_decision_record"]["memory_delta_id"] is None
+
+
+async def test_outcome_learning_is_coerced_without_complete_canonical_binding():
+    from unittest.mock import AsyncMock, patch
+
+    from src.db.models import Goal
+
+    goal = Goal(
+        id="goal-learning-coercion",
+        title="Write a brief",
+        revision=1,
+        success_criterion_json=GoalSuccessCriterion(
+            description="A readable brief is present",
+            verifier_kind="artifact_readback",
+            evidence_refs=["operator:readback"],
+        ).model_dump_json(),
+    )
+    candidate = build_goal_candidate_decision(
+        goal,
+        GoalCandidateRequest(
+            capability_id="workflow.goal-snapshot-to-file",
+            evidence_refs=["operator:readback"],
+        ),
+    )
+    persisted: list[dict[str, object]] = []
+
+    async def adapter(**_kwargs):
+        return GoalExecutionResult(
+            execution_status="succeeded",
+            verification="passed",
+            usefulness="helpful",
+            learning="applied",
+            learning_record_id="writeback-1",
+            artifact_ref="reports/brief.md",
+            evidence_refs=["readback:brief"],
+        )
+
+    async def persist(**kwargs):
+        persisted.append(kwargs)
+        return kwargs["details"]
+
+    import src.guardian.goal_conditioned_loop as goal_loop
+
+    with (
+        patch.object(goal_loop.goal_repository, "get", new=AsyncMock(return_value=goal)),
+        patch.object(goal_loop, "_existing_receipt", new=AsyncMock(return_value=None)),
+        patch.object(goal_loop, "_persist_receipt", new=persist),
+    ):
+        outcome = await dispatch_goal_candidate(candidate, adapter=adapter)
+
+    assert outcome.learning == "no_learning"
+    assert outcome.learning_record_id is None
+    saved = next(item["details"] for item in persisted if item["event_type"] == "goal_loop_outcome")
+    assert saved["learning"] == "no_learning"
+    assert saved["learning_record_id"] is None
+    assert saved["canonical_decision_record"]["status"] == "blocked"
+    assert saved["canonical_decision_record"]["learning"] == "no_learning"
 
 
 def test_receipt_evidence_refs_are_typed_opaque_digests():

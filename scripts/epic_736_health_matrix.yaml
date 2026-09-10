@@ -1,0 +1,124 @@
+schema_version: 1
+epic: 736
+description: >-
+  Keyless, read-only release-gate criteria. Source-contract checks do not
+  claim live execution. Provider, edge, media, and connector checks are
+  optional until a separately authorised canary supplies redacted evidence.
+status_vocabulary: [pass, degraded, blocked, skipped, unknown, failed]
+overall_status_precedence: [failed, blocked, unknown, degraded, skipped, pass]
+exit_codes:
+  pass: 0
+  optional_degraded_or_skipped: 2
+  required_blocked_or_unknown: 3
+  failed: 4
+  usage_or_config: 64
+  internal: 70
+criteria:
+  - id: runtime.openrouter_model_fabric
+    owner_issue: 741
+    required: true
+    evidence: configuration_and_policy_inspection
+  - id: runtime.remote_inference_admission
+    owner_issue: 744
+    required: true
+    evidence: source_contract
+  - id: runtime.effect_reconciliation
+    owner_issue: 743
+    required: true
+    evidence: source_contract
+  - id: runtime.openrouter_text_receipt
+    owner_issue: 741
+    required: false
+    evidence: separately_authorised_live_canary
+  - id: runtime.openrouter_multimodal_receipt
+    owner_issue: 751
+    required: false
+    evidence: separately_authorised_live_canary
+  - id: runtime.no_local_inference_dependency
+    owner_issue: 775
+    required: true
+    evidence: configuration_absence_no_network_call
+  - id: memory.embedding_capability
+    owner_issue: 775
+    required: false
+    evidence: separately_authorised_live_canary
+  - id: guardian.goal_revision_stop
+    owner_issue: 745
+    required: true
+    evidence: source_contract
+  - id: guardian.verified_progress
+    owner_issue: 746
+    required: true
+    evidence: source_contract
+  - id: security.capability_caller_enforcement
+    owner_issue: 747
+    required: true
+    evidence: source_contract
+  - id: memory.correction_delete_restore
+    owner_issue: 753
+    required: true
+    evidence: source_contract
+  - id: evolution.staged_candidate
+    owner_issue: 771
+    required: true
+    evidence: source_contract
+  - id: evolution.hidden_evaluation
+    owner_issue: 771
+    required: true
+    evidence: source_contract
+  - id: evolution.scoped_canary_rollback
+    owner_issue: 771
+    required: true
+    evidence: source_contract
+  - id: evaluation.comparator_scope_coverage
+    owner_issue: 754
+    required: true
+    evidence: documentation_contract
+  - id: core.authenticated_origin
+    owner_issue: 747
+    required: true
+    evidence: source_contract
+  - id: core.frontend
+    owner_issue: 746
+    required: true
+    evidence: source_contract
+  - id: core.api_ws
+    owner_issue: 746
+    required: true
+    evidence: source_contract
+  - id: core.db_workspace
+    owner_issue: 742
+    required: true
+    evidence: source_contract
+  - id: scheduler.priority_queue
+    owner_issue: 744
+    required: true
+    evidence: source_contract
+  - id: backup.restore
+    owner_issue: 742
+    required: true
+    evidence: source_contract
+  - id: edge.mac
+    owner_issue: 746
+    required: false
+    evidence: separately_authorised_operator_shell_probe
+  - id: voice.audio
+    owner_issue: 751
+    required: false
+    evidence: separately_authorised_test_media_canary
+  - id: telegram
+    owner_issue: 752
+    required: false
+    evidence: separately_authorised_paired_account_probe
+  - id: storage.disk
+    owner_issue: 742
+    required: true
+    evidence: canonical_workspace_contract
+  - id: docs.truth
+    owner_issue: 754
+    required: true
+    evidence: documentation_contract
+notes:
+  - A configured key, catalog row, fixture, or source file is never a live provider receipt.
+  - This command never calls OpenRouter, a GPU host, a VLM wrapper, Whisper, Piper, or a connector.
+  - Mutating drills belong in isolated staging/test profiles and are referenced by logical receipts.

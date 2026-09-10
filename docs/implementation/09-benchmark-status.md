@@ -16,11 +16,19 @@ media readiness remain `external_unverified` and are `skipped` by the keyless
 run. The stable #771 evolution IDs and #754 comparator coverage ID remain in
 the matrix as explicit `excluded` checks; they do not create closure or
 superiority claims for Epic #736.
-Required static child criteria cover #750 conversation identity/outbox, #748
-native software, #749 paired edge, #751 audio capture/decode/persistence, #752
-Telegram transport, and #755 capability-pack lifecycle. Missing source paths
-block the receipt until the owning milestone is present; source presence still
-does not claim exercised behavior.
+Required child criteria cover #750 conversation identity/outbox, #748 native
+software, #749 paired edge, #751 audio capture/decode/persistence, #752
+Telegram transport, and #755 capability-pack lifecycle. Each criterion has a
+separate informational source check and an integration gate. The gate accepts
+only one schema-v1 child receipt from the owning issue with `child_issue`,
+`criterion_id`, current collector `commit`, executed `command`, `result`, a
+fresh timezone-aware `timestamp`, and a SHA-256 `hash` over the canonical
+payload. The collector discovers receipts under
+`operator-receipts/epic-736-child-evidence` or accepts `--child-evidence`; a
+missing, malformed, stale, wrong-revision, tampered, or ambiguous receipt is
+`unknown` and leaves the overall state visibly `degraded` with exit 2. Source
+presence never satisfies a behavioral gate, and the collector does not make
+provider, connector, edge, media, or repository-mutation calls.
 
 ## Status On `develop`
 

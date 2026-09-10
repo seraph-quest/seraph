@@ -42,10 +42,14 @@ execution or competitive superiority. Receipt schema v2 labels each check as
 static, configuration, integration, external-unverified, or excluded; the
 stable #771 evolution IDs and #754 comparator coverage remain explicit excluded
 checks outside Epic #736 closure.
-Required static child criteria map #750 conversation identity/outbox, #748
-native software, #749 paired edge, #751 audio capture/decode/persistence, #752
-Telegram transport, and #755 capability-pack lifecycle; missing paths block
-until the owning milestone is present.
+Required child criteria map #750 conversation identity/outbox, #748 native
+software, #749 paired edge, #751 audio capture/decode/persistence, #752
+Telegram transport, and #755 capability-pack lifecycle. Static source checks
+are informational; each behavioral gate requires one current schema-v1,
+ownership- and revision-bound child receipt under
+`operator-receipts/epic-736-child-evidence` (or `--child-evidence`). Missing,
+malformed, stale, tampered, wrong-revision, or ambiguous evidence is visibly
+`unknown`/`degraded` with exit 2, so source presence cannot satisfy behavior.
 
 ## Legend
 

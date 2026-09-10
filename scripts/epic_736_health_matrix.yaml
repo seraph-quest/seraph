@@ -4,13 +4,15 @@ description: >-
   Keyless, read-only release-gate criteria. Source-contract checks do not
   claim live execution. Provider, edge, media, connector, evolution, and
   comparator checks are explicitly skipped or excluded until separately
-  authorised evidence exists. Required child criteria are static source gates;
-  a missing path blocks the receipt until its owning milestone is present.
+  authorised evidence exists. Required child criteria expose source presence
+  only as informational checks and require a current, validated behavioral
+  receipt from the owning runner; source presence never satisfies that gate.
 status_vocabulary: [pass, degraded, blocked, skipped, unknown, failed]
 evidence_mode_vocabulary: [configuration, static, integration, external_unverified, excluded]
 overall_status_precedence: [failed, blocked, unknown, degraded, skipped, pass]
 overall_status_rules:
   - failed always returns exit 4
+  - required integration evidence that is missing, invalid, stale, mismatched, ambiguous, or non-pass returns visibly degraded with exit 2
   - required blocked or unknown returns blocked with exit 3
   - required degraded returns degraded with exit 3
   - optional blocked, degraded, skipped, or unknown returns degraded with exit 2
@@ -22,6 +24,21 @@ exit_codes:
   failed: 4
   usage_or_config: 64
   internal: 70
+child_evidence:
+  schema_version: 1
+  directory: operator-receipts/epic-736-child-evidence
+  accepted_results: [pass, degraded, blocked, skipped, unknown, failed]
+  required_fields: [schema_version, child_issue, criterion_id, commit, command, result, timestamp, hash]
+  hash: sha256 of canonical JSON object with the hash field omitted
+  max_age_seconds: 86400
+  current_revision_required: true
+  required_criteria:
+    - conversation.identity_outbox
+    - native_software.loop
+    - edge.paired_transport
+    - audio.capture_decode_persistence
+    - telegram.durable_transport
+    - capability_pack.lifecycle
 criterion_fields:
   - id
   - owner_issue
@@ -98,63 +115,63 @@ criteria:
   - id: conversation.identity_outbox
     owner_issue: 750
     required: true
-    evidence_mode: static
-    command_or_probe: health::_contract_check (source presence only)
-    expected_exit_or_result: pass when canonical identity and durable outbox sources exist; blocked when a path is missing
-    artifact_path: source-contract:conversation.identity_outbox
-    live_environment: repository revision; no cross-surface delivery run
-    failure_meaning: canonical conversation identity or durable outbox source is missing
-    residual_risk_text: source presence does not prove identity continuity, ownership, or delivery recovery
+    evidence_mode: integration
+    command_or_probe: health::_contract_check (informational source check) + health::_child_evidence_check (validated child receipt)
+    expected_exit_or_result: pass only when the owning runner emits one current, hashed, revision-bound receipt with result pass; missing, invalid, stale, mismatched, or ambiguous evidence is unknown and overall degraded with exit 2
+    artifact_path: child-evidence:<sha256-prefix>
+    live_environment: owning runner command recorded in the child receipt; no provider or connector call by the collector
+    failure_meaning: canonical conversation identity or durable outbox behavior has no trusted current behavioral evidence
+    residual_risk_text: the receipt validates child evidence shape, hash, ownership, freshness, and revision binding; it does not independently replay the cross-surface delivery run
   - id: native_software.loop
     owner_issue: 748
     required: true
-    evidence_mode: static
-    command_or_probe: health::_contract_check (source presence only)
-    expected_exit_or_result: pass when native software loop and bounded process sources exist; blocked when a path is missing
-    artifact_path: source-contract:native_software.loop
-    live_environment: repository revision; no repository mutation run
-    failure_meaning: governed native software loop source contract is missing
-    residual_risk_text: source presence does not prove bounded execution, review, or rollback
+    evidence_mode: integration
+    command_or_probe: health::_contract_check (informational source check) + health::_child_evidence_check (validated child receipt)
+    expected_exit_or_result: pass only when the owning runner emits one current, hashed, revision-bound receipt with result pass; missing, invalid, stale, mismatched, or ambiguous evidence is unknown and overall degraded with exit 2
+    artifact_path: child-evidence:<sha256-prefix>
+    live_environment: owning runner command recorded in the child receipt; no repository mutation by the collector
+    failure_meaning: governed native software loop behavior has no trusted current behavioral evidence
+    residual_risk_text: the receipt validates child evidence shape, hash, ownership, freshness, and revision binding; it does not independently replay the bounded execution, review, or rollback run
   - id: edge.paired_transport
     owner_issue: 749
     required: true
-    evidence_mode: static
-    command_or_probe: health::_contract_check (source presence only)
-    expected_exit_or_result: pass when paired edge transport source exists; blocked when a path is missing
-    artifact_path: source-contract:edge.paired_transport
-    live_environment: repository revision; no paired edge connection
-    failure_meaning: paired edge identity, pairing, or revocation source contract is missing
-    residual_risk_text: source presence does not prove paired transport or revocation behavior
+    evidence_mode: integration
+    command_or_probe: health::_contract_check (informational source check) + health::_child_evidence_check (validated child receipt)
+    expected_exit_or_result: pass only when the owning runner emits one current, hashed, revision-bound receipt with result pass; missing, invalid, stale, mismatched, or ambiguous evidence is unknown and overall degraded with exit 2
+    artifact_path: child-evidence:<sha256-prefix>
+    live_environment: owning runner command recorded in the child receipt; no edge connection by the collector
+    failure_meaning: paired edge identity, pairing, or revocation behavior has no trusted current behavioral evidence
+    residual_risk_text: the receipt validates child evidence shape, hash, ownership, freshness, and revision binding; it does not independently replay paired transport or revocation behavior
   - id: audio.capture_decode_persistence
     owner_issue: 751
     required: true
-    evidence_mode: static
-    command_or_probe: health::_contract_check (source presence only)
-    expected_exit_or_result: pass when governed audio capture, decode, and persistence sources exist; blocked when a path is missing
-    artifact_path: source-contract:audio.capture_decode_persistence
-    live_environment: repository revision; no microphone, media, or provider call
-    failure_meaning: audio capture, decode, or persistence source contract is missing
-    residual_risk_text: source presence does not prove media privacy, decode correctness, or durable storage
+    evidence_mode: integration
+    command_or_probe: health::_contract_check (informational source check) + health::_child_evidence_check (validated child receipt)
+    expected_exit_or_result: pass only when the owning runner emits one current, hashed, revision-bound receipt with result pass; missing, invalid, stale, mismatched, or ambiguous evidence is unknown and overall degraded with exit 2
+    artifact_path: child-evidence:<sha256-prefix>
+    live_environment: owning runner command recorded in the child receipt; no microphone, media, or provider call by the collector
+    failure_meaning: governed audio capture, decode, or persistence behavior has no trusted current behavioral evidence
+    residual_risk_text: the receipt validates child evidence shape, hash, ownership, freshness, and revision binding; it does not independently replay media privacy, decode, or durable storage behavior
   - id: telegram.durable_transport
     owner_issue: 752
     required: true
-    evidence_mode: static
-    command_or_probe: health::_contract_check (source presence only)
-    expected_exit_or_result: pass when paired Telegram transport and durable receipt sources exist; blocked when a path is missing
-    artifact_path: source-contract:telegram.durable_transport
-    live_environment: repository revision; no Telegram or connector call
-    failure_meaning: paired Telegram transport, consent, or durable receipt source contract is missing
-    residual_risk_text: source presence does not prove consent, delivery, revocation, or retry behavior
+    evidence_mode: integration
+    command_or_probe: health::_contract_check (informational source check) + health::_child_evidence_check (validated child receipt)
+    expected_exit_or_result: pass only when the owning runner emits one current, hashed, revision-bound receipt with result pass; missing, invalid, stale, mismatched, or ambiguous evidence is unknown and overall degraded with exit 2
+    artifact_path: child-evidence:<sha256-prefix>
+    live_environment: owning runner command recorded in the child receipt; no Telegram or connector call by the collector
+    failure_meaning: paired Telegram transport, consent, or durable receipt behavior has no trusted current behavioral evidence
+    residual_risk_text: the receipt validates child evidence shape, hash, ownership, freshness, and revision binding; it does not independently replay consent, delivery, revocation, or retry behavior
   - id: capability_pack.lifecycle
     owner_issue: 755
     required: true
-    evidence_mode: static
-    command_or_probe: health::_contract_check (source presence only)
-    expected_exit_or_result: pass when capability-pack lifecycle sources exist; blocked when a path is missing
-    artifact_path: source-contract:capability_pack.lifecycle
-    live_environment: repository revision; no package install, activation, or external call
-    failure_meaning: governed capability-pack review, activation, or rollback source contract is missing
-    residual_risk_text: source presence does not prove package provenance, approval, or rollback behavior
+    evidence_mode: integration
+    command_or_probe: health::_contract_check (informational source check) + health::_child_evidence_check (validated child receipt)
+    expected_exit_or_result: pass only when the owning runner emits one current, hashed, revision-bound receipt with result pass; missing, invalid, stale, mismatched, or ambiguous evidence is unknown and overall degraded with exit 2
+    artifact_path: child-evidence:<sha256-prefix>
+    live_environment: owning runner command recorded in the child receipt; no package install, activation, or external call by the collector
+    failure_meaning: governed capability-pack lifecycle behavior has no trusted current behavioral evidence
+    residual_risk_text: the receipt validates child evidence shape, hash, ownership, freshness, and revision binding; it does not independently replay package provenance, approval, activation, or rollback behavior
   - id: runtime.openrouter_model_fabric
     owner_issue: 741
     required: true

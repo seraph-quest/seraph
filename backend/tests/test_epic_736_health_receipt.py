@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import socket
 import sys
@@ -50,8 +50,8 @@ def test_keyless_receipt_has_schema_and_logical_artifact(tmp_path: Path, monkeyp
     assert receipt["schema_version"] == 2
     assert receipt["epic"] == 736
     assert receipt["environment"] == "prod"
-    assert receipt["overall_status"] == "blocked"
-    assert exit_code == 3
+    assert receipt["overall_status"] == "degraded"
+    assert exit_code == 2
     assert logical.startswith("operator-receipts/epic-736-health/")
     assert (tmp_path / logical).is_file()
     assert {item["status"] for item in receipt["checks"]} <= health.VALID_STATUSES
@@ -93,7 +93,7 @@ def test_provider_model_is_generic_and_not_tied_to_a_single_catalog_entry(tmp_pa
     check = next(item for item in receipt["checks"] if item["id"] == "runtime.openrouter_model_fabric")
     assert check["status"] == "pass"
     assert check["evidence_mode"] == "configuration"
-    assert exit_code == 3
+    assert exit_code == 2
 
 
 def test_provider_model_must_match_configured_upstream_allowlist(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -129,7 +129,7 @@ def test_unprobed_optional_capabilities_are_skipped(tmp_path: Path, monkeypatch:
     for identifier in ("memory.embedding_capability", "edge.mac", "voice.audio", "telegram"):
         assert checks[identifier]["status"] == "skipped"
         assert checks[identifier]["evidence_mode"] == "external_unverified"
-    assert exit_code == 3
+    assert exit_code == 2
 
 
 def test_excluded_stable_criteria_remain_explicit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -176,7 +176,7 @@ def test_matrix_matches_python_evidence_contract() -> None:
     assert exclusions["research.harness_improvement"] == (771, "excluded", "deferred_outside_epic_736")
 
 
-def test_required_child_static_criteria_are_mapped_and_missing_paths_block() -> None:
+def test_required_child_criteria_are_mapped_and_source_check_is_separate() -> None:
     expected = {
         "conversation.identity_outbox": 750,
         "native_software.loop": 748,
@@ -191,12 +191,110 @@ def test_required_child_static_criteria_are_mapped_and_missing_paths_block() -> 
         criterion = criteria[identifier]
         assert criterion.owner_issue == owner
         assert criterion.required is True
-        assert criterion.evidence_mode == "static"
+        assert criterion.evidence_mode == "integration"
         assert criterion.paths
         check = health._contract_check(criterion)
         assert check["evidence_mode"] == "static"
         if any(not (health.ROOT / path).exists() for path in criterion.paths):
             assert check["status"] == "blocked"
+
+
+def _child_evidence_payload(criterion_id: str, *, timestamp: datetime | None = None) -> dict[str, object]:
+    criterion = next(item for item in health.CRITERIA if item.identifier == criterion_id)
+    payload: dict[str, object] = {
+        "schema_version": health.CHILD_EVIDENCE_SCHEMA_VERSION,
+        "child_issue": criterion.owner_issue,
+        "criterion_id": criterion_id,
+        "commit": health._safe_commit(),
+        "command": "uv run pytest -q tests/test_native_software_engineering.py",
+        "result": "pass",
+        "timestamp": health._timestamp(timestamp or datetime.now(timezone.utc)),
+    }
+    payload["hash"] = health._child_evidence_digest(payload)
+    return payload
+
+
+def _write_child_evidence(directory: Path, payload: object, name: str = "child.json") -> Path:
+    directory.mkdir()
+    path = directory / name
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    return path
+
+
+def _integration_check(receipt: dict[str, object], criterion_id: str) -> dict[str, object]:
+    checks = receipt["checks"]
+    assert isinstance(checks, list)
+    return next(item for item in checks if item["id"] == criterion_id and item["evidence_mode"] == "integration")
+
+
+def test_missing_child_evidence_is_unknown_and_never_source_pass(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _configured(monkeypatch, tmp_path)
+    receipt, exit_code, _ = health.build_receipt()
+    behavior = _integration_check(receipt, "native_software.loop")
+    source = next(item for item in receipt["checks"] if item["id"] == "native_software.loop.source")
+    assert behavior["status"] == "unknown"
+    assert behavior["required"] is True
+    assert source["status"] == "pass"
+    assert source["required"] is False
+    assert receipt["overall_status"] == "degraded"
+    assert exit_code == 2
+
+
+def test_malformed_child_evidence_is_unknown(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _configured(monkeypatch, tmp_path)
+    evidence_dir = tmp_path / "child-evidence"
+    _write_child_evidence(evidence_dir, "not-json")
+    receipt, exit_code, _ = health.build_receipt(evidence_dir)
+    behavior = _integration_check(receipt, "native_software.loop")
+    assert behavior["status"] == "unknown"
+    assert receipt["child_evidence"]["invalid_count"] >= 1
+    assert exit_code == 2
+
+
+@pytest.mark.parametrize("case", ["stale", "wrong_commit", "tampered_hash"])
+def test_stale_or_wrong_commit_child_evidence_is_unknown(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, case: str) -> None:
+    _configured(monkeypatch, tmp_path)
+    payload = _child_evidence_payload(
+        "native_software.loop",
+        timestamp=datetime.now(timezone.utc) - timedelta(days=2) if case == "stale" else None,
+    )
+    if case == "wrong_commit":
+        payload["commit"] = "0" * 40
+        payload["hash"] = health._child_evidence_digest(payload)
+    elif case == "tampered_hash":
+        payload["hash"] = "0" * 64
+    evidence_dir = tmp_path / "child-evidence"
+    _write_child_evidence(evidence_dir, payload)
+    receipt, exit_code, _ = health.build_receipt(evidence_dir)
+    assert _integration_check(receipt, "native_software.loop")["status"] == "unknown"
+    assert exit_code == 2
+
+
+def test_current_passing_child_evidence_satisfies_only_behavior_gate(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _configured(monkeypatch, tmp_path)
+    evidence_dir = tmp_path / "child-evidence"
+    payload = _child_evidence_payload("native_software.loop")
+    _write_child_evidence(evidence_dir, payload)
+    receipt, exit_code, _ = health.build_receipt(evidence_dir)
+    behavior = _integration_check(receipt, "native_software.loop")
+    source = next(item for item in receipt["checks"] if item["id"] == "native_software.loop.source")
+    assert behavior["status"] == "pass"
+    assert behavior["evidence_mode"] == "integration"
+    assert behavior["artifact_refs"][0].startswith("child-evidence:")
+    assert source["required"] is False
+    assert exit_code == 2
+
+
+def test_nonpassing_child_result_cannot_become_pass(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _configured(monkeypatch, tmp_path)
+    evidence_dir = tmp_path / "child-evidence"
+    payload = _child_evidence_payload("native_software.loop")
+    payload["result"] = "degraded"
+    payload["hash"] = health._child_evidence_digest(payload)
+    _write_child_evidence(evidence_dir, payload)
+    receipt, exit_code, _ = health.build_receipt(evidence_dir)
+    assert _integration_check(receipt, "native_software.loop")["status"] == "degraded"
+    assert exit_code == 2
 
 
 def test_optional_blocked_status_cannot_be_healthy() -> None:
@@ -251,7 +349,7 @@ def test_cli_redacts_secret_from_stdout_and_stderr(tmp_path: Path, monkeypatch: 
     _configured(monkeypatch, tmp_path)
     secret = "or-secret-cli-value"
     monkeypatch.setenv("OPENROUTER_API_KEY", secret)
-    assert health.main(["--format", "json"]) == 3
+    assert health.main(["--format", "json"]) == 2
     captured = capsys.readouterr()
     assert secret not in captured.out
     assert secret not in captured.err
@@ -266,4 +364,4 @@ def test_health_collection_is_network_free(tmp_path: Path, monkeypatch: pytest.M
 
     monkeypatch.setattr(socket, "socket", _forbidden_socket)
     receipt, _, _ = health.build_receipt()
-    assert receipt["overall_status"] == "blocked"
+    assert receipt["overall_status"] == "degraded"

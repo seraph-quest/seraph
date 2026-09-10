@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -74,11 +75,10 @@ DURABLE_JOB_TRANSITIONS: dict[str, frozenset[str]] = {
         "succeeded",
         "cancelled",
     }),
-    # Approval-held work stays unavailable until a future authenticated
-    # approval route can bind the current authority/goal revision/budget.  A
-    # generic resume call must never turn an old approval receipt into a new
-    # runnable claim.
-    "awaiting_approval": frozenset({"blocked", "failed", "cancelled"}),
+    # The transition is legal only through ``resume_approved_job`` (or an
+    # equivalent caller that supplies the current approval binding).  The
+    # generic resume operation remains fail-closed below.
+    "awaiting_approval": frozenset({"queued", "blocked", "failed", "cancelled"}),
     "paused": frozenset({
         "queued",
         "blocked",
@@ -662,6 +662,11 @@ def _canonical_reconciliation_receipt(value: Any) -> tuple[str, str]:
         raise ValueError("read_back reconciliation requires outcome or readback_digest")
     actual_cost = raw.get("actual_cost_microusd")
     if actual_cost is not None:
+        if isinstance(actual_cost, bool) or (
+            isinstance(actual_cost, float)
+            and (not math.isfinite(actual_cost) or not actual_cost.is_integer())
+        ):
+            raise ValueError("actual_cost_microusd must be a nonnegative integer")
         try:
             actual_cost = int(actual_cost)
         except (TypeError, ValueError) as exc:
@@ -708,6 +713,76 @@ def _canonical_reconciliation_receipt(value: Any) -> tuple[str, str]:
     return canonical, _digest(safe)
 
 
+def _reconciliation_matches_effect(
+    effect: Mapping[str, Any], receipt: Mapping[str, Any]
+) -> None:
+    """Require a reconciliation receipt to describe the exact ledger effect.
+
+    A receipt that merely has a valid shape must not be allowed to settle a
+    different operation.  This helper is shared by recovery and retry so a
+    settled/verified effect cannot later be paired with an unrelated receipt.
+    """
+    if _text(effect.get("effect_id")) != _text(receipt.get("effect_id")) or _text(
+        effect.get("effect_type")
+    ) != _text(receipt.get("effect_type")):
+        raise DurableJobTransitionError(
+            "reconciliation_receipt must identify one durable effect"
+        )
+    receipt_status = _text(receipt.get("status"))
+    if receipt_status in {"read_back", "reconciled"}:
+        observed_path = _text(receipt.get("target_path"))
+        expected_path = _text(effect.get("target_path"))
+        if not observed_path or not expected_path or observed_path != expected_path:
+            raise DurableJobTransitionError(
+                "readback reconciliation requires the exact effect target"
+            )
+        observed_digest = _text(receipt.get("target_digest"))
+        expected_digest = _text(effect.get("target_digest"))
+        if observed_digest and expected_digest and observed_digest != expected_digest:
+            raise DurableJobIdempotencyConflict(
+                "readback reconciliation target digest does not match the intended effect"
+            )
+    if receipt_status == "settled":
+        details = effect.get("details") if isinstance(effect.get("details"), dict) else {}
+        nested = details.get("receipt") if isinstance(details, dict) else None
+        expected_operation = _text(effect.get("provider_operation_id")) or _text(
+            nested.get("operation_id") if isinstance(nested, dict) else None
+        )
+        expected_adapter_key = _text(effect.get("adapter_idempotency_key")) or _text(
+            nested.get("adapter_idempotency_key") if isinstance(nested, dict) else None
+        )
+        observed_operation = _text(receipt.get("provider_operation_id"))
+        observed_adapter_key = _text(receipt.get("adapter_idempotency_key"))
+        if not (
+            (observed_operation and observed_operation == expected_operation)
+            or (observed_adapter_key and observed_adapter_key == expected_adapter_key)
+        ):
+            raise DurableJobTransitionError(
+                "settled reconciliation must bind the exact provider operation or adapter key"
+            )
+
+
+def _validate_no_effect_retry_receipt(job_id: str, receipt: Mapping[str, Any]) -> None:
+    """Bind a no-dispatch retry proof to this exact failed job.
+
+    Failed jobs with no effect ledger can be retried only after an explicit
+    typed observation that this invocation never crossed an external boundary.
+    A destination readback for another operation is not such a proof.
+    """
+    expected_effect_id = f"job-failure:{job_id}"
+    expected_target = f"job:{job_id}"
+    if (
+        _text(receipt.get("effect_id")) != expected_effect_id
+        or _text(receipt.get("effect_type")) != "job_failure"
+        or _text(receipt.get("target_path")) != expected_target
+        or _text(receipt.get("status")) not in {"read_back", "reconciled"}
+        or _text(receipt.get("outcome")) not in {"no_external_effect", "not_dispatched"}
+    ):
+        raise DurableJobTransitionError(
+            "retry without an effect requires a job-bound no_external_effect reconciliation receipt"
+        )
+
+
 def _canonical_remote_inference_receipt(
     value: Mapping[str, Any],
 ) -> tuple[dict[str, Any], str]:
@@ -750,6 +825,173 @@ def _validate_retry_actor(
         or getattr(run, "service_id", None) != service_id
     ):
         raise DurableJobLeaseError("retry actor is not the authenticated job owner")
+
+
+def _authority_approval_id(authority: Any) -> str:
+    """Read the approval identifier from the structured authority envelope."""
+    if not isinstance(authority, Mapping):
+        return ""
+    direct = _text(authority.get("approval_id"))
+    if direct:
+        return direct
+    nested = authority.get("approval")
+    if isinstance(nested, Mapping):
+        return _text(nested.get("approval_id") or nested.get("id"))
+    return ""
+
+
+def _authority_budget_microusd(authority: Any) -> int | None:
+    """Return the persisted owner budget, preserving an absent budget as None."""
+    if not isinstance(authority, Mapping):
+        return None
+    value: Any = None
+    found = False
+    for field_name in (
+        "budget_microusd",
+        "max_budget_microusd",
+        "owner_cost_budget_microusd",
+    ):
+        if field_name in authority:
+            value = authority[field_name]
+            found = True
+            break
+    if not found and isinstance(authority.get("budget"), Mapping):
+        budget = authority["budget"]
+        for field_name in ("microusd", "max_microusd", "amount_microusd"):
+            if field_name in budget:
+                value = budget[field_name]
+                found = True
+                break
+    if not found or value is None:
+        return None
+    if isinstance(value, bool):
+        raise DurableJobTransitionError("durable approval budget metadata is malformed")
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError) as exc:
+        raise DurableJobTransitionError("durable approval budget metadata is malformed") from exc
+    if parsed < 0:
+        raise DurableJobTransitionError("durable approval budget metadata is malformed")
+    return parsed
+
+
+def _validate_approval_resume_receipt(
+    run: WorkflowRunState,
+    receipt: Any,
+    *,
+    now: datetime,
+) -> dict[str, Any]:
+    """Validate a current authenticated approval for an approval-held job.
+
+    Approval state is intentionally checked against the immutable durable
+    authority/goal/plan/capability/budget projection.  This leaves a narrow
+    adapter seam for the existing approval API without allowing a stale
+    ``approved`` flag to make an old run runnable.
+    """
+    if not isinstance(receipt, Mapping):
+        raise DurableJobTransitionError(
+            "illegal approval resume requires a current authenticated approval"
+        )
+    raw = dict(receipt)
+    if _text(raw.get("status")) != "approved":
+        raise DurableJobTransitionError("approval resume requires an approved receipt")
+    if raw.get("authenticated") is not True or raw.get("revoked") is True:
+        raise DurableJobTransitionError("approval resume requires a current authenticated operator")
+    operator_principal_id = _bounded_identifier(
+        raw.get("operator_principal_id"), field_name="operator_principal_id"
+    )
+    operator_session_id = _bounded_identifier(
+        raw.get("operator_session_id"), field_name="operator_session_id"
+    )
+    if not operator_principal_id or not operator_session_id:
+        raise DurableJobTransitionError(
+            "approval resume requires authenticated operator and session identities"
+        )
+    owner_kind = _text(raw.get("owner_kind"))
+    owner_principal_id = _bounded_identifier(
+        raw.get("owner_principal_id"), field_name="owner_principal_id"
+    )
+    service_id = _bounded_identifier(raw.get("service_id"), field_name="service_id") or None
+    try:
+        _validate_owner_fields(
+            owner_kind=owner_kind,
+            owner_principal_id=owner_principal_id,
+            service_id=service_id,
+        )
+    except ValueError as exc:
+        raise DurableJobTransitionError("approval resume owner binding is malformed") from exc
+    if (
+        owner_kind != _text(getattr(run, "owner_kind", None))
+        or owner_principal_id != _text(getattr(run, "owner_principal_id", None))
+        or service_id != (_text(getattr(run, "service_id", None)) or None)
+    ):
+        raise DurableJobTransitionError("approval resume owner binding is stale")
+    approval_id = _bounded_identifier(raw.get("approval_id"), field_name="approval_id")
+    authority = _json_load(getattr(run, "declared_authority_json", None), {})
+    expected_approval_id = _authority_approval_id(authority)
+    if not approval_id or not expected_approval_id or approval_id != expected_approval_id:
+        raise DurableJobTransitionError("approval resume binding does not match the durable authority")
+    if _text(raw.get("authority_digest")) != _text(getattr(run, "authority_digest", None)):
+        raise DurableJobTransitionError("approval resume authority has changed")
+    required_fields = ("goal_id", "goal_revision", "plan_revision", "capability_version", "budget_microusd")
+    missing = [field_name for field_name in required_fields if field_name not in raw]
+    if missing:
+        raise DurableJobTransitionError(
+            "approval resume is missing current " + ", ".join(missing)
+        )
+    for field_name in ("goal_id", "goal_revision", "plan_revision", "capability_version"):
+        expected = getattr(run, field_name, None)
+        actual = raw.get(field_name)
+        if field_name in {"goal_revision", "plan_revision"}:
+            try:
+                actual = int(actual) if actual is not None else None
+            except (TypeError, ValueError) as exc:
+                raise DurableJobTransitionError(
+                    f"approval resume {field_name} is malformed"
+                ) from exc
+        if actual != expected:
+            raise DurableJobTransitionError(f"approval resume {field_name} is stale")
+    expected_budget = _authority_budget_microusd(authority)
+    expected_budget_digest = _digest({"budget_microusd": expected_budget})
+    if _text(raw.get("budget_digest")) != expected_budget_digest:
+        raise DurableJobTransitionError("approval resume budget digest is stale")
+    actual_budget = raw.get("budget_microusd")
+    if actual_budget is not None:
+        if isinstance(actual_budget, bool):
+            raise DurableJobTransitionError("approval resume budget is malformed")
+        try:
+            actual_budget = int(actual_budget)
+        except (TypeError, ValueError) as exc:
+            raise DurableJobTransitionError("approval resume budget is malformed") from exc
+        if actual_budget < 0:
+            raise DurableJobTransitionError("approval resume budget is malformed")
+    if actual_budget != expected_budget:
+        raise DurableJobTransitionError("approval resume budget is stale")
+    try:
+        expires_at = float(raw.get("expires_at"))
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise DurableJobTransitionError("approval resume expiry is malformed") from exc
+    if not math.isfinite(expires_at) or expires_at <= now.timestamp():
+        raise DurableJobTransitionError("approval resume approval has expired")
+    return {
+        "kind": "approval_resume",
+        "status": "approved",
+        "approval_id": approval_id,
+        "operator_principal_id": operator_principal_id,
+        "operator_session_id": operator_session_id,
+        "owner_kind": owner_kind,
+        "owner_principal_id": owner_principal_id,
+        "service_id": service_id,
+        "authority_digest": _text(getattr(run, "authority_digest", None)),
+        "goal_id": getattr(run, "goal_id", None),
+        "goal_revision": getattr(run, "goal_revision", None),
+        "plan_revision": getattr(run, "plan_revision", None),
+        "capability_version": getattr(run, "capability_version", None),
+        "budget_microusd": expected_budget,
+        "budget_digest": expected_budget_digest,
+        "expires_at": expires_at,
+        "recorded_at": now.isoformat(),
+    }
 
 
 def _serialize(run: WorkflowRunState, *, receipt: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -1091,6 +1333,7 @@ class DurableJobRepository:
         reason: str | None = None,
         result: Any = None,
         result_summary: str | None = None,
+        approval_resume_receipt: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         if to_status not in DURABLE_JOB_STATUSES:
             raise DurableJobTransitionError(f"unknown durable job status: {to_status}")
@@ -1138,6 +1381,19 @@ class DurableJobRepository:
                     # failure receipt, never a fresh runnable attempt.
                     to_status = "failed"
                     reason = "deadline_expired"
+            effect_ledger: list[dict[str, Any]] | None = None
+            approval_resume_record: dict[str, Any] | None = None
+            if current == "awaiting_approval" and to_status == "queued":
+                if approval_resume_receipt is None:
+                    raise DurableJobTransitionError(
+                        "illegal approval resume requires a current authenticated approval"
+                    )
+                approval_resume_record = _validate_approval_resume_receipt(
+                    run,
+                    approval_resume_receipt,
+                    now=_utc_now(),
+                )
+                effect_ledger = _effect_ledger_or_raise(run.effect_receipts_json)
             if current == "failed" and to_status == "queued":
                 raise DurableJobTransitionError(
                     "failed jobs require explicit retry with reconciliation"
@@ -1146,7 +1402,6 @@ class DurableJobRepository:
                 raise DurableJobLeaseError(
                     "active jobs require owner and fencing token for every transition"
                 )
-            effect_ledger: list[dict[str, Any]] | None = None
             if current in {"accepted", "queued", "paused", "blocked"} and to_status in {
                 "queued",
                 "running",
@@ -1231,6 +1486,10 @@ class DurableJobRepository:
                 values["result_summary"] = _text(result_summary, "result recorded")
             elif result_summary is not None:
                 values["result_summary"] = _text(result_summary)
+            if approval_resume_record is not None:
+                values["effect_receipts_json"] = _canonical(
+                    _bounded_effect_ledger([*(effect_ledger or []), approval_resume_record])
+                )
             conditions = [WorkflowRunState.run_identity == job_id, WorkflowRunState.status == current]
             conditions.append(WorkflowRunState.revision == current_revision)
             if owner is not None:
@@ -1332,6 +1591,86 @@ class DurableJobRepository:
             fencing_token=fencing_token,
             expected_revision=expected_revision,
             reason=reason,
+        )
+
+    async def resume_approved_job(
+        self,
+        job_id: str,
+        *,
+        approval_receipt: Mapping[str, Any],
+        approval_id: str,
+        authority_digest: str,
+        goal_id: str | None,
+        goal_revision: int | None,
+        plan_revision: int | None,
+        capability_version: str,
+        owner_kind: str,
+        owner_principal_id: str,
+        service_id: str | None,
+        budget_microusd: int | None,
+        budget_digest: str,
+        operator_principal_id: str,
+        operator_session_id: str,
+        expires_at: float,
+        expected_revision: int | None = None,
+        reason: str = "operator_approval_resumed",
+    ) -> dict[str, Any]:
+        """Resume approval-held work through the current authority binding.
+
+        ``resume_job`` deliberately has no approval capability.  Callers must
+        use this typed seam with a fresh authenticated approval receipt.  All
+        immutable owner, authority, goal/plan, and budget fields are explicit
+        so an adapter cannot accidentally resume from a stale projection.
+        """
+        if not isinstance(approval_receipt, Mapping):
+            raise DurableJobTransitionError("approval resume requires a typed approval receipt")
+        receipt_fields = dict(approval_receipt)
+        if any(
+            field_name in receipt_fields and receipt_fields[field_name] != expected
+            for field_name, expected in {
+                "approval_id": approval_id,
+                "authority_digest": authority_digest,
+                "goal_id": goal_id,
+                "goal_revision": goal_revision,
+                "plan_revision": plan_revision,
+                "capability_version": capability_version,
+                "owner_kind": owner_kind,
+                "owner_principal_id": owner_principal_id,
+                "service_id": service_id,
+                "budget_microusd": budget_microusd,
+                "budget_digest": budget_digest,
+                "operator_principal_id": operator_principal_id,
+                "operator_session_id": operator_session_id,
+                "expires_at": expires_at,
+            }.items()
+        ):
+            raise DurableJobTransitionError("approval resume receipt does not match its explicit binding")
+        approval_resume_receipt = {
+            **receipt_fields,
+            "status": receipt_fields.get("status"),
+            "authenticated": receipt_fields.get("authenticated"),
+            "operator_principal_id": operator_principal_id,
+            "operator_session_id": operator_session_id,
+            "owner_kind": owner_kind,
+            "owner_principal_id": owner_principal_id,
+            "service_id": service_id,
+            "approval_id": approval_id,
+            "authority_digest": authority_digest,
+            "goal_id": goal_id,
+            "goal_revision": goal_revision,
+            "plan_revision": plan_revision,
+            "capability_version": capability_version,
+            "budget_microusd": budget_microusd,
+            "budget_digest": budget_digest,
+            "expires_at": expires_at,
+        }
+        return await self.transition_job(
+            job_id,
+            "queued",
+            expected_state="awaiting_approval",
+            expected_revision=expected_revision,
+            reason=reason,
+            approval_resume_receipt=approval_resume_receipt,
         )
 
     async def revoke_job(
@@ -2256,7 +2595,14 @@ class DurableJobRepository:
                     )
                 if receipt_kind == "effect":
                     lifecycle_order = {"unknown": 0, "intent": 1, "dispatched": 2}
-                    if lifecycle_order.get(status, -1) < lifecycle_order.get(previous_status, 0):
+                    # A post-dispatch transport observation may be reported as
+                    # ``unknown`` after an intent was durably recorded.  It
+                    # remains unresolved, but is not a lifecycle rollback.
+                    intent_to_unknown = previous_status == "intent" and status == "unknown"
+                    if (
+                        not intent_to_unknown
+                        and lifecycle_order.get(status, -1) < lifecycle_order.get(previous_status, 0)
+                    ):
                         raise DurableJobTransitionError(
                             "unresolved external effect lifecycle cannot move backwards"
                         )
@@ -2279,14 +2625,34 @@ class DurableJobRepository:
                     )
                 receipt["reconciled"] = True
                 receipt["reconciliation_status"] = "resolved"
-            elif receipt_kind == "readback" and previous_status in UNRESOLVED_EFFECT_STATUSES:
-                receipt["reconciled"] = True
-                receipt["reconciliation_status"] = "resolved"
-            existing = [
-                item
-                for item in existing
-                if isinstance(item, dict) and item.get("effect_id") != effect_id
-            ]
+            preserve_unresolved = (
+                receipt_kind == "readback"
+                and previous_status in UNRESOLVED_EFFECT_STATUSES
+                and status != "succeeded"
+            )
+            if preserve_unresolved:
+                # A failed/blocked/unknown readback is an observation about
+                # verification, not proof that the intended effect was absent.
+                # Keep the original intent/dispatched liability addressable by
+                # reconciliation and retain this bounded diagnostic separately.
+                receipt["original_effect_id"] = effect_id
+                receipt["effect_id"] = (
+                    f"{effect_id}:readback:{_digest({'status': status, 'target_path': target_path})[:16]}"
+                )
+                receipt["details"] = {
+                    **(safe_details if isinstance(safe_details, dict) else {}),
+                    "readback_observation_only": True,
+                    "verified": False,
+                }
+                existing = [item for item in existing if not (
+                    isinstance(item, dict) and item.get("effect_id") == receipt["effect_id"]
+                )]
+            else:
+                existing = [
+                    item
+                    for item in existing
+                    if isinstance(item, dict) and item.get("effect_id") != effect_id
+                ]
             existing.append(receipt)
             now = _utc_now()
             current_revision = _revision(run)
@@ -2462,6 +2828,24 @@ class DurableJobRepository:
                 raise DurableJobTransitionError(
                     "failed job retains unknown external effect or cost liability; reconcile before retry"
                 )
+            receipt_payload = _json_load(canonical_receipt, {})
+            matched_effect: Mapping[str, Any] | None = None
+            if existing_effects:
+                for item in existing_effects:
+                    if (
+                        isinstance(item, Mapping)
+                        and _text(item.get("effect_id")) == _text(receipt_payload.get("effect_id"))
+                        and _text(item.get("effect_type")) == _text(receipt_payload.get("effect_type"))
+                    ):
+                        matched_effect = item
+                        break
+                if matched_effect is None:
+                    raise DurableJobTransitionError(
+                        "retry reconciliation receipt does not match a durable effect"
+                    )
+                _reconciliation_matches_effect(matched_effect, receipt_payload)
+            else:
+                _validate_no_effect_retry_receipt(job_id, receipt_payload)
             existing_effects.append(
                 {
                     "kind": "reconciliation",
@@ -2564,6 +2948,7 @@ class DurableJobRepository:
                     and _text(item.get("status")) in {"unknown", "intent", "dispatched"}
                 ):
                     receipt_status = _text(receipt_payload.get("status"))
+                    _reconciliation_matches_effect(item, receipt_payload)
                     details = item.get("details") if isinstance(item.get("details"), dict) else {}
                     nested_receipt = details.get("receipt") if isinstance(details, dict) else None
                     cost_outstanding = bool(
@@ -2577,27 +2962,6 @@ class DurableJobRepository:
                         raise DurableJobTransitionError(
                             "cost liability requires a settled receipt with actual cost and operation binding"
                         )
-                    if receipt_status == "settled":
-                        expected_operation = _text(item.get("provider_operation_id"))
-                        expected_adapter_key = _text(item.get("adapter_idempotency_key"))
-                        expected_operation = expected_operation or _text(
-                            nested_receipt.get("operation_id") if isinstance(nested_receipt, dict) else None
-                        )
-                        observed_operation = _text(receipt_payload.get("provider_operation_id"))
-                        observed_adapter_key = _text(receipt_payload.get("adapter_idempotency_key"))
-                        if not (
-                            (observed_operation and observed_operation == expected_operation)
-                            or (observed_adapter_key and observed_adapter_key == expected_adapter_key)
-                        ):
-                            raise DurableJobTransitionError(
-                                "settled reconciliation must bind the exact provider operation or adapter key"
-                            )
-                    if receipt_status in {"read_back", "reconciled"}:
-                        observed_path = _text(receipt_payload.get("target_path"))
-                        if not observed_path or observed_path != _text(item.get("target_path")):
-                            raise DurableJobTransitionError(
-                                "readback reconciliation requires the exact unresolved effect target"
-                            )
                     matched_effect = True
                     item = {
                         **item,

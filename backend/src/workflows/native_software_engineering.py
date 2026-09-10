@@ -840,12 +840,14 @@ async def _cancel_claimed_job(
     owner: str,
     fencing_token: int,
     reason: str,
+    expected_revision: int | None = None,
 ) -> dict[str, Any] | None:
     try:
         return await durable_job_repository.cancel_job(
             job_id,
             owner=owner,
             fencing_token=fencing_token,
+            expected_revision=expected_revision,
             reason=reason,
         )
     except Exception:
@@ -1422,17 +1424,38 @@ async def run_native_software_engineering_fixture(
             "fencing_token": fencing_token,
         }
         intent_revision = intent.get("revision") if isinstance(intent, dict) else None
-        if intent_revision is not None:
-            dispatch_kwargs["expected_revision"] = int(intent_revision)
-        await durable_job_repository.record_effect(
-            request.job_id,
-            **dispatch_kwargs,
-        )
         if execution_control is not None and execution_control.cancel_event.is_set():
             durable_job = await _cancel_claimed_job(
                 request.job_id,
                 owner=worker_owner,
                 fencing_token=fencing_token,
+                expected_revision=(int(intent_revision) if intent_revision is not None else None),
+                reason="operator_cancelled_before_dispatch",
+            )
+            return _cancellation_result(
+                request,
+                prepared,
+                job_workspace,
+                durable_job,
+                reason_code="operator_cancelled_before_dispatch",
+            )
+        if intent_revision is not None:
+            dispatch_kwargs["expected_revision"] = int(intent_revision)
+        dispatched = await durable_job_repository.record_effect(
+            request.job_id,
+            **dispatch_kwargs,
+        )
+        if execution_control is not None and execution_control.cancel_event.is_set():
+            dispatched_revision = (
+                dispatched.get("revision") if isinstance(dispatched, dict) else None
+            )
+            durable_job = await _cancel_claimed_job(
+                request.job_id,
+                owner=worker_owner,
+                fencing_token=fencing_token,
+                expected_revision=(
+                    int(dispatched_revision) if dispatched_revision is not None else None
+                ),
                 reason="operator_cancelled_before_apply",
             )
             return _cancellation_result(
@@ -1873,10 +1896,13 @@ async def cancel_native_software_engineering_job(
     caller cannot kill another job's test process; a runner that observes the
     event cannot produce a success receipt.
     """
+    current = await durable_job_repository.get_job(job_id)
+    expected_revision = current.get("revision") if isinstance(current, dict) else None
     result = await durable_job_repository.cancel_job(
         job_id,
         owner=owner,
         fencing_token=fencing_token,
+        expected_revision=(int(expected_revision) if expected_revision is not None else None),
         reason=reason,
     )
     if result.get("status") in {"cancelled", "unknown_external_effect", "cost_liability", "blocked"}:

@@ -158,6 +158,8 @@ describe("GoalLoopPanel", () => {
 
   it("exposes separate candidate and outcome contracts through a keyboard disclosure", async () => {
     const user = userEvent.setup();
+    expect(normalizeGoalLoopReceipt(candidateReceipt)).not.toBeNull();
+    expect(normalizeGoalLoopReceipt(outcomeReceipt)).not.toBeNull();
     const { unmount } = render(<GoalLoopReceiptDetails receipt={candidateReceipt} />);
 
     const candidateDetails = screen.getByTestId("goal-loop-receipt-details");
@@ -233,6 +235,25 @@ describe("GoalLoopPanel", () => {
     expect(screen.queryByText("goal snapshot read back")).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "run snapshot" })).toBeDisabled();
     expect(screen.queryByTestId("goal-loop-receipt-details")).not.toBeInTheDocument();
+    expect(runGoalSnapshot).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["candidate", { ...candidateReceipt, candidate_id: undefined }],
+    ["outcome", { ...outcomeReceipt, outcome_id: undefined }],
+  ] as const)("marks an incomplete %s receipt as partial and disables effects", (_label, receipt) => {
+    const runGoalSnapshot = vi.fn().mockResolvedValue({ status: "blocked" });
+    expect(normalizeGoalLoopReceipt(receipt)).toBeNull();
+    setupStore({
+      goalLoop: { ...payload, receipts: [receipt] },
+      runGoalSnapshot,
+    });
+    render(<GoalLoopPanel goal={goal} />);
+
+    expect(screen.getByTestId("goal-loop-panel")).toHaveAttribute("data-state", "partial_metadata");
+    expect(screen.getByText(/A bounded success criterion or receipt field is missing/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "run snapshot" })).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "run snapshot" }));
     expect(runGoalSnapshot).not.toHaveBeenCalled();
   });
 

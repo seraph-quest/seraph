@@ -132,6 +132,9 @@ def test_failures_pause_and_terminal_proposals_cannot_reactivate(tmp_path):
     resumed = runtime.screen(
         proposal["proposal_id"], structural_pass=True, safety_pass=True,
         candidate_hash=proposal["candidate_hash"],
+        authority_digest=proposal["authority_digest"],
+        goal_revision=proposal["goal_revision"],
+        effective_model_binding=proposal["effective_model_binding"],
     )
     assert resumed["state"] == "awaiting_review"
 

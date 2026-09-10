@@ -217,6 +217,7 @@ class EvolutionProposal:
     review_status: str = "pending"
     approval_id: str | None = None
     approval_digest: str | None = None
+    approval_expires_at: float | None = None
     active_version_before: str = ""
     active_version_after: str = ""
     rollback_version: str = ""
@@ -270,6 +271,7 @@ def _proposal_from_dict(payload: Mapping[str, Any]) -> EvolutionProposal:
         review_status=str(payload.get("review_status") or "pending"),
         approval_id=str(payload["approval_id"]) if payload.get("approval_id") else None,
         approval_digest=str(payload["approval_digest"]) if payload.get("approval_digest") else None,
+        approval_expires_at=(float(payload["approval_expires_at"]) if payload.get("approval_expires_at") is not None else None),
         active_version_before=str(payload.get("active_version_before") or ""),
         active_version_after=str(payload.get("active_version_after") or ""),
         rollback_version=str(payload.get("rollback_version") or ""),
@@ -420,20 +422,46 @@ class EvolutionRuntime:
             payload = self._read()
             return [dict(item) for item in payload["proposals"].values() if isinstance(item, Mapping)]
 
-    def _transition(self, proposal_id: str, target: ProposalState) -> tuple[dict[str, Any], EvolutionProposal, dict[str, Any]]:
+    def _transition(
+        self,
+        proposal_id: str,
+        target: ProposalState,
+        *,
+        expected_version: int | None = None,
+    ) -> tuple[dict[str, Any], EvolutionProposal, dict[str, Any]]:
         payload = self._read()
         raw = payload["proposals"].get(proposal_id)
         if not isinstance(raw, Mapping):
             raise EvolutionRuntimeError("evolution proposal not found")
         proposal = _proposal_from_dict(raw)
+        if expected_version is not None and proposal.version != int(expected_version):
+            raise EvolutionRuntimeError("evolution proposal version is stale")
         if target not in ALLOWED_TRANSITIONS.get(proposal.state, frozenset()):
             raise EvolutionRuntimeError(f"illegal evolution transition {proposal.state} -> {target}")
         proposal.state = target
         return payload, proposal, raw
 
-    def screen(self, proposal_id: str, *, structural_pass: bool, safety_pass: bool, candidate_hash: str) -> dict[str, Any]:
+    def screen(
+        self,
+        proposal_id: str,
+        *,
+        structural_pass: bool,
+        safety_pass: bool,
+        candidate_hash: str,
+        expected_version: int | None = None,
+        authority_digest: str | None = None,
+        goal_revision: int | None = None,
+        effective_model_binding: str | None = None,
+    ) -> dict[str, Any]:
         with self._locked():
-            payload, proposal, _ = self._transition(proposal_id, "screening")
+            payload, proposal, previous = self._transition(proposal_id, "screening", expected_version=expected_version)
+            if str(previous.get("state")) == "paused":
+                if authority_digest is None or _bounded_hash(authority_digest, "authority_digest") != proposal.authority_digest:
+                    raise EvolutionRuntimeError("paused proposal authority binding is stale")
+                if goal_revision is None or int(goal_revision) != proposal.goal_revision:
+                    raise EvolutionRuntimeError("paused proposal goal revision is stale")
+                if effective_model_binding is None or _bounded_hash(effective_model_binding, "effective_model_binding") != proposal.effective_model_binding:
+                    raise EvolutionRuntimeError("paused proposal model binding is stale")
             if _bounded_hash(candidate_hash, "candidate_hash") != proposal.candidate_hash:
                 raise EvolutionRuntimeError("candidate hash changed before screening")
             if not structural_pass or not safety_pass:
@@ -459,6 +487,7 @@ class EvolutionRuntime:
         evaluator_hash: str,
         corpus_manifest_hash: str,
         hidden_split_hash: str,
+        expected_version: int | None = None,
     ) -> dict[str, Any]:
         with self._locked():
             payload = self._read()
@@ -466,6 +495,8 @@ class EvolutionRuntime:
             if not isinstance(raw, Mapping):
                 raise EvolutionRuntimeError("evolution proposal not found")
             proposal = _proposal_from_dict(raw)
+            if expected_version is not None and proposal.version != int(expected_version):
+                raise EvolutionRuntimeError("evolution proposal version is stale")
             if proposal.state not in {"screening", "awaiting_review"}:
                 raise EvolutionRuntimeError("evaluation requires a screening or review proposal")
             if _bounded_hash(candidate_hash, "candidate_hash") != proposal.candidate_hash:
@@ -535,9 +566,10 @@ class EvolutionRuntime:
         expires_at: float,
         active_version_before: str,
         active_version_after: str,
+        expected_version: int | None = None,
     ) -> dict[str, Any]:
         with self._locked():
-            payload, proposal, _ = self._transition(proposal_id, "canary")
+            payload, proposal, _ = self._transition(proposal_id, "canary", expected_version=expected_version)
             if proposal.owner_id != _bounded_id(owner_id, "owner_id") or proposal.goal_id != _bounded_id(goal_id, "goal_id") or proposal.goal_revision != int(goal_revision):
                 raise EvolutionRuntimeError("canary approval owner or goal binding is stale")
             bindings = {
@@ -557,6 +589,8 @@ class EvolutionRuntime:
                 raise EvolutionRuntimeError("canary approval hash binding is stale")
             if bindings["expires_at"] <= datetime.now(timezone.utc).timestamp():
                 raise EvolutionRuntimeError("canary approval has expired")
+            if bindings["expires_at"] > datetime.now(timezone.utc).timestamp() + MAX_CANARY_SECONDS:
+                raise EvolutionRuntimeError("canary approval exceeds the 24-hour bound")
             if proposal.measured_result.get("status") != "measured" or proposal.measured_result.get("failure_count", 1):
                 raise EvolutionRuntimeError("canary requires complete, policy-clean evaluation evidence")
             expected_digest = _digest(bindings)
@@ -564,6 +598,7 @@ class EvolutionRuntime:
                 raise EvolutionRuntimeError("canary approval digest does not bind exact inputs")
             proposal.approval_id = bindings["approval_id"]
             proposal.approval_digest = expected_digest
+            proposal.approval_expires_at = bindings["expires_at"]
             proposal.active_version_before = bindings["active_version_before"]
             proposal.active_version_after = bindings["active_version_after"]
             proposal.rollback_version = bindings["active_version_before"]
@@ -580,9 +615,10 @@ class EvolutionRuntime:
         job_ids: Iterable[str],
         outcome: Literal["success", "failed", "unknown", "cancelled"],
         baseline_still_permitted: bool,
+        expected_version: int | None = None,
     ) -> dict[str, Any]:
         with self._locked():
-            payload, proposal, _ = self._transition(proposal_id, "rolled_back")
+            payload, proposal, _ = self._transition(proposal_id, "rolled_back", expected_version=expected_version)
             if proposal.approval_id != _bounded_id(approval_id, "approval_id"):
                 raise EvolutionRuntimeError("canary approval does not match the proposal")
             jobs = tuple(_bounded_id(item, "job_id") for item in job_ids)
@@ -608,29 +644,32 @@ class EvolutionRuntime:
                 },
             }
             proposal.job_ids = jobs
+            if proposal.approval_expires_at is not None and datetime.now(timezone.utc).timestamp() > proposal.approval_expires_at:
+                proposal.measured_result["canary"]["outcome"] = "unknown"
+                proposal.recovery_action = "canary_expired_baseline_restored"
             self._save_proposal(payload, proposal)
             return proposal.to_dict()
 
-    def pause(self, proposal_id: str, *, reason: str) -> dict[str, Any]:
+    def pause(self, proposal_id: str, *, reason: str, expected_version: int | None = None) -> dict[str, Any]:
         with self._locked():
-            payload, proposal, _ = self._transition(proposal_id, "paused")
+            payload, proposal, _ = self._transition(proposal_id, "paused", expected_version=expected_version)
             proposal.review_status = "paused"
             proposal.recovery_action = str(reason or "operator_review")[:160]
             self._save_proposal(payload, proposal)
             return proposal.to_dict()
 
-    def reject(self, proposal_id: str, *, reason: str) -> dict[str, Any]:
+    def reject(self, proposal_id: str, *, reason: str, expected_version: int | None = None) -> dict[str, Any]:
         with self._locked():
-            payload, proposal, _ = self._transition(proposal_id, "rejected")
+            payload, proposal, _ = self._transition(proposal_id, "rejected", expected_version=expected_version)
             proposal.review_status = "rejected"
             proposal.result = "no_learning_no_promotion"
             proposal.recovery_action = str(reason or "candidate_rejected")[:160]
             self._save_proposal(payload, proposal)
             return proposal.to_dict()
 
-    def rollback(self, proposal_id: str, *, reason: str = "operator_rollback") -> dict[str, Any]:
+    def rollback(self, proposal_id: str, *, reason: str = "operator_rollback", expected_version: int | None = None) -> dict[str, Any]:
         with self._locked():
-            payload, proposal, _ = self._transition(proposal_id, "rolled_back")
+            payload, proposal, _ = self._transition(proposal_id, "rolled_back", expected_version=expected_version)
             proposal.review_status = "rolled_back"
             proposal.result = "no_learning_no_promotion"
             proposal.recovery_action = str(reason or "operator_rollback")[:160]

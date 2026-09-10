@@ -229,6 +229,7 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
                 receipt = rollback_workspace(
                     workspace.host_root,
                     args.restore_id,
+                    registry=registry,
                 )
             else:  # pragma: no cover - argparse enforces the command set.
                 raise WorkspaceLifecycleError("unsupported workspace lifecycle command")

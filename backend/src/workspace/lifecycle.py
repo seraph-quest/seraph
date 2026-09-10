@@ -73,6 +73,15 @@ _JOURNAL_STATUSES = frozenset(
         "rolled_back",
     }
 )
+_RECOVERY_IN_FLIGHT_STATUSES = frozenset({"staged", "active_moved", "rollback_active_moved"})
+_TERMINAL_JOURNAL_STATUSES = frozenset(
+    {"promoted", "recovered_promoted", "recovered_rollback", "staging_discarded", "rolled_back"}
+)
+_RECEIPT_SECRET_PATTERN = re.compile(
+    r"(?:secret|password|credential|api[_-]?key|private[_-]?key|authorization|bearer|cookie|token)",
+    re.IGNORECASE,
+)
+_SAFE_RECEIPT_SECRET_IDENTIFIERS = frozenset({"google_calendar_token.json"})
 
 
 class WorkspaceLifecycleError(WorkspaceStateError):
@@ -267,6 +276,14 @@ def _bounded_identifier_list(value: object, *, label: str) -> None:
     for identifier in value:
         if not isinstance(identifier, str) or not identifier or len(identifier) > 256:
             raise WorkspaceLifecycleError(f"{label} contains an invalid identifier")
+        if identifier in _SAFE_RECEIPT_SECRET_IDENTIFIERS:
+            continue
+        if any(ord(character) < 32 or ord(character) == 127 for character in identifier):
+            raise WorkspaceLifecycleError(f"{label} contains a control character")
+        if _RECEIPT_SECRET_PATTERN.search(identifier):
+            raise WorkspaceLifecycleError(f"{label} contains a secret-like identifier")
+        if "\\" in identifier:
+            raise WorkspaceLifecycleError(f"{label} contains an unsafe identifier")
         normalized = identifier.replace("\\", "/")
         parts = PurePosixPath(normalized).parts
         if (
@@ -408,8 +425,15 @@ def _validate_journal(
         raise WorkspaceLifecycleError("restore journal previous-root binding is invalid")
     if journal.get("stage_name") != restore_id:
         raise WorkspaceLifecycleError("restore journal staging-root binding is invalid")
-    if not isinstance(journal.get("created_at"), str) or not journal["created_at"]:
+    created_at = journal.get("created_at")
+    if not isinstance(created_at, str) or not created_at:
         raise WorkspaceLifecycleError("restore journal creation timestamp is missing")
+    try:
+        parsed_created_at = datetime.fromisoformat(created_at)
+    except ValueError as exc:
+        raise WorkspaceLifecycleError("restore journal creation timestamp is invalid") from exc
+    if parsed_created_at.tzinfo is None:
+        raise WorkspaceLifecycleError("restore journal creation timestamp must include timezone")
     archive_digest = journal.get("archive_manifest_sha256")
     if not isinstance(archive_digest, str) or not _DIGEST_PATTERN.fullmatch(archive_digest):
         raise WorkspaceLifecycleError("restore journal archive identity is invalid")
@@ -914,6 +938,23 @@ def _remove_tree(path: Path, *, label: str) -> None:
         raise WorkspaceLifecycleError(f"cannot remove {label}") from exc
 
 
+def _is_empty_directory(path: Path, *, label: str) -> bool:
+    """Return whether an existing sidecar is an empty, safe directory."""
+    if not _path_present(path):
+        return True
+    _assert_no_symlink_components(path, label=label)
+    _assert_not_symlink(path, label=label)
+    if not path.is_dir():
+        raise WorkspaceLifecycleError(f"{label} must be a directory")
+    try:
+        next(path.iterdir())
+    except StopIteration:
+        return True
+    except OSError as exc:
+        raise WorkspaceLifecycleError(f"{label} is not readable") from exc
+    return False
+
+
 def _materialize_stage(
     *,
     root: Path,
@@ -1329,7 +1370,9 @@ def recover_interrupted_restore(
 
     # Do not mutate a valid earlier record until every later candidate has
     # passed journal, identity, symlink, and root-state validation.
-    actionable_records = 0
+    preflight_candidates: list[dict[str, Any]] = []
+    orphan_records: list[tuple[Path, Path]] = []
+    orphan_ids: set[str] = set()
     for record_root in sorted(backup_root.iterdir(), key=lambda item: item.name):
         if not _RESTORE_ID_PATTERN.fullmatch(record_root.name):
             continue
@@ -1340,7 +1383,29 @@ def recover_interrupted_restore(
         journal_file = record_root / "restore-journal.json"
         _assert_no_symlink_components(journal_file, label="restore journal path")
         if not _path_present(journal_file):
-            raise WorkspaceLifecycleError(f"restore record {record_root.name} journal is missing")
+            restore_id = record_root.name
+            _record_root, previous, current, stage = _journal_paths(resolved_root, restore_id)
+            for path, label in (
+                (resolved_root, "active workspace root"),
+                (previous, "previous workspace root"),
+                (current, "rollback workspace root"),
+                (stage, "restore staging root"),
+            ):
+                _assert_no_symlink_components(path, label=label)
+                _assert_not_symlink(path, label=label)
+            if (
+                _path_present(resolved_root)
+                and not _path_present(previous)
+                and not _path_present(current)
+                and _is_empty_directory(record_root, label="unjournaled restore record")
+                and _is_empty_directory(stage, label="unjournaled restore staging root")
+            ):
+                orphan_records.append((record_root, stage))
+                orphan_ids.add(restore_id)
+                continue
+            raise WorkspaceLifecycleError(
+                f"restore record {record_root.name} journal is missing; manual recovery is required"
+            )
         restore_id = record_root.name
         journal = _read_journal(
             journal_file,
@@ -1357,22 +1422,90 @@ def recover_interrupted_restore(
         ):
             _assert_no_symlink_components(path, label=label)
             _assert_not_symlink(path, label=label)
-        action = _recovery_action(
-            journal["status"],
-            restore_id,
-            active_present=_path_present(resolved_root),
-            previous_present=_path_present(previous),
-            current_present=_path_present(current),
-            stage_present=_path_present(stage),
+        preflight_candidates.append(
+            {
+                "record_root": record_root,
+                "journal_file": journal_file,
+                "journal": journal,
+                "restore_id": restore_id,
+                "previous": previous,
+                "current": current,
+                "stage": stage,
+                "active_present": _path_present(resolved_root),
+                "previous_present": _path_present(previous),
+                "current_present": _path_present(current),
+                "stage_present": _path_present(stage),
+            }
         )
+
+    in_flight = [
+        candidate
+        for candidate in preflight_candidates
+        if candidate["journal"]["status"] in _RECOVERY_IN_FLIGHT_STATUSES
+    ]
+    newest_in_flight = (
+        max(
+            in_flight,
+            key=lambda candidate: (
+                datetime.fromisoformat(candidate["journal"]["created_at"]).timestamp(),
+                candidate["restore_id"],
+            ),
+        )
+        if in_flight
+        else None
+    )
+    superseded_terminal_ids: set[str] = set()
+    if newest_in_flight is not None:
+        newest_key = (
+            datetime.fromisoformat(newest_in_flight["journal"]["created_at"]).timestamp(),
+            newest_in_flight["restore_id"],
+        )
+        for candidate in preflight_candidates:
+            candidate_key = (
+                datetime.fromisoformat(candidate["journal"]["created_at"]).timestamp(),
+                candidate["restore_id"],
+            )
+            if (
+                candidate["journal"]["status"] in _TERMINAL_JOURNAL_STATUSES
+                and not candidate["active_present"]
+                and candidate_key < newest_key
+            ):
+                superseded_terminal_ids.add(candidate["restore_id"])
+
+    actionable_records = 0
+    for candidate in preflight_candidates:
+        if candidate["restore_id"] in superseded_terminal_ids:
+            continue
+        action = _recovery_action(
+            candidate["journal"]["status"],
+            candidate["restore_id"],
+            active_present=candidate["active_present"],
+            previous_present=candidate["previous_present"],
+            current_present=candidate["current_present"],
+            stage_present=candidate["stage_present"],
+        )
+        candidate["action"] = action
         if action is not None:
             actionable_records += 1
     if actionable_records > 1:
         raise WorkspaceLifecycleError("multiple restore records require recovery")
 
     recovered: list[dict[str, Any]] = []
+    for record_root, stage in orphan_records:
+        _remove_tree(stage, label="empty unjournaled restore staging root")
+        _remove_tree(record_root, label="empty unjournaled restore record")
+        recovered.append(
+            {"restore_id": record_root.name, "action": "discarded_unjournaled_record"}
+        )
+    if orphan_records:
+        _fsync_directory(backup_root)
+        if _path_present(staging_root):
+            _fsync_directory(staging_root)
+
     for record_root in sorted(backup_root.iterdir(), key=lambda item: item.name):
         if not _RESTORE_ID_PATTERN.fullmatch(record_root.name):
+            continue
+        if record_root.name in superseded_terminal_ids or record_root.name in orphan_ids:
             continue
         _assert_not_symlink(record_root, label="restore record root")
         if not record_root.is_dir():
@@ -1499,15 +1632,20 @@ def recover_interrupted_restore(
 def rollback_workspace(
     root: str | os.PathLike[str],
     restore_id: str,
+    *,
+    registry: WorkspaceStateRegistry | None = None,
 ) -> dict[str, Any]:
     """Atomically swap the current root with a retained pre-restore root."""
     resolved_root = canonical_workspace_root(root)
+    if registry is not None:
+        _registry_root(resolved_root, registry)
     restore_id = _safe_restore_id(restore_id)
     backup_root = workspace_backup_dir(resolved_root)
     journal_file = _journal_path(backup_root, restore_id)
     journal = _read_journal(
         journal_file,
         expected_restore_id=restore_id,
+        expected_workspace_id=registry.config.identity.workspace_id if registry is not None else None,
         expected_root_digest=_workspace_root_digest(resolved_root),
     )
     if journal.get("status") not in {"promoted", "recovered_promoted"}:

@@ -144,7 +144,7 @@ async def _memory_tombstone_revision(
         {
             "id": str(row[0]),
             "memory_id": str(row[1]),
-            "created_at": row[2].isoformat() if row[2] is not None else None,
+            "created_at": _recovery_timestamp(row[2]),
         }
         for row in rows
     ]
@@ -166,14 +166,22 @@ def _parse_recovery_timestamp(value: Any, *, field_name: str) -> datetime | None
         raise ValueError(f"{field_name} must be an ISO-8601 timestamp") from exc
     if parsed.tzinfo is None:
         raise ValueError(f"{field_name} must include a timezone")
-    return parsed.astimezone(timezone.utc)
+    return _normalize_utc_timestamp(parsed)
+
+
+def _normalize_utc_timestamp(value: datetime | None) -> datetime | None:
+    """Normalize persisted or incoming datetimes before recovery comparisons."""
+
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
 
 
 def _recovery_timestamp(value: datetime | None) -> str | None:
-    if value is None:
-        return None
-    aware = value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
-    return aware.isoformat()
+    aware = _normalize_utc_timestamp(value)
+    return aware.isoformat() if aware is not None else None
 
 
 def _recovery_json_hash(payload: dict[str, Any]) -> str:
@@ -182,6 +190,49 @@ def _recovery_json_hash(payload: dict[str, Any]) -> str:
             "utf-8"
         )
     ).hexdigest()
+
+
+_MEMORY_EXPORT_ENVELOPE_FIELDS = (
+    "schema_version",
+    "owner_session_id",
+    "canonical_tombstone_revision",
+    "memories",
+    "tombstones",
+    "generated_at",
+    "status",
+    "operator_status",
+    "provenance",
+    "no_learning_reason",
+    "reconciliation",
+    "counts",
+    "memory_ids",
+    "tombstone_ids",
+)
+
+
+def _memory_export_integrity_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    """Return the immutable export envelope covered by ``export_hash``.
+
+    ``artifact_path`` is derived from the export hash and ``artifact_sha256``
+    is the checksum of the complete persisted payload, so neither can be part
+    of the export-hash input without creating a circular value.
+    """
+
+    return {
+        key: payload[key]
+        for key in _MEMORY_EXPORT_ENVELOPE_FIELDS
+        if key in payload
+    }
+
+
+def _memory_export_artifact_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    """Return the persisted export payload covered by ``artifact_sha256``."""
+
+    return {
+        key: value
+        for key, value in payload.items()
+        if key != "artifact_sha256"
+    }
 
 
 def _bounded_recovery_float(
@@ -1719,11 +1770,15 @@ class MemoryRepository:
                 db.expunge(tombstone)
             return tombstone
 
-    async def get_memory_tombstone_revision(self) -> str:
-        """Read a content-free revision of the canonical tombstone ledger."""
+    async def get_memory_tombstone_revision(self, *, owner_session_id: str | None = None) -> str:
+        """Read a content-free revision of the canonical tombstone ledger.
+
+        Recovery callers must provide their authenticated owner.  The optional
+        unscoped form remains for internal global snapshot/index maintenance.
+        """
 
         async with get_session() as db:
-            return await _memory_tombstone_revision(db)
+            return await _memory_tombstone_revision(db, owner_session_id=owner_session_id)
 
     async def export_canonical_memory_state(
         self,
@@ -1750,7 +1805,7 @@ class MemoryRepository:
             source_role=source_role,
         )
         bounded_limit = min(max(int(limit), 1), _MAX_RECOVERY_RECORDS)
-        reconciliation = await self.reconcile_memory_tombstones()
+        reconciliation = await self.reconcile_memory_tombstones(owner_session_id=normalized_owner)
         if reconciliation.get("status") != "ready":
             return {
                 "schema_version": _MEMORY_EXPORT_SCHEMA_VERSION,
@@ -1831,10 +1886,8 @@ class MemoryRepository:
             "memories": memory_payloads,
             "tombstones": tombstone_payloads,
         }
-        export_hash = _recovery_json_hash(body)
         payload = {
             **body,
-            "export_hash": export_hash,
             "generated_at": _now().isoformat(),
             "status": "ready",
             "operator_status": "canonical_memory_export_ready",
@@ -1845,6 +1898,7 @@ class MemoryRepository:
                 "owner_session_id": normalized_owner,
             },
             "no_learning_reason": None,
+            "reconciliation": reconciliation,
             "counts": {
                 "memories": len(memory_payloads),
                 "tombstones": len(tombstone_payloads),
@@ -1854,9 +1908,11 @@ class MemoryRepository:
             "memory_ids": [item["id"] for item in memory_payloads],
             "tombstone_ids": [item["id"] for item in tombstone_payloads],
         }
+        export_hash = _recovery_json_hash(_memory_export_integrity_payload(payload))
+        payload["export_hash"] = export_hash
         artifact_path, logical_path = _recovery_artifact_path(kind="export", digest=export_hash)
         payload["artifact_path"] = logical_path
-        payload["artifact_sha256"] = _recovery_json_hash(payload)
+        payload["artifact_sha256"] = _recovery_json_hash(_memory_export_artifact_payload(payload))
         _write_recovery_artifact(artifact_path, payload)
         return payload
 
@@ -1884,7 +1940,7 @@ class MemoryRepository:
             source_role=source_role,
         )
         bounded_limit = min(max(int(limit), 1), _MAX_RECOVERY_RECORDS)
-        reconciliation = await self.reconcile_memory_tombstones()
+        reconciliation = await self.reconcile_memory_tombstones(owner_session_id=normalized_owner)
         if reconciliation.get("status") != "ready":
             return {
                 "schema_version": _MEMORY_INDEX_SCHEMA_VERSION,
@@ -1903,7 +1959,7 @@ class MemoryRepository:
             for memory in await self.list_memories_for_reindex(limit=bounded_limit)
             if memory.source_session_id == normalized_owner
         ]
-        tombstone_revision = await self.get_memory_tombstone_revision()
+        tombstone_revision = await self.get_memory_tombstone_revision(owner_session_id=normalized_owner)
         records: list[dict[str, Any]] = []
         for memory in memories:
             try:
@@ -2002,17 +2058,37 @@ class MemoryRepository:
             r"[0-9a-f]{64}", supplied_archive_hash
         ):
             raise ValueError("memory restore archive export hash is required")
+        missing_envelope_fields = [
+            field for field in _MEMORY_EXPORT_ENVELOPE_FIELDS if field not in archive
+        ]
+        if missing_envelope_fields:
+            raise ValueError(
+                "memory restore archive is missing envelope fields: "
+                + ", ".join(missing_envelope_fields)
+            )
         expected_archive_hash = _recovery_json_hash(
-            {
-                "schema_version": archive.get("schema_version"),
-                "owner_session_id": archive.get("owner_session_id", ""),
-                "canonical_tombstone_revision": archive.get("canonical_tombstone_revision"),
-                "memories": records,
-                "tombstones": archive_tombstones,
-            }
+            _memory_export_integrity_payload(archive)
         )
         if not hmac.compare_digest(supplied_archive_hash, expected_archive_hash):
             raise ValueError("memory restore archive hash mismatch")
+        expected_artifact_path = (
+            f"artifacts/memory-recovery/export-{supplied_archive_hash[:24]}.json"
+        )
+        if archive.get("artifact_path") != expected_artifact_path:
+            raise ValueError("memory restore archive artifact path does not match its export hash")
+        supplied_artifact_hash = archive.get("artifact_sha256")
+        if not isinstance(supplied_artifact_hash, str) or not re.fullmatch(
+            r"[0-9a-f]{64}", supplied_artifact_hash
+        ):
+            raise ValueError("memory restore archive artifact hash is required")
+        expected_artifact_hash = _recovery_json_hash(_memory_export_artifact_payload(archive))
+        if not hmac.compare_digest(supplied_artifact_hash, expected_artifact_hash):
+            raise ValueError("memory restore archive artifact hash mismatch")
+        if archive.get("status") != "ready":
+            raise ValueError("memory restore archive status is not ready")
+        provenance = archive.get("provenance")
+        if not isinstance(provenance, dict) or provenance.get("owner_session_id") != normalized_owner:
+            raise PermissionError("memory restore archive provenance owner does not match the authenticated session")
         normalized_tombstones: list[dict[str, Any]] = []
         seen_tombstone_ids: set[str] = set()
         seen_tombstone_memory_ids: set[str] = set()
@@ -2193,6 +2269,7 @@ class MemoryRepository:
         restored_ids: list[str] = []
         suppressed_ids: list[str] = []
         conflict_ids: list[str] = []
+        owner_conflict_ids: list[str] = []
         source_count = 0
         applied_tombstone_ids: list[str] = []
 
@@ -2304,8 +2381,22 @@ class MemoryRepository:
                         suppressed_ids.append(memory_id)
                         continue
                     if existing is not None:
-                        existing_updated_at = existing.updated_at
-                        if existing_updated_at is not None and existing_updated_at >= record["updated_at"]:
+                        existing_owner = str(existing.source_session_id or "").strip()
+                        if existing_owner != normalized_owner:
+                            # A same-ID archive record cannot claim or replace
+                            # a row owned by another session (including an
+                            # unbound legacy row).  Quarantine it in the
+                            # restore receipt and leave its content, owner,
+                            # timestamps, and provenance untouched.
+                            owner_conflict_ids.append(memory_id)
+                            continue
+                        existing_updated_at = _normalize_utc_timestamp(existing.updated_at)
+                        incoming_updated_at = _normalize_utc_timestamp(record["updated_at"])
+                        if (
+                            existing_updated_at is not None
+                            and incoming_updated_at is not None
+                            and existing_updated_at >= incoming_updated_at
+                        ):
                             conflict_ids.append(memory_id)
                             continue
                         existing.content = record["content"]
@@ -2322,8 +2413,13 @@ class MemoryRepository:
                         existing.embedding_id = record["embedding_id"]
                         existing.scope_key = record["scope_key"]
                         existing.metadata_json = record["metadata_json"]
-                        existing.created_at = min(existing.created_at, record["created_at"])
-                        existing.updated_at = record["updated_at"]
+                        existing_created_at = _normalize_utc_timestamp(existing.created_at)
+                        incoming_created_at = _normalize_utc_timestamp(record["created_at"])
+                        if existing_created_at is None:
+                            existing.created_at = incoming_created_at
+                        elif incoming_created_at is not None:
+                            existing.created_at = min(existing_created_at, incoming_created_at)
+                        existing.updated_at = incoming_updated_at
                         existing.last_confirmed_at = record["last_confirmed_at"]
                         db.add(existing)
                     else:
@@ -2390,15 +2486,30 @@ class MemoryRepository:
                         )
                         source_count += 1
                     await db.flush()
-        reconciliation = await self.reconcile_memory_tombstones()
+        reconciliation = await self.reconcile_memory_tombstones(owner_session_id=normalized_owner)
+        if owner_conflict_ids:
+            reconciliation = {
+                **reconciliation,
+                "status": "degraded",
+                "reason": "memory restore encountered records owned by another session",
+                "owner_conflict_count": len(owner_conflict_ids),
+                "owner_conflict_memory_ids": owner_conflict_ids,
+            }
         status = "ready" if reconciliation.get("status") == "ready" else "degraded_no_learning"
+        no_learning_reason = (
+            "memory restore owner conflicts require operator review"
+            if owner_conflict_ids
+            else (
+                None
+                if status == "ready"
+                else "canonical tombstone ledger requires repair"
+            )
+        )
         return {
             "schema_version": _MEMORY_EXPORT_SCHEMA_VERSION,
             "status": status,
             "operator_status": "canonical_memory_restore_ready" if status == "ready" else "canonical_memory_restore_degraded",
-            "no_learning_reason": None
-            if status == "ready"
-            else "canonical tombstone ledger requires repair",
+            "no_learning_reason": no_learning_reason,
             "provenance": {
                 "kind": "operator_memory_restore",
                 "actor": normalized_actor,
@@ -2412,9 +2523,15 @@ class MemoryRepository:
             "restored_count": len(restored_ids),
             "tombstone_suppressed_count": len(suppressed_ids),
             "newer_conflict_count": len(conflict_ids),
+            "owner_conflict_memory_ids": owner_conflict_ids,
+            "owner_conflict_count": len(owner_conflict_ids),
+            "conflict_memory_ids": [*conflict_ids, *owner_conflict_ids],
+            "conflict_count": len(conflict_ids) + len(owner_conflict_ids),
             "restored_source_count": source_count,
             "applied_archive_tombstone_ids": applied_tombstone_ids,
-            "current_tombstone_revision": await self.get_memory_tombstone_revision(),
+            "current_tombstone_revision": await self.get_memory_tombstone_revision(
+                owner_session_id=normalized_owner
+            ),
             "reconciliation": reconciliation,
         }
 
@@ -2570,27 +2687,40 @@ class MemoryRepository:
     async def reconcile_memory_tombstones(
         self,
         *,
+        owner_session_id: str | None = None,
         _acquire_lock: bool = True,
     ) -> dict[str, int | str]:
         """Re-apply durable canonical deletion authority after a stale restore.
 
         The result is a deterministic operator receipt.  ``degraded`` means a
         ledger row refers to a missing memory row and therefore requires
-        operator restore repair; no deleted content is returned.
+        operator restore repair; no deleted content is returned.  Recovery
+        callers pass their authenticated owner so receipt counts and revision
+        inputs cannot disclose another owner's tombstone activity.
         """
 
+        normalized_owner = str(owner_session_id or "").strip()
         if _acquire_lock:
             async with self._canonical_memory_lock:
-                return await self.reconcile_memory_tombstones(_acquire_lock=False)
+                return await self.reconcile_memory_tombstones(
+                    owner_session_id=normalized_owner or None,
+                    _acquire_lock=False,
+                )
 
         checked_count = 0
         reapplied_count = 0
         missing_memory_count = 0
         async with get_session() as db:
             await _begin_canonical_write(db)
+            tombstone_statement = select(MemoryTombstone)
+            if normalized_owner:
+                tombstone_statement = tombstone_statement.join(
+                    Memory,
+                    Memory.id == MemoryTombstone.memory_id,
+                ).where(Memory.source_session_id == normalized_owner)
             tombstones = (
                 await db.execute(
-                    select(MemoryTombstone).order_by(
+                    tombstone_statement.order_by(
                         col(MemoryTombstone.created_at).asc(),
                         col(MemoryTombstone.id).asc(),
                     )
@@ -2598,11 +2728,10 @@ class MemoryRepository:
             ).scalars().all()
             for tombstone in tombstones:
                 checked_count += 1
-                memory = (
-                    await db.execute(
-                        select(Memory).where(Memory.id == tombstone.memory_id)
-                    )
-                ).scalars().first()
+                memory_statement = select(Memory).where(Memory.id == tombstone.memory_id)
+                if normalized_owner:
+                    memory_statement = memory_statement.where(Memory.source_session_id == normalized_owner)
+                memory = (await db.execute(memory_statement)).scalars().first()
                 if memory is None:
                     missing_memory_count += 1
                     continue

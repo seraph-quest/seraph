@@ -37,9 +37,16 @@ from src.db.models import (
     MemoryTombstone,
     Session as SessionModel,
 )
-from src.memory.repository import _recovery_json_hash, memory_repository
+from src.memory.repository import (
+    _EMPTY_TOMBSTONE_REVISION,
+    _memory_export_artifact_payload,
+    _memory_export_integrity_payload,
+    _recovery_json_hash,
+    memory_repository,
+)
 from src.memory.pipeline.merge import EmbeddingWriteResult, persist_extracted_memories
 from src.memory.types import ConsolidatedMemoryItem
+from src.memory.control import memory_recovery_status
 from src.auth.service import test_bypass_operator as make_test_bypass_operator
 
 
@@ -240,6 +247,26 @@ async def test_export_rebuild_and_restore_keep_current_tombstone_authoritative(l
         with _runtime_operator(operator):
             await memory_repository.restore_canonical_memory_state(
                 corrupt_export,
+                actor=operator.principal.principal_id,
+                owner_session_id=owner_session,
+                authenticated_session_id=owner_session,
+            )
+    corrupt_envelope = json.loads(json.dumps(live_export))
+    corrupt_envelope["provenance"]["actor"] = "forged-operator"
+    with pytest.raises(ValueError, match="archive hash mismatch"):
+        with _runtime_operator(operator):
+            await memory_repository.restore_canonical_memory_state(
+                corrupt_envelope,
+                actor=operator.principal.principal_id,
+                owner_session_id=owner_session,
+                authenticated_session_id=owner_session,
+            )
+    corrupt_artifact = json.loads(json.dumps(live_export))
+    corrupt_artifact["artifact_sha256"] = "0" * 64
+    with pytest.raises(ValueError, match="artifact hash mismatch"):
+        with _runtime_operator(operator):
+            await memory_repository.restore_canonical_memory_state(
+                corrupt_artifact,
                 actor=operator.principal.principal_id,
                 owner_session_id=owner_session,
                 authenticated_session_id=owner_session,
@@ -504,15 +531,11 @@ async def test_restore_rejects_record_without_owner_session(local_memory_db):
         )
     archive = json.loads(json.dumps(archive))
     archive["memories"][0].pop("source_session_id", None)
-    archive["export_hash"] = _recovery_json_hash(
-        {
-            "schema_version": archive["schema_version"],
-            "owner_session_id": archive["owner_session_id"],
-            "canonical_tombstone_revision": archive["canonical_tombstone_revision"],
-            "memories": archive["memories"],
-            "tombstones": archive["tombstones"],
-        }
+    archive["export_hash"] = _recovery_json_hash(_memory_export_integrity_payload(archive))
+    archive["artifact_path"] = (
+        f"artifacts/memory-recovery/export-{archive['export_hash'][:24]}.json"
     )
+    archive["artifact_sha256"] = _recovery_json_hash(_memory_export_artifact_payload(archive))
     with _runtime_operator(operator):
         with pytest.raises(PermissionError, match="requires an owner session"):
             await memory_repository.restore_canonical_memory_state(
@@ -616,6 +639,172 @@ async def test_export_scopes_tombstones_to_authenticated_owner(local_memory_db):
         tombstone["memory_id"] != other_memory.memory_id
         for tombstone in archive["tombstones"]
     )
+
+
+@pytest.mark.asyncio
+async def test_recovery_receipts_scope_reconciliation_and_revision_to_owner(local_memory_db):
+    _get_session, _database_path = local_memory_db
+    operator = make_test_bypass_operator()
+    owner_session = operator.session_id
+    other_memory = await memory_repository.create_memory(
+        content="Other owner's tombstone must not appear in recovery receipts.",
+        source_session_id="other-owner-session",
+        source_type="operator",
+    )
+    await memory_repository.mark_memory_tombstoned(
+        other_memory.memory_id,
+        actor="operator:other",
+        reason="other owner deletion",
+    )
+
+    with _runtime_operator(operator):
+        status = await memory_recovery_status(
+            owner_session_id=owner_session,
+            authenticated_session_id=owner_session,
+            actor=operator.principal.principal_id,
+        )
+        export = await memory_repository.export_canonical_memory_state(
+            actor=operator.principal.principal_id,
+            owner_session_id=owner_session,
+            authenticated_session_id=owner_session,
+        )
+        restored = await memory_repository.restore_canonical_memory_state(
+            export,
+            actor=operator.principal.principal_id,
+            owner_session_id=owner_session,
+            authenticated_session_id=owner_session,
+        )
+
+    for receipt in (status["reconciliation"], export["reconciliation"], restored["reconciliation"]):
+        assert receipt["checked_count"] == 0
+        assert receipt["reapplied_count"] == 0
+        assert receipt["missing_memory_count"] == 0
+    assert status["canonical_tombstone_revision"] == _EMPTY_TOMBSTONE_REVISION
+    assert export["canonical_tombstone_revision"] == _EMPTY_TOMBSTONE_REVISION
+    assert restored["current_tombstone_revision"] == _EMPTY_TOMBSTONE_REVISION
+
+
+@pytest.mark.parametrize(
+    "incoming_updated_at",
+    [
+        "2030-01-01T00:00:00+00:00",
+        "2030-01-01T00:00:00Z",
+    ],
+)
+@pytest.mark.asyncio
+async def test_restore_normalizes_naive_persisted_and_utc_archive_timestamps(
+    local_memory_db,
+    incoming_updated_at,
+):
+    _get_session, database_path = local_memory_db
+    operator = make_test_bypass_operator()
+    owner_session = operator.session_id
+    created = await memory_repository.create_memory(
+        content="Current canonical content.",
+        source_session_id=owner_session,
+        source_type="operator",
+    )
+    with _runtime_operator(operator):
+        archive = await memory_repository.export_canonical_memory_state(
+            actor=operator.principal.principal_id,
+            owner_session_id=owner_session,
+            authenticated_session_id=owner_session,
+        )
+
+    # SQLite returns persisted DateTime values without tzinfo.  Make the row
+    # older than the archive and let restore compare it with an aware UTC value.
+    stale_connection = sqlite3.connect(database_path)
+    try:
+        stale_connection.execute(
+            "UPDATE memories SET content = ?, updated_at = ? WHERE id = ?",
+            ("Database content before restore.", "2020-01-01 00:00:00", created.memory_id),
+        )
+        stale_connection.commit()
+    finally:
+        stale_connection.close()
+
+    archive = json.loads(json.dumps(archive))
+    archive["memories"][0]["content"] = "Restored canonical content."
+    archive["memories"][0]["updated_at"] = incoming_updated_at
+    archive["export_hash"] = _recovery_json_hash(_memory_export_integrity_payload(archive))
+    archive["artifact_path"] = (
+        f"artifacts/memory-recovery/export-{archive['export_hash'][:24]}.json"
+    )
+    archive["artifact_sha256"] = _recovery_json_hash(_memory_export_artifact_payload(archive))
+
+    with _runtime_operator(operator):
+        restored = await memory_repository.restore_canonical_memory_state(
+            archive,
+            actor=operator.principal.principal_id,
+            owner_session_id=owner_session,
+            authenticated_session_id=owner_session,
+        )
+
+    assert restored["restored_memory_ids"] == [created.memory_id]
+    assert (await memory_repository.get_memory(created.memory_id)).content == (
+        "Restored canonical content."
+    )
+
+
+@pytest.mark.asyncio
+async def test_restore_quarantines_existing_memory_owned_by_another_session(local_memory_db):
+    _get_session, _database_path = local_memory_db
+    operator = make_test_bypass_operator()
+    owner_session = operator.session_id
+    other_owner = "other-owner-session"
+    other_memory = await memory_repository.create_memory(
+        content="Other owner's canonical content.",
+        source_session_id=other_owner,
+        source_type="operator",
+        metadata={"provenance": {"kind": "other_owner"}},
+    )
+    original = await memory_repository.get_memory(other_memory.memory_id)
+    assert original is not None
+    original_metadata = original.metadata_json
+
+    owner_memory = await memory_repository.create_memory(
+        content="Owner archive content.",
+        source_session_id=owner_session,
+        source_type="operator",
+    )
+    with _runtime_operator(operator):
+        archive = await memory_repository.export_canonical_memory_state(
+            actor=operator.principal.principal_id,
+            owner_session_id=owner_session,
+            authenticated_session_id=owner_session,
+        )
+    archive = json.loads(json.dumps(archive))
+    archive["memories"][0]["id"] = other_memory.memory_id
+    archive["memories"][0]["content"] = "Forged overwrite of another owner."
+    archive["memory_ids"] = [other_memory.memory_id]
+    archive["export_hash"] = _recovery_json_hash(_memory_export_integrity_payload(archive))
+    archive["artifact_path"] = (
+        f"artifacts/memory-recovery/export-{archive['export_hash'][:24]}.json"
+    )
+    archive["artifact_sha256"] = _recovery_json_hash(_memory_export_artifact_payload(archive))
+
+    with _runtime_operator(operator):
+        restored = await memory_repository.restore_canonical_memory_state(
+            archive,
+            actor=operator.principal.principal_id,
+            owner_session_id=owner_session,
+            authenticated_session_id=owner_session,
+        )
+
+    assert restored["restored_memory_ids"] == []
+    assert restored["owner_conflict_memory_ids"] == [other_memory.memory_id]
+    assert restored["owner_conflict_count"] == 1
+    assert restored["conflict_memory_ids"] == [other_memory.memory_id]
+    assert restored["conflict_count"] == 1
+    assert restored["status"] == "degraded_no_learning"
+    assert restored["reconciliation"]["status"] == "degraded"
+    assert restored["reconciliation"]["owner_conflict_memory_ids"] == [other_memory.memory_id]
+    preserved = await memory_repository.get_memory(other_memory.memory_id)
+    assert preserved is not None
+    assert preserved.content == "Other owner's canonical content."
+    assert preserved.source_session_id == other_owner
+    assert preserved.metadata_json == original_metadata
+    assert await memory_repository.get_memory(owner_memory.memory_id) is not None
 
 
 @pytest.mark.asyncio

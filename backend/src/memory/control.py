@@ -684,8 +684,12 @@ async def memory_recovery_status(
         source_role=source_role,
     )
     try:
-        reconciliation = await memory_repository.reconcile_memory_tombstones()
-        revision = await memory_repository.get_memory_tombstone_revision()
+        reconciliation = await memory_repository.reconcile_memory_tombstones(
+            owner_session_id=normalized_owner,
+        )
+        revision = await memory_repository.get_memory_tombstone_revision(
+            owner_session_id=normalized_owner,
+        )
     except SQLAlchemyError:
         return {
             "schema_version": "guardian.memory.recovery_status.v1",
@@ -1118,7 +1122,9 @@ async def get_memory_live_controls_snapshot(
     provider_inventory = _apply_provider_quarantine_overlay(list_memory_provider_inventory())
     fetch_limit = bounded_limit if not owner_session_id else min(bounded_limit * 10, 200)
     try:
-        tombstone_reconciliation = await memory_repository.reconcile_memory_tombstones()
+        tombstone_reconciliation = await memory_repository.reconcile_memory_tombstones(
+            owner_session_id=owner_session_id,
+        )
         if tombstone_reconciliation.get("status") != "ready":
             active = []
             superseded = []

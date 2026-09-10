@@ -6,9 +6,9 @@ import mimetypes
 import os
 from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import FileResponse, PlainTextResponse
 from pydantic import BaseModel, ConfigDict, Field
 from sqlmodel import col, select
@@ -93,25 +93,62 @@ class NotificationAckResponse(BaseModel):
 
 
 class NotificationAckRequest(BaseModel):
-    """Optional daemon fence; empty bodies remain backward compatible."""
+    """Authenticated daemon receipt for the current notification claim."""
 
-    fencing_token: int | None = Field(default=None, ge=1)
+    model_config = ConfigDict(extra="forbid")
+
+    worker_id: str = Field(min_length=1, max_length=256)
+    fencing_token: int = Field(ge=1)
 
 
 class NotificationFailureRequest(BaseModel):
     """Bounded daemon failure receipt for a claimed notification."""
 
+    model_config = ConfigDict(extra="forbid")
+
     reason: str = "display_failed"
-    fencing_token: int | None = Field(default=None, ge=1)
+    worker_id: str = Field(min_length=1, max_length=256)
+    fencing_token: int = Field(ge=1)
 
 
 class NotificationFailureResponse(BaseModel):
     failed: bool
 
 
+class NotificationDisplayAttemptRequest(BaseModel):
+    """Daemon fence used immediately before handing off to the OS."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    worker_id: str = Field(min_length=1, max_length=256)
+    fencing_token: int = Field(ge=1)
+
+
+class NotificationDisplayAttemptResponse(BaseModel):
+    display_attempted: bool
+
+
 class NativeNotificationListResponse(BaseModel):
     notifications: list[NativeNotificationResponse]
     pending_count: int
+    recovery_count: int = 0
+
+
+class NativeNotificationRecoveryResponse(BaseModel):
+    recoveries: list[dict[str, Any]]
+    recovery_count: int
+
+
+class NotificationRecoveryRequest(BaseModel):
+    """Explicit operator decision after reviewing an unknown receipt."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    action: Literal["retry"]
+
+
+class NotificationRecoveryResult(BaseModel):
+    reconciled: bool
 
 
 class NotificationDismissResponse(BaseModel):
@@ -138,9 +175,31 @@ class DaemonStatusResponse(BaseModel):
     status_reason: str | None = None
     recovery_hint: str | None = None
     pending_notification_count: int
+    recovery_notification_count: int = 0
+    unknown_notification_count: int = 0
     last_native_notification_at: str | None = None
     last_native_notification_title: str | None = None
     last_native_notification_outcome: str | None = None
+
+
+_DAEMON_ID_HEADER = "X-Seraph-Daemon-Id"
+
+
+def _require_authenticated_daemon(request: Request, worker_id: str) -> None:
+    """Bind a daemon receipt to the authenticated request and worker id.
+
+    The lease owner in the JSON/query payload is not an authentication
+    credential. ``OperatorAuthMiddleware`` establishes the operator session;
+    this header binding prevents mixing one daemon's claim with another
+    daemon's receipt or accidentally omitting the device identity.
+    """
+    if getattr(request.state, "operator", None) is None:
+        raise HTTPException(status_code=401, detail="authenticated daemon request is required")
+    presented = request.headers.get(_DAEMON_ID_HEADER, "").strip()
+    if not presented:
+        raise HTTPException(status_code=401, detail="daemon identity header is required")
+    if presented != worker_id:
+        raise HTTPException(status_code=401, detail="daemon identity does not match worker_id")
 
 
 class QueuedInsightResponse(BaseModel):
@@ -887,6 +946,12 @@ async def _daemon_status_payload() -> dict[str, str | int | float | bool | None]
     classified = _classify_daemon_status(daemon_status)
     connected = context_manager.is_daemon_connected()
     pending_notification_count = await native_notification_queue.count()
+    recoveries = await native_notification_queue.recovery(limit=100)
+    unknown_notification_count = sum(
+        1
+        for item in recoveries
+        if bool(item.get("recovery_required"))
+    )
     return {
         "connected": connected,
         "daemon_alive": bool(daemon_status.get("alive")),
@@ -903,6 +968,8 @@ async def _daemon_status_payload() -> dict[str, str | int | float | bool | None]
         "status_reason": classified.get("status_reason"),
         "recovery_hint": classified.get("recovery_hint"),
         "pending_notification_count": pending_notification_count,
+        "recovery_notification_count": len(recoveries),
+        "unknown_notification_count": unknown_notification_count,
         "last_native_notification_at": (
             ctx.last_native_notification_at.isoformat()
             if ctx.last_native_notification_at is not None
@@ -2427,16 +2494,34 @@ async def get_observer_continuity():
 async def list_native_notifications():
     """Return pending native notifications for browser-side continuity controls."""
     notifications = [item.to_dict() for item in await native_notification_queue.list()]
+    recoveries = await native_notification_queue.recovery(limit=100)
     return {
         "notifications": notifications,
         "pending_count": len(notifications),
+        "recovery_count": len(recoveries),
     }
 
 
+@router.get(
+    "/observer/notifications/recovery",
+    response_model=NativeNotificationRecoveryResponse,
+)
+async def list_native_notification_recovery(limit: int = Query(default=100, ge=1, le=100)):
+    """Expose failed/ambiguous delivery attempts and required recovery state."""
+    recoveries = await native_notification_queue.recovery(limit=limit)
+    return {"recoveries": recoveries, "recovery_count": len(recoveries)}
+
+
 @router.get("/observer/notifications/next", response_model=NativeNotificationPollResponse)
-async def get_next_native_notification():
-    """Return the next pending native notification for the daemon, if any."""
-    notification = await native_notification_queue.peek()
+async def get_next_native_notification(
+    request: Request,
+    worker_id: str | None = Query(default=None, min_length=1, max_length=256),
+):
+    """Return one claim for the uniquely identified authenticated daemon."""
+    if worker_id is None:
+        raise HTTPException(status_code=401, detail="worker_id is required for daemon polling")
+    _require_authenticated_daemon(request, worker_id)
+    notification = await native_notification_queue.claim_next(worker_id=worker_id)
     if notification is None:
         await log_integration_event(
             integration_type="observer_daemon",
@@ -2450,10 +2535,12 @@ async def get_next_native_notification():
     await log_integration_event(
         integration_type="observer_daemon",
         name="notifications",
-        outcome="succeeded",
+        outcome="claimed",
         details={
             "notification_id": notification.id,
             "pending_count": pending_count,
+            "worker_id": worker_id,
+            "delivery_status": notification.delivery_status,
             "intervention_type": notification.intervention_type,
             "urgency": notification.urgency,
         },
@@ -2464,15 +2551,18 @@ async def get_next_native_notification():
 @router.post("/observer/notifications/{notification_id}/ack", response_model=NotificationAckResponse)
 async def ack_native_notification(
     notification_id: str,
-    body: NotificationAckRequest | None = None,
+    body: NotificationAckRequest,
+    request: Request,
 ):
     """Acknowledge a native notification after the daemon displays it."""
     from src.guardian.feedback import guardian_feedback_repository
 
+    _require_authenticated_daemon(request, body.worker_id)
     notification = await native_notification_queue.get(notification_id)
     acked = await native_notification_queue.ack(
         notification_id,
-        fencing_token=body.fencing_token if body is not None else None,
+        worker_id=body.worker_id,
+        fencing_token=body.fencing_token,
     )
     intervention_id = notification.intervention_id if notification is not None else None
     if acked and intervention_id:
@@ -2496,6 +2586,7 @@ async def ack_native_notification(
         details={
             "notification_id": notification_id,
             "intervention_id": intervention_id,
+            "worker_id": body.worker_id,
         },
     )
     return {"acked": acked}
@@ -2507,21 +2598,78 @@ async def ack_native_notification(
 )
 async def fail_native_notification(
     notification_id: str,
-    body: NotificationFailureRequest | None = None,
+    body: NotificationFailureRequest,
+    request: Request,
 ):
-    """Record a bounded native-display failure and requeue when safe."""
+    """Record an ambiguous native-display failure for operator recovery."""
+    _require_authenticated_daemon(request, body.worker_id)
     failed = await native_notification_queue.fail(
         notification_id,
-        reason=body.reason if body is not None else "display_failed",
-        fencing_token=body.fencing_token if body is not None else None,
+        reason=body.reason,
+        worker_id=body.worker_id,
+        fencing_token=body.fencing_token,
     )
     await log_integration_event(
         integration_type="observer_daemon",
         name="notifications",
         outcome="failed" if failed else "failure_missing",
-        details={"notification_id": notification_id},
+        details={"notification_id": notification_id, "worker_id": body.worker_id},
     )
     return {"failed": failed}
+
+
+@router.post(
+    "/observer/notifications/{notification_id}/display-attempted",
+    response_model=NotificationDisplayAttemptResponse,
+)
+async def mark_native_notification_display_attempted(
+    notification_id: str,
+    body: NotificationDisplayAttemptRequest,
+    request: Request,
+):
+    """Record the fenced handoff immediately before an OS display attempt."""
+    _require_authenticated_daemon(request, body.worker_id)
+    marked = await native_notification_queue.mark_display_attempted(
+        notification_id,
+        worker_id=body.worker_id,
+        fencing_token=body.fencing_token,
+    )
+    await log_integration_event(
+        integration_type="observer_daemon",
+        name="notifications",
+        outcome="display_attempted" if marked else "display_attempt_missing",
+        details={
+            "notification_id": notification_id,
+            "worker_id": body.worker_id,
+            "fencing_token": body.fencing_token,
+        },
+    )
+    return {"display_attempted": marked}
+
+
+@router.post(
+    "/observer/notifications/{notification_id}/reconcile",
+    response_model=NotificationRecoveryResult,
+)
+async def reconcile_native_notification(
+    notification_id: str,
+    body: NotificationRecoveryRequest,
+):
+    """Requeue one unknown notification only after explicit operator review."""
+    reconciled = await native_notification_queue.reconcile_unknown(
+        notification_id,
+        retry=body.action == "retry",
+    )
+    await log_integration_event(
+        integration_type="observer_daemon",
+        name="notifications",
+        outcome="reconciled" if reconciled else "reconcile_missing",
+        details={
+            "notification_id": notification_id,
+            "action": body.action,
+        },
+    )
+    return {"reconciled": reconciled}
 
 
 @router.post("/observer/notifications/{notification_id}/dismiss", response_model=NotificationDismissResponse)
@@ -2534,7 +2682,11 @@ async def dismiss_native_notification(notification_id: str):
         try:
             await guardian_feedback_repository.update_outcome(
                 notification.intervention_id,
-                latest_outcome="notification_dismissed",
+                latest_outcome=(
+                    "notification_reconciliation_required"
+                    if notification.delivery_status == "unknown"
+                    else "notification_dismissed"
+                ),
                 transport="native_notification",
                 notification_id=notification.id,
             )
@@ -2543,12 +2695,16 @@ async def dismiss_native_notification(notification_id: str):
     if notification is not None:
         context_manager.record_native_notification(
             title=notification.title,
-            outcome="dismissed",
+            outcome="unknown" if notification.delivery_status == "unknown" else "dismissed",
         )
     await log_integration_event(
         integration_type="observer_daemon",
         name="notifications",
-        outcome="dismissed" if notification is not None else "dismiss_missing",
+        outcome=(
+            "dismissed_ambiguous"
+            if notification is not None and notification.delivery_status == "unknown"
+            else "dismissed" if notification is not None else "dismiss_missing"
+        ),
         details={
             "notification_id": notification_id,
             "intervention_id": notification.intervention_id if notification is not None else None,
@@ -2569,7 +2725,11 @@ async def dismiss_all_native_notifications():
             try:
                 await guardian_feedback_repository.update_outcome(
                     notification.intervention_id,
-                    latest_outcome="notification_dismissed",
+                    latest_outcome=(
+                        "notification_reconciliation_required"
+                        if notification.delivery_status == "unknown"
+                        else "notification_dismissed"
+                    ),
                     transport="native_notification",
                     notification_id=notification.id,
                 )
@@ -2578,7 +2738,11 @@ async def dismiss_all_native_notifications():
     if notifications:
         context_manager.record_native_notification(
             title=notifications[-1].title,
-            outcome="dismissed",
+            outcome=(
+                "unknown"
+                if notifications[-1].delivery_status == "unknown"
+                else "dismissed"
+            ),
         )
     await log_integration_event(
         integration_type="observer_daemon",

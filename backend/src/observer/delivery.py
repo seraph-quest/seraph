@@ -1,5 +1,6 @@
 """Delivery coordinator — single entry point for all proactive messages."""
 
+import hashlib
 import logging
 
 from src.audit.runtime import log_observer_delivery_event
@@ -146,6 +147,21 @@ def _group_native_bundle_items(items: list[object]) -> list[list[object]]:
     if ambient_items:
         grouped_items.append(ambient_items)
     return grouped_items
+
+
+def _bundle_idempotency_key(items: list[object]) -> str:
+    """Derive a stable handoff key from the durable source insight IDs."""
+    source_ids = sorted(
+        str(item_id)
+        for item_id in (getattr(item, "id", None) for item in items)
+        if item_id
+    )
+    if not source_ids:
+        # The insight queue normally supplies IDs. An empty set must still be
+        # bounded and unique for defensive callers.
+        source_ids = ["empty-bundle"]
+    digest = hashlib.sha256("|".join(source_ids).encode("utf-8")).hexdigest()
+    return f"native_bundle:v1:{digest}"
 
 
 def _apply_native_channel_preference(
@@ -529,25 +545,24 @@ async def deliver_or_queue(
                     event_details.update(
                         {
                             "attempted_connections": 1,
-                            "delivered_connections": 1,
+                            "delivered_connections": 0,
                             "failed_connections": 0,
+                            "queued_connections": 1,
                         }
                     )
-                    if policy_decision.should_cost_budget:
-                        context_manager.decrement_attention_budget()
                     await _update_intervention_outcome(
                         intervention_id,
-                        latest_outcome="delivered",
+                        latest_outcome="queued",
                         transport="native_notification",
                         notification_id=notification.id,
                     )
                     logger.info(
-                        "Delivered proactive message over native notification (type=%s, notification_id=%s)",
+                        "Queued proactive message for native notification (type=%s, notification_id=%s)",
                         message.type,
                         notification.id,
                     )
                     await log_observer_delivery_event(
-                        decision="delivered",
+                        decision="queued",
                         message_type=message.type,
                         intervention_type=intervention_type,
                         urgency=urgency,
@@ -708,7 +723,7 @@ async def deliver_queued_bundle() -> int:
         content=bundle_content,
         intervention_type="proactive_bundle",
         urgency=3,
-        reasoning=f"Bundle of {len(items)} queued insight(s) delivered on state transition",
+        reasoning=f"Bundle of {len(items)} queued insight(s) handed off to the durable native outbox",
     )
 
     last_error = (
@@ -725,6 +740,11 @@ async def deliver_queued_bundle() -> int:
             for group_items in native_bundle_groups:
                 group_content = _bundle_content(group_items)
                 group_continuation = _bundle_continuation_payload(group_items, bundle_content=group_content)
+                source_insight_ids = [
+                    str(item.id)
+                    for item in group_items
+                    if getattr(item, "id", None)
+                ]
                 notification = await native_notification_queue.enqueue(
                     intervention_id=None,
                     title="Seraph update",
@@ -737,32 +757,32 @@ async def deliver_queued_bundle() -> int:
                     thread_source=str(group_continuation["thread_source"] or "ambient"),
                     continuation_mode=str(group_continuation["continuation_mode"] or "open_thread"),
                     resume_message=group_continuation["resume_message"],
+                    idempotency_key=_bundle_idempotency_key(group_items),
+                    source_insight_ids=source_insight_ids,
                 )
                 context_manager.record_native_notification(
                     title=notification.title,
                     outcome="queued",
                 )
                 notifications.append((notification, group_items))
-            await insight_queue.delete_many(
-                [item.id for item in items if getattr(item, "id", None)]
-            )
             for notification, group_items in notifications:
                 for item in group_items:
                     await _update_intervention_outcome(
                         item.intervention_id,
-                        latest_outcome="bundle_delivered",
+                        latest_outcome="bundle_queued",
                         transport="native_notification_bundle",
                         notification_id=notification.id,
                     )
             details.update(
                 {
                     "attempted_connections": len(notifications),
-                    "delivered_connections": len(notifications),
+                    "delivered_connections": 0,
                     "failed_connections": 0,
+                    "queued_connections": len(notifications),
                 }
             )
             await log_observer_delivery_event(
-                decision="delivered",
+                decision="queued",
                 message_type="proactive",
                 intervention_type="proactive_bundle",
                 urgency=3,

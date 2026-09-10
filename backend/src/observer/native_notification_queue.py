@@ -7,12 +7,14 @@ prove exactly-once display outside the process.
 
 State transitions::
 
-    queued -> claimed -> delivered
-                     \\-> queued (lease expiry, retry budget remains)
-                     \\-> unknown (lease expiry after retry budget)
-                     \\-> failed (bounded daemon failure or expiry)
-    queued/claimed -> cancelled (operator dismiss)
+    queued -> claimed -> display_attempted -> delivered
+                     \\-> unknown (lease expiry, daemon failure, or cancellation)
+    queued -> cancelled (operator dismiss before a daemon claim)
     failed -> queued (explicit bounded retry before deadline)
+
+``claimed`` and ``display_attempted`` are fenced by the daemon identity and
+monotonic fencing token. An ambiguous external display is never replayed
+automatically; an operator must reconcile it before requesting a retry.
 
 The outbox and attempt rows are stored in the canonical SQLite database. The
 public queue methods retain the old notification response shape while adding
@@ -32,12 +34,19 @@ from typing import Any
 from uuid import uuid4
 
 from sqlalchemy import delete, select, update
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+from sqlalchemy.exc import OperationalError
 
 from src.db import engine as db_engine
-from src.db.models import NativeNotificationDeliveryAttempt, NativeNotificationOutbox
+from src.db.models import (
+    NativeNotificationDeliveryAttempt,
+    NativeNotificationOutbox,
+    QueuedInsight,
+)
 
 
-ACTIVE_STATUSES = frozenset({"queued", "claimed"})
+ACTIVE_STATUSES = frozenset({"queued", "claimed", "display_attempted"})
+CLAIMED_STATUSES = frozenset({"claimed", "display_attempted"})
 TERMINAL_STATUSES = frozenset({"delivered", "failed", "cancelled", "unknown"})
 DEFAULT_MAX_ATTEMPTS = 3
 DEFAULT_LEASE_SECONDS = 30
@@ -219,6 +228,7 @@ class NativeNotificationQueue:
         resume_message: str | None = None,
         idempotency_key: str | None = None,
         owner_principal_id: str | None = None,
+        source_insight_ids: list[str] | None = None,
     ) -> NativeNotification:
         """Persist one notification or return the matching idempotent row.
 
@@ -287,6 +297,26 @@ class NativeNotificationQueue:
         digest = _payload_digest(payload)
         now = _utc_now()
 
+        source_ids: list[str] = []
+        for source_id in source_insight_ids or []:
+            validated_id = _validate_identifier(source_id, field="source_insight_id")
+            if validated_id is None:
+                raise ValueError("native notification source_insight_id is required")
+            source_ids.append(validated_id)
+        if len(source_ids) > 100:
+            raise ValueError("native notification source_insight_ids exceeds 100 items")
+
+        async def delete_source_rows(db) -> None:
+            if source_ids:
+                try:
+                    await db.execute(delete(QueuedInsight).where(QueuedInsight.id.in_(source_ids)))
+                except OperationalError as exc:
+                    # Test/operator callers can use the outbox before the
+                    # full insight schema exists. Production startup creates
+                    # this table; never hide any other database failure.
+                    if "no such table" not in str(exc).lower():
+                        raise
+
         async with self._lock:
             async with self._session() as db:
                 existing_result = await db.execute(
@@ -300,31 +330,54 @@ class NativeNotificationQueue:
                         raise NativeNotificationConflictError(
                             "native notification idempotency key is bound to another payload"
                         )
+                    # Bundle retries reuse the same key. Deleting source rows
+                    # in this transaction makes a crash between enqueue and
+                    # cleanup safe and idempotent.
+                    await delete_source_rows(db)
                     return _row_to_notification(existing)
 
-                row = NativeNotificationOutbox(
-                    idempotency_key=key,
-                    payload_digest=digest,
-                    intervention_id=intervention_id,
-                    owner_principal_id=owner_principal_id,
-                    title=title_value,
-                    body=body_value,
-                    intervention_type=intervention_type,
-                    urgency=urgency,
-                    surface=surface_value,
-                    session_id=session_id,
-                    thread_id=thread_id or session_id,
-                    thread_source=thread_source_value,
-                    continuation_mode=continuation_mode_value,
-                    resume_message=resume_value,
-                    status="queued",
-                    max_attempts=self.max_attempts,
-                    deadline_at=now + timedelta(seconds=self.ttl_seconds),
-                    created_at=now,
-                    updated_at=now,
+                # SQLite's conflict-aware insert is the cross-process CAS.
+                # It avoids a SELECT-then-INSERT uniqueness exception and
+                # lets a losing writer read the committed canonical row.
+                await db.execute(
+                    sqlite_insert(NativeNotificationOutbox)
+                    .values(
+                        id=uuid4().hex,
+                        idempotency_key=key,
+                        payload_digest=digest,
+                        intervention_id=intervention_id,
+                        owner_principal_id=owner_principal_id,
+                        title=title_value,
+                        body=body_value,
+                        intervention_type=intervention_type,
+                        urgency=urgency,
+                        surface=surface_value,
+                        session_id=session_id,
+                        thread_id=thread_id or session_id,
+                        thread_source=thread_source_value,
+                        continuation_mode=continuation_mode_value,
+                        resume_message=resume_value,
+                        status="queued",
+                        max_attempts=self.max_attempts,
+                        deadline_at=now + timedelta(seconds=self.ttl_seconds),
+                        created_at=now,
+                        updated_at=now,
+                    )
+                    .on_conflict_do_nothing(index_elements=["idempotency_key"])
                 )
-                db.add(row)
-                await db.flush()
+                existing_result = await db.execute(
+                    select(NativeNotificationOutbox).where(
+                        NativeNotificationOutbox.idempotency_key == key
+                    )
+                )
+                row = existing_result.scalar_one_or_none()
+                if row is None:
+                    raise RuntimeError("native notification idempotency insert produced no row")
+                if row.payload_digest != digest:
+                    raise NativeNotificationConflictError(
+                        "native notification idempotency key is bound to another payload"
+                    )
+                await delete_source_rows(db)
                 return _row_to_notification(row)
 
     async def _finish_attempt(
@@ -354,56 +407,55 @@ class NativeNotificationQueue:
     async def _reconcile_expired(self, db, now: datetime) -> None:
         """Recover leases and expire queued work before every read/transition."""
         result = await db.execute(
-            select(NativeNotificationOutbox).where(NativeNotificationOutbox.status == "claimed")
+            select(NativeNotificationOutbox).where(NativeNotificationOutbox.status.in_(CLAIMED_STATUSES))
         )
         for row in result.scalars().all():
             lease_expires_at = _aware(row.lease_expires_at)
             if lease_expires_at is not None and lease_expires_at > now:
                 continue
+            reason = "claimed_lease_missing" if lease_expires_at is None else "lease_expired_reconciliation_required"
+            predicates = [
+                NativeNotificationOutbox.id == row.id,
+                NativeNotificationOutbox.status.in_(CLAIMED_STATUSES),
+                NativeNotificationOutbox.fencing_token == row.fencing_token,
+            ]
             if lease_expires_at is None:
-                # A claimed row without a lease cannot be safely replayed or
-                # acknowledged: its external display outcome is ambiguous.
-                await self._finish_attempt(
-                    db,
-                    row,
-                    status="unknown",
-                    now=now,
-                    error_code="claimed_lease_missing",
-                )
-                row.status = "unknown"
-                row.last_error = "claimed_lease_missing"
-                row.lease_owner = None
-                row.lease_expires_at = None
-                row.updated_at = now
-                continue
-            await self._finish_attempt(db, row, status="lease_expired", now=now, error_code="lease_expired")
-            row.lease_owner = None
-            row.lease_expires_at = None
-            row.updated_at = now
-            deadline_at = _aware(row.deadline_at) or now
-            if deadline_at <= now:
-                row.status = "unknown"
-                row.last_error = "deadline_expired_after_claim"
-            elif row.attempt_count < row.max_attempts:
-                row.status = "queued"
-                row.last_error = "lease_expired_retryable"
+                predicates.append(NativeNotificationOutbox.lease_expires_at.is_(None))
             else:
-                row.status = "unknown"
-                row.last_error = "lease_expired_retry_budget_exhausted"
+                predicates.append(NativeNotificationOutbox.lease_expires_at <= now)
+            # CAS on both status and fence prevents a stale reconciler from
+            # overwriting a concurrent ACK, dismiss, or claim transition.
+            transition = await db.execute(
+                update(NativeNotificationOutbox)
+                .execution_options(synchronize_session=False)
+                .where(*predicates)
+                .values(
+                    status="unknown",
+                    last_error=reason,
+                    lease_owner=None,
+                    lease_expires_at=None,
+                    updated_at=now,
+                )
+            )
+            if transition.rowcount != 1:
+                continue
+            await db.refresh(row)
+            await self._finish_attempt(db, row, status="unknown", now=now, error_code=reason)
 
-        queued_result = await db.execute(
-            select(NativeNotificationOutbox).where(
+        await db.execute(
+            update(NativeNotificationOutbox)
+            .execution_options(synchronize_session=False)
+            .where(
                 NativeNotificationOutbox.status == "queued",
                 NativeNotificationOutbox.deadline_at <= now,
             )
+            .values(status="failed", last_error="deadline_expired", updated_at=now)
         )
-        for row in queued_result.scalars().all():
-            row.status = "failed"
-            row.last_error = "deadline_expired"
-            row.updated_at = now
 
-        malformed_result = await db.execute(
-            select(NativeNotificationOutbox).where(
+        await db.execute(
+            update(NativeNotificationOutbox)
+            .execution_options(synchronize_session=False)
+            .where(
                 NativeNotificationOutbox.status == "queued",
                 (
                     (NativeNotificationOutbox.deadline_at.is_(None))
@@ -412,11 +464,8 @@ class NativeNotificationQueue:
                     | (NativeNotificationOutbox.fencing_token < 0)
                 ),
             )
+            .values(status="failed", last_error="malformed_outbox_state", updated_at=now)
         )
-        for row in malformed_result.scalars().all():
-            row.status = "failed"
-            row.last_error = "malformed_outbox_state"
-            row.updated_at = now
 
     async def claim_next(
         self,
@@ -447,6 +496,7 @@ class NativeNotificationQueue:
                         ),
                     )
                     .order_by(
+                        NativeNotificationOutbox.urgency.desc().nullslast(),
                         NativeNotificationOutbox.created_at.asc(),
                         NativeNotificationOutbox.id.asc(),
                     )
@@ -455,7 +505,7 @@ class NativeNotificationQueue:
                 row = result.scalar_one_or_none()
                 if row is None:
                     return None
-                if row.status == "claimed":
+                if row.status in CLAIMED_STATUSES:
                     return _row_to_notification(row)
 
                 lease_expires = min(
@@ -499,8 +549,11 @@ class NativeNotificationQueue:
                 return _row_to_notification(row)
 
     async def peek(self) -> NativeNotification | None:
-        """Return the next item while claiming it for the built-in daemon."""
-        return await self.claim_next()
+        """Return the next item while claiming it for an internal caller.
+
+        The HTTP daemon path must provide its own unique worker identity.
+        """
+        return await self.claim_next(worker_id="native-daemon-internal")
 
     async def get(self, notification_id: str) -> NativeNotification | None:
         notification_id = _validate_identifier(notification_id, field="notification_id")
@@ -546,6 +599,10 @@ class NativeNotificationQueue:
         worker = _valid_worker(worker_id) if worker_id is not None else None
         if fencing_token is not None and (not isinstance(fencing_token, int) or fencing_token < 1):
             raise NativeNotificationLeaseError("fencing_token must be a positive integer")
+        # There is no browser/operator bypass. A receipt is accepted only
+        # from the daemon that owns the current lease and fence.
+        if worker is None or fencing_token is None:
+            return False
 
         async with self._lock:
             async with self._session() as db:
@@ -559,24 +616,25 @@ class NativeNotificationQueue:
                 row = result.scalar_one_or_none()
                 if row is None or row.status in TERMINAL_STATUSES:
                     return False
-                if row.status == "claimed":
+                if row.status in CLAIMED_STATUSES:
+                    if row.status != "display_attempted":
+                        # The daemon must first record the fenced OS handoff;
+                        # a claim alone is not evidence that a display call
+                        # was attempted.
+                        return False
                     if row.lease_expires_at is None or (_aware(row.lease_expires_at) or now) <= now:
                         return False
-                    # A claimed row can only be completed by a receipt from
-                    # the claim that owns it. The legacy empty-body API
-                    # cannot acknowledge a daemon claim without its fence.
                     if fencing_token is None or row.fencing_token != fencing_token:
                         return False
-                    if worker is not None and row.lease_owner != worker:
+                    if row.lease_owner != worker:
                         return False
                     predicates = [
                         NativeNotificationOutbox.id == notification_id,
-                        NativeNotificationOutbox.status == "claimed",
+                        NativeNotificationOutbox.status.in_(CLAIMED_STATUSES),
                         NativeNotificationOutbox.fencing_token == fencing_token,
                         NativeNotificationOutbox.lease_expires_at > now,
+                        NativeNotificationOutbox.lease_owner == worker,
                     ]
-                    if worker is not None:
-                        predicates.append(NativeNotificationOutbox.lease_owner == worker)
                     ack_result = await db.execute(
                         update(NativeNotificationOutbox)
                         .execution_options(synchronize_session=False)
@@ -592,49 +650,8 @@ class NativeNotificationQueue:
                     if ack_result.rowcount != 1:
                         return False
                     await db.refresh(row)
-                elif (
-                    row.status != "queued"
-                    or fencing_token is not None
-                    or worker is not None
-                    or row.attempt_count != 0
-                ):
-                    return False
                 else:
-                    # The conditional update also prevents an operator/test
-                    # ACK racing a daemon claim from completing that claim.
-                    ack_result = await db.execute(
-                        update(NativeNotificationOutbox)
-                        .execution_options(synchronize_session=False)
-                        .where(
-                            NativeNotificationOutbox.id == notification_id,
-                            NativeNotificationOutbox.status == "queued",
-                            NativeNotificationOutbox.attempt_count == 0,
-                            NativeNotificationOutbox.fencing_token == 0,
-                            NativeNotificationOutbox.deadline_at > now,
-                        )
-                        .values(
-                            status="delivered",
-                            attempt_count=NativeNotificationOutbox.attempt_count + 1,
-                            fencing_token=NativeNotificationOutbox.fencing_token + 1,
-                            delivered_at=now,
-                            updated_at=now,
-                        )
-                    )
-                    if ack_result.rowcount != 1:
-                        return False
-                    await db.refresh(row)
-                    # Keep direct browser/test acknowledgement compatible by
-                    # creating a fenced attempt in the same transaction.
-                    db.add(
-                        NativeNotificationDeliveryAttempt(
-                            notification_id=row.id,
-                            attempt_index=row.attempt_count,
-                            lease_owner="observer-api",
-                            fencing_token=row.fencing_token,
-                            status="claimed",
-                            started_at=now,
-                        )
-                    )
+                    return False
                 await self._finish_attempt(db, row, status="delivered", now=now)
                 await db.flush()
                 return True
@@ -647,13 +664,19 @@ class NativeNotificationQueue:
         worker_id: str | None = None,
         fencing_token: int | None = None,
     ) -> bool:
-        """Record a bounded known delivery failure and requeue if permitted."""
+        """Record an ambiguous daemon failure for explicit reconciliation.
+
+        The OS notification API does not provide a durable receipt. A failed
+        call may therefore have displayed, so automatic retry is unsafe.
+        """
         notification_id = _validate_identifier(notification_id, field="notification_id")
         if not notification_id:
             return False
         worker = _valid_worker(worker_id) if worker_id is not None else None
         if fencing_token is not None and (not isinstance(fencing_token, int) or fencing_token < 1):
             raise NativeNotificationLeaseError("fencing_token must be a positive integer")
+        if worker is None or fencing_token is None:
+            return False
 
         async with self._lock:
             async with self._session() as db:
@@ -667,35 +690,29 @@ class NativeNotificationQueue:
                 row = result.scalar_one_or_none()
                 if row is None or row.status in {"delivered", "cancelled", "unknown"}:
                     return False
-                if row.status != "claimed":
+                if row.status not in CLAIMED_STATUSES:
                     return False
                 if row.lease_expires_at is None or (_aware(row.lease_expires_at) or now) <= now:
                     return False
                 if fencing_token is None or row.fencing_token != fencing_token:
                     return False
-                if worker is not None and row.lease_owner != worker:
+                if row.lease_owner != worker:
                     return False
 
                 safe_reason = _safe_reason(reason)
-                next_status = (
-                    "queued"
-                    if row.attempt_count < row.max_attempts and (_aware(row.deadline_at) or now) > now
-                    else "failed"
-                )
                 predicates = [
                     NativeNotificationOutbox.id == notification_id,
-                    NativeNotificationOutbox.status == "claimed",
+                    NativeNotificationOutbox.status.in_(CLAIMED_STATUSES),
                     NativeNotificationOutbox.fencing_token == fencing_token,
                     NativeNotificationOutbox.lease_expires_at > now,
+                    NativeNotificationOutbox.lease_owner == worker,
                 ]
-                if worker is not None:
-                    predicates.append(NativeNotificationOutbox.lease_owner == worker)
                 fail_result = await db.execute(
                     update(NativeNotificationOutbox)
                     .execution_options(synchronize_session=False)
                     .where(*predicates)
                     .values(
-                        status=next_status,
+                        status="unknown",
                         last_error=safe_reason,
                         lease_owner=None,
                         lease_expires_at=None,
@@ -708,10 +725,63 @@ class NativeNotificationQueue:
                 await self._finish_attempt(
                     db,
                     row,
-                    status="failed",
+                    status="unknown",
                     now=now,
                     error_code=safe_reason,
                 )
+                await db.flush()
+                return True
+
+    async def mark_display_attempted(
+        self,
+        notification_id: str,
+        *,
+        worker_id: str,
+        fencing_token: int,
+    ) -> bool:
+        """Fence the handoff immediately before invoking the OS display call."""
+        notification_id = _validate_identifier(notification_id, field="notification_id")
+        worker = _valid_worker(worker_id)
+        if not notification_id or not isinstance(fencing_token, int) or fencing_token < 1:
+            return False
+        async with self._lock:
+            async with self._session() as db:
+                now = _utc_now()
+                await self._reconcile_expired(db, now)
+                row_result = await db.execute(
+                    select(NativeNotificationOutbox).where(
+                        NativeNotificationOutbox.id == notification_id
+                    )
+                )
+                row = row_result.scalar_one_or_none()
+                if row is None or row.attempt_count < 1:
+                    return False
+                attempt_result = await db.execute(
+                    select(NativeNotificationDeliveryAttempt).where(
+                        NativeNotificationDeliveryAttempt.notification_id == notification_id,
+                        NativeNotificationDeliveryAttempt.attempt_index == row.attempt_count,
+                    )
+                )
+                attempt = attempt_result.scalar_one_or_none()
+                if attempt is None:
+                    # A claim persisted without its attempt receipt is an
+                    # incomplete handoff and must not reach the OS.
+                    return False
+                result = await db.execute(
+                    update(NativeNotificationOutbox)
+                    .execution_options(synchronize_session=False)
+                    .where(
+                        NativeNotificationOutbox.id == notification_id,
+                        NativeNotificationOutbox.status == "claimed",
+                        NativeNotificationOutbox.lease_owner == worker,
+                        NativeNotificationOutbox.fencing_token == fencing_token,
+                        NativeNotificationOutbox.lease_expires_at > now,
+                    )
+                    .values(status="display_attempted", updated_at=now)
+                )
+                if result.rowcount != 1:
+                    return False
+                attempt.status = "display_attempted"
                 await db.flush()
                 return True
 
@@ -743,6 +813,40 @@ class NativeNotificationQueue:
                 await db.flush()
                 return True
 
+    async def reconcile_unknown(self, notification_id: str, *, retry: bool = False) -> bool:
+        """Explicitly requeue an ambiguous receipt after operator review.
+
+        This transition is opt-in and remains bounded by the original
+        deadline/attempt budget. It is intentionally separate from daemon
+        polling so restart or lease expiry can never replay silently.
+        """
+        notification_id = _validate_identifier(notification_id, field="notification_id")
+        if not notification_id or not retry:
+            return False
+        async with self._lock:
+            async with self._session() as db:
+                now = _utc_now()
+                await self._reconcile_expired(db, now)
+                result = await db.execute(
+                    update(NativeNotificationOutbox)
+                    .execution_options(synchronize_session=False)
+                    .where(
+                        NativeNotificationOutbox.id == notification_id,
+                        NativeNotificationOutbox.status == "unknown",
+                        NativeNotificationOutbox.attempt_count < NativeNotificationOutbox.max_attempts,
+                        NativeNotificationOutbox.deadline_at > now,
+                    )
+                    .values(
+                        status="queued",
+                        last_error="operator_reconciled_retry",
+                        lease_owner=None,
+                        lease_expires_at=None,
+                        updated_at=now,
+                    )
+                )
+                await db.flush()
+                return result.rowcount == 1
+
     async def dismiss(self, notification_id: str) -> NativeNotification | None:
         """Cancel a pending notification and retain its audit receipt."""
         notification_id = _validate_identifier(notification_id, field="notification_id")
@@ -760,12 +864,57 @@ class NativeNotificationQueue:
                 row = result.scalar_one_or_none()
                 if row is None or row.status not in ACTIVE_STATUSES:
                     return None
-                await self._finish_attempt(db, row, status="cancelled", now=now, error_code="operator_dismissed")
-                row.status = "cancelled"
-                row.cancelled_at = now
-                row.lease_owner = None
-                row.lease_expires_at = None
-                row.updated_at = now
+                if row.status in CLAIMED_STATUSES:
+                    # Browser dismissal has no daemon fence. It can stop a
+                    # future ACK, but must preserve ambiguity for recovery.
+                    dismiss_result = await db.execute(
+                        update(NativeNotificationOutbox)
+                        .execution_options(synchronize_session=False)
+                        .where(
+                            NativeNotificationOutbox.id == notification_id,
+                            NativeNotificationOutbox.status.in_(CLAIMED_STATUSES),
+                            NativeNotificationOutbox.fencing_token == row.fencing_token,
+                        )
+                        .values(
+                            status="unknown",
+                            last_error="operator_dismissed_reconciliation_required",
+                            lease_owner=None,
+                            lease_expires_at=None,
+                            updated_at=now,
+                        )
+                    )
+                    if dismiss_result.rowcount != 1:
+                        return None
+                    await db.refresh(row)
+                    await self._finish_attempt(
+                        db,
+                        row,
+                        status="unknown",
+                        now=now,
+                        error_code="operator_dismissed_reconciliation_required",
+                    )
+                else:
+                    dismiss_result = await db.execute(
+                        update(NativeNotificationOutbox)
+                        .execution_options(synchronize_session=False)
+                        .where(
+                            NativeNotificationOutbox.id == notification_id,
+                            NativeNotificationOutbox.status == "queued",
+                            NativeNotificationOutbox.attempt_count == row.attempt_count,
+                            NativeNotificationOutbox.fencing_token == row.fencing_token,
+                        )
+                        .values(status="cancelled", cancelled_at=now, updated_at=now)
+                    )
+                    if dismiss_result.rowcount != 1:
+                        return None
+                    await db.refresh(row)
+                    await self._finish_attempt(
+                        db,
+                        row,
+                        status="cancelled",
+                        now=now,
+                        error_code="operator_dismissed",
+                    )
                 await db.flush()
                 return _row_to_notification(row)
 
@@ -784,21 +933,60 @@ class NativeNotificationQueue:
                     )
                 )
                 rows = list(result.scalars().all())
+                changed: list[NativeNotification] = []
                 for row in rows:
-                    await self._finish_attempt(
-                        db,
-                        row,
-                        status="cancelled",
-                        now=now,
-                        error_code="operator_dismissed",
-                    )
-                    row.status = "cancelled"
-                    row.cancelled_at = now
-                    row.lease_owner = None
-                    row.lease_expires_at = None
-                    row.updated_at = now
+                    if row.status in CLAIMED_STATUSES:
+                        dismiss_result = await db.execute(
+                            update(NativeNotificationOutbox)
+                            .execution_options(synchronize_session=False)
+                            .where(
+                                NativeNotificationOutbox.id == row.id,
+                                NativeNotificationOutbox.status.in_(CLAIMED_STATUSES),
+                                NativeNotificationOutbox.fencing_token == row.fencing_token,
+                            )
+                            .values(
+                                status="unknown",
+                                last_error="operator_dismissed_reconciliation_required",
+                                lease_owner=None,
+                                lease_expires_at=None,
+                                updated_at=now,
+                            )
+                        )
+                        if dismiss_result.rowcount != 1:
+                            continue
+                        await db.refresh(row)
+                        await self._finish_attempt(
+                            db,
+                            row,
+                            status="unknown",
+                            now=now,
+                            error_code="operator_dismissed_reconciliation_required",
+                        )
+                    else:
+                        dismiss_result = await db.execute(
+                            update(NativeNotificationOutbox)
+                            .execution_options(synchronize_session=False)
+                            .where(
+                                NativeNotificationOutbox.id == row.id,
+                                NativeNotificationOutbox.status == "queued",
+                                NativeNotificationOutbox.attempt_count == row.attempt_count,
+                                NativeNotificationOutbox.fencing_token == row.fencing_token,
+                            )
+                            .values(status="cancelled", cancelled_at=now, updated_at=now)
+                        )
+                        if dismiss_result.rowcount != 1:
+                            continue
+                        await db.refresh(row)
+                        await self._finish_attempt(
+                            db,
+                            row,
+                            status="cancelled",
+                            now=now,
+                            error_code="operator_dismissed",
+                        )
+                    changed.append(_row_to_notification(row))
                 await db.flush()
-                return [_row_to_notification(row) for row in rows]
+                return changed
 
     async def get_attempts(self, notification_id: str) -> list[dict[str, Any]]:
         """Return bounded delivery-attempt metadata for operator/tests."""
@@ -830,6 +1018,49 @@ class NativeNotificationQueue:
                     }
                     for row in result.scalars().all()
                 ]
+
+    async def recovery(self, *, limit: int = 100) -> list[dict[str, Any]]:
+        """Return bounded failed/unknown rows and operator recovery state."""
+        if limit < 1 or limit > 100:
+            raise ValueError("recovery limit must be between 1 and 100")
+        async with self._lock:
+            async with self._session() as db:
+                await self._reconcile_expired(db, _utc_now())
+                result = await db.execute(
+                    select(NativeNotificationOutbox)
+                    .where(NativeNotificationOutbox.status.in_({"failed", "unknown"}))
+                    .order_by(
+                        NativeNotificationOutbox.updated_at.desc(),
+                        NativeNotificationOutbox.id.asc(),
+                    )
+                    .limit(limit)
+                )
+                rows = list(result.scalars().all())
+                output: list[dict[str, Any]] = []
+                for row in rows:
+                    attempt_result = await db.execute(
+                        select(NativeNotificationDeliveryAttempt)
+                        .where(NativeNotificationDeliveryAttempt.notification_id == row.id)
+                        .order_by(NativeNotificationDeliveryAttempt.attempt_index.asc())
+                    )
+                    output.append(
+                        {
+                            "notification": _row_to_notification(row).to_dict(),
+                            "last_error": row.last_error,
+                            "recovery_required": row.status == "unknown",
+                            "attempts": [
+                                {
+                                    "attempt_index": attempt.attempt_index,
+                                    "status": attempt.status,
+                                    "error_code": attempt.error_code,
+                                    "fencing_token": attempt.fencing_token,
+                                    "lease_owner": attempt.lease_owner,
+                                }
+                                for attempt in attempt_result.scalars().all()
+                            ],
+                        }
+                    )
+                return output
 
     async def count(self) -> int:
         async with self._lock:

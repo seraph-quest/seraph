@@ -1,11 +1,12 @@
 """Focused durable-outbox coverage for the built-in native notification path."""
 
+import asyncio
 from datetime import datetime, timedelta, timezone
 
 import pytest
 from sqlmodel import select
 
-from src.db.models import NativeNotificationOutbox
+from src.db.models import NativeNotificationOutbox, QueuedInsight
 from src.observer.native_notification_queue import (
     MAX_BODY_CHARS,
     NativeNotificationConflictError,
@@ -53,6 +54,51 @@ async def test_outbox_survives_queue_reconstruction_and_deduplicates(async_db):
 
 
 @pytest.mark.asyncio
+async def test_idempotency_key_is_atomic_across_queue_instances(async_db):
+    first_queue = NativeNotificationQueue()
+    second_queue = NativeNotificationQueue()
+    results = await asyncio.gather(
+        first_queue.enqueue(**_enqueue_kwargs(), idempotency_key="native:race-1"),
+        second_queue.enqueue(**_enqueue_kwargs(), idempotency_key="native:race-1"),
+    )
+
+    assert results[0].id == results[1].id
+    assert await first_queue.count() == 1
+
+
+@pytest.mark.asyncio
+async def test_bundle_handoff_deletes_source_in_same_transaction(async_db):
+    source = QueuedInsight(
+        id="queued-source-1",
+        content="Queued guardian update",
+        intervention_type="advisory",
+        urgency=3,
+    )
+    async with async_db() as db:
+        db.add(source)
+
+    queue = NativeNotificationQueue()
+    first = await queue.enqueue(
+        **_enqueue_kwargs(intervention_id=None, body="Queued guardian update"),
+        idempotency_key="native:bundle-handoff-1",
+        source_insight_ids=[source.id],
+    )
+    async with async_db() as db:
+        assert (
+            await db.execute(
+                select(QueuedInsight).where(QueuedInsight.id == source.id)
+            )
+        ).scalar_one_or_none() is None
+
+    duplicate = await queue.enqueue(
+        **_enqueue_kwargs(intervention_id=None, body="Queued guardian update"),
+        idempotency_key="native:bundle-handoff-1",
+        source_insight_ids=[source.id],
+    )
+    assert duplicate.id == first.id
+
+
+@pytest.mark.asyncio
 async def test_claim_requires_fence_and_records_attempt(async_db):
     queue = NativeNotificationQueue(max_attempts=2, lease_seconds=60, ttl_seconds=300)
     notification = await queue.enqueue(**_enqueue_kwargs(), idempotency_key="native:claim-1")
@@ -69,6 +115,16 @@ async def test_claim_requires_fence_and_records_attempt(async_db):
     assert (await queue.claim_next(worker_id="daemon-a")).fencing_token == 1
     assert await queue.claim_next(worker_id="daemon-b") is None
 
+    assert await queue.ack(
+        notification.id,
+        fencing_token=claimed.fencing_token,
+        worker_id="daemon-a",
+    ) is False
+    assert await queue.mark_display_attempted(
+        notification.id,
+        fencing_token=claimed.fencing_token,
+        worker_id="daemon-a",
+    ) is True
     assert await queue.ack(notification.id) is False
     assert await queue.ack(notification.id, fencing_token=999) is False
     assert await queue.ack(notification.id, fencing_token=claimed.fencing_token, worker_id="daemon-b") is False
@@ -86,7 +142,7 @@ async def test_claim_requires_fence_and_records_attempt(async_db):
 
 
 @pytest.mark.asyncio
-async def test_expired_lease_requeues_with_new_fence_and_rejects_stale_ack(async_db):
+async def test_expired_lease_becomes_unknown_and_rejects_stale_ack(async_db):
     queue = NativeNotificationQueue(max_attempts=2, lease_seconds=60, ttl_seconds=300)
     notification = await queue.enqueue(**_enqueue_kwargs(), idempotency_key="native:lease-1")
     first = await queue.claim_next(worker_id="daemon-a")
@@ -102,19 +158,15 @@ async def test_expired_lease_requeues_with_new_fence_and_rejects_stale_ack(async
         ).scalar_one()
         row.lease_expires_at = datetime.now(timezone.utc) - timedelta(seconds=1)
 
-    # Reconciliation must prevent a legacy empty-body ACK from completing a
-    # claim that has already expired and been returned to the queue.
+    # Reconciliation must prevent replay or a legacy empty-body ACK after an
+    # external display may already have happened.
     assert await queue.ack(notification.id) is False
-    requeued = await queue.get(notification.id)
-    assert requeued is not None
-    assert requeued.delivery_status == "queued"
-
-    second = await NativeNotificationQueue(max_attempts=2, lease_seconds=60, ttl_seconds=300).claim_next(
+    unknown = await queue.get(notification.id)
+    assert unknown is not None
+    assert unknown.delivery_status == "unknown"
+    assert await NativeNotificationQueue(max_attempts=2, lease_seconds=60, ttl_seconds=300).claim_next(
         worker_id="daemon-b"
-    )
-    assert second is not None
-    assert second.attempt_count == 2
-    assert second.fencing_token == first.fencing_token + 1
+    ) is None
     assert await queue.fail(
         notification.id,
         reason="stale worker",
@@ -122,14 +174,12 @@ async def test_expired_lease_requeues_with_new_fence_and_rejects_stale_ack(async
         worker_id="daemon-a",
     ) is False
     assert await queue.ack(notification.id, fencing_token=first.fencing_token, worker_id="daemon-a") is False
-    assert await queue.ack(notification.id, fencing_token=second.fencing_token, worker_id="daemon-b") is True
-
     attempts = await queue.get_attempts(notification.id)
-    assert [item["status"] for item in attempts] == ["lease_expired", "delivered"]
+    assert [item["status"] for item in attempts] == ["unknown"]
 
 
 @pytest.mark.asyncio
-async def test_failure_is_requeued_then_exhausts_bounded_retry_budget(async_db):
+async def test_failure_becomes_unknown_without_automatic_replay(async_db):
     queue = NativeNotificationQueue(max_attempts=2, lease_seconds=60, ttl_seconds=300)
     notification = await queue.enqueue(**_enqueue_kwargs(), idempotency_key="native:retry-1")
 
@@ -141,24 +191,15 @@ async def test_failure_is_requeued_then_exhausts_bounded_retry_budget(async_db):
         fencing_token=first.fencing_token,
         worker_id="daemon",
     ) is True
-    assert (await queue.get(notification.id)).delivery_status == "queued"
-
-    second = await queue.claim_next(worker_id="daemon")
-    assert second is not None
-    assert await queue.fail(
-        notification.id,
-        reason="display failed again",
-        fencing_token=second.fencing_token,
-        worker_id="daemon",
-    ) is True
-    exhausted = await queue.get(notification.id)
-    assert exhausted is not None
-    assert exhausted.delivery_status == "failed"
+    failed = await queue.get(notification.id)
+    assert failed is not None
+    assert failed.delivery_status == "unknown"
+    assert await queue.claim_next(worker_id="daemon") is None
     assert await queue.retry(notification.id) is False
     assert await queue.count() == 0
 
     attempts = await queue.get_attempts(notification.id)
-    assert [item["status"] for item in attempts] == ["failed", "failed"]
+    assert [item["status"] for item in attempts] == ["unknown"]
 
 
 @pytest.mark.asyncio
@@ -237,7 +278,12 @@ async def test_observer_api_requires_delivery_fence_and_records_failure(async_db
         idempotency_key="native:http-fence-1",
     )
 
-    poll_response = await client.get("/api/observer/notifications/next")
+    worker_id = "test-daemon"
+    poll_response = await client.get(
+        "/api/observer/notifications/next",
+        params={"worker_id": worker_id},
+        headers={"X-Seraph-Daemon-Id": worker_id},
+    )
     assert poll_response.status_code == 200
     polled = poll_response.json()["notification"]
     assert polled["id"] == notification.id
@@ -245,11 +291,18 @@ async def test_observer_api_requires_delivery_fence_and_records_failure(async_db
     fencing_token = polled["fencing_token"]
 
     ack_url = f"/api/observer/notifications/{notification.id}/ack"
-    assert (await client.post(ack_url)).json() == {"acked": False}
-    assert (await client.post(ack_url, json={"fencing_token": fencing_token + 1})).json() == {
+    assert (await client.post(ack_url, json={"worker_id": worker_id, "fencing_token": fencing_token + 1}, headers={"X-Seraph-Daemon-Id": worker_id})).json() == {
         "acked": False
     }
-    assert (await client.post(ack_url, json={"fencing_token": fencing_token})).json() == {
+    assert (await client.post(ack_url, json={"worker_id": "other-daemon", "fencing_token": fencing_token}, headers={"X-Seraph-Daemon-Id": "other-daemon"})).json() == {
+        "acked": False
+    }
+    assert (await client.post(
+        f"/api/observer/notifications/{notification.id}/display-attempted",
+        json={"worker_id": worker_id, "fencing_token": fencing_token},
+        headers={"X-Seraph-Daemon-Id": worker_id},
+    )).json() == {"display_attempted": True}
+    assert (await client.post(ack_url, json={"worker_id": worker_id, "fencing_token": fencing_token}, headers={"X-Seraph-Daemon-Id": worker_id})).json() == {
         "acked": True
     }
 
@@ -257,18 +310,34 @@ async def test_observer_api_requires_delivery_fence_and_records_failure(async_db
         **_enqueue_kwargs(body="The daemon should retry this."),
         idempotency_key="native:http-failure-1",
     )
-    failed_poll = await client.get("/api/observer/notifications/next")
+    failed_poll = await client.get(
+        "/api/observer/notifications/next",
+        params={"worker_id": worker_id},
+        headers={"X-Seraph-Daemon-Id": worker_id},
+    )
     failed_payload = failed_poll.json()["notification"]
     assert failed_payload["id"] == failed_notification.id
     fail_url = f"/api/observer/notifications/{failed_notification.id}/fail"
-    assert (await client.post(fail_url)).json() == {"failed": False}
+    assert (await client.post(fail_url, json={"worker_id": "other-daemon", "fencing_token": failed_payload["fencing_token"]}, headers={"X-Seraph-Daemon-Id": "other-daemon"})).json() == {
+        "failed": False
+    }
+    assert (await client.post(
+        f"/api/observer/notifications/{failed_notification.id}/display-attempted",
+        json={"worker_id": worker_id, "fencing_token": failed_payload["fencing_token"]},
+        headers={"X-Seraph-Daemon-Id": worker_id},
+    )).json() == {"display_attempted": True}
     assert (
         await client.post(
             fail_url,
-            json={"reason": "authorization=hidden-value", "fencing_token": failed_payload["fencing_token"]},
+            json={
+                "reason": "authorization=hidden-value",
+                "worker_id": worker_id,
+                "fencing_token": failed_payload["fencing_token"],
+            },
+            headers={"X-Seraph-Daemon-Id": worker_id},
         )
     ).json() == {"failed": True}
-    assert (await native_notification_queue.get(failed_notification.id)).delivery_status == "queued"
+    assert (await native_notification_queue.get(failed_notification.id)).delivery_status == "unknown"
     attempts = await native_notification_queue.get_attempts(failed_notification.id)
     assert attempts[0]["error_code"] == "authorization=[redacted]"
 

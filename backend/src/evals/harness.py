@@ -813,6 +813,7 @@ from src.api.mcp import test_server as test_mcp_server
 from src.api.observer import (
     InterventionFeedbackRequest,
     NotificationAckRequest,
+    NotificationDisplayAttemptRequest,
     ScreenContextRequest,
     ScreenObservationData,
     ack_native_notification,
@@ -821,6 +822,7 @@ from src.api.observer import (
     dismiss_native_notification,
     enqueue_test_native_notification,
     get_next_native_notification,
+    mark_native_notification_display_attempted,
     get_observer_continuity,
     list_native_notifications,
     post_intervention_feedback,
@@ -1016,6 +1018,19 @@ from src.vault.repository import VaultRepository
 Runner = Callable[[], dict[str, Any] | Awaitable[dict[str, Any]]]
 
 _TIMING = Timing(start_time=0.0, end_time=1.0)
+
+
+def _authenticated_daemon_request(worker_id: str) -> Request:
+    """Build the authenticated daemon request context used by direct evals."""
+    return Request(
+        {
+            "type": "http",
+            "method": "GET",
+            "path": "/api/observer/notifications/next",
+            "headers": [(b"x-seraph-daemon-id", worker_id.encode("utf-8"))],
+            "state": {"operator": object()},
+        }
+    )
 
 
 async def _browse_webpage_async(url: str, *, action: str = "extract") -> str:
@@ -10527,21 +10542,36 @@ async def _eval_native_presence_notification_behavior() -> dict[str, Any]:
         patch.object(audit_repository, "log_event", mock_log_event),
     ):
         decision = await deliver_or_queue(message)
-        polled = await get_next_native_notification()
+        polled = await get_next_native_notification(
+            _authenticated_daemon_request("eval-daemon"),
+            worker_id="eval-daemon",
+        )
         notification = polled["notification"]
+        await mark_native_notification_display_attempted(
+            notification["id"],
+            NotificationDisplayAttemptRequest(
+                worker_id="eval-daemon",
+                fencing_token=notification.get("fencing_token"),
+            ),
+            request=_authenticated_daemon_request("eval-daemon"),
+        )
         acked = await ack_native_notification(
             notification["id"],
-            NotificationAckRequest(fencing_token=notification.get("fencing_token")),
+            NotificationAckRequest(
+                worker_id="eval-daemon",
+                fencing_token=notification.get("fencing_token"),
+            ),
+            request=_authenticated_daemon_request("eval-daemon"),
         )
 
     delivered_event = _find_audit_call(
         mock_log_event,
-        event_type="observer_delivery_delivered",
+        event_type="observer_delivery_queued",
         tool_name="observer_delivery_gate",
     )
     integration_event = _find_audit_call(
         mock_log_event,
-        event_type="integration_succeeded",
+        event_type="integration_claimed",
         tool_name="observer_daemon:notifications",
     )
     ack_event = _find_audit_call(
@@ -10579,7 +10609,26 @@ async def _eval_native_desktop_shell_behavior() -> dict[str, Any]:
         initial_status = await daemon_status()
         queued = await enqueue_test_native_notification()
         queued_status = await daemon_status()
-        acked = await ack_native_notification(queued["id"])
+        polled = await get_next_native_notification(
+            _authenticated_daemon_request("eval-daemon"),
+            worker_id="eval-daemon",
+        )
+        await mark_native_notification_display_attempted(
+            queued["id"],
+            NotificationDisplayAttemptRequest(
+                worker_id="eval-daemon",
+                fencing_token=polled["notification"].get("fencing_token"),
+            ),
+            request=_authenticated_daemon_request("eval-daemon"),
+        )
+        acked = await ack_native_notification(
+            queued["id"],
+            NotificationAckRequest(
+                worker_id="eval-daemon",
+                fencing_token=polled["notification"].get("fencing_token"),
+            ),
+            request=_authenticated_daemon_request("eval-daemon"),
+        )
         acked_status = await daemon_status()
 
     queued_event = _find_audit_call(
@@ -10997,10 +11046,25 @@ async def _eval_desktop_notification_action_replay_behavior() -> dict[str, Any]:
         listed = await list_native_notifications()
         dismissed = await dismiss_native_notification(first["id"])
         second = await enqueue_test_native_notification()
-        polled = await get_next_native_notification()
+        polled = await get_next_native_notification(
+            _authenticated_daemon_request("eval-daemon"),
+            worker_id="eval-daemon",
+        )
+        await mark_native_notification_display_attempted(
+            second["id"],
+            NotificationDisplayAttemptRequest(
+                worker_id="eval-daemon",
+                fencing_token=polled["notification"].get("fencing_token"),
+            ),
+            request=_authenticated_daemon_request("eval-daemon"),
+        )
         acked = await ack_native_notification(
             second["id"],
-            NotificationAckRequest(fencing_token=polled["notification"].get("fencing_token")),
+            NotificationAckRequest(
+                worker_id="eval-daemon",
+                fencing_token=polled["notification"].get("fencing_token"),
+            ),
+            request=_authenticated_daemon_request("eval-daemon"),
         )
         final_status = await daemon_status()
 
@@ -11016,7 +11080,7 @@ async def _eval_desktop_notification_action_replay_behavior() -> dict[str, Any]:
     )
     poll_event = _find_audit_call(
         mock_log_event,
-        event_type="integration_succeeded",
+        event_type="integration_claimed",
         tool_name="observer_daemon:notifications",
     )
     await native_notification_queue.clear()
@@ -11095,11 +11159,26 @@ async def _eval_guardian_feedback_loop() -> dict[str, Any]:
                 guardian_confidence="grounded",
                 session_id="feedback-current",
             )
-            polled = await get_next_native_notification()
+            polled = await get_next_native_notification(
+                _authenticated_daemon_request("eval-daemon"),
+                worker_id="eval-daemon",
+            )
             notification = polled["notification"]
+            await mark_native_notification_display_attempted(
+                notification["id"],
+                NotificationDisplayAttemptRequest(
+                    worker_id="eval-daemon",
+                    fencing_token=notification.get("fencing_token"),
+                ),
+                request=_authenticated_daemon_request("eval-daemon"),
+            )
             acked = await ack_native_notification(
                 notification["id"],
-                NotificationAckRequest(fencing_token=notification.get("fencing_token")),
+                NotificationAckRequest(
+                    worker_id="eval-daemon",
+                    fencing_token=notification.get("fencing_token"),
+                ),
+                request=_authenticated_daemon_request("eval-daemon"),
             )
             feedback = await post_intervention_feedback(
                 message.intervention_id or "",
@@ -11119,7 +11198,7 @@ async def _eval_guardian_feedback_loop() -> dict[str, Any]:
 
         delivery_event = _find_audit_call(
             mock_log_event,
-            event_type="observer_delivery_delivered",
+            event_type="observer_delivery_queued",
             tool_name="observer_delivery_gate",
         )
         ack_event = _find_audit_call(

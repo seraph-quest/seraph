@@ -357,7 +357,7 @@ class ApprovalTool(Tool):
             arguments,
             approval_context=approval_context,
         )
-        if _run_async(
+        consumed_approval = _run_async(
             approval_repository.consume_approved(
                 session_id=session_id,
                 tool_name=self.name,
@@ -367,8 +367,10 @@ class ApprovalTool(Tool):
                     principal=principal,
                 ),
             )
-        ):
+        )
+        if consumed_approval:
             assert_runtime_not_revoked()
+            approval_binding = consumed_approval if isinstance(consumed_approval, dict) else None
             return _invoke_adopted_tool(
                 wrapped_tool=self.wrapped_tool,
                 tool_name=self.name,
@@ -378,9 +380,17 @@ class ApprovalTool(Tool):
                 sanitize_inputs_outputs=sanitize_inputs_outputs,
                 principal=principal,
                 session_id=session_id,
-                requires_approval=True,
-                approved=True,
-                approval_id=fingerprint,
+                approval_id=(
+                    str(consumed_approval.get("approval_id") or "")
+                    if isinstance(consumed_approval, dict)
+                    else ""
+                ),
+                approval_digest=(
+                    str(consumed_approval.get("fingerprint") or "")
+                    if isinstance(consumed_approval, dict)
+                    else ""
+                ),
+                approval_binding=approval_binding,
             )
 
         summary = format_tool_call_summary(self.name, arguments, set())
@@ -430,9 +440,9 @@ def _invoke_adopted_tool(
     sanitize_inputs_outputs: bool,
     principal: TrustPrincipal | None,
     session_id: str | None,
-    requires_approval: bool = False,
-    approved: bool = False,
     approval_id: str = "",
+    approval_digest: str = "",
+    approval_binding: dict[str, Any] | None = None,
 ) -> Any:
     """Cross the durable host for adopted local filesystem/process tools."""
     if tool_name not in _ADOPTED_CAPABILITIES:
@@ -453,17 +463,11 @@ def _invoke_adopted_tool(
         capability_id=tool_name,
         arguments=arguments,
         owner_principal_id=principal.principal_id,
-        principal_authenticated=principal.authenticated,
-        principal_revoked=principal.revoked,
-        authority_granted=any(
-            getattr(grant, "value", grant) == AuthorityGrant.CAPABILITY_EXECUTE.value
-            for grant in principal.grants
-        ),
         session_id=session_id,
         job_id=principal.job_id,
-        requires_approval=requires_approval,
-        approved=approved,
         approval_id=approval_id,
+        approval_digest=approval_digest,
+        approval_binding=approval_binding,
     )
     host = current_capability_execution_host()
     _, receipt = host._execute_adopted(request)  # noqa: SLF001 - wrapper-owned adapter hook

@@ -20,6 +20,7 @@ from src.operators.local_codex import (
     removed_external_agent_payload,
 )
 from src.extensions.lifecycle import list_extensions
+from src.extensions.capability_execution import current_capability_execution_host
 from src.llm_logger import list_recent_llm_calls
 from src.observer.manager import context_manager
 from src.api.observer import _continuity_surface, build_observer_continuity_snapshot
@@ -266,6 +267,13 @@ async def operator_local_codex_status():
 @router.get("/operator/database-doctor")
 async def get_operator_database_doctor():
     return await _operator_database_doctor_payload()
+
+
+@router.get("/operator/capability-execution")
+async def get_operator_capability_execution(request: Request):
+    """Expose local effect recovery state without raw arguments or paths."""
+    _require_authenticated_capability_operator(request)
+    return current_capability_execution_host().recovery_status()
 
 
 @router.post("/operator/local-codex/exec")

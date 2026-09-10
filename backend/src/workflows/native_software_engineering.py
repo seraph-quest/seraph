@@ -31,7 +31,14 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from config.settings import settings
-from src.approval.runtime import get_current_session_id, get_current_trust_principal
+from src.approval.runtime import (
+    get_current_session_id,
+    get_current_trust_principal,
+    reset_runtime_fencing_token,
+    reset_runtime_trust_principal,
+    set_runtime_fencing_token,
+    set_runtime_trust_principal,
+)
 from src.artifacts.registry import build_artifact_record
 from src.extensions.capability_execution import (
     CapabilityExecutionError,
@@ -697,17 +704,12 @@ def _execute_native_capability(
     session_id = get_current_session_id()
     if principal is None or session_id is None:
         raise NativeSoftwareEngineeringError("runtime_principal_missing")
-    grants = {str(getattr(grant, "value", grant)) for grant in principal.grants}
     request = build_capability_request(
         capability_id=capability_id,
         arguments=arguments,
         owner_principal_id=principal.principal_id,
-        principal_authenticated=principal.authenticated,
-        principal_revoked=principal.revoked,
-        authority_granted=AuthorityGrant.CAPABILITY_EXECUTE.value in grants,
         session_id=session_id,
         job_id=_NATIVE_JOB_ID.get() or principal.job_id,
-        fencing_token=_NATIVE_FENCING_TOKEN.get(),
         destination=destination,
     )
     try:
@@ -1108,6 +1110,15 @@ async def run_native_software_engineering_fixture(
     preflight = preflight_native_software_engineering_fixture(request)
     if preflight["status"] != "ready":
         return preflight
+    runtime_principal = get_current_trust_principal()
+    if runtime_principal is None:
+        return {
+            "status": "blocked",
+            "reason_code": "runtime_principal_missing",
+            "evidence_mode": NATIVE_SOFTWARE_ENGINEERING_EVIDENCE_MODE,
+            "provider": None,
+            "operator_visible": True,
+        }
     try:
         prepared = _prepare_fixture(request, executable=True)
     except NativeSoftwareEngineeringError as exc:
@@ -1198,6 +1209,8 @@ async def run_native_software_engineering_fixture(
     cancel_context_token: Any = None
     job_context_token: Any = None
     fencing_context_token: Any = None
+    runtime_principal_token: Any = None
+    runtime_fencing_token: Any = None
     try:
         try:
             await durable_job_repository.queue_job(request.job_id)
@@ -1227,6 +1240,10 @@ async def run_native_software_engineering_fixture(
         fencing_token = int(claimed["lease"]["fencing_token"])
         job_context_token = _NATIVE_JOB_ID.set(request.job_id)
         fencing_context_token = _NATIVE_FENCING_TOKEN.set(str(fencing_token))
+        runtime_principal_token = set_runtime_trust_principal(
+            replace(runtime_principal, job_id=request.job_id)
+        )
+        runtime_fencing_token = set_runtime_fencing_token(str(fencing_token))
         execution_control = _NativeExecutionControl(
             owner=worker_owner,
             fencing_token=fencing_token,
@@ -1951,6 +1968,10 @@ async def run_native_software_engineering_fixture(
             _NATIVE_JOB_ID.reset(job_context_token)
         if fencing_context_token is not None:
             _NATIVE_FENCING_TOKEN.reset(fencing_context_token)
+        if runtime_fencing_token is not None:
+            reset_runtime_fencing_token(runtime_fencing_token)
+        if runtime_principal_token is not None:
+            reset_runtime_trust_principal(runtime_principal_token)
         _unregister_native_execution(request.job_id, execution_control)
 
 

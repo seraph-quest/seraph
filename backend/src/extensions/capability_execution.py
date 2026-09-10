@@ -29,6 +29,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Callable, Mapping
 from urllib.parse import urlsplit, urlunsplit
+from uuid import uuid4
 
 from src.audit.formatting import redact_for_audit
 from src.security.trust_contract import canonical_digest
@@ -273,9 +274,6 @@ class CapabilityExecutionRequest:
     capability_version: str
     destination: str
     arguments: Mapping[str, Any] = field(default_factory=dict)
-    principal_authenticated: bool = False
-    principal_revoked: bool = False
-    authority_granted: bool = False
     session_id: str = ""
     job_id: str = ""
     request_id: str = ""
@@ -283,9 +281,7 @@ class CapabilityExecutionRequest:
     idempotency_key: str = ""
     approval_id: str = ""
     approval_digest: str = ""
-    approved: bool = False
-    requires_approval: bool = False
-    approval_expires_at: float | None = None
+    approval_binding: Mapping[str, Any] | None = None
     fencing_token: str = ""
     policy_version: str = "capability-execution-v1"
     expires_at: float | None = None
@@ -305,6 +301,13 @@ class CapabilityExecutionRequest:
         if len(self.idempotency_key.strip().encode("utf-8")) > _MAX_IDEMPOTENCY_BYTES:
             raise ValueError("idempotency_key exceeds the bounded local policy")
         normalize_destination(self.destination)
+        # Trust evaluation requires opaque request references.  They are not
+        # part of the effect identity, so retries remain idempotent while the
+        # host can reject malformed or replay-shaped authority material.
+        if not self.request_id:
+            object.__setattr__(self, "request_id", f"request:{uuid4().hex}")
+        if not self.attempt_id:
+            object.__setattr__(self, "attempt_id", f"attempt:{uuid4().hex}")
 
     @property
     def normalized_destination(self) -> str:
@@ -490,9 +493,16 @@ class CapabilityExecutionHost:
         self._uncertain_keys: set[str] = set()
         self._max_records = max_records
         self._max_bytes = max_bytes
+        self._journal_recovery_error: str | None = None
         with _JOURNAL_LOCKS_GUARD:
             self._lock = _JOURNAL_LOCKS.setdefault(self.journal_path, threading.RLock())
-        self._recover_incomplete()
+        try:
+            self._recover_incomplete()
+        except (CapabilityJournalError, OSError):
+            # A corrupt, unreadable, or over-bound journal must not take down
+            # the whole backend, but this host remains fail-closed until an
+            # operator can inspect or repair the durable record.
+            self._journal_recovery_error = "journal_recovery_required"
 
     @property
     def handlers(self) -> tuple[str, ...]:
@@ -515,6 +525,11 @@ class CapabilityExecutionHost:
 
     def execute(self, request: CapabilityExecutionRequest) -> CapabilityExecutionReceipt:
         """Execute a registered adapter through the durable effect boundary."""
+        if self._journal_recovery_error is not None:
+            raise CapabilityExecutionError(
+                self._journal_recovery_error,
+                recoverable=True,
+            )
         handler = self._resolve_handler(request.capability_id)
         if handler is None:
             raise CapabilityExecutionError("capability_handler_unregistered")
@@ -531,6 +546,49 @@ class CapabilityExecutionHost:
         """Expose bounded records for local tests/operator diagnostics."""
         with self._journal_guard():
             return self._read_records()
+
+    def recovery_status(self) -> dict[str, Any]:
+        """Return an operator-safe journal/recovery projection.
+
+        The projection deliberately contains state, bounded counts, and error
+        codes only.  Request arguments, paths, and effect payloads remain
+        digest-only in the journal and are never exposed by this surface.
+        """
+        try:
+            with self._journal_guard():
+                records = self._read_records()
+        except (CapabilityJournalError, OSError):
+            self._journal_recovery_error = "journal_recovery_required"
+            return {
+                "status": "blocked",
+                "recovery_required": True,
+                "error_code": "journal_recovery_required",
+                "journal_version": _JOURNAL_VERSION,
+                "uncertain_count": 0,
+                "record_count": 0,
+                "records": [],
+            }
+        uncertain = [record for record in records if record.get("state") == "uncertain"]
+        return {
+            "status": "blocked" if self._journal_recovery_error or uncertain else "ready",
+            "recovery_required": bool(self._journal_recovery_error or uncertain),
+            "error_code": self._journal_recovery_error,
+            "journal_version": _JOURNAL_VERSION,
+            "uncertain_count": len(uncertain),
+            "record_count": len(records),
+            "records": [
+                {
+                    "effect_id": str(record.get("effect_id") or ""),
+                    "state": str(record.get("state") or "unknown"),
+                    "recoverable": bool(record.get("recoverable")),
+                    "replay_blocked": bool(record.get("replay_blocked")),
+                    "error_code": record.get("error_code") if isinstance(record.get("error_code"), str) else None,
+                    "started_at": record.get("started_at"),
+                    "completed_at": record.get("completed_at"),
+                }
+                for record in records
+            ],
+        }
 
     def _resolve_handler(self, capability_id: str) -> CapabilityHandler | None:
         if capability_id.startswith("test."):
@@ -728,22 +786,95 @@ class CapabilityExecutionHost:
         )
         return bounded_result, receipt
 
-    @staticmethod
-    def _validate_authority(request: CapabilityExecutionRequest, *, now: float) -> None:
+    def _validate_authority(self, request: CapabilityExecutionRequest, *, now: float) -> None:
+        """Resolve authority from the authenticated runtime boundary.
+
+        ``CapabilityExecutionRequest`` carries effect identity, not an
+        authorization assertion.  In particular, no caller-provided boolean
+        can turn an unauthenticated or revoked principal into an authorized
+        effect.  The wrapper performs an early check for useful errors; this
+        host repeats it immediately before journal claim and dispatch.
+        """
+        from src.approval.runtime import (
+            get_current_fencing_token,
+            get_current_session_id,
+            get_current_trust_principal,
+        )
+        from src.auth.cancellation import assert_runtime_not_revoked
+        from src.security.trust_contract import evaluate_trust
+        from src.tools.approval import _capability_authority_request
+
         if request.expires_at is not None and now >= request.expires_at:
             raise CapabilityExecutionError("authority_expired")
-        if request.approval_expires_at is not None and now >= request.approval_expires_at:
-            raise CapabilityExecutionError("approval_expired")
-        if request.requires_approval and not request.approved:
-            raise CapabilityExecutionError("approval_required")
+        principal = get_current_trust_principal()
+        runtime_session_id = get_current_session_id()
+        if principal is None or not runtime_session_id:
+            raise CapabilityExecutionError("runtime_authority_missing")
         if not request.owner_principal_id.strip():
             raise CapabilityExecutionError("principal_missing")
-        if not request.principal_authenticated:
-            raise CapabilityExecutionError("principal_unauthenticated")
-        if request.principal_revoked:
-            raise CapabilityExecutionError("principal_revoked")
-        if not request.authority_granted:
-            raise CapabilityExecutionError("capability_grant_missing")
+        if request.owner_principal_id != str(principal.principal_id):
+            raise CapabilityExecutionError("owner_principal_mismatch")
+        if request.session_id != runtime_session_id or principal.session_id != runtime_session_id:
+            raise CapabilityExecutionError("session_identity_mismatch")
+        if request.job_id != str(principal.job_id or ""):
+            raise CapabilityExecutionError("job_identity_mismatch")
+        assert_runtime_not_revoked()
+
+        authority_request = _capability_authority_request(
+            session_id=runtime_session_id,
+            principal=principal,
+            tool_name=request.capability_id,
+            arguments=dict(request.arguments),
+        )
+        decision = evaluate_trust(authority_request, now=now)
+        if not decision.allowed:
+            reason = {
+                "principal_unauthorized": "principal_unauthenticated",
+                "authority_grant_missing": "capability_grant_missing",
+            }.get(decision.reason_code, decision.reason_code)
+            raise CapabilityExecutionError(reason)
+
+        runtime_fencing_token = str(get_current_fencing_token() or "")
+        if request.job_id:
+            if not request.fencing_token or not runtime_fencing_token:
+                raise CapabilityExecutionError("fencing_token_missing")
+            if request.fencing_token != runtime_fencing_token:
+                raise CapabilityExecutionError("fencing_token_mismatch")
+        elif request.fencing_token:
+            raise CapabilityExecutionError("fencing_token_unbound")
+
+        if request.approval_id or request.approval_digest or request.approval_binding is not None:
+            binding = request.approval_binding
+            from src.approval.runtime import verify_capability_approval
+
+            if not isinstance(binding, Mapping) or not verify_capability_approval(binding):
+                raise CapabilityExecutionError("approval_binding_missing")
+            if (
+                str(binding.get("approval_id") or "") != request.approval_id
+                or str(binding.get("status") or "") != "consumed"
+                or str(binding.get("session_id") or "") != request.session_id
+                or str(binding.get("tool_name") or "") != request.capability_id
+                or str(binding.get("fingerprint") or "") != request.approval_digest
+            ):
+                raise CapabilityExecutionError("approval_binding_mismatch")
+            owner_session = str(binding.get("owner_operator_session_id") or "")
+            principal_operator_session = str(getattr(principal, "operator_session_id", "") or "")
+            if not principal_operator_session:
+                principal_type = getattr(principal, "principal_type", "")
+                principal_type = str(getattr(principal_type, "value", principal_type))
+                if principal_type == "operator" and principal.session_id == request.session_id:
+                    # Compatibility for pre-auth-session rows whose operator
+                    # principal was explicitly bound to the same session.
+                    principal_operator_session = request.session_id
+            if owner_session and owner_session != principal_operator_session:
+                raise CapabilityExecutionError("approval_owner_mismatch")
+            approval_expires_at = binding.get("approval_expires_at")
+            if approval_expires_at is not None:
+                try:
+                    if now >= float(approval_expires_at):
+                        raise CapabilityExecutionError("approval_expired")
+                except (TypeError, ValueError, OverflowError) as exc:
+                    raise CapabilityExecutionError("approval_expiry_invalid") from exc
 
     def _find_record(self, duplicate_key: str) -> dict[str, Any] | None:
         for record in self._read_records():
@@ -787,7 +918,9 @@ class CapabilityExecutionHost:
                 self._write_records_unlocked(records)
         except Exception:
             # The in-memory deny set remains authoritative for this process;
-            # a failed durable write is itself surfaced to the caller.
+            # a failed durable write also blocks every subsequent attempt and
+            # is visible through the operator recovery surface.
+            self._journal_recovery_error = "journal_recovery_required"
             return
 
     def _read_records(self) -> list[dict[str, Any]]:
@@ -984,23 +1117,55 @@ def build_capability_request(
     *,
     capability_id: str,
     arguments: Mapping[str, Any],
-    owner_principal_id: str,
-    principal_authenticated: bool = False,
-    principal_revoked: bool = False,
-    authority_granted: bool = False,
+    owner_principal_id: str | None = None,
     session_id: str | None = None,
     job_id: str | None = None,
-    requires_approval: bool = False,
-    approved: bool = False,
     approval_id: str = "",
     approval_digest: str = "",
-    approval_expires_at: float | None = None,
+    approval_binding: Mapping[str, Any] | None = None,
     idempotency_key: str = "",
-    fencing_token: str = "",
+    fencing_token: str | None = None,
     destination: str | None = None,
     limits: CapabilityExecutionLimits | None = None,
 ) -> CapabilityExecutionRequest:
-    """Build a wrapper request with a stable local destination identity."""
+    """Build a request from the current runtime authority context.
+
+    Identity and lease values may be repeated by an internal adapter for
+    lineage, but they cannot override the authenticated context.  Approval
+    bindings are accepted only as repository-issued, MACed receipts and are
+    checked again by the host immediately before effect dispatch.
+    """
+    from src.approval.runtime import (
+        get_current_fencing_token,
+        get_current_session_id,
+        get_current_trust_principal,
+    )
+
+    principal = get_current_trust_principal()
+    runtime_session_id = get_current_session_id()
+    if principal is not None:
+        expected_owner = str(principal.principal_id)
+        if owner_principal_id is not None and owner_principal_id != expected_owner:
+            raise CapabilityExecutionError("owner_principal_mismatch")
+        owner_principal_id = expected_owner
+        expected_session = runtime_session_id or str(principal.session_id or "")
+        if session_id is not None and session_id != expected_session:
+            raise CapabilityExecutionError("session_identity_mismatch")
+        session_id = expected_session
+        expected_job = str(principal.job_id or "")
+        if job_id is not None and job_id != expected_job:
+            raise CapabilityExecutionError("job_identity_mismatch")
+        job_id = expected_job
+    if owner_principal_id is None:
+        owner_principal_id = ""
+    if session_id is None:
+        session_id = runtime_session_id or ""
+    if job_id is None:
+        job_id = ""
+    runtime_fence = str(get_current_fencing_token() or "")
+    if fencing_token is not None and str(fencing_token) != runtime_fence:
+        raise CapabilityExecutionError("fencing_token_mismatch")
+    fencing_token = runtime_fence
     if destination is None:
         if capability_id in {"read_file", "write_file", "preview_workspace_patch", "apply_workspace_patch"}:
             destination = f"workspace:{arguments.get('file_path', arguments.get('path', ''))}"
@@ -1014,16 +1179,11 @@ def build_capability_request(
         capability_version="native-v1",
         destination=destination,
         arguments=dict(arguments),
-        principal_authenticated=principal_authenticated,
-        principal_revoked=principal_revoked,
-        authority_granted=authority_granted,
-        session_id=session_id or "",
-        job_id=job_id or "",
-        requires_approval=requires_approval,
-        approved=approved,
+        session_id=session_id,
+        job_id=job_id,
         approval_id=approval_id,
         approval_digest=approval_digest or approval_id,
-        approval_expires_at=approval_expires_at,
+        approval_binding=approval_binding,
         idempotency_key=idempotency_key,
         fencing_token=fencing_token,
         limits=limits or CapabilityExecutionLimits(),

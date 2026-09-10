@@ -1,6 +1,11 @@
 """Execution context shared with tool wrappers during agent runs."""
 
 from contextvars import ContextVar, Token
+import hashlib
+import hmac
+import json
+import secrets
+from typing import Any, Mapping
 
 from src.security.trust_contract import (
     AuthorityGrant,
@@ -15,6 +20,33 @@ _current_trust_principal: ContextVar[TrustPrincipal | None] = ContextVar(
     "trust_principal",
     default=None,
 )
+_current_fencing_token: ContextVar[str | None] = ContextVar("capability_fencing_token", default=None)
+
+# Approval rows are consumed by the async repository and then handed to the
+# synchronous capability host.  The short-lived binding below is an opaque
+# repository receipt rather than a caller-controlled ``approved`` flag.  A
+# process-local key keeps a hand-built mapping from crossing the host boundary;
+# the durable approval row remains the source of authority.
+_CAPABILITY_APPROVAL_KEY = secrets.token_bytes(32)
+
+
+def seal_capability_approval(payload: Mapping[str, Any]) -> dict[str, Any]:
+    """Seal the exact approval row consumed immediately before an effect."""
+    body = {str(key): value for key, value in payload.items() if key != "binding_mac"}
+    encoded = json.dumps(body, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
+    body["binding_mac"] = hmac.new(_CAPABILITY_APPROVAL_KEY, encoded, hashlib.sha256).hexdigest()
+    return body
+
+
+def verify_capability_approval(payload: Mapping[str, Any]) -> bool:
+    """Verify a repository-issued approval binding without exposing its key."""
+    supplied = payload.get("binding_mac")
+    if not isinstance(supplied, str):
+        return False
+    body = {str(key): value for key, value in payload.items() if key != "binding_mac"}
+    encoded = json.dumps(body, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
+    expected = hmac.new(_CAPABILITY_APPROVAL_KEY, encoded, hashlib.sha256).hexdigest()
+    return hmac.compare_digest(supplied, expected)
 
 
 def set_runtime_context(
@@ -53,6 +85,28 @@ def get_current_approval_mode() -> str:
 def get_current_trust_principal() -> TrustPrincipal | None:
     """Return the authenticated principal bound to the current runtime turn."""
     return _current_trust_principal.get()
+
+
+def set_runtime_trust_principal(principal: TrustPrincipal | None) -> Token:
+    """Temporarily bind a verified service/job principal to the current turn."""
+    return _current_trust_principal.set(principal)
+
+
+def reset_runtime_trust_principal(token: Token) -> None:
+    _current_trust_principal.reset(token)
+
+
+def set_runtime_fencing_token(token: str | None) -> Token:
+    """Bind a durable job lease fence to the current execution context."""
+    return _current_fencing_token.set(str(token) if token is not None else None)
+
+
+def reset_runtime_fencing_token(token: Token) -> None:
+    _current_fencing_token.reset(token)
+
+
+def get_current_fencing_token() -> str | None:
+    return _current_fencing_token.get()
 
 
 def scheduled_workflow_service_principal(

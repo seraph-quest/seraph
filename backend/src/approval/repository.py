@@ -11,6 +11,7 @@ from sqlmodel import select, col
 from src.db.engine import get_session
 from src.db.models import ApprovalRequest
 from src.db.session_refs import ensure_sessions_exist
+from src.approval.runtime import seal_capability_approval
 
 
 def fingerprint_tool_call(
@@ -162,7 +163,15 @@ class ApprovalRepository:
         tool_name: str,
         fingerprint: str,
         owner_operator_session_id: str | None = None,
-    ) -> bool:
+    ) -> dict[str, Any] | None:
+        """Atomically consume one approval and return a host-verifiable receipt.
+
+        The receipt is intentionally short lived and MACed in the runtime
+        process.  A boolean is insufficient at the capability host boundary:
+        it lets a caller claim approval without proving which durable row was
+        consumed.  Existing callers may continue to use the result as a
+        truthy value.
+        """
         async with get_session() as db:
             result = await db.execute(
                 select(ApprovalRequest)
@@ -179,12 +188,37 @@ class ApprovalRepository:
                 request,
                 owner_operator_session_id,
             ):
-                return False
+                return None
 
-            request.status = "consumed"
-            request.resolved_at = datetime.now(timezone.utc)
-            db.add(request)
-            return True
+            consumed_at = datetime.now(timezone.utc)
+            consumed = await db.execute(
+                update(ApprovalRequest)
+                .where(
+                    ApprovalRequest.id == request.id,
+                    ApprovalRequest.status == "approved",
+                )
+                .values(status="consumed", resolved_at=consumed_at)
+            )
+            if getattr(consumed, "rowcount", None) != 1:
+                return None
+            details: dict[str, Any]
+            try:
+                parsed_details = json.loads(request.details_json) if request.details_json else {}
+            except (TypeError, ValueError):
+                parsed_details = {}
+            details = dict(parsed_details) if isinstance(parsed_details, Mapping) else {}
+            return seal_capability_approval(
+                {
+                    "approval_id": str(request.id),
+                    "status": "consumed",
+                    "session_id": str(request.session_id or ""),
+                    "tool_name": str(request.tool_name),
+                    "fingerprint": str(request.fingerprint),
+                    "owner_operator_session_id": str(owner_operator_session_id or ""),
+                    "approval_expires_at": details.get("approval_expires_at"),
+                    "consumed_at": consumed_at.isoformat(),
+                }
+            )
 
     async def consume_approved_for_resume(
         self,

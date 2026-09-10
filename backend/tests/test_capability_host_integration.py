@@ -11,7 +11,7 @@ from types import SimpleNamespace
 import pytest
 
 from config.settings import settings
-from src.approval.runtime import reset_runtime_context, set_runtime_context
+from src.approval.runtime import reset_runtime_context, seal_capability_approval, set_runtime_context
 from src.extensions.capability_execution import (
     CapabilityExecutionError,
     CapabilityJournalError,
@@ -34,12 +34,25 @@ def _request(**overrides) -> CapabilityExecutionRequest:
         "capability_version": "v1",
         "destination": "local://workspace/notes",
         "arguments": {"message": "hello", "count": 1},
-        "principal_authenticated": True,
-        "authority_granted": True,
         "session_id": "session:test",
     }
     payload.update(overrides)
     return CapabilityExecutionRequest(**payload)
+
+
+@pytest.fixture(autouse=True)
+def _authenticated_capability_runtime():
+    principal = TrustPrincipal(
+        principal_id="operator:test",
+        principal_type=PrincipalType.OPERATOR,
+        grants=(AuthorityGrant.CAPABILITY_EXECUTE,),
+        session_id="session:test",
+    )
+    tokens = set_runtime_context("session:test", "off", trust_principal=principal)
+    try:
+        yield
+    finally:
+        reset_runtime_context(tokens)
 
 
 def _test_host(path: Path, **handlers):
@@ -55,14 +68,23 @@ def _native_write_worker(journal: str, workspace: str, barrier, results) -> None
 
     child_settings.workspace_dir = workspace
     host = CapabilityExecutionHost(journal_path=journal)
+    principal = TrustPrincipal(
+        principal_id="operator:multi-process",
+        principal_type=PrincipalType.OPERATOR,
+        grants=(AuthorityGrant.CAPABILITY_EXECUTE,),
+        session_id="session:multi-process",
+    )
+    tokens = set_runtime_context(
+        "session:multi-process",
+        "off",
+        trust_principal=principal,
+    )
     request = CapabilityExecutionRequest(
         owner_principal_id="operator:multi-process",
         capability_id="write_file",
         capability_version="native-v1",
         destination="workspace:multi-process.txt",
         arguments={"file_path": "multi-process.txt", "content": "one\n"},
-        principal_authenticated=True,
-        authority_granted=True,
         session_id="session:multi-process",
         idempotency_key="same-request-key",
     )
@@ -71,6 +93,8 @@ def _native_write_worker(journal: str, workspace: str, barrier, results) -> None
         results.put(host.execute(request).state)
     except CapabilityExecutionError as exc:
         results.put(exc.reason_code)
+    finally:
+        reset_runtime_context(tokens)
 
 
 def test_request_and_effect_identity_is_stable_and_owner_scoped(tmp_path):
@@ -168,7 +192,20 @@ def test_failed_effect_is_durable_and_explicit_key_cannot_change_owner(tmp_path)
 
     other = _request(owner_principal_id="operator:other", idempotency_key="shared-key")
     assert other.duplicate_key != request.duplicate_key
-    assert host.execute(other).state == "failed"
+    other_tokens = set_runtime_context(
+        "session:test",
+        "off",
+        trust_principal=TrustPrincipal(
+            principal_id="operator:other",
+            principal_type=PrincipalType.OPERATOR,
+            grants=(AuthorityGrant.CAPABILITY_EXECUTE,),
+            session_id="session:test",
+        ),
+    )
+    try:
+        assert host.execute(other).state == "failed"
+    finally:
+        reset_runtime_context(other_tokens)
 
 
 def test_journal_tamper_is_rejected(tmp_path):
@@ -291,10 +328,71 @@ def test_authority_and_approval_expiry_fail_closed(tmp_path):
     host = _test_host(tmp_path / "journal.json", **{"test.echo": lambda _: "ok"})
     with pytest.raises(CapabilityExecutionError, match="authority_expired"):
         host.execute(_request(expires_at=0))
-    with pytest.raises(CapabilityExecutionError, match="approval_required"):
-        host.execute(_request(requires_approval=True, approved=False))
-    with pytest.raises(CapabilityExecutionError, match="approval_expired"):
-        host.execute(_request(requires_approval=True, approved=True, approval_expires_at=0))
+    with pytest.raises(CapabilityExecutionError, match="approval_binding_missing"):
+        host.execute(
+            _request(
+                approval_id="approval:forged",
+                approval_digest="forged",
+            )
+        )
+
+
+def test_public_request_cannot_supply_authority_booleans():
+    with pytest.raises(TypeError, match="principal_authenticated"):
+        CapabilityExecutionRequest(
+            owner_principal_id="operator:test",
+            capability_id="test.echo",
+            capability_version="v1",
+            destination="local://workspace/notes",
+            principal_authenticated=True,  # type: ignore[call-arg]
+        )
+
+
+def test_approval_binding_must_be_repository_sealed(tmp_path):
+    calls: list[dict] = []
+    host = _test_host(
+        tmp_path / "journal.json",
+        **{"test.echo": lambda arguments: calls.append(dict(arguments)) or "ok"},
+    )
+    forged = {
+        "approval_id": "approval:forged",
+        "status": "consumed",
+        "session_id": "session:test",
+        "tool_name": "test.echo",
+        "fingerprint": "fingerprint",
+        "owner_operator_session_id": "session:test",
+    }
+    with pytest.raises(CapabilityExecutionError, match="approval_binding_missing"):
+        host.execute(
+            _request(
+                approval_id="approval:forged",
+                approval_digest="fingerprint",
+                approval_binding=forged,
+            )
+        )
+
+    binding = seal_capability_approval(forged)
+    result = host.execute(
+        _request(
+            approval_id="approval:forged",
+            approval_digest="fingerprint",
+            approval_binding=binding,
+        )
+    )
+    assert result.state == "succeeded"
+    assert calls == [{"message": "hello", "count": 1}]
+
+
+def test_corrupt_journal_is_operator_visible_and_blocks_restart_execution(tmp_path):
+    journal = tmp_path / "journal.json"
+    journal.write_text("{not-json", encoding="utf-8")
+    host = _test_host(journal, **{"test.echo": lambda _: "must-not-run"})
+    status = host.recovery_status()
+    assert status["status"] == "blocked"
+    assert status["recovery_required"] is True
+    assert status["error_code"] == "journal_recovery_required"
+    with pytest.raises(CapabilityExecutionError, match="journal_recovery_required"):
+        host.execute(_request())
 
 
 def test_run_command_uses_adopted_host_after_authority_gate(tmp_path, monkeypatch):

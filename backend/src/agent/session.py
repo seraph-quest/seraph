@@ -191,6 +191,8 @@ class SessionManager:
 
     async def delete(self, session_id: str) -> bool:
         cleanup_fence_acquired = process_runtime_manager.begin_session_cleanup(session_id)
+        if not cleanup_fence_acquired:
+            return False
         try:
             return await self._delete_session_records(session_id)
         finally:

@@ -10,6 +10,11 @@ registry's redacted inventory and per-member checksums.  Canonical files are
 stored under ``payload/``.  Secret/recovery files, derived indexes, caches, and
 disposable files are represented as metadata only; secret material is
 preserved from the active workspace during a restore and is never serialized.
+
+Restore journals are also bounded, self-checksummed state records.  Recovery
+validates their identity, sidecar names, and state before moving a workspace
+root; a damaged or unknown journal state fails closed instead of being treated
+as an already-completed operation.
 """
 
 from __future__ import annotations
@@ -49,11 +54,25 @@ DEFAULT_RETENTION = 3
 MAX_ARCHIVE_MEMBER_BYTES = 512 * 1024 * 1024
 MAX_ARCHIVE_BYTES = 2 * 1024 * 1024 * 1024
 MAX_ARCHIVE_MEMBERS = 4096
+MAX_JOURNAL_BYTES = 1024 * 1024
 _SECRET_STATE_CLASSES = frozenset(
     {WorkspaceStateClass.SECRET.value, WorkspaceStateClass.SECRET_RECOVERY.value}
 )
 _ARCHIVEABLE_STATE_CLASSES = frozenset({WorkspaceStateClass.CANONICAL.value})
 _RESTORE_ID_PATTERN = re.compile(r"^restore-[a-z0-9][a-z0-9-]{7,79}$")
+_DIGEST_PATTERN = re.compile(r"^[0-9a-f]{64}$")
+_JOURNAL_STATUSES = frozenset(
+    {
+        "staged",
+        "active_moved",
+        "promoted",
+        "recovered_promoted",
+        "recovered_rollback",
+        "staging_discarded",
+        "rollback_active_moved",
+        "rolled_back",
+    }
+)
 
 
 class WorkspaceLifecycleError(WorkspaceStateError):
@@ -229,6 +248,69 @@ def _atomic_json_write(path: Path, payload: dict[str, Any]) -> None:
         raise WorkspaceLifecycleError(f"cannot atomically write {path.name}") from exc
 
 
+def _refresh_journal_digest(journal: dict[str, Any]) -> None:
+    """Refresh the journal's corruption-detection checksum in place."""
+    body = dict(journal)
+    body.pop("journal_sha256", None)
+    journal["journal_sha256"] = _digest_json(body)
+
+
+def _validate_journal(
+    journal: object,
+    *,
+    expected_restore_id: str | None = None,
+) -> dict[str, Any]:
+    """Validate journal identity and shape before recovery can move roots."""
+    if not isinstance(journal, dict):
+        raise WorkspaceLifecycleError("restore journal must contain an object")
+    if journal.get("journal_version") != JOURNAL_VERSION:
+        raise WorkspaceLifecycleError("unsupported restore journal version")
+
+    restore_id = journal.get("restore_id")
+    if not isinstance(restore_id, str) or not _RESTORE_ID_PATTERN.fullmatch(restore_id):
+        raise WorkspaceLifecycleError("restore journal has an invalid restore_id")
+    if expected_restore_id is not None and restore_id != expected_restore_id:
+        raise WorkspaceLifecycleError("restore journal identity does not match its record")
+
+    status = journal.get("status")
+    if not isinstance(status, str) or status not in _JOURNAL_STATUSES:
+        raise WorkspaceLifecycleError("restore journal has an unknown state")
+
+    workspace_id = journal.get("workspace_id")
+    if not isinstance(workspace_id, str) or not workspace_id or len(workspace_id) > 128:
+        raise WorkspaceLifecycleError("restore journal has an invalid workspace identity")
+    if journal.get("previous_name") != f"{restore_id}/previous-workspace":
+        raise WorkspaceLifecycleError("restore journal previous-root binding is invalid")
+    if journal.get("stage_name") != restore_id:
+        raise WorkspaceLifecycleError("restore journal staging-root binding is invalid")
+    if not isinstance(journal.get("created_at"), str) or not journal["created_at"]:
+        raise WorkspaceLifecycleError("restore journal creation timestamp is missing")
+    archive_digest = journal.get("archive_manifest_sha256")
+    if not isinstance(archive_digest, str) or not _DIGEST_PATTERN.fullmatch(archive_digest):
+        raise WorkspaceLifecycleError("restore journal archive identity is invalid")
+    if not isinstance(journal.get("stage_receipt"), dict):
+        raise WorkspaceLifecycleError("restore journal stage receipt is missing")
+
+    actual_digest = journal.get("journal_sha256")
+    digest_body = dict(journal)
+    digest_body.pop("journal_sha256", None)
+    if not isinstance(actual_digest, str) or not _DIGEST_PATTERN.fullmatch(actual_digest):
+        raise WorkspaceLifecycleError("restore journal checksum is missing")
+    if _digest_json(digest_body) != actual_digest:
+        raise WorkspaceLifecycleError("restore journal checksum mismatch")
+    return journal
+
+
+def _write_journal(path: Path, journal: dict[str, Any]) -> None:
+    """Write a validated, self-checksummed journal and update its caller."""
+    candidate = dict(journal)
+    _refresh_journal_digest(candidate)
+    _validate_journal(candidate, expected_restore_id=candidate.get("restore_id"))
+    _atomic_json_write(path, candidate)
+    journal.clear()
+    journal.update(candidate)
+
+
 def _safe_logical_path(value: object, *, field: str) -> str:
     if not isinstance(value, str) or not value:
         raise InvalidWorkspaceArchiveError(f"{field} must be a non-empty logical path")
@@ -267,7 +349,12 @@ def _safe_entry_path(root: Path, logical_path: str, registry: WorkspaceStateRegi
     return candidate
 
 
-def _regular_file_bytes(path: Path, *, label: str) -> bytes:
+def _regular_file_bytes(
+    path: Path,
+    *,
+    label: str,
+    max_bytes: int | None = None,
+) -> bytes:
     _assert_not_symlink(path, label=label)
     try:
         descriptor = os.open(
@@ -279,7 +366,12 @@ def _regular_file_bytes(path: Path, *, label: str) -> bytes:
             os.close(descriptor)
             raise WorkspaceLifecycleError(f"{label} must be a regular file")
         with os.fdopen(descriptor, "rb") as handle:
-            return handle.read()
+            if max_bytes is not None and metadata.st_size > max_bytes:
+                raise WorkspaceLifecycleError(f"{label} exceeds bounded size")
+            payload = handle.read(max_bytes + 1 if max_bytes is not None else -1)
+            if max_bytes is not None and len(payload) > max_bytes:
+                raise WorkspaceLifecycleError(f"{label} exceeds bounded size")
+            return payload
     except OSError as exc:
         raise WorkspaceLifecycleError(f"{label} is not readable") from exc
 
@@ -863,15 +955,21 @@ def _journal_path(backup_root: Path, restore_id: str) -> Path:
     return backup_root / restore_id / "restore-journal.json"
 
 
-def _read_journal(path: Path) -> dict[str, Any]:
+def _read_journal(
+    path: Path,
+    *,
+    expected_restore_id: str | None = None,
+) -> dict[str, Any]:
+    _assert_no_symlink_components(path, label="restore journal path")
     _assert_not_symlink(path, label="restore journal")
     try:
-        value = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raw = _regular_file_bytes(path, label="restore journal", max_bytes=MAX_JOURNAL_BYTES)
+        value = json.loads(raw.decode("utf-8"))
+    except WorkspaceLifecycleError:
+        raise
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise WorkspaceLifecycleError("restore journal is unreadable") from exc
-    if not isinstance(value, dict) or value.get("journal_version") != JOURNAL_VERSION:
-        raise WorkspaceLifecycleError("unsupported restore journal version")
-    return value
+    return _validate_journal(value, expected_restore_id=expected_restore_id)
 
 
 def _journal_paths(root: Path, restore_id: str) -> tuple[Path, Path, Path, Path]:
@@ -965,18 +1063,18 @@ def restore_workspace(
             "created_at": _utc_timestamp(),
             "stage_receipt": stage_receipt,
         }
-        _atomic_json_write(journal_file, journal)
+        _write_journal(journal_file, journal)
         os.replace(resolved_root, previous)
         _fsync_directory(resolved_root.parent)
         journal["status"] = "active_moved"
-        _atomic_json_write(journal_file, journal)
+        _write_journal(journal_file, journal)
         if interrupt_after_active_move:
             raise InterruptedWorkspaceRestore("restore interrupted after active workspace move")
         os.replace(stage, resolved_root)
         _fsync_directory(resolved_root.parent)
         journal["status"] = "promoted"
         journal["completed_at"] = _utc_timestamp()
-        _atomic_json_write(journal_file, journal)
+        _write_journal(journal_file, journal)
         cleanup_receipt = (
             cleanup_workspace_backups(resolved_root, keep=retention)
             if retention is not None
@@ -1021,9 +1119,9 @@ def recover_interrupted_restore(
         journal_file = record_root / "restore-journal.json"
         if not journal_file.exists():
             continue
-        journal = _read_journal(journal_file)
-        status = journal.get("status")
         restore_id = record_root.name
+        journal = _read_journal(journal_file, expected_restore_id=restore_id)
+        status = journal.get("status")
         _record_root, previous, current, stage = _journal_paths(resolved_root, restore_id)
         for path, label in (
             (resolved_root, "active workspace root"),
@@ -1053,7 +1151,7 @@ def recover_interrupted_restore(
             else:
                 raise WorkspaceLifecycleError(f"staged restore {restore_id} has an ambiguous root state")
             journal["recovered_at"] = _utc_timestamp()
-            _atomic_json_write(journal_file, journal)
+            _write_journal(journal_file, journal)
             recovered.append({"restore_id": restore_id, "action": action})
             continue
         if status == "active_moved":
@@ -1063,7 +1161,7 @@ def recover_interrupted_restore(
             if active_present and previous_present and not stage_present:
                 journal["status"] = "recovered_promoted"
                 journal["recovered_at"] = _utc_timestamp()
-                _atomic_json_write(journal_file, journal)
+                _write_journal(journal_file, journal)
                 recovered.append({"restore_id": restore_id, "action": "confirmed_promotion"})
                 continue
             if active_present:
@@ -1083,7 +1181,7 @@ def recover_interrupted_restore(
             else:
                 raise WorkspaceLifecycleError(f"interrupted restore {restore_id} has no recoverable root")
             journal["recovered_at"] = _utc_timestamp()
-            _atomic_json_write(journal_file, journal)
+            _write_journal(journal_file, journal)
             recovered.append({"restore_id": restore_id, "action": action})
             continue
         if status == "rollback_active_moved":
@@ -1093,7 +1191,7 @@ def recover_interrupted_restore(
             if active_present and current_present and not previous_present:
                 journal["status"] = "recovered_rollback"
                 journal["recovered_at"] = _utc_timestamp()
-                _atomic_json_write(journal_file, journal)
+                _write_journal(journal_file, journal)
                 recovered.append({"restore_id": restore_id, "action": "confirmed_rollback"})
                 continue
             if active_present:
@@ -1105,14 +1203,14 @@ def recover_interrupted_restore(
                 _fsync_directory(resolved_root.parent)
                 journal["status"] = "recovered_rollback"
                 journal["recovered_at"] = _utc_timestamp()
-                _atomic_json_write(journal_file, journal)
+                _write_journal(journal_file, journal)
                 recovered.append({"restore_id": restore_id, "action": "restored_previous"})
             elif current_present:
                 os.replace(current, resolved_root)
                 _fsync_directory(resolved_root.parent)
                 journal["status"] = "recovered_rollback"
                 journal["recovered_at"] = _utc_timestamp()
-                _atomic_json_write(journal_file, journal)
+                _write_journal(journal_file, journal)
                 recovered.append({"restore_id": restore_id, "action": "restored_current"})
             else:
                 raise WorkspaceLifecycleError(f"rollback {restore_id} has no previous root")
@@ -1125,7 +1223,7 @@ def recover_interrupted_restore(
                 _fsync_directory(resolved_root.parent)
                 journal["status"] = "recovered_rollback"
                 journal["recovered_at"] = _utc_timestamp()
-                _atomic_json_write(journal_file, journal)
+                _write_journal(journal_file, journal)
                 recovered.append({"restore_id": restore_id, "action": "restored_previous"})
             else:
                 raise WorkspaceLifecycleError(f"promoted restore {restore_id} has no active root")
@@ -1141,7 +1239,7 @@ def rollback_workspace(
     restore_id = _safe_restore_id(restore_id)
     backup_root = workspace_backup_dir(resolved_root)
     journal_file = _journal_path(backup_root, restore_id)
-    journal = _read_journal(journal_file)
+    journal = _read_journal(journal_file, expected_restore_id=restore_id)
     if journal.get("status") not in {"promoted", "recovered_promoted"}:
         raise WorkspaceLifecycleError("restore is not in a rollback-capable state")
     _record_root, previous, current, stage = _journal_paths(resolved_root, restore_id)
@@ -1156,7 +1254,7 @@ def rollback_workspace(
     os.replace(resolved_root, current)
     _fsync_directory(resolved_root.parent)
     journal["status"] = "rollback_active_moved"
-    _atomic_json_write(journal_file, journal)
+    _write_journal(journal_file, journal)
     try:
         os.replace(previous, resolved_root)
         _fsync_directory(resolved_root.parent)
@@ -1164,7 +1262,7 @@ def rollback_workspace(
         raise
     journal["status"] = "rolled_back"
     journal["rolled_back_at"] = _utc_timestamp()
-    _atomic_json_write(journal_file, journal)
+    _write_journal(journal_file, journal)
     return {
         "status": "rolled_back",
         "restore_id": restore_id,
@@ -1201,7 +1299,7 @@ def cleanup_workspace_backups(
         if candidate.is_dir():
             journal_file = candidate / "restore-journal.json"
             if journal_file.exists():
-                journal = _read_journal(journal_file)
+                journal = _read_journal(journal_file, expected_restore_id=candidate.name)
                 if journal.get("status") in {"active_moved", "rollback_active_moved"}:
                     continue
             _remove_tree(candidate, label=f"old backup record {candidate.name}")
@@ -1227,6 +1325,7 @@ __all__ = [
     "MAX_ARCHIVE_BYTES",
     "MAX_ARCHIVE_MEMBERS",
     "MAX_ARCHIVE_MEMBER_BYTES",
+    "MAX_JOURNAL_BYTES",
     "InterruptedWorkspaceRestore",
     "InvalidWorkspaceArchiveError",
     "MissingSecretMaterialError",

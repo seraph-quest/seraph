@@ -14,7 +14,9 @@ from pathlib import Path
 import subprocess
 import sys
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 
+from fastapi import HTTPException
 import pytest
 
 from src.approval.runtime import reset_runtime_context, set_runtime_context
@@ -23,10 +25,20 @@ from src.workflows.manager import (
     DurableWorkflowStateUnavailable,
     _CanonicalWorkflowStateWriter,
     _admit_canonical_workflow_job,
+    _assert_workflow_parent_recovery_authority,
     _run_async,
     _run_workflow_state_write,
+    _workflow_canonical_lease_owner,
     _workflow_contract_fields,
     _workflow_durable_owner_fields,
+)
+from src.api.workflows import (
+    _canonical_workflow_projection_input,
+    _control_typed_workflow_run,
+    _list_workflow_runs,
+    _safe_workflow_run_projection,
+    WorkflowRunControlRequest,
+    control_workflow_run,
 )
 
 
@@ -139,6 +151,8 @@ def test_canonical_admission_persists_full_workflow_contract():
                 "owner_kind": "user",
                 "owner_principal_id": "operator:durable-test",
             },
+            parent_job_id="session-durable:workflow:parent:run-1",
+            parent_fencing_token=7,
         )
     finally:
         reset_runtime_context(tokens)
@@ -154,6 +168,8 @@ def test_canonical_admission_persists_full_workflow_contract():
     assert repository.spec.budget_microusd == 17
     assert repository.spec.priority == 82
     assert repository.spec.max_attempts == 3
+    assert repository.spec.parent_job_id == "session-durable:workflow:parent:run-1"
+    assert repository.spec.parent_fencing_token == 7
 
 
 def test_contract_projection_binds_goal_plan_candidate_dependencies_deadline_budget():
@@ -224,6 +240,272 @@ def test_unknown_authenticated_principal_type_cannot_fall_back_to_legacy_writer(
             _workflow_durable_owner_fields()
     finally:
         reset_runtime_context(tokens)
+
+
+def _typed_api_job(*, status: str = "running", lease_owner: str | None = None) -> dict:
+    run_identity = "session-durable:workflow:typed:run-1"
+    lease_owner = lease_owner if lease_owner is not None else _workflow_canonical_lease_owner(run_identity)
+    return {
+        "job_id": run_identity,
+        "run_identity": run_identity,
+        "record_schema_version": 2,
+        "root_run_identity": run_identity,
+        "parent_job_id": None,
+        "parent_fencing_token": None,
+        "job_kind": "typed",
+        "workflow_name": "typed-workflow",
+        "tool_name": "workflow_typed",
+        "session_id": "session-durable",
+        "status": status,
+        "owner": {"kind": "user", "principal_id": "operator:durable-test", "service_id": None},
+        "declared_authority": {
+            "workflow_name": "typed-workflow",
+            "risk_level": "low",
+            "execution_boundaries": ["workspace_write"],
+            "accepts_secret_refs": False,
+            "step_tools": ["write_file"],
+        },
+        "dependencies": ["dependency-1"],
+        "resource_claims": ["cpu"],
+        "goal_id": "goal-typed",
+        "goal_revision": 2,
+        "plan_revision": 3,
+        "candidate_id": "candidate-typed",
+        "revision": 4,
+        "lease": {
+            "owner": lease_owner,
+            "expires_at": "2099-01-01T00:00:00+00:00",
+            "fencing_token": 7,
+        },
+        "started_at": "2026-09-10T10:00:00+00:00",
+        "updated_at": "2026-09-10T10:01:00+00:00",
+        "finished_at": None,
+        "checkpoints": [
+            {
+                "checkpoint_id": "step:prepare",
+                "state_digest": "sha256:" + "a" * 64,
+                "safe": True,
+                "fencing_token": 7,
+                "payload": {
+                    "step_id": "prepare",
+                    "step_index": 1,
+                    "tool": "write_file",
+                    "status": "succeeded",
+                    "state": {"arguments": {"file_path": "notes/out.md"}, "result": "secret result"},
+                    "artifact_paths": ["notes/out.md"],
+                },
+            }
+        ],
+        "artifacts": [
+            {
+                "artifact_id": "art_" + "a" * 24,
+                "artifact_type": "workspace_file",
+                "file_path": "notes/out.md",
+                "content_sha256": "sha256:" + "b" * 64,
+                "size_bytes": 12,
+                "exists": True,
+                "recorded_at": "2026-09-10T10:01:00+00:00",
+            }
+        ],
+        "effects": [
+            {
+                "effect_id": "workflow-output",
+                "receipt_kind": "readback",
+                "effect_type": "workflow_output",
+                "target_digest": "sha256:" + "c" * 64,
+                "status": "succeeded",
+                "content_sha256": "sha256:" + "c" * 64,
+                "recorded_at": "2026-09-10T10:01:00+00:00",
+                "fencing_token": 7,
+                "details": {"secret": "must not be projected"},
+            }
+        ],
+    }
+
+
+def test_typed_projection_exposes_bounded_receipts_and_status():
+    projection_input = _canonical_workflow_projection_input(_typed_api_job(status="degraded"))
+    projection = _safe_workflow_run_projection(projection_input)
+
+    assert projection is not None
+    assert projection["record_schema_version"] == 2
+    assert projection["status"] == "degraded"
+    assert projection["artifact_paths"] == ["notes/out.md"]
+    assert projection["durable_receipts"]["checkpoints"][0]["state_digest"] == "a" * 64
+    assert projection["durable_receipts"]["artifacts"][0]["artifact_id_digest"]
+    assert projection["durable_receipts"]["effects"][0]["effect_type"] == "workflow_output"
+    assert "secret result" not in str(projection)
+    assert "must not be projected" not in str(projection)
+
+
+@pytest.mark.asyncio
+async def test_typed_rows_are_listed_from_canonical_repository():
+    typed = _typed_api_job(status="unknown_external_effect")
+    with (
+        patch("src.api.workflows.audit_repository.list_events", new_callable=AsyncMock, return_value=[]),
+        patch("src.api.workflows.workflow_state_repository.list_runs", new_callable=AsyncMock, return_value=[]),
+        patch("src.api.workflows.durable_job_repository.list_jobs", new_callable=AsyncMock, return_value=[typed]),
+        patch("src.api.workflows.approval_repository.list_pending", new_callable=AsyncMock, return_value=[]),
+        patch("src.api.workflows.session_manager.list_sessions", new_callable=AsyncMock, return_value=[]),
+    ):
+        runs = await _list_workflow_runs(limit=10, session_id="session-durable")
+
+    assert len(runs) == 1
+    assert runs[0]["run_identity"] == typed["run_identity"]
+    assert runs[0]["record_schema_version"] == 2
+    assert runs[0]["status"] == "unknown_external_effect"
+    assert runs[0]["typed_receipts"]["effects"]
+
+
+@pytest.mark.asyncio
+async def test_typed_control_uses_canonical_fence_and_rejects_stale_owner():
+    typed = _typed_api_job(status="running")
+    transitioned = {**typed, "status": "paused", "lease": {"owner": None, "expires_at": None, "fencing_token": 7}, "revision": 5,
+                    "receipt": {"kind": "transition", "status": "recorded", "to": "paused", "revision": 5}}
+    with (
+        patch("src.api.workflows.durable_job_repository.get_job", new_callable=AsyncMock, return_value=typed),
+        patch("src.api.workflows.durable_job_repository.pause_job", new_callable=AsyncMock, return_value=transitioned) as pause,
+    ):
+        result = await _control_typed_workflow_run(
+            run_identity=typed["run_identity"],
+            action="pause",
+            run=typed,
+            principal_id="operator:durable-test",
+            session_id="session-durable",
+        )
+
+    pause.assert_awaited_once_with(
+        typed["run_identity"],
+        owner=_workflow_canonical_lease_owner(typed["run_identity"]),
+        fencing_token=7,
+        expected_revision=4,
+    )
+    assert result["status"] == "recorded"
+    assert result["transition_receipt"]["status"] == "recorded"
+    assert result["run"]["status"] == "paused"
+
+    stale = _typed_api_job(status="running", lease_owner="workflow-runner:stale")
+    with patch("src.api.workflows.durable_job_repository.get_job", new_callable=AsyncMock, return_value=stale):
+        with pytest.raises(HTTPException) as error:
+            await _control_typed_workflow_run(
+                run_identity=stale["run_identity"],
+                action="pause",
+                run=stale,
+                principal_id="operator:durable-test",
+                session_id="session-durable",
+            )
+    assert error.value.status_code == 409
+    assert error.value.detail == "workflow_control_lease_blocked"
+
+
+@pytest.mark.asyncio
+async def test_control_route_never_sends_schema_v2_row_to_legacy_repository():
+    typed = _typed_api_job(status="running")
+    transitioned = {**typed, "status": "paused", "lease": {"owner": None, "expires_at": None, "fencing_token": 7}, "revision": 5,
+                    "receipt": {"kind": "transition", "status": "recorded", "to": "paused", "revision": 5}}
+    principal = TrustPrincipal(
+        principal_id="operator:durable-test",
+        principal_type=PrincipalType.OPERATOR,
+        session_id="session-durable",
+    )
+    operator = SimpleNamespace(principal=principal, session_id="session-durable")
+    request = object()
+    with (
+        patch("src.api.workflows._require_authenticated_capability_operator", return_value=operator),
+        patch("src.api.workflows.bind_operator_principal", return_value=principal),
+        patch("src.api.workflows.context_manager.get_context", return_value=SimpleNamespace(approval_mode="balanced")),
+        patch("src.api.workflows._begin_rest_revocation_watch", return_value=None),
+        patch("src.api.workflows._end_rest_revocation_watch", new_callable=AsyncMock),
+        patch("src.api.workflows._workflow_session_fence", new_callable=AsyncMock),
+        patch("src.api.workflows._find_workflow_run_for_control", new_callable=AsyncMock, return_value=typed),
+        patch("src.api.workflows.durable_job_repository.get_job", new_callable=AsyncMock, return_value=typed),
+        patch("src.api.workflows.durable_job_repository.pause_job", new_callable=AsyncMock, return_value=transitioned) as pause,
+        patch("src.api.workflows.workflow_state_repository.acquire_or_renew_v2_lease", new_callable=AsyncMock) as legacy_lease,
+        patch("src.api.workflows.workflow_state_repository.record_v2_transition", new_callable=AsyncMock) as legacy_transition,
+        patch("src.api.workflows.workflow_state_repository.record_v2_operator_recovery_control", new_callable=AsyncMock) as legacy_control,
+    ):
+        result = await control_workflow_run(
+            typed["run_identity"],
+            WorkflowRunControlRequest(action="pause"),
+            request,
+        )
+
+    assert result["status"] == "recorded"
+    assert result["run"]["status"] == "paused"
+    pause.assert_awaited_once()
+    legacy_lease.assert_not_awaited()
+    legacy_transition.assert_not_awaited()
+    legacy_control.assert_not_awaited()
+
+
+def test_typed_checkpoint_recovery_requires_current_runner_owner_and_fence():
+    parent_id = "session-durable:workflow:typed:parent-1"
+    details = {
+        "record_schema_version": 2,
+        "state_source": "durable_workflow_state",
+        "durable_run_identity": parent_id,
+        "session_id": "session-durable",
+        "owner_kind": "user",
+        "owner_principal_id": "operator:durable-test",
+        "service_id": None,
+        "revision": 9,
+        "lease": {
+            "owner": _workflow_canonical_lease_owner(parent_id),
+            "lease_id": "lease-parent",
+            "expires_at": "2099-01-01T00:00:00+00:00",
+            "revision": 9,
+            "fencing_token": 11,
+        },
+    }
+    tokens = _operator_context()
+    try:
+        _assert_workflow_parent_recovery_authority(
+            parent_run_identity=parent_id,
+            details=details,
+            control_inputs={
+                "_seraph_parent_revision": 9,
+                "_seraph_parent_lease_id": "lease-parent",
+                "_seraph_parent_fencing_token": 11,
+            },
+        )
+        with pytest.raises(RuntimeError, match="parent fence is stale"):
+            _assert_workflow_parent_recovery_authority(
+                parent_run_identity=parent_id,
+                details=details,
+                control_inputs={
+                    "_seraph_parent_revision": 9,
+                    "_seraph_parent_lease_id": "lease-parent",
+                    "_seraph_parent_fencing_token": 10,
+                },
+            )
+    finally:
+        reset_runtime_context(tokens)
+
+
+def test_canonical_checkpoint_payload_contains_revision_lease_and_parent_fields():
+    typed = _typed_api_job()
+    repository = _RecordingRepository()
+    repository.job = typed
+    tokens = _operator_context()
+    try:
+        writer = _CanonicalWorkflowStateWriter(
+            repository,
+            job=typed,
+            owner=typed["lease"]["owner"],
+            fencing_token=typed["lease"]["fencing_token"],
+            checkpoint_context_allowed=True,
+        )
+        payload = asyncio.run(writer.get_checkpoint_payload(typed["run_identity"]))
+    finally:
+        reset_runtime_context(tokens)
+
+    assert payload is not None
+    assert payload["record_schema_version"] == 2
+    assert payload["revision"] == typed["revision"]
+    assert payload["lease"] == typed["lease"]
+    assert payload["parent_job_id"] is None
+    assert payload["parent_fencing_token"] is None
+    assert payload["step_records"][0]["id"] == "prepare"
 
 
 def test_degraded_terminal_readback_preserves_execution_status_and_goal_completion():

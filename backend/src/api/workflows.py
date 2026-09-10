@@ -4,6 +4,7 @@ from collections import defaultdict
 from datetime import datetime
 import hashlib
 import json
+import logging
 import os
 import re
 from typing import Any
@@ -41,12 +42,21 @@ from src.observer.manager import context_manager
 from src.extensions.workspace_package import save_workspace_contribution
 from src.tools.policy import get_current_tool_policy_mode
 from src.workflows.loader import parse_workflow_content
-from src.workflows.manager import approval_context_requires_tracked_lineage, workflow_manager
+from src.workflows.manager import (
+    _workflow_canonical_lease_owner,
+    approval_context_requires_tracked_lineage,
+    workflow_manager,
+)
 from src.workflows.durable_state import _safe_operator_recovery_target, workflow_state_repository
+from src.workflows.job_runtime import (
+    DurableJobError,
+    durable_job_repository,
+)
 from src.workflows.run_identity import build_workflow_run_identity, parse_workflow_run_identity
 from src.workspace import WorkspaceStateClass, canonical_workspace_registry
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 _WORKFLOW_FILENAME_RE = re.compile(r"[^a-zA-Z0-9_-]+")
 
@@ -502,6 +512,215 @@ def _safe_workflow_artifact_projection(value: Any) -> dict[str, Any]:
     }
 
 
+def _is_typed_workflow_run(value: Any) -> bool:
+    if not isinstance(value, dict):
+        return False
+    try:
+        return int(value.get("record_schema_version") or 0) >= 2
+    except (TypeError, ValueError, OverflowError):
+        return False
+
+
+def _canonical_lease_projection(value: dict[str, Any]) -> dict[str, Any]:
+    raw_lease = value.get("lease")
+    if isinstance(raw_lease, dict):
+        lease = dict(raw_lease)
+    else:
+        lease = {
+            "owner": value.get("lease_owner"),
+            "expires_at": value.get("lease_expires_at"),
+            "fencing_token": value.get("fencing_token"),
+        }
+    try:
+        if lease.get("fencing_token") is not None:
+            lease["fencing_token"] = int(lease["fencing_token"])
+    except (TypeError, ValueError, OverflowError):
+        lease["fencing_token"] = 0
+    return lease
+
+
+def _safe_canonical_receipt_projection(
+    receipts: Any,
+    *,
+    kind: str,
+) -> list[dict[str, Any]]:
+    """Expose bounded typed receipt structure without payload or secret text."""
+    if not isinstance(receipts, list):
+        return []
+    safe: list[dict[str, Any]] = []
+    for item in receipts[-100:]:
+        if not isinstance(item, dict):
+            continue
+        receipt: dict[str, Any] = {"kind": kind}
+        for field_name in (
+            "status",
+            "receipt_kind",
+            "effect_type",
+            "artifact_type",
+            "safe",
+            "reconciled",
+            "reconciliation_status",
+            "exists",
+            "operator_visible",
+        ):
+            if field_name in item and isinstance(item[field_name], (str, bool)):
+                receipt[field_name] = item[field_name]
+        for field_name in ("recorded_at", "observed_at", "recorded_at"):
+            if isinstance(item.get(field_name), str):
+                receipt[field_name] = item[field_name]
+        for field_name in ("fencing_token", "size_bytes"):
+            if item.get(field_name) is not None:
+                try:
+                    receipt[field_name] = max(0, int(item[field_name]))
+                except (TypeError, ValueError, OverflowError):
+                    continue
+        for field_name in ("checkpoint_id", "artifact_id", "effect_id"):
+            if item.get(field_name):
+                receipt[f"{field_name}_digest"] = _workflow_identity_digest(str(item[field_name]))
+        for field_name in ("state_digest", "content_sha256", "target_digest", "readback_digest"):
+            digest = _safe_workflow_artifact_digest(item.get(field_name))
+            if digest is not None:
+                receipt[field_name] = digest
+        if kind == "artifact" and isinstance(item.get("file_path"), str):
+            path = _safe_workflow_artifact_path(item["file_path"])
+            if path is not None:
+                receipt["file_path"] = path
+        safe.append(receipt)
+    return safe
+
+
+def _canonical_workflow_projection_input(value: Any) -> dict[str, Any] | None:
+    """Adapt a typed job readback to the existing cockpit projection shape."""
+    if not _is_typed_workflow_run(value):
+        return value if isinstance(value, dict) else None
+    raw = dict(value)
+    owner = raw.get("owner") if isinstance(raw.get("owner"), dict) else {
+        "kind": raw.get("owner_kind"),
+        "principal_id": raw.get("owner_principal_id"),
+        "service_id": raw.get("service_id"),
+    }
+    lease = _canonical_lease_projection(raw)
+    checkpoints = raw.get("checkpoints")
+    if not isinstance(checkpoints, list):
+        checkpoints = raw.get("checkpoint_receipts")
+    checkpoints = checkpoints if isinstance(checkpoints, list) else []
+    artifacts = raw.get("artifacts")
+    if not isinstance(artifacts, list):
+        artifacts = raw.get("artifact_receipts")
+    artifacts = artifacts if isinstance(artifacts, list) else []
+    effects = raw.get("effects")
+    if not isinstance(effects, list):
+        effects = raw.get("effect_receipts")
+    effects = effects if isinstance(effects, list) else []
+    checkpoint_context: dict[str, Any] = {}
+    step_records: list[dict[str, Any]] = []
+    artifact_paths: list[str] = []
+    continued_error_steps: list[str] = []
+    for receipt in checkpoints[-100:]:
+        if not isinstance(receipt, dict):
+            continue
+        payload = receipt.get("payload") if isinstance(receipt.get("payload"), dict) else {}
+        step_id = str(payload.get("step_id") or receipt.get("checkpoint_id") or "").strip()
+        if step_id.startswith("step:"):
+            step_id = step_id[5:]
+        state = payload.get("state")
+        if isinstance(state, dict):
+            checkpoint_context[step_id] = state
+        if not step_id:
+            continue
+        raw_status = str(payload.get("status") or receipt.get("status") or "unknown")
+        paths = payload.get("artifact_paths") if isinstance(payload.get("artifact_paths"), list) else []
+        paths = [path for path in paths if isinstance(path, str) and path.strip()]
+        for path in paths:
+            if path not in artifact_paths:
+                artifact_paths.append(path)
+        step = {
+            "id": step_id,
+            "index": _safe_workflow_count(payload.get("step_index")) or len(step_records) + 1,
+            "tool": str(payload.get("tool") or "workflow_step"),
+            "status": raw_status,
+            "arguments": state.get("arguments", {}) if isinstance(state, dict) else {},
+            "result": state.get("result") if isinstance(state, dict) else None,
+            "artifact_paths": paths,
+            "result_summary": payload.get("result_summary"),
+            "error_kind": payload.get("error_kind"),
+            "error_summary": payload.get("error_summary"),
+        }
+        step_records.append(step)
+        if raw_status in {"failed", "continued_error"}:
+            continued_error_steps.append(step_id)
+    for receipt in artifacts:
+        if isinstance(receipt, dict):
+            path = receipt.get("file_path")
+            if isinstance(path, str) and path.strip() and path not in artifact_paths:
+                artifact_paths.append(path)
+    updated_at = raw.get("updated_at") or raw.get("started_at")
+    started_at = raw.get("started_at") or updated_at
+    status = str(raw.get("status") or "unknown")
+    authority = raw.get("declared_authority")
+    if not isinstance(authority, dict):
+        authority = raw.get("approval_context") if isinstance(raw.get("approval_context"), dict) else {}
+    typed_receipts = {
+        "checkpoints": _safe_canonical_receipt_projection(checkpoints, kind="checkpoint"),
+        "artifacts": _safe_canonical_receipt_projection(artifacts, kind="artifact"),
+        "effects": _safe_canonical_receipt_projection(effects, kind="effect"),
+    }
+    raw_arguments = raw.get("arguments") if isinstance(raw.get("arguments"), dict) else {}
+    return {
+        **raw,
+        "id": raw.get("id") or raw.get("job_id") or raw.get("run_identity"),
+        "run_identity": raw.get("run_identity") or raw.get("job_id"),
+        "root_run_identity": raw.get("root_run_identity") or raw.get("run_identity") or raw.get("job_id"),
+        "parent_run_identity": raw.get("parent_run_identity") or raw.get("parent_job_id"),
+        "workflow_name": raw.get("workflow_name") or raw.get("job_kind") or "workflow",
+        "tool_name": raw.get("tool_name") or raw.get("job_kind") or "workflow",
+        "owner_kind": owner.get("kind"),
+        "owner_principal_id": owner.get("principal_id"),
+        "service_id": owner.get("service_id"),
+        "status": status,
+        "summary": f"Workflow {raw.get('workflow_name') or raw.get('job_kind') or 'workflow'} {status}",
+        "started_at": started_at,
+        "updated_at": updated_at,
+        "finished_at": raw.get("finished_at"),
+        "lease": lease,
+        "lease_owner": lease.get("owner"),
+        "lease_expires_at": lease.get("expires_at"),
+        "fencing_token": lease.get("fencing_token"),
+        "checkpoint_context": checkpoint_context,
+        "checkpoint_context_available": bool(checkpoint_context),
+        "step_records": step_records,
+        "checkpoint_step_ids": [step["id"] for step in step_records],
+        "last_completed_step_id": step_records[-1]["id"] if step_records else None,
+        "artifact_paths": artifact_paths,
+        "continued_error_steps": continued_error_steps,
+        "arguments": raw_arguments,
+        "approval_context": authority,
+        "pending_approvals": [],
+        "pending_approval_count": 1 if status == "awaiting_approval" else 0,
+        "pending_approval_ids": [],
+        "availability": "durable",
+        "state_source": "durable_workflow_state",
+        "typed_receipts": typed_receipts,
+        "replay_inputs": raw_arguments,
+        "replay_allowed": bool(checkpoint_context) and status not in {"succeeded", "degraded", "cancelled"},
+        "replay_block_reason": None,
+        "metadata": {
+            "durable_job": {
+                "goal_id": raw.get("goal_id"),
+                "goal_revision": raw.get("goal_revision"),
+                "plan_revision": raw.get("plan_revision"),
+                "candidate_id": raw.get("candidate_id"),
+                "dependencies": raw.get("dependencies", []),
+                "deadline_at": raw.get("deadline_at"),
+                "revision": raw.get("revision"),
+                "lease": lease,
+                "parent_job_id": raw.get("parent_job_id"),
+                "parent_fencing_token": raw.get("parent_fencing_token"),
+            }
+        },
+    }
+
+
 def _safe_workflow_action_handle(
     value: Any,
     *,
@@ -593,6 +812,9 @@ def _safe_workflow_resume_plan(value: Any) -> dict[str, Any] | None:
         "source_run_identity": _safe_workflow_identity(value.get("source_run_identity")),
         "parent_run_identity": _safe_workflow_identity(value.get("parent_run_identity")),
         "root_run_identity": _safe_workflow_identity(value.get("root_run_identity")),
+        "parent_fencing_token": _safe_workflow_count(value.get("parent_fencing_token"))
+        if value.get("parent_fencing_token") is not None
+        else None,
         "thread_id": _safe_workflow_token(value.get("thread_id"), fallback="") or None,
         "branch_kind": _safe_workflow_token(value.get("branch_kind"), fallback="recovery"),
         "resume_from_step": _safe_workflow_step_id(value.get("resume_from_step"))
@@ -660,6 +882,7 @@ def _safe_workflow_resume_plan(value: Any) -> dict[str, Any] | None:
 
 
 def _safe_workflow_run_projection(value: Any) -> dict[str, Any] | None:
+    value = _canonical_workflow_projection_input(value)
     if not isinstance(value, dict):
         return None
     workflow_name = _safe_workflow_token(value.get("workflow_name"), fallback="workflow")
@@ -692,6 +915,33 @@ def _safe_workflow_run_projection(value: Any) -> dict[str, Any] | None:
         "availability": _safe_workflow_token(value.get("availability"), fallback="unknown"),
         "summary": f"Workflow {workflow_name} {status}",
         "session_id": _safe_workflow_token(value.get("session_id"), fallback="") or None,
+        "record_schema_version": _safe_workflow_count(value.get("record_schema_version")),
+        "owner_kind": _safe_workflow_token(value.get("owner_kind"), fallback="legacy"),
+        "owner_principal_id_digest": (
+            _workflow_identity_digest(str(value.get("owner_principal_id")))
+            if value.get("owner_principal_id")
+            else None
+        ),
+        "revision": _safe_workflow_count(value.get("revision")),
+        "lease": {
+            "owner_digest": _workflow_identity_digest(str(value.get("lease", {}).get("owner")))
+            if isinstance(value.get("lease"), dict) and value.get("lease", {}).get("owner")
+            else None,
+            "expires_at": value.get("lease", {}).get("expires_at")
+            if isinstance(value.get("lease"), dict) and isinstance(value.get("lease", {}).get("expires_at"), str)
+            else None,
+            "fencing_token": _safe_workflow_count(value.get("lease", {}).get("fencing_token"))
+            if isinstance(value.get("lease"), dict)
+            else 0,
+        },
+        "parent_job_id_digest": (
+            _workflow_identity_digest(str(value.get("parent_job_id")))
+            if value.get("parent_job_id")
+            else None
+        ),
+        "parent_fencing_token": _safe_workflow_count(value.get("parent_fencing_token"))
+        if value.get("parent_fencing_token") is not None
+        else None,
         "thread_id": _safe_workflow_token(value.get("thread_id") or value.get("session_id"), fallback="") or None,
         "thread_label": _safe_workflow_token(value.get("thread_label"), fallback="workflow thread")
         if value.get("thread_label")
@@ -822,6 +1072,11 @@ def _safe_workflow_run_projection(value: Any) -> dict[str, Any] | None:
             ) if _as_record(value.get("trust_boundary")).get("reason") else None,
         },
     }
+    if isinstance(value.get("typed_receipts"), dict):
+        projection["durable_receipts"] = value["typed_receipts"]
+        projection["checkpoint_receipts"] = value["typed_receipts"].get("checkpoints", [])
+        projection["artifact_receipts"] = value["typed_receipts"].get("artifacts", [])
+        projection["effect_receipts"] = value["typed_receipts"].get("effects", [])
     projection["action_handle"] = projection["recovery_action"]
     plan = _safe_workflow_resume_plan(value.get("resume_plan"))
     if plan is not None:
@@ -1521,6 +1776,7 @@ def _workflow_retry_from_step_draft(
     branch_depth: int | None = None,
     parent_revision: int | None = None,
     parent_lease_id: str | None = None,
+    parent_fencing_token: int | None = None,
 ) -> str:
     control_inputs: dict[str, Any] = {
         "_seraph_resume_from_step": step_id,
@@ -1536,6 +1792,8 @@ def _workflow_retry_from_step_draft(
         control_inputs["_seraph_parent_revision"] = parent_revision
     if isinstance(parent_lease_id, str) and parent_lease_id.strip():
         control_inputs["_seraph_parent_lease_id"] = parent_lease_id.strip()
+    if isinstance(parent_fencing_token, int) and parent_fencing_token > 0:
+        control_inputs["_seraph_parent_fencing_token"] = parent_fencing_token
     return _workflow_replay_draft(
         workflow_name,
         arguments,
@@ -1543,21 +1801,32 @@ def _workflow_retry_from_step_draft(
     )
 
 
-def _workflow_parent_recovery_metadata(run: dict[str, Any]) -> tuple[int | None, str | None]:
+def _workflow_parent_recovery_metadata(
+    run: dict[str, Any],
+) -> tuple[int | None, str | None, int | None]:
     """Read only the lease metadata needed to bind a manual recovery draft."""
     metadata = run.get("metadata") if isinstance(run.get("metadata"), dict) else {}
     orchestration = run.get("orchestration_v2")
     if not isinstance(orchestration, dict):
         orchestration = metadata.get("orchestration_v2")
+    if not isinstance(orchestration, dict) and _is_typed_workflow_run(run):
+        orchestration = {
+            "revision": run.get("revision"),
+            "lease": run.get("lease"),
+        }
     if not isinstance(orchestration, dict):
-        return None, None
+        return None, None, None
     lease = orchestration.get("lease")
     lease_id = lease.get("lease_id") if isinstance(lease, dict) else None
     try:
         revision = int(orchestration["revision"]) if orchestration.get("revision") is not None else None
     except (TypeError, ValueError):
         revision = None
-    return revision, str(lease_id).strip() if lease_id else None
+    try:
+        fencing_token = int(lease.get("fencing_token")) if isinstance(lease, dict) and lease.get("fencing_token") is not None else None
+    except (TypeError, ValueError):
+        fencing_token = None
+    return revision, str(lease_id).strip() if lease_id else None, fencing_token
 
 
 def _workflow_branch_lineage(
@@ -1611,7 +1880,7 @@ def _workflow_checkpoint_candidates(
         if isinstance(run.get("branch_depth"), int) and int(run.get("branch_depth")) >= 0
         else (1 if run.get("run_identity") else 0)
     )
-    parent_revision, parent_lease_id = _workflow_parent_recovery_metadata(run)
+    parent_revision, parent_lease_id, parent_fencing_token = _workflow_parent_recovery_metadata(run)
     candidates: list[dict[str, Any]] = []
     if approvals:
         candidates.append({
@@ -1654,6 +1923,7 @@ def _workflow_checkpoint_candidates(
                     branch_depth=next_branch_depth,
                     parent_revision=parent_revision,
                     parent_lease_id=parent_lease_id,
+                    parent_fencing_token=parent_fencing_token,
                 )
                 if resume_supported
                 else None
@@ -1764,7 +2034,7 @@ def _workflow_resume_plan(
     )
     if not replay_draft and run.get("replay_draft"):
         replay_draft = str(run["replay_draft"])
-    parent_revision, parent_lease_id = _workflow_parent_recovery_metadata(run)
+    parent_revision, parent_lease_id, parent_fencing_token = _workflow_parent_recovery_metadata(run)
     return {
         "source_run_identity": run["run_identity"],
         "parent_run_identity": run["run_identity"],
@@ -1789,6 +2059,7 @@ def _workflow_resume_plan(
         "checkpoint_candidates": checkpoint_candidates,
         "parent_revision": parent_revision,
         "parent_lease_id": parent_lease_id,
+        "parent_fencing_token": parent_fencing_token,
         "replay_inputs": run.get("arguments") or {},
     }
 
@@ -1810,6 +2081,149 @@ async def _find_workflow_run_for_control(run_identity: str) -> dict[str, Any] | 
         )
         run = next((item for item in runs if item.get("run_identity") == run_identity), None)
     return run
+
+
+async def _load_typed_workflow_run_for_control(
+    run_identity: str,
+    *,
+    principal_id: str,
+    session_id: str,
+) -> dict[str, Any] | None:
+    """Read the current canonical row before exposing or mutating recovery."""
+    durable_run = await durable_job_repository.get_job(run_identity)
+    if durable_run is None:
+        return None
+    run = _canonical_workflow_projection_input(durable_run)
+    if not isinstance(run, dict):
+        return None
+    if not _workflow_owner_is_bound(run, principal_id):
+        raise HTTPException(status_code=403, detail="workflow_owner_mismatch")
+    if str(run.get("session_id") or "") != str(session_id or ""):
+        raise HTTPException(status_code=403, detail="workflow_owner_mismatch")
+    return run
+
+
+def _typed_workflow_control_detail(exc: Exception) -> str:
+    message = str(exc).lower()
+    if "approval" in message:
+        return "workflow_approval_gate_blocked"
+    if "lease" in message or "fenc" in message or "revision" in message:
+        return "workflow_control_lease_blocked"
+    if "retry" in message or "reconcil" in message or "effect" in message:
+        return "workflow_recovery_blocked"
+    if "terminal" in message or "transition" in message:
+        return "workflow_transition_blocked"
+    return "workflow_control_failed"
+
+
+async def _control_typed_workflow_run(
+    *,
+    run_identity: str,
+    action: str,
+    run: dict[str, Any],
+    principal_id: str,
+    session_id: str,
+    operator_context: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Apply operator controls through the canonical typed repository.
+
+    Legacy V2 orchestration receipts and leases cannot safely interpret a
+    schema-v2 job row.  This adapter keeps the existing API response shape
+    while every state-changing action uses the job repository's CAS/fence
+    methods.
+    """
+    current = await _load_typed_workflow_run_for_control(
+        run_identity,
+        principal_id=principal_id,
+        session_id=session_id,
+    )
+    if current is None:
+        raise HTTPException(status_code=404, detail="workflow_run_not_found")
+    run = current
+    lease = run.get("lease") if isinstance(run.get("lease"), dict) else {}
+    lease_owner = str(lease.get("owner") or "").strip() or None
+    try:
+        fencing_token = int(lease.get("fencing_token")) if lease.get("fencing_token") is not None else None
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise HTTPException(status_code=409, detail="workflow_control_lease_blocked") from exc
+    try:
+        revision = int(run.get("revision"))
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise HTTPException(status_code=409, detail="workflow_control_lease_blocked") from exc
+    if lease_owner and lease_owner != _workflow_canonical_lease_owner(run_identity):
+        raise HTTPException(status_code=409, detail="workflow_control_lease_blocked")
+
+    transition: dict[str, Any] | None = None
+    if action == "audit":
+        receipt = {
+            "kind": "operator_control",
+            "status": "recorded",
+            "action": action,
+            "revision": revision,
+            "operator_visible": True,
+        }
+    else:
+        try:
+            if action == "pause":
+                if lease_owner is None or fencing_token is None:
+                    raise DurableJobError("active owner lease and fencing token are required")
+                transition = await durable_job_repository.pause_job(
+                    run_identity,
+                    owner=lease_owner,
+                    fencing_token=fencing_token,
+                    expected_revision=revision,
+                )
+            elif action == "resume":
+                transition = await durable_job_repository.resume_job(
+                    run_identity,
+                    expected_revision=revision,
+                )
+            elif action == "revoke":
+                transition = await durable_job_repository.revoke_job(
+                    run_identity,
+                    owner=lease_owner,
+                    fencing_token=fencing_token,
+                    expected_revision=revision,
+                )
+            elif action == "retry":
+                context = operator_context if isinstance(operator_context, dict) else {}
+                reconciliation_receipt = context.get("reconciliation_receipt")
+                if not isinstance(reconciliation_receipt, dict):
+                    raise DurableJobError("retry requires external-effect reconciliation")
+                transition = await durable_job_repository.retry_job(
+                    run_identity,
+                    owner_kind=str(run.get("owner_kind") or "user"),
+                    owner_principal_id=str(run.get("owner_principal_id") or principal_id),
+                    service_id=run.get("service_id"),
+                    reconciliation_receipt=reconciliation_receipt,
+                    expected_revision=revision,
+                )
+            else:
+                raise DurableJobError("typed workflow action requires a canonical transition")
+        except HTTPException:
+            raise
+        except Exception as exc:
+            detail = _typed_workflow_control_detail(exc)
+            status_code = 423 if detail == "workflow_control_lease_blocked" else 409
+            raise HTTPException(status_code=status_code, detail=detail) from exc
+        receipt = transition.get("receipt") if isinstance(transition, dict) else None
+        if not isinstance(receipt, dict):
+            raise HTTPException(status_code=409, detail="workflow_transition_unavailable")
+    refreshed = transition or run
+    refreshed = _canonical_workflow_projection_input(refreshed) or refreshed
+    return {
+        "run_identity": _safe_workflow_identity(run_identity),
+        "workflow_name": _safe_workflow_token(run.get("workflow_name"), fallback="workflow"),
+        "action": action,
+        "status": "recorded",
+        "external_action_allowed": False,
+        "control_receipt": _safe_workflow_receipt(receipt),
+        "lease_receipt": None,
+        "recovery_receipt": None,
+        "transition_receipt": _safe_workflow_receipt(receipt),
+        "resume_plan": None,
+        "run": _safe_workflow_run_projection(refreshed),
+    }
 
 
 def _parse_run_identity(run_identity: str) -> tuple[str | None, str, str, str | None]:
@@ -2787,12 +3201,23 @@ async def _list_workflow_runs(
         durable_runs = await workflow_state_repository.list_runs(limit=limit, session_id=session_id)
     except Exception:
         durable_runs = []
+    try:
+        # Schema-v2 rows and their checkpoint/effect ledgers are owned by the
+        # typed repository.  Keep the legacy query for compatibility, then
+        # let the canonical projection replace any same-identity legacy view.
+        typed_runs = await durable_job_repository.list_jobs(limit=limit, session_id=session_id)
+    except Exception:
+        typed_runs = []
+    durable_runs.extend(typed_runs)
     completed_by_identity = {
         str(run.get("run_identity") or run.get("id")): run
         for run in completed
         if run.get("run_identity") or run.get("id")
     }
     for durable_run in durable_runs:
+        is_typed = _is_typed_workflow_run(durable_run)
+        if is_typed:
+            durable_run = _canonical_workflow_projection_input(durable_run) or durable_run
         run_identity = str(durable_run.get("run_identity") or durable_run.get("id"))
         if not run_identity:
             continue
@@ -2804,21 +3229,35 @@ async def _list_workflow_runs(
             **existing,
             **durable_run,
             "status": durable_run.get("status") or existing.get("status"),
-            "availability": existing.get("availability") or "audit_projection_missing",
-            "checkpoint_candidates": existing.get("checkpoint_candidates") or [],
-            "resume_plan": existing.get("resume_plan"),
+            "availability": existing.get("availability") or (
+                durable_run.get("availability") if is_typed else "audit_projection_missing"
+            ),
+            "checkpoint_candidates": existing.get("checkpoint_candidates") or (
+                _workflow_checkpoint_candidates(durable_run, approvals=[])
+                if is_typed and durable_run.get("checkpoint_context_available")
+                else []
+            ),
+            "resume_plan": existing.get("resume_plan") if not is_typed else None,
             "replay_allowed": (
-                existing.get("replay_allowed", durable_only_replay_allowed)
-                if audit_projection_available
-                else durable_only_replay_allowed
+                durable_run.get("replay_allowed", durable_only_replay_allowed)
+                if is_typed
+                else (
+                    existing.get("replay_allowed", durable_only_replay_allowed)
+                    if audit_projection_available
+                    else durable_only_replay_allowed
+                )
             ),
             "replay_block_reason": (
-                existing.get("replay_block_reason")
-                if audit_projection_available
-                else durable_only_replay_block_reason
+                durable_run.get("replay_block_reason")
+                if is_typed
+                else (
+                    existing.get("replay_block_reason")
+                    if audit_projection_available
+                    else durable_only_replay_block_reason
+                )
             ),
             "state_source": "durable_workflow_state",
-            "audit_projection_available": audit_projection_available,
+            "audit_projection_available": audit_projection_available or is_typed,
         }
         completed_by_identity[run_identity] = merged
     completed = list(completed_by_identity.values())
@@ -3127,6 +3566,47 @@ async def build_workflow_resume_plan(
             )
             await _workflow_session_fence(request, revocation_scope)
             raise HTTPException(status_code=403, detail=detail)
+        if _is_typed_workflow_run(run):
+            # Refresh the typed row so a stale list projection cannot produce
+            # a resume draft with an old revision, lease, or parent fence.
+            try:
+                run = await _load_typed_workflow_run_for_control(
+                    run_identity,
+                    principal_id=operator.principal.principal_id,
+                    session_id=active_session_id,
+                )
+            except HTTPException as exc:
+                detail = str(exc.detail or "workflow_owner_mismatch")
+                await _record_workflow_route_receipt(
+                    event_type="workflow_resume_plan_refused",
+                    session_id=active_session_id,
+                    run_identity=run_identity,
+                    action="resume",
+                    status_code=exc.status_code,
+                    detail=detail,
+                    workflow_name=run.get("workflow_name") if isinstance(run, dict) else None,
+                )
+                await _workflow_session_fence(request, revocation_scope)
+                raise
+            if run is None:
+                detail = "workflow_run_not_found"
+                await _workflow_session_fence(request, revocation_scope)
+                raise HTTPException(status_code=404, detail=detail)
+            typed_lease = run.get("lease") if isinstance(run.get("lease"), dict) else {}
+            typed_lease_owner = str(typed_lease.get("owner") or "").strip()
+            if typed_lease_owner and typed_lease_owner != _workflow_canonical_lease_owner(run_identity):
+                detail = "workflow_control_lease_blocked"
+                await _record_workflow_route_receipt(
+                    event_type="workflow_resume_plan_refused",
+                    session_id=active_session_id,
+                    run_identity=run_identity,
+                    action="resume",
+                    status_code=423,
+                    detail=detail,
+                    workflow_name=run.get("workflow_name"),
+                )
+                await _workflow_session_fence(request, revocation_scope)
+                raise HTTPException(status_code=423, detail=detail)
         replay_block_reason = str(run.get("replay_block_reason") or "").strip() or None
         if replay_block_reason or run.get("replay_allowed") is False:
             detail = _workflow_replay_block_detail(replay_block_reason)
@@ -3275,6 +3755,12 @@ async def control_workflow_run(
             await _workflow_session_fence(request, revocation_scope)
             raise HTTPException(status_code=404, detail=detail)
 
+        # A repository double or a direct typed read may provide the nested
+        # schema-v2 owner/lease shape.  Normalize it before the ingress owner
+        # check so every route decision uses the same canonical projection.
+        if _is_typed_workflow_run(run):
+            run = _canonical_workflow_projection_input(run) or run
+
         recovery_session_id = str(run.get("session_id") or "").strip() or None
         # A route auth session is the ingress fence.  Parent checkpoint
         # authority is fenced to the run's conversation session so the draft
@@ -3382,6 +3868,29 @@ async def control_workflow_run(
                 requested_step_id = handle_step_id
                 safe_step_id = _safe_workflow_step_id(handle_step_id)
                 operator_context["requested_step_id"] = safe_step_id
+
+        if _is_typed_workflow_run(run):
+            # Schema-v2 rows are owned by DurableJobRepository.  Route them
+            # before the legacy orchestration lease/control calls below; the
+            # latter intentionally reject typed rows rather than silently
+            # changing a canonical job through a second state machine.
+            try:
+                typed_result = await _control_typed_workflow_run(
+                    run_identity=run_identity,
+                    action=action,
+                    run=run,
+                    principal_id=operator.principal.principal_id,
+                    session_id=active_session_id,
+                    operator_context=operator_context,
+                )
+            except HTTPException as exc:
+                await log_refusal(
+                    status_code=exc.status_code,
+                    detail=str(exc.detail or "workflow_control_failed"),
+                )
+                raise
+            await _workflow_session_fence(request, revocation_scope)
+            return typed_result
 
         replay_block_reason = str(run.get("replay_block_reason") or "") or None
         if replay_block_reason in {"approval_context_changed", "approval_context_missing"}:

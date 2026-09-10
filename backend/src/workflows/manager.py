@@ -78,6 +78,11 @@ _WORKFLOW_CONTROL_INPUTS: dict[str, dict[str, Any]] = {
         "description": "Durable lease id expected for the parent workflow checkpoint.",
         "nullable": True,
     },
+    "_seraph_parent_fencing_token": {
+        "type": "integer",
+        "description": "Durable fencing token expected for the parent workflow checkpoint.",
+        "nullable": True,
+    },
 }
 _WORKFLOW_CONTROL_FIELD_NAMES = set(_WORKFLOW_CONTROL_INPUTS)
 
@@ -156,6 +161,17 @@ def _workflow_recovery_owner(principal_id: str, session_id: str) -> str:
     principal_digest = hashlib.sha256(principal_id.encode("utf-8", errors="replace")).hexdigest()[:16]
     session_digest = hashlib.sha256(session_id.encode("utf-8", errors="replace")).hexdigest()[:16]
     return f"operator:{principal_digest}:{session_digest}"
+
+
+def _workflow_canonical_lease_owner(run_identity: str) -> str:
+    """Return the stable runner lease owner for a typed workflow row.
+
+    The API recovery path reads the same canonical row as the workflow runner.
+    Keeping this derivation in one helper prevents recovery from accidentally
+    substituting its legacy operator lease label for the runner fence.
+    """
+    digest = hashlib.sha256(str(run_identity).encode("utf-8", errors="replace")).hexdigest()[:20]
+    return f"workflow-runner:{digest}"
 
 
 def _workflow_parent_v2_state(details: dict[str, Any]) -> tuple[int | None, dict[str, Any]]:
@@ -249,7 +265,17 @@ def _assert_workflow_parent_recovery_authority(
         expires = expires.replace(tzinfo=timezone.utc)
     if not lease_id or expires <= datetime.now(timezone.utc):
         raise RuntimeError("Workflow checkpoint recovery parent lease is unavailable")
-    if lease_owner != _workflow_recovery_owner(str(principal.principal_id), str(current_session_id)):
+    record_schema_version = 0
+    try:
+        record_schema_version = int(details.get("record_schema_version") or 0)
+    except (TypeError, ValueError):
+        raise RuntimeError("Workflow checkpoint recovery schema version is invalid")
+    expected_lease_owner = (
+        _workflow_canonical_lease_owner(parent_run_identity)
+        if record_schema_version >= 2
+        else _workflow_recovery_owner(str(principal.principal_id), str(current_session_id))
+    )
+    if lease_owner != expected_lease_owner:
         raise RuntimeError("Workflow checkpoint recovery parent lease owner is invalid")
     if not expected_lease_id or expected_lease_id != lease_id:
         raise RuntimeError("Workflow checkpoint recovery parent lease does not match the requested lease")
@@ -261,6 +287,19 @@ def _assert_workflow_parent_recovery_authority(
         raise RuntimeError("Workflow checkpoint recovery parent lease revision is invalid") from exc
     if lease_revision != revision:
         raise RuntimeError("Workflow checkpoint recovery parent lease revision is stale")
+    if record_schema_version >= 2:
+        try:
+            persisted_fence = int(lease.get("fencing_token"))
+        except (TypeError, ValueError):
+            persisted_fence = None
+        if persisted_fence is None or persisted_fence <= 0:
+            raise RuntimeError("Workflow checkpoint recovery parent fence is invalid")
+        try:
+            expected_fence = int(control_inputs["_seraph_parent_fencing_token"])
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError("Workflow checkpoint recovery parent fence is required") from exc
+        if expected_fence != persisted_fence:
+            raise RuntimeError("Workflow checkpoint recovery parent fence is stale")
 
 
 def _run_durable_state_write(coro) -> Any | None:
@@ -1037,11 +1076,17 @@ class _CanonicalWorkflowStateWriter:
         owner = current.get("owner") if isinstance(current.get("owner"), dict) else {}
         authority = current.get("declared_authority")
         return {
+            "record_schema_version": int(current.get("record_schema_version") or 0),
+            "job_id": current.get("job_id") or run_identity,
             "workflow_name": current.get("workflow_name"),
             "session_id": current.get("session_id"),
             "owner_kind": owner.get("kind"),
             "owner_principal_id": owner.get("principal_id"),
             "service_id": owner.get("service_id"),
+            "parent_job_id": current.get("parent_job_id"),
+            "parent_fencing_token": current.get("parent_fencing_token"),
+            "revision": current.get("revision"),
+            "lease": current.get("lease") if isinstance(current.get("lease"), dict) else {},
             "durable_run_identity": run_identity,
             "state_source": "durable_workflow_state",
             "approval_context": authority if isinstance(authority, dict) else {},
@@ -1397,6 +1442,8 @@ def _admit_canonical_workflow_job(
     approval_context: dict[str, Any],
     checkpoint_context_allowed: bool,
     owner_fields: dict[str, str],
+    parent_job_id: str | None = None,
+    parent_fencing_token: int | None = None,
 ) -> _CanonicalWorkflowStateWriter:
     owner_kind = str(owner_fields["owner_kind"])
     owner_principal_id = str(owner_fields["owner_principal_id"])
@@ -1446,6 +1493,8 @@ def _admit_canonical_workflow_job(
         identity=identity,
         inputs=_durable_arguments(audit_arguments, checkpoint_context_allowed=checkpoint_context_allowed),
         session_id=session_id,
+        parent_job_id=parent_job_id,
+        parent_fencing_token=parent_fencing_token,
         run_fingerprint=run_fingerprint,
         goal_id=contract["goal_id"],
         goal_revision=contract["goal_revision"],
@@ -1466,7 +1515,7 @@ def _admit_canonical_workflow_job(
         raise DurableWorkflowStateUnavailable(
             f"canonical workflow job was not queued (status={admitted.get('status')})"
         )
-    runner = "workflow-runner:" + hashlib.sha256(run_identity.encode("utf-8")).hexdigest()[:20]
+    runner = _workflow_canonical_lease_owner(run_identity)
     claimed = _run_async(repository.claim_job(run_identity, owner=runner, lease_seconds=300))
     if claimed.get("status") != "running":
         raise DurableWorkflowStateUnavailable(
@@ -1708,6 +1757,7 @@ class WorkflowTool(Tool):
         )
         parent_run_identity = control_inputs.get("_seraph_parent_run_identity")
         root_run_identity = control_inputs.get("_seraph_root_run_identity") or durable_run_identity
+        parent_fencing_token = control_inputs.get("_seraph_parent_fencing_token")
         context: dict[str, Any] = {
             "inputs": workflow_inputs,
             "steps": {},
@@ -1734,6 +1784,12 @@ class WorkflowTool(Tool):
                 approval_context=approval_context,
                 checkpoint_context_allowed=checkpoint_context_allowed,
                 owner_fields=durable_owner_fields,
+                parent_job_id=(str(parent_run_identity).strip() if parent_run_identity else None),
+                parent_fencing_token=(
+                    int(parent_fencing_token)
+                    if parent_fencing_token is not None
+                    else None
+                ),
             )
         _run_workflow_state_write(state_repository, state_repository.create_run(
             run_identity=durable_run_identity,
@@ -2098,6 +2154,8 @@ class WorkflowTool(Tool):
             details["resume_from_step"] = control_inputs["_seraph_resume_from_step"]
         if isinstance(control_inputs.get("_seraph_branch_depth"), int):
             details["branch_depth"] = control_inputs["_seraph_branch_depth"]
+        if isinstance(control_inputs.get("_seraph_parent_fencing_token"), int):
+            details["parent_fencing_token"] = control_inputs["_seraph_parent_fencing_token"]
         return details
 
     def _build_audit_payload(
@@ -2302,7 +2360,7 @@ class WorkflowTool(Tool):
             value = provided[key]
             if value is None or value == "":
                 continue
-            if key == "_seraph_branch_depth":
+            if key in {"_seraph_branch_depth", "_seraph_parent_revision", "_seraph_parent_fencing_token"}:
                 try:
                     control_inputs[key] = int(value)
                 except (TypeError, ValueError):

@@ -1442,6 +1442,37 @@ class DurableJobRepository:
             db.expunge(run)
             return _serialize(run)
 
+    async def list_jobs(
+        self,
+        *,
+        limit: int = 20,
+        session_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """List canonical typed jobs for operator projections and recovery.
+
+        The workflows API historically queried ``WorkflowStateRepository``;
+        that serializer intentionally owns only legacy step rows.  Keep this
+        read path beside the typed writes so schema-v2 receipt ledgers are
+        projected without asking the legacy repository to mutate or interpret
+        them.
+        """
+        bounded_limit = max(1, min(int(limit), 100))
+        async with self._session() as db:
+            stmt = (
+                select(WorkflowRunState)
+                .where(WorkflowRunState.record_schema_version >= DURABLE_JOB_RECORD_SCHEMA_VERSION)
+                .order_by(WorkflowRunState.updated_at.desc())
+                .limit(bounded_limit)
+            )
+            if session_id:
+                stmt = stmt.where(WorkflowRunState.session_id == session_id)
+            runs = (await db.execute(stmt)).scalars().all()
+            serialized: list[dict[str, Any]] = []
+            for run in runs:
+                db.expunge(run)
+                serialized.append(_serialize(run))
+            return serialized
+
     async def transition_job(
         self,
         job_id: str,

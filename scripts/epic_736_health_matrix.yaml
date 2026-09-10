@@ -4,7 +4,8 @@ description: >-
   Keyless, read-only release-gate criteria. Source-contract checks do not
   claim live execution. Provider, edge, media, connector, evolution, and
   comparator checks are explicitly skipped or excluded until separately
-  authorised evidence exists.
+  authorised evidence exists. Required child criteria are static source gates;
+  a missing path blocks the receipt until its owning milestone is present.
 status_vocabulary: [pass, degraded, blocked, skipped, unknown, failed]
 evidence_mode_vocabulary: [configuration, static, integration, external_unverified, excluded]
 overall_status_precedence: [failed, blocked, unknown, degraded, skipped, pass]
@@ -94,6 +95,66 @@ criteria:
     live_environment: repository revision; no production database access
     failure_meaning: database or workspace source contract is missing
     residual_risk_text: source presence does not prove canonical mounted state
+  - id: conversation.identity_outbox
+    owner_issue: 750
+    required: true
+    evidence_mode: static
+    command_or_probe: health::_contract_check (source presence only)
+    expected_exit_or_result: pass when canonical identity and durable outbox sources exist; blocked when a path is missing
+    artifact_path: source-contract:conversation.identity_outbox
+    live_environment: repository revision; no cross-surface delivery run
+    failure_meaning: canonical conversation identity or durable outbox source is missing
+    residual_risk_text: source presence does not prove identity continuity, ownership, or delivery recovery
+  - id: native_software.loop
+    owner_issue: 748
+    required: true
+    evidence_mode: static
+    command_or_probe: health::_contract_check (source presence only)
+    expected_exit_or_result: pass when native software loop and bounded process sources exist; blocked when a path is missing
+    artifact_path: source-contract:native_software.loop
+    live_environment: repository revision; no repository mutation run
+    failure_meaning: governed native software loop source contract is missing
+    residual_risk_text: source presence does not prove bounded execution, review, or rollback
+  - id: edge.paired_transport
+    owner_issue: 749
+    required: true
+    evidence_mode: static
+    command_or_probe: health::_contract_check (source presence only)
+    expected_exit_or_result: pass when paired edge transport source exists; blocked when a path is missing
+    artifact_path: source-contract:edge.paired_transport
+    live_environment: repository revision; no paired edge connection
+    failure_meaning: paired edge identity, pairing, or revocation source contract is missing
+    residual_risk_text: source presence does not prove paired transport or revocation behavior
+  - id: audio.capture_decode_persistence
+    owner_issue: 751
+    required: true
+    evidence_mode: static
+    command_or_probe: health::_contract_check (source presence only)
+    expected_exit_or_result: pass when governed audio capture, decode, and persistence sources exist; blocked when a path is missing
+    artifact_path: source-contract:audio.capture_decode_persistence
+    live_environment: repository revision; no microphone, media, or provider call
+    failure_meaning: audio capture, decode, or persistence source contract is missing
+    residual_risk_text: source presence does not prove media privacy, decode correctness, or durable storage
+  - id: telegram.durable_transport
+    owner_issue: 752
+    required: true
+    evidence_mode: static
+    command_or_probe: health::_contract_check (source presence only)
+    expected_exit_or_result: pass when paired Telegram transport and durable receipt sources exist; blocked when a path is missing
+    artifact_path: source-contract:telegram.durable_transport
+    live_environment: repository revision; no Telegram or connector call
+    failure_meaning: paired Telegram transport, consent, or durable receipt source contract is missing
+    residual_risk_text: source presence does not prove consent, delivery, revocation, or retry behavior
+  - id: capability_pack.lifecycle
+    owner_issue: 755
+    required: true
+    evidence_mode: static
+    command_or_probe: health::_contract_check (source presence only)
+    expected_exit_or_result: pass when capability-pack lifecycle sources exist; blocked when a path is missing
+    artifact_path: source-contract:capability_pack.lifecycle
+    live_environment: repository revision; no package install, activation, or external call
+    failure_meaning: governed capability-pack review, activation, or rollback source contract is missing
+    residual_risk_text: source presence does not prove package provenance, approval, or rollback behavior
   - id: runtime.openrouter_model_fabric
     owner_issue: 741
     required: true

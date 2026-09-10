@@ -49,8 +49,8 @@ def test_keyless_receipt_has_schema_and_logical_artifact(tmp_path: Path, monkeyp
     assert receipt["schema_version"] == 2
     assert receipt["epic"] == 736
     assert receipt["environment"] == "prod"
-    assert receipt["overall_status"] == "degraded"
-    assert exit_code == 2
+    assert receipt["overall_status"] == "blocked"
+    assert exit_code == 3
     assert logical.startswith("operator-receipts/epic-736-health/")
     assert (tmp_path / logical).is_file()
     assert {item["status"] for item in receipt["checks"]} <= health.VALID_STATUSES
@@ -91,7 +91,7 @@ def test_provider_model_is_generic_and_not_tied_to_a_single_catalog_entry(tmp_pa
     check = next(item for item in receipt["checks"] if item["id"] == "runtime.openrouter_model_fabric")
     assert check["status"] == "pass"
     assert check["evidence_mode"] == "configuration"
-    assert exit_code == 2
+    assert exit_code == 3
 
 
 def test_provider_model_uses_canonical_openrouter_syntax(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -118,7 +118,7 @@ def test_unprobed_optional_capabilities_are_skipped(tmp_path: Path, monkeypatch:
     for identifier in ("memory.embedding_capability", "edge.mac", "voice.audio", "telegram"):
         assert checks[identifier]["status"] == "skipped"
         assert checks[identifier]["evidence_mode"] == "external_unverified"
-    assert exit_code == 2
+    assert exit_code == 3
 
 
 def test_excluded_stable_criteria_remain_explicit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -158,6 +158,34 @@ def test_matrix_matches_python_evidence_contract() -> None:
     }
     assert matrix_contract == python_contract
     assert all(required_fields <= set(criterion) for criterion in matrix["criteria"])
+    exclusions = {
+        item["id"]: (item["owner_issue"], item["status"], item["replacement"])
+        for item in matrix["exclusion_mapping"]
+    }
+    assert exclusions["research.harness_improvement"] == (771, "excluded", "deferred_outside_epic_736")
+
+
+def test_required_child_static_criteria_are_mapped_and_missing_paths_block() -> None:
+    expected = {
+        "conversation.identity_outbox": 750,
+        "native_software.loop": 748,
+        "edge.paired_transport": 749,
+        "audio.capture_decode_persistence": 751,
+        "telegram.durable_transport": 752,
+        "capability_pack.lifecycle": 755,
+    }
+    criteria = {criterion.identifier: criterion for criterion in health.CRITERIA}
+    assert set(expected) <= criteria.keys()
+    for identifier, owner in expected.items():
+        criterion = criteria[identifier]
+        assert criterion.owner_issue == owner
+        assert criterion.required is True
+        assert criterion.evidence_mode == "static"
+        assert criterion.paths
+        check = health._contract_check(criterion)
+        assert check["evidence_mode"] == "static"
+        if any(not (health.ROOT / path).exists() for path in criterion.paths):
+            assert check["status"] == "blocked"
 
 
 def test_optional_blocked_status_cannot_be_healthy() -> None:
@@ -200,7 +228,7 @@ def test_cli_redacts_secret_from_stdout_and_stderr(tmp_path: Path, monkeypatch: 
     _configured(monkeypatch, tmp_path)
     secret = "or-secret-cli-value"
     monkeypatch.setenv("OPENROUTER_API_KEY", secret)
-    assert health.main(["--format", "json"]) == 2
+    assert health.main(["--format", "json"]) == 3
     captured = capsys.readouterr()
     assert secret not in captured.out
     assert secret not in captured.err
@@ -215,4 +243,4 @@ def test_health_collection_is_network_free(tmp_path: Path, monkeypatch: pytest.M
 
     monkeypatch.setattr(socket, "socket", _forbidden_socket)
     receipt, _, _ = health.build_receipt()
-    assert receipt["overall_status"] == "degraded"
+    assert receipt["overall_status"] == "blocked"

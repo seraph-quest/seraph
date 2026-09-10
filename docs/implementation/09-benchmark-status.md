@@ -16,6 +16,11 @@ media readiness remain `external_unverified` and are `skipped` by the keyless
 run. The stable #771 evolution IDs and #754 comparator coverage ID remain in
 the matrix as explicit `excluded` checks; they do not create closure or
 superiority claims for Epic #736.
+Required static child criteria cover #750 conversation identity/outbox, #748
+native software, #749 paired edge, #751 audio capture/decode/persistence, #752
+Telegram transport, and #755 capability-pack lifecycle. Missing source paths
+block the receipt until the owning milestone is present; source presence still
+does not claim exercised behavior.
 
 ## Status On `develop`
 

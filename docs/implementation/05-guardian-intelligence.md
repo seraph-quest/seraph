@@ -146,9 +146,21 @@ evidence references are bounded opaque typed digests; only a safe generated
 strategy-delta identifier remains readable for durable lookup. Stored positive
 provenance is revalidated against the current goal, revision, target, and
 decision-input digest or downgraded to unresolved, and priority is part of that
-linkage. This is governed strategy adaptation with explicit no-learning
-execution receipts; it is not silent prompt, tool, authority, or harness
-self-modification.
+linkage. The web-brief candidate keeps the selected priority in its
+decision-input digest, so a persisted correction that changes source, output
+format, or scheduling priority can establish verified influence on the later
+choice. If the target names a missing, stale, proposed, or rolled-back delta,
+the shared dispatch seam records `strategy_delta_unresolved` with
+`learning=no_learning` before invoking the workflow. This is governed strategy
+adaptation with explicit no-learning execution receipts; it is not silent
+prompt, tool, authority, or harness self-modification.
+The scheduler effect receipt likewise copies the delta identity only from that
+verified service result, so blocked or revoked corrections cannot appear as
+positive provenance merely because a goal target contains an ID. A higher
+priority brief blocked specifically by an unresolved correction records its
+blocked admission and yields to at most one next sorted eligible goal; the
+correction-only fallback is capped at two candidates total. Other blocked or
+failed outcomes stop the bounded tick.
 
 Scheduled child admission binds the work to the strategist occurrence's live
 durable fence before creating or replaying work. The child identity is stable

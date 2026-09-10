@@ -199,6 +199,33 @@ async def _resolve_strategy_delta_provenance(
     return delta_id, "verified"
 
 
+def _required_strategy_delta_id(
+    *,
+    candidate: GoalCandidateDecision,
+    goal: Goal,
+) -> tuple[str | None, bool]:
+    """Return the correction identity required by a corrected web-brief goal.
+
+    A goal target carrying a correction identity is a durable strategy
+    reference, not optional evidence.  The later capability run must either
+    verify that exact applied delta or stop before any workflow side effect.
+    """
+
+    if candidate.capability_id != "workflow.web-brief-to-file":
+        return None, False
+    criterion = deserialize_success_criterion(goal)
+    target = criterion.target if criterion is not None else None
+    if not isinstance(target, dict) or "strategy_delta_id" not in target:
+        return None, False
+    value = target.get("strategy_delta_id")
+    if not isinstance(value, str):
+        return None, True
+    normalized = value.strip()
+    if not normalized or not _SAFE_OPAQUE_ID.fullmatch(normalized):
+        return None, True
+    return normalized, True
+
+
 def _candidate_receipt_details(
     decision: GoalCandidateDecision,
     *,
@@ -645,15 +672,6 @@ async def dispatch_goal_candidate(
     if tuple(candidate.evidence_refs) != safe_evidence_refs:
         candidate = candidate.model_copy(update={"evidence_refs": list(safe_evidence_refs)})
     goal = await goal_repository.get(candidate.goal_id)
-    existing = await _existing_receipt(
-        event_type=_OUTCOME_EVENT,
-        dedupe_key=candidate.dedupe_key,
-        candidate=candidate,
-        goal=goal,
-    )
-    if existing is not None:
-        return GoalOutcomeReceipt.model_validate(existing)
-
     strategy_delta_id, strategy_delta_provenance = await _resolve_strategy_delta_provenance(
         candidate=candidate,
         goal=goal,
@@ -692,6 +710,34 @@ async def dispatch_goal_candidate(
             strategy_delta_provenance=strategy_delta_provenance,
             goal=goal,
         )
+    required_delta_id, correction_required = _required_strategy_delta_id(
+        candidate=candidate,
+        goal=goal,
+    )
+    if correction_required and (
+        strategy_delta_provenance != "verified" or strategy_delta_id != required_delta_id
+    ):
+        return await _persist_no_learning(
+            candidate,
+            execution_status="blocked",
+            verification="unknown",
+            usefulness="unknown",
+            reason="strategy_delta_unresolved",
+            evidence_refs=tuple(candidate.evidence_refs),
+            strategy_delta_provenance="unresolved",
+            goal=goal,
+        )
+    # Revalidate the live goal and any required correction before replaying a
+    # cached outcome. A stale positive receipt must not bypass the correction
+    # gate merely because its dedupe key still matches.
+    existing = await _existing_receipt(
+        event_type=_OUTCOME_EVENT,
+        dedupe_key=candidate.dedupe_key,
+        candidate=candidate,
+        goal=goal,
+    )
+    if existing is not None:
+        return GoalOutcomeReceipt.model_validate(existing)
     if not candidate.dispatchable:
         return await _persist_no_learning(
             candidate,

@@ -181,6 +181,163 @@ async def test_success_requires_readback_and_receipt_redacts_inputs(async_db):
     assert "do-not-store" not in str(candidate_receipt)
 
 
+async def test_unresolved_web_brief_correction_blocks_adapter_and_records_no_learning():
+    from unittest.mock import AsyncMock, patch
+
+    from src.db.models import Goal
+
+    delta_id = "delta-unresolved"
+    goal = Goal(
+        id="goal-correction-gate",
+        title="Research a source",
+        revision=2,
+        success_criterion_json=GoalSuccessCriterion(
+            description="A readable source brief is present",
+            verifier_kind="artifact_readback",
+            evidence_refs=["operator:source-consent"],
+            target={
+                "query": "corrected source",
+                "file_path": "briefs/corrected.md",
+                "priority": 80,
+                "strategy_delta_id": delta_id,
+            },
+        ).model_dump_json(),
+    )
+    candidate = build_goal_candidate_decision(
+        goal,
+        GoalCandidateRequest(
+            capability_id="workflow.web-brief-to-file",
+            inputs={
+                "query": "corrected source",
+                "file_path": "briefs/corrected.md",
+                "priority": 80,
+            },
+            evidence_refs=[f"strategy-delta:{delta_id}"],
+        ),
+    )
+    persisted: list[dict[str, object]] = []
+    adapter_calls = 0
+
+    async def adapter(**_kwargs):
+        nonlocal adapter_calls
+        adapter_calls += 1
+        return GoalExecutionResult(verification="passed", artifact_ref="should-not-exist")
+
+    async def persist(**kwargs):
+        persisted.append(kwargs)
+        return kwargs["details"]
+
+    import src.guardian.goal_conditioned_loop as goal_loop
+
+    with (
+        patch.object(goal_loop.goal_repository, "get", new=AsyncMock(return_value=goal)),
+        patch.object(goal_loop, "_existing_receipt", new=AsyncMock(return_value=None)),
+        patch.object(goal_loop, "get_strategy_delta", new=AsyncMock(return_value=None)),
+        patch.object(goal_loop, "_persist_receipt", new=persist),
+    ):
+        outcome = await dispatch_goal_candidate(candidate, adapter=adapter)
+
+    assert outcome.execution_status == "blocked"
+    assert outcome.verification == "unknown"
+    assert outcome.learning == "no_learning"
+    assert outcome.strategy_delta_id is None
+    assert outcome.strategy_delta_provenance == "unresolved"
+    assert adapter_calls == 0
+    no_learning = next(
+        item["details"] for item in persisted if item["event_type"] == "goal_loop_no_learning"
+    )
+    assert no_learning["reason"] == "strategy_delta_unresolved"
+    assert no_learning["strategy_delta_provenance"] == "unresolved"
+
+
+async def test_stale_corrected_outcome_is_not_replayed_before_delta_validation():
+    from datetime import datetime, timezone
+    from unittest.mock import AsyncMock, patch
+
+    from src.db.models import Goal
+
+    delta_id = "delta-stale-replay"
+    goal = Goal(
+        id="goal-stale-replay",
+        title="Research a source",
+        revision=2,
+        success_criterion_json=GoalSuccessCriterion(
+            description="A readable source brief is present",
+            verifier_kind="artifact_readback",
+            evidence_refs=["operator:source-consent"],
+            target={
+                "query": "corrected source",
+                "file_path": "briefs/corrected.md",
+                "priority": 80,
+                "strategy_delta_id": delta_id,
+            },
+        ).model_dump_json(),
+    )
+    candidate = build_goal_candidate_decision(
+        goal,
+        GoalCandidateRequest(
+            capability_id="workflow.web-brief-to-file",
+            inputs={
+                "query": "corrected source",
+                "file_path": "briefs/corrected.md",
+                "priority": 80,
+            },
+            evidence_refs=[f"strategy-delta:{delta_id}"],
+        ),
+    )
+    stale_outcome = {
+        "dedupe_key": candidate.dedupe_key,
+        "goal_id": goal.id,
+        "goal_revision": candidate.goal_revision,
+        "capability_id": candidate.capability_id,
+        "input_digest": _safe_digest(candidate.inputs),
+        "strategy_delta_id": delta_id,
+        "strategy_delta_provenance": "verified",
+        "evidence_refs": [f"strategy-delta:{delta_id}"],
+    }
+    persisted: list[dict[str, object]] = []
+    adapter_calls = 0
+
+    async def adapter(**_kwargs):
+        nonlocal adapter_calls
+        adapter_calls += 1
+        return GoalExecutionResult(verification="passed", artifact_ref="should-not-run")
+
+    async def persist(**kwargs):
+        persisted.append(kwargs)
+        return kwargs["details"]
+
+    import src.guardian.goal_conditioned_loop as goal_loop
+
+    with (
+        patch.object(goal_loop.goal_repository, "get", new=AsyncMock(return_value=goal)),
+        patch.object(
+            goal_loop.audit_repository,
+            "list_events",
+            new=AsyncMock(
+                return_value=[
+                    {
+                        "event_type": "goal_loop_outcome",
+                        "created_at": datetime.now(timezone.utc).isoformat(),
+                        "details": stale_outcome,
+                    }
+                ]
+            ),
+        ),
+        patch.object(goal_loop, "get_strategy_delta", new=AsyncMock(return_value=None)),
+        patch.object(goal_loop, "_persist_receipt", new=persist),
+    ):
+        outcome = await dispatch_goal_candidate(candidate, adapter=adapter)
+
+    assert outcome.execution_status == "blocked"
+    assert outcome.reason == "strategy_delta_unresolved"
+    assert outcome.learning == "no_learning"
+    assert outcome.strategy_delta_id is None
+    assert outcome.strategy_delta_provenance == "unresolved"
+    assert adapter_calls == 0
+    assert any(item["event_type"] == "goal_loop_no_learning" for item in persisted)
+
+
 async def test_correction_changes_later_choice_and_persists_provenance():
     from unittest.mock import AsyncMock, patch
     from types import SimpleNamespace

@@ -89,7 +89,11 @@ def _candidate_for_missing_goal(request: WebBriefToFileRequest) -> GoalCandidate
         capability_version=request.capability_version,
         evidence_refs=evidence_refs,
         expected_outcome=expected,
-        inputs={"query": request.query, "file_path": request.file_path},
+        inputs={
+            "query": request.query,
+            "file_path": request.file_path,
+            "priority": request.priority,
+        },
     )
     return GoalCandidateDecision(
         candidate_id="cand_" + hashlib.sha256(dedupe.encode("utf-8")).hexdigest()[:24],
@@ -102,7 +106,11 @@ def _candidate_for_missing_goal(request: WebBriefToFileRequest) -> GoalCandidate
         evidence_refs=evidence_refs,
         capability_id=CAPABILITY_ID,
         capability_version=request.capability_version,
-        inputs={"query": request.query, "file_path": request.file_path},
+        inputs={
+            "query": request.query,
+            "file_path": request.file_path,
+            "priority": request.priority,
+        },
         expected_outcome=expected,
         expires_at=request.deadline_at,
     )
@@ -114,7 +122,11 @@ def _candidate_for_goal(goal: Goal, request: WebBriefToFileRequest) -> GoalCandi
         GoalCandidateRequest(
             capability_id=CAPABILITY_ID,
             capability_version=request.capability_version,
-            inputs={"query": request.query, "file_path": request.file_path},
+            inputs={
+                "query": request.query,
+                "file_path": request.file_path,
+                "priority": request.priority,
+            },
             evidence_refs=request.evidence_refs,
             reason=request.reason,
             expected_outcome=request.expected_outcome.strip() or f"Save a public-source brief for {request.query}",

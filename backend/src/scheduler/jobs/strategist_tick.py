@@ -46,6 +46,7 @@ logger = logging.getLogger(__name__)
 _STRATEGIST_SERVICE_ID = "service:strategist"
 _STRATEGIST_RUNNER_ID = "scheduler:strategist_tick"
 _STRATEGIST_CAPABILITY_VERSION = "strategist-tick-v1"
+_WEB_BRIEF_CORRECTION_FALLBACK_MAX_CANDIDATES = 2
 
 
 def _reasoning_digest(reasoning: object) -> str:
@@ -343,72 +344,106 @@ async def _run_opted_in_goal_web_brief(
         )
         return details
 
-    goal, criterion, query, file_path, priority, strategy_delta_id = sorted(
+    async def _run_candidate(
+        selected: tuple[Goal, object, str, str, int, str | None],
+    ) -> dict[str, object]:
+        goal, criterion, query, file_path, priority, strategy_delta_id = selected
+        revision = max(int(goal.revision or 1), 1)
+        session_id = f"web-brief:scheduler:{goal.id}:{revision}"
+        principal = TrustPrincipal(
+            principal_id="service:web-brief",
+            principal_type=PrincipalType.SERVICE,
+            authenticated=True,
+            grants=(AuthorityGrant.CAPABILITY_EXECUTE,),
+            session_id=session_id,
+        )
+        evidence_refs = list(criterion.evidence_refs)
+        if strategy_delta_id:
+            evidence_refs.append(f"strategy-delta:{strategy_delta_id}")
+        request = WebBriefToFileRequest(
+            goal_id=goal.id,
+            goal_revision=revision,
+            query=query,
+            file_path=file_path,
+            owner_principal_id="service:web-brief",
+            service_id="service:web-brief",
+            session_id=session_id,
+            parent_job_id=parent_job_id,
+            parent_fencing_token=parent_fencing_token,
+            evidence_refs=evidence_refs,
+            reason="scheduled_proactive_web_brief",
+            expected_outcome=criterion.description,
+            priority=priority,
+        )
+        result = await WebBriefToFileService(authority_principal=principal).run(request)
+        if not isinstance(result, WebBriefToFileResult):
+            raise TypeError("web brief service returned an invalid result")
+        effect_status = (
+            "succeeded"
+            if result.execution_status == "succeeded" and result.verification == "passed"
+            else "blocked"
+            if result.execution_status == "blocked"
+            else "failed"
+        )
+        result_strategy_delta_id = (
+            result.strategy_delta_id
+            if result.strategy_delta_provenance == "verified"
+            else None
+        )
+        result_strategy_delta_provenance = result.strategy_delta_provenance
+        if result_strategy_delta_provenance == "verified" and not result_strategy_delta_id:
+            result_strategy_delta_provenance = "unresolved"
+        details = {
+            "status": result.execution_status,
+            "verification": result.verification,
+            "learning": result.learning,
+            "goal_id": result.goal_id,
+            "goal_revision": result.goal_revision,
+            "job_id": result.job_id,
+            "artifact_ref": result.artifact_ref,
+            "query_digest": hashlib.sha256(query.encode("utf-8")).hexdigest(),
+            "priority": priority,
+            # The target is caller/configuration input. Only the service's
+            # revalidated result may establish correction provenance on the
+            # operator-visible scheduler receipt.
+            "strategy_delta_id": result_strategy_delta_id,
+            "strategy_delta_provenance": result_strategy_delta_provenance,
+            "strategy_delta_evidence_ref": (
+                f"strategy-delta:{result_strategy_delta_id}"
+                if result_strategy_delta_id and result_strategy_delta_provenance == "verified"
+                else None
+            ),
+            "source_read": result.source_read,
+            "reason": result.reason,
+            "operator_visible": True,
+        }
+        await durable_job_repository.record_effect(
+            parent_job_id,
+            effect_type="web_brief_admission",
+            status=effect_status,
+            details=details,
+            owner=_STRATEGIST_RUNNER_ID,
+            fencing_token=parent_fencing_token,
+        )
+        return details
+
+    ordered_candidates = sorted(
         eligible,
         key=lambda item: _proactive_goal_sort_key(item[0], item[4]),
-    )[0]
-    revision = max(int(goal.revision or 1), 1)
-    session_id = f"web-brief:scheduler:{goal.id}:{revision}"
-    principal = TrustPrincipal(
-        principal_id="service:web-brief",
-        principal_type=PrincipalType.SERVICE,
-        authenticated=True,
-        grants=(AuthorityGrant.CAPABILITY_EXECUTE,),
-        session_id=session_id,
     )
-    evidence_refs = list(criterion.evidence_refs)
-    if strategy_delta_id:
-        evidence_refs.append(f"strategy-delta:{strategy_delta_id}")
-    request = WebBriefToFileRequest(
-        goal_id=goal.id,
-        goal_revision=revision,
-        query=query,
-        file_path=file_path,
-        owner_principal_id="service:web-brief",
-        service_id="service:web-brief",
-        session_id=session_id,
-        parent_job_id=parent_job_id,
-        parent_fencing_token=parent_fencing_token,
-        evidence_refs=evidence_refs,
-        reason="scheduled_proactive_web_brief",
-        expected_outcome=criterion.description,
-        priority=priority,
-    )
-    result = await WebBriefToFileService(authority_principal=principal).run(request)
-    if not isinstance(result, WebBriefToFileResult):
-        raise TypeError("web brief service returned an invalid result")
-    effect_status = (
-        "succeeded"
-        if result.execution_status == "succeeded" and result.verification == "passed"
-        else "blocked"
-        if result.execution_status == "blocked"
-        else "failed"
-    )
-    details = {
-        "status": result.execution_status,
-        "verification": result.verification,
-        "learning": result.learning,
-        "goal_id": result.goal_id,
-        "goal_revision": result.goal_revision,
-        "job_id": result.job_id,
-        "artifact_ref": result.artifact_ref,
-        "query_digest": hashlib.sha256(query.encode("utf-8")).hexdigest(),
-        "priority": priority,
-        "strategy_delta_id": strategy_delta_id,
-        "strategy_delta_evidence_ref": f"strategy-delta:{strategy_delta_id}" if strategy_delta_id else None,
-        "source_read": result.source_read,
-        "reason": result.reason,
-        "operator_visible": True,
-    }
-    await durable_job_repository.record_effect(
-        parent_job_id,
-        effect_type="web_brief_admission",
-        status=effect_status,
-        details=details,
-        owner=_STRATEGIST_RUNNER_ID,
-        fencing_token=parent_fencing_token,
-    )
-    return details
+    for candidate_index, selected in enumerate(ordered_candidates):
+        details = await _run_candidate(selected)
+        # A correction gate is a candidate-local no-op. Keep the scheduler's
+        # priority order but give one next valid goal a chance; all other
+        # blocked/failed outcomes stop the bounded tick after their receipt.
+        if (
+            details.get("status") == "blocked"
+            and details.get("reason") == "strategy_delta_unresolved"
+            and candidate_index + 1 < _WEB_BRIEF_CORRECTION_FALLBACK_MAX_CANDIDATES
+        ):
+            continue
+        return details
+    raise RuntimeError("web brief candidate fallback exhausted without a result")
 
 
 async def _run_opted_in_goal_snapshot(

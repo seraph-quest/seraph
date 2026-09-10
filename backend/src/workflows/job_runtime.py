@@ -30,6 +30,18 @@ from src.db.session_refs import ensure_sessions_exist
 
 DURABLE_JOB_RECORD_SCHEMA_VERSION = 2
 
+
+def get_session():
+    """Resolve the shared session factory through the durable-state module.
+
+    Keeping this narrow proxy makes the canonical repository's database
+    dependency explicit and patchable in isolated process/database fixtures
+    while preserving the runtime migration hook that owns the session factory.
+    """
+    from src.workflows import durable_state
+
+    return durable_state.get_session()
+
 # Higher priority values are selected first by a future broker.  The contract
 # itself only persists the value and never starts a second scheduler.
 DURABLE_JOB_STATUSES = (
@@ -3294,11 +3306,10 @@ class DurableJobRepository:
 
     @staticmethod
     def _session():
-        # Resolve dynamically so the existing durable_state DB fixture and
-        # migration shims can patch one canonical session factory.
-        from src.workflows import durable_state
-
-        return durable_state.get_session()
+        # Resolve dynamically so DB fixtures and migration shims can patch the
+        # canonical job runtime session factory without changing production
+        # persistence behavior.
+        return get_session()
 
 
 durable_job_repository = DurableJobRepository()
@@ -3325,5 +3336,6 @@ __all__ = [
     "DurableJobSpec",
     "DurableJobRepository",
     "_canonical_remote_inference_receipt",
+    "get_session",
     "durable_job_repository",
 ]

@@ -676,7 +676,7 @@ class TestWorkflowManager:
         assert mgr.list_workflows()[0]["requires_tools"] == ["execute_code"]
         assert mgr.get_tool_metadata(workflow.tool_name)["requires_tools"] == ["execute_code"]
 
-    def test_workflow_tool_resumes_from_checkpoint_state(self):
+    def test_workflow_tool_resumes_from_checkpoint_state(self, async_db):
         workflow = Workflow(
             name="web-brief-to-file",
             description="Search the web and save a note",
@@ -784,7 +784,7 @@ class TestWorkflowManager:
         assert details["step_records"][0]["reused_from_run_identity"] == parent_run_identity
         assert details["step_records"][1]["status"] == "succeeded"
 
-    def test_workflow_tool_failure_payload_keeps_checkpoint_and_failed_step_context(self):
+    def test_workflow_tool_failure_payload_keeps_checkpoint_and_failed_step_context(self, async_db):
         workflow = Workflow(
             name="web-brief-to-file",
             description="Search the web and save a note",
@@ -989,7 +989,7 @@ def test_workflow_tool_allows_partial_migration_missing_durable_state_tables():
     assert durable_repository.record_step_started.await_count == 1
 
 
-def test_workflow_tool_resume_rejects_when_delegation_boundary_changes():
+def test_workflow_tool_resume_rejects_when_delegation_boundary_changes(async_db):
     workflow = Workflow(
         name="delegation-replay",
         description="Resume delegated work",
@@ -1047,27 +1047,56 @@ def test_workflow_tool_resume_rejects_when_delegation_boundary_changes():
         finish_run=AsyncMock(),
     )
 
-    with (
-        patch(
-            "src.workflows.manager._load_workflow_checkpoint_payload",
-            AsyncMock(return_value=checkpoint_payload),
-        ),
-        patch("src.workflows.manager.workflow_state_repository", durable_repository),
-        pytest.raises(RuntimeError, match="trust boundary"),
-    ):
-        workflow_tool(
-            topic="seraph",
-            _seraph_resume_from_step="delegate",
-            _seraph_parent_run_identity=parent_run_identity,
-            _seraph_root_run_identity=parent_run_identity,
-        )
+    operator = _test_bypass_operator()
+    checkpoint_payload.update(
+        {
+            "session_id": "session-1",
+            "owner_kind": "user",
+            "owner_principal_id": operator.principal.principal_id,
+            "durable_run_identity": parent_run_identity,
+            "state_source": "durable_workflow_state",
+            "orchestration_v2": {
+                "revision": 1,
+                "lease": {
+                    "owner": _workflow_recovery_owner(operator.principal.principal_id, "session-1"),
+                    "lease_id": "parent-lease",
+                    "expires_at": "2099-01-01T00:00:00+00:00",
+                    "revision": 1,
+                },
+            },
+        }
+    )
+    tokens = set_runtime_context(
+        "session-1",
+        "balanced",
+        trust_principal=replace(operator.principal, session_id="session-1"),
+    )
+    try:
+        with (
+            patch(
+                "src.workflows.manager._load_workflow_checkpoint_payload",
+                AsyncMock(return_value=checkpoint_payload),
+            ),
+            patch("src.workflows.manager.workflow_state_repository", durable_repository),
+            pytest.raises(RuntimeError, match="trust boundary"),
+        ):
+            workflow_tool(
+                topic="seraph",
+                _seraph_resume_from_step="delegate",
+                _seraph_parent_run_identity=parent_run_identity,
+                _seraph_root_run_identity=parent_run_identity,
+                _seraph_parent_revision=1,
+                _seraph_parent_lease_id="parent-lease",
+            )
+    finally:
+        reset_runtime_context(tokens)
     assert durable_repository.create_run.await_count == 1
     assert durable_repository.record_step_started.await_count == 0
     assert durable_repository.finish_run.await_args.kwargs["status"] == "failed"
     assert durable_repository.finish_run.await_args.kwargs["last_completed_step_id"] is None
 
 
-def test_workflow_tool_resume_rejects_legacy_checkpoint_for_authenticated_surface():
+def test_workflow_tool_resume_rejects_legacy_checkpoint_for_authenticated_surface(async_db):
     workflow = Workflow(
         name="authenticated-replay",
         description="Resume authenticated source work",
@@ -1114,20 +1143,49 @@ def test_workflow_tool_resume_rejects_legacy_checkpoint_for_authenticated_surfac
         finish_run=AsyncMock(),
     )
 
-    with (
-        patch(
-            "src.workflows.manager._load_workflow_checkpoint_payload",
-            AsyncMock(return_value=checkpoint_payload),
-        ),
-        patch("src.workflows.manager.workflow_state_repository", durable_repository),
-        pytest.raises(RuntimeError, match="predates trust-boundary tracking"),
-    ):
-        workflow_tool(
-            query="seraph",
-            _seraph_resume_from_step="save",
-            _seraph_parent_run_identity=parent_run_identity,
-            _seraph_root_run_identity=parent_run_identity,
-        )
+    operator = _test_bypass_operator()
+    checkpoint_payload.update(
+        {
+            "session_id": "session-1",
+            "owner_kind": "user",
+            "owner_principal_id": operator.principal.principal_id,
+            "durable_run_identity": parent_run_identity,
+            "state_source": "durable_workflow_state",
+            "orchestration_v2": {
+                "revision": 1,
+                "lease": {
+                    "owner": _workflow_recovery_owner(operator.principal.principal_id, "session-1"),
+                    "lease_id": "parent-lease",
+                    "expires_at": "2099-01-01T00:00:00+00:00",
+                    "revision": 1,
+                },
+            },
+        }
+    )
+    tokens = set_runtime_context(
+        "session-1",
+        "balanced",
+        trust_principal=replace(operator.principal, session_id="session-1"),
+    )
+    try:
+        with (
+            patch(
+                "src.workflows.manager._load_workflow_checkpoint_payload",
+                AsyncMock(return_value=checkpoint_payload),
+            ),
+            patch("src.workflows.manager.workflow_state_repository", durable_repository),
+            pytest.raises(RuntimeError, match="predates trust-boundary tracking"),
+        ):
+            workflow_tool(
+                query="seraph",
+                _seraph_resume_from_step="save",
+                _seraph_parent_run_identity=parent_run_identity,
+                _seraph_root_run_identity=parent_run_identity,
+                _seraph_parent_revision=1,
+                _seraph_parent_lease_id="parent-lease",
+            )
+    finally:
+        reset_runtime_context(tokens)
     assert durable_repository.create_run.await_count == 1
     assert durable_repository.record_step_started.await_count == 0
     assert durable_repository.finish_run.await_args.kwargs["status"] == "failed"
@@ -6733,7 +6791,7 @@ async def test_workflow_resume_plan_resolves_redacted_step_handle_before_plannin
 
 
 @pytest.mark.asyncio
-async def test_workflow_control_uses_run_session_raw_step_and_post_transition_fence():
+async def test_workflow_control_uses_run_session_raw_step_and_post_transition_fence(async_db):
     """The route handle must be consumable by chat recovery under one fence."""
     from src.api.workflows import (
         WorkflowRunControlRequest,
@@ -6910,8 +6968,6 @@ async def test_workflow_control_uses_run_session_raw_step_and_post_transition_fe
     try:
         with (
             patch("src.workflows.manager._load_workflow_checkpoint_payload", AsyncMock(return_value=details)),
-            patch("src.workflows.manager._run_required_durable_state_write", return_value=None),
-            patch("src.workflows.manager._run_durable_state_write", return_value=None),
             patch("src.workflows.manager.flush_session_memory_sync"),
         ):
             workflow_tool(

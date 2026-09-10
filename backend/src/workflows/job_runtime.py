@@ -2790,27 +2790,52 @@ class DurableJobRepository:
                     "effect_id already identifies a different effect target"
                 )
             previous_status = _text(previous.get("status")) if previous is not None else ""
+            remote_terminal_settlement = (
+                effect_type == "remote_inference_admission"
+                and status in {"succeeded", "failed"}
+                and isinstance(safe_details, dict)
+                and isinstance(safe_details.get("receipt"), dict)
+                and _text(safe_details["receipt"].get("status"))
+                in {"succeeded", "settled", "failed", "cancelled", "expired", "rejected"}
+            )
+            remote_uncertain_projection = (
+                effect_type == "remote_inference_admission"
+                and status == "blocked"
+                and isinstance(safe_details, dict)
+                and isinstance(safe_details.get("receipt"), dict)
+                and _text(safe_details["receipt"].get("status")) == "blocked"
+            )
+            if remote_terminal_settlement:
+                prior_details = previous.get("details") if previous is not None else {}
+                prior_details = prior_details if isinstance(prior_details, Mapping) else {}
+                nested_receipt = safe_details.get("receipt") if isinstance(safe_details, Mapping) else None
+                nested_receipt = nested_receipt if isinstance(nested_receipt, Mapping) else {}
+                expected_operation_id = _text(
+                    prior_details.get("operation_id")
+                ) or _text(previous.get("target_digest") if previous is not None else None) or _text(
+                    target_digest
+                )
+                expected_job_id = _text(prior_details.get("job_id")) or job_id
+                expected_owner_id = _text(prior_details.get("owner_id")) or _text(
+                    getattr(run, "owner_principal_id", None)
+                )
+                if (
+                    not expected_operation_id
+                    or not expected_job_id
+                    or not expected_owner_id
+                    or _text(nested_receipt.get("operation_id")) != expected_operation_id
+                    or _text(nested_receipt.get("job_id")) != expected_job_id
+                    or _text(nested_receipt.get("owner_id")) != expected_owner_id
+                ):
+                    raise DurableJobIdempotencyConflict(
+                        "remote terminal receipt does not match the immutable intent binding"
+                    )
             if previous_status in UNRESOLVED_EFFECT_STATUSES:
                 # A terminal broker receipt is the exact settlement of the
                 # pre-dispatch remote intent.  Provider errors remain
                 # ``blocked`` and therefore still require reconciliation;
                 # only the broker's settled success/failure states may close
                 # this one effect identity.
-                remote_terminal_settlement = (
-                    effect_type == "remote_inference_admission"
-                    and status in {"succeeded", "failed"}
-                    and isinstance(safe_details, dict)
-                    and isinstance(safe_details.get("receipt"), dict)
-                    and _text(safe_details["receipt"].get("status"))
-                    in {"succeeded", "settled", "failed", "cancelled", "expired", "rejected"}
-                )
-                remote_uncertain_projection = (
-                    effect_type == "remote_inference_admission"
-                    and status == "blocked"
-                    and isinstance(safe_details, dict)
-                    and isinstance(safe_details.get("receipt"), dict)
-                    and _text(safe_details["receipt"].get("status")) == "blocked"
-                )
                 if (
                     receipt_kind == "effect"
                     and status not in UNRESOLVED_EFFECT_STATUSES

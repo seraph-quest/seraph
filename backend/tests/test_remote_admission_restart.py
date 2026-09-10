@@ -32,7 +32,9 @@ from src.model_fabric import (
 )
 from src.model_fabric.contracts import OPENROUTER_API_BASE
 from src.llm_runtime import _execute_sync_with_gpu_admission
+from src.model_fabric.execution import SyncAdapterReceiptError
 from src.model_fabric.proofs import build_model_route_proof
+from src.model_fabric.receipts import ReceiptPersistenceResult
 from src.security.trust_contract import (
     AuthorityGrant,
     ContentOrigin,
@@ -666,3 +668,115 @@ async def test_restart_after_terminal_remote_success_recovers_without_dispatch(a
                 now=now,
             )
     assert calls == 1
+
+
+@pytest.mark.asyncio
+async def test_sync_route_persistence_degradation_settles_durable_remote_first(async_db, monkeypatch):
+    """A degraded route projection cannot strand a successful remote intent."""
+    from src.model_fabric import execution
+
+    broker = RemoteInferenceAdmissionBroker()
+    monkeypatch.setattr(execution, "gpu_admission_broker", broker)
+    now = time.time()
+    profile = _profile(now=now)
+    context = _context(
+        job_id="job-744-route-persistence",
+        request_id="request-744-route-persistence",
+        profile=profile,
+    )
+    proofs = _proofs(profile, now=now)
+    _admitted, claimed = await _admit_and_claim(
+        context.job_id,
+        dedupe_key="route-persistence",
+        lease_seconds=1,
+    )
+
+    class DegradedRouteRepository:
+        def __init__(self):
+            self.receipts = []
+
+        async def persist_route_receipt(self, receipt):
+            self.receipts.append(receipt)
+            return ReceiptPersistenceResult.degraded(receipt.receipt_id)
+
+    route_repository = DegradedRouteRepository()
+    calls = 0
+
+    def transport(_candidate, _stream):
+        nonlocal calls
+        calls += 1
+        return {"choices": [{"message": {"content": "durable-before-route"}}]}
+
+    with bind_remote_inference_receipt(
+        repository=durable_job_repository,
+        job_id=context.job_id,
+        owner=LEASE_OWNER,
+        fencing_token=claimed["lease"]["fencing_token"],
+    ):
+        with pytest.raises(SyncAdapterReceiptError):
+            execute_sync_adapter(
+                context=context,
+                candidates=(candidate_from_profile(profile),),
+                proofs=proofs,
+                adapter=transport,
+                repository=route_repository,
+                now=now,
+            )
+
+    assert calls == 1
+    assert len(route_repository.receipts) == 1
+    running = await durable_job_repository.get_job(context.job_id)
+    effect = _remote_effect(running)
+    assert running["status"] == "running"
+    assert effect["status"] == "succeeded"
+    assert effect["details"]["receipt"]["status"] == "succeeded"
+    recovered = await durable_job_repository.recover_stale_jobs(
+        now=datetime.now(timezone.utc) + timedelta(seconds=5),
+    )
+    assert [item["status"] for item in recovered] == ["succeeded"]
+    assert calls == 1
+
+
+@pytest.mark.asyncio
+async def test_generic_remote_terminal_receipt_must_match_immutable_intent(async_db):
+    """Generic effect writes cannot settle another remote operation."""
+    _admitted, claimed = await _admit_and_claim(
+        "job-744-nested-mismatch",
+        dedupe_key="nested-mismatch",
+    )
+    repository = DurableJobRepository()
+    operation_id = "remote:job-744-nested-mismatch"
+    await repository.record_remote_inference_intent(
+        operation_id=operation_id,
+        job_id="job-744-nested-mismatch",
+        owner_id=OWNER_ID,
+        runtime_path="chat_agent",
+        profile_id="fixture-openrouter-text",
+        priority="interactive_chat",
+        capability_version="remote-text-v1",
+        owner=LEASE_OWNER,
+        fencing_token=claimed["lease"]["fencing_token"],
+    )
+    with pytest.raises(DurableJobIdempotencyConflict, match="immutable intent binding"):
+        await repository.record_effect(
+            "job-744-nested-mismatch",
+            effect_type="remote_inference_admission",
+            effect_id=f"remote_inference:{operation_id}",
+            target_path=f"remote_inference:{operation_id}",
+            target_digest=operation_id,
+            adapter_idempotency_key=operation_id,
+            status="succeeded",
+            details={
+                "admission_status": "succeeded",
+                "receipt": {
+                    "status": "succeeded",
+                    "operation_id": "remote:other-job",
+                    "job_id": "job-744-nested-mismatch",
+                    "owner_id": OWNER_ID,
+                },
+            },
+            owner=LEASE_OWNER,
+            fencing_token=claimed["lease"]["fencing_token"],
+    )
+    job = await repository.get_job("job-744-nested-mismatch")
+    assert _remote_effect(job)["status"] == "intent"

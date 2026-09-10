@@ -521,6 +521,11 @@ def execute_sync_adapter(
     try:
         result = gpu_admission_broker.execute_sync(admission_request, admitted_adapter, now=now)
     except GpuAdmissionError as error:
+        # Persist the broker's terminal/uncertain result while the durable
+        # intent is still the authoritative operation record. Route-receipt
+        # storage is a separate projection and may degrade; it must not leave
+        # a successfully admitted remote operation without a durable outcome.
+        persist_admission_receipt(getattr(error, "receipt", None), readback=True)
         if not callback_started:
             persistence = _run_awaitable_sync(
                 session.finalize_denied(
@@ -542,9 +547,12 @@ def execute_sync_adapter(
                 )
             )
             _require_persisted_receipt(persistence)
-        persist_admission_receipt(getattr(error, "receipt", None), readback=True)
         raise
     except BaseException:
+        # The provider callback may have crossed the remote boundary before a
+        # non-admission exception escaped. Record that broker outcome before
+        # attempting the route projection, which can independently degrade.
+        persist_admission_receipt(readback=True)
         if callback_started and attempt_completed:
             persistence = _run_awaitable_sync(session.finalize(outcome="failed"))
             _require_persisted_receipt(persistence)
@@ -556,10 +564,12 @@ def execute_sync_adapter(
                 )
             )
             _require_persisted_receipt(persistence)
-        persist_admission_receipt(readback=True)
         raise
 
+    # The remote terminal settlement is the durable source of truth for the
+    # admitted provider call. Finalizing the model-fabric route receipt after
+    # it prevents a degraded route projection from stranding the intent.
+    persist_admission_receipt(readback=True)
     persistence = _run_awaitable_sync(session.finalize(outcome="succeeded"))
     _require_persisted_receipt(persistence)
-    persist_admission_receipt(readback=True)
     return result

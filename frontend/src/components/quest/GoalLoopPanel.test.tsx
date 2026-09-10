@@ -4,7 +4,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { GoalLoopPanel } from "./GoalLoopPanel";
 import { GoalLoopReceiptDetails } from "./GoalLoopReceiptDetails";
-import { useQuestStore } from "../../stores/questStore";
+import { normalizeGoalLoopReceipt, useQuestStore } from "../../stores/questStore";
 import type { GoalInfo, GoalLoopPayload, GoalLoopReceipt, GoalStrategyDelta } from "../../types";
 
 const goal: GoalInfo = {
@@ -214,6 +214,13 @@ describe("GoalLoopPanel", () => {
   it.each([
     ["false", { ...outcomeReceipt, content_redacted: false }],
     ["absent", (({ content_redacted: _redacted, ...receipt }) => receipt)(outcomeReceipt)],
+  ] as const)("rejects a %s content_redacted receipt during runtime normalization", (_label, receipt) => {
+    expect(normalizeGoalLoopReceipt(receipt)).toBeNull();
+  });
+
+  it.each([
+    ["false", { ...outcomeReceipt, content_redacted: false }],
+    ["absent", (({ content_redacted: _redacted, ...receipt }) => receipt)(outcomeReceipt)],
   ] as const)("fails closed for a %s content_redacted flag before exposing receipt text", (_label, receipt) => {
     const runGoalSnapshot = vi.fn().mockResolvedValue({ status: "blocked" });
     setupStore({
@@ -225,9 +232,7 @@ describe("GoalLoopPanel", () => {
     expect(screen.getByTestId("goal-loop-panel")).toHaveAttribute("data-state", "partial_metadata");
     expect(screen.queryByText("goal snapshot read back")).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "run snapshot" })).toBeDisabled();
-
-    fireEvent.click(screen.getByText("Inspect exact backend receipt fields"));
-    expect(screen.getByTestId("goal-loop-receipt-withheld")).toBeInTheDocument();
+    expect(screen.queryByTestId("goal-loop-receipt-details")).not.toBeInTheDocument();
     expect(runGoalSnapshot).not.toHaveBeenCalled();
   });
 

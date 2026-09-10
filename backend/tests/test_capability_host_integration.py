@@ -13,7 +13,7 @@ import pytest
 from sqlalchemy.sql.dml import Update
 
 from config.settings import settings
-from src.approval.repository import approval_repository
+from src.approval.repository import approval_repository, fingerprint_tool_call
 from src.approval.runtime import (
     _seal_capability_approval,
     reset_runtime_context,
@@ -30,6 +30,7 @@ from src.extensions.capability_execution import (
     build_capability_request,
     current_capability_execution_host,
 )
+from src.db.models import ApprovalRequest
 from src.security.trust_contract import AuthorityGrant, PrincipalType, TrustPrincipal
 from src.tools.approval import wrap_tools_for_approval
 from src.tools.filesystem_tool import read_file, write_file
@@ -447,12 +448,14 @@ async def test_repository_consumed_approval_issues_one_use_host_binding(monkeypa
         tmp_path / "journal.json",
         **{"test.echo": lambda arguments: calls.append(dict(arguments)) or "ok"},
     )
-    request = SimpleNamespace(
+    arguments = {"message": "hello", "count": 1}
+    fingerprint = fingerprint_tool_call("test.echo", arguments)
+    request = ApprovalRequest(
         id="approval:repository",
         status="approved",
         session_id="session:test",
         tool_name="test.echo",
-        fingerprint="fingerprint",
+        fingerprint=fingerprint,
         details_json=None,
     )
 
@@ -483,7 +486,7 @@ async def test_repository_consumed_approval_issues_one_use_host_binding(monkeypa
     binding = await approval_repository.consume_approved(
         session_id="session:test",
         tool_name="test.echo",
-        fingerprint="fingerprint",
+        fingerprint=fingerprint,
     )
     assert isinstance(binding, dict)
     assert binding["approval_id"] == request.id
@@ -492,20 +495,32 @@ async def test_repository_consumed_approval_issues_one_use_host_binding(monkeypa
     assert await approval_repository.consume_approved(
         session_id="session:test",
         tool_name="test.echo",
-        fingerprint="fingerprint",
+        fingerprint=fingerprint,
     ) is False
 
     result = host.execute(
         _request(
             approval_id=request.id,
-            approval_digest="fingerprint",
+            approval_digest=fingerprint,
             approval_binding=binding,
+            arguments=arguments,
         )
     )
     assert result.state == "succeeded"
     assert calls == [{"message": "hello", "count": 1}]
 
-    with pytest.raises(CapabilityExecutionError, match="approval_binding_missing"):
+    with pytest.raises(CapabilityExecutionError, match="approval_binding_mismatch"):
+        host.execute(
+            _request(
+                approval_id=request.id,
+                approval_digest=fingerprint,
+                approval_binding=binding,
+                arguments={"message": "altered", "count": 1},
+            )
+        )
+    assert calls == [{"message": "hello", "count": 1}]
+
+    with pytest.raises(CapabilityExecutionError, match="approval_binding_mismatch"):
         host.execute(
             _request(
                 approval_id=request.id,

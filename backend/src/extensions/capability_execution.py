@@ -1047,12 +1047,29 @@ class CapabilityExecutionHost:
             binding = request.approval_binding
             if not isinstance(binding, Mapping):
                 raise CapabilityExecutionError("approval_binding_missing")
+            if not isinstance(binding.get("binding_mac"), str) or not isinstance(
+                binding.get("receipt_token"), str
+            ):
+                raise CapabilityExecutionError("approval_binding_missing")
+            from src.approval.repository import fingerprint_tool_call
+
+            approval_context = binding.get("approval_context")
+            expected_approval_digest = fingerprint_tool_call(
+                request.capability_id,
+                dict(request.arguments),
+                approval_context=(
+                    dict(approval_context)
+                    if isinstance(approval_context, Mapping)
+                    else None
+                ),
+            )
             if (
                 str(binding.get("approval_id") or "") != request.approval_id
                 or str(binding.get("status") or "") != "consumed"
                 or str(binding.get("session_id") or "") != request.session_id
                 or str(binding.get("tool_name") or "") != request.capability_id
-                or str(binding.get("fingerprint") or "") != request.approval_digest
+                or str(binding.get("fingerprint") or "") != expected_approval_digest
+                or request.approval_digest != expected_approval_digest
             ):
                 raise CapabilityExecutionError("approval_binding_mismatch")
             owner_session = str(binding.get("owner_operator_session_id") or "")

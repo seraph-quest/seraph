@@ -35,47 +35,12 @@ _CAPABILITY_APPROVAL_RECEIPT_TTL_SECONDS = 300.0
 _CAPABILITY_APPROVAL_RECEIPT_LIMIT = 1024
 _CAPABILITY_APPROVAL_RECEIPTS: dict[str, tuple[str, float]] = {}
 _CAPABILITY_APPROVAL_RECEIPTS_LOCK = threading.Lock()
-_CAPABILITY_APPROVAL_ISSUER_TOKEN = object()
-_CAPABILITY_APPROVAL_ISSUANCE_NONCES: dict[str, tuple[str, float]] = {}
-_CAPABILITY_APPROVAL_ISSUANCE_TTL_SECONDS = 300.0
-_CAPABILITY_APPROVAL_ISSUANCE_LIMIT = 1024
 
 
 def _approval_payload_body(payload: Mapping[str, Any]) -> tuple[dict[str, Any], bytes]:
     body = {str(key): value for key, value in payload.items() if key != "binding_mac"}
     encoded = json.dumps(body, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
     return body, encoded
-
-
-def _issue_capability_approval_nonce(
-    payload: Mapping[str, Any],
-    *,
-    _issuer: object,
-) -> str:
-    """Register a one-use seal nonce for the repository after row consumption.
-
-    The issuer token is an internal object capability held by the approval
-    repository.  The nonce is deliberately registered only after the
-    repository's conditional approved-row update succeeds; the sealer also
-    binds it to the exact payload that the repository is about to return.
-    """
-    if _issuer is not _CAPABILITY_APPROVAL_ISSUER_TOKEN:
-        raise RuntimeError("approval_issuance_internal_only")
-    _, encoded = _approval_payload_body(payload)
-    issued_at = time.monotonic()
-    nonce = secrets.token_urlsafe(32)
-    with _CAPABILITY_APPROVAL_RECEIPTS_LOCK:
-        cutoff = issued_at - _CAPABILITY_APPROVAL_ISSUANCE_TTL_SECONDS
-        for registered_nonce, (_, nonce_time) in list(_CAPABILITY_APPROVAL_ISSUANCE_NONCES.items()):
-            if nonce_time < cutoff:
-                _CAPABILITY_APPROVAL_ISSUANCE_NONCES.pop(registered_nonce, None)
-        while len(_CAPABILITY_APPROVAL_ISSUANCE_NONCES) >= _CAPABILITY_APPROVAL_ISSUANCE_LIMIT:
-            _CAPABILITY_APPROVAL_ISSUANCE_NONCES.pop(next(iter(_CAPABILITY_APPROVAL_ISSUANCE_NONCES)))
-        _CAPABILITY_APPROVAL_ISSUANCE_NONCES[nonce] = (
-            hashlib.sha256(encoded).hexdigest(),
-            issued_at,
-        )
-    return nonce
 
 
 def seal_capability_approval(payload: Mapping[str, Any]) -> dict[str, Any]:
@@ -92,29 +57,28 @@ def seal_capability_approval(payload: Mapping[str, Any]) -> dict[str, Any]:
 def _seal_capability_approval(
     payload: Mapping[str, Any],
     *,
-    issuance_nonce: str | None = None,
+    repository_proof: object | None = None,
 ) -> dict[str, Any]:
     """Issue an opaque binding for a repository-consumed approval row.
 
-    The public helper above cannot mint an approval.  This private seam also
-    requires a one-use nonce registered by ``ApprovalRepository`` after its
-    conditional approved-row update; an underscore by itself is not an
-    authority boundary.  The nonce is bound to this exact payload, and the
-    opaque receipt token must also be present in the issued-receipt registry
-    before the capability host accepts it.
+    The public helper above cannot mint an approval.  This seam accepts only
+    the actual, database-loaded ``ApprovalRequest`` instance after the
+    repository's conditional approved->consumed update.  A payload-only call
+    therefore cannot manufacture a repository receipt, even though this
+    module-local helper remains available to the repository implementation.
     """
-    if not isinstance(issuance_nonce, str) or not issuance_nonce:
+    if repository_proof is None:
         raise RuntimeError("approval_seal_proof_missing")
-    body, encoded = _approval_payload_body(payload)
-    payload_digest = hashlib.sha256(encoded).hexdigest()
-    with _CAPABILITY_APPROVAL_RECEIPTS_LOCK:
-        issuance = _CAPABILITY_APPROVAL_ISSUANCE_NONCES.pop(issuance_nonce, None)
-    if issuance is None:
+    proof_type = type(repository_proof)
+    if proof_type.__name__ != "ApprovalRequest" or proof_type.__module__ != "src.db.models":
         raise RuntimeError("approval_seal_proof_invalid")
-    expected_digest, issued_at = issuance
+    body, encoded = _approval_payload_body(payload)
     if (
-        time.monotonic() - issued_at > _CAPABILITY_APPROVAL_ISSUANCE_TTL_SECONDS
-        or not hmac.compare_digest(expected_digest, payload_digest)
+        str(getattr(repository_proof, "status", "")) != "consumed"
+        or str(getattr(repository_proof, "id", "")) != str(body.get("approval_id", ""))
+        or str(getattr(repository_proof, "session_id", "")) != str(body.get("session_id", ""))
+        or str(getattr(repository_proof, "tool_name", "")) != str(body.get("tool_name", ""))
+        or str(getattr(repository_proof, "fingerprint", "")) != str(body.get("fingerprint", ""))
     ):
         raise RuntimeError("approval_seal_proof_invalid")
     receipt_token = secrets.token_urlsafe(32)

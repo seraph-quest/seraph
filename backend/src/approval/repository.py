@@ -11,11 +11,7 @@ from sqlmodel import select, col
 from src.db.engine import get_session
 from src.db.models import ApprovalRequest
 from src.db.session_refs import ensure_sessions_exist
-from src.approval.runtime import (
-    _CAPABILITY_APPROVAL_ISSUER_TOKEN,
-    _issue_capability_approval_nonce,
-    _seal_capability_approval,
-)
+from src.approval.runtime import _seal_capability_approval
 
 
 def fingerprint_tool_call(
@@ -205,6 +201,11 @@ class ApprovalRepository:
             )
             if getattr(consumed, "rowcount", None) != 1:
                 return None
+            # Keep the database-loaded row as the repository provenance proof
+            # for the synchronous host seam.  A payload alone must never mint
+            # a capability receipt.
+            request.status = "consumed"
+            request.resolved_at = consumed_at
             details: dict[str, Any]
             try:
                 parsed_details = json.loads(request.details_json) if request.details_json else {}
@@ -219,15 +220,16 @@ class ApprovalRepository:
                 "fingerprint": str(request.fingerprint),
                 "owner_operator_session_id": str(owner_operator_session_id or ""),
                 "approval_expires_at": details.get("approval_expires_at"),
+                "approval_context": (
+                    dict(details["approval_context"])
+                    if isinstance(details.get("approval_context"), Mapping)
+                    else None
+                ),
                 "consumed_at": consumed_at.isoformat(),
             }
-            issuance_nonce = _issue_capability_approval_nonce(
-                binding_payload,
-                _issuer=_CAPABILITY_APPROVAL_ISSUER_TOKEN,
-            )
             return _seal_capability_approval(
                 binding_payload,
-                issuance_nonce=issuance_nonce,
+                repository_proof=request,
             )
 
     async def consume_approved_for_resume(

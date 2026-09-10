@@ -18,7 +18,7 @@ import hashlib
 import json
 import math
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Any, Final
@@ -41,6 +41,7 @@ _MEDIA_TYPE_RE: Final = re.compile(r"^audio/[a-z0-9][a-z0-9.+-]{0,62}$")
 _CONTAINER_RE: Final = re.compile(r"^[a-z0-9][a-z0-9._-]{0,31}$")
 _CODEC_RE: Final = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
 _DIGEST_RE: Final = re.compile(r"^[0-9a-f]{64}$")
+_TRUSTED_RESULT_TOKEN: Final = object()
 _CONSENT_REASON_CODES: Final = frozenset(
     f"{boundary}_consent_{suffix}"
     for boundary in ("capture", "cloud_upload")
@@ -91,6 +92,8 @@ _ALLOWED_REASON_CODES: Final = frozenset(
         "attachment_identity_conflict",
         "audio_ingress_preflight_accepted",
         "invalid_receipt_reason_code",
+        "invalid_result_provenance",
+        "capture_timestamp_in_future",
     }
 ) | _CONSENT_REASON_CODES
 
@@ -263,6 +266,10 @@ class AudioIngressResult:
     accepted: bool
     retryable: bool
     request_digest: str | None = None
+    # Public construction remains compatible for adapters and tests, but a
+    # hand-built result cannot assert status in an operator receipt.  Only
+    # ``_result`` below can attach the module-private provenance token.
+    _provenance: object | None = field(default=None, init=False, repr=False, compare=False)
 
     @property
     def terminal(self) -> bool:
@@ -685,13 +692,15 @@ def _result(
     *,
     request_digest: str | None = None,
 ) -> AudioIngressResult:
-    return AudioIngressResult(
+    result = AudioIngressResult(
         status=status,
         reason_code=reason_code,
         accepted=status is AudioIngressStatus.ACCEPTED,
         retryable=status is AudioIngressStatus.DEGRADED,
         request_digest=request_digest,
     )
+    object.__setattr__(result, "_provenance", _TRUSTED_RESULT_TOKEN)
+    return result
 
 
 def validate_audio_ingress(
@@ -797,6 +806,119 @@ def build_openrouter_input_audio(request: AudioIngressRequest) -> OpenRouterInpu
     return OpenRouterInputAudio(data=request.audio_base64, format=request.container)
 
 
+def _empty_receipt_request_metadata() -> dict[str, Any]:
+    """Return the redacted shape used when request metadata is not trusted."""
+
+    return {
+        "session_id": None,
+        "message_id": None,
+        "attachment_id": None,
+        "request_id": None,
+        "captured_at": None,
+        "audio_payload_digest": None,
+        "audio_size_bytes": None,
+        "duration_seconds": None,
+        "media_type": None,
+        "container": None,
+        "codec": None,
+        "normalized_wav_size_bytes": None,
+        "stream_count": None,
+        "capture_consent_reference": None,
+        "cloud_upload_consent_reference": None,
+        "raw_audio_retention_deadline": None,
+        "requested_capability": None,
+        "transcript_confirmed": False,
+        "provider": None,
+        "local_fallback_claimed": False,
+    }
+
+
+def _safe_receipt_request_metadata(
+    request: AudioIngressRequest,
+    *,
+    policy: AudioIngressPolicy,
+    reason_code: str,
+    include_request_fields: bool,
+) -> dict[str, Any]:
+    """Copy only bounded request fields after structural validation.
+
+    Receipts are also built for blocked requests, so they must not treat a
+    typed dataclass as proof that caller-supplied values are safe.  Blocked or
+    malformed requests are fully redacted.  For an accepted/degraded or
+    duplicate result with a structurally valid request, IDs and bounded media
+    fields are copied only after their allowlists/ranges pass; capability and
+    retention fields receive their own semantic checks.
+    """
+
+    redacted = _empty_receipt_request_metadata()
+    if not include_request_fields:
+        return redacted
+    if not isinstance(request, AudioIngressRequest) or not _valid_policy(policy):
+        return redacted
+    if _request_structure_error(request, policy) is not None:
+        return redacted
+
+    captured_at = _utc(request.captured_at)
+    if captured_at is None:
+        return redacted
+    retention_deadline = _utc(request.raw_audio_retention_deadline)
+    if retention_deadline is not None:
+        max_deadline = captured_at + timedelta(seconds=policy.max_raw_retention_seconds)
+        if retention_deadline <= captured_at or retention_deadline > max_deadline:
+            retention_deadline = None
+
+    capability = (
+        request.requested_capability
+        if request.requested_capability in policy.allowed_capabilities
+        else None
+    )
+    # A future capture is a semantic validation failure.  Do not repeat the
+    # untrusted timestamp in its receipt even though it has a valid datetime
+    # shape.
+    safe_captured_at = None if reason_code == "capture_timestamp_in_future" else _iso(captured_at)
+    redacted.update(
+        {
+            "session_id": request.session_id,
+            "message_id": request.message_id,
+            "attachment_id": request.attachment_id,
+            "request_id": request.request_id,
+            "captured_at": safe_captured_at,
+            "audio_payload_digest": _safe_payload_digest(request),
+            "audio_size_bytes": request.audio_size_bytes,
+            "duration_seconds": request.duration_seconds,
+            "media_type": request.media_type,
+            "container": request.container,
+            "codec": request.codec,
+            "normalized_wav_size_bytes": request.normalized_wav_size_bytes,
+            "stream_count": request.stream_count,
+            "capture_consent_reference": _consent_reference(request.capture_consent),
+            "cloud_upload_consent_reference": _consent_reference(request.cloud_upload_consent),
+            "raw_audio_retention_deadline": _iso(retention_deadline),
+            "requested_capability": capability,
+            "transcript_confirmed": request.transcript_confirmed,
+            "provider": OPENROUTER_PROVIDER,
+            "local_fallback_claimed": False,
+        }
+    )
+    return redacted
+
+
+def _trusted_result_for_receipt(result: AudioIngressResult) -> AudioIngressResult:
+    """Fail closed when a caller forges or hand-builds a preflight result."""
+
+    if (
+        isinstance(result, AudioIngressResult)
+        and result._provenance is _TRUSTED_RESULT_TOKEN
+        and isinstance(result.status, AudioIngressStatus)
+        and isinstance(result.accepted, bool)
+        and isinstance(result.retryable, bool)
+        and result.accepted is (result.status is AudioIngressStatus.ACCEPTED)
+        and result.retryable is (result.status is AudioIngressStatus.DEGRADED)
+    ):
+        return result
+    return _result(AudioIngressStatus.BLOCKED, "invalid_result_provenance")
+
+
 def serialize_audio_ingress_receipt(
     request: AudioIngressRequest | None,
     result: AudioIngressResult,
@@ -807,11 +929,14 @@ def serialize_audio_ingress_receipt(
 
     if not isinstance(result, AudioIngressResult):
         raise TypeError("result must be an AudioIngressResult")
+    safe_result = _trusted_result_for_receipt(result)
+    effective_policy = policy if policy is not None else AudioIngressPolicy()
+    safe_reason_code = _safe_reason_code(safe_result.reason_code)
     if request is None:
         return AudioIngressReceipt(
             schema_version=AUDIO_INGRESS_RECEIPT_SCHEMA_VERSION,
-            status=result.status,
-            reason_code=_safe_reason_code(result.reason_code),
+            status=safe_result.status,
+            reason_code=safe_reason_code,
             request_digest=None,
             session_id=None,
             message_id=None,
@@ -832,40 +957,47 @@ def serialize_audio_ingress_receipt(
             requested_capability=None,
             transcript_confirmed=False,
             provider=None,
-            provider_status=policy.provider_status if policy is not None and _valid_policy(policy) else None,
-            trusted_adapter_id=policy.trusted_adapter_id if policy is not None and _valid_policy(policy) else None,
-            provider_proof_reference=policy.provider_proof_reference if policy is not None and _valid_policy(policy) else None,
-            consent_proof_reference=policy.consent_proof_reference if policy is not None and _valid_policy(policy) else None,
+            provider_status=effective_policy.provider_status if _valid_policy(effective_policy) else None,
+            trusted_adapter_id=effective_policy.trusted_adapter_id if _valid_policy(effective_policy) else None,
+            provider_proof_reference=effective_policy.provider_proof_reference if _valid_policy(effective_policy) else None,
+            consent_proof_reference=effective_policy.consent_proof_reference if _valid_policy(effective_policy) else None,
         )
+    metadata = _safe_receipt_request_metadata(
+        request,
+        policy=effective_policy,
+        reason_code=safe_reason_code,
+        include_request_fields=safe_result.status is not AudioIngressStatus.BLOCKED,
+    )
+    policy_valid = _valid_policy(effective_policy)
     return AudioIngressReceipt(
         schema_version=AUDIO_INGRESS_RECEIPT_SCHEMA_VERSION,
-        status=result.status,
-        reason_code=_safe_reason_code(result.reason_code),
-        request_digest=_receipt_request_digest(request, result),
-        session_id=request.session_id,
-        message_id=request.message_id,
-        attachment_id=request.attachment_id,
-        request_id=request.request_id,
-        captured_at=_iso(request.captured_at),
-        audio_payload_digest=_safe_payload_digest(request),
-        audio_size_bytes=request.audio_size_bytes,
-        duration_seconds=request.duration_seconds,
-        media_type=request.media_type,
-        container=request.container,
-        codec=request.codec,
-        normalized_wav_size_bytes=request.normalized_wav_size_bytes,
-        stream_count=request.stream_count,
-        capture_consent_reference=_consent_reference(request.capture_consent),
-        cloud_upload_consent_reference=_consent_reference(request.cloud_upload_consent),
-        raw_audio_retention_deadline=_iso(request.raw_audio_retention_deadline),
-        requested_capability=request.requested_capability,
-        transcript_confirmed=request.transcript_confirmed,
-        provider=request.inference_provider,
-        provider_status=policy.provider_status if policy is not None and _valid_policy(policy) else None,
-        trusted_adapter_id=policy.trusted_adapter_id if policy is not None and _valid_policy(policy) else None,
-        provider_proof_reference=policy.provider_proof_reference if policy is not None and _valid_policy(policy) else None,
-        consent_proof_reference=policy.consent_proof_reference if policy is not None and _valid_policy(policy) else None,
-        local_fallback_claimed=request.local_fallback_requested,
+        status=safe_result.status,
+        reason_code=safe_reason_code,
+        request_digest=_receipt_request_digest(request, safe_result),
+        session_id=metadata["session_id"],
+        message_id=metadata["message_id"],
+        attachment_id=metadata["attachment_id"],
+        request_id=metadata["request_id"],
+        captured_at=metadata["captured_at"],
+        audio_payload_digest=metadata["audio_payload_digest"],
+        audio_size_bytes=metadata["audio_size_bytes"],
+        duration_seconds=metadata["duration_seconds"],
+        media_type=metadata["media_type"],
+        container=metadata["container"],
+        codec=metadata["codec"],
+        normalized_wav_size_bytes=metadata["normalized_wav_size_bytes"],
+        stream_count=metadata["stream_count"],
+        capture_consent_reference=metadata["capture_consent_reference"],
+        cloud_upload_consent_reference=metadata["cloud_upload_consent_reference"],
+        raw_audio_retention_deadline=metadata["raw_audio_retention_deadline"],
+        requested_capability=metadata["requested_capability"],
+        transcript_confirmed=metadata["transcript_confirmed"],
+        provider=metadata["provider"],
+        provider_status=effective_policy.provider_status if policy_valid else None,
+        trusted_adapter_id=effective_policy.trusted_adapter_id if policy_valid else None,
+        provider_proof_reference=effective_policy.provider_proof_reference if policy_valid else None,
+        consent_proof_reference=effective_policy.consent_proof_reference if policy_valid else None,
+        local_fallback_claimed=metadata["local_fallback_claimed"],
     )
 
 

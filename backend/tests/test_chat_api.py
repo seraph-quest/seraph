@@ -213,7 +213,7 @@ class TestChatAPI:
         mock_onboarding.return_value = mock_agent
         payload = {
             "message": "Retry-safe message",
-            "message_id": "client-message-1",
+            "message_id": "rest-retry-1",
             "idempotency_key": "rest-retry-1",
         }
 
@@ -235,7 +235,7 @@ class TestChatAPI:
         ingress = user_messages[0]["metadata"]["ingress"]
         assert ingress["schema_version"] == "seraph.chat.message.v1"
         assert ingress["message_id"] == second.json()["detail"]["message_id"]
-        assert ingress["client_message_id"] == "client-message-1"
+        assert ingress["client_message_id"] == "rest-retry-1"
         assert ingress["idempotency_key"].startswith("sha256:")
         assert ingress["idempotency_key_digest"] != "rest-retry-1"
         assert ingress["principal_id"]
@@ -249,6 +249,30 @@ class TestChatAPI:
             if event["event_type"] == "chat_message_ingress"
         }
         assert {"accepted", "duplicate_rejected"}.issubset(statuses)
+
+    @patch("src.memory.vector_store.search_formatted", return_value="")
+    @patch("src.api.chat.create_onboarding_agent")
+    @patch("src.api.chat.log_chat_ingress_event", new_callable=AsyncMock)
+    async def test_chat_ingress_rejects_ambiguous_dual_identity_before_effects(
+        self,
+        mock_log_ingress,
+        mock_onboarding,
+        mock_search,
+        client,
+    ):
+        response = await client.post(
+            "/api/chat",
+            json={
+                "message": "Do not reserve this",
+                "message_id": "client-message-1",
+                "idempotency_key": "rest-retry-1",
+            },
+        )
+
+        assert response.status_code == 422
+        assert response.json()["detail"]["code"] == "chat_message_identity_conflict"
+        mock_onboarding.assert_not_called()
+        mock_log_ingress.assert_not_awaited()
 
     @patch("src.memory.vector_store.search_formatted", return_value="")
     @patch("src.api.chat.create_onboarding_agent")
@@ -289,8 +313,9 @@ class TestChatAPI:
         assert unknown.json()["detail"]["code"] == "chat_session_not_found"
         mock_agent.run.assert_called_once_with("Original")
 
-    async def test_chat_empty_message(self, client):
-        response = await client.post("/api/chat", json={"message": ""})
+    @pytest.mark.parametrize("message", ["", " \t "])
+    async def test_chat_empty_message(self, message, client):
+        response = await client.post("/api/chat", json={"message": message})
         assert response.status_code == 422
 
     @patch("src.memory.vector_store.search_formatted", return_value="")

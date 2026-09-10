@@ -30,10 +30,13 @@ from src.audit.repository import audit_repository
 from src.api.profile import get_or_create_profile, mark_onboarding_complete, reset_onboarding
 from src.api.chat import (
     ChatAuthorityError,
+    ChatIngressValidationError,
     _bind_chat_principal,
     build_chat_ingress_envelope,
     chat_ingress_metadata,
     log_chat_ingress_event,
+    validate_chat_ingress_identity,
+    validate_chat_message,
 )
 from src.auth.middleware import authenticate_websocket
 from src.auth.service import AuthFailure, auth_enabled, authenticate_token, bind_operator_principal
@@ -286,9 +289,14 @@ async def websocket_chat(websocket: WebSocket):
             try:
                 data = json.loads(raw)
                 ws_msg = WSMessage(**data)
-            except (json.JSONDecodeError, Exception) as e:
+            except Exception as e:
                 await websocket.send_text(
-                    WSResponse(type="error", content=f"Invalid message: {e}", seq=_next_seq()).model_dump_json()
+                    WSResponse(
+                        type="error",
+                        content=f"Invalid message: {e}",
+                        reason="chat_message_invalid" if isinstance(e, ValueError) else None,
+                        seq=_next_seq(),
+                    ).model_dump_json()
                 )
                 continue
 
@@ -313,6 +321,25 @@ async def websocket_chat(websocket: WebSocket):
                     ).model_dump_json()
                 )
                 continue
+
+            if ws_msg.type != "resume_message":
+                try:
+                    validate_chat_message(ws_msg.message)
+                    validate_chat_ingress_identity(
+                        client_message_id=ws_msg.message_id,
+                        idempotency_key=ws_msg.idempotency_key,
+                    )
+                except ChatIngressValidationError as exc:
+                    active_turn_completed = True
+                    await websocket.send_text(
+                        WSResponse(
+                            type="error",
+                            content=exc.message,
+                            reason=exc.code,
+                            seq=_next_seq(),
+                        ).model_dump_json()
+                    )
+                    continue
 
             if ws_msg.session_id is not None and not ws_msg.session_id.strip():
                 active_turn_completed = True

@@ -149,6 +149,16 @@ class ChatAuthorityError(Exception):
         self.code = code
 
 
+class ChatIngressValidationError(Exception):
+    """Raised when a web ingress payload cannot resolve safely."""
+
+    def __init__(self, message: str, *, code: str):
+        super().__init__(message)
+        self.message = message
+        self.status_code = 422
+        self.code = code
+
+
 def _bind_chat_principal(
     session_id: str,
     *,
@@ -238,11 +248,15 @@ def build_chat_ingress_envelope(
     """Create server-owned metadata for one authenticated web ingress.
 
     A caller may provide either identity field to make a retry deterministic.
-    The canonical persisted message ID is derived by Seraph and is scoped to
-    the bound principal and session; caller identity never grants authority.
+    If both aliases are supplied, they must carry the same normalized value so
+    one canonical retry identity can be reserved. The canonical persisted
+    message ID is derived by Seraph and is scoped to the bound principal and
+    session; caller identity never grants authority.
     """
-    normalized_client_message_id = str(client_message_id or "").strip() or None
-    normalized_idempotency_key = str(idempotency_key or "").strip() or None
+    normalized_client_message_id, normalized_idempotency_key = validate_chat_ingress_identity(
+        client_message_id=client_message_id,
+        idempotency_key=idempotency_key,
+    )
     identity_material = normalized_idempotency_key or normalized_client_message_id
     if identity_material:
         server_message_id = uuid5(
@@ -267,6 +281,53 @@ def build_chat_ingress_envelope(
         content_digest=hashlib.sha256(message.encode("utf-8")).hexdigest(),
         received_at=datetime.now(timezone.utc),
     )
+
+
+def validate_chat_ingress_identity(
+    *,
+    client_message_id: str | None = None,
+    idempotency_key: str | None = None,
+) -> tuple[str | None, str | None]:
+    """Normalize caller identity and reject ambiguous dual identities.
+
+    The two request fields are aliases for this web ingress slice.  When both
+    are present they must resolve to the same opaque value; otherwise there is
+    no single retry identity to reserve.  This check is pure and can run before
+    session creation or audit/model dispatch.
+    """
+
+    normalized_client_message_id = str(client_message_id).strip() if client_message_id is not None else None
+    normalized_idempotency_key = str(idempotency_key).strip() if idempotency_key is not None else None
+    if client_message_id is not None and not normalized_client_message_id:
+        raise ChatIngressValidationError(
+            "client message_id must not be blank.",
+            code="chat_message_identity_invalid",
+        )
+    if idempotency_key is not None and not normalized_idempotency_key:
+        raise ChatIngressValidationError(
+            "idempotency_key must not be blank.",
+            code="chat_message_identity_invalid",
+        )
+    if (
+        normalized_client_message_id is not None
+        and normalized_idempotency_key is not None
+        and normalized_client_message_id != normalized_idempotency_key
+    ):
+        raise ChatIngressValidationError(
+            "client message_id and idempotency_key must resolve to one identity.",
+            code="chat_message_identity_conflict",
+        )
+    return normalized_client_message_id, normalized_idempotency_key
+
+
+def validate_chat_message(message: str) -> None:
+    """Reject empty or whitespace-only interactive messages before effects."""
+
+    if not isinstance(message, str) or not message.strip():
+        raise ChatIngressValidationError(
+            "Chat message must not be blank.",
+            code="chat_message_invalid",
+        )
 
 
 def chat_ingress_metadata(envelope: ChatIngressEnvelope) -> str:
@@ -321,6 +382,17 @@ async def chat(request: ChatRequest, http_request: HttpRequest):
                 code="chat_authentication_required",
             )
     except ChatAuthorityError as exc:
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail={"code": exc.code, "message": exc.message},
+        ) from exc
+    try:
+        validate_chat_message(request.message)
+        validate_chat_ingress_identity(
+            client_message_id=request.message_id,
+            idempotency_key=request.idempotency_key,
+        )
+    except ChatIngressValidationError as exc:
         raise HTTPException(
             status_code=exc.status_code,
             detail={"code": exc.code, "message": exc.message},

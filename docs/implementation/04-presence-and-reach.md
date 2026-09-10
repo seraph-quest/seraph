@@ -45,10 +45,14 @@ The #750 web slice adds a typed, server-owned `seraph.chat.message.v1`
 envelope to REST `/api/chat` and WebSocket `/ws/chat`.  Seraph binds the
 envelope to the authenticated principal, operator session, device label, and
 canonical conversation before model dispatch; a supplied `idempotency_key` or
-`message_id` produces a session-scoped UUID5 server message identity.  The
+`message_id` produces a session-scoped UUID5 server message identity.  If both
+aliases are supplied, their normalized opaque values must match or the ingress
+is rejected before session reservation.  The
 redacted envelope and SHA-256 content/key digests are persisted in the user
 `Message.metadata_json`, and accepted, duplicate, and identity-conflict
 receipts are written to the canonical audit path without message content.
+REST and WebSocket turns reject empty or whitespace-only message content before
+reservation, audit, or model dispatch.
 
 Retries that reuse the same identity in the same session receive a deterministic
 409/error receipt before model dispatch.  Reuse with changed content or bound

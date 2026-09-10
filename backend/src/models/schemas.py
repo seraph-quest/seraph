@@ -61,7 +61,7 @@ class ChatResponse(BaseModel):
 
 class WSMessage(BaseModel):
     type: str = Field("message", description="Message type: message | resume_message | ping | skip_onboarding")
-    message: str = Field("", description="User message")
+    message: str = Field("", min_length=1, description="User message")
     session_id: str | None = None
     message_id: str | None = Field(None, min_length=1, max_length=128)
     idempotency_key: str | None = Field(None, min_length=1, max_length=256)

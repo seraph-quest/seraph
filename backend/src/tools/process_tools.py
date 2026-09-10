@@ -260,6 +260,51 @@ _NETWORK_CAPABLE_FLAGS = {
 _NETWORK_CAPABLE_FLAG_PREFIXES = tuple(f"{flag}=" for flag in _NETWORK_CAPABLE_FLAGS)
 _NETWORK_ARGUMENT_PREFIXES = ("http://", "https://", "ssh://", "git@")
 _GIT_SAFE_INLINE_CONFIG_KEYS = frozenset({"user.name", "user.email"})
+_GIT_PATH_VALUE_OPTIONS = frozenset(
+    {
+        "-C",
+        "--git-dir",
+        "--work-tree",
+        "--exec-path",
+        "--output",
+        "--output-directory",
+        "--file",
+        "--template",
+        "--notes-file",
+        "--order-file",
+        "--pathspec-from-file",
+        "--exclude",
+        "--include",
+        "--export-marks",
+        "--import-marks",
+    }
+)
+_GIT_NON_PATH_VALUE_OPTIONS = frozenset(
+    {
+        "-c",
+        "--config-env",
+        "--upload-pack",
+        "--receive-pack",
+        "--namespace",
+    }
+)
+_GIT_ATTACHED_PATH_OPTION_PREFIXES = (
+    "--git-dir=",
+    "--work-tree=",
+    "--exec-path=",
+    "--output=",
+    "--output-directory=",
+    "--file=",
+    "--template=",
+    "--notes-file=",
+    "--order-file=",
+    "--pathspec-from-file=",
+    "--exclude=",
+    "--include=",
+    "--export-marks=",
+    "--import-marks=",
+)
+_GIT_SHORT_ATTACHED_PATH_OPTION_PREFIXES = ("-C", "-F", "-O", "-o", "-f")
 _ENV_ALLOWLIST = {
     "PATH",
     "LANG",
@@ -508,26 +553,104 @@ def _reject_network_script_markers(script_path: Path) -> None:
         raise ValueError("script network clients are blocked in the process runtime.")
 
 
+def _validate_git_line_range_path(raw_range: str, cwd: Path) -> None:
+    """Validate the file component of Git's ``-L <range>:<path>`` option."""
+    value = str(raw_range)
+    parts = value.split(":")
+    if value.startswith(":") and len(parts) >= 3:
+        path = ":".join(parts[2:])
+    elif len(parts) >= 2:
+        path = ":".join(parts[1:])
+    else:
+        path = ""
+    if path:
+        _ensure_process_accessible_path(path, cwd, label="git path argument")
+
+
+def _validate_git_workspace_args(args: list[str], cwd: Path) -> None:
+    """Validate Git path operands before spawning the child process.
+
+    Git accepts path operands for many subcommands and its ``--`` separator
+    turns every following token into a pathspec.  Treating those values as
+    opaque command arguments lets ``git diff --no-index`` read arbitrary
+    files, even though the process runtime advertises workspace-only paths.
+    Relative operands are resolved against the already-bound workspace cwd;
+    absolute paths and traversal are rejected by the same resolver used by
+    the other process commands.
+    """
+    pathspec_mode = False
+    index = 0
+    while index < len(args):
+        arg = args[index]
+        if pathspec_mode:
+            _ensure_process_accessible_path(arg, cwd, label="git path argument")
+            index += 1
+            continue
+        if arg == "--":
+            pathspec_mode = True
+            index += 1
+            continue
+        if arg in _GIT_PATH_VALUE_OPTIONS:
+            if index + 1 >= len(args):
+                raise ValueError(f"{arg} requires a path argument.")
+            _ensure_process_accessible_path(args[index + 1], cwd, label=f"{arg} path")
+            index += 2
+            continue
+        if arg in _GIT_NON_PATH_VALUE_OPTIONS:
+            if index + 1 >= len(args):
+                raise ValueError(f"{arg} requires a value.")
+            index += 2
+            continue
+        attached_path = next(
+            (
+                arg[len(prefix) :]
+                for prefix in _GIT_ATTACHED_PATH_OPTION_PREFIXES
+                if arg.startswith(prefix)
+            ),
+            None,
+        )
+        if attached_path is not None:
+            if not attached_path:
+                raise ValueError("Git path option requires a path argument.")
+            _ensure_process_accessible_path(attached_path, cwd, label="git path argument")
+            index += 1
+            continue
+        attached_short_path = next(
+            (
+                arg[len(prefix) :]
+                for prefix in _GIT_SHORT_ATTACHED_PATH_OPTION_PREFIXES
+                if len(arg) > len(prefix) and arg.startswith(prefix)
+            ),
+            None,
+        )
+        if attached_short_path is not None:
+            _ensure_process_accessible_path(attached_short_path, cwd, label="git path argument")
+            index += 1
+            continue
+        if arg in {"-L", "--line-range"}:
+            if index + 1 >= len(args):
+                raise ValueError(f"{arg} requires a range and path argument.")
+            _validate_git_line_range_path(args[index + 1], cwd)
+            index += 2
+            continue
+        if arg.startswith("-L") and len(arg) > 2:
+            _validate_git_line_range_path(arg[2:], cwd)
+            index += 1
+            continue
+        if arg.startswith("-"):
+            index += 1
+            continue
+        _ensure_process_accessible_path(arg, cwd, label="git path argument")
+        index += 1
+
+
 def _validate_workspace_scoped_args(executable: str, args: list[str], cwd: Path) -> None:
     command_name = Path(executable).name
 
     _reject_network_capable_package_args(command_name, args)
 
     if command_name == "git":
-        index = 0
-        while index < len(args):
-            arg = args[index]
-            if arg in {"-C", "--git-dir", "--work-tree"}:
-                if index + 1 >= len(args):
-                    raise ValueError(f"{arg} requires a path argument.")
-                _ensure_process_accessible_path(args[index + 1], cwd, label=f"{arg} path")
-                index += 2
-                continue
-            if arg.startswith("--git-dir="):
-                _ensure_process_accessible_path(arg.split("=", 1)[1], cwd, label="--git-dir path")
-            elif arg.startswith("--work-tree="):
-                _ensure_process_accessible_path(arg.split("=", 1)[1], cwd, label="--work-tree path")
-            index += 1
+        _validate_git_workspace_args(args, cwd)
         return
 
     if command_name in {"python", "python3", "node"}:

@@ -1,9 +1,13 @@
 import logging
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
-from src.agent.session import session_manager
+from src.agent.session import (
+    SessionOwnerMismatchError,
+    SessionNotFoundError,
+    session_manager,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -40,13 +44,27 @@ async def search_sessions(
 @router.get("/sessions/{session_id}/messages")
 async def get_session_messages(
     session_id: str,
+    request: Request,
     limit: int = Query(default=100, ge=1, le=1000),
     offset: int = Query(default=0, ge=0),
 ):
     """Get paginated message history for a session."""
-    session = await session_manager.get(session_id)
-    if not session:
-        raise HTTPException(status_code=404, detail="Session not found")
+    operator = getattr(request.state, "operator", None)
+    owner_principal_id = getattr(getattr(operator, "principal", None), "principal_id", None)
+    if not owner_principal_id:
+        raise HTTPException(status_code=401, detail={"code": "authentication_required"})
+    try:
+        await session_manager.get_for_ingress(
+            session_id,
+            owner_principal_id=owner_principal_id,
+        )
+    except SessionNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="Session not found") from exc
+    except SessionOwnerMismatchError as exc:
+        raise HTTPException(
+            status_code=403,
+            detail={"code": "chat_session_owner_forbidden", "session_id": exc.session_id},
+        ) from exc
     return await session_manager.get_messages(session_id, limit=limit, offset=offset)
 
 

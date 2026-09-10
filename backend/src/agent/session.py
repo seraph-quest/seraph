@@ -13,6 +13,7 @@ from sqlmodel import select, col
 from config.settings import settings
 from src.approval.runtime import get_current_trust_principal, reset_runtime_context, set_runtime_context
 from src.audit.runtime import log_background_task_event
+from src.conversation.identity import redact_attachment_refs
 from src.model_fabric.caller_context import build_canonical_inference_context
 from src.db.engine import get_session
 from src.db.models import (
@@ -22,6 +23,7 @@ from src.db.models import (
     MemoryEpisode,
     MemoryEpisodeType,
     Message,
+    NativeNotificationOutbox,
     QueuedInsight,
     ScheduledJob,
     Session,
@@ -318,6 +320,27 @@ class SessionManager:
             )
             for intervention in interventions.scalars().all():
                 await db.delete(intervention)
+            # A deleted conversation can never resume an old native delivery.
+            # Preserve the outbox receipt while cancelling active handoffs so
+            # a restarted daemon cannot dispatch stale content.
+            await db.execute(
+                update(NativeNotificationOutbox)
+                .where(
+                    NativeNotificationOutbox.session_id == session_id,
+                    NativeNotificationOutbox.status.in_(
+                        {"queued", "claimed", "display_attempted"}
+                    ),
+                )
+                .values(
+                    status="cancelled",
+                    last_error="conversation_deleted",
+                    degraded_state="conversation_deleted",
+                    lease_owner=None,
+                    lease_expires_at=None,
+                    cancelled_at=datetime.now(timezone.utc),
+                    updated_at=datetime.now(timezone.utc),
+                )
+            )
             await db.delete(session)
             return True
 
@@ -728,6 +751,11 @@ class SessionManager:
                 "principal_id",
                 "device_id",
                 "session_id",
+                "conversation_id",
+                "thread_id",
+                "channel",
+                "transport",
+                "correlation_id",
             )
         )
 
@@ -798,10 +826,43 @@ class SessionManager:
                 parsed_metadata = None
             if isinstance(parsed_metadata, dict):
                 episode_metadata = parsed_metadata
+        lineage = episode_metadata.get("lineage") if isinstance(episode_metadata, dict) else None
+        if not isinstance(lineage, dict) and isinstance(episode_metadata, dict):
+            # Web ingress metadata predates the explicit lineage block.  Keep
+            # old rows readable while still projecting their canonical fields.
+            candidate = episode_metadata.get("ingress")
+            lineage = candidate if isinstance(candidate, dict) else None
+        if not isinstance(lineage, dict):
+            lineage = {}
+        try:
+            safe_attachment_refs = redact_attachment_refs(lineage.get("attachment_refs"))
+        except Exception:
+            safe_attachment_refs = []
+        lineage_conversation_id = str(
+            lineage.get("conversation_id") or lineage.get("session_id") or session_id
+        ).strip() or session_id
+        lineage_thread_id = str(
+            lineage.get("thread_id") or lineage_conversation_id
+        ).strip() or lineage_conversation_id
         async with get_session() as db:
             msg = Message(
                 id=message_id or uuid.uuid4().hex,
                 session_id=session_id,
+                conversation_id=lineage_conversation_id,
+                thread_id=lineage_thread_id,
+                owner_principal_id=(
+                    str(lineage.get("owner_principal_id") or lineage.get("principal_id") or "").strip()
+                    or None
+                ),
+                operator_session_id=(
+                    str(lineage.get("operator_session_id") or "").strip() or None
+                ),
+                device_id=str(lineage.get("device_id") or "").strip() or None,
+                channel=str(lineage.get("channel") or "").strip() or None,
+                transport=str(lineage.get("transport") or "").strip() or None,
+                correlation_id=str(lineage.get("correlation_id") or "").strip() or None,
+                causation_id=str(lineage.get("causation_id") or "").strip() or None,
+                attachment_refs_json=json.dumps(safe_attachment_refs, sort_keys=True),
                 role=role,
                 content=content,
                 step_number=step_number,
@@ -917,18 +978,38 @@ class SessionManager:
             messages = result.scalars().all()
             if newest_first:
                 messages.reverse()
-            return [
-                {
-                    "id": m.id,
-                    "role": m.role,
-                    "content": m.content,
-                    "metadata": json.loads(m.metadata_json) if m.metadata_json else None,
-                    "step_number": m.step_number,
-                    "tool_used": m.tool_used,
-                    "created_at": m.created_at.isoformat(),
-                }
-                for m in messages
-            ]
+            output: list[dict] = []
+            for message in messages:
+                try:
+                    metadata = json.loads(message.metadata_json) if message.metadata_json else None
+                except (TypeError, json.JSONDecodeError):
+                    metadata = None
+                try:
+                    attachment_refs = redact_attachment_refs(message.attachment_refs_json and json.loads(message.attachment_refs_json))
+                except Exception:
+                    attachment_refs = []
+                output.append(
+                    {
+                        "id": message.id,
+                        "role": message.role,
+                        "content": message.content,
+                        "metadata": metadata,
+                        "step_number": message.step_number,
+                        "tool_used": message.tool_used,
+                        "created_at": message.created_at.isoformat(),
+                        "conversation_id": message.conversation_id or message.session_id,
+                        "thread_id": message.thread_id or message.session_id,
+                        "owner_principal_id": message.owner_principal_id,
+                        "operator_session_id": message.operator_session_id,
+                        "device_id": message.device_id,
+                        "channel": message.channel,
+                        "transport": message.transport,
+                        "correlation_id": message.correlation_id,
+                        "causation_id": message.causation_id,
+                        "attachment_refs": attachment_refs,
+                    }
+                )
+            return output
 
     async def get_todos(self, session_id: str) -> list[dict]:
         async with get_session() as db:

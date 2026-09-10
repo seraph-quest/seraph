@@ -34,6 +34,13 @@ from src.agent.session import (
 from src.audit.runtime import log_agent_run_event
 from src.audit.repository import audit_repository
 from src.api.profile import get_or_create_profile, mark_onboarding_complete
+from src.conversation.identity import (
+    ConversationIdentityError,
+    build_conversation_identity,
+    build_lineage,
+    lineage_json,
+    redact_attachment_refs,
+)
 from src.auth.cancellation import (
     RuntimeRevokedError,
     assert_runtime_not_revoked,
@@ -244,6 +251,7 @@ def build_chat_ingress_envelope(
     transport: str,
     client_message_id: str | None = None,
     idempotency_key: str | None = None,
+    attachments: object = None,
 ) -> ChatIngressEnvelope:
     """Create server-owned metadata for one authenticated web ingress.
 
@@ -267,6 +275,17 @@ def build_chat_ingress_envelope(
         server_message_id = uuid4().hex
         identity_material = server_message_id
     idempotency_key_digest = hashlib.sha256(identity_material.encode("utf-8")).hexdigest()
+    safe_attachments = redact_attachment_refs(attachments)
+    conversation_identity = build_conversation_identity(
+        conversation_id=session_id,
+        thread_id=session_id,
+        owner_principal_id=principal.principal_id,
+        operator_session_id=operator_session_id,
+        device_id=f"web-operator-session:{operator_session_id}",
+        channel="web",
+        transport=transport,
+        correlation_id=f"chat:{server_message_id}",
+    )
     return ChatIngressEnvelope(
         message_id=server_message_id,
         client_message_id=normalized_client_message_id,
@@ -274,13 +293,61 @@ def build_chat_ingress_envelope(
         idempotency_key_digest=idempotency_key_digest,
         principal_id=principal.principal_id,
         operator_session_id=operator_session_id,
-        device_id=f"web-operator-session:{operator_session_id}",
+        device_id=conversation_identity.device_id,
         transport=transport,
         session_id=session_id,
+        conversation_id=conversation_identity.conversation_id,
+        thread_id=conversation_identity.thread_id,
         correlation_id=f"chat:{server_message_id}",
         content_digest=hashlib.sha256(message.encode("utf-8")).hexdigest(),
+        attachment_refs=safe_attachments,
         received_at=datetime.now(timezone.utc),
     )
+
+
+def _chat_identity(envelope: ChatIngressEnvelope):
+    return build_conversation_identity(
+        conversation_id=envelope.conversation_id or envelope.session_id,
+        thread_id=envelope.thread_id or envelope.session_id,
+        owner_principal_id=envelope.principal_id,
+        operator_session_id=envelope.operator_session_id,
+        device_id=envelope.device_id,
+        channel=envelope.channel,
+        transport=envelope.transport,
+        correlation_id=envelope.correlation_id,
+        causation_id=envelope.message_id,
+    )
+
+
+def assistant_message_id_for_ingress(envelope: ChatIngressEnvelope, *, suffix: str = "assistant") -> str:
+    """Derive one durable assistant identity for a successfully accepted turn."""
+    return uuid5(
+        NAMESPACE_URL,
+        f"seraph-chat:{envelope.principal_id}:{envelope.session_id}:{envelope.message_id}:{suffix}",
+    ).hex
+
+
+def chat_assistant_metadata(
+    envelope: ChatIngressEnvelope,
+    *,
+    message_id: str,
+    display_role: str | None = None,
+    extra: dict | None = None,
+    degraded_state: str | None = None,
+) -> str:
+    metadata: dict = {
+        "lineage": build_lineage(
+            _chat_identity(envelope),
+            attachment_refs=envelope.attachment_refs,
+            message_id=message_id,
+            degraded_state=degraded_state,
+        )
+    }
+    if display_role:
+        metadata["display_role"] = display_role
+    if extra:
+        metadata.update(extra)
+    return json.dumps(metadata, sort_keys=True)
 
 
 def validate_chat_ingress_identity(
@@ -365,7 +432,10 @@ async def log_chat_ingress_event(
             "channel": envelope.channel,
             "transport": envelope.transport,
             "session_id": envelope.session_id,
+            "conversation_id": envelope.conversation_id,
+            "thread_id": envelope.thread_id,
             "correlation_id": envelope.correlation_id,
+            "attachment_count": len(envelope.attachment_refs),
         },
     )
 
@@ -433,15 +503,22 @@ async def chat(request: ChatRequest, http_request: HttpRequest):
             status_code=exc.status_code,
             detail={"code": exc.code, "message": exc.message},
         ) from exc
-    ingress = build_chat_ingress_envelope(
-        message=request.message,
-        session_id=session.id,
-        principal=chat_principal,
-        operator_session_id=operator.session_id,
-        transport="rest",
-        client_message_id=request.message_id,
-        idempotency_key=request.idempotency_key,
-    )
+    try:
+        ingress = build_chat_ingress_envelope(
+            message=request.message,
+            session_id=session.id,
+            principal=chat_principal,
+            operator_session_id=operator.session_id,
+            transport="rest",
+            client_message_id=request.message_id,
+            idempotency_key=request.idempotency_key,
+            attachments=request.attachments,
+        )
+    except ConversationIdentityError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={"code": exc.code, "message": exc.message},
+        ) from exc
     try:
         _ingress_message, duplicate = await session_manager.reserve_ingress_message(
             session.id,
@@ -584,7 +661,17 @@ async def chat(request: ChatRequest, http_request: HttpRequest):
             await _end_rest_revocation_watch(revocation_scope)
 
         await _ensure_rest_authorized(http_request, revocation_scope)
-        await session_manager.add_message(session.id, "assistant", response_text)
+        assistant_message_id = assistant_message_id_for_ingress(ingress)
+        await session_manager.add_message(
+            session.id,
+            "assistant",
+            response_text,
+            metadata_json=chat_assistant_metadata(
+                ingress,
+                message_id=assistant_message_id,
+            ),
+            message_id=assistant_message_id,
+        )
         await log_agent_run_event(
             session_id=session.id,
             transport="rest",
@@ -599,7 +686,21 @@ async def chat(request: ChatRequest, http_request: HttpRequest):
                 "runtime": "direct-openrouter-chat",
             },
         )
-        return ChatResponse(response=response_text, session_id=session.id)
+        return ChatResponse(
+            response=response_text,
+            session_id=session.id,
+            conversation_id=ingress.conversation_id,
+            thread_id=ingress.thread_id,
+            message_id=assistant_message_id,
+            owner_principal_id=ingress.principal_id,
+            operator_session_id=ingress.operator_session_id,
+            device_id=ingress.device_id,
+            channel=ingress.channel,
+            transport=ingress.transport,
+            correlation_id=ingress.correlation_id,
+            causation_id=ingress.message_id,
+            attachment_refs=ingress.attachment_refs,
+        )
 
     if is_onboarding:
         agent = create_onboarding_agent(request.message)
@@ -679,16 +780,22 @@ async def chat(request: ChatRequest, http_request: HttpRequest):
     except ClarificationRequired as exc:
         await _ensure_rest_authorized(http_request, revocation_scope)
         rendered = await redact_secrets_in_text(exc.render_message())
+        clarification_message_id = assistant_message_id_for_ingress(ingress, suffix="clarification")
         await session_manager.add_message(
             session.id,
             "assistant",
             rendered,
-            metadata_json=json.dumps({
-                "display_role": "clarification",
-                "question": exc.question,
-                "reason": exc.reason,
-                "options": exc.options,
-            }),
+            metadata_json=chat_assistant_metadata(
+                ingress,
+                message_id=clarification_message_id,
+                display_role="clarification",
+                extra={
+                    "question": exc.question,
+                    "reason": exc.reason,
+                    "options": exc.options,
+                },
+            ),
+            message_id=clarification_message_id,
         )
         await audit_repository.log_event(
             session_id=session.id,
@@ -754,7 +861,17 @@ async def chat(request: ChatRequest, http_request: HttpRequest):
         await _end_rest_revocation_watch(revocation_scope)
 
     await _ensure_rest_authorized(http_request, revocation_scope)
-    await session_manager.add_message(session.id, "assistant", response_text)
+    assistant_message_id = assistant_message_id_for_ingress(ingress)
+    await session_manager.add_message(
+        session.id,
+        "assistant",
+        response_text,
+        metadata_json=chat_assistant_metadata(
+            ingress,
+            message_id=assistant_message_id,
+        ),
+        message_id=assistant_message_id,
+    )
     await log_agent_run_event(
         session_id=session.id,
         transport="rest",
@@ -791,4 +908,15 @@ async def chat(request: ChatRequest, http_request: HttpRequest):
     return ChatResponse(
         response=response_text,
         session_id=session.id,
+        conversation_id=ingress.conversation_id,
+        thread_id=ingress.thread_id,
+        message_id=assistant_message_id,
+        owner_principal_id=ingress.principal_id,
+        operator_session_id=ingress.operator_session_id,
+        device_id=ingress.device_id,
+        channel=ingress.channel,
+        transport=ingress.transport,
+        correlation_id=ingress.correlation_id,
+        causation_id=ingress.message_id,
+        attachment_refs=ingress.attachment_refs,
     )

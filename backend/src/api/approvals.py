@@ -5,6 +5,7 @@ from src.approval.repository import approval_repository
 from src.approval.surfaces import approval_surface_metadata
 from src.agent.session import session_manager
 from src.audit.repository import audit_repository
+from src.conversation.identity import redact_attachment_refs
 from src.tools.policy import get_current_tool_policy_mode
 
 router = APIRouter()
@@ -28,6 +29,15 @@ def _approval_details(request) -> dict:
     return details if isinstance(details, dict) else {}
 
 
+def _approval_attachment_refs(request) -> list[dict]:
+    """Read durable attachment metadata without exposing malformed legacy data."""
+    try:
+        parsed = json.loads(getattr(request, "attachment_refs_json", "[]") or "[]")
+        return redact_attachment_refs(parsed)
+    except Exception:
+        return []
+
+
 def _require_approval_owner(request: Request, approval, operator) -> dict:
     """Bind a decision to its authenticated owner and conversation context.
 
@@ -46,11 +56,23 @@ def _require_approval_owner(request: Request, approval, operator) -> dict:
         or ""
     ).strip()
     legacy_owner_session_id = str(details.get("approval_owner_session_id") or "").strip()
-    owner_principal_id = str(details.get("approval_owner_principal_id") or "").strip()
+    owner_principal_id = str(
+        getattr(approval, "owner_principal_id", None)
+        or details.get("approval_owner_principal_id")
+        or ""
+    ).strip()
     current_principal_id = str(
         getattr(getattr(operator, "principal", None), "principal_id", "") or ""
     ).strip()
-    conversation_id = str(details.get("approval_conversation_id") or "").strip()
+    conversation_id = str(
+        getattr(approval, "conversation_id", None)
+        or details.get("approval_conversation_id")
+        or approval.session_id
+        or ""
+    ).strip()
+    model_operator_session_id = str(getattr(approval, "operator_session_id", None) or "").strip()
+    if model_operator_session_id and not owner_operator_session_id:
+        owner_operator_session_id = model_operator_session_id
 
     if conversation_id and conversation_id != str(approval.session_id or ""):
         allowed = False
@@ -85,10 +107,12 @@ def _require_approval_owner(request: Request, approval, operator) -> dict:
 
 @router.get("/approvals/pending")
 async def list_pending_approvals(
+    request: Request,
     session_id: str | None = Query(default=None),
     limit: int = Query(default=20, ge=1, le=100),
 ):
     """List pending approval requests."""
+    operator = _require_approval_operator(request)
     approvals = await approval_repository.list_pending(session_id=session_id, limit=limit)
     session_titles = {
         str(session["id"]): str(session.get("title") or "Untitled session")
@@ -97,11 +121,38 @@ async def list_pending_approvals(
     }
     items = []
     for approval in approvals:
+        # ``list_pending`` returns dictionaries for compatibility.  Explicit
+        # owner fields are sufficient to filter here; legacy ownerless rows
+        # remain visible only to the existing authenticated test/operator
+        # session binding handled by the route's decision endpoint.
+        owner_principal_id = str(approval.get("owner_principal_id") or "").strip()
+        owner_operator_session_id = str(approval.get("operator_session_id") or "").strip()
+        current_principal_id = str(
+            getattr(getattr(operator, "principal", None), "principal_id", "") or ""
+        ).strip()
+        if owner_principal_id and owner_principal_id != current_principal_id:
+            continue
+        if owner_operator_session_id and owner_operator_session_id != operator.session_id:
+            continue
+        conversation_id = str(
+            approval.get("conversation_id") or approval.get("session_id") or ""
+        ).strip()
+        if conversation_id and approval.get("session_id") and conversation_id != str(approval["session_id"]):
+            continue
         approval_metadata = approval_surface_metadata(approval)
         items.append(
             {
                 **approval,
                 "thread_id": approval.get("session_id"),
+                "conversation_id": approval.get("conversation_id") or approval.get("session_id"),
+                "owner_principal_id": approval.get("owner_principal_id"),
+                "operator_session_id": approval.get("operator_session_id"),
+                "device_id": approval.get("device_id"),
+                "channel": approval.get("channel"),
+                "transport": approval.get("transport"),
+                "correlation_id": approval.get("correlation_id"),
+                "causation_id": approval.get("causation_id"),
+                "attachment_refs": approval.get("attachment_refs") or [],
                 "thread_label": (
                     session_titles.get(str(approval["session_id"]))
                     if approval.get("session_id")
@@ -147,7 +198,21 @@ async def approve_request(approval_id: str, request: Request):
     details = details if isinstance(details, dict) else _approval_details(request)
     resume_message = details.get("resume_message")
 
-    response = {"status": request.status, "id": request.id}
+    response = {
+        "status": request.status,
+        "id": request.id,
+        "approval_id": request.id,
+        "conversation_id": getattr(request, "conversation_id", None) or request.session_id,
+        "thread_id": getattr(request, "thread_id", None) or request.session_id,
+        "owner_principal_id": getattr(request, "owner_principal_id", None),
+        "operator_session_id": getattr(request, "operator_session_id", None),
+        "device_id": getattr(request, "device_id", None),
+        "channel": getattr(request, "channel", None),
+        "transport": getattr(request, "transport", None),
+        "correlation_id": getattr(request, "correlation_id", None),
+        "causation_id": getattr(request, "causation_id", None),
+        "attachment_refs": _approval_attachment_refs(request),
+    }
     if request.session_id and resume_message:
         response["session_id"] = request.session_id
         response["resume_message"] = resume_message
@@ -174,4 +239,18 @@ async def deny_request(approval_id: str, request: Request):
         policy_mode=get_current_tool_policy_mode(),
         summary=f"Denied high-risk action for {request.tool_name}",
     )
-    return {"status": request.status, "id": request.id}
+    return {
+        "status": request.status,
+        "id": request.id,
+        "approval_id": request.id,
+        "conversation_id": getattr(request, "conversation_id", None) or request.session_id,
+        "thread_id": getattr(request, "thread_id", None) or request.session_id,
+        "owner_principal_id": getattr(request, "owner_principal_id", None),
+        "operator_session_id": getattr(request, "operator_session_id", None),
+        "device_id": getattr(request, "device_id", None),
+        "channel": getattr(request, "channel", None),
+        "transport": getattr(request, "transport", None),
+        "correlation_id": getattr(request, "correlation_id", None),
+        "causation_id": getattr(request, "causation_id", None),
+        "attachment_refs": _approval_attachment_refs(request),
+    }

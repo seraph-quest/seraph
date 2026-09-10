@@ -4,6 +4,8 @@ import hashlib
 import logging
 
 from src.audit.runtime import log_observer_delivery_event
+from src.approval.runtime import get_current_trust_principal
+from src.conversation.identity import ConversationIdentityError, build_conversation_identity, redact_attachment_refs
 from src.models.schemas import WSResponse
 from src.observer.intervention_policy import InterventionDecision, decide_intervention
 from src.observer.native_notification_queue import native_notification_queue
@@ -301,6 +303,38 @@ async def deliver_or_queue(
     from src.memory.procedural_guidance import load_procedural_memory_guidance
 
     ctx = context_manager.get_context()
+    # A proactive message may be created by an authenticated interactive turn
+    # or by an ambient scheduler.  If it carries a bound conversation, derive
+    # the owner from trusted runtime context/message lineage and reject any
+    # conflicting caller identity before creating an intervention/outbox row.
+    trusted_principal = get_current_trust_principal()
+    requested_conversation_id = session_id or message.conversation_id or message.session_id or None
+    if session_id and message.conversation_id and session_id != message.conversation_id:
+        raise ConversationIdentityError(
+            "conversation_session_mismatch",
+            "Delivery session must equal the canonical conversation id.",
+        )
+    owner_principal_id = message.owner_principal_id or getattr(trusted_principal, "principal_id", None)
+    operator_session_id = message.operator_session_id or getattr(
+        trusted_principal, "operator_session_id", None
+    )
+    if requested_conversation_id:
+        identity = build_conversation_identity(
+            conversation_id=requested_conversation_id,
+            thread_id=message.thread_id or requested_conversation_id,
+            owner_principal_id=owner_principal_id or "ambient",
+            operator_session_id=operator_session_id,
+            device_id=message.device_id,
+            channel="web",
+            transport="websocket",
+            correlation_id=message.correlation_id,
+            causation_id=message.causation_id,
+            require_owner=False,
+        )
+        # Preserve one normalized session id for all downstream paths.
+        session_id = requested_conversation_id
+    else:
+        identity = None
     active_channel_adapters = _active_channel_adapters()
     intervention_type = message.intervention_type or message.type
     urgency = message.urgency or 0
@@ -537,6 +571,15 @@ async def deliver_or_queue(
                         thread_source="session" if session_id else "ambient",
                         continuation_mode="resume_thread" if session_id else "open_thread",
                         resume_message=f"Continue from this guardian intervention: {message.content}",
+                        owner_principal_id=owner_principal_id,
+                        operator_session_id=operator_session_id,
+                        device_id=message.device_id,
+                        channel="native_notification",
+                        transport="native_notification",
+                        conversation_id=identity.conversation_id if identity is not None else None,
+                        correlation_id=message.correlation_id,
+                        causation_id=message.causation_id,
+                        attachment_refs=message.attachment_refs,
                     )
                     context_manager.record_native_notification(
                         title=notification.title,

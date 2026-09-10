@@ -73,7 +73,16 @@ class NativeNotificationResponse(BaseModel):
     urgency: int | None = None
     surface: str = "notification"
     session_id: str | None = None
+    conversation_id: str | None = None
     thread_id: str | None = None
+    owner_principal_id: str | None = None
+    operator_session_id: str | None = None
+    device_id: str | None = None
+    channel: str = "native_notification"
+    transport: str = "native_notification"
+    correlation_id: str | None = None
+    causation_id: str | None = None
+    attachment_refs: list[dict[str, Any]] = Field(default_factory=list)
     thread_label: str | None = None
     thread_source: str = "ambient"
     continuation_mode: str = "open_thread"
@@ -82,6 +91,7 @@ class NativeNotificationResponse(BaseModel):
     delivery_status: str = "queued"
     attempt_count: int = 0
     fencing_token: int = 0
+    degraded_state: str | None = None
 
 
 class NativeNotificationPollResponse(BaseModel):

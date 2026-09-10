@@ -9,8 +9,35 @@ from sqlalchemy import update
 from sqlmodel import select, col
 
 from src.db.engine import get_session
-from src.db.models import ApprovalRequest
+from src.db.models import ApprovalRequest, Session
 from src.db.session_refs import ensure_sessions_exist
+from src.conversation.identity import (
+    ConversationIdentityError,
+    build_conversation_identity,
+    redact_attachment_refs,
+)
+
+
+def _approval_expiry(value: object) -> datetime | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value
+    try:
+        return datetime.fromtimestamp(float(value), tz=timezone.utc)
+    except (TypeError, ValueError, OverflowError):
+        try:
+            return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        except (TypeError, ValueError):
+            return None
+
+
+def _approval_attachment_refs(request: ApprovalRequest) -> list[dict[str, Any]]:
+    try:
+        parsed = json.loads(request.attachment_refs_json or "[]")
+    except (TypeError, ValueError):
+        return []
+    return parsed if isinstance(parsed, list) else []
 
 
 def fingerprint_tool_call(
@@ -52,6 +79,7 @@ def _approval_belongs_to_operator_session(
     explicit_owner = str(
         details.get("approval_owner_operator_session_id")
         or details.get("approval_owner_auth_session_id")
+        or request.operator_session_id
         or ""
     ).strip()
     if explicit_owner:
@@ -89,10 +117,58 @@ class ApprovalRepository:
         fingerprint: str,
         details: dict[str, Any] | None = None,
     ) -> ApprovalRequest:
+        details = dict(details or {})
+        canonical_session_id = str(session_id or "").strip() or None
+        supplied_conversation_id = str(
+            details.get("conversation_id")
+            or details.get("approval_conversation_id")
+            or canonical_session_id
+            or ""
+        ).strip() or None
+        if supplied_conversation_id != canonical_session_id:
+            raise ConversationIdentityError(
+                "conversation_session_mismatch",
+                "Approval conversation identity must equal its session id.",
+            )
+        supplied_owner = str(
+            details.get("owner_principal_id")
+            or details.get("approval_owner_principal_id")
+            or ""
+        ).strip() or None
+        supplied_operator_session = str(
+            details.get("operator_session_id")
+            or details.get("approval_owner_operator_session_id")
+            or details.get("approval_owner_auth_session_id")
+            or ""
+        ).strip() or None
+        try:
+            safe_attachment_refs = redact_attachment_refs(
+                details.get("attachment_refs", details.get("attachments"))
+            )
+        except ConversationIdentityError:
+            raise
+        if "attachment_refs" in details or "attachments" in details:
+            details["attachment_refs"] = safe_attachment_refs
+            details.pop("attachments", None)
+        channel = str(details.get("channel") or "web").strip()
+        transport = str(details.get("transport") or "rest").strip()
+        identity = build_conversation_identity(
+            conversation_id=canonical_session_id,
+            thread_id=details.get("thread_id") or canonical_session_id,
+            owner_principal_id=supplied_owner or "ambient",
+            operator_session_id=supplied_operator_session,
+            device_id=details.get("device_id"),
+            channel=channel,
+            transport=transport,
+            correlation_id=details.get("correlation_id") or f"approval:{fingerprint}",
+            causation_id=details.get("causation_id"),
+            require_owner=False,
+        )
+
         async with get_session() as db:
             existing = await db.execute(
                 select(ApprovalRequest)
-                .where(ApprovalRequest.session_id == session_id)
+                .where(ApprovalRequest.session_id == canonical_session_id)
                 .where(ApprovalRequest.tool_name == tool_name)
                 .where(ApprovalRequest.fingerprint == fingerprint)
                 .where(ApprovalRequest.status == "pending")
@@ -100,19 +176,55 @@ class ApprovalRepository:
             )
             request = existing.scalars().first()
             if request:
+                if supplied_owner and request.owner_principal_id not in (None, supplied_owner):
+                    raise ConversationIdentityError(
+                        "conversation_owner_mismatch",
+                        "Approval request belongs to another operator.",
+                    )
                 db.expunge(request)
                 return request
 
             request = ApprovalRequest(
-                session_id=session_id,
+                session_id=canonical_session_id,
+                conversation_id=identity.conversation_id or None,
+                thread_id=identity.thread_id or None,
+                owner_principal_id=supplied_owner,
+                operator_session_id=supplied_operator_session,
+                device_id=identity.device_id,
+                channel=identity.channel,
+                transport=identity.transport,
+                correlation_id=identity.correlation_id,
+                causation_id=identity.causation_id,
+                attachment_refs_json=json.dumps(safe_attachment_refs, sort_keys=True),
+                challenge=(str(details.get("challenge") or "").strip() or None),
+                action=(str(details.get("action") or "").strip() or None),
+                expires_at=_approval_expiry(details.get("expires_at")),
                 tool_name=tool_name,
                 risk_level=risk_level,
                 status="pending",
                 fingerprint=fingerprint,
                 summary=summary,
-                details_json=json.dumps(details) if details is not None else None,
+                details_json=json.dumps(details) if details else None,
             )
-            await ensure_sessions_exist(db, [session_id])
+            await ensure_sessions_exist(db, [canonical_session_id])
+            if canonical_session_id and supplied_owner:
+                session_result = await db.execute(
+                    select(Session).where(Session.id == canonical_session_id)
+                )
+                session = session_result.scalar_one_or_none()
+                if session is None:
+                    raise ConversationIdentityError(
+                        "conversation_session_not_found",
+                        "The approval conversation session was not found.",
+                    )
+                if session.owner_principal_id not in (None, supplied_owner):
+                    raise ConversationIdentityError(
+                        "conversation_owner_mismatch",
+                        "Approval conversation belongs to another operator.",
+                    )
+                if session.owner_principal_id is None:
+                    session.owner_principal_id = supplied_owner
+                    db.add(session)
             db.add(request)
             await db.flush()
             db.expunge(request)
@@ -400,24 +512,58 @@ class ApprovalRepository:
 
             result = await db.execute(stmt)
             requests = result.scalars().all()
-            return [
-                {
-                    "id": request.id,
-                    "session_id": request.session_id,
-                    "tool_name": request.tool_name,
-                    "risk_level": request.risk_level,
-                    "status": request.status,
-                    "fingerprint": request.fingerprint,
-                    "summary": request.summary,
-                    "created_at": request.created_at.isoformat(),
-                    **(
-                        json.loads(request.details_json)
-                        if request.details_json
-                        else {}
-                    ),
-                }
-                for request in requests
-            ]
+            output: list[dict[str, Any]] = []
+            for request in requests:
+                try:
+                    details = json.loads(request.details_json) if request.details_json else {}
+                except (TypeError, ValueError):
+                    details = {}
+                if not isinstance(details, dict):
+                    details = {}
+                if "attachment_refs" in details:
+                    try:
+                        details["attachment_refs"] = redact_attachment_refs(details["attachment_refs"])
+                    except ConversationIdentityError:
+                        details["attachment_refs"] = []
+                conversation_id = request.conversation_id or details.get("approval_conversation_id") or request.session_id
+                thread_id = request.thread_id or details.get("thread_id") or conversation_id
+                owner_principal_id = request.owner_principal_id or details.get("approval_owner_principal_id")
+                operator_session_id = (
+                    request.operator_session_id
+                    or details.get("approval_owner_operator_session_id")
+                    or details.get("approval_owner_auth_session_id")
+                )
+                attachment_refs = _approval_attachment_refs(request)
+                if not attachment_refs and "attachment_refs" in details:
+                    attachment_refs = details["attachment_refs"]
+                # Server-owned lineage wins over caller-provided detail keys.
+                output.append(
+                    {
+                        **details,
+                        "id": request.id,
+                        "session_id": request.session_id,
+                        "tool_name": request.tool_name,
+                        "risk_level": request.risk_level,
+                        "status": request.status,
+                        "fingerprint": request.fingerprint,
+                        "summary": request.summary,
+                        "conversation_id": conversation_id,
+                        "thread_id": thread_id,
+                        "owner_principal_id": owner_principal_id,
+                        "operator_session_id": operator_session_id,
+                        "device_id": request.device_id or details.get("device_id"),
+                        "channel": request.channel or details.get("channel") or "web",
+                        "transport": request.transport or details.get("transport") or "rest",
+                        "correlation_id": request.correlation_id or details.get("correlation_id"),
+                        "causation_id": request.causation_id or details.get("causation_id"),
+                        "attachment_refs": attachment_refs,
+                        "challenge": request.challenge or details.get("challenge"),
+                        "action": request.action or details.get("action"),
+                        "expires_at": request.expires_at.isoformat() if request.expires_at is not None else details.get("expires_at"),
+                        "created_at": request.created_at.isoformat(),
+                    }
+                )
+            return output
 
 
 approval_repository = ApprovalRepository()

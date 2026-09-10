@@ -1370,6 +1370,39 @@ async def run_native_software_engineering_fixture(
                 durable_job,
                 reason_code="operator_cancelled_before_apply",
             )
+        patch_target_digest = str(preview_payload.get("after_sha256") or "")
+        patch_effect_id = "workspace_patch:" + _digest(
+            {
+                "job_id": request.job_id,
+                "target_path": relative_bug_path,
+                "target_digest": patch_target_digest,
+            }
+        )[:24]
+        patch_approval_id = (
+            request.approval_receipt.receipt_id
+            if request.approval_receipt is not None
+            else None
+        )
+        patch_adapter_key = f"native-swe:workspace-patch:{request.job_id}:{patch_target_digest}"
+        # Establish the intended external write before applying it. If the
+        # process dies after this point, restart recovery keeps the effect
+        # uncertain until a readback/reconciliation receipt resolves it.
+        await durable_job_repository.record_effect(
+            request.job_id,
+            effect_id=patch_effect_id,
+            effect_type="workspace_patch",
+            target_path=relative_bug_path,
+            target_digest=patch_target_digest,
+            approval_id=patch_approval_id,
+            adapter_idempotency_key=patch_adapter_key,
+            status="intent",
+            details={
+                "preview_artifact": _relative_workspace_path(job_workspace.artifact_dir / "patch.preview.json"),
+                "approval_artifact": _relative_workspace_path(job_workspace.artifact_dir / "approval.json"),
+            },
+            owner=worker_owner,
+            fencing_token=fencing_token,
+        )
         applied_raw = apply_workspace_patch(
             file_path=relative_bug_path,
             old_text=FIXTURE_BEFORE_TEXT,
@@ -1401,8 +1434,12 @@ async def run_native_software_engineering_fixture(
         )
         await durable_job_repository.record_effect(
             request.job_id,
+            effect_id=patch_effect_id,
             effect_type="workspace_patch",
             target_path=relative_bug_path,
+            target_digest=patch_target_digest,
+            approval_id=patch_approval_id,
+            adapter_idempotency_key=patch_adapter_key,
             status="succeeded",
             content_sha256=str(applied_payload.get("after_sha256") or ""),
             details={"patch_artifact": _relative_workspace_path(job_workspace.artifact_dir / "patch.json")},

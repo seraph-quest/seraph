@@ -108,6 +108,24 @@ class ModelFabricConfiguration:
     openrouter_setup: OpenRouterSetup | None = None
 
 
+def openrouter_policy_for_setup(setup: OpenRouterSetup, runtime_path: str) -> WorkloadPolicy:
+    """Derive one effective route policy from the persisted OpenRouter setup.
+
+    The setup is the operator-owned source of truth for the active OpenRouter
+    route.  Keeping this derivation here prevents readiness and caller-side
+    admission from falling back to mutable legacy environment controls.
+    """
+    return WorkloadPolicy(
+        runtime_path=runtime_path,
+        egress_class=setup.egress_class,
+        cloud_egress_acknowledged=setup.cloud_egress_acknowledged,
+        allowed_profile_ids=(setup.profile_id,),
+        allowed_provider_kinds=(OPENROUTER_PROVIDER_KIND,),
+        fallback_allowed=False,
+        max_cost_microusd=setup.spend_ceiling_microusd,
+    )
+
+
 def model_fabric_configuration_path() -> Path:
     return Path(settings.workspace_dir).expanduser().resolve() / "model-fabric-settings.json"
 
@@ -126,27 +144,33 @@ def read_model_fabric_configuration() -> ModelFabricConfiguration:
 async def hydrate_openrouter_credential() -> bool:
     """Load the configured vault credential before canonical route resolution.
 
-    The vault is consulted only when the trusted process settings and env
-    fallback are empty.  The secret stays in the settings object and is never
+    A persisted vault reference is authoritative; legacy environment values
+    cannot satisfy it.  The secret stays in the settings object and is never
     returned, logged, or sent by this helper; the transport remains responsible
     for the eventual provider call.
     """
+    persisted = read_model_fabric_configuration()
+    setup = persisted.openrouter_setup if persisted.status == "ready" else None
+    if setup is not None and setup.credential_ref == OPENROUTER_VAULT_CREDENTIAL_REF:
+        # A vault reference is authoritative.  A mutable environment value
+        # must not make a persisted vault-backed setup appear hydrated.
+        configured = str(settings.openrouter_api_key or "").strip()
+        if configured:
+            return True
+        from src.vault.repository import vault_repository
+
+        credential = str(await vault_repository.get("openrouter_api_key") or "").strip()
+        if not credential:
+            return False
+        settings.openrouter_api_key = credential
+        return True
+
     configured = str(settings.openrouter_api_key or os.getenv("OPENROUTER_API_KEY", "") or "").strip()
     if configured:
         if not settings.openrouter_api_key:
             settings.openrouter_api_key = configured
         return True
-    persisted = read_model_fabric_configuration()
-    setup = persisted.openrouter_setup if persisted.status == "ready" else None
-    if setup is None or setup.credential_ref != OPENROUTER_VAULT_CREDENTIAL_REF:
-        return False
-    from src.vault.repository import vault_repository
-
-    credential = str(await vault_repository.get("openrouter_api_key") or "").strip()
-    if not credential:
-        return False
-    settings.openrouter_api_key = credential
-    return True
+    return False
 
 
 def write_model_fabric_configuration(configuration: ModelFabricConfiguration) -> None:
@@ -220,6 +244,8 @@ def effective_provider_profiles(legacy_profiles: dict[str, ProviderProfile]) -> 
 def effective_workload_policy(runtime_path: str) -> WorkloadPolicy:
     configured = read_model_fabric_configuration()
     if configured.status == "ready":
+        if configured.openrouter_setup is not None:
+            return openrouter_policy_for_setup(configured.openrouter_setup, runtime_path)
         for policy in configured.workload_policies:
             if policy.runtime_path == runtime_path:
                 return policy
@@ -426,8 +452,8 @@ def validate_openrouter_setup(setup: OpenRouterSetup) -> None:
         raise ValueError("vision and embedding workloads require zero-data-retention policy")
     if setup.egress_class is EgressClass.LOCAL_ONLY or not setup.cloud_egress_acknowledged:
         raise ValueError("OpenRouter setup requires explicit cloud egress acknowledgement")
-    if setup.spend_ceiling_microusd is None or not 0 <= int(setup.spend_ceiling_microusd) <= 1_000_000_000:
-        raise ValueError("OpenRouter setup requires a finite spend ceiling")
+    if setup.spend_ceiling_microusd is None or not 1 <= int(setup.spend_ceiling_microusd) <= 1_000_000_000:
+        raise ValueError("OpenRouter setup requires a positive finite spend ceiling")
     if setup.max_inflight != 1:
         raise ValueError("OpenRouter admission allows exactly one in-flight request")
     if not 1 <= int(setup.max_queued) <= _MAX_OPENROUTER_QUEUE:

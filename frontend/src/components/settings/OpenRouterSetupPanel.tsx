@@ -116,7 +116,7 @@ export function OpenRouterSetupPanel({ setup, stale, onSave }: OpenRouterSetupPa
       const temperature = boundedNumber(draft.temperature, "Temperature", 0, 2);
       const maxOutputTokens = boundedNumber(draft.maxOutputTokens, "Max output tokens", 1, 131072, true);
       const timeoutSeconds = boundedNumber(draft.timeoutSeconds, "Timeout", 1, 120);
-      const spendCeilingMicrousd = boundedNumber(draft.spendCeilingMicrousd, "Spend ceiling", 0, 1_000_000_000, true);
+      const spendCeilingMicrousd = boundedNumber(draft.spendCeilingMicrousd, "Spend ceiling", 1, 1_000_000_000, true);
       const maxQueued = boundedNumber(draft.maxQueued, "Max queued", 1, 64, true);
       const maxInflight = boundedNumber(draft.maxInflight, "Max in flight", 1, 1, true);
       const maxOutstandingPerOwner = boundedNumber(draft.maxOutstandingPerOwner, "Max outstanding per owner", 1, 16, true);
@@ -221,7 +221,7 @@ export function OpenRouterSetupPanel({ setup, stale, onSave }: OpenRouterSetupPa
           </label>
         </div>
         <label className="text-retro-text/40 uppercase tracking-wider" htmlFor="openrouter-spend">Spend ceiling (micro USD)</label>
-        <input id="openrouter-spend" aria-label="OpenRouter spend ceiling" type="number" min="0" max="1000000000" value={draft.spendCeilingMicrousd} onChange={(event) => update("spendCeilingMicrousd", event.target.value)} className={inputClass()} placeholder="required" />
+        <input id="openrouter-spend" aria-label="OpenRouter spend ceiling" type="number" min="1" max="1000000000" value={draft.spendCeilingMicrousd} onChange={(event) => update("spendCeilingMicrousd", event.target.value)} className={inputClass()} placeholder="required" />
         <div className="text-retro-text/40 uppercase tracking-wider">Queue bounds</div>
         <div className="grid grid-cols-4 gap-1">
           <input aria-label="OpenRouter max queued" type="number" min="1" max="64" value={draft.maxQueued} onChange={(event) => update("maxQueued", event.target.value)} className={inputClass()} title="max queued" />

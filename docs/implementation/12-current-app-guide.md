@@ -68,16 +68,20 @@ Open the Settings panel's **OpenRouter setup** section to save the fixed
 one qualified `provider/model` ID (multiple model selection is rejected until a
 governed selector exists), select the capabilities, choose the explicit
 upstream allow-list, and set temperature, output-token, timeout, cloud-egress
-acknowledgement, data-retention policy, finite spend ceiling, and the bounded
-queue controls. These persisted controls are applied to the active profile and
-remote admission lane on every profile resolution. Fallbacks are always
+acknowledgement, explicit deny data-retention policy, a positive finite spend
+ceiling, and the bounded queue controls. These persisted controls are applied
+to the active profile, caller cost/budget context, and remote admission lane
+on every profile resolution; mutable legacy environment controls cannot
+override them. Fallbacks are always
 disabled; vision and embedding capabilities require zero-data-retention
 acknowledgement.
 
 The API-key field is write-only. A supplied key is stored through Seraph's
 encrypted vault and the response exposes only `credential_configured` and a
 short fingerprint plus the non-secret credential reference. Leaving the field
-blank preserves the existing server-side reference. The browser does not retain
+blank preserves the existing server-side reference and fingerprint. Credential
+and configuration writes compensate a vault update if the configuration write
+fails. The browser does not retain
 the field, and saved configuration and status payloads contain no key value.
 With no key, status is explicitly
 `configuration_required` and the route is not silently usable. On restart the

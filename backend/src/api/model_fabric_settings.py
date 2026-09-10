@@ -36,6 +36,7 @@ from src.model_fabric.configuration import (
     credential_ref_allowed,
     effective_workload_policy,
     normalize_openrouter_model_id,
+    openrouter_policy_for_setup,
     openrouter_profile_for_setup,
     hydrate_openrouter_credential,
     _openrouter_setup_payload,
@@ -164,14 +165,17 @@ class OpenRouterSetupInput(BaseModel):
     # edge; the canonical setup stores only allow_fallbacks.
     fallback_allowed: bool | None = None
     require_parameters: bool = True
-    data_collection: str = "deny"
-    data_retention_policy: str = "deny"
+    # These are intentionally required at the request boundary.  Persisted
+    # dataclasses keep safe defaults for backwards-compatible readback, but a
+    # new operator save must explicitly acknowledge the deny policy.
+    data_collection: str = Field(..., min_length=1)
+    data_retention_policy: str = Field(..., min_length=1)
     zero_data_retention: bool = False
     egress_class: EgressClass = EgressClass.LOCAL_ONLY
     cloud_egress: EgressClass | None = None
     cloud_egress_acknowledged: bool = False
-    spend_ceiling_microusd: int | None = Field(default=None, ge=0, le=1_000_000_000)
-    max_cost_microusd: int | None = Field(default=None, ge=0, le=1_000_000_000)
+    spend_ceiling_microusd: int | None = Field(default=None, ge=1, le=1_000_000_000)
+    max_cost_microusd: int | None = Field(default=None, ge=1, le=1_000_000_000)
     max_queued: int = Field(default=64, ge=1, le=64)
     max_queue_size: int | None = Field(default=None, ge=1, le=64)
     max_inflight: int = Field(default=1, ge=1, le=1)
@@ -243,6 +247,14 @@ def _openrouter_setup_from_input(
     credential_ref = body.credential_ref
     if credential_ref == "OPENROUTER_API_KEY":
         credential_ref = OPENROUTER_ENV_CREDENTIAL_REF
+    supplied_key = body.api_key.get_secret_value() if body.api_key is not None else ""
+    if (
+        existing is not None
+        and not supplied_key.strip()
+        and body.credential_ref is not None
+        and credential_ref != existing.credential_ref
+    ):
+        raise ValueError("blank API key input cannot replace the persisted credential reference")
     return OpenRouterSetup(
         profile_id=body.profile_id,
         model_ids=model_ids,
@@ -289,14 +301,29 @@ async def _store_setup_credential(
     """Store a newly supplied key in the existing encrypted vault."""
     raw_key = api_key.get_secret_value() if api_key is not None else ""
     if not raw_key.strip():
-        configured_key = _configured_openrouter_key()
-        if configured_key and setup.credential_ref == OPENROUTER_VAULT_CREDENTIAL_REF:
-            # The env reference remains a trusted, server-side fallback when
-            # an operator intentionally omitted a replacement key.
+        # A blank write means "keep the current credential".  In particular,
+        # an already hydrated vault credential must remain vault-backed; it
+        # must never be silently relabelled as an environment secret.
+        configured_key = (
+            str(settings.openrouter_api_key or "").strip()
+            if setup.credential_ref == OPENROUTER_VAULT_CREDENTIAL_REF
+            else _configured_openrouter_key()
+        )
+        if not configured_key and setup.credential_ref == OPENROUTER_VAULT_CREDENTIAL_REF:
+            try:
+                configured_key = str(await vault_repository.get("openrouter_api_key") or "").strip()
+            except Exception:
+                # Policy-only keyless saves remain safe when the vault is
+                # temporarily unavailable.  Preserve the prior reference and
+                # fingerprint so status can report configuration_required.
+                configured_key = ""
+        if configured_key and setup.credential_ref in {
+            OPENROUTER_VAULT_CREDENTIAL_REF,
+            OPENROUTER_ENV_CREDENTIAL_REF,
+        }:
             return OpenRouterSetup(
                 **{
                     **setup.__dict__,
-                    "credential_ref": OPENROUTER_ENV_CREDENTIAL_REF,
                     "credential_fingerprint": _fingerprint_secret(configured_key),
                 }
             )
@@ -325,16 +352,35 @@ async def _store_setup_credential(
     )
 
 
-def _openrouter_policy_for_setup(setup: OpenRouterSetup, runtime_path: str) -> WorkloadPolicy:
-    return WorkloadPolicy(
-        runtime_path=runtime_path,
-        egress_class=setup.egress_class,
-        cloud_egress_acknowledged=setup.cloud_egress_acknowledged,
-        allowed_profile_ids=(setup.profile_id,),
-        allowed_provider_kinds=(OPENROUTER_PROVIDER_KIND,),
-        fallback_allowed=False,
-        max_cost_microusd=setup.spend_ceiling_microusd,
-    )
+async def _snapshot_setup_credential() -> str | None:
+    """Read the prior vault value for a compensating credential update."""
+    try:
+        return await vault_repository.get("openrouter_api_key")
+    except Exception as exc:
+        # Do not write a replacement when the previous value cannot be
+        # recovered.  That would make a later configuration failure unable to
+        # restore the operator's credential safely.
+        raise RuntimeError("OpenRouter credential snapshot failed") from exc
+
+
+async def _restore_setup_credential(
+    previous_vault_value: str | None,
+    previous_process_value: str,
+) -> None:
+    """Restore both credential sources after a failed configuration write."""
+    try:
+        if previous_vault_value is None:
+            await vault_repository.delete("openrouter_api_key")
+        else:
+            await vault_repository.store(
+                "openrouter_api_key",
+                previous_vault_value,
+                description="Seraph OpenRouter API key (write-only settings input)",
+            )
+    except Exception as exc:
+        settings.openrouter_api_key = previous_process_value
+        raise RuntimeError("OpenRouter credential rollback failed") from exc
+    settings.openrouter_api_key = previous_process_value
 
 
 def _setup_configuration(
@@ -345,17 +391,18 @@ def _setup_configuration(
 ) -> ModelFabricConfiguration:
     generated_profile = openrouter_profile_for_setup(setup)
     if profiles:
-        configured_profiles = tuple(ProviderProfile(**item.model_dump()) for item in profiles)
-        if any(profile.id == generated_profile.id for profile in configured_profiles):
-            raise ValueError("OpenRouter setup owns the canonical openrouter profile")
-        configured_profiles = (*configured_profiles, generated_profile)
+        raise ValueError(
+            "OpenRouter setup owns the canonical profile; omit API-supplied profiles"
+        )
     else:
         configured_profiles = (generated_profile,)
     if policies:
-        configured_policies = tuple(WorkloadPolicy(**item.model_dump()) for item in policies)
+        raise ValueError(
+            "OpenRouter setup owns the canonical workload policies; omit API-supplied policies"
+        )
     else:
         configured_policies = tuple(
-            _openrouter_policy_for_setup(setup, runtime_path)
+            openrouter_policy_for_setup(setup, runtime_path)
             for runtime_path in CANONICAL_ROUTE_SPECS
         )
     return ModelFabricConfiguration(
@@ -375,9 +422,13 @@ async def get_model_fabric_settings():
 async def put_model_fabric_settings(body: ModelFabricConfigurationRequest, request: Request):
     if not _is_local_request(request):
         raise HTTPException(status_code=403, detail="Model-fabric settings require localhost access")
+    credential_mutated = False
+    previous_vault_value: str | None = None
+    previous_process_value = str(settings.openrouter_api_key or "")
     try:
         setup_input = body.openrouter_setup or body.openrouter
-        existing = read_model_fabric_configuration().openrouter_setup
+        persisted = read_model_fabric_configuration()
+        existing = persisted.openrouter_setup
         if setup_input is not None:
             # Build and validate the complete profile before writing a new
             # credential. An invalid policy must never leave a usable secret
@@ -389,7 +440,15 @@ async def put_model_fabric_settings(body: ModelFabricConfigurationRequest, reque
                 policies=body.workload_policies,
             )
             validate_active_model_fabric_configuration(configuration)
+            raw_key = (
+                setup_input.api_key.get_secret_value()
+                if setup_input.api_key is not None
+                else ""
+            )
+            if raw_key.strip():
+                previous_vault_value = await _snapshot_setup_credential()
             stored_setup = await _store_setup_credential(setup, setup_input.api_key)
+            credential_mutated = bool(raw_key.strip())
             if stored_setup != setup:
                 setup = stored_setup
                 configuration = _setup_configuration(
@@ -397,7 +456,16 @@ async def put_model_fabric_settings(body: ModelFabricConfigurationRequest, reque
                     profiles=body.profiles,
                     policies=body.workload_policies,
                 )
+                validate_active_model_fabric_configuration(configuration)
         else:
+            if existing is not None:
+                raise ValueError(
+                    "persisted OpenRouter setup must be included; refusing destructive replacement"
+                )
+            if persisted.status == "degraded":
+                raise ValueError(
+                    "persisted model-fabric settings are unreadable; refusing destructive replacement"
+                )
             configuration = ModelFabricConfiguration(
                 profiles=tuple(ProviderProfile(**item.model_dump()) for item in body.profiles),
                 workload_policies=tuple(WorkloadPolicy(**item.model_dump()) for item in body.workload_policies),
@@ -405,12 +473,19 @@ async def put_model_fabric_settings(body: ModelFabricConfigurationRequest, reque
             )
         validate_active_model_fabric_configuration(configuration)
         write_model_fabric_configuration(configuration)
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
-    except RuntimeError as exc:
-        raise HTTPException(status_code=503, detail="Model-fabric credential persistence failed") from exc
-    except OSError as exc:
-        raise HTTPException(status_code=503, detail="Model-fabric settings persistence failed") from exc
+    except Exception as exc:
+        if credential_mutated:
+            try:
+                await _restore_setup_credential(previous_vault_value, previous_process_value)
+            except RuntimeError as rollback_error:
+                raise rollback_error
+        if isinstance(exc, ValueError):
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        if isinstance(exc, RuntimeError):
+            raise HTTPException(status_code=503, detail="Model-fabric credential persistence failed") from exc
+        if isinstance(exc, OSError):
+            raise HTTPException(status_code=503, detail="Model-fabric settings persistence failed") from exc
+        raise
     return await model_fabric_settings_payload()
 
 
@@ -683,12 +758,20 @@ async def _openrouter_setup_status(setup: OpenRouterSetup | None) -> dict[str, o
     """Return setup metadata while keeping credentials backend-only."""
     if setup is None:
         return None
-    credential = _configured_openrouter_key()
+    credential = (
+        str(settings.openrouter_api_key or "").strip()
+        if setup.credential_ref == OPENROUTER_VAULT_CREDENTIAL_REF
+        else _configured_openrouter_key()
+    )
     credential_store_error: str | None = None
     if not credential and setup.credential_ref == OPENROUTER_VAULT_CREDENTIAL_REF:
         try:
             await hydrate_openrouter_credential()
-            credential = _configured_openrouter_key()
+            credential = (
+                str(settings.openrouter_api_key or "").strip()
+                if setup.credential_ref == OPENROUTER_VAULT_CREDENTIAL_REF
+                else _configured_openrouter_key()
+            )
         except Exception:
             credential_store_error = "credential_store_unavailable"
     payload = _openrouter_setup_payload(setup)

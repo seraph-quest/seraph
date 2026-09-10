@@ -231,6 +231,15 @@ def build_canonical_inference_context(
         if capability not in capabilities:
             capabilities = (*capabilities, capability)
 
+    context_tokens = _estimated_context_tokens(payload)
+    normalized_output_tokens = max(int(output_tokens), 1)
+    owner_budget_microusd = getattr(policy, "max_cost_microusd", None)
+    estimated_cost_microusd = _bounded_admission_cost(
+        context_tokens,
+        normalized_output_tokens,
+        owner_budget_microusd,
+    )
+
     return InferenceRequestContext(
         principal=effective_principal,
         session_id=normalized_session_id,
@@ -252,9 +261,9 @@ def build_canonical_inference_context(
         workload=spec.workload,
         requirements=InferenceRequirements(
             capabilities=tuple(capability.value for capability in capabilities),
-            context_tokens=_estimated_context_tokens(payload),
-            output_tokens=max(int(output_tokens), 1),
-            max_cost_microusd=getattr(policy, "max_cost_microusd", None),
+            context_tokens=context_tokens,
+            output_tokens=normalized_output_tokens,
+            max_cost_microusd=owner_budget_microusd,
             max_local_resource_ms=max(int(timeout_seconds * 1000), 1),
             max_latency_ms=max(int(timeout_seconds * 1000), 1),
             task_class=spec.task_class,
@@ -265,6 +274,8 @@ def build_canonical_inference_context(
         allowed_profile_ids=tuple(getattr(policy, "allowed_profile_ids", ()) or ()),
         allowed_provider_kinds=("openrouter",),
         redaction_applied=redaction_applied,
+        estimated_cost_microusd=estimated_cost_microusd,
+        owner_budget_microusd=owner_budget_microusd,
     )
 
 
@@ -272,3 +283,23 @@ def _estimated_context_tokens(payload: object) -> int:
     """Return a conservative transport-independent input-token requirement."""
     serialized = str(payload)
     return max(1, (len(serialized.encode("utf-8")) + 2) // 3)
+
+
+def _bounded_admission_cost(
+    context_tokens: int,
+    output_tokens: int,
+    owner_budget_microusd: int | None,
+) -> int | None:
+    """Derive a deterministic admission estimate from the bounded token request.
+
+    No provider price table is consulted at context construction time.  The
+    one-microusd-per-token envelope is deliberately a conservative local
+    admission proxy and is capped by the persisted owner ceiling, so the
+    remote broker never receives an unknown estimate or a caller-created
+    budget.  Final provider cost remains a reconciliation concern.
+    """
+    if owner_budget_microusd is None:
+        return None
+    budget = max(int(owner_budget_microusd), 0)
+    requested_tokens = max(int(context_tokens), 1) + max(int(output_tokens), 1)
+    return min(max(requested_tokens, 1), budget)

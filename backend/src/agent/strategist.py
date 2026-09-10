@@ -18,9 +18,7 @@ from src.llm_runtime import (
 )
 from src.model_fabric.caller_context import build_canonical_inference_context
 from src.model_fabric.remote_inference_admission import (
-    RemoteInferenceReceiptBinding,
-    reset_remote_inference_receipt_binding,
-    set_remote_inference_receipt_binding,
+    bind_remote_inference_receipt,
 )
 from src.tools.approval import wrap_tools_for_approval
 from src.tools.audit import wrap_tools_for_audit
@@ -182,17 +180,7 @@ async def run_strategist_decision_completion(
         session_id=principal.session_id if principal is not None else "",
         job_id=principal.job_id if principal is not None else "",
     )
-    binding = (
-        RemoteInferenceReceiptBinding(
-            repository=admission_repository,
-            owner=str(durable_lease_owner).strip(),
-            fencing_token=int(durable_fencing_token),
-        )
-        if durable_job_id is not None
-        else None
-    )
-    binding_token = set_remote_inference_receipt_binding(binding)
-    try:
+    if durable_job_id is None:
         response = await completion_with_fallback(
             messages=transport_messages,
             temperature=0.2,
@@ -201,8 +189,21 @@ async def run_strategist_decision_completion(
             runtime_path="strategist_agent",
             request_context=request_context,
         )
-    finally:
-        reset_remote_inference_receipt_binding(binding_token)
+    else:
+        with bind_remote_inference_receipt(
+            repository=admission_repository,
+            job_id=durable_job_id,
+            owner=str(durable_lease_owner).strip(),
+            fencing_token=int(durable_fencing_token),
+        ):
+            response = await completion_with_fallback(
+                messages=transport_messages,
+                temperature=0.2,
+                max_tokens=512,
+                timeout=settings.agent_strategist_timeout,
+                runtime_path="strategist_agent",
+                request_context=request_context,
+            )
     return str(response.choices[0].message.content or "").strip()
 
 

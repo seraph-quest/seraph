@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 from collections.abc import AsyncIterator, Awaitable, Callable
 from threading import Thread
 from typing import Any, Protocol, TypeVar
@@ -21,7 +22,9 @@ from .remote_inference_admission import (
     RemoteInferenceAdmissionError as GpuAdmissionError,
     RemoteInferenceAdmissionRequest as GpuAdmissionRequest,
     current_remote_inference_receipt_binding,
+    prepare_bound_remote_inference,
     remote_inference_admission_broker as gpu_admission_broker,
+    stable_remote_inference_operation_id,
 )
 from .selector import select_route
 
@@ -77,10 +80,11 @@ def _run_awaitable_sync(awaitable: Awaitable[_SyncResult]) -> _SyncResult:
 
     result: list[_SyncResult] = []
     error: list[BaseException] = []
+    caller_context = contextvars.copy_context()
 
     def runner() -> None:
         try:
-            result.append(asyncio.run(awaitable))
+            result.append(caller_context.run(asyncio.run, awaitable))
         except BaseException as exc:  # pragma: no cover - defensive thread bridge
             error.append(exc)
 
@@ -174,9 +178,14 @@ async def execute_streaming(
         emitted = False
         admission_request = GpuAdmissionRequest.from_inference_context(
             attempt_context,
-            operation_id=decision.attempt_id or f"{attempt_context.request_id}:{candidate.profile.id}",
+            operation_id=stable_remote_inference_operation_id(
+                attempt_context,
+                profile_id=candidate.profile.id,
+                fallback=decision.attempt_id or f"{attempt_context.request_id}:{candidate.profile.id}",
+            ),
             uncertain_on_error=(candidate.profile.provider_kind == "openrouter"),
         )
+        await prepare_bound_remote_inference(admission_request)
         admission_callback_started = False
 
         async def admitted_transport() -> AsyncIterator[str]:
@@ -340,9 +349,14 @@ async def run_preflighted_adapter(
         raise NoCompliantModelRouteError()
     admission_request = GpuAdmissionRequest.from_inference_context(
         context,
-        operation_id=decision.attempt_id or f"{context.request_id}:{decision.selected.profile.id}",
+        operation_id=stable_remote_inference_operation_id(
+            context,
+            profile_id=decision.selected.profile.id,
+            fallback=decision.attempt_id or f"{context.request_id}:{decision.selected.profile.id}",
+        ),
         uncertain_on_error=(decision.selected.profile.provider_kind == "openrouter"),
     )
+    await prepare_bound_remote_inference(admission_request)
     admission_callback_started = False
 
     async def admitted_adapter() -> object:
@@ -440,8 +454,12 @@ def execute_sync_adapter(
     )
     admission_request = GpuAdmissionRequest.from_inference_context(
         context,
-        operation_id=decision.attempt_id
-        or f"{context.request_id}:{decision.selected.profile.id}",
+        operation_id=stable_remote_inference_operation_id(
+            context,
+            profile_id=decision.selected.profile.id,
+            fallback=decision.attempt_id
+            or f"{context.request_id}:{decision.selected.profile.id}",
+        ),
         uncertain_on_error=(decision.selected.profile.provider_kind == "openrouter"),
     )
     callback_started = False
@@ -461,6 +479,8 @@ def execute_sync_adapter(
                 readback=readback,
             )
         )
+
+    _run_awaitable_sync(prepare_bound_remote_inference(admission_request))
 
     def admitted_adapter() -> _SyncResult:
         nonlocal callback_started, attempt_completed

@@ -43,7 +43,9 @@ from src.model_fabric.remote_inference_admission import (
     RemoteInferenceAdmissionIdentityError as GpuAdmissionIdentityError,
     RemoteInferenceAdmissionRequest as GpuAdmissionRequest,
     current_remote_inference_receipt_binding,
+    prepare_bound_remote_inference,
     remote_inference_admission_broker as gpu_admission_broker,
+    stable_remote_inference_operation_id,
 )
 from src.operators.local_codex import reject_legacy_external_agent_model
 from src.security.trust_contract import (
@@ -3162,15 +3164,28 @@ def _execute_sync_with_gpu_admission(
     """Run one blocking route callback under the shared one-GPU broker."""
     if not _requires_sync_gpu_admission(context):
         return operation()
+    effective_operation_id = operation_id
     try:
+        selected_profile = getattr(getattr(decision, "selected", None), "profile", None)
+        profile_id = str(
+            getattr(selected_profile, "id", None)
+            or getattr(selected_profile, "model", None)
+            or "unknown"
+        )
+        effective_operation_id = stable_remote_inference_operation_id(
+            context,
+            profile_id=profile_id,
+            fallback=operation_id,
+        )
         request = GpuAdmissionRequest.from_inference_context(
             context,
-            operation_id=operation_id,
+            operation_id=effective_operation_id,
             uncertain_on_error=(
                 getattr(getattr(getattr(decision, "selected", None), "profile", None), "provider_kind", "")
                 == "openrouter"
             ),
         )
+        _run_receipt_hook_sync(prepare_bound_remote_inference(request))
     except (TypeError, ValueError) as error:
         reasons = ("gpu_admission_rejected", "gpu_admission_identity_conflict")
         _persist_sync_gpu_admission_denial(
@@ -3185,7 +3200,7 @@ def _execute_sync_with_gpu_admission(
         result = gpu_admission_broker.execute_sync(request, operation)
     except GpuAdmissionError as error:
         _persist_bound_sync_admission_receipt(
-            operation_id,
+            effective_operation_id,
             receipt=getattr(error, "receipt", None),
             readback=True,
         )
@@ -3218,9 +3233,9 @@ def _execute_sync_with_gpu_admission(
         # exception escapes. Read back that terminal/uncertain receipt so a
         # durable caller never loses the provider outcome just because the
         # exception was not an admission error subtype.
-        _persist_bound_sync_admission_receipt(operation_id, readback=True)
+        _persist_bound_sync_admission_receipt(effective_operation_id, readback=True)
         raise
-    _persist_bound_sync_admission_receipt(operation_id, readback=True)
+    _persist_bound_sync_admission_receipt(effective_operation_id, readback=True)
     return result
 
 

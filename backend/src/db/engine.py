@@ -137,6 +137,14 @@ async def _ensure_legacy_columns(conn) -> None:
         await conn.exec_driver_sql(
             "ALTER TABLE queued_insights ADD COLUMN session_id VARCHAR"
         )
+    if queued_insight_columns and "owner_principal_id" not in queued_insight_columns:
+        await conn.exec_driver_sql(
+            "ALTER TABLE queued_insights ADD COLUMN owner_principal_id VARCHAR"
+        )
+    if queued_insight_columns and "operator_session_id" not in queued_insight_columns:
+        await conn.exec_driver_sql(
+            "ALTER TABLE queued_insights ADD COLUMN operator_session_id VARCHAR"
+        )
 
     guardian_intervention_columns = await _table_columns("guardian_interventions")
     if guardian_intervention_columns and "active_project" not in guardian_intervention_columns:

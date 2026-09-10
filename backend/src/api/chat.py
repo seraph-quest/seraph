@@ -39,7 +39,7 @@ from src.conversation.identity import (
     build_conversation_identity,
     build_lineage,
     lineage_json,
-    redact_attachment_refs,
+    validate_attachment_refs,
 )
 from src.auth.cancellation import (
     RuntimeRevokedError,
@@ -275,7 +275,10 @@ def build_chat_ingress_envelope(
         server_message_id = uuid4().hex
         identity_material = server_message_id
     idempotency_key_digest = hashlib.sha256(identity_material.encode("utf-8")).hexdigest()
-    safe_attachments = redact_attachment_refs(attachments)
+    safe_attachments = validate_attachment_refs(
+        attachments,
+        owner_principal_id=principal.principal_id,
+    )
     conversation_identity = build_conversation_identity(
         conversation_id=session_id,
         thread_id=session_id,

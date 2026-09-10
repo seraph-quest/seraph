@@ -4,8 +4,11 @@ import hashlib
 import logging
 
 from src.audit.runtime import log_observer_delivery_event
-from src.approval.runtime import get_current_trust_principal
-from src.conversation.identity import ConversationIdentityError, build_conversation_identity, redact_attachment_refs
+from src.conversation.identity import (
+    ConversationIdentityError,
+    build_conversation_identity,
+    validate_attachment_refs,
+)
 from src.models.schemas import WSResponse
 from src.observer.intervention_policy import InterventionDecision, decide_intervention
 from src.observer.native_notification_queue import native_notification_queue
@@ -13,6 +16,13 @@ from src.observer.native_notification_queue import native_notification_queue
 logger = logging.getLogger(__name__)
 
 _BUILTIN_CHANNEL_TRANSPORTS = {"websocket", "native_notification"}
+
+
+def _current_trust_principal():
+    """Load runtime authority lazily to keep observer imports acyclic."""
+    from src.approval.runtime import get_current_trust_principal
+
+    return get_current_trust_principal()
 
 
 def _transport_failure_reason(
@@ -126,6 +136,56 @@ def _bundle_continuation_payload(items: list[object], *, bundle_content: str) ->
     }
 
 
+async def _bundle_owner_binding(items: list[object]) -> tuple[str | None, str | None]:
+    """Resolve and validate one durable owner's identity for a bundle group."""
+    session_ids = {
+        str(getattr(item, "session_id", "")).strip()
+        for item in items
+        if isinstance(getattr(item, "session_id", None), str)
+        and str(getattr(item, "session_id", "")).strip()
+    }
+    owner_ids = {
+        str(getattr(item, "owner_principal_id", "")).strip()
+        for item in items
+        if isinstance(getattr(item, "owner_principal_id", None), str)
+        and str(getattr(item, "owner_principal_id", "")).strip()
+    }
+    operator_session_ids = {
+        str(getattr(item, "operator_session_id", "")).strip()
+        for item in items
+        if isinstance(getattr(item, "operator_session_id", None), str)
+        and str(getattr(item, "operator_session_id", "")).strip()
+    }
+    if len(session_ids) > 1 or len(owner_ids) > 1 or len(operator_session_ids) > 1:
+        raise ConversationIdentityError(
+            "conversation_bundle_identity_conflict",
+            "A native bundle group contains conflicting owner or session bindings.",
+        )
+    session_id = next(iter(session_ids), None)
+    owner_principal_id = next(iter(owner_ids), None)
+    operator_session_id = next(iter(operator_session_ids), None)
+    if session_id and owner_principal_id is None:
+        from src.agent.session import session_manager
+
+        session = await session_manager.get(session_id)
+        owner_principal_id = (
+            str(session.owner_principal_id).strip()
+            if session is not None and session.owner_principal_id
+            else None
+        )
+    if session_id and owner_principal_id is None:
+        raise ConversationIdentityError(
+            "conversation_owner_missing",
+            "A session-bound queued insight has no canonical owner.",
+        )
+    if operator_session_id and owner_principal_id is None:
+        raise ConversationIdentityError(
+            "conversation_owner_missing",
+            "An operator-bound queued insight has no canonical owner.",
+        )
+    return owner_principal_id, operator_session_id
+
+
 def _bundle_content(items: list[object]) -> str:
     parts = [f"- {item.content}" for item in items]
     return f"While you were away ({len(items)} update{'s' if len(items) != 1 else ''}):\n" + "\n".join(parts)
@@ -164,6 +224,104 @@ def _bundle_idempotency_key(items: list[object]) -> str:
         source_ids = ["empty-bundle"]
     digest = hashlib.sha256("|".join(source_ids).encode("utf-8")).hexdigest()
     return f"native_bundle:v1:{digest}"
+
+
+def _resolve_delivery_identity(
+    message: WSResponse,
+    *,
+    session_id: str | None,
+    trusted_principal=None,
+) -> tuple[object | None, str | None, str | None, str | None]:
+    """Resolve proactive identity from trusted runtime state.
+
+    Lineage fields on ``WSResponse`` are receipts, not credentials. A bound
+    delivery must carry the authenticated owner and conversation scope; a
+    caller cannot replace those values by constructing a response object.
+    """
+    candidates = [
+        str(value).strip()
+        for value in (session_id, message.conversation_id, message.session_id)
+        if isinstance(value, str) and value.strip()
+    ]
+    if candidates and len(set(candidates)) != 1:
+        raise ConversationIdentityError(
+            "conversation_session_mismatch",
+            "Delivery identity contains conflicting conversation/session ids.",
+        )
+    requested_conversation_id = candidates[0] if candidates else None
+
+    supplied_owner = str(message.owner_principal_id or "").strip() or None
+    supplied_operator_session = str(message.operator_session_id or "").strip() or None
+    trusted_owner = str(getattr(trusted_principal, "principal_id", "") or "").strip() or None
+    trusted_operator_session = str(
+        getattr(trusted_principal, "operator_session_id", "") or ""
+    ).strip() or None
+    trusted_conversation = str(getattr(trusted_principal, "session_id", "") or "").strip() or None
+
+    if trusted_principal is not None and (
+        not getattr(trusted_principal, "authenticated", False)
+        or getattr(trusted_principal, "revoked", False)
+    ):
+        raise ConversationIdentityError(
+            "conversation_authority_revoked",
+            "The runtime principal is not authorized for proactive delivery.",
+        )
+    if supplied_owner and trusted_principal is not None and supplied_owner != trusted_owner:
+        raise ConversationIdentityError(
+            "conversation_owner_mismatch",
+            "Delivery owner does not match the authenticated runtime principal.",
+        )
+    if supplied_operator_session and trusted_principal is not None:
+        if supplied_operator_session != trusted_operator_session:
+            raise ConversationIdentityError(
+                "operator_session_mismatch",
+                "Delivery operator session does not match the authenticated runtime session.",
+            )
+    if (
+        requested_conversation_id
+        and trusted_principal is not None
+        and requested_conversation_id != trusted_conversation
+    ):
+        raise ConversationIdentityError(
+            "conversation_session_mismatch",
+            "Delivery conversation does not match the authenticated runtime conversation.",
+        )
+
+    owner_principal_id = trusted_owner or supplied_owner
+    operator_session_id = trusted_operator_session or supplied_operator_session
+    if message.attachment_refs:
+        # The delivery layer never persists raw attachment objects. This also
+        # rejects an attachment that explicitly claims another owner.
+        validate_attachment_refs(
+            message.attachment_refs,
+            owner_principal_id=owner_principal_id,
+        )
+    if requested_conversation_id and owner_principal_id is None:
+        raise ConversationIdentityError(
+            "conversation_owner_missing",
+            "A session-bound delivery requires an authenticated owner principal.",
+        )
+    if requested_conversation_id and trusted_principal is not None and trusted_conversation is None:
+        raise ConversationIdentityError(
+            "conversation_session_missing",
+            "A runtime principal without a conversation cannot deliver to a bound session.",
+        )
+
+    identity = None
+    if requested_conversation_id:
+        identity = build_conversation_identity(
+            conversation_id=requested_conversation_id,
+            thread_id=message.thread_id or requested_conversation_id,
+            owner_principal_id=owner_principal_id,
+            operator_session_id=operator_session_id,
+            device_id=message.device_id,
+            channel="web",
+            transport="websocket",
+            correlation_id=message.correlation_id,
+            causation_id=message.causation_id,
+            require_owner=True,
+        )
+    return identity, requested_conversation_id, owner_principal_id, operator_session_id
 
 
 def _apply_native_channel_preference(
@@ -304,37 +462,18 @@ async def deliver_or_queue(
 
     ctx = context_manager.get_context()
     # A proactive message may be created by an authenticated interactive turn
-    # or by an ambient scheduler.  If it carries a bound conversation, derive
-    # the owner from trusted runtime context/message lineage and reject any
-    # conflicting caller identity before creating an intervention/outbox row.
-    trusted_principal = get_current_trust_principal()
-    requested_conversation_id = session_id or message.conversation_id or message.session_id or None
-    if session_id and message.conversation_id and session_id != message.conversation_id:
-        raise ConversationIdentityError(
-            "conversation_session_mismatch",
-            "Delivery session must equal the canonical conversation id.",
+    # or by an ambient scheduler. Bound identity is resolved before any
+    # intervention or delivery receipt is persisted.
+    trusted_principal = _current_trust_principal()
+    identity, requested_conversation_id, owner_principal_id, operator_session_id = (
+        _resolve_delivery_identity(
+            message,
+            session_id=session_id,
+            trusted_principal=trusted_principal,
         )
-    owner_principal_id = message.owner_principal_id or getattr(trusted_principal, "principal_id", None)
-    operator_session_id = message.operator_session_id or getattr(
-        trusted_principal, "operator_session_id", None
     )
-    if requested_conversation_id:
-        identity = build_conversation_identity(
-            conversation_id=requested_conversation_id,
-            thread_id=message.thread_id or requested_conversation_id,
-            owner_principal_id=owner_principal_id or "ambient",
-            operator_session_id=operator_session_id,
-            device_id=message.device_id,
-            channel="web",
-            transport="websocket",
-            correlation_id=message.correlation_id,
-            causation_id=message.causation_id,
-            require_owner=False,
-        )
-        # Preserve one normalized session id for all downstream paths.
-        session_id = requested_conversation_id
-    else:
-        identity = None
+    # Preserve one normalized session id for all downstream paths.
+    session_id = requested_conversation_id
     active_channel_adapters = _active_channel_adapters()
     intervention_type = message.intervention_type or message.type
     urgency = message.urgency or 0
@@ -650,13 +789,19 @@ async def deliver_or_queue(
             return policy_decision
 
         elif policy_decision.action.value == "bundle":
+            insight_kwargs = {
+                "content": message.content,
+                "intervention_type": intervention_type,
+                "urgency": urgency,
+                "reasoning": message.reasoning or "",
+                "intervention_id": intervention_id,
+                "session_id": session_id,
+            }
+            if session_id is not None:
+                insight_kwargs["owner_principal_id"] = owner_principal_id
+                insight_kwargs["operator_session_id"] = operator_session_id
             await insight_queue.enqueue(
-                content=message.content,
-                intervention_type=intervention_type,
-                urgency=urgency,
-                reasoning=message.reasoning or "",
-                intervention_id=intervention_id,
-                session_id=session_id,
+                **insight_kwargs,
             )
             logger.info("Queued proactive message (state=%s, mode=%s)", ctx.user_state, ctx.interruption_mode)
             await log_observer_delivery_event(
@@ -783,6 +928,9 @@ async def deliver_queued_bundle() -> int:
             for group_items in native_bundle_groups:
                 group_content = _bundle_content(group_items)
                 group_continuation = _bundle_continuation_payload(group_items, bundle_content=group_content)
+                group_owner_principal_id, group_operator_session_id = await _bundle_owner_binding(
+                    group_items
+                )
                 source_insight_ids = [
                     str(item.id)
                     for item in group_items
@@ -801,6 +949,8 @@ async def deliver_queued_bundle() -> int:
                     continuation_mode=str(group_continuation["continuation_mode"] or "open_thread"),
                     resume_message=group_continuation["resume_message"],
                     idempotency_key=_bundle_idempotency_key(group_items),
+                    owner_principal_id=group_owner_principal_id,
+                    operator_session_id=group_operator_session_id,
                     source_insight_ids=source_insight_ids,
                 )
                 context_manager.record_native_notification(
@@ -840,6 +990,18 @@ async def deliver_queued_bundle() -> int:
             return len(items)
 
         if transport == "websocket":
+            if any(
+                getattr(item, "session_id", None) or getattr(item, "owner_principal_id", None)
+                for item in items
+            ):
+                # ConnectionManager broadcasts globally and has no per-session
+                # recipient fence. A bound bundle must stay on the owner-aware
+                # native outbox until a scoped WebSocket transport exists.
+                last_error = _prefer_delivery_error(
+                    last_error,
+                    "bound_bundle_requires_owner_scoped_transport",
+                )
+                continue
             broadcast_result = await ws_manager.broadcast(message)
             details.update(
                 {

@@ -222,9 +222,17 @@ class SessionManager:
             db.expunge(session)
             return session
 
-    async def get(self, session_id: str) -> Session | None:
+    async def get(
+        self,
+        session_id: str,
+        *,
+        owner_principal_id: str | None = None,
+    ) -> Session | None:
         async with get_session() as db:
-            result = await db.execute(select(Session).where(Session.id == session_id))
+            stmt = select(Session).where(Session.id == session_id)
+            if owner_principal_id is not None:
+                stmt = stmt.where(Session.owner_principal_id == owner_principal_id)
+            result = await db.execute(stmt)
             session = result.scalars().first()
             if session:
                 db.expunge(session)
@@ -239,23 +247,49 @@ class SessionManager:
                 db.expunge(message)
             return message
 
-    async def delete(self, session_id: str) -> bool:
+    async def delete(
+        self,
+        session_id: str,
+        *,
+        owner_principal_id: str | None = None,
+    ) -> bool:
+        if owner_principal_id is not None:
+            # Claiming an unowned legacy session is safe only through the
+            # authenticated ingress path. Once claimed, deletion cannot race
+            # another principal without failing this check.
+            await self.get_for_ingress(
+                session_id,
+                owner_principal_id=owner_principal_id,
+            )
         cleanup_fence_acquired = process_runtime_manager.begin_session_cleanup(session_id)
         if not cleanup_fence_acquired:
             return False
         try:
-            return await self._delete_session_records(session_id)
+            return await self._delete_session_records(
+                session_id,
+                owner_principal_id=owner_principal_id,
+            )
         finally:
             if cleanup_fence_acquired:
                 process_runtime_manager.end_session_cleanup(session_id)
 
-    async def _delete_session_records(self, session_id: str) -> bool:
+    async def _delete_session_records(
+        self,
+        session_id: str,
+        *,
+        owner_principal_id: str | None = None,
+    ) -> bool:
         await flush_session_memory(session_id, trigger="session_end", manager=self)
         async with get_session() as db:
             result = await db.execute(select(Session).where(Session.id == session_id))
             session = result.scalars().first()
             if not session:
                 return False
+            if (
+                owner_principal_id is not None
+                and session.owner_principal_id != owner_principal_id
+            ):
+                raise SessionOwnerMismatchError(session_id)
             try:
                 process_runtime_manager.stop_processes_for_session(
                     session_id,
@@ -344,7 +378,11 @@ class SessionManager:
             await db.delete(session)
             return True
 
-    async def list_sessions(self) -> list[dict]:
+    async def list_sessions(
+        self,
+        *,
+        owner_principal_id: str | None = None,
+    ) -> list[dict]:
         try:
             async with get_session() as db:
                 # Single query: fetch sessions with their latest message using window function
@@ -359,9 +397,10 @@ class SessionManager:
                                ROW_NUMBER() OVER (PARTITION BY session_id ORDER BY created_at DESC) AS rn
                         FROM messages
                     ) lm ON lm.session_id = s.id AND lm.rn = 1
+                    WHERE (:owner_principal_id IS NULL OR s.owner_principal_id = :owner_principal_id)
                     ORDER BY s.updated_at DESC
                     """
-                ))).all()
+                ), {"owner_principal_id": owner_principal_id})).all()
 
                 return [
                     {
@@ -584,6 +623,7 @@ class SessionManager:
         limit: int = 5,
         exclude_session_id: str | None = None,
         snippet_chars: int = 180,
+        owner_principal_id: str | None = None,
     ) -> list[dict]:
         normalized_query = query.strip().lower()
         if not normalized_query:
@@ -593,6 +633,10 @@ class SessionManager:
             session_stmt = select(Session)
             if exclude_session_id:
                 session_stmt = session_stmt.where(Session.id != exclude_session_id)
+            if owner_principal_id is not None:
+                session_stmt = session_stmt.where(
+                    Session.owner_principal_id == owner_principal_id
+                )
             session_rows = await db.execute(session_stmt)
             sessions = session_rows.scalars().all()
             if not sessions:
@@ -716,9 +760,18 @@ class SessionManager:
                 for item in ordered[:limit]
             ]
 
-    async def update_title(self, session_id: str, title: str) -> bool:
+    async def update_title(
+        self,
+        session_id: str,
+        title: str,
+        *,
+        owner_principal_id: str | None = None,
+    ) -> bool:
         async with get_session() as db:
-            result = await db.execute(select(Session).where(Session.id == session_id))
+            stmt = select(Session).where(Session.id == session_id)
+            if owner_principal_id is not None:
+                stmt = stmt.where(Session.owner_principal_id == owner_principal_id)
+            result = await db.execute(stmt)
             session = result.scalars().first()
             if not session:
                 return False
@@ -834,8 +887,14 @@ class SessionManager:
             lineage = candidate if isinstance(candidate, dict) else None
         if not isinstance(lineage, dict):
             lineage = {}
+        lineage_owner_principal_id = str(
+            lineage.get("owner_principal_id") or lineage.get("principal_id") or ""
+        ).strip() or None
         try:
-            safe_attachment_refs = redact_attachment_refs(lineage.get("attachment_refs"))
+            safe_attachment_refs = redact_attachment_refs(
+                lineage.get("attachment_refs"),
+                owner_principal_id=lineage_owner_principal_id,
+            )
         except Exception:
             safe_attachment_refs = []
         lineage_conversation_id = str(
@@ -851,8 +910,7 @@ class SessionManager:
                 conversation_id=lineage_conversation_id,
                 thread_id=lineage_thread_id,
                 owner_principal_id=(
-                    str(lineage.get("owner_principal_id") or lineage.get("principal_id") or "").strip()
-                    or None
+                    lineage_owner_principal_id
                 ),
                 operator_session_id=(
                     str(lineage.get("operator_session_id") or "").strip() or None
@@ -1185,10 +1243,18 @@ class SessionManager:
                 return items[index]
         return None
 
-    async def generate_title(self, session_id: str) -> str | None:
+    async def generate_title(
+        self,
+        session_id: str,
+        *,
+        owner_principal_id: str | None = None,
+    ) -> str | None:
         """Generate a short title for a session using LLM."""
         started_at = perf_counter()
-        session = await self.get(session_id)
+        session = await self.get(
+            session_id,
+            owner_principal_id=owner_principal_id,
+        )
         if not session or session.title != "New Conversation":
             await log_background_task_event(
                 task_name="session_title_generation",

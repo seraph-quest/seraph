@@ -171,6 +171,7 @@ def _object_mapping(value: object) -> Mapping[str, Any] | None:
             key: getattr(value, key)
             for key in (
                 "attachment_id",
+                "owner_principal_id",
                 "media_type",
                 "size_bytes",
                 "content_hash",
@@ -195,7 +196,11 @@ def _safe_attachment_text(value: object, *, field: str, max_chars: int = MAX_ATT
     return normalized
 
 
-def redact_attachment_refs(value: object) -> list[dict[str, Any]]:
+def redact_attachment_refs(
+    value: object,
+    *,
+    owner_principal_id: str | None = None,
+) -> list[dict[str, Any]]:
     """Return durable attachment metadata without file paths, URLs, or tokens.
 
     Unknown keys are intentionally dropped.  This protects transcript,
@@ -223,6 +228,23 @@ def redact_attachment_refs(value: object) -> list[dict[str, Any]]:
             raise ConversationIdentityError(
                 "attachment_reference_invalid",
                 "Each attachment reference must be an object.",
+            )
+        attachment_owner = _safe_attachment_text(
+            item.get("owner_principal_id"),
+            field="owner_principal_id",
+        )
+        expected_owner = _safe_attachment_text(
+            owner_principal_id,
+            field="owner_principal_id",
+        )
+        if (
+            attachment_owner is not None
+            and expected_owner is not None
+            and attachment_owner != expected_owner
+        ):
+            raise ConversationIdentityError(
+                "attachment_owner_mismatch",
+                "Attachment ownership does not match the authenticated principal.",
             )
         attachment_id = _safe_attachment_text(
             item.get("attachment_id", item.get("id")),
@@ -278,6 +300,64 @@ def redact_attachment_refs(value: object) -> list[dict[str, Any]]:
     return redacted
 
 
+def validate_attachment_refs(
+    value: object,
+    *,
+    owner_principal_id: str | None = None,
+) -> list[dict[str, Any]]:
+    """Validate an external attachment handoff before it enters Seraph.
+
+    A generic attachment registry is not present on this branch. The existing
+    Telegram ingress quarantine contract is therefore the authority seam:
+    unknown references, missing content hashes, and non-quarantined files are
+    rejected before transcript, approval, or delivery metadata is created.
+    """
+    if value is None:
+        return []
+    if not isinstance(value, (list, tuple)):
+        raise ConversationIdentityError(
+            "attachment_reference_invalid",
+            "Attachment references must be a list.",
+        )
+    for raw in value:
+        item = _object_mapping(raw)
+        if item is None:
+            raise ConversationIdentityError(
+                "attachment_reference_unknown",
+                "Attachment references must come from the quarantined ingress adapter.",
+            )
+        attachment_id = _safe_attachment_text(
+            item.get("attachment_id", item.get("id")),
+            field="id",
+        )
+        if attachment_id is None:
+            raise ConversationIdentityError(
+                "attachment_reference_unknown",
+                "An attachment registry id is required before delivery.",
+            )
+        quarantine_status = _safe_attachment_text(
+            item.get("quarantine_status", item.get("status")),
+            field="quarantine_status",
+            max_chars=64,
+        )
+        if quarantine_status != "quarantined":
+            raise ConversationIdentityError(
+                "attachment_quarantine_required",
+                "Attachment delivery requires a server-owned quarantine receipt.",
+            )
+        content_hash = _safe_attachment_text(
+            item.get("content_hash"),
+            field="content_hash",
+            max_chars=MAX_HASH_CHARS,
+        )
+        if content_hash is None:
+            raise ConversationIdentityError(
+                "attachment_reference_unknown",
+                "A quarantined attachment requires a content hash.",
+            )
+    return redact_attachment_refs(value, owner_principal_id=owner_principal_id)
+
+
 def build_lineage(
     identity: ConversationIdentity,
     *,
@@ -292,7 +372,14 @@ def build_lineage(
     payload: dict[str, Any] = {
         "schema_version": CONVERSATION_SCHEMA_VERSION,
         **identity.to_dict(),
-        "attachment_refs": redact_attachment_refs(attachment_refs),
+        "attachment_refs": redact_attachment_refs(
+            attachment_refs,
+            owner_principal_id=(
+                identity.owner_principal_id
+                if identity.owner_principal_id != "ambient"
+                else None
+            ),
+        ),
     }
     if message_id:
         payload["message_id"] = message_id

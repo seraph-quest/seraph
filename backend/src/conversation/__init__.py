@@ -7,6 +7,7 @@ from .identity import (
     build_conversation_identity,
     build_lineage,
     redact_attachment_refs,
+    validate_attachment_refs,
 )
 
 __all__ = [
@@ -16,4 +17,5 @@ __all__ = [
     "build_conversation_identity",
     "build_lineage",
     "redact_attachment_refs",
+    "validate_attachment_refs",
 ]

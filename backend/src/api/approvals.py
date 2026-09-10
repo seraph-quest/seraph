@@ -33,7 +33,10 @@ def _approval_attachment_refs(request) -> list[dict]:
     """Read durable attachment metadata without exposing malformed legacy data."""
     try:
         parsed = json.loads(getattr(request, "attachment_refs_json", "[]") or "[]")
-        return redact_attachment_refs(parsed)
+        owner_principal_id = str(
+            getattr(request, "owner_principal_id", None) or ""
+        ).strip() or None
+        return redact_attachment_refs(parsed, owner_principal_id=owner_principal_id)
     except Exception:
         return []
 
@@ -113,12 +116,18 @@ async def list_pending_approvals(
 ):
     """List pending approval requests."""
     operator = _require_approval_operator(request)
-    approvals = await approval_repository.list_pending(session_id=session_id, limit=limit)
+    approvals = await approval_repository.list_pending(
+        session_id=session_id,
+        limit=limit,
+    )
     session_titles = {
         str(session["id"]): str(session.get("title") or "Untitled session")
-        for session in await session_manager.list_sessions()
+        for session in await session_manager.list_sessions(
+            owner_principal_id=operator.principal.principal_id,
+        )
         if isinstance(session, dict) and session.get("id")
     }
+    owned_session_ids = set(session_titles)
     items = []
     for approval in approvals:
         # ``list_pending`` returns dictionaries for compatibility.  Explicit
@@ -138,6 +147,14 @@ async def list_pending_approvals(
             approval.get("conversation_id") or approval.get("session_id") or ""
         ).strip()
         if conversation_id and approval.get("session_id") and conversation_id != str(approval["session_id"]):
+            continue
+        # Ownerless legacy rows remain visible only when their canonical
+        # session is already owned by this authenticated principal. A bound
+        # row with no resolvable owner fails closed; truly ambient approvals
+        # have no conversation/session binding and remain visible.
+        if conversation_id and not owner_principal_id and conversation_id not in owned_session_ids:
+            continue
+        if conversation_id and owner_principal_id and conversation_id not in owned_session_ids:
             continue
         approval_metadata = approval_surface_metadata(approval)
         items.append(

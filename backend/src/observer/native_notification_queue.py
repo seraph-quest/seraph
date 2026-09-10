@@ -33,7 +33,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 from uuid import uuid4
 
-from sqlalchemy import delete, select, update
+from sqlalchemy import and_, delete, or_, select, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import OperationalError
 
@@ -48,7 +48,7 @@ from src.db.models import (
 from src.conversation.identity import (
     ConversationIdentityError,
     build_conversation_identity,
-    redact_attachment_refs,
+    validate_attachment_refs,
 )
 
 
@@ -201,6 +201,93 @@ def _valid_worker(value: object) -> str:
     worker = _validate_text(value, field="lease owner", max_chars=MAX_IDENTIFIER_CHARS, required=True)
     assert worker is not None
     return worker
+
+
+def _bind_runtime_identity(
+    *,
+    session_id: str | None,
+    owner_principal_id: str | None,
+    operator_session_id: str | None,
+) -> tuple[str | None, str | None]:
+    """Resolve delivery identity against the authenticated runtime context.
+
+    A queue call may be made by a durable internal adapter without a request
+    context, so the already-canonical owner can be supplied by that adapter.
+    Whenever a runtime principal is present, caller fields are assertions and
+    cannot override its owner, operator session, or conversation scope.
+    """
+    from src.approval.runtime import get_current_trust_principal
+
+    trusted = get_current_trust_principal()
+    if trusted is None:
+        if session_id is not None and owner_principal_id is None:
+            raise ConversationIdentityError(
+                "conversation_owner_missing",
+                "A session-bound notification requires an owner principal.",
+            )
+        return owner_principal_id, operator_session_id
+    if not trusted.authenticated or trusted.revoked:
+        raise ConversationIdentityError(
+            "conversation_authority_revoked",
+            "The runtime principal is not authorized for notification delivery.",
+        )
+
+    trusted_owner = str(trusted.principal_id or "").strip() or None
+    trusted_operator_session = str(trusted.operator_session_id or "").strip() or None
+    trusted_session = str(trusted.session_id or "").strip() or None
+    if owner_principal_id is not None and owner_principal_id != trusted_owner:
+        raise ConversationIdentityError(
+            "conversation_owner_mismatch",
+            "Notification owner does not match the authenticated runtime principal.",
+        )
+    if (
+        operator_session_id is not None
+        and trusted_operator_session is not None
+        and operator_session_id != trusted_operator_session
+    ):
+        raise ConversationIdentityError(
+            "operator_session_mismatch",
+            "Notification operator session does not match the authenticated runtime session.",
+        )
+    if session_id is not None and trusted_session is not None and session_id != trusted_session:
+        raise ConversationIdentityError(
+            "conversation_session_mismatch",
+            "Notification session does not match the authenticated runtime conversation.",
+        )
+    if session_id is not None and owner_principal_id is None:
+        owner_principal_id = trusted_owner
+    if operator_session_id is None and trusted_operator_session is not None:
+        operator_session_id = trusted_operator_session
+    if session_id is not None and owner_principal_id is None:
+        raise ConversationIdentityError(
+            "conversation_owner_missing",
+            "A session-bound notification requires an authenticated owner principal.",
+        )
+    return owner_principal_id, operator_session_id
+
+
+def _owner_scope_predicate(
+    *,
+    owner_principal_id: str,
+    operator_session_id: str | None,
+):
+    """Match one operator's rows plus genuinely ambient broadcasts."""
+    ambient = and_(
+        NativeNotificationOutbox.owner_principal_id.is_(None),
+        NativeNotificationOutbox.operator_session_id.is_(None),
+        NativeNotificationOutbox.session_id.is_(None),
+    )
+    operator_match = NativeNotificationOutbox.operator_session_id.is_(None)
+    if operator_session_id is not None:
+        operator_match = or_(
+            operator_match,
+            NativeNotificationOutbox.operator_session_id == operator_session_id,
+        )
+    owned = and_(
+        NativeNotificationOutbox.owner_principal_id == owner_principal_id,
+        operator_match,
+    )
+    return or_(ambient, owned)
 
 
 async def _ensure_outbox_tables(db) -> None:
@@ -363,13 +450,26 @@ class NativeNotificationQueue:
                 "conversation_thread_mismatch",
                 "Thread identity must equal the canonical session id.",
             )
+        owner_principal_id, operator_session_id = _bind_runtime_identity(
+            session_id=session_id,
+            owner_principal_id=owner_principal_id,
+            operator_session_id=operator_session_id,
+        )
+        if session_id is not None and owner_principal_id is None:
+            raise ConversationIdentityError(
+                "conversation_owner_missing",
+                "A session-bound notification requires an owner principal.",
+            )
         if operator_session_id is not None and owner_principal_id is None:
             raise ConversationIdentityError(
                 "conversation_owner_missing",
                 "An operator session cannot be persisted without its owner principal.",
             )
         try:
-            safe_attachment_refs = redact_attachment_refs(attachment_refs)
+            safe_attachment_refs = validate_attachment_refs(
+                attachment_refs,
+                owner_principal_id=owner_principal_id,
+            )
         except ConversationIdentityError:
             raise
         except Exception as exc:
@@ -378,8 +478,8 @@ class NativeNotificationQueue:
                 "Attachment references could not be persisted safely.",
             ) from exc
         # The identity helper validates the channel/transport registry and
-        # supplies deterministic ambient defaults.  Legacy ambient delivery
-        # remains ownerless; bound deliveries must provide an owner.
+        # supplies deterministic ambient defaults. Ambient delivery remains
+        # ownerless only when it has no conversation/session binding.
         identity = build_conversation_identity(
             conversation_id=session_id,
             thread_id=canonical_thread_id,
@@ -390,7 +490,7 @@ class NativeNotificationQueue:
             transport=transport,
             correlation_id=correlation_id,
             causation_id=causation_id,
-            require_owner=False,
+            require_owner=session_id is not None,
         )
 
         if urgency is not None and (not isinstance(urgency, int) or urgency < 0 or urgency > 5):
@@ -451,7 +551,7 @@ class NativeNotificationQueue:
 
         async with self._lock:
             async with self._session() as db:
-                if session_id is not None and owner_principal_id is not None:
+                if session_id is not None:
                     session_result = await db.execute(
                         select(Session).where(Session.id == session_id)
                     )
@@ -609,23 +709,27 @@ class NativeNotificationQueue:
         bound_result = await db.execute(
             select(NativeNotificationOutbox).where(
                 NativeNotificationOutbox.status.in_(ACTIVE_STATUSES),
-                (
-                    NativeNotificationOutbox.owner_principal_id.is_not(None)
-                    | NativeNotificationOutbox.operator_session_id.is_not(None)
+                or_(
+                    NativeNotificationOutbox.session_id.is_not(None),
+                    NativeNotificationOutbox.owner_principal_id.is_not(None),
+                    NativeNotificationOutbox.operator_session_id.is_not(None),
                 ),
             )
         )
         for row in bound_result.scalars().all():
             reason: str | None = None
-            if row.session_id and row.owner_principal_id:
-                session_result = await db.execute(
-                    select(Session).where(Session.id == row.session_id)
-                )
-                session = session_result.scalar_one_or_none()
-                if session is None:
-                    reason = "conversation_session_missing"
-                elif session.owner_principal_id not in (None, row.owner_principal_id):
-                    reason = "conversation_owner_revoked"
+            if row.session_id:
+                if not row.owner_principal_id:
+                    reason = "conversation_owner_missing"
+                else:
+                    session_result = await db.execute(
+                        select(Session).where(Session.id == row.session_id)
+                    )
+                    session = session_result.scalar_one_or_none()
+                    if session is None:
+                        reason = "conversation_session_missing"
+                    elif session.owner_principal_id not in (None, row.owner_principal_id):
+                        reason = "conversation_owner_revoked"
             if reason is None and row.operator_session_id:
                 operator_result = await db.execute(
                     select(OperatorSession).where(OperatorSession.id == row.operator_session_id)
@@ -788,30 +892,56 @@ class NativeNotificationQueue:
         """
         return await self.claim_next(worker_id="native-daemon-internal")
 
-    async def get(self, notification_id: str) -> NativeNotification | None:
+    async def get(
+        self,
+        notification_id: str,
+        *,
+        owner_principal_id: str | None = None,
+        operator_session_id: str | None = None,
+    ) -> NativeNotification | None:
         notification_id = _validate_identifier(notification_id, field="notification_id")
         if not notification_id:
             return None
         async with self._lock:
             async with self._session() as db:
                 await self._reconcile_expired(db, _utc_now())
-                result = await db.execute(
-                    select(NativeNotificationOutbox).where(
-                        NativeNotificationOutbox.id == notification_id
-                    )
+                stmt = select(NativeNotificationOutbox).where(
+                    NativeNotificationOutbox.id == notification_id
                 )
+                if owner_principal_id is not None:
+                    stmt = stmt.where(
+                        _owner_scope_predicate(
+                            owner_principal_id=owner_principal_id,
+                            operator_session_id=operator_session_id,
+                        )
+                    )
+                result = await db.execute(stmt)
                 row = result.scalar_one_or_none()
                 return _row_to_notification(row) if row is not None else None
 
-    async def list(self) -> list[NativeNotification]:
+    async def list(
+        self,
+        *,
+        owner_principal_id: str | None = None,
+        operator_session_id: str | None = None,
+    ) -> list[NativeNotification]:
         async with self._lock:
             async with self._session() as db:
                 now = _utc_now()
                 await self._reconcile_expired(db, now)
-                result = await db.execute(
+                stmt = (
                     select(NativeNotificationOutbox)
                     .where(NativeNotificationOutbox.status.in_(ACTIVE_STATUSES))
-                    .order_by(
+                )
+                if owner_principal_id is not None:
+                    stmt = stmt.where(
+                        _owner_scope_predicate(
+                            owner_principal_id=owner_principal_id,
+                            operator_session_id=operator_session_id,
+                        )
+                    )
+                result = await db.execute(
+                    stmt.order_by(
                         NativeNotificationOutbox.created_at.asc(),
                         NativeNotificationOutbox.id.asc(),
                     )
@@ -1048,7 +1178,14 @@ class NativeNotificationQueue:
                 await db.flush()
                 return True
 
-    async def reconcile_unknown(self, notification_id: str, *, retry: bool = False) -> bool:
+    async def reconcile_unknown(
+        self,
+        notification_id: str,
+        *,
+        retry: bool = False,
+        owner_principal_id: str | None = None,
+        operator_session_id: str | None = None,
+    ) -> bool:
         """Explicitly requeue an ambiguous receipt after operator review.
 
         This transition is opt-in and remains bounded by the original
@@ -1062,15 +1199,23 @@ class NativeNotificationQueue:
             async with self._session() as db:
                 now = _utc_now()
                 await self._reconcile_expired(db, now)
+                predicates = [
+                    NativeNotificationOutbox.id == notification_id,
+                    NativeNotificationOutbox.status == "unknown",
+                    NativeNotificationOutbox.attempt_count < NativeNotificationOutbox.max_attempts,
+                    NativeNotificationOutbox.deadline_at > now,
+                ]
+                if owner_principal_id is not None:
+                    predicates.append(
+                        _owner_scope_predicate(
+                            owner_principal_id=owner_principal_id,
+                            operator_session_id=operator_session_id,
+                        )
+                    )
                 result = await db.execute(
                     update(NativeNotificationOutbox)
                     .execution_options(synchronize_session=False)
-                    .where(
-                        NativeNotificationOutbox.id == notification_id,
-                        NativeNotificationOutbox.status == "unknown",
-                        NativeNotificationOutbox.attempt_count < NativeNotificationOutbox.max_attempts,
-                        NativeNotificationOutbox.deadline_at > now,
-                    )
+                    .where(*predicates)
                     .values(
                         status="queued",
                         last_error="operator_reconciled_retry",
@@ -1083,7 +1228,13 @@ class NativeNotificationQueue:
                 await db.flush()
                 return result.rowcount == 1
 
-    async def dismiss(self, notification_id: str) -> NativeNotification | None:
+    async def dismiss(
+        self,
+        notification_id: str,
+        *,
+        owner_principal_id: str | None = None,
+        operator_session_id: str | None = None,
+    ) -> NativeNotification | None:
         """Cancel a pending notification and retain its audit receipt."""
         notification_id = _validate_identifier(notification_id, field="notification_id")
         if not notification_id:
@@ -1092,25 +1243,39 @@ class NativeNotificationQueue:
             async with self._session() as db:
                 now = _utc_now()
                 await self._reconcile_expired(db, now)
-                result = await db.execute(
-                    select(NativeNotificationOutbox).where(
-                        NativeNotificationOutbox.id == notification_id
-                    )
+                stmt = select(NativeNotificationOutbox).where(
+                    NativeNotificationOutbox.id == notification_id
                 )
+                if owner_principal_id is not None:
+                    stmt = stmt.where(
+                        _owner_scope_predicate(
+                            owner_principal_id=owner_principal_id,
+                            operator_session_id=operator_session_id,
+                        )
+                    )
+                result = await db.execute(stmt)
                 row = result.scalar_one_or_none()
                 if row is None or row.status not in ACTIVE_STATUSES:
                     return None
                 if row.status in CLAIMED_STATUSES:
                     # Browser dismissal has no daemon fence. It can stop a
                     # future ACK, but must preserve ambiguity for recovery.
+                    dismiss_predicates = [
+                        NativeNotificationOutbox.id == notification_id,
+                        NativeNotificationOutbox.status.in_(CLAIMED_STATUSES),
+                        NativeNotificationOutbox.fencing_token == row.fencing_token,
+                    ]
+                    if owner_principal_id is not None:
+                        dismiss_predicates.append(
+                            _owner_scope_predicate(
+                                owner_principal_id=owner_principal_id,
+                                operator_session_id=operator_session_id,
+                            )
+                        )
                     dismiss_result = await db.execute(
                         update(NativeNotificationOutbox)
                         .execution_options(synchronize_session=False)
-                        .where(
-                            NativeNotificationOutbox.id == notification_id,
-                            NativeNotificationOutbox.status.in_(CLAIMED_STATUSES),
-                            NativeNotificationOutbox.fencing_token == row.fencing_token,
-                        )
+                        .where(*dismiss_predicates)
                         .values(
                             status="unknown",
                             last_error="operator_dismissed_reconciliation_required",
@@ -1130,15 +1295,23 @@ class NativeNotificationQueue:
                         error_code="operator_dismissed_reconciliation_required",
                     )
                 else:
+                    dismiss_predicates = [
+                        NativeNotificationOutbox.id == notification_id,
+                        NativeNotificationOutbox.status == "queued",
+                        NativeNotificationOutbox.attempt_count == row.attempt_count,
+                        NativeNotificationOutbox.fencing_token == row.fencing_token,
+                    ]
+                    if owner_principal_id is not None:
+                        dismiss_predicates.append(
+                            _owner_scope_predicate(
+                                owner_principal_id=owner_principal_id,
+                                operator_session_id=operator_session_id,
+                            )
+                        )
                     dismiss_result = await db.execute(
                         update(NativeNotificationOutbox)
                         .execution_options(synchronize_session=False)
-                        .where(
-                            NativeNotificationOutbox.id == notification_id,
-                            NativeNotificationOutbox.status == "queued",
-                            NativeNotificationOutbox.attempt_count == row.attempt_count,
-                            NativeNotificationOutbox.fencing_token == row.fencing_token,
-                        )
+                        .where(*dismiss_predicates)
                         .values(status="cancelled", cancelled_at=now, updated_at=now)
                     )
                     if dismiss_result.rowcount != 1:
@@ -1154,16 +1327,29 @@ class NativeNotificationQueue:
                 await db.flush()
                 return _row_to_notification(row)
 
-    async def dismiss_all(self) -> list[NativeNotification]:
+    async def dismiss_all(
+        self,
+        *,
+        owner_principal_id: str | None = None,
+        operator_session_id: str | None = None,
+    ) -> list[NativeNotification]:
         """Cancel all pending notifications while preserving their receipts."""
         async with self._lock:
             async with self._session() as db:
                 now = _utc_now()
                 await self._reconcile_expired(db, now)
+                stmt = select(NativeNotificationOutbox).where(
+                    NativeNotificationOutbox.status.in_(ACTIVE_STATUSES)
+                )
+                if owner_principal_id is not None:
+                    stmt = stmt.where(
+                        _owner_scope_predicate(
+                            owner_principal_id=owner_principal_id,
+                            operator_session_id=operator_session_id,
+                        )
+                    )
                 result = await db.execute(
-                    select(NativeNotificationOutbox)
-                    .where(NativeNotificationOutbox.status.in_(ACTIVE_STATUSES))
-                    .order_by(
+                    stmt.order_by(
                         NativeNotificationOutbox.created_at.asc(),
                         NativeNotificationOutbox.id.asc(),
                     )
@@ -1172,14 +1358,22 @@ class NativeNotificationQueue:
                 changed: list[NativeNotification] = []
                 for row in rows:
                     if row.status in CLAIMED_STATUSES:
+                        dismiss_predicates = [
+                            NativeNotificationOutbox.id == row.id,
+                            NativeNotificationOutbox.status.in_(CLAIMED_STATUSES),
+                            NativeNotificationOutbox.fencing_token == row.fencing_token,
+                        ]
+                        if owner_principal_id is not None:
+                            dismiss_predicates.append(
+                                _owner_scope_predicate(
+                                    owner_principal_id=owner_principal_id,
+                                    operator_session_id=operator_session_id,
+                                )
+                            )
                         dismiss_result = await db.execute(
                             update(NativeNotificationOutbox)
                             .execution_options(synchronize_session=False)
-                            .where(
-                                NativeNotificationOutbox.id == row.id,
-                                NativeNotificationOutbox.status.in_(CLAIMED_STATUSES),
-                                NativeNotificationOutbox.fencing_token == row.fencing_token,
-                            )
+                            .where(*dismiss_predicates)
                             .values(
                                 status="unknown",
                                 last_error="operator_dismissed_reconciliation_required",
@@ -1199,15 +1393,23 @@ class NativeNotificationQueue:
                             error_code="operator_dismissed_reconciliation_required",
                         )
                     else:
+                        dismiss_predicates = [
+                            NativeNotificationOutbox.id == row.id,
+                            NativeNotificationOutbox.status == "queued",
+                            NativeNotificationOutbox.attempt_count == row.attempt_count,
+                            NativeNotificationOutbox.fencing_token == row.fencing_token,
+                        ]
+                        if owner_principal_id is not None:
+                            dismiss_predicates.append(
+                                _owner_scope_predicate(
+                                    owner_principal_id=owner_principal_id,
+                                    operator_session_id=operator_session_id,
+                                )
+                            )
                         dismiss_result = await db.execute(
                             update(NativeNotificationOutbox)
                             .execution_options(synchronize_session=False)
-                            .where(
-                                NativeNotificationOutbox.id == row.id,
-                                NativeNotificationOutbox.status == "queued",
-                                NativeNotificationOutbox.attempt_count == row.attempt_count,
-                                NativeNotificationOutbox.fencing_token == row.fencing_token,
-                            )
+                            .where(*dismiss_predicates)
                             .values(status="cancelled", cancelled_at=now, updated_at=now)
                         )
                         if dismiss_result.rowcount != 1:
@@ -1255,27 +1457,38 @@ class NativeNotificationQueue:
                     for row in result.scalars().all()
                 ]
 
-    async def recovery(self, *, limit: int = 100) -> list[dict[str, Any]]:
+    async def recovery(
+        self,
+        *,
+        limit: int = 100,
+        owner_principal_id: str | None = None,
+        operator_session_id: str | None = None,
+    ) -> list[dict[str, Any]]:
         """Return bounded failed/unknown rows and operator recovery state."""
         if limit < 1 or limit > 100:
             raise ValueError("recovery limit must be between 1 and 100")
         async with self._lock:
             async with self._session() as db:
                 await self._reconcile_expired(db, _utc_now())
-                result = await db.execute(
-                    select(NativeNotificationOutbox)
-                    .where(
-                        NativeNotificationOutbox.status.in_({"failed", "unknown", "cancelled"}),
-                        (
-                            NativeNotificationOutbox.status.in_({"failed", "unknown"})
-                            | NativeNotificationOutbox.degraded_state.is_not(None)
-                        ),
+                stmt = select(NativeNotificationOutbox).where(
+                    NativeNotificationOutbox.status.in_({"failed", "unknown", "cancelled"}),
+                    (
+                        NativeNotificationOutbox.status.in_({"failed", "unknown"})
+                        | NativeNotificationOutbox.degraded_state.is_not(None)
+                    ),
+                )
+                if owner_principal_id is not None:
+                    stmt = stmt.where(
+                        _owner_scope_predicate(
+                            owner_principal_id=owner_principal_id,
+                            operator_session_id=operator_session_id,
+                        )
                     )
-                    .order_by(
+                result = await db.execute(
+                    stmt.order_by(
                         NativeNotificationOutbox.updated_at.desc(),
                         NativeNotificationOutbox.id.asc(),
-                    )
-                    .limit(limit)
+                    ).limit(limit)
                 )
                 rows = list(result.scalars().all())
                 output: list[dict[str, Any]] = []
@@ -1304,16 +1517,27 @@ class NativeNotificationQueue:
                     )
                 return output
 
-    async def count(self) -> int:
+    async def count(
+        self,
+        *,
+        owner_principal_id: str | None = None,
+        operator_session_id: str | None = None,
+    ) -> int:
         async with self._lock:
             async with self._session() as db:
                 now = _utc_now()
                 await self._reconcile_expired(db, now)
-                result = await db.execute(
-                    select(NativeNotificationOutbox).where(
-                        NativeNotificationOutbox.status.in_(ACTIVE_STATUSES)
-                    )
+                stmt = select(NativeNotificationOutbox).where(
+                    NativeNotificationOutbox.status.in_(ACTIVE_STATUSES)
                 )
+                if owner_principal_id is not None:
+                    stmt = stmt.where(
+                        _owner_scope_predicate(
+                            owner_principal_id=owner_principal_id,
+                            operator_session_id=operator_session_id,
+                        )
+                    )
+                result = await db.execute(stmt)
                 return len(result.scalars().all())
 
     async def clear(self) -> None:

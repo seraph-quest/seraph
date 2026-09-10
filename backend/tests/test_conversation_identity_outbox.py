@@ -20,6 +20,7 @@ from src.conversation.identity import (
     build_conversation_identity,
     build_lineage,
     redact_attachment_refs,
+    validate_attachment_refs,
 )
 from src.db import engine as db_engine
 from src.db.models import (
@@ -28,7 +29,9 @@ from src.db.models import (
     Session,
 )
 from src.models.schemas import WSResponse
+from src.observer.delivery import _resolve_delivery_identity
 from src.observer.native_notification_queue import NativeNotificationQueue
+from src.security.trust_contract import TrustPrincipal
 
 
 def test_conversation_identity_is_single_session_and_attachment_refs_are_public_metadata():
@@ -95,6 +98,63 @@ def test_conversation_identity_is_single_session_and_attachment_refs_are_public_
     assert frame.owner_principal_id == "operator:750"
 
 
+def test_attachment_owner_conflict_and_forged_delivery_identity_are_rejected():
+    with pytest.raises(ConversationIdentityError, match="ownership"):
+        redact_attachment_refs(
+            [{"attachment_id": "attachment-750", "owner_principal_id": "operator:other"}],
+            owner_principal_id="operator:750",
+        )
+
+    trusted = TrustPrincipal(
+        principal_id="operator:750",
+        principal_type="operator",
+        session_id="conversation-750",
+        operator_session_id="operator-session-750",
+    )
+    forged = WSResponse(
+        type="proactive",
+        session_id="conversation-750",
+        owner_principal_id="operator:other",
+        operator_session_id="operator-session-750",
+    )
+    with pytest.raises(ConversationIdentityError, match="owner"):
+        _resolve_delivery_identity(
+            forged,
+            session_id="conversation-750",
+            trusted_principal=trusted,
+        )
+    with pytest.raises(ConversationIdentityError, match="quarantine"):
+        validate_attachment_refs(
+            [{"attachment_id": "unknown-attachment", "media_type": "text/plain"}],
+            owner_principal_id="operator:750",
+        )
+    with pytest.raises(ConversationIdentityError, match="quarantine"):
+        _resolve_delivery_identity(
+            WSResponse(
+                type="proactive",
+                session_id="conversation-750",
+                owner_principal_id="operator:750",
+                attachment_refs=[{"attachment_id": "unknown-attachment"}],
+            ),
+            session_id="conversation-750",
+            trusted_principal=trusted,
+        )
+
+
+@pytest.mark.asyncio
+async def test_session_bound_outbox_rejects_ownerless_intent():
+    queue = NativeNotificationQueue()
+    with pytest.raises(ConversationIdentityError, match="owner"):
+        await queue.enqueue(
+            intervention_id="ownerless-intervention",
+            title="Bound notification",
+            body="Must be rejected",
+            intervention_type="alert",
+            urgency=3,
+            session_id="ownerless-conversation",
+        )
+
+
 @pytest.mark.asyncio
 async def test_rest_payload_persists_the_same_identity_and_redacted_attachment_refs(async_db, client):
     agent = MagicMock()
@@ -112,6 +172,8 @@ async def test_rest_payload_persists_the_same_identity_and_redacted_attachment_r
                     {
                         "attachment_id": "attachment-750",
                         "media_type": "text/plain",
+                        "content_hash": "sha256:attachment-750",
+                        "quarantine_status": "quarantined",
                         "file_path": "/private/file.txt",
                         "token": "private-token",
                     }
@@ -123,7 +185,12 @@ async def test_rest_payload_persists_the_same_identity_and_redacted_attachment_r
     assert payload["conversation_id"] == payload["thread_id"] == payload["session_id"]
     assert payload["owner_principal_id"]
     assert payload["attachment_refs"] == [
-        {"attachment_id": "attachment-750", "media_type": "text/plain"}
+        {
+            "attachment_id": "attachment-750",
+            "content_hash": "sha256:attachment-750",
+            "media_type": "text/plain",
+            "quarantine_status": "quarantined",
+        }
     ]
     history = await client.get(f"/api/sessions/{payload['session_id']}/messages")
     assert history.status_code == 200
@@ -204,6 +271,8 @@ async def test_file_outbox_replay_is_idempotent_and_keeps_canonical_lineage(file
             {
                 "attachment_id": "attachment-1",
                 "media_type": "text/plain",
+                "content_hash": "sha256:attachment-1",
+                "quarantine_status": "quarantined",
                 "file_path": "/private/secret.txt",
                 "token": "secret-token",
             }
@@ -215,7 +284,14 @@ async def test_file_outbox_replay_is_idempotent_and_keeps_canonical_lineage(file
     assert first.id == second.id
     assert first.conversation_id == first.thread_id == first.session_id == "conversation-750"
     assert first.owner_principal_id == "operator:750"
-    assert first.attachment_refs == [{"attachment_id": "attachment-1", "media_type": "text/plain"}]
+    assert first.attachment_refs == [
+        {
+            "attachment_id": "attachment-1",
+            "content_hash": "sha256:attachment-1",
+            "media_type": "text/plain",
+            "quarantine_status": "quarantined",
+        }
+    ]
     assert database_path.exists()
     async with get_session() as db:
         row = (await db.execute(select(NativeNotificationOutbox).where(NativeNotificationOutbox.id == first.id))).scalar_one()
@@ -223,6 +299,70 @@ async def test_file_outbox_replay_is_idempotent_and_keeps_canonical_lineage(file
         assert row.thread_id == "conversation-750"
         assert "file_path" not in row.attachment_refs_json
         assert "secret-token" not in row.attachment_refs_json
+
+
+@pytest.mark.asyncio
+async def test_file_outbox_browser_scope_rejects_cross_owner_reads_and_dismissals(file_db):
+    get_session, _ = file_db
+    await _add_owner(
+        get_session,
+        session_id="conversation-owner-a",
+        owner_id="operator:a",
+        operator_session_id="operator-session-a",
+    )
+    await _add_owner(
+        get_session,
+        session_id="conversation-owner-b",
+        owner_id="operator:b",
+        operator_session_id="operator-session-b",
+    )
+    queue = NativeNotificationQueue(lease_seconds=5, ttl_seconds=60)
+    notification_a = await queue.enqueue(
+        intervention_id="intervention-owner-a",
+        title="Owner A",
+        body="Private A",
+        intervention_type="alert",
+        urgency=3,
+        session_id="conversation-owner-a",
+        owner_principal_id="operator:a",
+        operator_session_id="operator-session-a",
+        idempotency_key="owner-a-notification",
+    )
+    notification_b = await queue.enqueue(
+        intervention_id="intervention-owner-b",
+        title="Owner B",
+        body="Private B",
+        intervention_type="alert",
+        urgency=3,
+        session_id="conversation-owner-b",
+        owner_principal_id="operator:b",
+        operator_session_id="operator-session-b",
+        idempotency_key="owner-b-notification",
+    )
+    ambient = await queue.enqueue(
+        intervention_id=None,
+        title="Ambient",
+        body="Public local state",
+        intervention_type="test",
+        urgency=1,
+        idempotency_key="ambient-notification",
+    )
+
+    owner_a_rows = await queue.list(
+        owner_principal_id="operator:a",
+        operator_session_id="operator-session-a",
+    )
+    assert {row.id for row in owner_a_rows} == {notification_a.id, ambient.id}
+    assert await queue.get(
+        notification_b.id,
+        owner_principal_id="operator:a",
+        operator_session_id="operator-session-a",
+    ) is None
+    assert await queue.dismiss(
+        notification_b.id,
+        owner_principal_id="operator:a",
+        operator_session_id="operator-session-a",
+    ) is None
 
 
 @pytest.mark.asyncio

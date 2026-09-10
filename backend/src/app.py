@@ -505,6 +505,18 @@ def create_app() -> FastAPI:
 
         fabric_status = await model_fabric_runtime_status(str(runtime.get("active_profile") or ""))
         remote_inference_admission = await remote_inference_admission_broker.status()
+        setup_status = fabric_status.get("openrouter_setup")
+        remote_inference_admission["verification"] = {
+            # The contract is covered by local deterministic tests; this
+            # endpoint never turns that evidence into a live-provider claim.
+            "contract": "contract_tested",
+            "configuration": (
+                "configured"
+                if isinstance(setup_status, dict) and setup_status.get("credential_configured")
+                else "configuration_required"
+            ),
+            "provider": "live_unverified",
+        }
         effective_runtime = _augment_inference_readiness(
             _effective_runtime_route_status(runtime, vlm_status),
             fabric_status,

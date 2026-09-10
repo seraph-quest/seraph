@@ -397,6 +397,91 @@ def _restart_recovery_state(run: WorkflowRunState) -> tuple[str, str]:
     return "blocked", "stale_lease_requires_reconciliation"
 
 
+def _terminal_remote_settlement_effect(
+    effects: Iterable[Any],
+    *,
+    expected_job_id: str | None = None,
+    expected_owner_id: str | None = None,
+) -> Mapping[str, Any] | None:
+    """Find a broker-settled remote effect that can close a crashed run.
+
+    The broker receipt is the durable readback for a remote invocation.  It
+    contains the operation/job/owner binding and a terminal success status;
+    unlike an ``intent`` or ``blocked`` projection it carries no unresolved
+    external liability.  Recovery uses this narrow shape so an arbitrary
+    successful effect can never promote a stale job to ``succeeded``.
+    """
+    for item in effects:
+        if not isinstance(item, Mapping):
+            continue
+        if _text(item.get("effect_type")) != "remote_inference_admission":
+            continue
+        if _text(item.get("status")) != "succeeded":
+            continue
+        details = item.get("details")
+        if not isinstance(details, Mapping):
+            continue
+        nested = details.get("receipt")
+        if not isinstance(nested, Mapping):
+            continue
+        if _text(details.get("admission_status")) not in {"succeeded", "settled"}:
+            continue
+        if _text(nested.get("status")) not in {"succeeded", "settled"}:
+            continue
+        operation_id = _text(nested.get("operation_id"))
+        job_id = _text(nested.get("job_id"))
+        owner_id = _text(nested.get("owner_id"))
+        if not operation_id or not job_id or not owner_id:
+            continue
+        if expected_job_id is not None and job_id != expected_job_id:
+            continue
+        if expected_owner_id is not None and owner_id != expected_owner_id:
+            continue
+        if _text(item.get("target_digest")) != operation_id:
+            continue
+        if details.get("reconciliation_required") or details.get("unknown_cost_outstanding"):
+            continue
+        if nested.get("reconciliation_required") or nested.get("unknown_cost_outstanding"):
+            continue
+        return item
+    return None
+
+
+def _remote_terminal_recovery_readback(
+    effect: Mapping[str, Any],
+    *,
+    observed_at: datetime,
+) -> dict[str, Any]:
+    """Build a verified readback marker for terminal remote settlement."""
+    details = effect.get("details")
+    nested = details.get("receipt") if isinstance(details, Mapping) else None
+    nested = nested if isinstance(nested, Mapping) else {}
+    effect_id = _text(effect.get("effect_id"))
+    settlement_digest = _text(details.get("receipt_digest")) if isinstance(details, Mapping) else ""
+    settlement_digest = settlement_digest or _digest(dict(nested))
+    return {
+        "kind": "remote_inference_terminal_recovery",
+        "receipt_kind": "readback",
+        "effect_id": f"{effect_id}:terminal_readback",
+        "original_effect_id": effect_id,
+        "effect_type": "remote_inference_admission",
+        "target_path": _text(effect.get("target_path")),
+        "target_digest": _text(effect.get("target_digest")),
+        "status": "succeeded",
+        "content_sha256": settlement_digest,
+        "details": {
+            "verified": True,
+            "source": "durable_remote_settlement",
+            "operation_id": _text(nested.get("operation_id")),
+            "settlement_receipt_digest": settlement_digest,
+        },
+        "recorded_at": observed_at.isoformat(),
+        "fencing_token": effect.get("fencing_token"),
+        "reconciled": True,
+        "reconciliation_status": "resolved",
+    }
+
+
 def _safe_structure(value: Any, *, max_depth: int = 3) -> Any:
     """Keep durable receipts structural and never persist secret values."""
     if max_depth <= 0:
@@ -2705,12 +2790,66 @@ class DurableJobRepository:
                     "effect_id already identifies a different effect target"
                 )
             previous_status = _text(previous.get("status")) if previous is not None else ""
+            remote_terminal_settlement = (
+                effect_type == "remote_inference_admission"
+                and status in {"succeeded", "failed"}
+                and isinstance(safe_details, dict)
+                and isinstance(safe_details.get("receipt"), dict)
+                and _text(safe_details["receipt"].get("status"))
+                in {"succeeded", "settled", "failed", "cancelled", "expired", "rejected"}
+            )
+            remote_uncertain_projection = (
+                effect_type == "remote_inference_admission"
+                and status == "blocked"
+                and isinstance(safe_details, dict)
+                and isinstance(safe_details.get("receipt"), dict)
+                and _text(safe_details["receipt"].get("status")) == "blocked"
+            )
+            if remote_terminal_settlement:
+                prior_details = previous.get("details") if previous is not None else {}
+                prior_details = prior_details if isinstance(prior_details, Mapping) else {}
+                nested_receipt = safe_details.get("receipt") if isinstance(safe_details, Mapping) else None
+                nested_receipt = nested_receipt if isinstance(nested_receipt, Mapping) else {}
+                expected_operation_id = _text(
+                    prior_details.get("operation_id")
+                ) or _text(previous.get("target_digest") if previous is not None else None) or _text(
+                    target_digest
+                )
+                expected_job_id = _text(prior_details.get("job_id")) or job_id
+                expected_owner_id = _text(prior_details.get("owner_id")) or _text(
+                    getattr(run, "owner_principal_id", None)
+                )
+                if (
+                    not expected_operation_id
+                    or not expected_job_id
+                    or not expected_owner_id
+                    or _text(nested_receipt.get("operation_id")) != expected_operation_id
+                    or _text(nested_receipt.get("job_id")) != expected_job_id
+                    or _text(nested_receipt.get("owner_id")) != expected_owner_id
+                ):
+                    raise DurableJobIdempotencyConflict(
+                        "remote terminal receipt does not match the immutable intent binding"
+                    )
             if previous_status in UNRESOLVED_EFFECT_STATUSES:
-                if receipt_kind == "effect" and status not in UNRESOLVED_EFFECT_STATUSES:
+                # A terminal broker receipt is the exact settlement of the
+                # pre-dispatch remote intent.  Provider errors remain
+                # ``blocked`` and therefore still require reconciliation;
+                # only the broker's settled success/failure states may close
+                # this one effect identity.
+                if (
+                    receipt_kind == "effect"
+                    and status not in UNRESOLVED_EFFECT_STATUSES
+                    and not remote_terminal_settlement
+                    and not remote_uncertain_projection
+                ):
                     raise DurableJobTransitionError(
                         "unresolved external effect requires exact readback or cost settlement"
                     )
-                if receipt_kind == "effect":
+                if (
+                    receipt_kind == "effect"
+                    and not remote_terminal_settlement
+                    and not remote_uncertain_projection
+                ):
                     lifecycle_order = {"unknown": 0, "intent": 1, "dispatched": 2}
                     # A post-dispatch transport observation may be reported as
                     # ``unknown`` after an intent was durably recorded.  It
@@ -2735,6 +2874,15 @@ class DurableJobRepository:
                     raise DurableJobIdempotencyConflict(
                         "readback target digest does not match the intended effect"
                     )
+                if remote_terminal_settlement:
+                    prior_details = previous.get("details")
+                    if isinstance(prior_details, Mapping) and isinstance(safe_details, dict):
+                        # Keep the immutable route/profile selected at intent
+                        # time attached to the terminal settlement. A restart
+                        # must be able to audit the exact route that crossed
+                        # the provider boundary.
+                        safe_details = {**dict(prior_details), **safe_details}
+                        receipt["details"] = safe_details
             if receipt_kind == "readback" and status == "succeeded":
                 if not _verified_readback_exists([receipt]):
                     raise DurableJobTransitionError(
@@ -2899,6 +3047,156 @@ class DurableJobRepository:
             fencing_token=fencing_token,
             expected_revision=expected_revision,
         )
+
+    async def record_remote_inference_intent(
+        self,
+        *,
+        operation_id: str,
+        job_id: str,
+        owner_id: str,
+        parent_job_id: str | None = None,
+        runtime_path: str = "",
+        profile_id: str = "",
+        priority: str = "",
+        deadline_at: float | None = None,
+        capability_version: str = "",
+        owner: str | None = None,
+        fencing_token: int | None = None,
+    ) -> dict[str, Any]:
+        """Fence one remote operation before its provider callback starts.
+
+        The process-local remote broker cannot survive a worker restart.  The
+        intent effect therefore reserves the durable operation identity under
+        the existing job lease before dispatch.  A repeated operation ID is a
+        hard idempotency conflict, including after a process restart; callers
+        must reconcile the prior effect instead of issuing another provider
+        request.
+        """
+        operation_id = _bounded_identifier(operation_id, field_name="operation_id", limit=256)
+        job_id = _bounded_identifier(job_id, field_name="job_id", limit=256)
+        owner_id = _bounded_identifier(owner_id, field_name="owner_id", limit=256)
+        if not operation_id or not job_id or not owner_id:
+            raise DurableJobLeaseError("remote inference intent requires operation, job, and owner identities")
+        parent_job_id = (
+            _bounded_identifier(parent_job_id, field_name="parent_job_id", limit=256)
+            if parent_job_id is not None
+            else None
+        )
+        runtime_path = _bounded_identifier(runtime_path, field_name="runtime_path", limit=128)
+        profile_id = _bounded_identifier(profile_id, field_name="profile_id", limit=256)
+        priority = _bounded_identifier(priority, field_name="priority", limit=64)
+        capability_version = _bounded_identifier(
+            capability_version,
+            field_name="capability_version",
+            limit=256,
+        )
+        normalized_deadline = None if deadline_at is None else float(deadline_at)
+        if normalized_deadline is not None and not math.isfinite(normalized_deadline):
+            raise DurableJobTransitionError("remote inference deadline is malformed")
+        effect_id = f"remote_inference:{operation_id}"
+        target_path = f"remote_inference:{operation_id}"
+        intent_details = {
+            "admission_status": "intent",
+            "operation_id": operation_id,
+            "job_id": job_id,
+            "owner_id": owner_id,
+            "parent_job_id": parent_job_id,
+            "runtime_path": runtime_path,
+            "profile_id": profile_id,
+            "priority": priority,
+            "deadline_at": normalized_deadline,
+            "capability_version": capability_version,
+        }
+        safe_details = _safe_structure(intent_details)
+        async with self._session() as db:
+            now = _utc_now()
+            run = await self._fetch(db, job_id)
+            if _deadline_expired(run, now=now):
+                raise DurableJobTransitionError("job deadline has expired")
+            if run.status in DURABLE_JOB_TERMINAL_STATUSES:
+                raise DurableJobTransitionError("terminal durable job cannot dispatch remote inference")
+            persisted_owner = _text(getattr(run, "owner_principal_id", None))
+            if persisted_owner != owner_id:
+                raise DurableJobLeaseError(
+                    "remote inference intent owner does not match the durable job owner"
+                )
+            if owner is None or fencing_token is None:
+                raise DurableJobLeaseError(
+                    "remote inference intent requires the active durable job lease"
+                )
+            self._assert_lease(run, owner=owner, fencing_token=fencing_token)
+            effects = _effect_ledger_or_raise(run.effect_receipts_json)
+            previous = next(
+                (
+                    item
+                    for item in effects
+                    if isinstance(item, dict) and _text(item.get("effect_id")) == effect_id
+                ),
+                None,
+            )
+            if previous is not None:
+                previous_details = previous.get("details")
+                previous_details = previous_details if isinstance(previous_details, Mapping) else {}
+                route_fields = ("runtime_path", "profile_id")
+                if any(
+                    _text(previous_details.get(field_name)) != _text(intent_details[field_name])
+                    for field_name in route_fields
+                ):
+                    raise DurableJobIdempotencyConflict(
+                        "remote inference operation identity is bound to a different route/profile"
+                    )
+                raise DurableJobIdempotencyConflict(
+                    "remote inference operation identity is already fenced"
+                )
+            receipt = {
+                "effect_id": effect_id,
+                "receipt_kind": "effect",
+                "effect_type": "remote_inference_admission",
+                "target_path": target_path,
+                "target_digest": operation_id,
+                "approval_id": None,
+                "adapter_idempotency_key": operation_id,
+                "status": "intent",
+                "content_sha256": None,
+                "details": safe_details,
+                "recorded_at": now.isoformat(),
+                "fencing_token": fencing_token,
+            }
+            current_revision = _revision(run)
+            conditions = [
+                WorkflowRunState.run_identity == job_id,
+                WorkflowRunState.status == run.status,
+                WorkflowRunState.revision == current_revision,
+                WorkflowRunState.lease_owner == owner,
+                WorkflowRunState.fencing_token == fencing_token,
+                WorkflowRunState.lease_expires_at > now,
+            ]
+            _append_parent_fence_condition(conditions, run, now=now)
+            effects.append(receipt)
+            updated = await db.execute(
+                update(WorkflowRunState)
+                .execution_options(synchronize_session=False)
+                .where(*conditions)
+                .values(
+                    effect_receipts_json=_canonical(_bounded_effect_ledger(effects)),
+                    updated_at=now,
+                    heartbeat_at=now,
+                    revision=WorkflowRunState.revision + 1,
+                )
+            )
+            if not _rowcount_is_one(updated):
+                # The revision predicate is the durable unique-operation CAS.
+                # A concurrent process that won the same identity cannot be
+                # overwritten by this stale intent.
+                raise DurableJobLeaseError(
+                    "remote inference intent lost the concurrent durable fence"
+                )
+            refreshed = await self._fetch(db, job_id)
+            db.expunge(refreshed)
+            return _serialize(
+                refreshed,
+                receipt={"kind": "effect", "status": "recorded", **receipt},
+            )
 
     async def retry_job(
         self,
@@ -3179,6 +3477,7 @@ class DurableJobRepository:
                 old_owner = run.lease_owner
                 expected_token = run.fencing_token
                 expected_revision = _revision(run)
+                recovery_effects: list[dict[str, Any]] | None = None
                 try:
                     persisted_deadline = _as_utc(run.deadline_at)
                 except ValueError:
@@ -3190,8 +3489,53 @@ class DurableJobRepository:
                 else:
                     if persisted_deadline is not None and persisted_deadline <= observed_at:
                         recovered_status, recovery_reason = "failed", "deadline_expired"
+                        recovery_effects = None
                     else:
-                        recovered_status, recovery_reason = _restart_recovery_state(run)
+                        try:
+                            effects = _effect_ledger_or_raise(run.effect_receipts_json)
+                        except DurableJobTransitionError:
+                            effects = None
+                        terminal_settlement = (
+                            _terminal_remote_settlement_effect(
+                                effects,
+                                expected_job_id=run.run_identity,
+                                expected_owner_id=_text(run.owner_principal_id),
+                            )
+                            if effects is not None and not _job_has_unsafe_effects(effects)
+                            else None
+                        )
+                        if terminal_settlement is not None:
+                            recovered_status = "succeeded"
+                            recovery_reason = "remote_terminal_settlement_recovered"
+                            recovery_effects = [
+                                *effects,
+                                _remote_terminal_recovery_readback(
+                                    terminal_settlement,
+                                    observed_at=observed_at,
+                                ),
+                            ]
+                        else:
+                            recovered_status, recovery_reason = _restart_recovery_state(run)
+                            recovery_effects = None
+                recovery_values: dict[str, Any] = {
+                    "status": recovered_status,
+                    "failure_reason": recovery_reason,
+                    "lease_owner": None,
+                    "lease_expires_at": None,
+                    "fencing_token": WorkflowRunState.fencing_token + 1,
+                    "revision": WorkflowRunState.revision + 1,
+                    "updated_at": observed_at,
+                    "heartbeat_at": observed_at,
+                    "finished_at": (
+                        observed_at
+                        if recovered_status in {"failed", "succeeded"}
+                        else None
+                    ),
+                }
+                if recovery_effects is not None:
+                    recovery_values["effect_receipts_json"] = _canonical(
+                        _bounded_effect_ledger(recovery_effects)
+                    )
                 updated = await db.execute(
                     update(WorkflowRunState)
                     .execution_options(synchronize_session=False)
@@ -3201,28 +3545,14 @@ class DurableJobRepository:
                         WorkflowRunState.revision == expected_revision,
                         WorkflowRunState.fencing_token == expected_token,
                     )
-                    .values(
-                        status=recovered_status,
-                        failure_reason=recovery_reason,
-                        lease_owner=None,
-                        lease_expires_at=None,
-                        fencing_token=WorkflowRunState.fencing_token + 1,
-                        revision=WorkflowRunState.revision + 1,
-                        updated_at=observed_at,
-                        heartbeat_at=observed_at,
-                        finished_at=(
-                            observed_at
-                            if recovered_status == "failed"
-                            else None
-                        ),
-                    )
+                    .values(**recovery_values)
                 )
                 if not _rowcount_is_one(updated):
                     continue
                 refreshed = await self._fetch(db, run.run_identity)
                 receipt = {
                     "kind": "restart_recovery",
-                    "status": "failed" if recovered_status == "failed" else "blocked",
+                    "status": recovered_status,
                     "reason": recovery_reason,
                     "recovery_state": recovered_status,
                     "previous_owner": old_owner,
@@ -3232,9 +3562,13 @@ class DurableJobRepository:
                         "deadline_expired_no_retry"
                         if recovered_status == "failed" and recovery_reason == "deadline_expired"
                         else (
-                            "reconcile_external_effect_and_cost_then_retry_or_cancel"
-                            if recovered_status in UNCERTAIN_EXTERNAL_EFFECT_STATUSES
-                            else "reconcile_effects_then_retry_or_cancel"
+                            "resume_already_settled_remote_operation"
+                            if recovered_status == "succeeded"
+                            else (
+                                "reconcile_external_effect_and_cost_then_retry_or_cancel"
+                                if recovered_status in UNCERTAIN_EXTERNAL_EFFECT_STATUSES
+                                else "reconcile_effects_then_retry_or_cancel"
+                            )
                         )
                     ),
                     "operator_visible": True,

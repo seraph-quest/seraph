@@ -4,12 +4,20 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from src.local_runtime_profile_verifier import latest_local_runtime_profile_proof, verify_local_runtime_profiles
 from src.local_runtime_profiles import (
     local_runtime_chat_payload,
     local_runtime_profile_form_fields,
     local_runtime_profile_headers,
 )
+
+
+@pytest.fixture(autouse=True)
+def _legacy_local_probe_test_mode(monkeypatch):
+    """Keep historical transport fixtures outside the active OpenRouter mode."""
+    monkeypatch.setattr("src.local_runtime_profile_verifier.settings.openrouter_provider_only", False)
 
 
 def test_local_runtime_profile_contract_includes_screenshot_fast_controls(monkeypatch):
@@ -91,6 +99,7 @@ async def test_verify_local_runtime_profiles_writes_receipt(tmp_path, monkeypatc
         model="unsloth/gemma-test",
         api_key="secret",
         output_dir=tmp_path,
+        allow_legacy_local_probe=True,
     )
 
     assert receipt["schema_version"] == "seraph.local_runtime_profiles.proof.v1"
@@ -106,6 +115,56 @@ async def test_verify_local_runtime_profiles_writes_receipt(tmp_path, monkeypatc
     saved = json.loads(path.read_text(encoding="utf-8"))
     assert saved["sha256"] == receipt["sha256"]
     assert any(call["method"] == "POST" and call["json"]["metadata"]["runtime_profile"] == "chat_thinking" for call in calls)
+
+
+@pytest.mark.asyncio
+async def test_local_runtime_profile_verifier_blocks_active_local_transport(tmp_path, monkeypatch):
+    calls = []
+
+    class ForbiddenAsyncClient:
+        def __init__(self, **_kwargs):
+            calls.append("client-created")
+            raise AssertionError("active local profile proof must not create a transport client")
+
+    monkeypatch.setattr("src.local_runtime_profile_verifier.settings.openrouter_provider_only", True)
+    monkeypatch.setattr("src.local_runtime_profile_verifier.httpx.AsyncClient", ForbiddenAsyncClient)
+
+    receipt = await verify_local_runtime_profiles(
+        base_url="http://127.0.0.1:8000/v1",
+        model="unsloth/gemma-test",
+        api_key="secret-token",
+        output_dir=tmp_path,
+    )
+
+    assert calls == []
+    assert receipt["status"] == "blocked"
+    assert receipt["operator_visible"] is True
+    assert receipt["reason_code"] == "local_runtime_profile_probe_disabled_openrouter_only"
+    assert receipt["profiles"] == []
+    assert receipt["backend"]["probes"] == []
+    assert receipt["admission"] == {
+        "status": "blocked",
+        "resource_class": "local_runtime_profile_verification",
+        "owner_id": None,
+        "job_id": None,
+        "priority": None,
+        "deadline_at": None,
+        "cancel_state": "not_started",
+        "reconciliation_state": "not_applicable",
+        "idempotency_key": None,
+    }
+
+    saved = next(tmp_path.glob("*.json")).read_text(encoding="utf-8")
+    assert "secret-token" not in saved
+    proof = latest_local_runtime_profile_proof(
+        receipt_dir=tmp_path,
+        expected_base_url="http://127.0.0.1:8000/v1",
+        expected_model="unsloth/gemma-test",
+    )
+    assert proof["status"] == "blocked"
+    assert proof["safe_for_single_backend_profile_routing"] is False
+    assert proof["operator_visible"] is True
+    assert proof["reason_code"] == "local_runtime_profile_probe_disabled_openrouter_only"
 
 
 async def test_verify_local_runtime_profiles_marks_ambiguous_without_structured_reasoning(tmp_path, monkeypatch):
@@ -145,6 +204,7 @@ async def test_verify_local_runtime_profiles_marks_ambiguous_without_structured_
         base_url="http://127.0.0.1:8000/v1",
         model="unsloth/gemma-test",
         output_dir=tmp_path,
+        allow_legacy_local_probe=True,
     )
 
     assert receipt["conclusion"]["profile_requests_completed"] is True
@@ -195,6 +255,7 @@ async def test_verify_local_runtime_profiles_rejects_visible_screenshot_thought_
         base_url="http://127.0.0.1:8000/v1",
         model="unsloth/gemma-test",
         output_dir=tmp_path,
+        allow_legacy_local_probe=True,
     )
 
     assert receipt["profiles"][0]["response"]["reasoning_markers"]["visible_reasoning"] is True
@@ -246,6 +307,7 @@ async def test_verify_local_runtime_profiles_rejects_structured_screenshot_reaso
         base_url="http://127.0.0.1:8000/v1",
         model="unsloth/gemma-test",
         output_dir=tmp_path,
+        allow_legacy_local_probe=True,
     )
 
     assert receipt["profiles"][0]["response"]["reasoning_markers"]["structured_reasoning_field"] is True
@@ -296,6 +358,7 @@ async def test_latest_local_runtime_profile_proof_rejects_config_mismatch(tmp_pa
         base_url="http://127.0.0.1:8000/v1",
         model="unsloth/gemma-test",
         output_dir=tmp_path,
+        allow_legacy_local_probe=True,
     )
 
     matching = latest_local_runtime_profile_proof(
@@ -364,7 +427,10 @@ async def test_local_runtime_profile_verifier_uses_gpu_vlm_base_when_llm_base_mi
     monkeypatch.setattr("src.local_runtime_profile_verifier.settings.local_model", "openai/unsloth/gemma-test")
     monkeypatch.setattr("src.local_runtime_profile_verifier.httpx.AsyncClient", FakeAsyncClient)
 
-    receipt = await verify_local_runtime_profiles(output_dir=tmp_path)
+    receipt = await verify_local_runtime_profiles(
+        output_dir=tmp_path,
+        allow_legacy_local_probe=True,
+    )
 
     assert receipt["base_url"] == "http://192.168.1.26:8001/v1"
     models_call = next(call for call in calls if call["url"].endswith("/models"))

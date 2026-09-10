@@ -28,8 +28,36 @@ async def verify_local_runtime_profiles(
     api_key: str | None = None,
     output_dir: Path | None = None,
     timeout_seconds: int = 60,
+    allow_legacy_local_probe: bool = False,
 ) -> dict[str, Any]:
-    """Verify the live local gateway profile behavior and write a safe receipt."""
+    """Verify the historical local gateway profile behavior and write a receipt.
+
+    The active OpenRouter-only runtime cannot probe a local or GPU gateway.
+    Legacy generation is therefore available only to an explicitly opted-in
+    diagnostic caller while the active provider-only setting is disabled.
+    """
+    if bool(getattr(settings, "openrouter_provider_only", True)):
+        return _blocked_receipt(
+            base_url=base_url,
+            model=model,
+            output_dir=output_dir,
+            reason_code="local_runtime_profile_probe_disabled_openrouter_only",
+            note=(
+                "local runtime profile verification is blocked while the active "
+                "OpenRouter-only policy is enabled"
+            ),
+        )
+    if not allow_legacy_local_probe:
+        return _blocked_receipt(
+            base_url=base_url,
+            model=model,
+            output_dir=output_dir,
+            reason_code="local_runtime_profile_probe_requires_legacy_opt_in",
+            note=(
+                "legacy local runtime profile verification requires explicit "
+                "allow_legacy_local_probe opt-in"
+            ),
+        )
     resolved_base_url = (base_url or effective_vlm_chat_api_base()).strip()
     if not resolved_base_url:
         raise ValueError("local runtime verifier requires LOCAL_LLM_API_BASE or SERAPH_VLM_BASE_URL")
@@ -139,6 +167,15 @@ def latest_local_runtime_profile_proof(
         and conclusion.get("per_request_reasoning_control") == "verified"
     )
     notes = list(conclusion.get("notes") or []) if isinstance(conclusion.get("notes"), list) else []
+    blocked_by_active_policy = bool(
+        getattr(settings, "openrouter_provider_only", True)
+        and conclusion.get("safe_for_single_backend_profile_routing") is True
+    )
+    if blocked_by_active_policy:
+        safe = False
+        notes.append(
+            "local runtime profile proof is blocked while the active OpenRouter-only policy is enabled"
+        )
     if not schema_ok:
         notes.append("latest local runtime profile proof receipt has an unsupported schema")
     if not hash_ok:
@@ -152,8 +189,11 @@ def latest_local_runtime_profile_proof(
     if expected_model and receipt_model != expected_model:
         safe = False
         notes.append("latest local runtime profile proof receipt does not match the configured local model")
+    receipt_status = str(payload.get("status") or "")
+    if blocked_by_active_policy:
+        receipt_status = "blocked"
     return {
-        "status": "safe" if safe else "unsafe",
+        "status": receipt_status or ("safe" if safe else "unsafe"),
         "receipt_path": str(latest),
         "sha256": stored_hash or None,
         "finished_at": payload.get("finished_at"),
@@ -163,6 +203,8 @@ def latest_local_runtime_profile_proof(
         "per_request_reasoning_control": conclusion.get("per_request_reasoning_control"),
         "profile_requests_completed": bool(conclusion.get("profile_requests_completed")),
         "safe_for_single_backend_profile_routing": safe,
+        "operator_visible": bool(payload.get("operator_visible", True)),
+        "reason_code": payload.get("reason_code"),
         "notes": notes,
     }
 
@@ -474,3 +516,54 @@ def _safe_error(exc: Exception) -> str:
 
 def _replace_non_empty(value: str, secret: str) -> str:
     return value.replace(secret, "[redacted]") if secret else value
+
+
+def _blocked_receipt(
+    *,
+    base_url: str | None,
+    model: str | None,
+    output_dir: Path | None,
+    reason_code: str,
+    note: str,
+) -> dict[str, Any]:
+    """Persist an operator-visible proof that no legacy local request ran."""
+    started_at = datetime.now(timezone.utc)
+    resolved_base_url = (base_url or effective_vlm_chat_api_base()).strip()
+    resolved_model = (
+        model or settings.local_model or settings.local_vlm_model or settings.default_model
+    ).strip()
+    receipt: dict[str, Any] = {
+        "schema_version": PROFILE_VERIFIER_VERSION,
+        "receipt_id": uuid4().hex,
+        "started_at": started_at.isoformat(),
+        "finished_at": started_at.isoformat(),
+        "status": "blocked",
+        "operator_visible": True,
+        "reason_code": reason_code,
+        "base_url": _safe_base_url(resolved_base_url) if resolved_base_url else None,
+        "model": resolved_model or None,
+        "profile_contract_sha256": local_runtime_profile_contract_hash(),
+        "profiles": [],
+        "backend": {"probes": []},
+        "admission": {
+            "status": "blocked",
+            "resource_class": "local_runtime_profile_verification",
+            "owner_id": None,
+            "job_id": None,
+            "priority": None,
+            "deadline_at": None,
+            "cancel_state": "not_started",
+            "reconciliation_state": "not_applicable",
+            "idempotency_key": None,
+        },
+        "conclusion": {
+            "profile_requests_completed": False,
+            "per_request_reasoning_control": "blocked",
+            "safe_for_single_backend_profile_routing": False,
+            "notes": [note],
+        },
+    }
+    receipt["sha256"] = _receipt_hash(receipt)
+    path = _write_receipt(receipt, output_dir=output_dir)
+    receipt["receipt_path"] = str(path)
+    return receipt

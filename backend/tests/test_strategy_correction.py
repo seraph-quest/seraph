@@ -415,3 +415,72 @@ async def test_web_brief_scheduler_yields_after_unresolved_correction_and_redact
     assert first_details["strategy_delta_provenance"] == "unresolved"
     assert first_details["strategy_delta_evidence_ref"] is None
     assert len(jobs.record_effect.await_args_list) == 2
+
+
+@pytest.mark.asyncio
+async def test_web_brief_scheduler_caps_correction_fallback_at_two_candidates():
+    goals = []
+    blocked_results = []
+    for index, priority in enumerate((90, 80, 70), start=1):
+        goal_id = f"goal-unresolved-{index}"
+        query = f"unresolved priority {priority}"
+        criterion = _criterion(
+            {
+                "query": query,
+                "file_path": f"briefs/unresolved-{index}.md",
+                "priority": priority,
+                "strategy_delta_id": f"delta-unresolved-{index}",
+            }
+        )
+        goal = SimpleNamespace(
+            id=goal_id,
+            revision=2,
+            proactive_enabled=True,
+            success_criterion_json=criterion.model_dump_json(),
+            due_date=None,
+            sort_order=index,
+        )
+        goals.append(goal)
+        blocked_results.append(
+            WebBriefToFileResult(
+                goal_id=goal_id,
+                goal_revision=2,
+                query=query,
+                file_path=f"briefs/unresolved-{index}.md",
+                execution_status="blocked",
+                verification="unknown",
+                learning="no_learning",
+                strategy_delta_id=f"delta-unresolved-{index}",
+                strategy_delta_provenance="unresolved",
+                reason="strategy_delta_unresolved",
+            )
+        )
+
+    jobs = MagicMock()
+    jobs.record_effect = AsyncMock()
+    service = MagicMock()
+    service.run = AsyncMock(side_effect=blocked_results)
+
+    with (
+        patch(
+            "src.scheduler.jobs.strategist_tick.goal_repository.list_goals",
+            new=AsyncMock(return_value=goals),
+        ),
+        patch("src.scheduler.jobs.strategist_tick.durable_job_repository", jobs),
+        patch("src.scheduler.jobs.strategist_tick.WebBriefToFileService", return_value=service),
+    ):
+        receipt = await _run_opted_in_goal_web_brief(
+            parent_job_id="parent-correction-cap",
+            parent_fencing_token=4,
+        )
+
+    assert receipt["goal_id"] == goals[1].id
+    assert [call.args[0].query for call in service.run.await_args_list] == [
+        "unresolved priority 90",
+        "unresolved priority 80",
+    ]
+    assert len(jobs.record_effect.await_args_list) == 2
+    assert all(
+        call.kwargs["details"]["reason"] == "strategy_delta_unresolved"
+        for call in jobs.record_effect.await_args_list
+    )

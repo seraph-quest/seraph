@@ -35,7 +35,6 @@ from src.auth.middleware import OperatorAuthMiddleware
 from src.auth.service import validate_auth_configuration
 
 limiter = Limiter(key_func=get_remote_address, default_limits=["60/minute"])
-_LOCAL_DEV_ORIGIN_REGEX = r"https?://(localhost|127\.0\.0\.1)(:\d+)?$"
 
 
 def _safe_runtime_endpoint(value: object) -> str:
@@ -479,9 +478,12 @@ def create_app() -> FastAPI:
     app.add_middleware(
         CORSMiddleware,
         allow_origins=list(dict.fromkeys([
-            "http://localhost:3000", "http://localhost:5173", *configured_origins
+            "http://localhost:3000",
+            "http://localhost:5173",
+            "http://127.0.0.1:3000",
+            "http://127.0.0.1:5173",
+            *configured_origins,
         ])),
-        allow_origin_regex=_LOCAL_DEV_ORIGIN_REGEX,
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],

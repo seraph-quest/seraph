@@ -35,11 +35,13 @@ The final integration branch also provides the managed, keyless health receipt
 command `./manage.sh -e prod health --format json`. It writes only redacted
 logical receipts under `operator-receipts/epic-736-health/`, makes no provider,
 GPU/VLM, speech, or connector calls, and records unprobed live evidence as
-`skipped`/`degraded` with recovery guidance. Source-contract checks are evidence
-of the checked revision, not claims of live execution or competitive
-superiority. Receipt schema v2 labels each check as static, configuration,
-integration, external-unverified, or excluded; the deferred HarnessDev work in
-#771 and comparator campaigns are excluded from Epic #736 closure.
+`skipped`/`degraded` with recovery guidance. The writer uses #742's canonical
+production workspace resolver and rejects symlink or ambiguous roots. Source-
+contract checks are evidence of the checked revision, not claims of live
+execution or competitive superiority. Receipt schema v2 labels each check as
+static, configuration, integration, external-unverified, or excluded; the
+stable #771 evolution IDs and #754 comparator coverage remain explicit excluded
+checks outside Epic #736 closure.
 
 ## Legend
 

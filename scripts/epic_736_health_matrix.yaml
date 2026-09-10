@@ -2,10 +2,18 @@ schema_version: 2
 epic: 736
 description: >-
   Keyless, read-only release-gate criteria. Source-contract checks do not
-  claim live execution. Provider, edge, media, and connector checks are
-  optional until a separately authorised canary supplies redacted evidence.
+  claim live execution. Provider, edge, media, connector, evolution, and
+  comparator checks are explicitly skipped or excluded until separately
+  authorised evidence exists.
 status_vocabulary: [pass, degraded, blocked, skipped, unknown, failed]
+evidence_mode_vocabulary: [configuration, static, integration, external_unverified, excluded]
 overall_status_precedence: [failed, blocked, unknown, degraded, skipped, pass]
+overall_status_rules:
+  - failed always returns exit 4
+  - required blocked or unknown returns blocked with exit 3
+  - required degraded returns degraded with exit 3
+  - optional blocked, degraded, skipped, or unknown returns degraded with exit 2
+  - all required pass with no optional non-pass returns pass with exit 0
 exit_codes:
   pass: 0
   optional_degraded_or_skipped: 2
@@ -13,102 +21,312 @@ exit_codes:
   failed: 4
   usage_or_config: 64
   internal: 70
-criteria:
-  - id: runtime.openrouter_model_fabric
-    owner_issue: 741
-    required: true
-    evidence: configuration_and_policy_inspection
-  - id: runtime.remote_inference_admission
-    owner_issue: 744
-    required: true
-    evidence: source_contract
-  - id: runtime.effect_reconciliation
-    owner_issue: 743
-    required: true
-    evidence: source_contract
-  - id: runtime.openrouter_text_receipt
-    owner_issue: 741
-    required: false
-    evidence: separately_authorised_live_canary
-  - id: runtime.openrouter_multimodal_receipt
-    owner_issue: 751
-    required: false
-    evidence: separately_authorised_live_canary
-  - id: runtime.no_local_inference_dependency
-    owner_issue: 775
-    required: true
-    evidence: configuration_absence_no_network_call
-  - id: memory.embedding_capability
-    owner_issue: 775
-    required: false
-    evidence: separately_authorised_live_canary
-  - id: guardian.goal_revision_stop
-    owner_issue: 745
-    required: true
-    evidence: source_contract
-  - id: guardian.verified_progress
-    owner_issue: 746
-    required: true
-    evidence: source_contract
-  - id: security.capability_caller_enforcement
-    owner_issue: 747
-    required: true
-    evidence: source_contract
-  - id: memory.correction_delete_restore
-    owner_issue: 753
-    required: true
-    evidence: source_contract
+criterion_fields:
+  - id
+  - owner_issue
+  - required
+  - evidence_mode
+  - command_or_probe
+  - expected_exit_or_result
+  - artifact_path
+  - live_environment
+  - failure_meaning
+  - residual_risk_text
+exclusion_mapping:
   - id: research.harness_improvement
     owner_issue: 771
-    required: false
-    evidence: excluded
+    status: excluded
+    replacement: deferred_outside_epic_736
+  - id: evolution.staged_candidate
+    owner_issue: 771
+    status: excluded
+    replacement: deferred_outside_epic_736
+  - id: evolution.hidden_evaluation
+    owner_issue: 771
+    status: excluded
+    replacement: deferred_outside_epic_736
+  - id: evolution.scoped_canary_rollback
+    owner_issue: 771
+    status: excluded
+    replacement: deferred_outside_epic_736
+  - id: evaluation.comparator_scope_coverage
+    owner_issue: 754
+    status: excluded
+    replacement: deferred_outside_epic_736
+criteria:
   - id: core.authenticated_origin
     owner_issue: 747
     required: true
-    evidence: source_contract
+    evidence_mode: static
+    command_or_probe: health::_contract_check (source presence only)
+    expected_exit_or_result: pass when the authenticated origin contract exists
+    artifact_path: source-contract:core.authenticated_origin
+    live_environment: repository revision; no runtime request
+    failure_meaning: authenticated origin source contract is missing
+    residual_risk_text: source presence does not prove an exercised ingress boundary
   - id: core.frontend
     owner_issue: 746
     required: true
-    evidence: source_contract
+    evidence_mode: static
+    command_or_probe: health::_contract_check (source presence only)
+    expected_exit_or_result: pass when cockpit sources exist
+    artifact_path: source-contract:core.frontend
+    live_environment: repository revision; no browser session
+    failure_meaning: cockpit source contract is missing
+    residual_risk_text: source presence does not prove a built or reachable cockpit
   - id: core.api_ws
     owner_issue: 746
     required: true
-    evidence: source_contract
+    evidence_mode: static
+    command_or_probe: health::_contract_check (source presence only)
+    expected_exit_or_result: pass when HTTP and WebSocket sources exist
+    artifact_path: source-contract:core.api_ws
+    live_environment: repository revision; no server request
+    failure_meaning: application or WebSocket source contract is missing
+    residual_risk_text: source presence does not prove a running API or socket
   - id: core.db_workspace
     owner_issue: 742
     required: true
-    evidence: source_contract
+    evidence_mode: static
+    command_or_probe: health::_contract_check (source presence only)
+    expected_exit_or_result: pass when database and workspace sources exist
+    artifact_path: source-contract:core.db_workspace
+    live_environment: repository revision; no production database access
+    failure_meaning: database or workspace source contract is missing
+    residual_risk_text: source presence does not prove canonical mounted state
+  - id: runtime.openrouter_model_fabric
+    owner_issue: 741
+    required: true
+    evidence_mode: configuration
+    command_or_probe: health::_openrouter_config_check
+    expected_exit_or_result: pass when bounded OpenRouter policy is configured; failed otherwise
+    artifact_path: config:openrouter-policy
+    live_environment: managed production configuration; no provider call
+    failure_meaning: provider endpoint, model, policy, consent, or request bound is unsafe
+    residual_risk_text: configuration does not prove provider capability or quality
+  - id: runtime.remote_inference_admission
+    owner_issue: 744
+    required: true
+    evidence_mode: static
+    command_or_probe: health::_contract_check (source presence only)
+    expected_exit_or_result: pass when bounded admission sources exist
+    artifact_path: source-contract:runtime.remote_inference_admission
+    live_environment: repository revision; no remote request
+    failure_meaning: remote admission source contract is missing
+    residual_risk_text: source presence does not prove serial admission or cancellation
+  - id: runtime.effect_reconciliation
+    owner_issue: 743
+    required: true
+    evidence_mode: static
+    command_or_probe: health::_contract_check (source presence only)
+    expected_exit_or_result: pass when durable effect sources exist
+    artifact_path: source-contract:runtime.effect_reconciliation
+    live_environment: repository revision; no external effect
+    failure_meaning: durable reconciliation source contract is missing
+    residual_risk_text: source presence does not prove crash or retry recovery
+  - id: runtime.openrouter_text_receipt
+    owner_issue: 741
+    required: false
+    evidence_mode: external_unverified
+    command_or_probe: health::_optional_live_check
+    expected_exit_or_result: skipped and overall degraded with exit 2
+    artifact_path: none; separately authorised canary required
+    live_environment: keyless local command; no provider call
+    failure_meaning: no live text capability evidence was supplied
+    residual_risk_text: run a separately authorised redacted text canary
+  - id: runtime.openrouter_multimodal_receipt
+    owner_issue: 751
+    required: false
+    evidence_mode: external_unverified
+    command_or_probe: health::_optional_live_check
+    expected_exit_or_result: skipped and overall degraded with exit 2
+    artifact_path: none; separately authorised canary required
+    live_environment: keyless local command; no provider or media call
+    failure_meaning: no live vision or audio capability evidence was supplied
+    residual_risk_text: run isolated authorised multimodal canaries
+  - id: runtime.no_local_inference_dependency
+    owner_issue: 775
+    required: true
+    evidence_mode: configuration
+    command_or_probe: health::_no_local_inference_check
+    expected_exit_or_result: pass when no configured local route is found; failed when one is found
+    artifact_path: config:local-inference-absence
+    live_environment: managed production configuration; no process or socket probe
+    failure_meaning: a local model, wrapper, speech, GPU, or fallback route is configured
+    residual_risk_text: process/listener absence remains a separately authorised deployment probe
   - id: scheduler.priority_queue
     owner_issue: 744
     required: true
-    evidence: source_contract
+    evidence_mode: static
+    command_or_probe: health::_contract_check (source presence only)
+    expected_exit_or_result: pass when scheduler and admission sources exist
+    artifact_path: source-contract:scheduler.priority_queue
+    live_environment: repository revision; no scheduler job
+    failure_meaning: bounded scheduler source contract is missing
+    residual_risk_text: source presence does not prove priority or non-starvation
+  - id: security.capability_caller_enforcement
+    owner_issue: 747
+    required: true
+    evidence_mode: static
+    command_or_probe: health::_contract_check (source presence only)
+    expected_exit_or_result: pass when capability and security sources exist
+    artifact_path: source-contract:security.capability_caller_enforcement
+    live_environment: repository revision; no egress request
+    failure_meaning: caller or egress enforcement source contract is missing
+    residual_risk_text: source presence does not prove hostile-call denial
+  - id: guardian.goal_revision_stop
+    owner_issue: 745
+    required: true
+    evidence_mode: static
+    command_or_probe: health::_contract_check (source presence only)
+    expected_exit_or_result: pass when goal revision sources exist
+    artifact_path: source-contract:guardian.goal_revision_stop
+    live_environment: repository revision; no proactive run
+    failure_meaning: stale-plan stop source contract is missing
+    residual_risk_text: source presence does not prove stale execution is stopped
+  - id: guardian.verified_progress
+    owner_issue: 746
+    required: true
+    evidence_mode: static
+    command_or_probe: health::_contract_check (source presence only)
+    expected_exit_or_result: pass when guardian verification sources exist
+    artifact_path: source-contract:guardian.verified_progress
+    live_environment: repository revision; no guardian run
+    failure_meaning: verified progress source contract is missing
+    residual_risk_text: source presence does not prove outcome verification
+  - id: memory.embedding_capability
+    owner_issue: 775
+    required: false
+    evidence_mode: external_unverified
+    command_or_probe: health::_optional_live_check
+    expected_exit_or_result: skipped and overall degraded with exit 2
+    artifact_path: none; separately authorised canary required
+    live_environment: keyless local command; no embedding request
+    failure_meaning: no live embedding capability evidence was supplied
+    residual_risk_text: run an authorised embedding canary with model, dimension, and rollback evidence
+  - id: memory.correction_delete_restore
+    owner_issue: 753
+    required: true
+    evidence_mode: static
+    command_or_probe: health::_contract_check (source presence only)
+    expected_exit_or_result: pass when memory correction sources exist
+    artifact_path: source-contract:memory.correction_delete_restore
+    live_environment: repository revision; no memory mutation
+    failure_meaning: canonical memory correction source contract is missing
+    residual_risk_text: source presence does not prove deletion or restore propagation
+  - id: research.harness_improvement
+    owner_issue: 771
+    required: false
+    evidence_mode: excluded
+    command_or_probe: health::_excluded_check
+    expected_exit_or_result: skipped with explicit exclusion; no closure claim
+    artifact_path: exclusion:research.harness_improvement
+    live_environment: "outside keyless Epic #736 closure"
+    failure_meaning: "none; #771 remains separately tracked"
+    residual_risk_text: no harness or comparator superiority claim follows
+  - id: evolution.staged_candidate
+    owner_issue: 771
+    required: false
+    evidence_mode: excluded
+    command_or_probe: health::_excluded_check
+    expected_exit_or_result: skipped with explicit exclusion; no promotion claim
+    artifact_path: exclusion:evolution.staged_candidate
+    live_environment: "outside keyless Epic #736 closure"
+    failure_meaning: "none; #771 evidence is separately reviewed"
+    residual_risk_text: "staged-candidate proof remains owned by #771"
+  - id: evolution.hidden_evaluation
+    owner_issue: 771
+    required: false
+    evidence_mode: excluded
+    command_or_probe: health::_excluded_check
+    expected_exit_or_result: skipped with explicit exclusion; no evaluation claim
+    artifact_path: exclusion:evolution.hidden_evaluation
+    live_environment: "outside keyless Epic #736 closure"
+    failure_meaning: "none; #771 evidence is separately reviewed"
+    residual_risk_text: "hidden-split evidence remains owned by #771"
+  - id: evolution.scoped_canary_rollback
+    owner_issue: 771
+    required: false
+    evidence_mode: excluded
+    command_or_probe: health::_excluded_check
+    expected_exit_or_result: skipped with explicit exclusion; no rollback claim
+    artifact_path: exclusion:evolution.scoped_canary_rollback
+    live_environment: "outside keyless Epic #736 closure"
+    failure_meaning: "none; #771 evidence is separately reviewed"
+    residual_risk_text: "canary and rollback evidence remains owned by #771"
+  - id: evaluation.comparator_scope_coverage
+    owner_issue: 754
+    required: false
+    evidence_mode: excluded
+    command_or_probe: health::_excluded_check
+    expected_exit_or_result: skipped with explicit exclusion; no superiority claim
+    artifact_path: exclusion:evaluation.comparator_scope_coverage
+    live_environment: "outside keyless Epic #736 closure"
+    failure_meaning: none; comparator campaigns are separately reviewed
+    residual_risk_text: unavailable comparator evidence cannot create a Seraph win
   - id: backup.restore
     owner_issue: 742
     required: true
-    evidence: source_contract
+    evidence_mode: static
+    command_or_probe: health::_contract_check (source presence only)
+    expected_exit_or_result: pass when backup and restore sources exist
+    artifact_path: source-contract:backup.restore
+    live_environment: repository revision; no production restore
+    failure_meaning: backup or restore source contract is missing
+    residual_risk_text: source presence does not prove isolated restore recovery
   - id: edge.mac
     owner_issue: 746
     required: false
-    evidence: separately_authorised_operator_shell_probe
+    evidence_mode: external_unverified
+    command_or_probe: health::_optional_live_check
+    expected_exit_or_result: skipped and overall degraded with exit 2
+    artifact_path: none; separately authorised operator-shell probe required
+    live_environment: keyless local command; no edge call
+    failure_meaning: no live edge readiness evidence was supplied
+    residual_risk_text: run the operator-shell edge probe with a redacted receipt
   - id: voice.audio
     owner_issue: 751
     required: false
-    evidence: separately_authorised_test_media_canary
+    evidence_mode: external_unverified
+    command_or_probe: health::_optional_live_check
+    expected_exit_or_result: skipped and overall degraded with exit 2
+    artifact_path: none; separately authorised test-media canary required
+    live_environment: keyless local command; no provider or media call
+    failure_meaning: no live voice/audio readiness evidence was supplied
+    residual_risk_text: run an isolated consented media canary
   - id: telegram
     owner_issue: 752
     required: false
-    evidence: separately_authorised_paired_account_probe
+    evidence_mode: external_unverified
+    command_or_probe: health::_optional_live_check
+    expected_exit_or_result: skipped and overall degraded with exit 2
+    artifact_path: none; separately authorised paired-account probe required
+    live_environment: keyless local command; no connector call
+    failure_meaning: no live Telegram readiness evidence was supplied
+    residual_risk_text: run an isolated paired-channel probe with revocation evidence
   - id: storage.disk
     owner_issue: 742
     required: true
-    evidence: canonical_workspace_contract
+    evidence_mode: static
+    command_or_probe: health::_contract_check (source presence only)
+    expected_exit_or_result: pass when canonical storage source exists
+    artifact_path: source-contract:storage.disk
+    live_environment: repository revision; canonical writer validates the workspace
+    failure_meaning: canonical storage source contract is missing
+    residual_risk_text: source presence does not prove available production disk capacity
   - id: docs.truth
     owner_issue: 754
     required: true
-    evidence: documentation_contract
+    evidence_mode: static
+    command_or_probe: health::_contract_check plus docs contract checks
+    expected_exit_or_result: pass when canonical implementation docs exist
+    artifact_path: source-contract:docs.truth
+    live_environment: repository revision; no external source refresh
+    failure_meaning: required documentation contract is missing
+    residual_risk_text: docs presence does not prove every runtime claim has a receipt
 notes:
   - A configured key, catalog row, fixture, or source file is never a live provider receipt.
   - This command never calls OpenRouter, a GPU host, a VLM wrapper, Whisper, Piper, or a connector.
   - Mutating drills belong in isolated staging/test profiles and are referenced by logical receipts.
   - Source-contract and configuration checks are explicitly static/configuration evidence; they do not claim exercised behavior.
-  - Harness improvement, comparator, and paid/live evaluation work are excluded from Epic #736 closure.
+  - The stable evolution and comparator IDs remain in the matrix as explicit exclusions; they are not silently removed or reclassified.

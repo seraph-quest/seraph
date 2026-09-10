@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 import socket
 import sys
 
 import pytest
+import yaml
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -18,6 +20,7 @@ import epic_736_health as health  # noqa: E402
 def _configured(monkeypatch: pytest.MonkeyPatch, workspace: Path) -> None:
     values = {
         "WORKSPACE_DIR": str(workspace),
+        "BACKEND_DATA_PATH_PROD": str(workspace),
         "LLM_API_BASE": "https://openrouter.ai/api/v1",
         "DEFAULT_MODEL": "openrouter/z-ai/glm-5.3-flash",
         "OPENROUTER_PROVIDER_ONLY": "true",
@@ -91,6 +94,14 @@ def test_provider_model_is_generic_and_not_tied_to_a_single_catalog_entry(tmp_pa
     assert exit_code == 2
 
 
+def test_provider_model_uses_canonical_openrouter_syntax(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _configured(monkeypatch, tmp_path)
+    for model in ("foo", "https://evil.invalid/model", "openrouter/provider/model/extra"):
+        monkeypatch.setenv("DEFAULT_MODEL", model)
+        check = health._openrouter_config_check()
+        assert check["status"] == "failed", model
+
+
 def test_local_inference_configuration_fails_closed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _configured(monkeypatch, tmp_path)
     monkeypatch.setenv("LOCAL_LLM_API_BASE", "http://127.0.0.1:8000/v1")
@@ -98,6 +109,102 @@ def test_local_inference_configuration_fails_closed(tmp_path: Path, monkeypatch:
     check = next(item for item in receipt["checks"] if item["id"] == "runtime.no_local_inference_dependency")
     assert check["status"] == "failed"
     assert exit_code == 4
+
+
+def test_unprobed_optional_capabilities_are_skipped(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _configured(monkeypatch, tmp_path)
+    receipt, exit_code, _ = health.build_receipt()
+    checks = {item["id"]: item for item in receipt["checks"]}
+    for identifier in ("memory.embedding_capability", "edge.mac", "voice.audio", "telegram"):
+        assert checks[identifier]["status"] == "skipped"
+        assert checks[identifier]["evidence_mode"] == "external_unverified"
+    assert exit_code == 2
+
+
+def test_excluded_stable_criteria_remain_explicit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _configured(monkeypatch, tmp_path)
+    receipt, _, _ = health.build_receipt()
+    checks = {item["id"]: item for item in receipt["checks"]}
+    expected = {
+        "research.harness_improvement": 771,
+        "evolution.staged_candidate": 771,
+        "evolution.hidden_evaluation": 771,
+        "evolution.scoped_canary_rollback": 771,
+        "evaluation.comparator_scope_coverage": 754,
+    }
+    assert set(expected) <= checks.keys()
+    for identifier, owner in expected.items():
+        assert checks[identifier]["owner_issue"] == owner
+        assert checks[identifier]["required"] is False
+        assert checks[identifier]["status"] == "skipped"
+        assert checks[identifier]["evidence_mode"] == "excluded"
+        assert checks[identifier]["artifact_refs"] == [f"exclusion:{identifier}"]
+    assert {item["id"] for item in receipt["exclusions"]} == set(expected)
+
+
+def test_matrix_matches_python_evidence_contract() -> None:
+    matrix = yaml.safe_load((ROOT / "scripts/epic_736_health_matrix.yaml").read_text())
+    assert set(matrix["status_vocabulary"]) == health.VALID_STATUSES
+    assert set(matrix["evidence_mode_vocabulary"]) == health.VALID_EVIDENCE_MODES
+    required_fields = set(matrix["criterion_fields"])
+    assert required_fields <= set(matrix["criteria"][0])
+    python_contract = {
+        criterion.identifier: (criterion.owner_issue, criterion.required, criterion.evidence_mode)
+        for criterion in health.CRITERIA
+    }
+    matrix_contract = {
+        criterion["id"]: (criterion["owner_issue"], criterion["required"], criterion["evidence_mode"])
+        for criterion in matrix["criteria"]
+    }
+    assert matrix_contract == python_contract
+    assert all(required_fields <= set(criterion) for criterion in matrix["criteria"])
+
+
+def test_optional_blocked_status_cannot_be_healthy() -> None:
+    assert health._overall([{"required": False, "status": "blocked"}]) == ("degraded", 2)
+
+
+def test_canonical_workspace_rejects_symlink_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    real = tmp_path / "real"
+    real.mkdir()
+    link = tmp_path / "link"
+    link.symlink_to(real, target_is_directory=True)
+    _configured(monkeypatch, link)
+    with pytest.raises(RuntimeError, match="canonical production workspace"):
+        health.build_receipt()
+
+
+def test_canonical_workspace_rejects_ambiguous_bind(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    bind = tmp_path / "bind"
+    workspace = tmp_path / "workspace"
+    bind.mkdir()
+    workspace.mkdir()
+    _configured(monkeypatch, workspace)
+    monkeypatch.setenv("BACKEND_DATA_PATH_PROD", str(bind))
+    with pytest.raises(RuntimeError, match="canonical production workspace"):
+        health.build_receipt()
+
+
+def test_receipt_timestamp_collision_keeps_both_atomic_artifacts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _configured(monkeypatch, tmp_path)
+    generated = datetime(2026, 1, 2, 3, 4, 5, tzinfo=timezone.utc)
+    first = health._write_receipt({"marker": "first"}, generated)
+    second = health._write_receipt({"marker": "second"}, generated)
+    assert first != second
+    receipts = sorted((tmp_path / "operator-receipts/epic-736-health").glob("*.json"))
+    assert len(receipts) == 2
+    assert {json.loads(path.read_text())["marker"] for path in receipts} == {"first", "second"}
+
+
+def test_cli_redacts_secret_from_stdout_and_stderr(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    _configured(monkeypatch, tmp_path)
+    secret = "or-secret-cli-value"
+    monkeypatch.setenv("OPENROUTER_API_KEY", secret)
+    assert health.main(["--format", "json"]) == 2
+    captured = capsys.readouterr()
+    assert secret not in captured.out
+    assert secret not in captured.err
+    assert json.loads(captured.out)["schema_version"] == 2
 
 
 def test_health_collection_is_network_free(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

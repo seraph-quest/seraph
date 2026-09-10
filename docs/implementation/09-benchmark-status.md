@@ -7,11 +7,15 @@ title: 09. Benchmark Status
 ## Epic #736 keyless health receipt (2026-09-10)
 
 `scripts/epic_736_health.py` emits schema v2 receipts without opening provider,
-GPU, VLM, speech, connector, or comparator sockets. Configuration and source
+GPU, VLM, speech, connector, or comparator sockets. It resolves the receipt
+root through the canonical #742 production workspace contract, rejects symlink
+or ambiguous roots, and publishes the file atomically. Configuration and source
 checks carry explicit `evidence_mode` values and are not presented as exercised
 runtime behavior. OpenRouter capability, model quality, embeddings, and edge or
-media readiness remain `external_unverified`; the HarnessDev improvement work in
-#771 and comparator campaigns are explicitly `excluded` from Epic #736 closure.
+media readiness remain `external_unverified` and are `skipped` by the keyless
+run. The stable #771 evolution IDs and #754 comparator coverage ID remain in
+the matrix as explicit `excluded` checks; they do not create closure or
+superiority claims for Epic #736.
 
 ## Status On `develop`
 

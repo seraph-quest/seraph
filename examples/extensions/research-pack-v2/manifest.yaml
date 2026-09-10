@@ -1,0 +1,50 @@
+schema_version: 2
+id: seraph.research-pack
+version: 1.0.0
+kind: capability-pack
+publisher:
+  name: Seraph
+  provenance: local-reviewed
+signature:
+  state: unsigned-local
+  signer: null
+compatibility:
+  seraph: ">=1"
+dependencies: []
+contributes:
+  capabilities:
+    - research-brief
+  skills: []
+  workflows: []
+  prompts: []
+  sources: []
+  reports: []
+  evals: []
+  runbooks: []
+authority:
+  tools:
+    - read_file
+  filesystem:
+    - workspace_read
+  network: false
+  secrets: []
+  approval: on_authority_expansion
+resources:
+  inference_priority: background
+  max_inference_cost_microusd: 0
+  max_runtime_seconds: 300
+  max_artifact_bytes: 10485760
+data_policy:
+  classes:
+    - public
+  egress: []
+policy_overlays: []
+lifecycle:
+  hooks:
+    activate: required
+    pause: required
+    update: required
+    revoke: required
+    uninstall: required
+  artifact_migration: preserve
+  revoke_running_jobs: cancel_at_safe_checkpoint

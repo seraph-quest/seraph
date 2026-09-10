@@ -33,6 +33,8 @@ DEFAULT_MAX_RAW_RETENTION_SECONDS: Final = 15 * 60
 DEFAULT_REPLAY_WINDOW: Final = 64
 DEFAULT_RATE_LIMIT_WINDOW_SECONDS: Final = 60
 DEFAULT_RATE_LIMIT_MAX_UPDATES: Final = 20
+TELEGRAM_TRANSIT_CONSENT_SCOPE: Final = "telegram_transit"
+OPENROUTER_INFERENCE_CONSENT_SCOPE: Final = "openrouter_inference"
 DEFAULT_ALLOWED_MEDIA_TYPES: Final[tuple[str, ...]] = (
     "audio/ogg",
     "audio/mpeg",
@@ -80,6 +82,7 @@ _ALLOWED_REASON_CODES: Final = frozenset(
         "consent_missing",
         "consent_invalid",
         "consent_reference_invalid",
+        "consent_scope_invalid",
         "consent_revoked",
         "consent_expired",
         "consent_not_current",
@@ -93,6 +96,7 @@ _ALLOWED_REASON_CODES: Final = frozenset(
         "text_ingress_accepted",
         "voice_ingress_degraded_provider_unavailable",
         "voice_ingress_degraded_provider_unverified",
+        "voice_ingress_degraded_preflight_proof_required",
         "voice_handoff_ready",
         "invalid_result_provenance",
     }
@@ -119,6 +123,7 @@ class TelegramConsent:
     state: TelegramConsentState
     granted_at: datetime
     expires_at: datetime
+    scope: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -152,6 +157,11 @@ class TelegramIngressPolicy:
     rate_limit_max_updates: int = DEFAULT_RATE_LIMIT_MAX_UPDATES
     allowed_media_types: tuple[str, ...] = DEFAULT_ALLOWED_MEDIA_TYPES
     provider_status: AudioProviderStatus = AudioProviderStatus.UNVERIFIED
+    # These are proof handles issued by the governed #751 adapter.  This
+    # pure module validates their shape but never creates or verifies them.
+    trusted_adapter_id: str | None = None
+    provider_proof_reference: str | None = None
+    consent_proof_reference: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -317,6 +327,25 @@ def _valid_policy(policy: TelegramIngressPolicy) -> bool:
         or policy.chat_id <= 0
         or not _valid_id(policy.pairing_id)
         or not isinstance(policy.provider_status, AudioProviderStatus)
+        or not all(
+            value is None or isinstance(value, str)
+            for value in (
+                policy.trusted_adapter_id,
+                policy.provider_proof_reference,
+                policy.consent_proof_reference,
+            )
+        )
+    ):
+        return False
+    proof_fields = (
+        policy.trusted_adapter_id,
+        policy.provider_proof_reference,
+        policy.consent_proof_reference,
+    )
+    if any(value is not None for value in proof_fields) and not (
+        _valid_id(policy.trusted_adapter_id)
+        and _valid_id(policy.provider_proof_reference)
+        and _valid_id(policy.consent_proof_reference)
     ):
         return False
     positive_ints = (
@@ -373,6 +402,9 @@ def _policy_fingerprint(policy: TelegramIngressPolicy | None) -> str | None:
         "rate_limit_max_updates": policy.rate_limit_max_updates,
         "allowed_media_types": sorted(policy.allowed_media_types),
         "provider_status": policy.provider_status.value,
+        "trusted_adapter_id": policy.trusted_adapter_id,
+        "provider_proof_reference": policy.provider_proof_reference,
+        "consent_proof_reference": policy.consent_proof_reference,
     }
     return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
@@ -407,7 +439,6 @@ def canonical_telegram_request_digest(update: TelegramUpdate) -> str:
         "chat_id": update.chat_id,
         "update_id": update.update_id,
         "message_id": update.message_id,
-        "received_at": _iso(captured),
         "text_digest": hashlib.sha256(update.normalized_text.encode("utf-8")).hexdigest()
         if update.normalized_text is not None
         else None,
@@ -415,7 +446,13 @@ def canonical_telegram_request_digest(update: TelegramUpdate) -> str:
         "external_transit_consent": update.external_transit_consent.reference
         if isinstance(update.external_transit_consent, TelegramConsent)
         else None,
+        "external_transit_scope": update.external_transit_consent.scope
+        if isinstance(update.external_transit_consent, TelegramConsent)
+        else None,
         "openrouter_consent": update.openrouter_consent.reference
+        if isinstance(update.openrouter_consent, TelegramConsent)
+        else None,
+        "openrouter_scope": update.openrouter_consent.scope
         if isinstance(update.openrouter_consent, TelegramConsent)
         else None,
         "sequence": update.sequence,
@@ -527,6 +564,15 @@ def _consent_error(consent: TelegramConsent | None, *, boundary: str, current: d
         return "consent_reference_invalid"
     if not isinstance(consent.state, TelegramConsentState):
         return "consent_invalid"
+    expected_scope = (
+        TELEGRAM_TRANSIT_CONSENT_SCOPE
+        if boundary == "external"
+        else OPENROUTER_INFERENCE_CONSENT_SCOPE
+        if boundary == "openrouter"
+        else None
+    )
+    if expected_scope is None or consent.scope != expected_scope:
+        return "consent_scope_invalid"
     granted = _utc(consent.granted_at)
     expires = _utc(consent.expires_at)
     if granted is None or expires is None or expires <= granted:
@@ -699,12 +745,22 @@ def validate_telegram_update(
         retention_deadline=_iso(deadline),
         request_digest=digest,
     )
+    proof_available = all(
+        (
+            effective_policy.trusted_adapter_id,
+            effective_policy.provider_proof_reference,
+            effective_policy.consent_proof_reference,
+        )
+    )
     if effective_policy.provider_status is AudioProviderStatus.UNAVAILABLE:
         status = TelegramIngressStatus.DEGRADED
         reason = "voice_ingress_degraded_provider_unavailable"
     elif effective_policy.provider_status is AudioProviderStatus.UNVERIFIED:
         status = TelegramIngressStatus.DEGRADED
         reason = "voice_ingress_degraded_provider_unverified"
+    elif not proof_available:
+        status = TelegramIngressStatus.DEGRADED
+        reason = "voice_ingress_degraded_preflight_proof_required"
     else:
         status = TelegramIngressStatus.ACCEPTED
         reason = "voice_handoff_ready"
@@ -744,8 +800,6 @@ def ingest_telegram_update(
         return result, next_state
     assert result.idempotency_key is not None and result.request_digest is not None
     live_events.append(TelegramRateEvent(result.idempotency_key, current))
-    if result.status is TelegramIngressStatus.DEGRADED:
-        return result, replace(next_state, rate_events=tuple(live_events))
     entries = list(state.replay_entries)
     entries.append(
         TelegramReplayEntry(
@@ -833,11 +887,19 @@ def serialize_telegram_receipt(
         }
         consent = {
             "external_transit_reference": update.external_transit_consent.reference if update.external_transit_consent else None,
+            "external_transit_scope": update.external_transit_consent.scope if update.external_transit_consent else None,
             "openrouter_reference": update.openrouter_consent.reference if update.openrouter_consent else None,
+            "openrouter_scope": update.openrouter_consent.scope if update.openrouter_consent else None,
         }
         provider = {
             "name": "openrouter",
             "status": safe_result.provider_status.value if safe_result.provider_status else None,
+            "preflight_proof_present": bool(
+                policy
+                and policy.trusted_adapter_id
+                and policy.provider_proof_reference
+                and policy.consent_proof_reference
+            ),
             "model_dispatch_claimed": False,
             "local_fallback_claimed": False,
         }
@@ -881,8 +943,8 @@ def serialize_telegram_receipt(
         {"operator_id": None, "chat_id": None, "update_id": None, "message_id": None, "sequence": None},
         {"present": False, "size_bytes": None, "digest": None, "redacted": True},
         {"present": False, "quarantine_status": "blocked", "attachment_id": None, "media_type": None, "size_bytes": None, "content_hash": None, "duration_seconds": None, "file_reference": None},
-        {"external_transit_reference": None, "openrouter_reference": None},
-        {"name": None, "status": None, "model_dispatch_claimed": False, "local_fallback_claimed": False},
+        {"external_transit_reference": None, "external_transit_scope": None, "openrouter_reference": None, "openrouter_scope": None},
+        {"name": None, "status": None, "preflight_proof_present": False, "model_dispatch_claimed": False, "local_fallback_claimed": False},
         {"status": "none"},
     )
 
@@ -899,6 +961,8 @@ serialize_telegram_ingress_receipt = serialize_telegram_receipt
 __all__ = [
     "AUDIO_INGRESS_SCHEMA_VERSION",
     "DEFAULT_ALLOWED_MEDIA_TYPES",
+    "OPENROUTER_INFERENCE_CONSENT_SCOPE",
+    "TELEGRAM_TRANSIT_CONSENT_SCOPE",
     "TelegramAttachmentMetadata",
     "TelegramConsent",
     "TelegramConsentState",

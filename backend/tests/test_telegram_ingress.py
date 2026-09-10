@@ -9,6 +9,8 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from src.extensions.telegram_ingress import (
+    OPENROUTER_INFERENCE_CONSENT_SCOPE,
+    TELEGRAM_TRANSIT_CONSENT_SCOPE,
     TelegramAttachmentMetadata,
     TelegramConsent,
     TelegramConsentState,
@@ -35,8 +37,9 @@ def _consent(
     state: TelegramConsentState = TelegramConsentState.ACTIVE,
     granted_at: datetime = NOW - timedelta(minutes=1),
     expires_at: datetime = NOW + timedelta(minutes=10),
+    scope: str = TELEGRAM_TRANSIT_CONSENT_SCOPE,
 ) -> TelegramConsent:
-    return TelegramConsent(reference, state, granted_at, expires_at)
+    return TelegramConsent(reference, state, granted_at, expires_at, scope)
 
 
 def _policy(**changes) -> TelegramIngressPolicy:
@@ -52,7 +55,9 @@ def _update(**changes) -> TelegramUpdate:
         received_at=NOW,
         text="  secret operator message  ",
         external_transit_consent=_consent("consent:telegram:1"),
-        openrouter_consent=_consent("consent:openrouter:1"),
+        openrouter_consent=_consent(
+            "consent:openrouter:1", scope=OPENROUTER_INFERENCE_CONSENT_SCOPE
+        ),
         sequence=1,
     )
     return replace(update, **changes)
@@ -120,9 +125,33 @@ def test_consent_boundaries_are_required_current_and_separate():
     cases = (
         (_update(external_transit_consent=None), "consent_missing"),
         (_update(openrouter_consent=None), "consent_missing"),
-        (_update(openrouter_consent=_consent("consent:telegram:1")), "consent_references_not_separate"),
+        (
+            _update(
+                openrouter_consent=_consent(
+                    "consent:telegram:1", scope=OPENROUTER_INFERENCE_CONSENT_SCOPE
+                )
+            ),
+            "consent_references_not_separate",
+        ),
         (_update(external_transit_consent=_consent("consent:telegram:revoked", state=TelegramConsentState.REVOKED)), "consent_revoked"),
-        (_update(openrouter_consent=_consent("consent:openrouter:expired", expires_at=NOW - timedelta(seconds=1))), "consent_expired"),
+        (
+            _update(
+                external_transit_consent=_consent(
+                    "consent:wrong-scope", scope=OPENROUTER_INFERENCE_CONSENT_SCOPE
+                )
+            ),
+            "consent_scope_invalid",
+        ),
+        (
+            _update(
+                openrouter_consent=_consent(
+                    "consent:openrouter:expired",
+                    expires_at=NOW - timedelta(seconds=1),
+                    scope=OPENROUTER_INFERENCE_CONSENT_SCOPE,
+                )
+            ),
+            "consent_expired",
+        ),
     )
     for update, reason in cases:
         result = validate_telegram_update(update, policy=policy, now=NOW)
@@ -135,6 +164,9 @@ def test_ingest_advances_sequence_and_rejects_duplicate_conflict_and_replay():
     update = _update()
     first, state = ingest_telegram_update(TelegramIngressState(), update, policy, now=NOW)
     duplicate = validate_telegram_update(update, state, policy, now=NOW)
+    duplicate_with_new_arrival_time = validate_telegram_update(
+        replace(update, received_at=NOW + timedelta(seconds=5)), state, policy, now=NOW
+    )
     conflict = validate_telegram_update(replace(update, text="different"), state, policy, now=NOW)
     old_sequence = validate_telegram_update(
         replace(update, update_id=2, message_id=102, sequence=1), state, policy, now=NOW
@@ -144,12 +176,21 @@ def test_ingest_advances_sequence_and_rejects_duplicate_conflict_and_replay():
     assert state.last_sequence == 1
     assert duplicate.status is TelegramIngressStatus.DUPLICATE
     assert duplicate.reason_code == "request_already_recorded"
+    assert duplicate_with_new_arrival_time.status is TelegramIngressStatus.DUPLICATE
+    assert canonical_telegram_request_digest(update) == canonical_telegram_request_digest(
+        replace(update, received_at=NOW + timedelta(seconds=5))
+    )
     assert conflict.reason_code == "replay_conflict"
     assert old_sequence.reason_code == "update_not_monotonic"
 
 
 def test_voice_is_quarantined_and_handoff_is_metadata_only():
-    policy = _policy(provider_status=AudioProviderStatus.READY)
+    policy = _policy(
+        provider_status=AudioProviderStatus.READY,
+        trusted_adapter_id="audio-adapter-1",
+        provider_proof_reference="provider-proof:1",
+        consent_proof_reference="consent-proof:1",
+    )
     update = _voice_update()
     result = validate_telegram_update(update, policy=policy, now=NOW)
     payload = serialize_telegram_receipt(update, result, policy=policy).as_payload()
@@ -164,6 +205,9 @@ def test_voice_is_quarantined_and_handoff_is_metadata_only():
     assert payload["attachment"]["file_reference"] is None
     assert "telegram-file-token-secret" not in encoded
     assert "audio_payload" not in encoded
+    assert payload["consent"]["external_transit_scope"] == TELEGRAM_TRANSIT_CONSENT_SCOPE
+    assert payload["consent"]["openrouter_scope"] == OPENROUTER_INFERENCE_CONSENT_SCOPE
+    assert payload["provider"]["preflight_proof_present"] is True
     assert payload["voice_handoff"]["decode_claimed"] is False
     assert payload["voice_handoff"]["send_claimed"] is False
 
@@ -182,6 +226,40 @@ def test_voice_degrades_without_provider_and_text_remains_usable():
     assert unavailable_voice.retryable is True
     assert unavailable_text.status is TelegramIngressStatus.ACCEPTED
     assert unavailable_text.accepted is True
+
+
+def test_ready_voice_requires_existing_audio_preflight_proof():
+    update = _voice_update()
+    result = validate_telegram_update(
+        update,
+        policy=_policy(provider_status=AudioProviderStatus.READY),
+        now=NOW,
+    )
+    payload = serialize_telegram_receipt(
+        update, result, policy=_policy(provider_status=AudioProviderStatus.READY)
+    ).as_payload()
+
+    assert result.status is TelegramIngressStatus.DEGRADED
+    assert result.reason_code == "voice_ingress_degraded_preflight_proof_required"
+    assert result.voice_handoff is not None
+    assert result.voice_handoff.decode_claimed is False
+    assert payload["provider"]["preflight_proof_present"] is False
+
+
+def test_degraded_voice_is_recorded_once_and_distinct_updates_remain_retryable():
+    policy = _policy(provider_status=AudioProviderStatus.UNAVAILABLE)
+    voice = _voice_update()
+    first, state = ingest_telegram_update(TelegramIngressState(), voice, policy, now=NOW)
+    retry = validate_telegram_update(voice, state, policy, now=NOW)
+    distinct = validate_telegram_update(
+        replace(voice, update_id=2, message_id=102, sequence=2), state, policy, now=NOW
+    )
+
+    assert first.status is TelegramIngressStatus.DEGRADED
+    assert state.last_sequence == 1
+    assert len(state.replay_entries) == 1
+    assert retry.status is TelegramIngressStatus.DUPLICATE
+    assert distinct.status is TelegramIngressStatus.DEGRADED
 
 
 @pytest.mark.parametrize(

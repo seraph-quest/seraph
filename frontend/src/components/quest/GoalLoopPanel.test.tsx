@@ -1,9 +1,11 @@
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { GoalLoopPanel } from "./GoalLoopPanel";
-import { useQuestStore } from "../../stores/questStore";
-import type { GoalInfo, GoalLoopPayload, GoalStrategyDelta } from "../../types";
+import { GoalLoopReceiptDetails } from "./GoalLoopReceiptDetails";
+import { normalizeGoalLoopReceipt, useQuestStore } from "../../stores/questStore";
+import type { GoalInfo, GoalLoopPayload, GoalLoopReceipt, GoalStrategyDelta } from "../../types";
 
 const goal: GoalInfo = {
   id: "g1",
@@ -31,6 +33,58 @@ const goal: GoalInfo = {
   },
 };
 
+const candidateReceipt: GoalLoopReceipt = {
+  audit_event_id: "audit-candidate",
+  event_type: "goal_loop_candidate",
+  receipt_version: "goal_conditioned_loop_v1",
+  receipt_type: "candidate",
+  proposal_only: true,
+  candidate_id: "candidate-1",
+  dedupe_key: `gcl:${"d".repeat(32)}`,
+  goal_id: "g1",
+  goal_revision: 4,
+  criterion_id: "artifact",
+  action: "act",
+  capability_id: "workflow.goal-snapshot-to-file",
+  capability_version: "1",
+  input_keys: ["evidence_refs", "file_path"],
+  input_digest: "a".repeat(64),
+  strategy_delta_id: null,
+  strategy_delta_provenance: "not_present",
+  expected_outcome: "A verified artifact exists",
+  expires_at: "2026-09-10T08:00:00Z",
+  created_at: "2026-09-09T07:59:00Z",
+  reason: "goal snapshot proposed",
+  evidence_refs: ["artifact:guardian"],
+  content_redacted: true,
+};
+
+const outcomeReceipt: GoalLoopReceipt = {
+  audit_event_id: "audit-outcome",
+  event_type: "goal_loop_outcome",
+  receipt_version: "goal_conditioned_loop_v1",
+  receipt_type: "outcome",
+  outcome_id: "outcome-1",
+  candidate_id: "candidate-1",
+  dedupe_key: `gcl:${"d".repeat(32)}`,
+  decision_input_digest: "b".repeat(64),
+  strategy_delta_id: null,
+  strategy_delta_provenance: "not_present",
+  goal_id: "g1",
+  goal_revision: 4,
+  execution_status: "succeeded",
+  verification: "passed",
+  usefulness: "helpful",
+  learning: "applied",
+  learning_record_id: "learning-1",
+  artifact_ref: "artifacts/guardian.md",
+  evidence_refs: ["artifact:guardian"],
+  capability_id: "workflow.goal-snapshot-to-file",
+  reason: "goal snapshot read back",
+  created_at: "2026-09-09T08:00:00Z",
+  content_redacted: true,
+};
+
 const payload: GoalLoopPayload = {
   goal: {
     id: "g1",
@@ -39,18 +93,7 @@ const payload: GoalLoopPayload = {
     revision: 4,
   },
   criterion: goal.success_criterion ?? null,
-  receipts: [
-    {
-      receipt_type: "outcome",
-      created_at: "2026-09-09T08:00:00Z",
-      execution_status: "completed",
-      verification: "passed",
-      usefulness: "useful",
-      learning: "applied",
-      artifact_ref: "artifacts/guardian.md",
-      evidence_refs: ["artifact:guardian"],
-    },
-  ],
+  receipts: [outcomeReceipt],
   strategy_deltas: [],
 };
 
@@ -100,9 +143,9 @@ describe("GoalLoopPanel", () => {
     render(<GoalLoopPanel goal={goal} />);
 
     expect(screen.getByTestId("goal-loop-panel")).toHaveAttribute("data-state", "active");
-    expect(screen.getByTestId("goal-axis-execution")).toHaveTextContent("completed");
+    expect(screen.getByTestId("goal-axis-execution")).toHaveTextContent("succeeded");
     expect(screen.getByTestId("goal-axis-verification")).toHaveTextContent("passed");
-    expect(screen.getByTestId("goal-axis-usefulness")).toHaveTextContent("useful");
+    expect(screen.getByTestId("goal-axis-usefulness")).toHaveTextContent("helpful");
     expect(screen.getByTestId("goal-axis-learning")).toHaveTextContent("applied");
 
     fireEvent.click(screen.getByRole("button", { name: "run snapshot" }));
@@ -111,6 +154,107 @@ describe("GoalLoopPanel", () => {
       evidence_refs: ["artifact:guardian"],
     })));
     expect(screen.getByTestId("goal-loop-panel")).toHaveAttribute("data-state", "recovered");
+  });
+
+  it("exposes separate candidate and outcome contracts through a keyboard disclosure", async () => {
+    const user = userEvent.setup();
+    expect(normalizeGoalLoopReceipt(candidateReceipt)).not.toBeNull();
+    expect(normalizeGoalLoopReceipt(outcomeReceipt)).not.toBeNull();
+    const { unmount } = render(<GoalLoopReceiptDetails receipt={candidateReceipt} />);
+
+    const candidateDetails = screen.getByTestId("goal-loop-receipt-details");
+    const candidateSummary = screen.getByText("Inspect exact backend receipt fields");
+    expect(candidateDetails).not.toHaveAttribute("open");
+    candidateSummary.focus();
+    expect(document.activeElement).toBe(candidateSummary);
+    await user.keyboard("{Enter}");
+
+    expect(candidateDetails).toHaveAttribute("open");
+    expect(screen.getByTestId("goal-loop-receipt-audit-event-id")).toHaveTextContent("audit-candidate");
+    expect(screen.getByTestId("goal-loop-receipt-proposal-only")).toHaveTextContent("true");
+    expect(screen.getByTestId("goal-loop-receipt-action")).toHaveTextContent("act");
+    expect(screen.getByTestId("goal-loop-receipt-capability-id")).toHaveTextContent("workflow.goal-snapshot-to-file");
+    expect(screen.getByTestId("goal-loop-receipt-input-digest")).toHaveTextContent("a".repeat(64));
+    expect(screen.getByTestId("goal-loop-receipt-evidence-refs")).toHaveTextContent("artifact:guardian");
+    expect(screen.getByTestId("goal-loop-receipt-expires-at")).toHaveTextContent("2026-09-10T08:00:00Z");
+
+    await user.keyboard(" ");
+    expect(candidateDetails).not.toHaveAttribute("open");
+
+    unmount();
+    render(<GoalLoopReceiptDetails receipt={outcomeReceipt} />);
+    const outcomeDetails = screen.getByTestId("goal-loop-receipt-details");
+    const outcomeSummary = screen.getByText("Inspect exact backend receipt fields");
+    outcomeSummary.focus();
+    await user.keyboard("{Enter}");
+
+    expect(outcomeDetails).toHaveAttribute("open");
+    expect(screen.getByTestId("goal-loop-receipt-decision-input-digest")).toHaveTextContent("b".repeat(64));
+    expect(screen.getByTestId("goal-loop-receipt-execution-status")).toHaveTextContent("succeeded");
+    expect(screen.getByTestId("goal-loop-receipt-usefulness")).toHaveTextContent("helpful");
+    expect(screen.getByTestId("goal-loop-receipt-proposal-only")).toHaveTextContent("unknown");
+    expect(screen.getByTestId("goal-loop-receipt-action")).toHaveTextContent("unknown");
+    expect(screen.getByTestId("goal-loop-receipt-input-digest")).toHaveTextContent("unknown");
+    expect(screen.getByTestId("goal-loop-receipt-capability-version")).toHaveTextContent("unknown");
+    expect(screen.getByTestId("goal-loop-receipt-expected-outcome")).toHaveTextContent("unknown");
+    expect(screen.getByTestId("goal-loop-receipt-expires-at")).toHaveTextContent("unknown");
+  });
+
+  it.each([
+    ["false", { ...outcomeReceipt, content_redacted: false }],
+    ["absent", (({ content_redacted: _redacted, ...receipt }) => receipt)(outcomeReceipt)],
+  ] as const)("withholds receipt fields when content_redacted is %s", (_label, receipt) => {
+    render(<GoalLoopReceiptDetails receipt={receipt} />);
+
+    fireEvent.click(screen.getByText("Inspect exact backend receipt fields"));
+
+    expect(screen.getByTestId("goal-loop-receipt-withheld")).toBeInTheDocument();
+    expect(screen.queryByTestId("goal-loop-receipt-reason")).not.toBeInTheDocument();
+    expect(screen.queryByText("goal snapshot read back")).not.toBeInTheDocument();
+  });
+
+  it.each([
+    ["false", { ...outcomeReceipt, content_redacted: false }],
+    ["absent", (({ content_redacted: _redacted, ...receipt }) => receipt)(outcomeReceipt)],
+  ] as const)("rejects a %s content_redacted receipt during runtime normalization", (_label, receipt) => {
+    expect(normalizeGoalLoopReceipt(receipt)).toBeNull();
+  });
+
+  it.each([
+    ["false", { ...outcomeReceipt, content_redacted: false }],
+    ["absent", (({ content_redacted: _redacted, ...receipt }) => receipt)(outcomeReceipt)],
+  ] as const)("fails closed for a %s content_redacted flag before exposing receipt text", (_label, receipt) => {
+    const runGoalSnapshot = vi.fn().mockResolvedValue({ status: "blocked" });
+    setupStore({
+      goalLoop: { ...payload, receipts: [receipt] },
+      runGoalSnapshot,
+    });
+    render(<GoalLoopPanel goal={goal} onEdit={vi.fn()} />);
+
+    expect(screen.getByTestId("goal-loop-panel")).toHaveAttribute("data-state", "partial_metadata");
+    expect(screen.queryByText("goal snapshot read back")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "run snapshot" })).toBeDisabled();
+    expect(screen.queryByTestId("goal-loop-receipt-details")).not.toBeInTheDocument();
+    expect(runGoalSnapshot).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["candidate", { ...candidateReceipt, candidate_id: undefined }],
+    ["outcome", { ...outcomeReceipt, outcome_id: undefined }],
+  ] as const)("marks an incomplete %s receipt as partial and disables effects", (_label, receipt) => {
+    const runGoalSnapshot = vi.fn().mockResolvedValue({ status: "blocked" });
+    expect(normalizeGoalLoopReceipt(receipt)).toBeNull();
+    setupStore({
+      goalLoop: { ...payload, receipts: [receipt] },
+      runGoalSnapshot,
+    });
+    render(<GoalLoopPanel goal={goal} />);
+
+    expect(screen.getByTestId("goal-loop-panel")).toHaveAttribute("data-state", "partial_metadata");
+    expect(screen.getByText(/A bounded success criterion or receipt field is missing/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "run snapshot" })).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "run snapshot" }));
+    expect(runGoalSnapshot).not.toHaveBeenCalled();
   });
 
   it("binds pause, correction, and rollback to their existing bounded controls", async () => {

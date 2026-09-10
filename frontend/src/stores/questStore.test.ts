@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { GoalUpdateError, useQuestStore } from "./questStore";
+import type { GoalLoopPayload } from "../types";
 
 const mockFetch = vi.fn();
 globalThis.fetch = mockFetch;
@@ -159,7 +160,26 @@ describe("questStore", () => {
         target: { file_path: "artifacts/ship.md" },
         evidence_refs: ["artifact:ship"],
       },
-      receipts: [{ receipt_type: "outcome", execution_status: "blocked", verification: "unknown", usefulness: "unknown", learning: "no_learning" }],
+      receipts: [{
+        audit_event_id: "audit-loop-1",
+        event_type: "goal_loop_outcome",
+        receipt_version: "goal_conditioned_loop_v1",
+        receipt_type: "outcome",
+        outcome_id: "outcome-1",
+        candidate_id: "candidate-1",
+        dedupe_key: `gcl:${"d".repeat(32)}`,
+        goal_id: "g1",
+        goal_revision: 4,
+        execution_status: "blocked",
+        verification: "unknown",
+        usefulness: "unknown",
+        learning: "no_learning",
+        strategy_delta_provenance: "not_present",
+        evidence_refs: [],
+        reason: "loop blocked",
+        created_at: "2026-09-09T08:00:00Z",
+        content_redacted: true,
+      }],
       strategy_deltas: [],
     };
     mockFetch.mockResolvedValueOnce({ ok: true, status: 200, json: async () => payload });
@@ -172,10 +192,29 @@ describe("questStore", () => {
   });
 
   it.each([500, 422, 404])("retains last-known loop evidence while HTTP %s retrieval fails", async (status) => {
-    const previous = {
+    const previous: GoalLoopPayload = {
       goal: { id: "g1", title: "Ship", status: "active", revision: 4 },
       criterion: null,
-      receipts: [{ receipt_type: "outcome", execution_status: "completed", verification: "passed", usefulness: "useful", learning: "applied" }],
+      receipts: [{
+        audit_event_id: "audit-loop-2",
+        event_type: "goal_loop_outcome",
+        receipt_version: "goal_conditioned_loop_v1",
+        receipt_type: "outcome",
+        outcome_id: "outcome-2",
+        candidate_id: "candidate-2",
+        dedupe_key: `gcl:${"e".repeat(32)}`,
+        goal_id: "g1",
+        goal_revision: 4,
+        execution_status: "succeeded",
+        verification: "passed",
+        usefulness: "helpful",
+        learning: "applied",
+        strategy_delta_provenance: "not_present",
+        evidence_refs: [],
+        reason: "loop recovered",
+        created_at: "2026-09-09T08:00:00Z",
+        content_redacted: true,
+      }],
       strategy_deltas: [],
     };
     useQuestStore.setState({ goalLoop: previous, goalLoopGoalId: "g1" });

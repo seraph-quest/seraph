@@ -103,6 +103,7 @@ _MEMORY_EXPORT_SCHEMA_VERSION = "guardian.memory.export.v1"
 _MEMORY_INDEX_SCHEMA_VERSION = "guardian.memory.derived_index.v1"
 _MAX_RECOVERY_RECORDS = 10_000
 _MAX_RECOVERY_SOURCE_RECORDS = 10_000
+_MAX_RECOVERY_SOURCES_PER_RECORD = 1_000
 
 
 async def _begin_canonical_write(db) -> None:
@@ -1818,9 +1819,17 @@ class MemoryRepository:
         if reconciliation.get("status") != "ready":
             return {
                 "schema_version": _MEMORY_EXPORT_SCHEMA_VERSION,
+                "owner_session_id": normalized_owner,
                 "status": "degraded_no_learning",
+                "degraded": True,
                 "operator_status": "canonical_memory_recovery_degraded",
                 "no_learning_reason": "canonical tombstone ledger requires repair",
+                "provenance": {
+                    "kind": "operator_memory_export",
+                    "actor": normalized_actor,
+                    "source_role": source_role,
+                    "owner_session_id": normalized_owner,
+                },
                 "reconciliation": reconciliation,
                 "memories": [],
                 "tombstones": [],
@@ -1910,6 +1919,7 @@ class MemoryRepository:
             **body,
             "generated_at": _now().isoformat(),
             "status": "ready",
+            "degraded": False,
             "operator_status": "canonical_memory_export_ready",
             "provenance": {
                 "kind": "operator_memory_export",
@@ -1964,9 +1974,17 @@ class MemoryRepository:
         if reconciliation.get("status") != "ready":
             return {
                 "schema_version": _MEMORY_INDEX_SCHEMA_VERSION,
+                "owner_session_id": normalized_owner,
                 "status": "degraded_no_learning",
+                "degraded": True,
                 "operator_status": "canonical_memory_index_rebuild_degraded",
                 "no_learning_reason": "canonical tombstone ledger requires repair",
+                "provenance": {
+                    "kind": "operator_memory_rebuild",
+                    "actor": normalized_actor,
+                    "source_role": source_role,
+                    "owner_session_id": normalized_owner,
+                },
                 "reconciliation": reconciliation,
                 "records": [],
                 "memory_ids": [],
@@ -2015,6 +2033,7 @@ class MemoryRepository:
             "index_hash": index_hash,
             "generated_at": _now().isoformat(),
             "status": "ready",
+            "degraded": False,
             "operator_status": "canonical_memory_index_rebuilt",
             "provenance": {
                 "kind": "operator_memory_rebuild",
@@ -2151,6 +2170,7 @@ class MemoryRepository:
             )
         normalized_records: list[dict[str, Any]] = []
         seen_ids: set[str] = set()
+        normalized_source_count = 0
         for record in records:
             if not isinstance(record, dict):
                 raise ValueError("memory restore archive contains an invalid record")
@@ -2198,6 +2218,13 @@ class MemoryRepository:
             sources = record.get("sources", [])
             if not isinstance(sources, list):
                 raise ValueError(f"memory restore record {memory_id} sources must be a list")
+            if len(sources) > _MAX_RECOVERY_SOURCES_PER_RECORD:
+                raise ValueError(
+                    f"memory restore record {memory_id} sources exceed the per-record recovery limit"
+                )
+            if normalized_source_count + len(sources) > _MAX_RECOVERY_SOURCE_RECORDS:
+                raise ValueError("memory restore source provenance exceeds the recovery limit")
+            normalized_source_count += len(sources)
             normalized_sources: list[dict[str, Any]] = []
             for source in sources:
                 if not isinstance(source, dict):

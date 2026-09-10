@@ -39,6 +39,7 @@ from src.db.models import (
 )
 from src.memory.repository import (
     _EMPTY_TOMBSTONE_REVISION,
+    _MAX_RECOVERY_SOURCES_PER_RECORD,
     _memory_export_artifact_payload,
     _memory_export_integrity_payload,
     _recovery_json_hash,
@@ -618,6 +619,76 @@ async def test_restore_rejects_record_without_owner_session(local_memory_db):
                 authenticated_session_id=owner_session,
             )
     assert await memory_repository.get_memory(created.memory_id) is not None
+
+
+@pytest.mark.asyncio
+async def test_restore_bounds_each_record_source_list_before_writes(local_memory_db):
+    _get_session, _database_path = local_memory_db
+    operator = make_test_bypass_operator()
+    owner_session = operator.session_id
+    created = await memory_repository.create_memory(
+        content="Source-list bounded restore record.",
+        source_session_id=owner_session,
+        source_type="operator",
+    )
+    with _runtime_operator(operator):
+        archive = await memory_repository.export_canonical_memory_state(
+            actor=operator.principal.principal_id,
+            owner_session_id=owner_session,
+            authenticated_session_id=owner_session,
+        )
+    archive = json.loads(json.dumps(archive))
+    archive["memories"][0]["sources"] = [{} for _ in range(_MAX_RECOVERY_SOURCES_PER_RECORD + 1)]
+    archive["export_hash"] = _recovery_json_hash(_memory_export_integrity_payload(archive))
+    archive["artifact_path"] = (
+        f"artifacts/memory-recovery/export-{archive['export_hash'][:24]}.json"
+    )
+    archive["artifact_sha256"] = _recovery_json_hash(_memory_export_artifact_payload(archive))
+
+    with _runtime_operator(operator):
+        with pytest.raises(ValueError, match="per-record recovery limit"):
+            await memory_repository.restore_canonical_memory_state(
+                archive,
+                actor=operator.principal.principal_id,
+                owner_session_id=owner_session,
+                authenticated_session_id=owner_session,
+            )
+    assert await memory_repository.get_memory(created.memory_id) is not None
+
+
+@pytest.mark.asyncio
+async def test_degraded_recovery_receipts_keep_owner_provenance_and_no_learning(local_memory_db):
+    _get_session, _database_path = local_memory_db
+    operator = make_test_bypass_operator()
+    owner_session = operator.session_id
+    degraded_reconciliation = {
+        "status": "degraded",
+        "reason": "canonical tombstone ledger requires repair",
+    }
+    with patch.object(
+        memory_repository,
+        "reconcile_memory_tombstones",
+        new=AsyncMock(return_value=degraded_reconciliation),
+    ):
+        with _runtime_operator(operator):
+            exported = await memory_repository.export_canonical_memory_state(
+                actor=operator.principal.principal_id,
+                owner_session_id=owner_session,
+                authenticated_session_id=owner_session,
+            )
+            rebuilt = await memory_repository.rebuild_canonical_memory_index(
+                actor=operator.principal.principal_id,
+                owner_session_id=owner_session,
+                authenticated_session_id=owner_session,
+            )
+
+    for result, kind in ((exported, "operator_memory_export"), (rebuilt, "operator_memory_rebuild")):
+        assert result["status"] == "degraded_no_learning"
+        assert result["degraded"] is True
+        assert result["owner_session_id"] == owner_session
+        assert result["no_learning_reason"]
+        assert result["provenance"]["kind"] == kind
+        assert result["provenance"]["owner_session_id"] == owner_session
 
 
 @pytest.mark.asyncio

@@ -11,6 +11,7 @@ from src.approval.runtime import reset_runtime_context, set_runtime_context
 from src.auth.service import AuthenticatedOperator
 from src.memory.benchmark import build_guardian_memory_benchmark_report
 from src.memory.control import (
+    _apply_provider_quarantine_overlay,
     apply_memory_live_control_action,
     audit_memory,
     correct_memory,
@@ -199,6 +200,11 @@ async def list_memory_providers(*, owner_session_id: str | None = None):
     """
 
     payload = list_memory_provider_inventory()
+    if owner_session_id:
+        payload = _apply_provider_quarantine_overlay(
+            payload,
+            owner_session_id=owner_session_id,
+        )
     reconciliation = await summarize_memory_reconciliation_state(
         owner_session_id=owner_session_id,
         content_free=owner_session_id is not None,

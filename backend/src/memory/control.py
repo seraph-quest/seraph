@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
@@ -12,7 +13,11 @@ from sqlmodel import select
 from src.audit.repository import audit_repository
 from src.db.engine import get_session
 from src.db.models import Memory, MemoryEdgeType, MemoryKind, MemoryStatus, StrategyDelta
-from src.memory.decay import apply_memory_decay_policies, summarize_memory_reconciliation_state
+from src.memory.decay import (
+    DecayMaintenanceResult,
+    apply_memory_decay_policies,
+    summarize_memory_reconciliation_state,
+)
 from src.memory.providers import list_memory_provider_inventory
 from src.memory.repository import (
     _CANONICAL_MEMORY_DELETE_EXPORT_REASON,
@@ -983,7 +988,112 @@ async def list_memory_audit_receipts(
     }
 
 
-def _apply_provider_quarantine_overlay(inventory: dict[str, Any]) -> dict[str, Any]:
+def _provider_quarantine_reason_digest(quarantine: dict[str, Any]) -> str | None:
+    reason = str(quarantine.get("reason") or "").strip()
+    if not reason:
+        return None
+    return hashlib.sha256(reason.encode("utf-8")).hexdigest()
+
+
+def _owner_scoped_provider_quarantine_overlay(
+    inventory: dict[str, Any],
+    *,
+    owner_session_id: str,
+) -> dict[str, Any]:
+    """Project global provider state into a content-free owner receipt.
+
+    Provider inventory and the in-process quarantine map are global runtime
+    state.  An authenticated owner may see bounded status and aggregate
+    counts, but must not receive another scope's free-form descriptions,
+    health notes, actors, or quarantine reasons.
+    """
+
+    providers: list[dict[str, Any]] = []
+    quarantine_entries: list[dict[str, Any]] = []
+    safe_runtime_states = {"disabled", "requires_config", "no_adapter", "unavailable", "degraded", "ready"}
+    for item in inventory.get("providers", []):
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "").strip()
+        if not name:
+            continue
+        base_runtime_state = str(item.get("runtime_state") or "unknown").strip()
+        if base_runtime_state not in safe_runtime_states:
+            base_runtime_state = "unknown"
+        quarantine = _PROVIDER_QUARANTINES.get(name)
+        if quarantine:
+            reason_digest = _provider_quarantine_reason_digest(quarantine)
+            quarantine_entries.append(
+                {
+                    "name": name,
+                    "state": "quarantined",
+                    "reason_digest": reason_digest,
+                }
+            )
+            provider = {
+                "name": name,
+                "provider_kind": str(item.get("provider_kind") or "unknown").strip() or "unknown",
+                "enabled": bool(item.get("enabled")),
+                "configured": bool(item.get("configured")),
+                "runtime_state_before_quarantine": base_runtime_state,
+                "runtime_state": "quarantined",
+                "quarantine": {
+                    "state": "quarantined",
+                    "reason_present": bool(str(quarantine.get("reason") or "").strip()),
+                    "reason_digest": reason_digest,
+                },
+            }
+        else:
+            provider = {
+                "name": name,
+                "provider_kind": str(item.get("provider_kind") or "unknown").strip() or "unknown",
+                "enabled": bool(item.get("enabled")),
+                "configured": bool(item.get("configured")),
+                "runtime_state": base_runtime_state,
+                "quarantine": {"state": "not_quarantined"},
+            }
+        providers.append(provider)
+
+    quarantine_digest = hashlib.sha256(
+        json.dumps(
+            sorted(quarantine_entries, key=lambda item: item["name"]),
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    summary = {
+        "provider_count": len(providers),
+        "ready_count": sum(1 for item in providers if item["runtime_state"] == "ready"),
+        "degraded_count": sum(1 for item in providers if item["runtime_state"] == "degraded"),
+        "configured_count": sum(1 for item in providers if item["configured"]),
+        "quarantined_count": len(quarantine_entries),
+    }
+    return {
+        "providers": providers,
+        "summary": summary,
+        "provider_runtime_controls": {
+            "quarantined_count": len(quarantine_entries),
+            "quarantine_digest": quarantine_digest,
+            "state_scope": "runtime_process_memory",
+            "persistent_provider_state_available": False,
+        },
+        "scope": "owner",
+        "owner_session_id": owner_session_id,
+        "content_free": True,
+    }
+
+
+def _apply_provider_quarantine_overlay(
+    inventory: dict[str, Any],
+    *,
+    owner_session_id: str | None = None,
+) -> dict[str, Any]:
+    normalized_owner = str(owner_session_id or "").strip()
+    if normalized_owner:
+        return _owner_scoped_provider_quarantine_overlay(
+            inventory,
+            owner_session_id=normalized_owner,
+        )
     providers = []
     for item in inventory.get("providers", []):
         if not isinstance(item, dict):
@@ -1147,7 +1257,10 @@ async def get_memory_live_controls_snapshot(
     owner_session_id: str | None = None,
 ) -> dict[str, Any]:
     bounded_limit = min(max(int(limit or 8), 1), 50)
-    provider_inventory = _apply_provider_quarantine_overlay(list_memory_provider_inventory())
+    provider_inventory = _apply_provider_quarantine_overlay(
+        list_memory_provider_inventory(),
+        owner_session_id=owner_session_id,
+    )
     fetch_limit = bounded_limit if not owner_session_id else min(bounded_limit * 10, 200)
     try:
         tombstone_reconciliation = await memory_repository.reconcile_memory_tombstones(
@@ -1306,6 +1419,14 @@ async def apply_memory_live_control_action(
     authenticated_session_id: str | None = None,
     source_role: str = "operator",
 ) -> dict[str, Any]:
+    normalized_memory_id = str(memory_id or "").strip() or None
+    normalized_owner_session_id = str(owner_session_id or "").strip() or None
+    if normalized_memory_id and not normalized_owner_session_id:
+        raise PermissionError(
+            "memory live control requires an owner session for memory targets"
+        )
+    memory_id = normalized_memory_id
+    owner_session_id = normalized_owner_session_id
     if authenticated_session_id is not None:
         # API routes pass the middleware-bound session here.  Keep direct
         # internal calls backwards-compatible, while making every externally
@@ -1387,6 +1508,20 @@ async def apply_memory_live_control_action(
                 "memory_id": memory.id,
                 "decayed_count": 1,
                 "global_decay_ran": False,
+            }
+        elif owner_session_id:
+            result["decay"] = {
+                **asdict(DecayMaintenanceResult()),
+                "target_scope": "owner",
+                "owner_session_id": owner_session_id,
+                "global_decay_ran": False,
+                "deferred": True,
+                "status": "deferred_no_learning",
+                "operator_status": "owner_scoped_decay_requires_explicit_memory_id",
+                "no_learning": True,
+                "no_learning_reason": (
+                    "owner-scoped stale-evidence decay requires an explicit memory_id"
+                ),
             }
         else:
             decay_result = await apply_memory_decay_policies(now=now)
@@ -1478,10 +1613,26 @@ async def apply_memory_live_control_action(
         else:
             _PROVIDER_QUARANTINES.pop(normalized_provider, None)
         changed_provider = True
-        result["provider_state"] = (
-            _PROVIDER_QUARANTINES.get(normalized_provider)
-            or {"state": "reinstated", "provider_name": normalized_provider}
-        )
+        provider_quarantine = _PROVIDER_QUARANTINES.get(normalized_provider)
+        if owner_session_id:
+            result["provider_state"] = {
+                "provider_name": normalized_provider,
+                "state": "quarantined" if provider_quarantine else "reinstated",
+                "reason_present": bool(
+                    provider_quarantine
+                    and str(provider_quarantine.get("reason") or "").strip()
+                ),
+                "reason_digest": (
+                    _provider_quarantine_reason_digest(provider_quarantine)
+                    if provider_quarantine
+                    else None
+                ),
+            }
+        else:
+            result["provider_state"] = (
+                provider_quarantine
+                or {"state": "reinstated", "provider_name": normalized_provider}
+            )
 
     audit_event = await _log_live_control_event(
         actor=actor,

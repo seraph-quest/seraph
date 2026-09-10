@@ -1,22 +1,33 @@
+from contextlib import asynccontextmanager
+from dataclasses import dataclass
+from typing import Any
+
 from fastapi import APIRouter
 from fastapi import HTTPException
 from fastapi import Request
 from pydantic import BaseModel, Field
 
+from src.approval.runtime import reset_runtime_context, set_runtime_context
 from src.auth.service import AuthenticatedOperator
 from src.memory.benchmark import build_guardian_memory_benchmark_report
 from src.memory.control import (
+    _apply_provider_quarantine_overlay,
     apply_memory_live_control_action,
     audit_memory,
     correct_memory,
+    export_memory_recovery as export_memory_recovery_control,
     forget_memory,
     get_memory_live_controls_snapshot,
     list_memory_audit_receipts,
     memory_operator_policy_payload,
+    memory_recovery_status,
     pin_memory,
+    rebuild_memory_recovery as rebuild_memory_recovery_control,
+    restore_memory_recovery as restore_memory_recovery_control,
 )
 from src.memory.decay import summarize_memory_reconciliation_state
 from src.memory.providers import list_memory_provider_inventory
+from src.memory.repository import memory_repository
 from src.security.trust_contract import AuthorityGrant, PrincipalType
 
 router = APIRouter()
@@ -29,6 +40,7 @@ class MemoryCorrectionRequest(BaseModel):
     corrects_memory_id: str | None = None
     source_session_id: str | None = None
     actor: str = "operator"
+    source_role: str = "operator"
     reason: str | None = None
     confidence: float = 0.95
     importance: float = 0.9
@@ -67,7 +79,36 @@ class MemoryLiveControlActionRequest(BaseModel):
     privacy_boundary: str | None = None
 
 
-def authenticated_memory_actor(request: Request) -> str:
+class MemoryRecoveryRequest(BaseModel):
+    owner_session_id: str | None = None
+    source_session_id: str | None = None
+    source_role: str = "operator"
+    actor: str = "operator"
+    limit: int = Field(default=10_000, ge=1, le=10_000)
+
+
+class MemoryRestoreRequest(BaseModel):
+    archive: dict[str, Any]
+    owner_session_id: str | None = None
+    source_session_id: str | None = None
+    source_role: str = "operator"
+    actor: str = "operator"
+
+
+@dataclass(frozen=True)
+class AuthenticatedMemoryContext:
+    actor: str
+    session_id: str
+    source_role: str = "operator"
+
+
+def authenticated_memory_context(
+    request: Request,
+    *,
+    requested_owner_session_id: str | None = None,
+    requested_source_session_id: str | None = None,
+    requested_source_role: str | None = None,
+) -> AuthenticatedMemoryContext:
     """Return the middleware-bound operator identity for memory mutations.
 
     The actor fields remain accepted in request models for wire compatibility,
@@ -97,7 +138,50 @@ def authenticated_memory_actor(request: Request) -> str:
         or AuthorityGrant.CAPABILITY_EXECUTE.value not in grants
     ):
         raise HTTPException(status_code=401, detail={"code": "authentication_required"})
-    return principal_id
+    requested_sessions = {
+        str(candidate).strip()
+        for candidate in (requested_owner_session_id, requested_source_session_id)
+        if str(candidate or "").strip()
+    }
+    if requested_sessions and requested_sessions != {session_id}:
+        raise HTTPException(
+            status_code=403,
+            detail={"code": "memory_owner_session_forbidden"},
+        )
+    source_role = str(requested_source_role or "operator").strip().lower()
+    if source_role != "operator":
+        raise HTTPException(
+            status_code=403,
+            detail={"code": "memory_source_role_forbidden"},
+        )
+    return AuthenticatedMemoryContext(
+        actor=principal_id,
+        session_id=session_id,
+        source_role=source_role,
+    )
+
+
+def authenticated_memory_actor(request: Request) -> str:
+    return authenticated_memory_context(request).actor
+
+
+async def _require_memory_owner(memory_id: str, session_id: str) -> None:
+    """Reject cross-session control before invoking a canonical mutation."""
+
+    memory = await memory_repository.get_memory(memory_id)
+    if memory is None:
+        return
+    bound_session = str(memory.source_session_id or "").strip()
+    if not bound_session:
+        raise HTTPException(
+            status_code=403,
+            detail={"code": "memory_owner_session_unbound"},
+        )
+    if bound_session != session_id:
+        raise HTTPException(
+            status_code=403,
+            detail={"code": "memory_owner_session_forbidden"},
+        )
 
 
 def _live_control_acknowledgement(request: MemoryLiveControlActionRequest) -> bool:
@@ -106,10 +190,25 @@ def _live_control_acknowledgement(request: MemoryLiveControlActionRequest) -> bo
     return request.acknowledged or request.acknowledge_rollback_boundary
 
 
-@router.get("/memory/providers")
-async def list_memory_providers():
+async def list_memory_providers(*, owner_session_id: str | None = None):
+    """Build the provider inventory with an optional reconciliation scope.
+
+    Internal maintenance and benchmark callers may omit the owner scope and
+    retain the existing global diagnostic summary.  The HTTP route below
+    always supplies the authenticated operator session, so its reconciliation
+    payload is owner-filtered and content-free.
+    """
+
     payload = list_memory_provider_inventory()
-    reconciliation = await summarize_memory_reconciliation_state()
+    if owner_session_id:
+        payload = _apply_provider_quarantine_overlay(
+            payload,
+            owner_session_id=owner_session_id,
+        )
+    reconciliation = await summarize_memory_reconciliation_state(
+        owner_session_id=owner_session_id,
+        content_free=owner_session_id is not None,
+    )
     payload["canonical_memory_reconciliation"] = reconciliation
     payload["guardian_memory_benchmark"] = await build_guardian_memory_benchmark_report(
         run_suite=False,
@@ -118,19 +217,47 @@ async def list_memory_providers():
     return payload
 
 
+@router.get("/memory/providers")
+async def list_memory_providers_route(http_request: Request):
+    context = authenticated_memory_context(http_request)
+    return await list_memory_providers(owner_session_id=context.session_id)
+
+
 @router.get("/memory/operator-policy")
 async def get_memory_operator_policy():
     return memory_operator_policy_payload()
 
 
 @router.get("/memory/live-controls")
-async def get_memory_live_controls(limit: int = 8, owner_session_id: str | None = None):
-    return await get_memory_live_controls_snapshot(limit=limit, owner_session_id=owner_session_id)
+async def get_memory_live_controls(
+    http_request: Request,
+    limit: int = 8,
+    owner_session_id: str | None = None,
+):
+    context = authenticated_memory_context(
+        http_request,
+        requested_owner_session_id=owner_session_id,
+    )
+    return await get_memory_live_controls_snapshot(
+        limit=limit,
+        owner_session_id=context.session_id,
+    )
 
 
 @router.get("/memory/guardian-memory-live-control")
-async def get_guardian_memory_live_control(limit: int = 8, owner_session_id: str | None = None):
-    return await get_memory_live_controls_snapshot(limit=limit, owner_session_id=owner_session_id)
+async def get_guardian_memory_live_control(
+    http_request: Request,
+    limit: int = 8,
+    owner_session_id: str | None = None,
+):
+    context = authenticated_memory_context(
+        http_request,
+        requested_owner_session_id=owner_session_id,
+    )
+    return await get_memory_live_controls_snapshot(
+        limit=limit,
+        owner_session_id=context.session_id,
+    )
 
 
 @router.post("/memory/live-controls/actions")
@@ -139,17 +266,33 @@ async def post_memory_live_control_action(
     request: MemoryLiveControlActionRequest,
 ):
     try:
-        return await apply_memory_live_control_action(
-            action=request.action,
-            acknowledged=_live_control_acknowledgement(request),
-            actor=authenticated_memory_actor(http_request),
-            reason=request.reason,
-            owner_session_id=request.owner_session_id,
-            memory_id=request.memory_id,
-            provider_name=request.provider_name,
-            outcome=request.outcome,
-            privacy_boundary=request.privacy_boundary,
+        context = authenticated_memory_context(
+            http_request,
+            requested_owner_session_id=request.owner_session_id,
         )
+        if request.memory_id:
+            await _require_memory_owner(request.memory_id, context.session_id)
+        async with _bound_recovery_runtime(http_request, context):
+            return await apply_memory_live_control_action(
+                action=request.action,
+                acknowledged=_live_control_acknowledgement(request),
+                actor=context.actor,
+                reason=request.reason,
+                owner_session_id=context.session_id,
+                memory_id=request.memory_id,
+                provider_name=request.provider_name,
+                outcome=request.outcome,
+                privacy_boundary=request.privacy_boundary,
+                authenticated_session_id=context.session_id,
+                source_role=context.source_role,
+            )
+    except HTTPException:
+        raise
+    except PermissionError as exc:
+        raise HTTPException(
+            status_code=403,
+            detail={"code": "memory_authority_forbidden", "reason": str(exc)},
+        ) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -165,19 +308,32 @@ async def post_guardian_memory_live_control_action(
 @router.post("/memory/corrections")
 async def create_memory_correction(http_request: Request, request: MemoryCorrectionRequest):
     try:
+        context = authenticated_memory_context(
+            http_request,
+            requested_source_session_id=request.source_session_id,
+            requested_source_role=request.source_role,
+        )
+        if request.corrects_memory_id:
+            await _require_memory_owner(request.corrects_memory_id, context.session_id)
         return await correct_memory(
             content=request.content,
             kind=request.kind,
             summary=request.summary,
             corrects_memory_id=request.corrects_memory_id,
-            source_session_id=request.source_session_id,
-            actor=authenticated_memory_actor(http_request),
+            source_session_id=context.session_id,
+            actor=context.actor,
             reason=request.reason,
             confidence=request.confidence,
             importance=request.importance,
             privacy_boundary=request.privacy_boundary,
             metadata=request.metadata,
+            authenticated_session_id=context.session_id,
+            source_role=context.source_role,
         )
+    except HTTPException:
+        raise
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail={"code": "memory_authority_forbidden", "reason": str(exc)}) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -185,12 +341,16 @@ async def create_memory_correction(http_request: Request, request: MemoryCorrect
 @router.post("/memory/{memory_id}/pin")
 async def pin_memory_item(memory_id: str, http_request: Request, request: MemoryPinRequest):
     try:
+        context = authenticated_memory_context(http_request)
+        await _require_memory_owner(memory_id, context.session_id)
         return await pin_memory(
             memory_id=memory_id,
-            actor=authenticated_memory_actor(http_request),
+            actor=context.actor,
             reason=request.reason,
             privacy_boundary=request.privacy_boundary,
         )
+    except HTTPException:
+        raise
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
@@ -198,13 +358,17 @@ async def pin_memory_item(memory_id: str, http_request: Request, request: Memory
 @router.post("/memory/{memory_id}/forget")
 async def forget_memory_item(memory_id: str, http_request: Request, request: MemoryForgetRequest):
     try:
+        context = authenticated_memory_context(http_request)
+        await _require_memory_owner(memory_id, context.session_id)
         return await forget_memory(
             memory_id=memory_id,
-            actor=authenticated_memory_actor(http_request),
+            actor=context.actor,
             reason=request.reason,
             mode=request.mode,
             privacy_boundary=request.privacy_boundary,
         )
+    except HTTPException:
+        raise
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
@@ -212,15 +376,147 @@ async def forget_memory_item(memory_id: str, http_request: Request, request: Mem
 @router.post("/memory/{memory_id}/audit")
 async def audit_memory_item(memory_id: str, http_request: Request, request: MemoryAuditRequest):
     try:
+        context = authenticated_memory_context(http_request)
+        await _require_memory_owner(memory_id, context.session_id)
         return await audit_memory(
             memory_id=memory_id,
-            actor=authenticated_memory_actor(http_request),
+            actor=context.actor,
             reason=request.reason,
         )
+    except HTTPException:
+        raise
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @router.get("/memory/audit")
-async def get_memory_audit(memory_id: str | None = None, limit: int = 20):
-    return await list_memory_audit_receipts(memory_id=memory_id, limit=limit)
+async def get_memory_audit(
+    http_request: Request,
+    memory_id: str | None = None,
+    limit: int = 20,
+):
+    context = authenticated_memory_context(http_request)
+    if memory_id:
+        await _require_memory_owner(memory_id, context.session_id)
+    return await list_memory_audit_receipts(
+        memory_id=memory_id,
+        limit=limit,
+        owner_session_id=context.session_id,
+    )
+
+
+def _recovery_request_context(
+    http_request: Request,
+    request: MemoryRecoveryRequest | MemoryRestoreRequest,
+) -> AuthenticatedMemoryContext:
+    return authenticated_memory_context(
+        http_request,
+        requested_owner_session_id=request.owner_session_id,
+        requested_source_session_id=request.source_session_id,
+        requested_source_role=request.source_role,
+    )
+
+
+@asynccontextmanager
+async def _bound_recovery_runtime(
+    http_request: Request,
+    context: AuthenticatedMemoryContext,
+):
+    """Bind middleware-verified operator authority around the store call."""
+
+    principal = http_request.state.operator.principal
+    tokens = set_runtime_context(
+        context.session_id,
+        "off",
+        trust_principal=principal,
+    )
+    try:
+        yield
+    finally:
+        reset_runtime_context(tokens)
+
+
+@router.post("/memory/recovery/export")
+async def export_memory_recovery_route(http_request: Request, request: MemoryRecoveryRequest):
+    try:
+        context = _recovery_request_context(http_request, request)
+        async with _bound_recovery_runtime(http_request, context):
+            return await export_memory_recovery_control(
+                actor=context.actor,
+                owner_session_id=context.session_id,
+                authenticated_session_id=context.session_id,
+                source_role=context.source_role,
+                limit=request.limit,
+            )
+    except HTTPException:
+        raise
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail={"code": "memory_authority_forbidden", "reason": str(exc)}) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail={"code": "memory_recovery_unavailable", "reason": str(exc)}) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/memory/recovery/rebuild")
+async def rebuild_memory_recovery_route(http_request: Request, request: MemoryRecoveryRequest):
+    try:
+        context = _recovery_request_context(http_request, request)
+        async with _bound_recovery_runtime(http_request, context):
+            return await rebuild_memory_recovery_control(
+                actor=context.actor,
+                owner_session_id=context.session_id,
+                authenticated_session_id=context.session_id,
+                source_role=context.source_role,
+                limit=request.limit,
+            )
+    except HTTPException:
+        raise
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail={"code": "memory_authority_forbidden", "reason": str(exc)}) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail={"code": "memory_recovery_unavailable", "reason": str(exc)}) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/memory/recovery/restore")
+async def restore_memory_recovery_route(http_request: Request, request: MemoryRestoreRequest):
+    try:
+        context = _recovery_request_context(http_request, request)
+        async with _bound_recovery_runtime(http_request, context):
+            return await restore_memory_recovery_control(
+                archive=request.archive,
+                actor=context.actor,
+                owner_session_id=context.session_id,
+                authenticated_session_id=context.session_id,
+                source_role=context.source_role,
+            )
+    except HTTPException:
+        raise
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail={"code": "memory_authority_forbidden", "reason": str(exc)}) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail={"code": "memory_recovery_unavailable", "reason": str(exc)}) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/memory/recovery/status")
+async def get_memory_recovery_status(http_request: Request, owner_session_id: str | None = None):
+    try:
+        context = authenticated_memory_context(
+            http_request,
+            requested_owner_session_id=owner_session_id,
+        )
+        async with _bound_recovery_runtime(http_request, context):
+            return await memory_recovery_status(
+                owner_session_id=context.session_id,
+                authenticated_session_id=context.session_id,
+                actor=context.actor,
+                source_role=context.source_role,
+            )
+    except HTTPException:
+        raise
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail={"code": "memory_authority_forbidden", "reason": str(exc)}) from exc

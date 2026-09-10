@@ -1242,6 +1242,7 @@ __all__ = [
     "canonical_workspace_inventory",
     "canonical_workspace_registry",
     "canonical_workspace_root",
+    "canonical_workspace_root_identity",
     "production_workspace_inventory",
 ]
 
@@ -1298,6 +1299,30 @@ def canonical_workspace_root(root: str | os.PathLike[str]) -> Path:
     if not stat.S_ISDIR(metadata.st_mode):
         raise WorkspaceStateError("canonical workspace root must be a directory")
     return candidate.resolve(strict=True)
+
+
+def canonical_workspace_root_identity(root: str | os.PathLike[str]) -> dict[str, int | str]:
+    """Return the non-secret identity of the current canonical root directory.
+
+    A lexical path digest alone cannot detect a directory that was removed and
+    recreated at the same path. Lifecycle code uses this binding immediately
+    before and after every root rename so a stale or replaced root fails closed.
+    The raw path is intentionally omitted from the returned receipt.
+    """
+    resolved = canonical_workspace_root(root)
+    try:
+        metadata = resolved.lstat()
+    except OSError as exc:
+        raise WorkspaceStateError("canonical workspace root is not readable") from exc
+    if stat.S_ISLNK(metadata.st_mode):
+        raise UnsupportedWorkspaceEntryError("canonical workspace root must not be a symlink")
+    if not stat.S_ISDIR(metadata.st_mode):
+        raise WorkspaceStateError("canonical workspace root must be a directory")
+    return {
+        "path_digest": hashlib.sha256(str(resolved).encode("utf-8")).hexdigest(),
+        "device": int(metadata.st_dev),
+        "inode": int(metadata.st_ino),
+    }
 
 
 def canonical_workspace_config(root: str | os.PathLike[str]) -> WorkspaceConfig:

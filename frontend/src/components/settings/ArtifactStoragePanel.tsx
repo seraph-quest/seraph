@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { API_URL } from "../../config/constants";
+import { apiFetch } from "../../lib/api";
 import {
   loadRetainedModelFabricSettings,
   isGreenModelFabricCanary,
@@ -321,7 +322,7 @@ async function fetchJsonWithTimeout(path: string, timeoutMs = 3_000, init?: Requ
     const controller = new AbortController();
     const timeout = window.setTimeout(() => controller.abort(), timeoutMs);
     try {
-      const response = await fetch(`${apiUrl}${path}`, { ...init, signal: controller.signal });
+      const response = await apiFetch(`${apiUrl}${path}`, { ...init, signal: controller.signal });
       if (!response.ok) throw new Error(`Request failed: ${response.status}`);
       return await response.json();
     } catch (error) {
@@ -337,7 +338,7 @@ async function postModelFabricCanary(path: string, body: Record<string, unknown>
   const controller = new AbortController();
   const timeout = window.setTimeout(() => controller.abort(), 35_000);
   try {
-    const response = await fetch(`${API_URL}${path}`, {
+    const response = await apiFetch(`${API_URL}${path}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),

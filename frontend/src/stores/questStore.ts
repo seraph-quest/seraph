@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import { API_URL } from "../config/constants";
+import { apiFetch } from "../lib/api";
 import type {
   GoalInfo,
   GoalLoopActionResponse,
@@ -412,28 +413,28 @@ export const useQuestStore = create<QuestStore>((set, get) => ({
     if (filters?.status) params.set("status", filters.status);
     const qs = params.toString();
     try {
-      const res = await fetch(`${API_URL}/api/goals${qs ? `?${qs}` : ""}`);
+      const res = await apiFetch(`${API_URL}/api/goals${qs ? `?${qs}` : ""}`);
       if (res.ok) set({ goals: await res.json() });
     } catch (err) { console.error("Failed to load goals:", err); }
   },
 
   loadTree: async () => {
     try {
-      const res = await fetch(`${API_URL}/api/goals/tree`);
+      const res = await apiFetch(`${API_URL}/api/goals/tree`);
       if (res.ok) set({ goalTree: await res.json() });
     } catch (err) { console.error("Failed to load goal tree:", err); }
   },
 
   loadDashboard: async () => {
     try {
-      const res = await fetch(`${API_URL}/api/goals/dashboard`);
+      const res = await apiFetch(`${API_URL}/api/goals/dashboard`);
       if (res.ok) set({ dashboard: await res.json() });
     } catch (err) { console.error("Failed to load dashboard:", err); }
   },
 
   createGoal: async (goal) => {
     try {
-      await fetch(`${API_URL}/api/goals`, {
+      await apiFetch(`${API_URL}/api/goals`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(goal),
@@ -444,7 +445,7 @@ export const useQuestStore = create<QuestStore>((set, get) => ({
 
   updateGoal: async (id, updates) => {
     try {
-      const res = await fetch(`${API_URL}/api/goals/${id}`, {
+      const res = await apiFetch(`${API_URL}/api/goals/${id}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(updates),
@@ -484,7 +485,7 @@ export const useQuestStore = create<QuestStore>((set, get) => ({
 
   deleteGoal: async (id) => {
     try {
-      await fetch(`${API_URL}/api/goals/${id}`, { method: "DELETE" });
+      await apiFetch(`${API_URL}/api/goals/${id}`, { method: "DELETE" });
       await get().refresh();
     } catch (err) { console.error("Failed to delete goal:", err); }
   },
@@ -499,7 +500,7 @@ export const useQuestStore = create<QuestStore>((set, get) => ({
       goalLoopError: null,
     });
     try {
-      const res = await fetch(`${API_URL}/api/goals/${id}/loop`);
+      const res = await apiFetch(`${API_URL}/api/goals/${id}/loop`);
       const payload = await readResponsePayload(res);
       if (!res.ok) throw goalLoopError(res, payload, "Goal loop could not be loaded");
       const normalizedPayload = normalizeGoalLoopPayload(payload);
@@ -526,7 +527,7 @@ export const useQuestStore = create<QuestStore>((set, get) => ({
   runGoalSnapshot: async (id, input) => {
     set({ goalLoopAction: "snapshot", goalLoopError: null });
     try {
-      const res = await fetch(`${API_URL}/api/goals/${id}/snapshot`, {
+      const res = await apiFetch(`${API_URL}/api/goals/${id}/snapshot`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(input),
@@ -550,7 +551,7 @@ export const useQuestStore = create<QuestStore>((set, get) => ({
   applyStrategyCorrection: async (id, input) => {
     set({ goalLoopAction: "correction", goalLoopError: null });
     try {
-      const res = await fetch(`${API_URL}/api/goals/${id}/strategy-corrections`, {
+      const res = await apiFetch(`${API_URL}/api/goals/${id}/strategy-corrections`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(input),
@@ -575,7 +576,7 @@ export const useQuestStore = create<QuestStore>((set, get) => ({
   rollbackStrategyCorrection: async (id, deltaId, input) => {
     set({ goalLoopAction: "rollback", goalLoopError: null });
     try {
-      const res = await fetch(`${API_URL}/api/goals/${id}/strategy-corrections/${deltaId}/rollback`, {
+      const res = await apiFetch(`${API_URL}/api/goals/${id}/strategy-corrections/${deltaId}/rollback`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(input),

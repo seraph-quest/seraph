@@ -39,7 +39,7 @@ SOURCE_PROJECTION_CLAIM_BOUNDARY = (
     "audit_projected_workflow_receipt_not_durable_state_machine"
 )
 TRUST_BOUNDARY_BLOCK_REASONS = {"approval_context_changed", "approval_context_missing"}
-TERMINAL_STATUSES = {"completed", "succeeded", "failed", "cancelled"}
+TERMINAL_STATUSES = {"completed", "succeeded", "degraded", "failed", "cancelled"}
 DURABLE_WORKFLOW_ENGINE_BENCHMARK_SUITE_NAME = DURABLE_WORKFLOW_ENGINE_SUITE_NAME
 DURABLE_WORKFLOW_ENGINE_BENCHMARK_SCENARIO_NAMES = DURABLE_WORKFLOW_ENGINE_SCENARIO_NAMES
 PRODUCTION_DURABLE_ORCHESTRATION_SUITE_NAME = "production_durable_orchestration"
@@ -470,6 +470,7 @@ class WorkflowStateRepository:
             "capability_version": getattr(run, "capability_version", "workflow-v1"),
             "input_digest": getattr(run, "input_digest", None),
             "authority_digest": getattr(run, "authority_digest", None),
+            "budget_digest": getattr(run, "budget_digest", None),
             "idempotency_scope": getattr(run, "idempotency_scope", None),
             "idempotency_key": getattr(run, "idempotency_key", None),
             "idempotency_binding": getattr(run, "idempotency_binding", None),

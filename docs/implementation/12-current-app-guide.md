@@ -126,15 +126,29 @@ optional integration tokens. The production preflight requires dedicated
 identity match, and the configured path/device/inode identity match. The
 backend holds
 the same bind-local owner lock for its lifetime so backup and restore fail
-closed while writers or the scheduler are active. Restore resets only empty
+closed while writers or the scheduler are active; lifecycle code hard-links
+that lock inode into the staged generation before promotion, so the fence
+survives the directory rename. Backup and restore reject a source manifest
+that omits any declared required canonical path, and archives enforce both
+per-member and cumulative uncompressed payload bounds. Public lifecycle
+helpers require the production maintenance-fence context. Restore resets only empty
 declared derived directories; a stored derived index that has no bounded
 rebuild hook blocks promotion. Staged operator sessions and durable workflow
 authority rows are revoked or blocked before promotion. The current slice
 proves deterministic local inventory, archive validation, staged promotion,
 rollback journaling, durable status receipts, and provider-independent
-maintenance. Migration fencing beyond the backend owner lease,
-retention/disk-pressure drills, and live operator receipts remain partial #742
-acceptance work.
+maintenance. The owner fence is exercised by a competing subprocess, and
+restore journals bind the active, staged, previous, and promoted roots to
+device/inode identity; status also blocks when the current root no longer
+matches the last successful bind identity. Root replacement, symlink endpoints, archive traversal,
+special-file members, and promotion disk errors fail closed while retaining a
+recoverable journal. Rollback carries tombstones, revocations, configuration
+history, unresolved cost liabilities, and existing target safety rows without
+overwriting newer values, alongside session invalidation and workflow
+authority blocking into the retained generation. The checked-in drill is an
+isolated temporary workspace; it does not prove a live production-data restore,
+retention/disk-pressure capacity, or an interrupted CLI recovery when the
+active root is absent.
 
 ## Historical develop topology
 
@@ -223,13 +237,26 @@ curl -b /tmp/seraph.cookies -H 'Origin: https://cockpit.example' \
   https://api.example/api/auth/session
 ```
 
+For a private LAN cockpit, replace the production host and origin allow-lists
+with the exact LAN hostname/IP and browser origin (for example,
+`seraph.lan,192.168.1.50` and `https://seraph.lan`). The same boundary is
+enforced for unsafe HTTP requests and WebSocket upgrades. An authenticated
+operator may use model-fabric setup and canaries from that configured LAN
+boundary; loopback is only the unauthenticated local-development shortcut.
+
 The login/session/refresh/logout endpoints are the canonical provisioning
 surface for the current single-operator deployment. Host headers with ports
 such as `127.0.0.1:8004` are normalized against the configured allow-list.
 Unauthenticated API requests fail closed; the explicit unauthenticated bypass
 is accepted only by test configuration. A WebSocket rechecks the session at a
-bounded interval and closes when the session is revoked or expires. A cockpit
-login form and multi-operator identity ownership remain #741 follow-up scope.
+bounded interval and closes when the session is revoked or expires. The cockpit
+now gates protected UI startup on `/api/auth/session`, provides a login form,
+and returns to login after a revoked or expired session. When no server-side
+credential is configured it shows the PBKDF2 provisioning command and keeps the
+core locked until the managed backend is restarted. Browser API requests use
+credentialed cookies across the local frontend/backend ports; raw passwords and
+session tokens never enter frontend state. Multi-operator identity ownership
+remains outside the current single-operator boundary.
 
 `/api/runtime/status` and `/api/settings/artifact-storage` are the active
 operator receipts. They expose the effective OpenRouter route, consent,

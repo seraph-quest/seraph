@@ -4,6 +4,37 @@ title: 09. Benchmark Status
 
 # 09. Benchmark Status
 
+## Epic #736 keyless health receipt (2026-09-10)
+
+`scripts/epic_736_health.py` emits schema v2 receipts without opening provider,
+GPU, VLM, speech, connector, or comparator sockets. It resolves the receipt
+root through the canonical #742 production workspace contract, rejects symlink
+or ambiguous roots, and publishes the file atomically. Configuration and source
+checks carry explicit `evidence_mode` values and are not presented as exercised
+runtime behavior. OpenRouter capability, model quality, embeddings, and edge or
+media readiness remain `external_unverified` and are `skipped` by the keyless
+run. The stable #771 evolution IDs and #754 comparator coverage ID remain in
+the matrix as explicit `excluded` checks; they do not create closure or
+superiority claims for Epic #736.
+Required child criteria cover #750 conversation identity/outbox, #748 native
+software, #749 paired edge, #751 audio capture/decode/persistence, #752
+Telegram transport, and #755 capability-pack lifecycle. Each criterion has a
+separate informational source check and an integration gate. The gate accepts
+only one schema-v1 child receipt from the owning issue with `child_issue`,
+`criterion_id`, current collector `commit`, executed `command`, `result`, a
+fresh timezone-aware `timestamp`, and a SHA-256 `hash` over the canonical
+payload. The collector discovers receipts under
+`operator-receipts/epic-736-child-evidence` under the server-resolved canonical
+production workspace. The child directory and receipt files must be owned by
+the health process user and must not be group/world writable; caller-selected
+`--child-evidence` paths are rejected. A missing, malformed, stale,
+wrong-revision, tampered, or ambiguous receipt is `unknown`, while any
+child-reported non-pass result, including `failed`, leaves the overall state
+visibly `degraded` with exit 2. Hard configuration or static failures remain
+`failed` with exit 4. Source presence never satisfies a behavioral gate, and
+the collector does not make provider, connector, edge, media, or
+repository-mutation calls.
+
 ## Status On `develop`
 
 When this file is updated on an open feature branch, checked items describe the intended post-merge `develop` state. The open PR remains the integration truth until it merges.

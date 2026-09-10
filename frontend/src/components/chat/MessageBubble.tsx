@@ -1,5 +1,6 @@
 import type { ChatMessage } from "../../types";
 import { API_URL } from "../../config/constants";
+import { apiFetch } from "../../lib/api";
 import { useState } from "react";
 import { appEventBus } from "../../lib/appEventBus";
 
@@ -42,7 +43,7 @@ export function MessageBubble({ message }: MessageBubbleProps) {
     if (!message.approvalId || submitting || approvalStatus !== "pending") return;
     setSubmitting(true);
     try {
-      const res = await fetch(`${API_URL}/api/approvals/${message.approvalId}/${decision}`, {
+      const res = await apiFetch(`${API_URL}/api/approvals/${message.approvalId}/${decision}`, {
         method: "POST",
       });
       if (res.ok) {

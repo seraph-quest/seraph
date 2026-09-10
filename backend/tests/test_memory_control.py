@@ -91,6 +91,7 @@ def test_memory_rollback_rejects_canonical_tombstone_before_mutation(
         metadata_json=json.dumps(metadata),
         content=content,
         summary=summary,
+        source_session_id="owner-session",
     )
 
     async def invoke():
@@ -106,6 +107,7 @@ def test_memory_rollback_rejects_canonical_tombstone_before_mutation(
                 await memory_control.apply_memory_live_control_action(
                     action="rollback_memory",
                     acknowledged=True,
+                    owner_session_id="owner-session",
                     memory_id="deleted-memory",
                     privacy_boundary="operator_visible",
                 )
@@ -124,8 +126,9 @@ def test_memory_rollback_keeps_ordinary_archived_memory_reversible():
         confidence=0.2,
         importance=0.2,
         reinforcement=0.2,
+        source_session_id="owner-session",
     )
-    restored = SimpleNamespace(id="ordinary-memory", source_session_id=None)
+    restored = SimpleNamespace(id="ordinary-memory", source_session_id="owner-session")
 
     async def invoke():
         with (
@@ -150,6 +153,7 @@ def test_memory_rollback_keeps_ordinary_archived_memory_reversible():
             result = await memory_control.apply_memory_live_control_action(
                 action="rollback_memory",
                 acknowledged=True,
+                owner_session_id="owner-session",
                 memory_id="ordinary-memory",
                 privacy_boundary="operator_visible",
             )
@@ -171,6 +175,7 @@ def test_memory_rollback_cas_loses_to_delete_export_interleaving():
         confidence=0.2,
         importance=0.2,
         reinforcement=0.2,
+        source_session_id="owner-session",
     )
     deleted = SimpleNamespace(
         metadata_json=json.dumps(
@@ -182,6 +187,7 @@ def test_memory_rollback_cas_loses_to_delete_export_interleaving():
         content="[delete/export propagated by operator]",
         summary="[delete/export propagated by operator]",
         status=MemoryStatus.archived,
+        source_session_id="owner-session",
     )
     state = {"memory": original}
 
@@ -202,6 +208,7 @@ def test_memory_rollback_cas_loses_to_delete_export_interleaving():
                 await memory_control.apply_memory_live_control_action(
                     action="rollback_memory",
                     acknowledged=True,
+                    owner_session_id="owner-session",
                     memory_id="interleaved-memory",
                     privacy_boundary="operator_visible",
                 )
@@ -215,11 +222,108 @@ def test_memory_rollback_cas_loses_to_delete_export_interleaving():
 
 
 @pytest.mark.asyncio
+async def test_direct_memory_live_control_requires_owner_before_mutation():
+    with patch.object(
+        memory_control.memory_repository,
+        "mark_memory_tombstoned",
+        new=AsyncMock(side_effect=AssertionError("unscoped memory mutation")),
+    ) as tombstone:
+        with pytest.raises(PermissionError, match="requires an owner session"):
+            await memory_control.apply_memory_live_control_action(
+                action="propagate_delete_export",
+                acknowledged=True,
+                memory_id="unscoped-memory",
+                privacy_boundary="operator_visible",
+            )
+    tombstone.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_owner_scoped_decay_without_memory_id_is_deferred_without_global_write():
+    with (
+        patch.object(
+            memory_control,
+            "apply_memory_decay_policies",
+            new=AsyncMock(side_effect=AssertionError("global decay was invoked")),
+        ) as global_decay,
+        patch.object(
+            memory_control,
+            "_log_live_control_event",
+            new=AsyncMock(return_value=SimpleNamespace(id="audit-owner-decay")),
+        ),
+        patch.object(
+            memory_control,
+            "get_memory_live_controls_snapshot",
+            new=AsyncMock(return_value={}),
+        ),
+    ):
+        result = await memory_control.apply_memory_live_control_action(
+            action="decay_stale_evidence",
+            acknowledged=True,
+            owner_session_id="owner-session",
+            privacy_boundary="operator_visible",
+        )
+
+    global_decay.assert_not_awaited()
+    decay = result["receipt"]["decay"]
+    assert decay["target_scope"] == "owner"
+    assert decay["global_decay_ran"] is False
+    assert decay["deferred"] is True
+    assert decay["status"] == "deferred_no_learning"
+    assert decay["no_learning"] is True
+
+
+def test_owner_scoped_provider_overlay_is_content_free_and_digest_bound():
+    provider_name = "graph-memory"
+    previous_quarantines = dict(memory_control._PROVIDER_QUARANTINES)
+    try:
+        memory_control._PROVIDER_QUARANTINES.clear()
+        memory_control._PROVIDER_QUARANTINES[provider_name] = {
+            "state": "quarantined",
+            "actor": "other-owner",
+            "reason": "OTHER_OWNER_SECRET free-form quarantine reason",
+            "quarantined_at": "2026-09-11T00:00:00+00:00",
+        }
+        overlay = memory_control._apply_provider_quarantine_overlay(
+            {
+                "providers": [
+                    {
+                        "name": provider_name,
+                        "provider_kind": "graph",
+                        "enabled": True,
+                        "configured": True,
+                        "runtime_state": "ready",
+                        "description": "OTHER_OWNER_SECRET provider description",
+                        "notes": ["OTHER_OWNER_SECRET provider note"],
+                    }
+                ],
+                "summary": {"provider_count": 1},
+            },
+            owner_session_id="owner-session",
+        )
+    finally:
+        memory_control._PROVIDER_QUARANTINES.clear()
+        memory_control._PROVIDER_QUARANTINES.update(previous_quarantines)
+
+    serialized = json.dumps(overlay, sort_keys=True)
+    assert "OTHER_OWNER_SECRET" not in serialized
+    assert overlay["scope"] == "owner"
+    assert overlay["content_free"] is True
+    assert overlay["summary"]["quarantined_count"] == 1
+    assert overlay["provider_runtime_controls"]["quarantine_digest"]
+    provider = overlay["providers"][0]
+    assert provider["runtime_state"] == "quarantined"
+    assert provider["quarantine"]["reason_digest"]
+    assert "reason" not in provider["quarantine"]
+
+
+@pytest.mark.asyncio
 async def test_memory_correction_creates_receipt_and_suppresses_corrected_memory(client):
     stale = await memory_repository.create_memory(
         content="Atlas launch is delayed.",
         kind=MemoryKind.project,
         summary="Atlas launch delayed",
+        source_session_id="test-auth-bypass",
         confidence=0.55,
         importance=0.55,
     )
@@ -304,6 +408,7 @@ async def test_memory_pin_and_forget_are_audited_and_change_active_recall(client
         content="User prefers detailed implementation receipts.",
         kind=MemoryKind.communication_preference,
         summary="Prefers detailed implementation receipts",
+        source_session_id="test-auth-bypass",
         confidence=0.4,
         importance=0.4,
     )
@@ -356,6 +461,7 @@ async def test_memory_redaction_and_audit_receipts_are_queryable_without_leaking
         content="The deployment token is seraph-secret-token.",
         kind=MemoryKind.fact,
         summary="Deployment token is stored in memory",
+        source_session_id="test-auth-bypass",
         confidence=0.8,
         importance=0.8,
     )
@@ -428,11 +534,12 @@ async def test_memory_retrieval_decision_receipt_reports_suppression_and_capabil
 
 @pytest.mark.asyncio
 async def test_memory_live_controls_snapshot_and_review_action_emit_real_receipts(client):
+    owner_session = test_bypass_operator().session_id
     created = await memory_repository.create_memory(
         content="Guardian should prefer concise checkpoint updates.",
         kind=MemoryKind.communication_preference,
         summary="Prefers concise checkpoints",
-        source_session_id="session-live-controls",
+        source_session_id=owner_session,
         confidence=0.45,
         importance=0.5,
     )
@@ -451,7 +558,7 @@ async def test_memory_live_controls_snapshot_and_review_action_emit_real_receipt
     snapshot = snapshot_response.json()
     operator_snapshot_response = await client.get(
         "/api/operator/guardian-memory-live-control",
-        params={"owner_session_id": "session-live-controls"},
+        params={"owner_session_id": owner_session},
     )
     assert operator_snapshot_response.status_code == 200
     operator_snapshot = operator_snapshot_response.json()
@@ -512,6 +619,7 @@ async def test_memory_live_controls_decay_and_delete_export_are_bounded_operator
         content="The legacy export token is seraph-delete-me.",
         kind=MemoryKind.fact,
         summary="Legacy export token",
+        source_session_id="test-auth-bypass",
         confidence=0.8,
         importance=0.8,
     )
@@ -583,6 +691,7 @@ async def test_memory_live_controls_rollback_requires_specific_boundary_acknowle
         content="Rollback candidate memory.",
         kind=MemoryKind.fact,
         summary="Rollback candidate",
+        source_session_id="test-auth-bypass",
         confidence=0.2,
         importance=0.2,
     )
@@ -611,7 +720,6 @@ async def test_memory_live_controls_rollback_requires_specific_boundary_acknowle
         json={
             "action": "rollback_memory",
             "acknowledge_rollback_boundary": True,
-            "owner_session_id": "session-rollback",
             "memory_id": created.memory_id,
             "reason": "Operator acknowledged rollback boundary.",
         },
@@ -620,7 +728,7 @@ async def test_memory_live_controls_rollback_requires_specific_boundary_acknowle
     assert refused.status_code == 400
     assert "explicit acknowledgement" in refused.json()["detail"]
     assert accepted.status_code == 200
-    assert accepted.json()["receipt"]["owner_session_id"] == "session-rollback"
+    assert accepted.json()["receipt"]["owner_session_id"] == test_bypass_operator().session_id
     assert accepted.json()["memory"]["status"] == "active"
 
 
@@ -677,6 +785,7 @@ async def test_memory_mutation_routes_bind_authenticated_principal_and_ignore_bo
         content="Principal-bound memory control candidate.",
         kind=MemoryKind.fact,
         summary="Principal-bound candidate",
+        source_session_id="test-auth-bypass",
         confidence=0.6,
         importance=0.6,
     )

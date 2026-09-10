@@ -100,9 +100,28 @@ reservation, audit, or model dispatch.
 Retries that reuse the same identity in the same session receive a deterministic
 409/error receipt before model dispatch.  Reuse with changed content or bound
 metadata is rejected as an identity conflict, and an explicit unknown session
-is rejected rather than created.  Attachments, durable outbox delivery, voice,
-and Telegram or other external channel adapters remain future integration
-slices.
+is rejected rather than created.  The branch-local #750 slice now projects the
+same conversation, thread, owner, operator-session, device, channel, transport,
+correlation, causation, and redacted attachment metadata into REST responses,
+WebSocket frames, session history, approvals, and native-notification receipts.
+`Session.id` remains the sole conversation key; these fields are lineage
+receipts rather than a second conversation store.  Session ownership and
+operator-session validity are checked again before native outbox claim, and
+deleted or revoked conversations are cancelled with an explicit degraded
+reason so a restart cannot dispatch stale work.
+
+Native notifications use the existing SQLite outbox and delivery-attempt
+tables.  An idempotency key is bound to one payload digest, so retries across
+queue instances or process restarts return the same notification row.  Lease
+expiry, daemon failure, and ambiguous handoff become operator-visible
+`unknown` recovery receipts with preserved attempt and fencing metadata;
+revoked, expired, missing, or deleted owners remain cancelled and visible to
+recovery.  Attachment references retain only bounded public metadata such as
+an attachment id, media type, hash, size, duration, voice-note flag, and
+quarantine status; file paths, provider URLs, and credentials are discarded.
+No live Telegram, macOS provider, or other external adapter is claimed by this
+slice; those adapters still require their own authenticated transport and
+runtime proof.
 
 ## Telegram Ingress Contract (Branch-Local #752 Partial)
 

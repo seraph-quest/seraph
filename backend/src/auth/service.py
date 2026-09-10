@@ -225,6 +225,55 @@ async def authenticate_token(token: str | None, *, touch: bool = True) -> Authen
         )
 
 
+async def authenticate_session(
+    session_id: str | None,
+    *,
+    touch: bool = True,
+) -> AuthenticatedOperator:
+    """Validate a live session, following refresh replacements for WS continuity.
+
+    A rotated bearer token remains revoked when presented to ``authenticate_token``.
+    An already-authenticated WebSocket, however, is bound to the server-issued
+    session identity rather than retaining the old token forever.  Following the
+    bounded replacement chain lets that socket survive the normal refresh
+    rotation while explicit logout/revocation still closes it.
+    """
+    if not session_id:
+        raise AuthFailure("authentication_required")
+    now = datetime.now(timezone.utc)
+    current_id = session_id
+    visited: set[str] = set()
+    async with get_session() as db:
+        for _ in range(8):
+            if not current_id or current_id in visited:
+                raise AuthFailure("session_revoked")
+            visited.add(current_id)
+            record = await db.get(OperatorSession, current_id)
+            if record is None:
+                raise AuthFailure("authentication_required")
+            if record.revoked_at is not None:
+                if record.replaced_by_id:
+                    current_id = record.replaced_by_id
+                    continue
+                raise AuthFailure("session_revoked")
+            idle_expires_at = _aware(record.idle_expires_at)
+            absolute_expires_at = _aware(record.absolute_expires_at)
+            if now >= idle_expires_at or now >= absolute_expires_at:
+                record.revoked_at = now
+                db.add(record)
+                raise AuthFailure("session_expired")
+            if touch:
+                record.last_seen_at = now
+                record.idle_expires_at = min(
+                    now + timedelta(seconds=settings.operator_auth_idle_seconds), absolute_expires_at
+                )
+                db.add(record)
+            return AuthenticatedOperator(
+                record.id, _principal(record.id), record.idle_expires_at, record.absolute_expires_at
+            )
+    raise AuthFailure("session_revoked")
+
+
 async def revoke_session(session_id: str) -> None:
     async with get_session() as db:
         record = await db.get(OperatorSession, session_id)

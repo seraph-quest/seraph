@@ -1,5 +1,7 @@
 import { useEffect, useRef, useCallback } from "react";
 import { API_URL, WS_URL, WS_RECONNECT_DELAY_MS, WS_PING_INTERVAL_MS } from "../config/constants";
+import { apiFetch } from "../lib/api";
+import { signalAuthRequired } from "../lib/operatorAuthEvents";
 import { useChatStore } from "../stores/chatStore";
 import { detectToolFromStep } from "../lib/toolParser";
 import { getIdleState, getThinkingState } from "../lib/animationStateMachine";
@@ -13,6 +15,14 @@ function makeId(): string {
 const WS_BACKOFF_MAX_MS = 30_000;
 export const WS_RESPONSE_TIMEOUT_MS = 130_000;
 export const REST_RESPONSE_TIMEOUT_MS = 130_000;
+
+/** Resolve proxy-relative WebSocket paths against the cockpit origin. */
+export function resolveWebSocketUrl(value: string, locationHref?: string): string {
+  if (!value.startsWith("/")) return value;
+  const base = locationHref ?? window.location.href;
+  const origin = base.replace(/^http:/, "ws:").replace(/^https:/, "wss:");
+  return new URL(value, origin).toString();
+}
 const ACTIVE_RESPONSE_TYPES = new Set([
   "status",
   "step",
@@ -295,7 +305,7 @@ export function useWebSocket() {
     const timeoutId = setTimeout(() => controller.abort(), REST_RESPONSE_TIMEOUT_MS);
 
     try {
-      const response = await fetch(`${API_URL}/api/chat`, {
+      const response = await apiFetch(`${API_URL}/api/chat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         signal: controller.signal,
@@ -386,7 +396,7 @@ export function useWebSocket() {
     if (wsRef.current?.readyState === WebSocket.OPEN) return;
 
     setConnectionStatus("connecting");
-    const ws = new WebSocket(WS_URL);
+    const ws = new WebSocket(resolveWebSocketUrl(WS_URL));
     wsRef.current = ws;
     if (connectTimeoutRef.current) {
       clearTimeout(connectTimeoutRef.current);
@@ -579,7 +589,7 @@ export function useWebSocket() {
       }
     };
 
-    ws.onclose = () => {
+    ws.onclose = (event) => {
       if (wsRef.current !== ws) return;
       clearResponseTimeout();
       clearStreamingMessage();
@@ -594,6 +604,10 @@ export function useWebSocket() {
       setConnectionStatus("disconnected");
       wsRef.current = null;
       if (pingRef.current) clearInterval(pingRef.current);
+      if (event.code === 4401) {
+        signalAuthRequired();
+        return;
+      }
       reconnectRef.current = setTimeout(connect, backoffRef.current);
       backoffRef.current = Math.min(backoffRef.current * 2, WS_BACKOFF_MAX_MS);
     };

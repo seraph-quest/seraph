@@ -279,6 +279,11 @@ class TestWebSocket:
             assert first_responses[-1]["type"] == "final"
             assert duplicate["type"] == "error"
             assert duplicate["reason"] == "chat_message_duplicate"
+            assert duplicate["session_id"] == duplicate["conversation_id"] == duplicate["thread_id"] == session_id
+            assert duplicate["message_id"] == first_responses[-1]["causation_id"]
+            assert duplicate["owner_principal_id"]
+            assert duplicate["transport"] == "websocket"
+            assert duplicate["degraded_state"] == "duplicate_rejected"
             assert stream_calls == ["Retry-safe websocket message"]
         finally:
             stack.close()

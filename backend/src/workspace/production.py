@@ -24,8 +24,17 @@ from pathlib import Path
 import stat
 from typing import Any, Iterator, Mapping
 
-from src.workspace.lifecycle import workspace_backup_dir, workspace_restore_staging_dir
-from src.workspace.state_registry import WorkspaceStateError, canonical_workspace_root
+from src.workspace.lifecycle import (
+    _require_production_fence,
+    lifecycle_fence_marker,
+    workspace_backup_dir,
+    workspace_restore_staging_dir,
+)
+from src.workspace.state_registry import (
+    WorkspaceStateError,
+    canonical_workspace_root,
+    canonical_workspace_root_identity,
+)
 
 
 CANONICAL_CONTAINER_WORKSPACE = "/app/data"
@@ -60,6 +69,12 @@ class DuplicateWorkspaceOwnerError(ProductionWorkspaceError):
     """Raised when another maintenance owner already holds the fence."""
 
     reason_code = "production_workspace_owner_busy"
+
+
+class ProductionWorkspaceRootChangedError(ProductionWorkspaceError):
+    """Raised when the configured root changes while acquiring the owner lock."""
+
+    reason_code = "production_workspace_root_changed"
 
 
 class ProductionWorkspaceReconciliationError(ProductionWorkspaceError):
@@ -387,8 +402,15 @@ def _mountinfo_receipt(
 
 
 def _open_fenced_lock(workspace: ProductionWorkspace, *, exclusive: bool) -> int:
+    try:
+        initial_identity = canonical_workspace_root_identity(workspace.host_root)
+    except WorkspaceStateError as exc:
+        raise ProductionWorkspaceRootChangedError(
+            "production workspace root identity is unavailable"
+        ) from exc
     lock_path = workspace.maintenance_lock_path
     try:
+        _assert_no_symlink_components(workspace.host_root, label="production workspace root")
         if lock_path.is_symlink():
             raise DuplicateWorkspaceOwnerError("workspace owner lock path is a symlink")
         descriptor = os.open(
@@ -408,6 +430,27 @@ def _open_fenced_lock(workspace: ProductionWorkspace, *, exclusive: bool) -> int
         raise DuplicateWorkspaceOwnerError(
             "another production workspace owner is active"
         ) from exc
+    try:
+        current_identity = canonical_workspace_root_identity(workspace.host_root)
+    except WorkspaceStateError as exc:
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+        finally:
+            os.close(descriptor)
+        raise ProductionWorkspaceRootChangedError(
+            "production workspace root identity changed while acquiring owner lock"
+        ) from exc
+    if (
+        current_identity["device"] != initial_identity["device"]
+        or current_identity["inode"] != initial_identity["inode"]
+    ):
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+        finally:
+            os.close(descriptor)
+        raise ProductionWorkspaceRootChangedError(
+            "production workspace root identity changed while acquiring owner lock"
+        )
     return descriptor
 
 
@@ -505,6 +548,7 @@ def reconcile_production_restore(
     authority rows are invalidated in the staged SQLite database; the optional
     calendar credential is dropped so it must be re-provisioned.
     """
+    _require_production_fence(registry)
     import sqlite3
 
     entries = source_manifest.get("entries")
@@ -519,8 +563,8 @@ def reconcile_production_restore(
         if not isinstance(logical_path, str):
             raise ProductionWorkspaceReconciliationError("derived restore path is invalid")
         if logical_path == MAINTENANCE_LOCK_NAME:
-            # The owner lock is recreated by the next backend or maintenance
-            # process and must never be copied into a staged generation.
+            # The owner lock is handed off by lifecycle code as a hard link;
+            # it is never treated as archive payload or authority state.
             continue
         if entry.get("file_type") == "directory":
             derived_directories.append(logical_path)
@@ -636,6 +680,154 @@ def reconcile_production_restore(
     }
 
 
+def reconcile_production_rollback(
+    *,
+    active: Path,
+    target: Path,
+    registry: Any,
+) -> dict[str, Any]:
+    """Carry restore-time safety state into the retained rollback generation.
+
+    The retained root predates the restore and can therefore contain bearer
+    sessions or executable workflow authority that the staged generation has
+    already revoked or blocked.  Rollback keeps the requested canonical data,
+    while reapplying those safety transitions and unioning durable tombstones,
+    revocations, configuration history, and unresolved cost liabilities.
+    """
+    _require_production_fence(registry)
+    import sqlite3
+
+    active_db = active / registry.config.database_path
+    target_db = target / registry.config.database_path
+    if (
+        not active_db.is_file()
+        or active_db.is_symlink()
+        or not target_db.is_file()
+        or target_db.is_symlink()
+    ):
+        raise ProductionWorkspaceReconciliationError("rollback authority databases are unavailable")
+
+    def table_names(connection: sqlite3.Connection) -> set[str]:
+        return {
+            str(row[0])
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            ).fetchall()
+        }
+
+    def table_columns(connection: sqlite3.Connection, table: str) -> list[str]:
+        return [
+            str(row[1])
+            for row in connection.execute(
+                f'PRAGMA table_info("{table.replace(chr(34), chr(34) * 2)}")'
+            ).fetchall()
+        ]
+
+    def quote(identifier: str) -> str:
+        return '"' + identifier.replace('"', '""') + '"'
+
+    merged_rows: dict[str, int] = {}
+    preserved_rows: dict[str, int] = {}
+    invalidated_sessions = 0
+    blocked_authority = 0
+    try:
+        source = sqlite3.connect(active_db)
+        target_connection = sqlite3.connect(target_db)
+        try:
+            source_tables = table_names(source)
+            target_tables = table_names(target_connection)
+            target_connection.execute("BEGIN IMMEDIATE")
+            for table in ("tombstones", "revocations", "config_versions", "cost_liabilities"):
+                if table not in source_tables or table not in target_tables:
+                    continue
+                source_columns = table_columns(source, table)
+                target_columns = set(table_columns(target_connection, table))
+                columns = [column for column in source_columns if column in target_columns]
+                if not columns:
+                    continue
+                values = source.execute(
+                    f"SELECT {', '.join(quote(column) for column in columns)} "
+                    f"FROM {quote(table)}"
+                ).fetchall()
+                placeholders = ", ".join("?" for _ in columns)
+                before_changes = target_connection.total_changes
+                target_connection.executemany(
+                    f"INSERT OR IGNORE INTO {quote(table)} "
+                    f"({', '.join(quote(column) for column in columns)}) VALUES ({placeholders})",
+                    values,
+                )
+                inserted = target_connection.total_changes - before_changes
+                merged_rows[table] = inserted
+                preserved_rows[table] = max(0, len(values) - inserted)
+
+            if "operator_sessions" in target_tables:
+                columns = set(table_columns(target_connection, "operator_sessions"))
+                if "revoked_at" not in columns:
+                    raise ProductionWorkspaceReconciliationError(
+                        "rollback session invalidation schema is unavailable"
+                    )
+                invalidated_sessions = int(
+                    target_connection.execute(
+                        "SELECT COUNT(*) FROM operator_sessions WHERE revoked_at IS NULL"
+                    ).fetchone()[0]
+                )
+                target_connection.execute(
+                    "UPDATE operator_sessions SET revoked_at = CURRENT_TIMESTAMP "
+                    "WHERE revoked_at IS NULL"
+                )
+
+            if "production_workflow_authority_states" in target_tables:
+                columns = set(
+                    table_columns(target_connection, "production_workflow_authority_states")
+                )
+                required = {"workflow_phase", "safe_replay_decision", "blocked_replay_reason"}
+                if not required.issubset(columns):
+                    raise ProductionWorkspaceReconciliationError(
+                        "rollback workflow authority schema is unavailable"
+                    )
+                blocked_authority = int(
+                    target_connection.execute(
+                        "SELECT COUNT(*) FROM production_workflow_authority_states "
+                        "WHERE workflow_phase NOT IN ('blocked', 'cancelled', 'failed')"
+                    ).fetchone()[0]
+                )
+                target_connection.execute(
+                    "UPDATE production_workflow_authority_states SET "
+                    "workflow_phase = 'blocked', safe_replay_decision = 'unsafe', "
+                    "blocked_replay_reason = 'workspace_restore_requires_reconciliation' "
+                    "WHERE workflow_phase NOT IN ('blocked', 'cancelled', 'failed')"
+                )
+            target_connection.commit()
+        finally:
+            source.close()
+            target_connection.close()
+    except ProductionWorkspaceReconciliationError:
+        raise
+    except sqlite3.Error as exc:
+        raise ProductionWorkspaceReconciliationError(
+            "rollback authority state could not be reconciled"
+        ) from exc
+
+    optional_token = target / "google_calendar_token.json"
+    optional_token_invalidated = False
+    if optional_token.exists() or optional_token.is_symlink():
+        if optional_token.is_symlink() or not optional_token.is_file():
+            raise ProductionWorkspaceReconciliationError("rollback optional token state is unsafe")
+        optional_token.unlink()
+        optional_token_invalidated = True
+    return {
+        "status": "ready",
+        "rows_merged": merged_rows,
+        "rows_preserved": preserved_rows,
+        "operator_sessions_invalidated": invalidated_sessions,
+        "workflow_authority_rows_blocked": blocked_authority,
+        "optional_credentials_invalidated": ["google_calendar_token.json"]
+        if optional_token_invalidated
+        else [],
+        "secret_values_included": False,
+    }
+
+
 @contextmanager
 def maintenance_fence(workspace: ProductionWorkspace) -> Iterator[None]:
     """Acquire an exclusive process-wide maintenance fence.
@@ -647,7 +839,8 @@ def maintenance_fence(workspace: ProductionWorkspace) -> Iterator[None]:
     descriptor = _open_fenced_lock(workspace, exclusive=True)
     try:
         try:
-            yield
+            with lifecycle_fence_marker():
+                yield
         finally:
             fcntl.flock(descriptor, fcntl.LOCK_UN)
     finally:
@@ -660,6 +853,7 @@ __all__ = [
     "PRODUCTION_BIND_ENV",
     "WORKSPACE_ENV",
     "DuplicateWorkspaceOwnerError",
+    "ProductionWorkspaceRootChangedError",
     "ProductionWorkspaceReconciliationError",
     "ProductionWorkspace",
     "ProductionWorkspaceConfigurationError",
@@ -670,6 +864,7 @@ __all__ = [
     "lifecycle_receipt_path",
     "read_lifecycle_receipt",
     "reconcile_production_restore",
+    "reconcile_production_rollback",
     "resolve_production_workspace",
     "validate_container_workspace_mount",
     "write_lifecycle_receipt",

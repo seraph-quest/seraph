@@ -395,6 +395,9 @@ class ApprovalTool(Tool):
 
         summary = format_tool_call_summary(self.name, arguments, set())
         risk_level = self.risk_level_override or get_tool_risk_level(self.name, is_mcp=self.is_mcp)
+        # Pending approvals are durable capabilities, so they need a bounded
+        # decision window even when the wrapped tool did not provide one.
+        approval_expires_at = time.time() + 5 * 60.0
         request = _run_async(
             approval_repository.get_or_create_pending(
                 session_id=session_id,
@@ -406,6 +409,8 @@ class ApprovalTool(Tool):
                     "arguments": redact_for_audit(arguments),
                     **build_approval_owner_details(session_id=session_id, principal=principal),
                     **({"approval_context": approval_context} if approval_context else {}),
+                    "approval_expires_at": approval_expires_at,
+                    "expires_at": approval_expires_at,
                 },
             )
         )

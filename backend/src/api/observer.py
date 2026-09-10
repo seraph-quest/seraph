@@ -73,7 +73,16 @@ class NativeNotificationResponse(BaseModel):
     urgency: int | None = None
     surface: str = "notification"
     session_id: str | None = None
+    conversation_id: str | None = None
     thread_id: str | None = None
+    owner_principal_id: str | None = None
+    operator_session_id: str | None = None
+    device_id: str | None = None
+    channel: str = "native_notification"
+    transport: str = "native_notification"
+    correlation_id: str | None = None
+    causation_id: str | None = None
+    attachment_refs: list[dict[str, Any]] = Field(default_factory=list)
     thread_label: str | None = None
     thread_source: str = "ambient"
     continuation_mode: str = "open_thread"
@@ -82,6 +91,7 @@ class NativeNotificationResponse(BaseModel):
     delivery_status: str = "queued"
     attempt_count: int = 0
     fencing_token: int = 0
+    degraded_state: str | None = None
 
 
 class NativeNotificationPollResponse(BaseModel):
@@ -200,6 +210,16 @@ def _require_authenticated_daemon(request: Request, worker_id: str) -> None:
         raise HTTPException(status_code=401, detail="daemon identity header is required")
     if presented != worker_id:
         raise HTTPException(status_code=401, detail="daemon identity does not match worker_id")
+
+
+def _require_authenticated_operator_binding(request: Request) -> tuple[str, str]:
+    """Resolve the authenticated browser principal and operator session."""
+    operator = getattr(request.state, "operator", None)
+    principal_id = getattr(getattr(operator, "principal", None), "principal_id", None)
+    operator_session_id = getattr(operator, "session_id", None)
+    if not operator or not principal_id or not operator_session_id:
+        raise HTTPException(status_code=401, detail="authenticated operator request is required")
+    return str(principal_id), str(operator_session_id)
 
 
 class QueuedInsightResponse(BaseModel):
@@ -862,9 +882,13 @@ def _screenshot_folder_image_analysis(
 
 
 @router.get("/observer/daemon-status", response_model=DaemonStatusResponse)
-async def daemon_status():
+async def daemon_status(request: Request):
     """Return daemon connectivity status based on heartbeat timestamp."""
-    return await _daemon_status_payload()
+    owner_principal_id, operator_session_id = _require_authenticated_operator_binding(request)
+    return await _daemon_status_payload(
+        owner_principal_id=owner_principal_id,
+        operator_session_id=operator_session_id,
+    )
 
 
 def _continuity_surface(
@@ -940,13 +964,24 @@ def _classify_daemon_status(
     }
 
 
-async def _daemon_status_payload() -> dict[str, str | int | float | bool | None]:
+async def _daemon_status_payload(
+    *,
+    owner_principal_id: str | None = None,
+    operator_session_id: str | None = None,
+) -> dict[str, str | int | float | bool | None]:
     ctx = context_manager.get_context()
     daemon_status = _read_daemon_status_file()
     classified = _classify_daemon_status(daemon_status)
     connected = context_manager.is_daemon_connected()
-    pending_notification_count = await native_notification_queue.count()
-    recoveries = await native_notification_queue.recovery(limit=100)
+    pending_notification_count = await native_notification_queue.count(
+        owner_principal_id=owner_principal_id,
+        operator_session_id=operator_session_id,
+    )
+    recoveries = await native_notification_queue.recovery(
+        limit=100,
+        owner_principal_id=owner_principal_id,
+        operator_session_id=operator_session_id,
+    )
     unknown_notification_count = sum(
         1
         for item in recoveries
@@ -2308,20 +2343,59 @@ def _observer_reach_payload() -> dict[str, list[dict[str, Any]]]:
     }
 
 
-@router.get("/observer/continuity", response_model=ObserverContinuityResponse)
-async def build_observer_continuity_snapshot() -> dict[str, Any]:
+async def build_observer_continuity_snapshot(
+    *,
+    owner_principal_id: str | None = None,
+    operator_session_id: str | None = None,
+) -> dict[str, Any]:
     """Build a single live continuity snapshot for browser and daemon surfaces."""
     from src.guardian.feedback import guardian_feedback_repository
     from src.observer.insight_queue import insight_queue
 
-    notifications = [_notification_payload(item) for item in await native_notification_queue.list()]
+    notifications = [
+        _notification_payload(item)
+        for item in await native_notification_queue.list(
+            owner_principal_id=owner_principal_id,
+            operator_session_id=operator_session_id,
+        )
+    ]
     queued_insights = await insight_queue.peek_all()
     recent_interventions = await guardian_feedback_repository.list_recent(limit=8)
     session_titles = {
         str(session["id"]): str(session.get("title") or "Untitled session")
-        for session in await session_manager.list_sessions()
+        for session in await session_manager.list_sessions(
+            owner_principal_id=owner_principal_id,
+        )
         if isinstance(session, dict) and session.get("id")
     }
+    if owner_principal_id is not None:
+        owned_session_ids = set(session_titles)
+        queued_insights = [
+            item
+            for item in queued_insights
+            if (
+                not getattr(item, "session_id", None)
+                and not getattr(item, "owner_principal_id", None)
+                and not getattr(item, "operator_session_id", None)
+            )
+            or (
+                getattr(item, "owner_principal_id", None) == owner_principal_id
+                and (
+                    not getattr(item, "operator_session_id", None)
+                    or getattr(item, "operator_session_id", None) == operator_session_id
+                )
+            )
+            or (
+                getattr(item, "session_id", None) in owned_session_ids
+                and not getattr(item, "owner_principal_id", None)
+            )
+        ]
+        recent_interventions = [
+            item
+            for item in recent_interventions
+            if not getattr(item, "session_id", None)
+            or getattr(item, "session_id", None) in owned_session_ids
+        ]
     intervention_thread_map: dict[str, tuple[str | None, str | None]] = {}
     for item in recent_interventions:
         thread_id = getattr(item, "session_id", None)
@@ -2469,7 +2543,10 @@ async def build_observer_continuity_snapshot() -> dict[str, Any]:
     )
 
     return {
-        "daemon": await _daemon_status_payload(),
+        "daemon": await _daemon_status_payload(
+            owner_principal_id=owner_principal_id,
+            operator_session_id=operator_session_id,
+        ),
         "notifications": notifications_payload,
         "queued_insights": queued_insights_payload,
         "queued_insight_count": len(queued_insights),
@@ -2485,16 +2562,31 @@ async def build_observer_continuity_snapshot() -> dict[str, Any]:
 
 
 @router.get("/observer/continuity", response_model=ObserverContinuityResponse)
-async def get_observer_continuity():
+async def get_observer_continuity(request: Request):
     """Return a single continuity snapshot for browser and daemon surfaces."""
-    return await build_observer_continuity_snapshot()
+    owner_principal_id, operator_session_id = _require_authenticated_operator_binding(request)
+    return await build_observer_continuity_snapshot(
+        owner_principal_id=owner_principal_id,
+        operator_session_id=operator_session_id,
+    )
 
 
 @router.get("/observer/notifications", response_model=NativeNotificationListResponse)
-async def list_native_notifications():
+async def list_native_notifications(request: Request):
     """Return pending native notifications for browser-side continuity controls."""
-    notifications = [item.to_dict() for item in await native_notification_queue.list()]
-    recoveries = await native_notification_queue.recovery(limit=100)
+    owner_principal_id, operator_session_id = _require_authenticated_operator_binding(request)
+    notifications = [
+        item.to_dict()
+        for item in await native_notification_queue.list(
+            owner_principal_id=owner_principal_id,
+            operator_session_id=operator_session_id,
+        )
+    ]
+    recoveries = await native_notification_queue.recovery(
+        limit=100,
+        owner_principal_id=owner_principal_id,
+        operator_session_id=operator_session_id,
+    )
     return {
         "notifications": notifications,
         "pending_count": len(notifications),
@@ -2506,9 +2598,17 @@ async def list_native_notifications():
     "/observer/notifications/recovery",
     response_model=NativeNotificationRecoveryResponse,
 )
-async def list_native_notification_recovery(limit: int = Query(default=100, ge=1, le=100)):
+async def list_native_notification_recovery(
+    request: Request,
+    limit: int = Query(default=100, ge=1, le=100),
+):
     """Expose failed/ambiguous delivery attempts and required recovery state."""
-    recoveries = await native_notification_queue.recovery(limit=limit)
+    owner_principal_id, operator_session_id = _require_authenticated_operator_binding(request)
+    recoveries = await native_notification_queue.recovery(
+        limit=limit,
+        owner_principal_id=owner_principal_id,
+        operator_session_id=operator_session_id,
+    )
     return {"recoveries": recoveries, "recovery_count": len(recoveries)}
 
 
@@ -2654,11 +2754,15 @@ async def mark_native_notification_display_attempted(
 async def reconcile_native_notification(
     notification_id: str,
     body: NotificationRecoveryRequest,
+    request: Request,
 ):
     """Requeue one unknown notification only after explicit operator review."""
+    owner_principal_id, operator_session_id = _require_authenticated_operator_binding(request)
     reconciled = await native_notification_queue.reconcile_unknown(
         notification_id,
         retry=body.action == "retry",
+        owner_principal_id=owner_principal_id,
+        operator_session_id=operator_session_id,
     )
     await log_integration_event(
         integration_type="observer_daemon",
@@ -2673,11 +2777,16 @@ async def reconcile_native_notification(
 
 
 @router.post("/observer/notifications/{notification_id}/dismiss", response_model=NotificationDismissResponse)
-async def dismiss_native_notification(notification_id: str):
+async def dismiss_native_notification(notification_id: str, request: Request):
     """Dismiss a pending native notification from the browser control surface."""
     from src.guardian.feedback import guardian_feedback_repository
 
-    notification = await native_notification_queue.dismiss(notification_id)
+    owner_principal_id, operator_session_id = _require_authenticated_operator_binding(request)
+    notification = await native_notification_queue.dismiss(
+        notification_id,
+        owner_principal_id=owner_principal_id,
+        operator_session_id=operator_session_id,
+    )
     if notification is not None and notification.intervention_id:
         try:
             await guardian_feedback_repository.update_outcome(
@@ -2715,11 +2824,15 @@ async def dismiss_native_notification(notification_id: str):
 
 
 @router.post("/observer/notifications/dismiss-all", response_model=NotificationDismissAllResponse)
-async def dismiss_all_native_notifications():
+async def dismiss_all_native_notifications(request: Request):
     """Dismiss all pending native notifications from the browser control surface."""
     from src.guardian.feedback import guardian_feedback_repository
 
-    notifications = await native_notification_queue.dismiss_all()
+    owner_principal_id, operator_session_id = _require_authenticated_operator_binding(request)
+    notifications = await native_notification_queue.dismiss_all(
+        owner_principal_id=owner_principal_id,
+        operator_session_id=operator_session_id,
+    )
     for notification in notifications:
         if notification.intervention_id:
             try:
@@ -2757,20 +2870,26 @@ async def dismiss_all_native_notifications():
 
 
 @router.post("/observer/notifications/test", response_model=NativeNotificationResponse)
-async def enqueue_test_native_notification():
+async def enqueue_test_native_notification(request: Request):
     """Queue a sample native notification so the operator can verify the desktop path."""
+    owner_principal_id, operator_session_id = _require_authenticated_operator_binding(request)
     notification = await native_notification_queue.enqueue(
         intervention_id=None,
         title="Seraph desktop shell",
         body="Native presence is connected. This is a test notification.",
         intervention_type="test",
         urgency=1,
+        owner_principal_id=owner_principal_id,
+        operator_session_id=operator_session_id,
     )
     context_manager.record_native_notification(
         title=notification.title,
         outcome="queued_test",
     )
-    pending_count = await native_notification_queue.count()
+    pending_count = await native_notification_queue.count(
+        owner_principal_id=owner_principal_id,
+        operator_session_id=operator_session_id,
+    )
     await log_integration_event(
         integration_type="observer_daemon",
         name="notifications",

@@ -33,15 +33,23 @@ from src.api.chat import (
     ChatIngressValidationError,
     _bind_chat_principal,
     build_chat_ingress_envelope,
+    assistant_message_id_for_ingress,
+    chat_assistant_metadata,
     chat_ingress_metadata,
     log_chat_ingress_event,
     validate_chat_ingress_identity,
     validate_chat_message,
 )
+from src.conversation.identity import ConversationIdentityError
 from src.auth.middleware import authenticate_websocket
-from src.auth.service import AuthFailure, auth_enabled, authenticate_token, bind_operator_principal
+from src.auth.service import (
+    AuthFailure,
+    auth_enabled,
+    authenticate_session,
+    bind_operator_principal,
+)
 from src.guardian.state import build_guardian_state
-from src.models.schemas import WSMessage, WSResponse
+from src.models.schemas import ChatIngressEnvelope, WSMessage, WSResponse
 from src.operators.local_codex import ExternalAgentRuntimeRemovedError
 from src.scheduler.connection_manager import ws_manager
 from src.tools.policy import get_current_tool_policy_mode
@@ -65,6 +73,39 @@ _INTERRUPTED_TURN_MESSAGE = (
     "Response interrupted because the browser connection closed before Seraph could finish. "
     "Please send that turn again."
 )
+
+
+def _ws_lineage_kwargs(
+    session_id: str,
+    operator,
+    ingress: ChatIngressEnvelope | None = None,
+    *,
+    message_id: str | None = None,
+    degraded_state: str | None = None,
+) -> dict:
+    """Return the shared canonical identity fields for every WS frame."""
+    operator_session_id = ingress.operator_session_id if ingress is not None else operator.session_id
+    device_id = ingress.device_id if ingress is not None else f"web-operator-session:{operator_session_id}"
+    correlation_id = ingress.correlation_id if ingress is not None else f"chat:{session_id}"
+    causation_id = ingress.message_id if ingress is not None else None
+    return {
+        "conversation_id": ingress.conversation_id if ingress is not None else session_id,
+        "thread_id": ingress.thread_id if ingress is not None else session_id,
+        "message_id": message_id,
+        "owner_principal_id": (
+            ingress.principal_id
+            if ingress is not None
+            else getattr(getattr(operator, "principal", None), "principal_id", None)
+        ),
+        "operator_session_id": operator_session_id,
+        "device_id": device_id,
+        "channel": "web",
+        "transport": "websocket",
+        "correlation_id": correlation_id,
+        "causation_id": causation_id,
+        "attachment_refs": ingress.attachment_refs if ingress is not None else [],
+        "degraded_state": degraded_state,
+    }
 
 
 class _DirectStreamOutcomeUncertain(Exception):
@@ -109,18 +150,24 @@ async def _await_authorized(awaitable, revoked_event: asyncio.Event, *, timeout:
 
 async def watch_operator_session(
     websocket,
-    auth_cookie: str | None,
+    session_id: str | None,
     revoked_event: asyncio.Event,
     revocation_guard: Event,
 ) -> None:
-    """Poll the authenticated session and close a socket after revocation/expiry."""
-    if not auth_cookie:
+    """Poll the authenticated session and close a socket after revocation/expiry.
+
+    The watcher uses the server-issued session identity so a normal bearer-token
+    refresh can replace the session without interrupting an accepted socket.
+    Explicit revocation still terminates the socket through the replacement
+    chain's terminal row.
+    """
+    if not session_id:
         return
     poll_seconds = max(float(settings.operator_auth_revocation_poll_seconds), 0.25)
     while True:
         await asyncio.sleep(poll_seconds)
         try:
-            await authenticate_token(auth_cookie, touch=False)
+            await authenticate_session(session_id, touch=False)
         except AuthFailure as exc:
             revoked_event.set()
             revocation_guard.set()
@@ -218,17 +265,22 @@ async def websocket_chat(websocket: WebSocket):
         await websocket.close(code=4401, reason=exc.code)
         return
     await websocket.accept()
-    ws_manager.connect(websocket)
+    ws_manager.connect(
+        websocket,
+        owner_principal_id=operator.principal.principal_id,
+        operator_session_id=operator.session_id,
+    )
     auth_revoked = asyncio.Event()
     revocation_guard = Event()
-    auth_cookie = websocket.cookies.get(settings.operator_auth_cookie_name) if auth_enabled() else None
+    auth_session_id = operator.session_id if auth_enabled() else None
 
     revocation_task = asyncio.create_task(
-        watch_operator_session(websocket, auth_cookie, auth_revoked, revocation_guard),
+        watch_operator_session(websocket, auth_session_id, auth_revoked, revocation_guard),
         name=f"ws-auth-watch:{operator.session_id[:8]}",
     )
     _seq = 0
     active_turn_session_id: str | None = None
+    active_turn_ingress: ChatIngressEnvelope | None = None
     active_turn_completed = True
     revocation_guard_token = None
 
@@ -243,7 +295,21 @@ async def websocket_chat(websocket: WebSocket):
             return
         active_turn_completed = True
         with suppress(Exception):
-            await session_manager.add_message(active_turn_session_id, "assistant", _INTERRUPTED_TURN_MESSAGE)
+            if active_turn_ingress is not None:
+                message_id = assistant_message_id_for_ingress(active_turn_ingress, suffix="interrupted")
+                await session_manager.add_message(
+                    active_turn_session_id,
+                    "assistant",
+                    _INTERRUPTED_TURN_MESSAGE,
+                    metadata_json=chat_assistant_metadata(
+                        active_turn_ingress,
+                        message_id=message_id,
+                        degraded_state="connection_interrupted",
+                    ),
+                    message_id=message_id,
+                )
+            else:
+                await session_manager.add_message(active_turn_session_id, "assistant", _INTERRUPTED_TURN_MESSAGE)
 
     async def _ensure_operator_active() -> None:
         if auth_revoked.is_set():
@@ -274,9 +340,9 @@ async def websocket_chat(websocket: WebSocket):
         while True:
             await _ensure_operator_active()
             raw = await websocket.receive_text()
-            if auth_cookie:
+            if auth_session_id:
                 try:
-                    operator = await authenticate_token(auth_cookie, touch=True)
+                    operator = await authenticate_session(operator.session_id, touch=True)
                 except AuthFailure:
                     auth_revoked.set()
                     revocation_guard.set()
@@ -286,6 +352,11 @@ async def websocket_chat(websocket: WebSocket):
                     auth_revoked.set()
                     revocation_guard.set()
                     raise _OperatorSessionRevoked
+                ws_manager.bind_operator(
+                    websocket,
+                    owner_principal_id=operator.principal.principal_id,
+                    operator_session_id=operator.session_id,
+                )
             try:
                 data = json.loads(raw)
                 ws_msg = WSMessage(**data)
@@ -357,6 +428,7 @@ async def websocket_chat(websocket: WebSocket):
                     ws_msg.session_id,
                     owner_principal_id=operator.principal.principal_id,
                 )
+                ws_manager.bind_conversation(websocket, session.id)
             except SessionNotFoundError as exc:
                 active_turn_session_id = exc.session_id
                 active_turn_completed = True
@@ -401,21 +473,37 @@ async def websocket_chat(websocket: WebSocket):
                 continue
             ingress = None
             if ws_msg.type != "resume_message":
-                ingress = build_chat_ingress_envelope(
-                    message=ws_msg.message,
-                    session_id=session.id,
-                    principal=chat_principal,
-                    operator_session_id=operator.session_id,
-                    transport="websocket",
-                    client_message_id=ws_msg.message_id,
-                    idempotency_key=ws_msg.idempotency_key,
-                )
+                try:
+                    ingress = build_chat_ingress_envelope(
+                        message=ws_msg.message,
+                        session_id=session.id,
+                        principal=chat_principal,
+                        operator_session_id=operator.session_id,
+                        transport="websocket",
+                        client_message_id=ws_msg.message_id,
+                        idempotency_key=ws_msg.idempotency_key,
+                        attachments=ws_msg.attachments,
+                    )
+                except ConversationIdentityError as exc:
+                    active_turn_completed = True
+                    await websocket.send_text(
+                        WSResponse(
+                            type="error",
+                            content=exc.message,
+                            session_id=session.id,
+                            reason=exc.code,
+                            **_ws_lineage_kwargs(session.id, operator),
+                            seq=_next_seq(),
+                        ).model_dump_json()
+                    )
+                    continue
                 try:
                     _ingress_message, duplicate = await session_manager.reserve_ingress_message(
                         session.id,
                         ws_msg.message,
                         message_id=ingress.message_id,
                         metadata_json=chat_ingress_metadata(ingress),
+                        attachment_refs=ws_msg.attachments,
                     )
                 except MessageIngressConflictError as exc:
                     await log_chat_ingress_event(
@@ -431,6 +519,13 @@ async def websocket_chat(websocket: WebSocket):
                             content="This message identity is already bound to another request.",
                             session_id=session.id,
                             reason="chat_message_identity_conflict",
+                            **_ws_lineage_kwargs(
+                                session.id,
+                                operator,
+                                ingress,
+                                message_id=ingress.message_id,
+                                degraded_state="identity_conflict",
+                            ),
                             seq=_next_seq(),
                         ).model_dump_json()
                     )
@@ -449,6 +544,13 @@ async def websocket_chat(websocket: WebSocket):
                             content="This message was already accepted for this session.",
                             session_id=session.id,
                             reason="chat_message_duplicate",
+                            **_ws_lineage_kwargs(
+                                session.id,
+                                operator,
+                                ingress,
+                                message_id=ingress.message_id,
+                                degraded_state="duplicate_rejected",
+                            ),
                             seq=_next_seq(),
                         ).model_dump_json()
                     )
@@ -458,6 +560,7 @@ async def websocket_chat(websocket: WebSocket):
                     envelope=ingress,
                     status="accepted",
                 )
+            active_turn_ingress = ingress
             active_turn_session_id = session.id
             active_turn_completed = False
             await websocket.send_text(
@@ -465,6 +568,7 @@ async def websocket_chat(websocket: WebSocket):
                     type="status",
                     content="Seraph received the message.",
                     session_id=session.id,
+                    **_ws_lineage_kwargs(session.id, operator, ingress),
                     seq=_next_seq(),
                 ).model_dump_json()
             )
@@ -536,12 +640,13 @@ async def websocket_chat(websocket: WebSocket):
                 revocation_guard_token = set_revocation_guard(revocation_guard)
                 try:
                     await websocket.send_text(
-                        WSResponse(
-                            type="status",
-                            content="Seraph is using the governed OpenRouter chat runtime.",
-                            session_id=session.id,
-                            seq=_next_seq(),
-                        ).model_dump_json()
+                    WSResponse(
+                        type="status",
+                        content="Seraph is using the governed OpenRouter chat runtime.",
+                        session_id=session.id,
+                        **_ws_lineage_kwargs(session.id, operator, ingress),
+                        seq=_next_seq(),
+                    ).model_dump_json()
                     )
                     streamed_parts: list[str] = []
                     emitted_safe_chars = 0
@@ -565,6 +670,7 @@ async def websocket_chat(websocket: WebSocket):
                                         type="delta",
                                         content=safe_delta,
                                         session_id=session.id,
+                                        **_ws_lineage_kwargs(session.id, operator, ingress),
                                         seq=_next_seq(),
                                     ).model_dump_json()
                                 )
@@ -685,7 +791,23 @@ async def websocket_chat(websocket: WebSocket):
                     reset_runtime_context(auth_tokens)
                     _finish_request(llm_request_id)
 
-                await session_manager.add_message(session.id, "assistant", final_result)
+                direct_assistant_message_id = (
+                    assistant_message_id_for_ingress(ingress) if ingress is not None else None
+                )
+                await session_manager.add_message(
+                    session.id,
+                    "assistant",
+                    final_result,
+                    metadata_json=(
+                        chat_assistant_metadata(
+                            ingress,
+                            message_id=direct_assistant_message_id,
+                        )
+                        if ingress is not None and direct_assistant_message_id is not None
+                        else None
+                    ),
+                    message_id=direct_assistant_message_id,
+                )
                 active_turn_completed = True
                 await log_agent_run_event(
                     session_id=session.id,
@@ -706,6 +828,16 @@ async def websocket_chat(websocket: WebSocket):
                         type="final",
                         content=final_result,
                         session_id=session.id,
+                        **_ws_lineage_kwargs(
+                            session.id,
+                            operator,
+                            ingress,
+                            message_id=(
+                                assistant_message_id_for_ingress(ingress)
+                                if ingress is not None
+                                else None
+                            ),
+                        ),
                         seq=_next_seq(),
                     ).model_dump_json()
                 )
@@ -716,6 +848,7 @@ async def websocket_chat(websocket: WebSocket):
                     type="status",
                     content="Seraph is preparing the agent context.",
                     session_id=session.id,
+                    **_ws_lineage_kwargs(session.id, operator, ingress),
                     seq=_next_seq(),
                 ).model_dump_json()
             )
@@ -725,6 +858,7 @@ async def websocket_chat(websocket: WebSocket):
                     type="status",
                     content="Seraph is using the governed OpenRouter chat runtime.",
                     session_id=session.id,
+                    **_ws_lineage_kwargs(session.id, operator, ingress),
                     seq=_next_seq(),
                 ).model_dump_json()
             )
@@ -772,6 +906,7 @@ async def websocket_chat(websocket: WebSocket):
                                     type="step",
                                     content=content,
                                     session_id=session.id,
+                                    **_ws_lineage_kwargs(session.id, operator, ingress),
                                     step=step_num,
                                     seq=_next_seq(),
                                 ).model_dump_json()
@@ -786,6 +921,7 @@ async def websocket_chat(websocket: WebSocket):
                                         type="step",
                                         content=safe_observations,
                                         session_id=session.id,
+                                        **_ws_lineage_kwargs(session.id, operator, ingress),
                                         step=step_num,
                                         seq=_next_seq(),
                                     ).model_dump_json()
@@ -858,6 +994,12 @@ async def websocket_chat(websocket: WebSocket):
                             "This is a high-risk action. Approve it in chat to continue automatically."
                         ),
                         session_id=session.id,
+                        **_ws_lineage_kwargs(
+                            session.id,
+                            operator,
+                            ingress,
+                            degraded_state="approval_required",
+                        ),
                         seq=_next_seq(),
                         approval_id=exc.approval_id,
                         tool_name=exc.tool_name,
@@ -867,16 +1009,35 @@ async def websocket_chat(websocket: WebSocket):
                 continue
             except ClarificationRequired as exc:
                 rendered = await redact_secrets_in_text(exc.render_message())
+                clarification_message_id = (
+                    assistant_message_id_for_ingress(ingress, suffix="clarification")
+                    if ingress is not None
+                    else None
+                )
                 await session_manager.add_message(
                     session.id,
                     "assistant",
                     rendered,
-                    metadata_json=json.dumps({
-                        "display_role": "clarification",
-                        "question": exc.question,
-                        "reason": exc.reason,
-                        "options": exc.options,
-                    }),
+                    metadata_json=(
+                        chat_assistant_metadata(
+                            ingress,
+                            message_id=clarification_message_id,
+                            display_role="clarification",
+                            extra={
+                                "question": exc.question,
+                                "reason": exc.reason,
+                                "options": exc.options,
+                            },
+                        )
+                        if ingress is not None and clarification_message_id is not None
+                        else json.dumps({
+                            "display_role": "clarification",
+                            "question": exc.question,
+                            "reason": exc.reason,
+                            "options": exc.options,
+                        })
+                    ),
+                    message_id=clarification_message_id,
                 )
                 active_turn_completed = True
                 await audit_repository.log_event(
@@ -897,6 +1058,12 @@ async def websocket_chat(websocket: WebSocket):
                         type="clarification_required",
                         content=rendered,
                         session_id=session.id,
+                        **_ws_lineage_kwargs(
+                            session.id,
+                            operator,
+                            ingress,
+                            message_id=clarification_message_id,
+                        ),
                         seq=_next_seq(),
                         question=exc.question,
                         reason=exc.reason or None,
@@ -940,7 +1107,23 @@ async def websocket_chat(websocket: WebSocket):
                 if "llm_request_id" in locals():
                     _finish_request(llm_request_id)
 
-            await session_manager.add_message(session.id, "assistant", final_result)
+            generic_assistant_message_id = (
+                assistant_message_id_for_ingress(ingress) if ingress is not None else None
+            )
+            await session_manager.add_message(
+                session.id,
+                "assistant",
+                final_result,
+                metadata_json=(
+                    chat_assistant_metadata(
+                        ingress,
+                        message_id=generic_assistant_message_id,
+                    )
+                    if ingress is not None and generic_assistant_message_id is not None
+                    else None
+                ),
+                message_id=generic_assistant_message_id,
+            )
             active_turn_completed = True
             if run_outcome == "succeeded":
                 await log_agent_run_event(
@@ -963,6 +1146,13 @@ async def websocket_chat(websocket: WebSocket):
                     type="final",
                     content=final_result,
                     session_id=session.id,
+                    **_ws_lineage_kwargs(
+                        session.id,
+                        operator,
+                        ingress,
+                        message_id=generic_assistant_message_id,
+                        degraded_state=("agent_timed_out" if run_outcome == "timed_out" else None),
+                    ),
                     seq=_next_seq(),
                 ).model_dump_json()
             )

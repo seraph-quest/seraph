@@ -57,6 +57,7 @@ _LEGACY_WORKFLOW_STATUS_MAP = {
     "completed": "succeeded",
     "succeeded": "succeeded",
     "failed": "failed",
+    "degraded": "degraded",
     "cancelled": "cancelled",
     "canceled": "cancelled",
     "queued": "queued",
@@ -136,6 +137,14 @@ async def _ensure_legacy_columns(conn) -> None:
     if queued_insight_columns and "session_id" not in queued_insight_columns:
         await conn.exec_driver_sql(
             "ALTER TABLE queued_insights ADD COLUMN session_id VARCHAR"
+        )
+    if queued_insight_columns and "owner_principal_id" not in queued_insight_columns:
+        await conn.exec_driver_sql(
+            "ALTER TABLE queued_insights ADD COLUMN owner_principal_id VARCHAR"
+        )
+    if queued_insight_columns and "operator_session_id" not in queued_insight_columns:
+        await conn.exec_driver_sql(
+            "ALTER TABLE queued_insights ADD COLUMN operator_session_id VARCHAR"
         )
 
     guardian_intervention_columns = await _table_columns("guardian_interventions")
@@ -275,6 +284,99 @@ async def _ensure_legacy_columns(conn) -> None:
                 {"owner_principal_id": _SINGLE_OPERATOR_PRINCIPAL_ID},
             )
 
+    # #750 adds queryable lineage to the existing transcript and durable
+    # surfaces.  The session primary key remains the canonical conversation;
+    # these additive fields are receipts, never an alternate identity store.
+    message_lineage_columns = await _add_missing_columns(
+        "messages",
+        {
+            "conversation_id": "VARCHAR",
+            "thread_id": "VARCHAR",
+            "owner_principal_id": "VARCHAR",
+            "operator_session_id": "VARCHAR",
+            "device_id": "VARCHAR",
+            "channel": "VARCHAR",
+            "transport": "VARCHAR",
+            "correlation_id": "VARCHAR",
+            "causation_id": "VARCHAR",
+            "attachment_refs_json": "VARCHAR DEFAULT '[]'",
+        },
+    )
+    for column in (
+        "conversation_id",
+        "thread_id",
+        "owner_principal_id",
+        "operator_session_id",
+        "correlation_id",
+    ):
+        if column in message_lineage_columns:
+            await conn.exec_driver_sql(
+                f"CREATE INDEX IF NOT EXISTS ix_messages_{column} ON messages ({column})"
+            )
+
+    approval_lineage_columns = await _add_missing_columns(
+        "approval_requests",
+        {
+            "conversation_id": "VARCHAR",
+            "thread_id": "VARCHAR",
+            "owner_principal_id": "VARCHAR",
+            "operator_session_id": "VARCHAR",
+            "device_id": "VARCHAR",
+            "channel": "VARCHAR DEFAULT 'web'",
+            "transport": "VARCHAR DEFAULT 'rest'",
+            "correlation_id": "VARCHAR",
+            "causation_id": "VARCHAR",
+            "attachment_refs_json": "VARCHAR DEFAULT '[]'",
+            "challenge": "VARCHAR",
+            "action": "VARCHAR",
+            "expires_at": "DATETIME",
+        },
+    )
+    for column in (
+        "conversation_id",
+        "thread_id",
+        "owner_principal_id",
+        "operator_session_id",
+        "correlation_id",
+        "action",
+        "expires_at",
+    ):
+        if column in approval_lineage_columns:
+            await conn.exec_driver_sql(
+                f"CREATE INDEX IF NOT EXISTS ix_approval_requests_{column} "
+                f"ON approval_requests ({column})"
+            )
+
+    outbox_lineage_columns = await _add_missing_columns(
+        "native_notification_outbox",
+        {
+            "operator_session_id": "VARCHAR",
+            "device_id": "VARCHAR",
+            "channel": "VARCHAR DEFAULT 'native_notification'",
+            "transport": "VARCHAR DEFAULT 'native_notification'",
+            "conversation_id": "VARCHAR",
+            "correlation_id": "VARCHAR",
+            "causation_id": "VARCHAR",
+            "attachment_refs_json": "VARCHAR DEFAULT '[]'",
+            "degraded_state": "VARCHAR",
+        },
+    )
+    for column in (
+        "operator_session_id",
+        "device_id",
+        "channel",
+        "transport",
+        "conversation_id",
+        "correlation_id",
+        "causation_id",
+        "degraded_state",
+    ):
+        if column in outbox_lineage_columns:
+            await conn.exec_driver_sql(
+                f"CREATE INDEX IF NOT EXISTS ix_native_notification_outbox_{column} "
+                f"ON native_notification_outbox ({column})"
+            )
+
     proof_columns = await _add_missing_columns(
         "model_capability_proofs",
         {
@@ -358,6 +460,7 @@ async def _ensure_legacy_columns(conn) -> None:
             "capability_version": "VARCHAR DEFAULT 'workflow-v1'",
             "input_digest": "VARCHAR",
             "authority_digest": "VARCHAR",
+            "budget_digest": "VARCHAR",
             "idempotency_scope": "VARCHAR",
             "idempotency_key": "VARCHAR",
             "idempotency_binding": "VARCHAR",

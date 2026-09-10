@@ -1,6 +1,7 @@
 from datetime import datetime, timedelta, timezone
 import asyncio
 from threading import Event
+from types import SimpleNamespace
 
 import pytest
 from fastapi import HTTPException, Response
@@ -12,11 +13,19 @@ from src.auth.middleware import validate_request_boundary
 from src.auth.middleware import OperatorAuthMiddleware
 from src.api.ws import _OperatorSessionRevoked, _await_authorized, watch_operator_session, websocket_chat
 from src.api.chat import _ensure_rest_authorized, _watch_rest_operator_session
-from src.auth.service import AuthFailure, authenticate_token, bind_operator_principal, create_session, revoke_session
+from src.auth.service import (
+    AuthFailure,
+    authenticate_session,
+    authenticate_token,
+    bind_operator_principal,
+    create_session,
+    revoke_session,
+)
 from src.auth.cancellation import RuntimeRevokedError, reset_revocation_guard, set_revocation_guard
 from src.llm_runtime import _governed_openai_chat_completion
 from src.api.auth import _reset_login_throttle_for_tests, _login_source
 from src.api.auth import LoginRequest, login
+from src.api.model_fabric_settings import _is_local_request
 
 
 def _request(peer: str = "127.0.0.1", headers: list[tuple[bytes, bytes]] | None = None) -> Request:
@@ -88,6 +97,23 @@ async def test_login_cookie_session_refresh_rotation_and_logout(client):
     assert logout.status_code == 204
     with pytest.raises(AuthFailure, match="session_revoked"):
         await authenticate_token(new_token)
+
+
+@pytest.mark.asyncio
+async def test_live_session_identity_follows_refresh_replacement(client):
+    _, old_token = await _login(client)
+    old_operator = await authenticate_token(old_token, touch=False)
+
+    refreshed = await client.post("/api/auth/refresh", headers={"origin": ORIGIN})
+    assert refreshed.status_code == 200
+    new_token = refreshed.cookies.get(settings.operator_auth_cookie_name)
+    assert new_token
+    new_operator = await authenticate_token(new_token, touch=False)
+
+    followed = await authenticate_session(old_operator.session_id, touch=False)
+    assert followed.session_id == new_operator.session_id
+    with pytest.raises(AuthFailure, match="session_revoked"):
+        await authenticate_token(old_token, touch=False)
 
 
 @pytest.mark.asyncio
@@ -189,6 +215,40 @@ def test_websocket_boundary_rejects_malformed_host_authorities(host):
     assert validate_request_boundary(host=host, origin=ORIGIN, method="POST") == "origin_forbidden"
 
 
+def test_authenticated_lan_operator_can_use_model_setup_without_being_loopback(monkeypatch):
+    operator = SimpleNamespace(
+        principal=SimpleNamespace(authenticated=True),
+    )
+    request = SimpleNamespace(
+        client=SimpleNamespace(host="192.168.1.50"),
+        state=SimpleNamespace(operator=operator),
+    )
+    assert _is_local_request(request) is True
+
+    anonymous = SimpleNamespace(
+        client=SimpleNamespace(host="192.168.1.50"),
+        state=SimpleNamespace(),
+    )
+    assert _is_local_request(anonymous) is False
+
+
+def test_configured_lan_host_and_origin_are_enforced(monkeypatch):
+    monkeypatch.setattr(settings, "operator_auth_allowed_hosts", "seraph.lan,192.168.1.50")
+    monkeypatch.setattr(settings, "operator_auth_allowed_origins", "https://seraph.lan")
+    assert validate_request_boundary(
+        host="192.168.1.50:8004", origin="https://seraph.lan", method="PUT"
+    ) is None
+    assert validate_request_boundary(
+        host="192.168.1.50:8004", origin=None, method="PUT"
+    ) == "mutation_origin_required"
+    assert validate_request_boundary(
+        host="192.168.1.50:8004", origin="https://evil.example", method="PUT"
+    ) == "origin_forbidden"
+    assert validate_request_boundary(
+        host="evil.example", origin="https://seraph.lan", method="PUT"
+    ) == "origin_forbidden"
+
+
 @pytest.mark.asyncio
 async def test_revocation_watch_closes_socket_and_cancels_active_turn(monkeypatch):
     monkeypatch.setattr(settings, "operator_auth_revocation_poll_seconds", 0.25)
@@ -200,10 +260,10 @@ async def test_revocation_watch_closes_socket_and_cancels_active_turn(monkeypatc
         async def close(self, *, code, reason):
             closed.update(code=code, reason=reason)
 
-    async def _revoked(_token, *, touch=False):
+    async def _revoked(_session_id, *, touch=False):
         raise AuthFailure("session_revoked")
 
-    monkeypatch.setattr("src.api.ws.authenticate_token", _revoked)
+    monkeypatch.setattr("src.api.ws.authenticate_session", _revoked)
     await asyncio.wait_for(
         watch_operator_session(FakeWebSocket(), "token", revoked, guard),
         timeout=1,
@@ -227,10 +287,10 @@ async def test_revocation_watch_fails_closed_when_auth_store_is_unavailable(monk
         async def close(self, *, code, reason):
             closed.update(code=code, reason=reason)
 
-    async def _unavailable(_token, *, touch=False):
+    async def _unavailable(_session_id, *, touch=False):
         raise RuntimeError("database unavailable")
 
-    monkeypatch.setattr("src.api.ws.authenticate_token", _unavailable)
+    monkeypatch.setattr("src.api.ws.authenticate_session", _unavailable)
     await asyncio.wait_for(
         watch_operator_session(FakeWebSocket(), "token", revoked, guard),
         timeout=1,
@@ -278,7 +338,9 @@ async def test_rest_chat_discards_result_when_session_is_revoked(client, monkeyp
     monkeypatch.setattr("src.api.chat.run_direct_local_chat", slow_chat)
     response = await client.post(
         "/api/chat",
-        json={"session_id": "rest-revocation", "message": "hello"},
+        # An omitted session exercises the authenticated ingress creation path;
+        # explicit unknown IDs are intentionally rejected by SessionManager.
+        json={"message": "hello"},
         headers={"origin": ORIGIN},
     )
     assert response.status_code == 401
@@ -410,3 +472,23 @@ async def test_unconfigured_websocket_closes_before_accept(monkeypatch):
     await websocket_chat(websocket)
     assert websocket.accepted is False
     assert websocket.closed == (4401, "auth_not_configured")
+
+
+@pytest.mark.asyncio
+async def test_authenticated_operator_can_read_runtime_and_settings_without_provider_transport(client, monkeypatch):
+    _, token = await _login(client)
+    monkeypatch.setattr(
+        "src.api.model_fabric_settings.httpx.AsyncClient",
+        lambda *args, **kwargs: pytest.fail("metadata reads must not call provider transport"),
+    )
+
+    runtime = await client.get("/api/runtime/status")
+    settings_response = await client.get("/api/settings/model-fabric")
+
+    assert runtime.status_code == 200
+    assert settings_response.status_code == 200
+    assert runtime.json()["model_fabric"]["status"] in {"configuration_required", "ready", "degraded"}
+    # Metadata may expose the boolean ``api_key_configured`` flag; raw key
+    # material must never be returned.
+    assert "test-key" not in runtime.text
+    assert "test-key" not in settings_response.text

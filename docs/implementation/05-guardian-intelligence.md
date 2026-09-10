@@ -281,7 +281,66 @@ is metadata-only and carries the claim boundary
 
 This slice does not claim semantic quality, latency, cost, live provider
 quality, or later #745 decision usefulness. Runtime measurement, real restore
-and reindex receipts, provider deletion propagation, and Gate B remain open.
+and reindex receipts, provider deletion propagation, and the full Gate B pilot
+remain open.
+
+## Branch-local #753 Gate B deterministic provider decision boundary
+
+**Status:** Partial on the milestone branch; not Shipped on `develop`.
+
+The existing operator-readable memory report now includes a frozen
+`guardian-memory-gate-b-provider-v1` decision receipt at
+`gate_b_provider_decision`. It binds the provider decision to the Gate A
+corpus and metric-contract versions and SHA-256 values, reports
+`status=degraded` with `provider_status=blocked`, `decision=deferred`,
+`measurement_status=blocked`, and `pilot_status=not_run`, and makes the
+canonical-memory status visible. The degraded status means the frozen
+canonical contract is covered but unmeasured; it is not a provider-quality or
+live-memory-readback result.
+
+This deterministic boundary intentionally does not read or persist an
+OpenRouter credential, probe the network, send retrieval payloads, invoke a
+model, or fabricate a provider measurement. `credential_state` records that a
+credential was not provided to this boundary and `probe_status=not_run` keeps
+that distinction explicit. The receipt is metadata-only: it contains no
+memory content, provider payload, secret, or private path. The provider lane
+remains advisory and cannot override canonical memory; no learning is allowed
+without a verified outcome and governed writeback.
+
+The #745 goal-conditioned contract already provides the deterministic
+correction path used by this Gate B boundary: an applied, goal-owned strategy
+delta changes the later candidate input digest and can produce verified
+provenance, while missing or unresolved correction evidence stops dispatch
+with `learning=no_learning`. The Gate A canonical-first corpus also covers
+delete/tombstone/rebuild and provider-outage continuity. These are focused
+contract proofs, not a live end-to-end provider or human-outcome result.
+
+The shared `guardian-memory-canonical-decision-v1` record is emitted alongside
+#745 candidate and outcome receipts. Its contract can bind `goal_id`, goal and
+plan revisions, the decision-input digest, strategy-delta ID/provenance, an
+authenticated control-owner attestation, and the current memory/recovery
+state. The current goal-loop seam does not own an authoritative plan revision,
+control-owner handle, or reconciled memory/restart state, so it emits those
+records as blocked with `learning=no_learning` rather than manufacturing
+positive bindings. A governed caller that supplies the complete current state
+may produce the verified later-decision binding. `learning=applied` additionally
+requires a helpful verified outcome and an opaque governed-writeback handle;
+otherwise the record remains `learning=no_learning`. Unresolved evidence
+records `no_learning`, while tombstoned or revoked memory and an unreconciled
+restart are `blocked`. The owner field is a bounded attestation handle; the
+authoritative owner identity remains on the existing `StrategyDelta` record
+and is validated before a caller emits the handle. The pure contract helper
+does not authenticate that handle or perform writeback, so only a trusted
+adapter may supply an authenticated owner proof to a runtime caller.
+Stored/readback receipts cross-check their outer and nested bindings and clear
+learning claims when the outer provenance cannot be revalidated.
+
+Remaining Gate B work requires a trusted OpenRouter adapter with explicit
+credential, capability, consent, egress, serial-admission, and budget proof;
+one bounded advisory pilot with held-out evaluation and rollback; provider
+deletion propagation; and a real verified outcome receipt. Until those
+receipts exist, the claim boundary remains
+`deterministic_no_pilot_admission_decision_not_live_provider_quality_or_memory_superiority`.
 
 ## Memory Upgrade Program Record
 

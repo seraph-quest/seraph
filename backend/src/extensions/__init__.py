@@ -27,6 +27,12 @@ from .capability_contract import (
     build_capability_contract,
     build_native_tool_contract,
 )
+from .capability_execution import (
+    CapabilityEffectLedger,
+    CapabilityExecutionHost,
+    CapabilityExecutionReceipt,
+    capability_execution_host,
+)
 from .layout import (
     CONTRIBUTION_LAYOUTS,
     MANIFEST_FILENAMES,
@@ -109,6 +115,10 @@ __all__ = [
     "ScaffoldedExtensionPackage",
     "build_capability_contract",
     "build_native_tool_contract",
+    "CapabilityEffectLedger",
+    "CapabilityExecutionHost",
+    "CapabilityExecutionReceipt",
+    "capability_execution_host",
     "doctor_extension",
     "doctor_snapshot",
     "extension_registry",

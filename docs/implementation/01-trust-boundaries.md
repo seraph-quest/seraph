@@ -349,6 +349,25 @@ Every entry also classifies existing evidence as `real`, `partial`, `metadata`,
 6. #754 verifies cumulative migration and rollback. Re-enabling an unauthenticated,
    unclassified, or unaudited path is not an acceptable rollback.
 
+## Local capability execution choke point (2026-09)
+
+`backend/src/extensions/capability_execution.py` provides the shared local
+effect boundary for adapters that already have a typed
+`CapabilityEnvelope`, `CapabilityPolicy`, and global policy. It calls the
+model-independent authority decision before invoking an effect, records only
+redacted metadata and output digests, denies approval-required or out-of-scope
+requests before the callback, and suppresses duplicate effect keys within one
+process. `backend/tests/test_capability_host_integration.py` exercises real
+temporary-file and bounded-process effects, symlink/escape and private-network
+denials, prompt-injection quarantine, and duplicate suppression.
+
+The in-process ledger is a front-stop, not durable exactly-once execution;
+restart reconciliation remains owned by the durable job runtime. The helper
+does not provide container or browser isolation and does not make provider
+calls. Callers that have not adopted this envelope or the existing governed
+tool wrappers remain explicitly partial until their effect boundaries are
+migrated and tested.
+
 ## Residual Risks
 
 - The v1 evaluator is branch-local and is not a universal runtime choke point;

@@ -24,13 +24,26 @@ from datetime import datetime, timezone
 from pathlib import Path
 import re
 import signal
+import socket
 import subprocess
 import sys
 import time
+from uuid import uuid4
 
 import httpx
 
 logger = logging.getLogger("seraph_daemon")
+
+
+def _daemon_worker_id() -> str:
+    """Return one bounded identity for this daemon process/device lease."""
+    configured = os.environ.get("SERAPH_DAEMON_WORKER_ID", "").strip()
+    if configured:
+        return configured[:256]
+    return f"native-daemon:{socket.gethostname()[:80]}:{uuid4().hex}"
+
+
+DAEMON_WORKER_ID = _daemon_worker_id()
 
 
 def _slug(value: str) -> str:
@@ -292,10 +305,19 @@ async def fetch_screen_analysis_settings(client: httpx.AsyncClient, url: str) ->
         return None
 
 
-async def fetch_next_notification(client: httpx.AsyncClient, url: str) -> dict | None:
-    """Fetch the next pending native notification from the backend."""
+async def fetch_next_notification(
+    client: httpx.AsyncClient,
+    url: str,
+    worker_id: str | None = None,
+) -> dict | None:
+    """Fetch one claim for this uniquely identified daemon process."""
+    worker = worker_id or DAEMON_WORKER_ID
     try:
-        r = await client.get(f"{url}/api/observer/notifications/next")
+        r = await client.get(
+            f"{url}/api/observer/notifications/next",
+            params={"worker_id": worker},
+            headers={"X-Seraph-Daemon-Id": worker},
+        )
         if r.status_code == 200:
             return r.json().get("notification")
     except Exception:
@@ -308,11 +330,18 @@ async def ack_notification(
     url: str,
     notification_id: str,
     fencing_token: int | None = None,
+    worker_id: str | None = None,
 ) -> bool:
     """Acknowledge a displayed native notification under its lease fence."""
+    if fencing_token is None:
+        return False
     try:
-        kwargs = {"json": {"fencing_token": fencing_token}} if fencing_token is not None else {}
-        r = await client.post(f"{url}/api/observer/notifications/{notification_id}/ack", **kwargs)
+        worker = worker_id or DAEMON_WORKER_ID
+        r = await client.post(
+            f"{url}/api/observer/notifications/{notification_id}/ack",
+            json={"worker_id": worker, "fencing_token": fencing_token},
+            headers={"X-Seraph-Daemon-Id": worker},
+        )
         if r.status_code == 200:
             return bool(r.json().get("acked"))
     except Exception:
@@ -327,18 +356,49 @@ async def fail_notification(
     *,
     reason: str = "display_failed",
     fencing_token: int | None = None,
+    worker_id: str | None = None,
 ) -> bool:
-    """Record a failed display so the backend can perform bounded retry."""
+    """Record an ambiguous display failure for operator reconciliation."""
+    if fencing_token is None:
+        return False
     try:
-        payload: dict[str, object] = {"reason": reason}
-        if fencing_token is not None:
-            payload["fencing_token"] = fencing_token
+        worker = worker_id or DAEMON_WORKER_ID
+        payload: dict[str, object] = {
+            "reason": reason,
+            "worker_id": worker,
+            "fencing_token": fencing_token,
+        }
         r = await client.post(
             f"{url}/api/observer/notifications/{notification_id}/fail",
             json=payload,
+            headers={"X-Seraph-Daemon-Id": worker},
         )
         if r.status_code == 200:
             return bool(r.json().get("failed"))
+    except Exception:
+        pass
+    return False
+
+
+async def mark_display_attempted(
+    client: httpx.AsyncClient,
+    url: str,
+    notification_id: str,
+    fencing_token: int | None,
+    worker_id: str | None = None,
+) -> bool:
+    """Fence the OS handoff before invoking ``osascript``."""
+    if fencing_token is None:
+        return False
+    worker = worker_id or DAEMON_WORKER_ID
+    try:
+        r = await client.post(
+            f"{url}/api/observer/notifications/{notification_id}/display-attempted",
+            json={"worker_id": worker, "fencing_token": fencing_token},
+            headers={"X-Seraph-Daemon-Id": worker},
+        )
+        if r.status_code == 200:
+            return bool(r.json().get("display_attempted"))
     except Exception:
         pass
     return False
@@ -577,6 +637,7 @@ async def poll_loop(
     idle_timeout: float,
     verbose: bool,
     screen_runtime: ScreenAnalysisRuntime | None = None,
+    worker_id: str | None = None,
 ) -> None:
     """Core polling loop — detect window changes, post to backend.
 
@@ -586,6 +647,7 @@ async def poll_loop(
     last_posted: str | None = None
     was_idle = False
     shown_notification_ids: set[str] = set()
+    daemon_worker_id = worker_id or DAEMON_WORKER_ID
 
     async with httpx.AsyncClient(timeout=10.0) as client:
         if screen_runtime is not None:
@@ -594,15 +656,38 @@ async def poll_loop(
             try:
                 if screen_runtime is not None:
                     await screen_runtime.refresh(client, url)
-                notification = await fetch_next_notification(client, url)
+                notification = await fetch_next_notification(client, url, daemon_worker_id)
                 if notification is not None:
                     notification_id = notification.get("id")
                     fencing_token = notification.get("fencing_token")
                     if notification_id in shown_notification_ids:
-                        acked = await ack_notification(client, url, notification_id, fencing_token)
+                        acked = await ack_notification(
+                            client,
+                            url,
+                            notification_id,
+                            fencing_token,
+                            daemon_worker_id,
+                        )
                         if acked:
                             shown_notification_ids.discard(notification_id)
                     else:
+                        # Do not invoke the OS display call unless the
+                        # backend durably records this exact fenced handoff.
+                        display_started = await mark_display_attempted(
+                            client,
+                            url,
+                            notification_id,
+                            fencing_token,
+                            daemon_worker_id,
+                        ) if notification_id else False
+                        if not display_started:
+                            if verbose:
+                                logger.warning(
+                                    "Skipping notification without active display fence (id=%s)",
+                                    notification_id,
+                                )
+                            await asyncio.sleep(interval)
+                            continue
                         displayed = await asyncio.to_thread(
                             show_notification,
                             notification.get("title", "Seraph"),
@@ -616,6 +701,7 @@ async def poll_loop(
                                 url,
                                 notification["id"],
                                 fencing_token,
+                                daemon_worker_id,
                             )
                             if acked and notification_id:
                                 shown_notification_ids.discard(notification_id)
@@ -628,6 +714,7 @@ async def poll_loop(
                                 url,
                                 notification_id,
                                 fencing_token=fencing_token,
+                                worker_id=daemon_worker_id,
                             )
 
                 # Check idle state

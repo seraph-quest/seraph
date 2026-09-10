@@ -615,9 +615,9 @@ class NativeNotificationOutbox(SQLModel, table=True):
     """Durable, bounded state for the built-in native notification path.
 
     This row is a delivery intent and receipt, not proof that an external
-    desktop notification was displayed. ``unknown`` is retained for an
-    expired lease after the retry budget is exhausted because the daemon may
-    have displayed the notification before Seraph lost the acknowledgement.
+    desktop notification was displayed. ``unknown`` is retained whenever a
+    daemon handoff is ambiguous because it may have displayed the notification
+    before Seraph received a receipt.
     """
 
     __tablename__ = "native_notification_outbox"

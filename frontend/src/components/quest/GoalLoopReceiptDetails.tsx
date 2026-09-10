@@ -3,7 +3,7 @@ import type { GoalLoopReceipt } from "../../types";
 type ReceiptFieldKind = "scalar" | "list";
 
 interface ReceiptField {
-  key: string;
+  key: keyof GoalLoopReceipt;
   label: string;
   kind: ReceiptFieldKind;
 }
@@ -70,27 +70,43 @@ interface Props {
  * inventing a client-side outcome or coercing malformed values into text.
  */
 export function GoalLoopReceiptDetails({ receipt }: Props) {
+  const contentRedacted = receipt.content_redacted === true;
+
   return (
     <details
       className="mt-2 border-t border-retro-text/10 pt-1"
       data-testid="goal-loop-receipt-details"
     >
-      <summary className="cursor-pointer text-[9px] text-retro-text/60 hover:text-retro-highlight focus-visible:outline focus-visible:outline-1 focus-visible:outline-retro-highlight">
+      <summary
+        className="cursor-pointer text-[9px] text-retro-text/60 hover:text-retro-highlight focus-visible:outline focus-visible:outline-1 focus-visible:outline-retro-highlight"
+        onKeyDown={(event) => {
+          if (event.key !== "Enter" && event.key !== " ") return;
+          event.preventDefault();
+          const details = event.currentTarget.parentElement;
+          if (details instanceof HTMLDetailsElement) details.open = !details.open;
+        }}
+      >
         Inspect exact backend receipt fields
       </summary>
-      <dl className="grid grid-cols-1 sm:grid-cols-2 gap-x-2 gap-y-1 mt-2 text-[9px]">
-        {RECEIPT_FIELDS.map((field) => (
-          <div key={field.key} className="min-w-0">
-            <dt className="text-retro-text/40 uppercase tracking-wider">{field.label}</dt>
-            <dd
-              className="text-retro-text break-words"
-              data-testid={`goal-loop-receipt-${field.key.replace(/_/g, "-")}`}
-            >
-              {fieldValue(receipt, field)}
-            </dd>
-          </div>
-        ))}
-      </dl>
+      {contentRedacted ? (
+        <dl className="grid grid-cols-1 sm:grid-cols-2 gap-x-2 gap-y-1 mt-2 text-[9px]">
+          {RECEIPT_FIELDS.map((field) => (
+            <div key={field.key} className="min-w-0">
+              <dt className="text-retro-text/40 uppercase tracking-wider">{field.label}</dt>
+              <dd
+                className="text-retro-text break-words"
+                data-testid={`goal-loop-receipt-${String(field.key).replace(/_/g, "-")}`}
+              >
+                {fieldValue(receipt, field)}
+              </dd>
+            </div>
+          ))}
+        </dl>
+      ) : (
+        <p className="mt-2 text-[9px] text-amber-300" data-testid="goal-loop-receipt-withheld" role="note">
+          Receipt fields withheld until the backend confirms redacted content.
+        </p>
+      )}
     </details>
   );
 }

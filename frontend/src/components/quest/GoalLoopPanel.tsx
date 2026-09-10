@@ -112,6 +112,7 @@ function viewState({
   if (payload.goal.revision !== (goal.revision ?? payload.goal.revision)) return "stale";
   if (!Array.isArray(payload.receipts) || hasMalformedReceipt(payload)) return "partial_metadata";
   const receipt = latestReceipt(payload);
+  if (receipt && receipt.content_redacted !== true) return "partial_metadata";
   if (receipt?.goal_revision && receipt.goal_revision !== payload.goal.revision) return "stale";
   const executionStatus = typeof receipt?.execution_status === "string"
     ? receipt.execution_status.toLowerCase()
@@ -401,8 +402,8 @@ export function GoalLoopPanel({ goal, onEdit }: Props) {
           {latest && (
             <div className="mt-2 border-t border-retro-text/10 pt-1 text-[9px] text-retro-text/50">
               latest receipt · {latest.receipt_type ?? latest.event_type ?? "unknown"} · {formatReceiptTime(latest.created_at)}
-              {typeof latest.reason === "string" && latest.reason && <div className="text-retro-text/40">{latest.reason}</div>}
-              {typeof latest.artifact_ref === "string" && latest.artifact_ref && <div className="text-retro-text/40">artifact: {latest.artifact_ref}</div>}
+              {latest.content_redacted === true && typeof latest.reason === "string" && latest.reason && <div className="text-retro-text/40">{latest.reason}</div>}
+              {latest.content_redacted === true && typeof latest.artifact_ref === "string" && latest.artifact_ref && <div className="text-retro-text/40">artifact: {latest.artifact_ref}</div>}
             </div>
           )}
 

@@ -208,11 +208,25 @@ async def persist_extracted_memories(
     persisted_memories: list[ConsolidatedMemoryItem] = []
 
     for item in extracted_memories:
-        metadata = dict(item.metadata or {})
+        # Extraction is an untrusted proposal.  LLM/OCR/tool payloads cannot
+        # smuggle operator provenance, privacy boundaries, or control state
+        # into canonical memory metadata; those fields are authored only by
+        # the authenticated operator-control seam.
+        metadata = {
+            str(key): value
+            for key, value in dict(item.metadata or {}).items()
+            if str(key) not in {"provenance", "operator_control", "privacy_boundary"}
+        }
         metadata.update(
             {
                 "writer": writer_name,
                 "source": "llm_extract",
+                "source_role": "inferred",
+                "provenance": {
+                    "kind": "inferred_extraction",
+                    "source": "llm_extract",
+                    "source_session_id": session_id,
+                },
             }
         )
         if item.subject_name:

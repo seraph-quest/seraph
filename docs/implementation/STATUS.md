@@ -55,6 +55,12 @@ with exit 2, and a child-reported non-pass result, including `failed`, is
 visibly `degraded` with exit 2; hard configuration or static failures remain
 `failed` with exit 4. Source presence cannot satisfy behavior.
 
+Branch-local #753 adds authenticated local canonical-memory export, deterministic
+rebuild, tombstone-aware additive restore, and operator-visible recovery status;
+the owning guide records its bounded SQLite proof and remaining StrategyDelta,
+multi-process, production-restore, and semantic-quality limits. It is not
+Shipped `develop` truth until the reviewed milestone change lands.
+
 ## Legend
 
 - `[x]` shipped on `develop`

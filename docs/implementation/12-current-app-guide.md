@@ -237,6 +237,13 @@ curl -b /tmp/seraph.cookies -H 'Origin: https://cockpit.example' \
   https://api.example/api/auth/session
 ```
 
+For a private LAN cockpit, replace the production host and origin allow-lists
+with the exact LAN hostname/IP and browser origin (for example,
+`seraph.lan,192.168.1.50` and `https://seraph.lan`). The same boundary is
+enforced for unsafe HTTP requests and WebSocket upgrades. An authenticated
+operator may use model-fabric setup and canaries from that configured LAN
+boundary; loopback is only the unauthenticated local-development shortcut.
+
 The login/session/refresh/logout endpoints are the canonical provisioning
 surface for the current single-operator deployment. Host headers with ports
 such as `127.0.0.1:8004` are normalized against the configured allow-list.

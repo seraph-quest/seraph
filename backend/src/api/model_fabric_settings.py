@@ -421,7 +421,10 @@ async def get_model_fabric_settings():
 @router.put("/settings/model-fabric")
 async def put_model_fabric_settings(body: ModelFabricConfigurationRequest, request: Request):
     if not _is_local_request(request):
-        raise HTTPException(status_code=403, detail="Model-fabric settings require localhost access")
+        raise HTTPException(
+            status_code=403,
+            detail="Model-fabric settings require a loopback request or an authenticated operator on the configured host/origin boundary",
+        )
     credential_mutated = False
     previous_vault_value: str | None = None
     previous_process_value = str(settings.openrouter_api_key or "")
@@ -492,7 +495,10 @@ async def put_model_fabric_settings(body: ModelFabricConfigurationRequest, reque
 @router.post("/settings/model-fabric/canary")
 async def run_model_fabric_canary(body: CapabilityCanaryRequest, request: Request):
     if not _is_local_request(request):
-        raise HTTPException(status_code=403, detail="Model-fabric canaries require localhost access")
+        raise HTTPException(
+            status_code=403,
+            detail="Model-fabric canaries require a loopback request or an authenticated operator on the configured host/origin boundary",
+        )
     if body.capability not in _PROBE_CAPABILITIES:
         raise HTTPException(status_code=422, detail="Unsupported model capability")
     principal = get_current_trust_principal()

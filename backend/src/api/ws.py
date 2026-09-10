@@ -39,7 +39,12 @@ from src.api.chat import (
     validate_chat_message,
 )
 from src.auth.middleware import authenticate_websocket
-from src.auth.service import AuthFailure, auth_enabled, authenticate_token, bind_operator_principal
+from src.auth.service import (
+    AuthFailure,
+    auth_enabled,
+    authenticate_session,
+    bind_operator_principal,
+)
 from src.guardian.state import build_guardian_state
 from src.models.schemas import WSMessage, WSResponse
 from src.operators.local_codex import ExternalAgentRuntimeRemovedError
@@ -109,18 +114,24 @@ async def _await_authorized(awaitable, revoked_event: asyncio.Event, *, timeout:
 
 async def watch_operator_session(
     websocket,
-    auth_cookie: str | None,
+    session_id: str | None,
     revoked_event: asyncio.Event,
     revocation_guard: Event,
 ) -> None:
-    """Poll the authenticated session and close a socket after revocation/expiry."""
-    if not auth_cookie:
+    """Poll the authenticated session and close a socket after revocation/expiry.
+
+    The watcher uses the server-issued session identity so a normal bearer-token
+    refresh can replace the session without interrupting an accepted socket.
+    Explicit revocation still terminates the socket through the replacement
+    chain's terminal row.
+    """
+    if not session_id:
         return
     poll_seconds = max(float(settings.operator_auth_revocation_poll_seconds), 0.25)
     while True:
         await asyncio.sleep(poll_seconds)
         try:
-            await authenticate_token(auth_cookie, touch=False)
+            await authenticate_session(session_id, touch=False)
         except AuthFailure as exc:
             revoked_event.set()
             revocation_guard.set()
@@ -221,10 +232,10 @@ async def websocket_chat(websocket: WebSocket):
     ws_manager.connect(websocket)
     auth_revoked = asyncio.Event()
     revocation_guard = Event()
-    auth_cookie = websocket.cookies.get(settings.operator_auth_cookie_name) if auth_enabled() else None
+    auth_session_id = operator.session_id if auth_enabled() else None
 
     revocation_task = asyncio.create_task(
-        watch_operator_session(websocket, auth_cookie, auth_revoked, revocation_guard),
+        watch_operator_session(websocket, auth_session_id, auth_revoked, revocation_guard),
         name=f"ws-auth-watch:{operator.session_id[:8]}",
     )
     _seq = 0
@@ -274,9 +285,9 @@ async def websocket_chat(websocket: WebSocket):
         while True:
             await _ensure_operator_active()
             raw = await websocket.receive_text()
-            if auth_cookie:
+            if auth_session_id:
                 try:
-                    operator = await authenticate_token(auth_cookie, touch=True)
+                    operator = await authenticate_session(operator.session_id, touch=True)
                 except AuthFailure:
                     auth_revoked.set()
                     revocation_guard.set()

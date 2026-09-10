@@ -147,6 +147,7 @@ describe("GoalLoopPanel", () => {
     expect(screen.getByTestId("goal-loop-receipt-action")).toHaveTextContent("write_artifact");
     expect(screen.getByTestId("goal-loop-receipt-capability-id")).toHaveTextContent("workflow.goal-snapshot-to-file");
     expect(screen.getByTestId("goal-loop-receipt-input-digest")).toHaveTextContent("a".repeat(64));
+    expect(screen.getByTestId("goal-loop-receipt-decision-input-digest")).toHaveTextContent("b".repeat(64));
     expect(screen.getByTestId("goal-loop-receipt-evidence-refs")).toHaveTextContent("artifact:guardian");
     expect(screen.getByTestId("goal-loop-receipt-expires-at")).toHaveTextContent("2026-09-10T08:00:00Z");
   });

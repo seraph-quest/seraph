@@ -81,6 +81,7 @@ class RemoteInferenceReceiptRepository(Protocol):
         owner_id: str,
         parent_job_id: str | None = None,
         runtime_path: str = "",
+        profile_id: str = "",
         priority: str = "",
         deadline_at: float | None = None,
         capability_version: str = "",
@@ -201,20 +202,28 @@ def stable_remote_inference_operation_id(
     Route decision attempt IDs intentionally contain fresh trust-attempt
     entropy.  A durable job needs a stable operation key so a restarted
     worker cannot dispatch the same remote effect under a new broker identity.
-    Short-lived request jobs retain the decision-derived fallback identity.
+    The durable job is the identity boundary; route/profile metadata is
+    persisted in the intent and a drifted resume is rejected there.  This
+    keeps the operation key stable across a route/profile refresh while still
+    preventing a second provider dispatch.
     """
     binding = current_remote_inference_receipt_binding()
     durable_job_id = str(getattr(binding, "job_id", "") or "").strip()
     if not durable_job_id:
         return str(fallback or "").strip()
-    route = str(getattr(context, "runtime_path", "") or "").strip()
-    profile = str(profile_id or "").strip()
-    suffix = hashlib.sha256(f"{route}\x00{profile}".encode("utf-8")).hexdigest()[:24]
-    return f"remote:{durable_job_id}:{suffix}"[:256]
+    del profile_id
+    operation_id = f"remote:{durable_job_id}"
+    if len(operation_id) <= 256:
+        return operation_id
+    # Binding IDs are bounded, but preserve collision resistance if a caller
+    # supplies one near the upper limit.
+    return "remote:" + hashlib.sha256(durable_job_id.encode("utf-8")).hexdigest()
 
 
 async def prepare_bound_remote_inference(
     request: GpuAdmissionRequest,
+    *,
+    profile_id: str | None = None,
 ) -> None:
     """Fence a durable operation before the shared broker can dispatch it.
 
@@ -243,6 +252,7 @@ async def prepare_bound_remote_inference(
             owner_id=request.owner_id,
             parent_job_id=request.parent_job_id,
             runtime_path=request.runtime_path,
+            profile_id=str(profile_id or "").strip(),
             priority=request.priority.value,
             deadline_at=request.deadline_at,
             capability_version=request.capability_version,

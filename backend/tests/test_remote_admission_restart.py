@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 import time
 from types import SimpleNamespace
 
 import pytest
+from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
+from sqlalchemy.orm import sessionmaker
+from sqlmodel import SQLModel
 
 from src.model_fabric import (
     EndpointClass,
@@ -43,6 +47,7 @@ from src.workflows.job_runtime import (
     DurableJobRepository,
     DurableJobSpec,
     DurableJobIdempotencyConflict,
+    DurableJobLeaseError,
     durable_job_repository,
 )
 
@@ -178,15 +183,24 @@ def _spec(job_id: str, *, dedupe_key: str) -> DurableJobSpec:
     )
 
 
-async def _admit_and_claim(job_id: str, *, dedupe_key: str):
+async def _admit_and_claim(job_id: str, *, dedupe_key: str, lease_seconds: int = 300):
     admitted = await durable_job_repository.admit_job(_spec(job_id, dedupe_key=dedupe_key))
     await durable_job_repository.queue_job(job_id)
-    claimed = await durable_job_repository.claim_job(job_id, owner=LEASE_OWNER)
+    claimed = await durable_job_repository.claim_job(
+        job_id,
+        owner=LEASE_OWNER,
+        lease_seconds=lease_seconds,
+    )
     return admitted, claimed
 
 
 def _remote_effect(job: dict[str, object]) -> dict[str, object]:
-    effects = [item for item in job["effects"] if item["effect_type"] == "remote_inference_admission"]
+    effects = [
+        item
+        for item in job["effects"]
+        if item["effect_type"] == "remote_inference_admission"
+        and item.get("receipt_kind") == "effect"
+    ]
     assert len(effects) == 1
     return effects[0]
 
@@ -266,7 +280,7 @@ async def test_llm_runtime_sync_caller_uses_the_same_durable_fence(async_db, mon
     job = await durable_job_repository.get_job(context.job_id)
     effect = _remote_effect(job)
     assert effect["status"] == "succeeded"
-    assert effect["target_digest"].startswith("remote:job-744-llm-runtime:")
+    assert effect["target_digest"] == "remote:job-744-llm-runtime"
     assert effect["target_digest"] == effect["adapter_idempotency_key"]
 
 
@@ -464,3 +478,191 @@ async def test_queued_cancelled_job_never_reaches_injected_transport(async_db):
     finally:
         reset_remote_inference_receipt_binding(token)
     assert calls == 0
+
+
+@pytest.mark.asyncio
+async def test_concurrent_intents_have_one_durable_cas_winner(async_db, monkeypatch, tmp_path):
+    """Two workers cannot reserve the same remote effect identity."""
+    # The default async_db fixture intentionally uses StaticPool. Two
+    # concurrent sessions on that single connection can roll back each
+    # other's transaction, so use a temporary file-backed SQLite seam here to
+    # exercise the repository CAS with independent connections.
+    engine = create_async_engine(
+        f"sqlite+aiosqlite:///{tmp_path / 'remote-intent-race.db'}",
+        connect_args={"timeout": 5},
+    )
+    factory = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    async with engine.begin() as connection:
+        await connection.run_sync(SQLModel.metadata.create_all)
+
+    @asynccontextmanager
+    async def file_session():
+        async with factory() as session:
+            try:
+                yield session
+                await session.commit()
+            except Exception:
+                await session.rollback()
+                raise
+
+    monkeypatch.setattr("src.workflows.durable_state.get_session", file_session)
+    try:
+        _admitted, claimed = await _admit_and_claim(
+            "job-744-intent-race",
+            dedupe_key="intent-race",
+        )
+        repository_a = DurableJobRepository()
+        repository_b = DurableJobRepository()
+        kwargs = {
+            "operation_id": "remote:job-744-intent-race",
+            "job_id": "job-744-intent-race",
+            "owner_id": OWNER_ID,
+            "runtime_path": "chat_agent",
+            "profile_id": "fixture-openrouter-text",
+            "priority": "interactive_chat",
+            "capability_version": "remote-text-v1",
+            "owner": LEASE_OWNER,
+            "fencing_token": claimed["lease"]["fencing_token"],
+        }
+
+        results = await asyncio.gather(
+            repository_a.record_remote_inference_intent(**kwargs),
+            repository_b.record_remote_inference_intent(**kwargs),
+            return_exceptions=True,
+        )
+        successes = [item for item in results if isinstance(item, dict)]
+        failures = [item for item in results if isinstance(item, BaseException)]
+        assert len(successes) == 1
+        assert len(failures) == 1
+        assert isinstance(failures[0], (DurableJobLeaseError, DurableJobIdempotencyConflict))
+        job = await durable_job_repository.get_job("job-744-intent-race")
+        effects = [
+            item
+            for item in job["effects"]
+            if item.get("effect_id") == "remote_inference:remote:job-744-intent-race"
+        ]
+        assert len(effects) == 1
+        assert effects[0]["status"] == "intent"
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_remote_intent_rejects_route_profile_drift_for_same_job_identity(async_db):
+    """A refreshed route cannot reuse a job-bound operation key."""
+    _admitted, claimed = await _admit_and_claim(
+        "job-744-route-drift",
+        dedupe_key="route-drift",
+    )
+    repository = DurableJobRepository()
+    common = {
+        "operation_id": "remote:job-744-route-drift",
+        "job_id": "job-744-route-drift",
+        "owner_id": OWNER_ID,
+        "runtime_path": "chat_agent",
+        "priority": "interactive_chat",
+        "capability_version": "remote-text-v1",
+        "owner": LEASE_OWNER,
+        "fencing_token": claimed["lease"]["fencing_token"],
+    }
+    await repository.record_remote_inference_intent(
+        **common,
+        profile_id="fixture-openrouter-text-v1",
+    )
+    with pytest.raises(DurableJobIdempotencyConflict, match="route/profile"):
+        await repository.record_remote_inference_intent(
+            **common,
+            profile_id="fixture-openrouter-text-v2",
+        )
+    job = await repository.get_job("job-744-route-drift")
+    effect = _remote_effect(job)
+    assert effect["details"]["profile_id"] == "fixture-openrouter-text-v1"
+
+
+@pytest.mark.asyncio
+async def test_restart_after_terminal_remote_success_recovers_without_dispatch(async_db, monkeypatch):
+    """A crash after broker settlement promotes the durable job exactly once."""
+    from src.model_fabric import execution
+
+    broker = RemoteInferenceAdmissionBroker()
+    monkeypatch.setattr(execution, "gpu_admission_broker", broker)
+    now = time.time()
+    profile = _profile(now=now)
+    context = _context(
+        job_id="job-744-terminal-recovery",
+        request_id="request-744-terminal-recovery",
+        profile=profile,
+    )
+    proofs = _proofs(profile, now=now)
+    _admitted, claimed = await _admit_and_claim(
+        "job-744-terminal-recovery",
+        dedupe_key="terminal-recovery",
+        lease_seconds=1,
+    )
+    calls = 0
+
+    def transport(_candidate, _stream):
+        nonlocal calls
+        calls += 1
+        return {"choices": [{"message": {"content": "settled-once"}}]}
+
+    with bind_remote_inference_receipt(
+        repository=durable_job_repository,
+        job_id=context.job_id,
+        owner=LEASE_OWNER,
+        fencing_token=claimed["lease"]["fencing_token"],
+    ):
+        result = execute_sync_adapter(
+            context=context,
+            candidates=(candidate_from_profile(profile),),
+            proofs=proofs,
+            adapter=transport,
+            now=now,
+        )
+    assert result["choices"][0]["message"]["content"] == "settled-once"
+    assert calls == 1
+    running = await durable_job_repository.get_job(context.job_id)
+    assert running["status"] == "running"
+    assert _remote_effect(running)["status"] == "succeeded"
+    assert _remote_effect(running)["details"]["profile_id"] == profile.id
+
+    replacement_repository = DurableJobRepository()
+    recovered = await replacement_repository.recover_stale_jobs(
+        now=datetime.now(timezone.utc) + timedelta(seconds=5),
+    )
+    assert len(recovered) == 1
+    assert recovered[0]["status"] == "succeeded"
+    assert recovered[0]["receipt"]["reason"] == "remote_terminal_settlement_recovered"
+    assert recovered[0]["receipt"]["operator_action"] == "resume_already_settled_remote_operation"
+    settled = await replacement_repository.get_job(context.job_id)
+    assert settled["status"] == "succeeded"
+    readbacks = [
+        item
+        for item in settled["effects"]
+        if item.get("kind") == "remote_inference_terminal_recovery"
+    ]
+    assert len(readbacks) == 1
+    assert readbacks[0]["receipt_kind"] == "readback"
+    assert readbacks[0]["status"] == "succeeded"
+    assert readbacks[0]["details"]["verified"] is True
+    assert await replacement_repository.recover_stale_jobs(
+        now=datetime.now(timezone.utc) + timedelta(seconds=5),
+    ) == []
+
+    # A replacement worker has no process-local broker history. The terminal
+    # durable state still rejects the operation before a second callback.
+    with bind_remote_inference_receipt(
+        repository=replacement_repository,
+        job_id=context.job_id,
+        owner=LEASE_OWNER,
+        fencing_token=claimed["lease"]["fencing_token"],
+    ):
+        with pytest.raises(ValueError, match="durable remote inference"):
+            execute_sync_adapter(
+                context=context,
+                candidates=(candidate_from_profile(profile),),
+                proofs=proofs,
+                adapter=transport,
+                now=now,
+            )
+    assert calls == 1

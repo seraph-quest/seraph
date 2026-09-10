@@ -3185,7 +3185,12 @@ def _execute_sync_with_gpu_admission(
                 == "openrouter"
             ),
         )
-        _run_receipt_hook_sync(prepare_bound_remote_inference(request))
+        _run_receipt_hook_sync(
+            prepare_bound_remote_inference(
+                request,
+                profile_id=profile_id,
+            )
+        )
     except (TypeError, ValueError) as error:
         reasons = ("gpu_admission_rejected", "gpu_admission_identity_conflict")
         _persist_sync_gpu_admission_denial(

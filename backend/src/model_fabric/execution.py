@@ -185,7 +185,10 @@ async def execute_streaming(
             ),
             uncertain_on_error=(candidate.profile.provider_kind == "openrouter"),
         )
-        await prepare_bound_remote_inference(admission_request)
+        await prepare_bound_remote_inference(
+            admission_request,
+            profile_id=decision.selected.profile.id,
+        )
         admission_callback_started = False
 
         async def admitted_transport() -> AsyncIterator[str]:
@@ -356,7 +359,10 @@ async def run_preflighted_adapter(
         ),
         uncertain_on_error=(decision.selected.profile.provider_kind == "openrouter"),
     )
-    await prepare_bound_remote_inference(admission_request)
+    await prepare_bound_remote_inference(
+        admission_request,
+        profile_id=decision.selected.profile.id,
+    )
     admission_callback_started = False
 
     async def admitted_adapter() -> object:
@@ -480,7 +486,12 @@ def execute_sync_adapter(
             )
         )
 
-    _run_awaitable_sync(prepare_bound_remote_inference(admission_request))
+    _run_awaitable_sync(
+        prepare_bound_remote_inference(
+            admission_request,
+            profile_id=decision.selected.profile.id,
+        )
+    )
 
     def admitted_adapter() -> _SyncResult:
         nonlocal callback_started, attempt_completed

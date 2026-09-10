@@ -5,6 +5,7 @@ import hashlib
 import logging
 from datetime import datetime, timedelta, timezone
 from time import perf_counter
+from zoneinfo import ZoneInfo
 
 from config.settings import settings
 from src.approval.runtime import get_current_trust_principal
@@ -12,7 +13,7 @@ from src.agent.strategist import parse_strategist_response, run_strategist_decis
 from src.audit.runtime import log_scheduler_job_event
 from src.db.models import Goal
 from src.goals.contracts import GoalCandidateRequest
-from src.goals.repository import deserialize_success_criterion, goal_repository
+from src.goals.repository import deserialize_admission_budget, deserialize_success_criterion, goal_repository
 from src.guardian.goal_conditioned_loop import propose_goal_candidate
 from src.guardian.goal_snapshot_to_file import (
     GoalSnapshotToFileRequest,
@@ -49,6 +50,108 @@ _STRATEGIST_SERVICE_ID = "service:strategist"
 _STRATEGIST_RUNNER_ID = "scheduler:strategist_tick"
 _STRATEGIST_CAPABILITY_VERSION = "strategist-tick-v1"
 _WEB_BRIEF_CORRECTION_FALLBACK_MAX_CANDIDATES = 2
+
+
+async def _goal_budget_admission(goal: Goal, *, capability_id: str) -> dict[str, object] | None:
+    """Return a visible defer receipt when a persisted standing-goal budget is absent/exhausted."""
+
+    if not isinstance(goal, Goal):
+        return None
+    budget = deserialize_admission_budget(goal)
+    if budget is None:
+        reason = (
+            "goal_budget_invalid"
+            if getattr(goal, "admission_budget_json", None)
+            else "goal_budget_missing_reviewed_grant"
+        )
+        return {
+            "status": "deferred",
+            "reason": reason,
+            "goal_id": goal.id,
+            "capability_id": capability_id,
+            "proposal_only": True,
+            "operator_visible": True,
+        }
+    if not budget.reviewed_grant or not budget.grant_id:
+        return {
+            "status": "deferred",
+            "reason": "goal_budget_missing_reviewed_grant",
+            "goal_id": goal.id,
+            "capability_id": capability_id,
+            "proposal_only": True,
+            "operator_visible": True,
+        }
+    now = datetime.now(timezone.utc)
+    if budget.period_expires_at is not None and budget.period_expires_at <= now:
+        reason = "goal_budget_period_expired"
+    elif budget.period_started_at is not None and budget.period_started_at > now:
+        reason = "goal_budget_period_not_started"
+    else:
+        reason = ""
+    if not reason and budget.quiet_hours_start is not None:
+        try:
+            local_hour = now.astimezone(ZoneInfo(budget.timezone)).hour
+        except Exception:
+            reason = "goal_budget_timezone_invalid"
+        else:
+            start, end = budget.quiet_hours_start, budget.quiet_hours_end
+            quiet = local_hour >= start or local_hour < end if start > end else start <= local_hour < end
+            if quiet:
+                reason = "goal_quiet_hours"
+    if not reason:
+        try:
+            jobs = await durable_job_repository.list_jobs(limit=100)
+        except Exception:
+            return {
+                "status": "deferred",
+                "reason": "goal_budget_state_unavailable",
+                "goal_id": goal.id,
+                "capability_id": capability_id,
+                "proposal_only": True,
+                "operator_visible": True,
+            }
+        terminal = {"succeeded", "failed", "blocked", "cancelled", "canceled"}
+        outstanding = sum(
+            1
+            for job in jobs
+            if isinstance(job, dict)
+            and job.get("goal_id") == goal.id
+            and str(job.get("status") or "") not in terminal
+        )
+        if outstanding >= budget.max_outstanding_jobs:
+            reason = "goal_budget_outstanding_limit"
+    if reason:
+        return {
+            "status": "deferred",
+            "reason": reason,
+            "goal_id": goal.id,
+            "capability_id": capability_id,
+            "proposal_only": True,
+            "operator_visible": True,
+            "budget": {
+                "max_outstanding_jobs": budget.max_outstanding_jobs,
+                "max_attempts": budget.max_attempts,
+                "max_runtime_seconds": budget.max_runtime_seconds,
+                "notifications_per_day": budget.notifications_per_day,
+            },
+        }
+    return {
+        "status": "admitted",
+        "budget": budget,
+        "notifications_used": 0,
+    }
+
+
+async def _record_budget_defer(parent_job_id: str, parent_fencing_token: int, details: dict[str, object], *, effect_type: str) -> dict[str, object]:
+    await durable_job_repository.record_effect(
+        parent_job_id,
+        effect_type=effect_type,
+        status="succeeded",
+        details=details,
+        owner=_STRATEGIST_RUNNER_ID,
+        fencing_token=parent_fencing_token,
+    )
+    return details
 
 
 def _reasoning_digest(reasoning: object) -> str:
@@ -366,6 +469,18 @@ async def _run_opted_in_goal_web_brief(
         selected: tuple[Goal, object, str, str, int, str | None],
     ) -> dict[str, object]:
         goal, criterion, query, file_path, priority, strategy_delta_id = selected
+        budget_admission = await _goal_budget_admission(
+            goal,
+            capability_id="workflow.web-brief-to-file",
+        )
+        if budget_admission is not None and budget_admission.get("status") != "admitted":
+            return await _record_budget_defer(
+                parent_job_id,
+                parent_fencing_token,
+                budget_admission,
+                effect_type="web_brief_admission",
+            )
+        budget = budget_admission.get("budget") if budget_admission else None
         revision = max(int(goal.revision or 1), 1)
         session_id = f"web-brief:scheduler:{goal.id}:{revision}"
         principal = TrustPrincipal(
@@ -392,6 +507,11 @@ async def _run_opted_in_goal_web_brief(
             reason="scheduled_proactive_web_brief",
             expected_outcome=criterion.description,
             priority=priority,
+            max_attempts=budget.max_attempts if budget is not None else 1,
+            deadline_at=(
+                datetime.now(timezone.utc) + timedelta(seconds=budget.max_runtime_seconds)
+                if budget is not None else datetime.now(timezone.utc) + timedelta(seconds=300)
+            ),
         )
         await _persist_scheduled_candidate(
             goal,
@@ -450,6 +570,11 @@ async def _run_opted_in_goal_web_brief(
             "source_read": result.source_read,
             "reason": result.reason,
             "operator_visible": True,
+            "content_sha256": result.content_sha256,
+            "output_exists": result.output_exists,
+            "workspace_contained": result.workspace_contained,
+            "goal_id_read_back": result.goal_id_read_back,
+            "evidence_refs": list(result.evidence_refs),
         }
         await durable_job_repository.record_effect(
             parent_job_id,
@@ -516,6 +641,18 @@ async def _run_opted_in_goal_snapshot(
         return details
 
     goal, criterion = sorted(eligible, key=lambda item: _proactive_goal_sort_key(item[0]))[0]
+    budget_admission = await _goal_budget_admission(
+        goal,
+        capability_id="workflow.goal-snapshot-to-file",
+    )
+    if budget_admission is not None and budget_admission.get("status") != "admitted":
+        return await _record_budget_defer(
+            parent_job_id,
+            parent_fencing_token,
+            budget_admission,
+            effect_type="goal_snapshot_admission",
+        )
+    budget = budget_admission.get("budget") if budget_admission else None
     revision = max(int(goal.revision or 1), 1)
     # Keep the child authority/session stable across strategist occurrences;
     # parent_job_id remains the lineage/fence, while the candidate identity
@@ -540,6 +677,11 @@ async def _run_opted_in_goal_snapshot(
         evidence_refs=list(criterion.evidence_refs),
         reason="scheduled_proactive_goal_snapshot",
         expected_outcome=criterion.description,
+        max_attempts=budget.max_attempts if budget is not None else 1,
+        deadline_at=(
+            datetime.now(timezone.utc) + timedelta(seconds=budget.max_runtime_seconds)
+            if budget is not None else datetime.now(timezone.utc) + timedelta(seconds=300)
+        ),
     )
     await _persist_scheduled_candidate(
         goal,
@@ -573,6 +715,11 @@ async def _run_opted_in_goal_snapshot(
         "artifact_ref": result.artifact_ref,
         "reason": result.reason,
         "operator_visible": True,
+        "content_sha256": result.content_sha256,
+        "output_exists": result.output_exists,
+        "workspace_contained": result.workspace_contained,
+        "goal_id_read_back": result.goal_id_read_back,
+        "evidence_refs": list(result.evidence_refs),
     }
     await durable_job_repository.record_effect(
         parent_job_id,

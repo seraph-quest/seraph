@@ -177,6 +177,7 @@ class GoalSnapshotToFileRequest(BaseModel):
     reason: str = Field(default="goal_snapshot_requested", max_length=1_000)
     expected_outcome: str = Field(default="", max_length=1_000)
     priority: int = Field(default=DEFAULT_PRIORITY, ge=0, le=MAX_PRIORITY)
+    max_attempts: int = Field(default=1, ge=1, le=3)
     deadline_at: datetime = Field(
         default_factory=lambda: _now() + timedelta(seconds=DEFAULT_DEADLINE_SECONDS)
     )
@@ -1292,7 +1293,7 @@ class GoalSnapshotToFileAdapter:
             resource_claims=self._resource_claims(),
             declared_authority=declared_authority,
             deadline_at=self.request.deadline_at,
-            max_attempts=1,
+            max_attempts=self.request.max_attempts,
             service_id=self.request.service_id,
         )
         try:
@@ -2192,6 +2193,11 @@ class GoalSnapshotToFileAdapter:
                     "output_exists": True,
                     "workspace_contained": True,
                     "goal_id_read_back": True,
+                    "evidence_refs": [
+                        f"job:{job_id}",
+                        f"readback:{digest}",
+                        *self._extra_evidence_refs(readback),
+                    ],
                     "idempotent_replay": True,
                 }
                 return GoalExecutionResult(
@@ -2206,7 +2212,21 @@ class GoalSnapshotToFileAdapter:
                     ],
                     reason="idempotent_replay_verified",
                 )
-            return self._blocked("idempotent_terminal_artifact_readback_failed", job_id=job_id, durable_status=status)
+            self.last_receipt = {
+                **(self.last_receipt or {}),
+                "job_id": job_id,
+                "durable_status": status,
+                "output_exists": readback.output_exists,
+                "workspace_contained": readback.workspace_contained,
+                "goal_id_read_back": readback.goal_id_read_back,
+                "content_sha256": readback.content_sha256,
+                "idempotent_replay": True,
+            }
+            return self._blocked(
+                "idempotent_terminal_artifact_readback_failed",
+                job_id=job_id,
+                durable_status=status,
+            )
         if status == "failed":
             return self._failed("idempotent_existing_failed_job", job_id=job_id, durable_status=status)
         if status == "cancelled":
@@ -2386,10 +2406,25 @@ class GoalSnapshotToFileService:
         # on audit replay so scheduler receipts keep their job/artifact
         # lineage across a process restart without executing the workflow
         # again.
-        if not receipt.get("job_id") and hasattr(adapter, "_job_identifier"):
+        replay_projection = None
+        replay_job_id = _text(receipt.get("job_id")) or None
+        if not replay_job_id and hasattr(adapter, "_job_identifier"):
+            replay_job_id = adapter._job_identifier(candidate)
+        needs_replay_projection = (
+            outcome.execution_status == "succeeded"
+            and outcome.verification == "passed"
+            and not (
+                _text(receipt.get("content_sha256"))
+                and receipt.get("output_exists") is True
+                and receipt.get("workspace_contained") is True
+                and receipt.get("goal_id_read_back") is True
+                and (receipt.get("artifact_id") or outcome.artifact_ref)
+            )
+        )
+        if replay_job_id and (needs_replay_projection or not receipt.get("job_id")):
             try:
-                replay_job_id = adapter._job_identifier(candidate)
-                replay_projection = await adapter.jobs.get_job(replay_job_id)
+                get_job = getattr(adapter.jobs, "get_job", None)
+                replay_projection = await get_job(replay_job_id) if get_job is not None else None
             except Exception:
                 replay_projection = None
             if isinstance(replay_projection, dict):
@@ -2398,6 +2433,52 @@ class GoalSnapshotToFileService:
                     "job_id": replay_job_id,
                     "durable_status": replay_projection.get("status"),
                 }
+                if needs_replay_projection and hasattr(adapter, "_replay_admission"):
+                    replay_result = await adapter._replay_admission(
+                        replay_projection,
+                        candidate,
+                        request.file_path,
+                    )
+                    replay_receipt = adapter.last_receipt or {}
+                    receipt = {**receipt, **replay_receipt}
+                    if (
+                        replay_result.execution_status != "succeeded"
+                        or replay_result.verification != "passed"
+                    ):
+                        outcome = outcome.model_copy(
+                            update={
+                                "execution_status": replay_result.execution_status,
+                                "verification": replay_result.verification,
+                                "usefulness": replay_result.usefulness,
+                                "learning": "no_learning",
+                                "artifact_ref": replay_result.artifact_ref,
+                                "evidence_refs": list(replay_result.evidence_refs),
+                                "reason": replay_result.reason,
+                            }
+                        )
+                    else:
+                        outcome = outcome.model_copy(
+                            update={
+                                "execution_status": "succeeded",
+                                "verification": "passed",
+                                "artifact_ref": replay_result.artifact_ref or outcome.artifact_ref,
+                                "evidence_refs": list(replay_result.evidence_refs),
+                                "reason": replay_result.reason,
+                            }
+                        )
+            elif needs_replay_projection:
+                # A cached positive audit row without its canonical durable
+                # projection cannot establish artifact/readback evidence.
+                outcome = outcome.model_copy(
+                    update={
+                        "execution_status": "blocked",
+                        "verification": "unknown",
+                        "learning": "no_learning",
+                        "artifact_ref": None,
+                        "evidence_refs": [],
+                        "reason": "idempotent_replay_projection_missing",
+                    }
+                )
         return self._result_for_outcome(
             request=request,
             candidate=candidate,

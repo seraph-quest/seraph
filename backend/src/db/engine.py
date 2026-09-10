@@ -114,6 +114,27 @@ async def _ensure_legacy_columns(conn) -> None:
         await conn.exec_driver_sql(
             "CREATE INDEX IF NOT EXISTS ix_goals_proactive_enabled ON goals (proactive_enabled)"
         )
+    goal_columns = await _table_columns("goals")
+    if goal_columns and "owner_principal_id" not in goal_columns:
+        await conn.exec_driver_sql(
+            "ALTER TABLE goals ADD COLUMN owner_principal_id VARCHAR"
+        )
+    if goal_columns and "owner_session_id" not in goal_columns:
+        await conn.exec_driver_sql(
+            "ALTER TABLE goals ADD COLUMN owner_session_id VARCHAR"
+        )
+    if goal_columns and "admission_budget_json" not in goal_columns:
+        await conn.exec_driver_sql(
+            "ALTER TABLE goals ADD COLUMN admission_budget_json VARCHAR"
+        )
+    if goal_columns and "owner_principal_id" in await _table_columns("goals"):
+        await conn.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_goals_owner_principal_id ON goals (owner_principal_id)"
+        )
+    if goal_columns and "owner_session_id" in await _table_columns("goals"):
+        await conn.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_goals_owner_session_id ON goals (owner_session_id)"
+        )
 
     user_profile_columns = await _table_columns("user_profiles")
     if user_profile_columns and "tool_policy_mode" not in user_profile_columns:

@@ -9,7 +9,7 @@ from sqlmodel import select, col
 
 from src.db.engine import get_session
 from src.db.models import Goal, GoalLevel, GoalDomain, GoalStatus
-from src.goals.contracts import GoalSuccessCriterion
+from src.goals.contracts import GoalAdmissionBudget, GoalSuccessCriterion
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +55,26 @@ def deserialize_success_criterion(goal: Goal) -> GoalSuccessCriterion | None:
         return None
 
 
+def serialize_admission_budget(
+    budget: GoalAdmissionBudget | dict | None,
+) -> str | None:
+    if budget is None:
+        return None
+    parsed = budget if isinstance(budget, GoalAdmissionBudget) else GoalAdmissionBudget.model_validate(budget)
+    return parsed.model_dump_json()
+
+
+def deserialize_admission_budget(goal: Goal) -> GoalAdmissionBudget | None:
+    raw = getattr(goal, "admission_budget_json", None)
+    if not raw:
+        return None
+    try:
+        return GoalAdmissionBudget.model_validate(json.loads(raw))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        logger.warning("Invalid admission budget stored for goal %s", goal.id)
+        return None
+
+
 class GoalRepository:
     """CRUD operations for the Goal table."""
 
@@ -68,6 +88,9 @@ class GoalRepository:
         due_date: Optional[datetime] = None,
         success_criterion: GoalSuccessCriterion | dict | None = None,
         proactive_enabled: bool = False,
+        owner_principal_id: str | None = None,
+        owner_session_id: str | None = None,
+        admission_budget: GoalAdmissionBudget | dict | None = None,
     ) -> Goal:
         if level not in _VALID_LEVELS:
             raise ValueError(f"Invalid level '{level}'. Must be one of: {_VALID_LEVELS}")
@@ -105,6 +128,9 @@ class GoalRepository:
                 revision=1,
                 success_criterion_json=serialize_success_criterion(success_criterion),
                 proactive_enabled=bool(proactive_enabled),
+                owner_principal_id=str(owner_principal_id or "").strip() or None,
+                owner_session_id=str(owner_session_id or "").strip() or None,
+                admission_budget_json=serialize_admission_budget(admission_budget),
             )
             db.add(goal)
             await db.flush()
@@ -126,6 +152,9 @@ class GoalRepository:
         due_date: Optional[datetime] = None,
         success_criterion: GoalSuccessCriterion | dict | None = None,
         proactive_enabled: bool | None = None,
+        admission_budget: GoalAdmissionBudget | dict | None = None,
+        owner_principal_id: str | None = None,
+        owner_session_id: str | None = None,
         expected_revision: int | None = None,
     ) -> Optional[Goal]:
         if level is not None and level not in _VALID_LEVELS:
@@ -167,6 +196,15 @@ class GoalRepository:
                 changed = True
             if proactive_enabled is not None:
                 values["proactive_enabled"] = bool(proactive_enabled)
+                changed = True
+            if admission_budget is not None:
+                values["admission_budget_json"] = serialize_admission_budget(admission_budget)
+                changed = True
+            if owner_principal_id is not None:
+                values["owner_principal_id"] = str(owner_principal_id).strip() or None
+                changed = True
+            if owner_session_id is not None:
+                values["owner_session_id"] = str(owner_session_id).strip() or None
                 changed = True
             values["updated_at"] = datetime.now(timezone.utc)
             if changed:
@@ -258,6 +296,12 @@ class GoalRepository:
                 "revision": max(int(g.revision or 1), 1),
                 "success_criterion": criterion.model_dump(mode="json") if criterion else None,
                 "proactive_enabled": bool(getattr(g, "proactive_enabled", False)),
+                "owner_principal_id": getattr(g, "owner_principal_id", None),
+                "owner_session_id": getattr(g, "owner_session_id", None),
+                "admission_budget": (
+                    deserialize_admission_budget(g).model_dump(mode="json")
+                    if deserialize_admission_budget(g) else None
+                ),
                 "due_date": g.due_date.isoformat() if g.due_date else None,
                 "created_at": g.created_at.isoformat(),
                 "children": [],

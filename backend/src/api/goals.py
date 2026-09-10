@@ -5,12 +5,12 @@ from typing import Any, Optional
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy.exc import SQLAlchemyError
 
 from src.audit.repository import audit_repository
 from src.auth.service import AuthenticatedOperator
-from src.goals.contracts import GoalCandidateRequest, GoalSuccessCriterion
+from src.goals.contracts import GoalAdmissionBudget, GoalCandidateRequest, GoalSuccessCriterion
 from src.guardian.goal_snapshot_to_file import (
     GoalSnapshotToFileRequest,
     GoalSnapshotToFileResult,
@@ -26,6 +26,7 @@ from src.memory.control import (
 )
 from src.goals.repository import (
     GoalRevisionConflict,
+    deserialize_admission_budget,
     deserialize_success_criterion,
     goal_repository,
 )
@@ -51,6 +52,10 @@ class GoalCreate(BaseModel):
     due_date: Optional[str] = None
     success_criterion: Optional[GoalSuccessCriterion] = None
     proactive_enabled: bool = False
+    admission_budget: Optional[GoalAdmissionBudget] = Field(
+        default=None,
+        validation_alias=AliasChoices("admission_budget", "budget"),
+    )
 
 
 class GoalUpdate(BaseModel):
@@ -64,6 +69,10 @@ class GoalUpdate(BaseModel):
     due_date: Optional[str] = None
     success_criterion: Optional[GoalSuccessCriterion] = None
     proactive_enabled: Optional[bool] = None
+    admission_budget: Optional[GoalAdmissionBudget] = Field(
+        default=None,
+        validation_alias=AliasChoices("admission_budget", "budget"),
+    )
     expected_revision: Optional[int] = Field(default=None, ge=1)
 
 
@@ -138,13 +147,38 @@ def _require_authenticated_operator(request: Request) -> AuthenticatedOperator:
         raise HTTPException(status_code=401, detail={"code": "authentication_required"})
     grants = {str(getattr(grant, "value", grant)) for grant in principal.grants}
     if (
+        principal.principal_type is not PrincipalType.OPERATOR
+        or
         not principal.authenticated
         or principal.revoked
+        or not str(getattr(principal, "principal_id", "") or "").strip()
         or not session_id
+        or str(getattr(principal, "session_id", "") or "").strip() != session_id
+        or str(getattr(principal, "operator_session_id", "") or "").strip() != session_id
         or AuthorityGrant.CAPABILITY_EXECUTE.value not in grants
     ):
         raise HTTPException(status_code=401, detail={"code": "session_unavailable"})
     return operator
+
+
+def _require_goal_owner(goal: Any, operator: AuthenticatedOperator) -> None:
+    """Bind public goal reads/proposals to the canonical persisted owner."""
+
+    owner_id = str(getattr(goal, "owner_principal_id", "") or "").strip()
+    owner_session = str(getattr(goal, "owner_session_id", "") or "").strip()
+    if not owner_id or not owner_session:
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "code": "goal_owner_unbound",
+                "recovery": "Bind the goal through the authenticated goals API before using its public loop routes.",
+            },
+        )
+    if owner_id != operator.principal.principal_id or owner_session != operator.session_id:
+        raise HTTPException(
+            status_code=403,
+            detail={"code": "goal_owner_mismatch"},
+        )
 
 
 def _goal_snapshot_service_principal(operator: AuthenticatedOperator) -> TrustPrincipal:
@@ -352,6 +386,12 @@ def _goal_payload(goal) -> dict:
         "revision": max(int(goal.revision or 1), 1),
         "success_criterion": criterion.model_dump(mode="json") if criterion else None,
         "proactive_enabled": bool(getattr(goal, "proactive_enabled", False)),
+        "owner_principal_id": getattr(goal, "owner_principal_id", None),
+        "owner_session_id": getattr(goal, "owner_session_id", None),
+        "admission_budget": (
+            deserialize_admission_budget(goal).model_dump(mode="json")
+            if deserialize_admission_budget(goal) else None
+        ),
     }
 
 
@@ -392,6 +432,9 @@ async def create_goal(body: GoalCreate, request: Request):
         due_date=due,
         success_criterion=body.success_criterion,
         proactive_enabled=False,
+        owner_principal_id=operator.principal.principal_id if operator else None,
+        owner_session_id=operator.session_id if operator else None,
+        admission_budget=body.admission_budget,
     )
     if body.proactive_enabled:
         await _record_proactive_permission(
@@ -419,6 +462,8 @@ async def create_goal(body: GoalCreate, request: Request):
             else None
         ),
         "proactive_enabled": bool(getattr(goal, "proactive_enabled", False)),
+        "owner_principal_id": getattr(goal, "owner_principal_id", None),
+        "owner_session_id": getattr(goal, "owner_session_id", None),
     }
 
 
@@ -426,11 +471,22 @@ async def create_goal(body: GoalCreate, request: Request):
 async def update_goal(goal_id: str, body: GoalUpdate, request: Request):
     """Update a goal."""
     due = datetime.fromisoformat(body.due_date) if body.due_date else None
-    operator = _require_authenticated_operator(request) if body.proactive_enabled is not None else None
-    current = await goal_repository.get(goal_id) if body.proactive_enabled is not None else None
+    needs_owner = body.proactive_enabled is not None or body.admission_budget is not None
+    operator = _require_authenticated_operator(request) if needs_owner else None
+    current = await goal_repository.get(goal_id) if needs_owner else None
+    ownerless_enable = False
     if body.proactive_enabled is not None and current is None:
         raise HTTPException(status_code=404, detail="Goal not found")
-    if body.proactive_enabled is not None:
+    if needs_owner and current is None:
+        raise HTTPException(status_code=404, detail="Goal not found")
+    if needs_owner:
+        ownerless_enable = (
+            body.proactive_enabled is True
+            and not getattr(current, "owner_principal_id", None)
+            and not getattr(current, "owner_session_id", None)
+        )
+        if not ownerless_enable:
+            _require_goal_owner(current, operator)
         current_revision = max(int(current.revision or 1), 1)
         if body.expected_revision is not None and body.expected_revision != current_revision:
             raise HTTPException(
@@ -462,6 +518,9 @@ async def update_goal(goal_id: str, body: GoalUpdate, request: Request):
             due_date=due,
             success_criterion=body.success_criterion,
             proactive_enabled=body.proactive_enabled,
+            admission_budget=body.admission_budget,
+            owner_principal_id=(operator.principal.principal_id if ownerless_enable else None),
+            owner_session_id=(operator.session_id if ownerless_enable else None),
             expected_revision=body.expected_revision,
         )
     except GoalRevisionConflict as exc:
@@ -949,11 +1008,13 @@ async def delete_goal(goal_id: str):
 
 
 @router.get("/goals/{goal_id}/loop")
-async def inspect_goal_loop(goal_id: str):
+async def inspect_goal_loop(goal_id: str, request: Request):
     """Inspect a goal's criterion and candidate/outcome receipts."""
+    operator = _require_authenticated_operator(request)
     goal = await goal_repository.get(goal_id)
     if not goal:
         raise HTTPException(status_code=404, detail="Goal not found")
+    _require_goal_owner(goal, operator)
     criterion = deserialize_success_criterion(goal)
     try:
         strategy_deltas = await list_strategy_deltas(goal_id)
@@ -968,8 +1029,17 @@ async def inspect_goal_loop(goal_id: str):
 
 
 @router.post("/goals/{goal_id}/candidates")
-async def propose_goal_loop_candidate(goal_id: str, body: GoalCandidateRequest):
+async def propose_goal_loop_candidate(
+    goal_id: str,
+    body: GoalCandidateRequest,
+    request: Request,
+):
     """Create one bounded candidate decision for operator inspection."""
+    operator = _require_authenticated_operator(request)
+    goal = await goal_repository.get(goal_id)
+    if not goal:
+        raise HTTPException(status_code=404, detail="Goal not found")
+    _require_goal_owner(goal, operator)
     try:
         decision = await propose_goal_candidate(goal_id, body)
     except LookupError as exc:

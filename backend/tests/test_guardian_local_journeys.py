@@ -28,9 +28,11 @@ from unittest.mock import patch
 
 from config.settings import settings
 from src.auth.service import test_bypass_operator as _test_bypass_operator
+from src.approval.runtime import reset_runtime_context, set_runtime_context
 from src.db.engine import _ensure_search_indexes
-from src.goals.contracts import CriterionVerifierKind, GoalSuccessCriterion
+from src.goals.contracts import CriterionVerifierKind, GoalAdmissionBudget, GoalSuccessCriterion
 from src.goals.repository import goal_repository
+from src.extensions.source_operations import collect_source_evidence_bundle
 from src.scheduler.jobs import strategist_tick
 from src.api.goals import (
     GoalStrategyCorrection,
@@ -39,6 +41,7 @@ from src.api.goals import (
     rollback_goal_strategy_correction,
 )
 from src.workflows.job_runtime import durable_job_repository
+from src.security.trust_contract import AuthorityGrant, PrincipalType, TrustPrincipal
 
 
 _SESSION_PATCH_TARGETS = (
@@ -122,6 +125,7 @@ class _LocalWorkflow:
         self.kind = kind
         self.source_url = source_url
         self.calls = 0
+        self.transport_calls: list[str] = []
 
     @property
     def name(self) -> str:
@@ -157,16 +161,29 @@ class _LocalWorkflow:
                 "Status: active\n"
             )
         else:
-            with urlopen(f"{self.source_url}?q={quote(query)}", timeout=2) as response:
-                source = json.loads(response.read().decode("utf-8"))
+            source_request_url = f"{self.source_url}?q={quote(query)}"
+            bundle = collect_source_evidence_bundle(
+                contract="webpage.read",
+                source="browse_webpage",
+                url=source_request_url,
+                transport=self._transport,
+                test_destination_grant=f"goal-local-source:{source_request_url}",
+            )
+            assert bundle["status"] == "ok", bundle
+            source = json.loads(bundle["items"][0]["content"])
             content = (
                 f'Web brief for "{query}"\n'
                 f"Goal id: {self.goal_id}\n"
-                f"URL: {self.source_url}?q={quote(query)}\n"
+                f"URL: {source_request_url}\n"
                 f"Source: {source['body']}\n"
             )
         target.write_text(content, encoding="utf-8")
         return f"Saved {file_path}"
+
+    def _transport(self, url: str) -> str:
+        self.transport_calls.append(url)
+        with urlopen(url, timeout=2) as response:
+            return response.read().decode("utf-8")
 
     def get_audit_result_payload(self, _arguments: dict[str, Any], _result: Any):
         return "local workflow executed", {"durable_run_identity": f"local-{self.kind}-run"}
@@ -189,6 +206,20 @@ def _criterion(*, description: str, target: dict[str, Any] | str = ""):
         verifier_kind=CriterionVerifierKind.artifact_readback,
         target=target,
         evidence_refs=["operator:local-test-consent"],
+    )
+
+
+def _journey_budget() -> GoalAdmissionBudget:
+    now = datetime.now(timezone.utc)
+    return GoalAdmissionBudget(
+        reviewed_grant=True,
+        grant_id="test-local-goal-grant",
+        max_outstanding_jobs=1,
+        max_attempts=1,
+        max_runtime_seconds=120,
+        notifications_per_day=0,
+        period_started_at=now - timedelta(minutes=1),
+        period_expires_at=now + timedelta(hours=1),
     )
 
 
@@ -222,6 +253,7 @@ async def test_file_backed_goal_journey_survives_restart_and_reversible_correcti
             "Keep the local goal snapshot current",
             success_criterion=_criterion(description="A readable snapshot exists"),
             proactive_enabled=True,
+            admission_budget=_journey_budget(),
         )
         brief = await goal_repository.create(
             "Produce the controlled source brief",
@@ -234,6 +266,7 @@ async def test_file_backed_goal_journey_survives_restart_and_reversible_correcti
                 },
             ),
             proactive_enabled=True,
+            admission_budget=_journey_budget(),
         )
 
         snapshot_tool = _LocalWorkflow(workspace, goal_id=snapshot.id, kind="snapshot")
@@ -243,6 +276,32 @@ async def test_file_backed_goal_journey_survives_restart_and_reversible_correcti
             kind="brief",
             source_url=source_url,
         )
+        denied_url = f"{source_url}?q=denied"
+        runtime_tokens = set_runtime_context(
+            "web-brief:source-policy-test",
+            "high_risk",
+            trust_principal=TrustPrincipal(
+                principal_id="service:web-brief",
+                principal_type=PrincipalType.SERVICE,
+                authenticated=True,
+                revoked=False,
+                grants=(AuthorityGrant.CAPABILITY_EXECUTE,),
+                session_id="web-brief:source-policy-test",
+            ),
+        )
+        try:
+            denied_bundle = collect_source_evidence_bundle(
+                contract="webpage.read",
+                source="browse_webpage",
+                url=denied_url,
+                transport=brief_tool._transport,
+                test_destination_grant=f"goal-local-source:{source_url}?q=other",
+            )
+        finally:
+            reset_runtime_context(runtime_tokens)
+        assert denied_bundle["status"] == "failed"
+        assert any("destination denied" in warning for warning in denied_bundle["warnings"])
+        assert brief_tool.transport_calls == []
         original_snapshot_service = strategist_tick.GoalSnapshotToFileService
         original_brief_service = strategist_tick.WebBriefToFileService
 
@@ -333,6 +392,13 @@ async def test_file_backed_goal_journey_survives_restart_and_reversible_correcti
             )
         assert snapshot_after_restart["job_id"] == snapshot_first["job_id"]
         assert brief_after_restart["job_id"] == brief_first["job_id"]
+        for replay in (snapshot_after_restart, brief_after_restart):
+            assert replay["content_sha256"]
+            assert replay["output_exists"] is True
+            assert replay["workspace_contained"] is True
+            assert replay["goal_id_read_back"] is True
+            assert replay["artifact_ref"]
+            assert replay["evidence_refs"]
         assert snapshot_tool.calls == brief_tool.calls == 1
 
         correction = await apply_goal_strategy_correction(

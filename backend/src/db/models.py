@@ -527,6 +527,12 @@ class Goal(SQLModel, table=True):
     # The authenticated goals API records the operator grant; the scheduler
     # must never infer permission from an active status or criterion alone.
     proactive_enabled: bool = Field(default=False, index=True)
+    # Nullable so existing local databases and manually-created legacy goals
+    # remain readable. Public loop routes require both bindings; scheduler
+    # service runs use their own explicit service authority.
+    owner_principal_id: Optional[str] = Field(default=None, index=True)
+    owner_session_id: Optional[str] = Field(default=None, index=True)
+    admission_budget_json: Optional[str] = Field(default=None)
     created_at: datetime = Field(default_factory=_now)
     updated_at: datetime = Field(default_factory=_now)
 

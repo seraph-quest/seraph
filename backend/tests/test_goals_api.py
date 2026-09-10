@@ -1,5 +1,6 @@
 """Tests for goals HTTP endpoints (src/api/goals.py)."""
 
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
@@ -7,9 +8,13 @@ import pytest
 from fastapi import HTTPException
 
 from src.api.goals import GOAL_SNAPSHOT_SERVICE_ID
+from src.api.goals import inspect_goal_loop, propose_goal_loop_candidate
 from src.audit.repository import audit_repository
 from src.guardian.goal_snapshot_to_file import GoalSnapshotToFileResult
+from src.goals.contracts import GoalCandidateRequest
 from src.goals.repository import GoalRepository
+from src.auth.service import AuthenticatedOperator
+from src.security.trust_contract import AuthorityGrant, PrincipalType, TrustPrincipal
 
 
 @pytest.fixture
@@ -94,6 +99,51 @@ class TestDeleteGoal:
     async def test_not_found(self, client):
         res = await client.delete("/api/goals/nope")
         assert res.status_code == 404
+
+
+class TestPublicGoalLoopOwnership:
+    async def test_unbound_goal_is_rejected_before_loop_receipt_read(self, async_db, repo):
+        goal = await repo.create("Unbound goal")
+        with patch("src.api.goals.list_goal_loop_receipts", new=AsyncMock(side_effect=AssertionError("read bypassed"))):
+            with pytest.raises(HTTPException) as exc:
+                await inspect_goal_loop(goal.id, SimpleNamespace(state=SimpleNamespace(operator=_operator("operator:test-bypass", "test-auth-bypass"))))
+        assert exc.value.status_code == 403
+        assert exc.value.detail["code"] == "goal_owner_unbound"
+
+    async def test_wrong_owner_is_rejected_before_candidate_mutation(self, async_db, repo):
+        owner = _operator("operator:owner", "session-owner")
+        goal = await repo.create(
+            "Owned goal",
+            owner_principal_id=owner.principal.principal_id,
+            owner_session_id=owner.session_id,
+        )
+        with patch("src.api.goals.propose_goal_candidate", new=AsyncMock(side_effect=AssertionError("mutation bypassed"))):
+            with pytest.raises(HTTPException) as exc:
+                await propose_goal_loop_candidate(
+                    goal.id,
+                    GoalCandidateRequest(capability_id="workflow.goal-snapshot-to-file"),
+                    SimpleNamespace(state=SimpleNamespace(operator=_operator("operator:other", "session-other"))),
+                )
+        assert exc.value.status_code == 403
+        assert exc.value.detail["code"] == "goal_owner_mismatch"
+
+
+def _operator(principal_id: str, session_id: str) -> AuthenticatedOperator:
+    principal = TrustPrincipal(
+        principal_id=principal_id,
+        principal_type=PrincipalType.OPERATOR,
+        authenticated=True,
+        grants=(AuthorityGrant.CAPABILITY_EXECUTE,),
+        session_id=session_id,
+        operator_session_id=session_id,
+    )
+    expires = datetime.now(timezone.utc) + timedelta(hours=1)
+    return AuthenticatedOperator(
+        session_id=session_id,
+        principal=principal,
+        idle_expires_at=expires,
+        absolute_expires_at=expires,
+    )
 
 
 class TestGoalSnapshot:
@@ -188,7 +238,7 @@ class TestGoalSnapshot:
         assert payload["learning"] == "no_learning"
         assert payload["artifact_ref"] == "artifact-1"
         assert payload["operator_receipt"]["delegated_service_id"] == GOAL_SNAPSHOT_SERVICE_ID
-        assert payload["operator_receipt"]["principal_id"] == "operator:single"
+        assert payload["operator_receipt"]["principal_id"] == "operator:test-bypass"
         service_cls.assert_called_once()
         request = service.run.await_args.args[0]
         assert request.owner_principal_id == GOAL_SNAPSHOT_SERVICE_ID

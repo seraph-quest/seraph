@@ -1,7 +1,7 @@
 """Tests for strategist tick runtime audit coverage."""
 
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -11,7 +11,8 @@ from src.audit.repository import audit_repository
 from src.guardian.state import GuardianState, GuardianStateConfidence
 from src.guardian.goal_snapshot_to_file import GoalSnapshotToFileResult
 from src.guardian.web_brief_to_file import WebBriefToFileResult
-from src.goals.contracts import CriterionVerifierKind, GoalSuccessCriterion
+from src.goals.contracts import CriterionVerifierKind, GoalAdmissionBudget, GoalSuccessCriterion
+from src.db.models import Goal
 from src.guardian.world_model import GuardianWorldModel
 from src.observer.context import CurrentContext
 from src.observer.user_state import DeliveryDecision
@@ -19,6 +20,7 @@ from src.scheduler.jobs.strategist_tick import (
     _occurrence_identity,
     _run_opted_in_goal_web_brief,
     _run_opted_in_goal_snapshot,
+    _goal_budget_admission,
     run_strategist_tick,
 )
 from src.workflows.job_runtime import durable_job_repository
@@ -31,6 +33,62 @@ class _RecordingDurableJobs:
     async def record_effect(self, job_id, **kwargs):
         self.effects.append((job_id, kwargs))
         return {"status": kwargs["status"]}
+
+
+@pytest.mark.asyncio
+async def test_goal_budget_missing_expired_and_valid_admission_are_visible():
+    missing = Goal(id="budget-missing", title="Missing budget", proactive_enabled=True)
+    missing_receipt = await _goal_budget_admission(
+        missing,
+        capability_id="workflow.goal-snapshot-to-file",
+    )
+    assert missing_receipt["status"] == "deferred"
+    assert missing_receipt["reason"] == "goal_budget_missing_reviewed_grant"
+    assert missing_receipt["proposal_only"] is True
+
+    now = datetime.now(timezone.utc)
+    expired = Goal(
+        id="budget-expired",
+        title="Expired budget",
+        proactive_enabled=True,
+        admission_budget_json=GoalAdmissionBudget(
+            reviewed_grant=True,
+            grant_id="expired-grant",
+            period_started_at=now - timedelta(hours=2),
+            period_expires_at=now - timedelta(hours=1),
+        ).model_dump_json(),
+    )
+    expired_receipt = await _goal_budget_admission(
+        expired,
+        capability_id="workflow.goal-snapshot-to-file",
+    )
+    assert expired_receipt["status"] == "deferred"
+    assert expired_receipt["reason"] == "goal_budget_period_expired"
+
+    valid = Goal(
+        id="budget-valid",
+        title="Valid budget",
+        proactive_enabled=True,
+        admission_budget_json=GoalAdmissionBudget(
+            reviewed_grant=True,
+            grant_id="valid-grant",
+            period_started_at=now - timedelta(minutes=1),
+            period_expires_at=now + timedelta(hours=1),
+            max_attempts=2,
+            max_runtime_seconds=45,
+        ).model_dump_json(),
+    )
+    with patch.object(
+        durable_job_repository,
+        "list_jobs",
+        new=AsyncMock(return_value=[]),
+    ):
+        valid_receipt = await _goal_budget_admission(
+            valid,
+            capability_id="workflow.goal-snapshot-to-file",
+        )
+    assert valid_receipt["status"] == "admitted"
+    assert valid_receipt["budget"].max_attempts == 2
 
 
 def _make_context(**overrides) -> CurrentContext:

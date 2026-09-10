@@ -161,6 +161,31 @@ def test_backup_rejects_secret_directory_shape(tmp_path):
         backup_workspace(root, registry=registry, archive_path=tmp_path / "secret-directory.zip")
 
 
+def test_backup_and_restore_reject_symlinked_archive_paths(tmp_path):
+    root, registry = _workspace(tmp_path)
+    outside_archive = tmp_path / "outside.zip"
+    outside_archive.write_bytes(b"outside-sentinel")
+    linked_destination = tmp_path / "linked-destination.zip"
+    linked_destination.symlink_to(outside_archive)
+
+    with pytest.raises(WorkspaceLifecycleError, match="symlink"):
+        backup_workspace(root, registry=registry, archive_path=linked_destination)
+    assert outside_archive.read_bytes() == b"outside-sentinel"
+
+    archive = Path(backup_workspace(root, registry=registry)["archive_path"])
+    linked_parent = tmp_path / "linked-archive-parent"
+    linked_parent.symlink_to(archive.parent, target_is_directory=True)
+    linked_archive = linked_parent / archive.name
+    with pytest.raises(InvalidWorkspaceArchiveError, match="symlink"):
+        restore_workspace(
+            root,
+            linked_archive,
+            registry=registry,
+            confirm=True,
+            restore_id="restore-linked-archive-01",
+        )
+
+
 def test_backup_restore_round_trip_and_rollback_preserve_secret_boundary(tmp_path):
     root, registry = _workspace(tmp_path)
     backup = backup_workspace(root, registry=registry)

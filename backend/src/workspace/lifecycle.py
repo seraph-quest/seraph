@@ -139,6 +139,28 @@ def _assert_not_symlink(path: Path, *, label: str) -> None:
         raise WorkspaceLifecycleError(f"{label} must not be a symlink")
 
 
+def _assert_no_symlink_components(path: Path, *, label: str) -> None:
+    """Reject a path whose existing lexical components include a symlink.
+
+    ``Path.resolve`` follows links, so checking only its result would allow an
+    archive path to escape through a linked parent or linked destination.  Walk
+    the lexical path first and stop at the first missing component; later
+    components cannot already contain a symlink when that ancestor is absent.
+    """
+    candidate = path if path.is_absolute() else path.absolute()
+    current = Path(candidate.anchor)
+    for component in candidate.parts[1:]:
+        current /= component
+        try:
+            metadata = current.lstat()
+        except FileNotFoundError:
+            break
+        except OSError as exc:
+            raise WorkspaceLifecycleError(f"{label} is not readable") from exc
+        if stat.S_ISLNK(metadata.st_mode):
+            raise WorkspaceLifecycleError(f"{label} must not contain symlink components")
+
+
 def _path_present(path: Path) -> bool:
     """Return lstat-style existence, including dangling symlinks."""
     try:
@@ -345,8 +367,13 @@ def _archive_path(root: Path, archive_path: str | os.PathLike[str] | None) -> Pa
     candidate = Path(archive_path).expanduser()
     if not candidate.is_absolute():
         candidate = backup_root / candidate
-    candidate = candidate.resolve(strict=False)
-    if candidate == root or root in candidate.parents:
+    # Keep the lexical path for the eventual write.  Resolving first would
+    # follow a symlinked destination/parent and make the safety check observe a
+    # different path than the one opened by ZipFile.
+    candidate = candidate.absolute()
+    _assert_no_symlink_components(candidate, label="backup archive path")
+    resolved_candidate = candidate.resolve(strict=False)
+    if resolved_candidate == root or root in resolved_candidate.parents:
         raise WorkspaceLifecycleError("backup archive must not be stored inside active workspace")
     _assert_not_symlink(candidate.parent, label="backup archive parent")
     return candidate
@@ -479,6 +506,7 @@ def _load_archive(
     registry: WorkspaceStateRegistry,
 ) -> _LoadedArchive:
     try:
+        _assert_no_symlink_components(archive_path, label="workspace backup archive path")
         _assert_not_symlink(archive_path, label="workspace backup archive")
     except WorkspaceLifecycleError as exc:
         raise InvalidWorkspaceArchiveError("workspace backup archive must not be a symlink") from exc

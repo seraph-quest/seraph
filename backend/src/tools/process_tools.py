@@ -658,6 +658,59 @@ def _kill_process_group(
     return process.poll() is not None
 
 
+def _remaining_process_group_members(
+    process_group_id: int | None,
+    *,
+    wait_timeout: float = _PROCESS_STOP_WAIT_SECONDS,
+) -> int | None:
+    """Return the number of same-group processes still alive within a bound."""
+    if process_group_id is None or process_group_id <= 0:
+        return 0
+
+    deadline = time.monotonic() + max(0.01, float(wait_timeout))
+    proc_root = Path("/proc")
+    while True:
+        member_count: int | None = None
+        if proc_root.is_dir():
+            member_count = 0
+            try:
+                entries = tuple(proc_root.iterdir())
+            except OSError:
+                member_count = None
+            else:
+                for entry in entries:
+                    if not entry.name.isdecimal():
+                        continue
+                    try:
+                        stat_text = (entry / "stat").read_text(encoding="utf-8")
+                        closing_paren = stat_text.rfind(")")
+                        if closing_paren < 0:
+                            continue
+                        fields = stat_text[closing_paren + 2 :].split()
+                        # After the comm field, state is field 0, ppid field 1,
+                        # and process-group ID field 2.
+                        if len(fields) >= 3 and fields[0] != "Z" and int(fields[2]) == process_group_id:
+                            member_count += 1
+                    except (OSError, ValueError):
+                        continue
+
+        if member_count == 0:
+            return 0
+        if member_count is None:
+            try:
+                os.killpg(process_group_id, 0)
+            except (AttributeError, ProcessLookupError):
+                return 0
+            except PermissionError:
+                return None
+            except OSError:
+                return 0
+            member_count = 1
+        if time.monotonic() >= deadline:
+            return member_count
+        time.sleep(0.01)
+
+
 def _bounded_reap_process(process: subprocess.Popen[Any], *, timeout: float = 1.0) -> tuple[str, str]:
     """Reap pipes without allowing a descendant-held pipe to hang the caller."""
     try:
@@ -773,7 +826,7 @@ class ProcessRuntimeManager:
     @staticmethod
     def _stop_managed_process(process: ManagedProcess, *, force: bool) -> dict[str, Any]:
         if force:
-            _kill_process_group(process.popen, process_group_id=process.process_group_id)
+            parent_reaped = _kill_process_group(process.popen, process_group_id=process.process_group_id)
         else:
             # Preserve graceful stop for a live parent, but still attempt the
             # retained group after the parent has exited so descendants do not
@@ -789,15 +842,21 @@ class ProcessRuntimeManager:
                 except (ProcessLookupError, PermissionError, OSError):
                     pass
             try:
-                process.popen.wait(timeout=2)
+                process.popen.wait(timeout=_PROCESS_STOP_WAIT_SECONDS)
             except subprocess.TimeoutExpired:
-                _kill_process_group(process.popen, process_group_id=process.process_group_id)
+                parent_reaped = _kill_process_group(process.popen, process_group_id=process.process_group_id)
             else:
                 # The parent can be reaped while a same-group descendant still
                 # owns output; group cleanup is safe to attempt and bounded.
-                _kill_process_group(process.popen, process_group_id=process.process_group_id)
+                parent_reaped = _kill_process_group(process.popen, process_group_id=process.process_group_id)
         payload = process.status_payload()
-        payload["stopped"] = True
+        remaining_descendants = _remaining_process_group_members(process.process_group_id)
+        payload.update(
+            {
+                "stopped": parent_reaped and remaining_descendants == 0,
+                "remaining_descendants": remaining_descendants,
+            }
+        )
         return payload
 
     @staticmethod
@@ -1005,7 +1064,11 @@ class ProcessRuntimeManager:
         if process is None or not self._is_visible_to_session(process, session_id):
             return None
         payload = self._stop_managed_process(process, force=force)
-        self._cleanup_worker_if_exited(process)
+        self._delete_process_artifacts(process)
+        with self._lock:
+            removed = self._processes.pop(process_id, None) is process
+        payload["registry_removed"] = removed
+        payload["artifacts_removed"] = not process.output_path.exists() and not process.worker_root.exists()
         return payload
 
     def reset_for_tests(self) -> None:
@@ -1358,9 +1421,16 @@ class StopProcessTool(Tool):
                 "pid": payload["pid"],
                 "exit_code": payload["exit_code"],
                 "forced": bool(arguments.get("force", False)),
+                "stopped": payload["stopped"],
+                "remaining_descendants": payload["remaining_descendants"],
+                "registry_removed": payload["registry_removed"],
+                "artifacts_removed": payload["artifacts_removed"],
             },
         ))
-        return f"Stopped process '{payload['process_id']}' with exit_code={payload['exit_code']}."
+        return (
+            f"Stopped process '{payload['process_id']}' with exit_code={payload['exit_code']} "
+            f"(remaining_descendants={payload['remaining_descendants']})."
+        )
 
     def get_audit_result_payload(self, _arguments: dict[str, Any], _result: Any) -> tuple[str, dict[str, Any]] | None:
         payload = _stop_process_audit_payload.get()

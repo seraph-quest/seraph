@@ -415,6 +415,14 @@ def test_start_list_read_and_stop_process():
     else:
         raise AssertionError("process did not appear in list_processes output")
 
+    managed_payload = next(
+        process
+        for process in process_runtime_manager.list_processes()
+        if process["process_id"] == process_id
+    )
+    output_path = Path(managed_payload["output_path"])
+    worker_root = Path(managed_payload["worker_root"])
+
     output = ""
     for _ in range(20):
         output = read_process_output(process_id=process_id)
@@ -425,12 +433,100 @@ def test_start_list_read_and_stop_process():
 
     stopped = stop_process(process_id=process_id)
     assert f"Stopped process '{process_id}'" in stopped
-    payload = next(
-        process
-        for process in process_runtime_manager.list_processes()
-        if process["process_id"] == process_id
+    assert "remaining_descendants=0" in stopped
+    stop_receipt = stop_process.get_audit_result_payload({}, stopped)
+    assert stop_receipt is not None
+    assert stop_receipt[1]["stopped"] is True
+    assert stop_receipt[1]["remaining_descendants"] == 0
+    assert stop_receipt[1]["registry_removed"] is True
+    assert stop_receipt[1]["artifacts_removed"] is True
+    assert process_id not in process_runtime_manager.list_processes()
+    assert not output_path.exists()
+    assert not worker_root.exists()
+
+
+def test_stop_process_kills_descendant_after_parent_exit_and_cleans_receipt():
+    survivor_marker = Path(settings.workspace_dir) / "process-stop-survivor.marker"
+    parent_marker = Path(settings.workspace_dir) / "process-stop-parent.marker"
+    survivor_marker.unlink(missing_ok=True)
+    parent_marker.unlink(missing_ok=True)
+    script_name = _write_script(
+        "wave_process_stop_parent_exit.py",
+        """
+        import pathlib
+        import subprocess
+        import sys
+
+        subprocess.Popen(
+            [
+                sys.executable,
+                "-c",
+                "import pathlib,time; time.sleep(1.5); pathlib.Path('process-stop-survivor.marker').write_text('survived')",
+            ],
+            stdout=sys.stdout,
+            stderr=sys.stderr,
+        )
+        pathlib.Path("process-stop-parent.marker").write_text("parent-exited")
+        """,
     )
-    assert not Path(payload["worker_root"]).exists()
+
+    started = start_process(command="python3", args_json=f'["{script_name}"]')
+    process_id = started.split("process=")[1].split(",")[0]
+    for _ in range(40):
+        listed = process_runtime_manager.list_processes()
+        if parent_marker.is_file() and any(
+            process["process_id"] == process_id and process["status"] == "exited"
+            for process in listed
+        ):
+            break
+        time.sleep(0.05)
+    else:
+        raise AssertionError("parent did not exit while its descendant remained in the group")
+
+    managed_payload = next(process for process in listed if process["process_id"] == process_id)
+    output_path = Path(managed_payload["output_path"])
+    worker_root = Path(managed_payload["worker_root"])
+    stopped = process_runtime_manager.stop_process(process_id=process_id)
+
+    assert stopped is not None
+    assert stopped["stopped"] is True
+    assert stopped["remaining_descendants"] == 0
+    assert stopped["registry_removed"] is True
+    assert stopped["artifacts_removed"] is True
+    assert process_id not in process_runtime_manager.list_processes()
+    assert not output_path.exists()
+    assert not worker_root.exists()
+    time.sleep(1.7)
+    assert not survivor_marker.exists()
+
+
+def test_session_cleanup_removes_process_registry_and_artifacts():
+    script_name = _write_script(
+        "wave_process_session_cleanup.py",
+        """
+        import time
+        print("session-cleanup", flush=True)
+        time.sleep(30)
+        """,
+    )
+    tokens = set_runtime_context("session-cleanup", "high_risk")
+    try:
+        started = start_process(command="python3", args_json=f'["{script_name}"]')
+        process_id = started.split("process=")[1].split(",")[0]
+        managed_payload = next(
+            process
+            for process in process_runtime_manager.list_processes()
+            if process["process_id"] == process_id
+        )
+    finally:
+        reset_runtime_context(tokens)
+
+    output_path = Path(managed_payload["output_path"])
+    worker_root = Path(managed_payload["worker_root"])
+    assert process_runtime_manager.stop_processes_for_session("session-cleanup") == 1
+    assert process_id not in process_runtime_manager.list_all_processes()
+    assert not output_path.exists()
+    assert not worker_root.exists()
 
 
 def test_start_process_scrubs_ambient_secret_environment(monkeypatch):

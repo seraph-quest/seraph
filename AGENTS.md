@@ -1,5 +1,21 @@
 # Agent Guidelines
 
+## Canonical Project Contract
+
+Before substantial work, read the
+[Project Constitution](docs/implementation/00-project-constitution.md) and its
+ADRs. Use [Current App Guide](docs/implementation/12-current-app-guide.md) for
+the current topology, [Development Status](docs/implementation/STATUS.md) for
+shipped/partial truth, and
+[Documentation Contract](docs/implementation/08-docs-contract.md) for ownership
+and status vocabulary. GitHub issues, PRs, and the Project remain the execution
+layer; these docs do not replace tracked work.
+
+For Epic #736, [ADR-005](docs/implementation/decisions/005-epic-integration-branch-workflow.md)
+locks the integration workflow: milestone branches start from the latest epic
+branch, ready PRs target it, and only the final reviewed epic PR targets
+`develop`.
+
 ## What Seraph Is
 
 Seraph is a local-first operator cockpit and agent runtime. The repo spans a
@@ -7,8 +23,21 @@ FastAPI backend, React cockpit/settings UI, scheduler jobs, screen observation
 storage, local model routing, VLM screenshot analysis, reports, skills,
 workflows, and external service adapters.
 
-The current development topology is part of the product contract, not incidental
-developer setup:
+### Active Epic #736/#775 inference phase
+
+On the OpenRouter-only migration branch, the GPU/VLM topology described below
+is historical `develop` baseline evidence. Active text, vision, and embedding
+inference must use the governed `https://openrouter.ai/api/v1` route with
+explicit upstream, consent, budget, and capability checks. The Seraph backend,
+canonical workspace, storage, tools, scheduler, and operator UI must remain
+usable on a CPU host with local model services and the VLM wrapper absent.
+Status and settings must show local inference as inactive or blocked rather than
+probing those services. The final reviewed migration PR is required before
+this branch-local target becomes shipped `develop` truth.
+
+The pre-#775 `develop` topology below is retained as historical evidence and
+GPU administration guidance, not as an active inference prerequisite on this
+branch:
 
 ```text
 Seraph frontend       http://127.0.0.1:3001
@@ -45,10 +74,12 @@ Two properties shape most Seraph decisions:
 - Runtime truth must be operator-visible. If chat, screenshots, reports, or
   settings use local Gemma/VLM/GPU paths, the UI and APIs must say that, not a
   stale default model or fallback provider.
-- Work should be queued, bounded, and priority-aware. One GPU means no fantasy
-  parallelism. Active GPU work is allowed to finish; the next accepted job must
-  be the highest-priority ready job, and background screenshot work should keep
-  the GPU busy when higher-priority work is absent.
+- Work should be queued, bounded, and priority-aware. On the active #775
+  branch, the serial resource is the governed remote-inference lane, not a
+  physical GPU. At most one remote inference may be admitted until durable
+  queue and cost ownership land; the next accepted job must be the highest-
+  priority ready job, and background screenshot work stays disabled unless its
+  explicit consent, budget, and capability gates are ready.
 
 ## Contribution Rubric
 
@@ -189,6 +220,34 @@ proof scaffolding, broad docs reconciliation, or claim gates while the actual
 capability is still missing. Ship the capability with the focused receipts it
 needs, then track broader proof work separately when necessary.
 
+### Capability Completion Contract
+
+A capability is not **Shipped** merely because its registry entry, settings
+surface, deterministic scenario, or benchmark endpoint exists. Where the
+capability crosses the relevant boundaries, completion requires one observable
+vertical slice:
+
+1. a stable capability identity with typed inputs and outputs;
+2. declared permissions, limits, policy, approval, and runtime dependencies;
+3. an accepted bounded job with owner, priority, retry/cancel behavior, and
+   idempotency expectations;
+4. real execution through the governed runtime rather than a receipt fixture;
+5. durable artifact, checkpoint, audit, and effective-route receipts;
+6. verification or external readback of the intended outcome;
+7. an explicit canonical-memory update or an explicit no-learning result; and
+8. operator-visible success, degraded, blocked, and recovery states.
+
+Mark a non-applicable element explicitly instead of silently omitting it.
+Proof-only endpoints and deterministic fixtures may validate a capability, but
+they do not count as the capability. Prefer one complete operator journey over
+several disconnected surfaces.
+
+For proactive behavior, prove the bounded loop end to end: goal or standing
+intent -> candidate intervention -> admission and priority -> approval or
+reservation -> capability execution -> evidence/readback -> outcome evaluation
+-> governed memory update. Periodic model calls or delivered messages alone do
+not satisfy the proactive-agent contract.
+
 ## Runtime And Lifecycle Rules
 
 - Use `./manage.sh -e dev local run` for live observation in managed Codex
@@ -228,7 +287,7 @@ needs, then track broader proof work separately when necessary.
   `frontend/src/components/chat/`, and related tests.
 - Lifecycle scripts and env loading: `manage.sh`, `env.dev.example`,
   `env.prod.example`, Docker/VLM wrapper docs.
-- Shipped-truth docs: `docs/implementation/`; target-shape and evidence docs:
+- Shipped-truth docs: `docs/implementation/`; evidence and alternatives:
   `docs/research/`; historical/archive docs: `docs/docs/`.
 
 Prefer these extension points before adding new broad modules or parallel UI
@@ -242,8 +301,8 @@ surfaces.
 | Chat/local model routing | API or WebSocket probe proving effective provider/model path, plus transcript persistence check when turn behavior changes. |
 | Streaming chat UI | Backend frame test, frontend reducer/rendering test, and live or mocked delta/final receipt. |
 | Settings/UI truth | Endpoint payload inspection plus frontend binding or component test. |
-| Scheduler/GPU queue | Priority/non-starvation test and proof that one-GPU serial semantics are preserved. |
-| Screenshot/VLM analysis | Wrapper `/health`, backend `/health/backend`, ingestion/analysis tests, and operator-visible status receipt. |
+| Scheduler/remote inference queue | Priority/non-starvation test and proof that one-remote-inference serial semantics are preserved; GPU receipts are historical on #775. |
+| Screenshot/OpenRouter vision analysis | OpenRouter policy/admission/ingestion tests and operator-visible status receipt; local wrapper health is historical and must not be a readiness prerequisite. |
 | Docs-only workflow change | Link to owning doc, contradiction scan for stale guidance, and no claims of runtime change. |
 | GitHub/project mutation | Duplicate issue search, issue/PR/project item IDs, and field verification after mutation. |
 | Security/privacy/trust boundary | Focused negative tests or proof of fail-closed behavior, plus explicit residual risk. |
@@ -293,8 +352,10 @@ feat/batch-three -> feat/batch-two
 
 ## Docs And Execution Contract
 
-- `docs/research/` is the target-shape, evidence, and comparative-truth layer.
-- `docs/implementation/` is the shipped-truth and strategic implementation layer for `develop`.
+- `docs/implementation/00-project-constitution.md` and its ADRs are the sole
+  product-definition and accepted-target authority.
+- `docs/research/` is the evidence, alternatives, and dated comparative-analysis layer; it cannot accept a target or claim shipping.
+- other `docs/implementation/` pages own shipped/partial truth and durable operator contracts for `develop`.
 - `docs/docs/` is the archive and historical layer.
 - The GitHub Project is the execution layer.
 - GitHub issues and PRs are the active work-tracking layer.
@@ -414,6 +475,21 @@ relevant docs.
 - While review is running, set `Code Review=Running`, then move to
   `Changes Requested` or `Passed`.
 - When the PR merges, set `PR=Merged` and `Status=Done`.
+
+### GitHub Approval Discipline
+
+- Reuse the operator's existing scoped approvals for routine `gh issue`,
+  `gh pr`, `gh project`, `gh api`, and related Git operations. Do not request
+  repeated approval for operations already covered by those scopes.
+- For issue comments, PR bodies, and other multiline GitHub text, write the
+  content to a workspace or `/tmp` file with `apply_patch`, then pass it with
+  `--body-file`. Avoid shell-expanded inline bodies such as `$'...'`, command
+  substitution, or heredocs that turn a routine `gh` call into a new approval
+  shape.
+- If an optional GitHub receipt cannot run under the existing scoped approvals,
+  skip it and report the omission instead of interrupting the operator. Request
+  a new permission only when the operation is required to complete the task;
+  keep that request narrow and reusable.
 
 ## Review Rule
 

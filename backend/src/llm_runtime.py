@@ -4,17 +4,21 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import hashlib
+import ipaddress
 import json
 import logging
 import math
 import os
+import time
+from collections.abc import Callable
 from fnmatch import fnmatchcase
 from threading import Lock
 from time import monotonic
 from types import SimpleNamespace
 from typing import Any
+from urllib.parse import urlparse, urlsplit, urlunsplit
 from uuid import uuid4
 
 from smolagents import LiteLLMModel as BaseLiteLLMModel
@@ -22,11 +26,38 @@ from smolagents.models import ChatMessage, MessageRole
 
 from config.settings import settings
 from src.agent.prompt_compaction import compact_messages_for_local_runtime
-from src.approval.runtime import get_current_session_id
+from src.approval.runtime import get_current_session_id, get_current_trust_principal
+from src.auth.cancellation import RuntimeRevokedError, assert_runtime_not_revoked
 from src.audit.repository import audit_repository
 from src.local_runtime_profiles import local_runtime_profile
-from src.operators.local_codex import is_local_codex_model, local_codex_chat_timeout_seconds, run_local_codex
-from src.vlm_runtime import effective_vlm_api_key, effective_vlm_chat_api_base
+from src.model_fabric.contracts import (
+    InferenceRequestContext,
+    NoCompliantModelRouteError,
+    ProviderProfile,
+    SUPPORTED_SECRET_REFS,
+    finalized_openai_compatible_body,
+    transport_model_for_provider,
+)
+from src.model_fabric.remote_inference_admission import (
+    RemoteInferenceAdmissionError as GpuAdmissionError,
+    RemoteInferenceAdmissionIdentityError as GpuAdmissionIdentityError,
+    RemoteInferenceAdmissionRequest as GpuAdmissionRequest,
+    current_remote_inference_receipt_binding,
+    remote_inference_admission_broker as gpu_admission_broker,
+)
+from src.operators.local_codex import reject_legacy_external_agent_model
+from src.security.trust_contract import (
+    DestinationClass,
+    TrustDecision,
+    TrustDestination,
+    evaluate_trust,
+    strict_local_inference_request,
+)
+from src.vlm_runtime import (
+    SCREENSHOT_VLM_PROFILE_ID,
+    effective_vlm_api_key,
+    effective_vlm_chat_api_base,
+)
 
 logger = logging.getLogger(__name__)
 _runtime_request_lock = Lock()
@@ -67,32 +98,19 @@ class _TargetFeedback:
 
 _target_feedback: dict[tuple[str, str | None, str | None], _TargetFeedback] = {}
 
+_model_fabric_streaming_transport: Any = None
+_model_fabric_receipt_hooks: Any = None
+
+
+def configure_model_fabric_streaming(*, transport: Any, receipt_hooks: Any) -> None:
+    """Install governed transport/receipt adapters; absent adapters fail closed."""
+    global _model_fabric_streaming_transport, _model_fabric_receipt_hooks
+    _model_fabric_streaming_transport = transport
+    _model_fabric_receipt_hooks = receipt_hooks
+
 
 class ProviderProfileConfigurationError(RuntimeError):
     """Raised when a selected provider profile is not usable."""
-
-
-@dataclass(frozen=True)
-class ProviderProfile:
-    id: str
-    provider_kind: str
-    model: str
-    api_base: str = ""
-    secret_env: str = ""
-    options: dict[str, Any] | None = None
-    capabilities: tuple[str, ...] = ()
-    cost_tier: str | None = None
-    latency_tier: str | None = None
-    task_class: str | None = None
-    budget_class: str | None = None
-    fallback_models: tuple[str, ...] = ()
-    enabled: bool = True
-    keyless: bool = False
-    safety_notes: str = ""
-
-    @property
-    def api_key(self) -> str:
-        return _secret_value(self.secret_env)
 
 
 def _redact_text(value: str | None) -> str | None:
@@ -156,7 +174,7 @@ def _secret_value(env_name: str) -> str:
         return settings.local_llm_api_key or os.getenv(env_name, "")
     if env_name == "SERAPH_VLM_API_KEY":
         return settings.seraph_vlm_api_key or settings.local_vlm_api_key or settings.local_llm_api_key or os.getenv(env_name, "")
-    return os.getenv(env_name, "")
+    raise ProviderProfileConfigurationError("provider profile references an unsupported secret")
 
 
 def _safe_error(error: Exception | str | None) -> str:
@@ -233,6 +251,48 @@ def _profile_bool(raw_value: Any, *, default: bool) -> bool:
     return bool(raw_value)
 
 
+def _profile_optional_nonnegative_int(raw_value: Any) -> int | None:
+    if raw_value is None or raw_value == "":
+        return None
+    try:
+        value = int(raw_value)
+    except (TypeError, ValueError):
+        return None
+    return value if value >= 0 else None
+
+
+def _profile_optional_float(raw_value: Any) -> float | None:
+    if raw_value is None or raw_value == "":
+        return None
+    try:
+        return float(raw_value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _sanitized_api_base(raw_value: object) -> str:
+    value = str(raw_value or "").strip()
+    try:
+        parsed = urlsplit(value)
+        port = parsed.port
+    except ValueError:
+        return ""
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not parsed.hostname
+        or parsed.username
+        or parsed.password
+        or parsed.query
+        or parsed.fragment
+    ):
+        return ""
+    host = parsed.hostname
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    netloc = f"{host}:{port}" if port is not None else host
+    return urlunsplit((parsed.scheme.lower(), netloc, parsed.path.rstrip("/"), "", ""))
+
+
 def _profile_from_payload(profile_id: str, payload: Any) -> ProviderProfile | None:
     if not isinstance(payload, dict):
         return None
@@ -249,22 +309,63 @@ def _profile_from_payload(profile_id: str, payload: Any) -> ProviderProfile | No
         or payload.get("env_var")
         or ""
     ).strip()
+    resolved_secret_env = secret_env or _provider_secret_env(provider_kind)
+    if resolved_secret_env and resolved_secret_env not in SUPPORTED_SECRET_REFS:
+        return None
+    raw_api_base = payload.get("api_base") or _provider_default_api_base(provider_kind)
+    api_base = _sanitized_api_base(raw_api_base)
+    if not api_base:
+        return None
+    cost_microusd = _profile_optional_nonnegative_int(payload.get("cost_microusd"))
+    cost_source = str(payload.get("cost_source") or "").strip() or None
+    cost_source_updated_at = _profile_optional_float(payload.get("cost_source_updated_at"))
+    pricing_fields = (
+        cost_microusd is not None,
+        cost_source is not None,
+        cost_source_updated_at is not None,
+    )
+    if any(pricing_fields) and not all(pricing_fields):
+        return None
+    if cost_source is not None:
+        from src.model_fabric.receipts import safe_code
+
+        try:
+            safe_code(cost_source, field_name="cost source")
+        except ValueError:
+            return None
+    if cost_source_updated_at is not None and (
+        not math.isfinite(cost_source_updated_at) or cost_source_updated_at < 0
+    ):
+        return None
     return ProviderProfile(
         id=_normal_profile_id(profile_id),
         provider_kind=provider_kind,
-        model=model,
-        api_base=str(payload.get("api_base") or _provider_default_api_base(provider_kind)).strip(),
-        secret_env=secret_env or _provider_secret_env(provider_kind),
+        model=transport_model_for_provider(provider_kind, model),
+        routing_model=model,
+        api_base=api_base,
+        secret_env=resolved_secret_env,
         options=dict(options),
         capabilities=_profile_tuple(payload.get("capabilities")),
         cost_tier=_normalize_guardrail_tier(str(payload.get("cost") or payload.get("cost_tier") or "")),
         latency_tier=_normalize_guardrail_tier(str(payload.get("latency") or payload.get("latency_tier") or "")),
         task_class=_normalize_policy_tag(str(payload.get("task") or payload.get("task_class") or "")) or None,
+        task_classes=_profile_tuple(payload.get("task_classes")),
         budget_class=_normalize_guardrail_tier(str(payload.get("budget") or payload.get("budget_class") or "")),
         fallback_models=_profile_models(payload.get("fallback", payload.get("fallback_models"))),
         enabled=_profile_bool(payload.get("enabled"), default=True),
         keyless=_profile_bool(payload.get("keyless"), default=provider_kind in {"local", "ollama"}),
         safety_notes=str(payload.get("safety_notes") or "").strip(),
+        transport_adapter=_normalize_policy_tag(
+            str(payload.get("transport_adapter") or "openai_compatible_chat")
+        ),
+        context_window_tokens=_profile_optional_nonnegative_int(payload.get("context_window_tokens")),
+        max_output_tokens=_profile_optional_nonnegative_int(payload.get("max_output_tokens")),
+        cost_microusd=cost_microusd,
+        cost_source=cost_source,
+        cost_source_updated_at=cost_source_updated_at,
+        local_resource_ms=_profile_optional_nonnegative_int(payload.get("local_resource_ms")),
+        max_latency_ms=_profile_optional_nonnegative_int(payload.get("max_latency_ms")),
+        follow_redirects=_profile_bool(payload.get("follow_redirects"), default=False),
     )
 
 
@@ -303,22 +404,64 @@ def _configured_provider_profiles() -> dict[str, ProviderProfile]:
                 profile = _profile_from_payload(profile_id, raw_profile)
                 if profile is not None:
                     profiles[profile.id] = profile
-    return profiles
+    return {
+        profile_id: replace(
+            profile,
+            model=transport_model_for_provider(profile.provider_kind, profile.routing_model or profile.model),
+            routing_model=profile.routing_model or profile.model,
+        )
+        for profile_id, profile in profiles.items()
+    }
+
+
+def _openrouter_policy_options(*, vision: bool = False) -> dict[str, object]:
+    """Build the server-side OpenRouter policy attached to a profile.
+
+    The allow-list is intentionally empty until an operator selects approved
+    upstreams.  The model-fabric selector treats that as a configuration block
+    rather than silently accepting the gateway's default routing.
+    """
+    upstreams = tuple(
+        item.strip()
+        for item in str(getattr(settings, "openrouter_allowed_upstreams", "") or "").split(",")
+        if item.strip()
+    )
+    return {
+        "provider": {
+            "only": list(upstreams),
+            "allow_fallbacks": bool(getattr(settings, "openrouter_allow_fallbacks", False)),
+            "require_parameters": bool(getattr(settings, "openrouter_require_parameters", True)),
+            "data_collection": str(getattr(settings, "openrouter_data_collection", "deny") or "deny"),
+            "data_retention_policy": str(
+                getattr(settings, "openrouter_data_retention_policy", "deny") or "deny"
+            ),
+            "zdr": bool(getattr(settings, "openrouter_zero_data_retention", False)) if vision else True,
+        }
+    }
 
 
 def _builtin_provider_profiles() -> dict[str, ProviderProfile]:
+    configured_default_model = settings.default_model.strip() or "openrouter/anthropic/claude-sonnet-4"
     profiles = {
         "openrouter": ProviderProfile(
             id="openrouter",
             provider_kind="openrouter",
-            model=settings.default_model.strip() or "openrouter/anthropic/claude-sonnet-4",
+            model=transport_model_for_provider("openrouter", configured_default_model),
+            routing_model=configured_default_model,
             api_base="https://openrouter.ai/api/v1",
             secret_env="OPENROUTER_API_KEY",
-            capabilities=("reasoning", "tool_use"),
+            capabilities=("text", "reasoning", "tool_use", "streaming"),
             cost_tier="medium",
             latency_tier="medium",
             task_class="general",
+            task_classes=(
+                "interactive_chat",
+                "report_synthesis",
+                "memory_synthesis",
+                "agent_reasoning",
+            ),
             budget_class="medium",
+            options=_openrouter_policy_options(),
             safety_notes="OpenRouter-compatible cloud profile; credentials stay provider-scoped.",
         ),
         "openai-compatible": ProviderProfile(
@@ -376,33 +519,115 @@ def _builtin_provider_profiles() -> dict[str, ProviderProfile]:
             safety_notes="Anthropic-keyed Claude profile; operators may pin the exact provider model id in LLM_PROVIDER_PROFILES.",
         ),
     }
+    # Embeddings are a separate capability and transport contract.  Do not
+    # synthesize a default model here: an operator must explicitly configure
+    # an OpenRouter-qualified embedding model before this profile exists.
+    configured_embedding_model = str(getattr(settings, "embedding_model", "") or "").strip()
+    if (
+        configured_embedding_model.startswith("openrouter/")
+        and "/" in configured_embedding_model.removeprefix("openrouter/")
+        and not any(character.isspace() for character in configured_embedding_model)
+    ):
+        profiles["memory_embedding"] = ProviderProfile(
+            id="memory_embedding",
+            provider_kind="openrouter",
+            model=transport_model_for_provider("openrouter", configured_embedding_model),
+            routing_model=configured_embedding_model,
+            api_base="https://openrouter.ai/api/v1",
+            secret_env="OPENROUTER_API_KEY",
+            capabilities=("embedding",),
+            task_class="memory_embedding",
+            task_classes=("memory_embedding",),
+            budget_class="medium",
+            options=_openrouter_policy_options(),
+            safety_notes=(
+                "Canonical memory embedding profile; requires explicit OpenRouter policy, "
+                "capability proofs, and cloud-egress consent."
+            ),
+            transport_adapter="openai_compatible_embeddings",
+            context_window_tokens=int(settings.local_runtime_context_window_tokens),
+            max_output_tokens=1,
+            max_latency_ms=max(int(settings.consolidation_llm_timeout * 1000), 1),
+        )
+    from src.observer.screen_analysis_settings import effective_screen_analysis_model
+
+    screenshot_vlm_model = effective_screen_analysis_model()
+    if screenshot_vlm_model:
+        screenshot_routing_model = screenshot_vlm_model.strip()
+        profiles[SCREENSHOT_VLM_PROFILE_ID] = ProviderProfile(
+            id=SCREENSHOT_VLM_PROFILE_ID,
+            provider_kind="openrouter",
+            model=transport_model_for_provider("openrouter", screenshot_routing_model),
+            routing_model=screenshot_routing_model,
+            api_base="https://openrouter.ai/api/v1",
+            secret_env="OPENROUTER_API_KEY",
+            capabilities=("text", "vision", "structured_output"),
+            cost_tier="medium",
+            latency_tier="medium",
+            task_class="vision_analysis",
+            task_classes=("vision_analysis",),
+            budget_class="medium",
+            options=_openrouter_policy_options(vision=True),
+            safety_notes="Governed OpenRouter screenshot profile; requires explicit vision consent and ZDR policy.",
+            transport_adapter="openai_compatible_chat",
+            context_window_tokens=int(settings.local_runtime_context_window_tokens),
+            max_output_tokens=int(settings.model_max_tokens),
+            max_latency_ms=max(int(settings.agent_chat_timeout * 1000), 1),
+        )
     if has_local_model_profile():
         local_chat_api_base = effective_vlm_chat_api_base()
         profiles["local-ollama"] = ProviderProfile(
             id="local-ollama",
-            provider_kind="ollama",
+            provider_kind="local",
             model=settings.local_model.strip(),
             api_base=settings.local_llm_api_base.strip() or "http://localhost:11434/v1",
-            capabilities=("local", "private"),
+            capabilities=("text", "streaming", "local", "private"),
             cost_tier="low",
             latency_tier="low",
             task_class="general",
+            task_classes=(
+                "interactive_chat",
+                "report_synthesis",
+                "memory_synthesis",
+                "agent_reasoning",
+            ),
             budget_class="low",
             keyless=True,
             safety_notes="Local Ollama-compatible profile.",
+            context_window_tokens=int(settings.local_runtime_context_window_tokens),
+            max_output_tokens=int(settings.model_max_tokens),
+            local_resource_ms=max(int(settings.agent_chat_timeout * 1000), 1),
+            max_latency_ms=max(int(settings.agent_chat_timeout * 1000), 1),
         )
         if local_chat_api_base:
             for profile_id in ("screenshot_fast", "report_thinking", "chat_thinking", "strategist_fast"):
                 runtime_profile = local_runtime_profile(profile_id)
                 profiles[f"local-gemma-{profile_id.replace('_', '-')}"] = ProviderProfile(
                     id=f"local-gemma-{profile_id.replace('_', '-')}",
-                    provider_kind="openai_compatible",
+                    provider_kind="local",
                     model=settings.local_model.strip(),
                     api_base=local_chat_api_base,
-                    capabilities=("local", "private", "reasoning_profile", runtime_profile.reasoning),
+                    capabilities=(
+                        "text",
+                        "streaming",
+                        "structured_output",
+                        "local",
+                        "private",
+                        "reasoning_profile",
+                        runtime_profile.reasoning,
+                    ),
                     cost_tier="low",
                     latency_tier="low" if runtime_profile.priority != "background" else "medium",
                     task_class=runtime_profile.runtime_path,
+                    task_classes=(
+                        "vision_analysis"
+                        if profile_id == "screenshot_fast"
+                        else "interactive_chat"
+                        if profile_id == "chat_thinking"
+                        else "agent_reasoning"
+                        if profile_id == "strategist_fast"
+                        else "report_synthesis",
+                    ) + (("memory_synthesis",) if profile_id == "report_thinking" else ()),
                     budget_class="low",
                     keyless=not bool(effective_vlm_api_key()),
                     secret_env="SERAPH_VLM_API_KEY",
@@ -411,8 +636,19 @@ def _builtin_provider_profiles() -> dict[str, ProviderProfile]:
                         "Local Gemma profile contract. Treat as unsafe for production "
                         "profile routing until the local runtime proof receipt says safe."
                     ),
+                    context_window_tokens=int(settings.local_runtime_context_window_tokens),
+                    max_output_tokens=int(runtime_profile.max_tokens),
+                    local_resource_ms=max(int(runtime_profile.timeout_seconds * 1000), 1),
+                    max_latency_ms=max(int(runtime_profile.timeout_seconds * 1000), 1),
                 )
-    return profiles
+    return {
+        profile_id: replace(
+            profile,
+            model=transport_model_for_provider(profile.provider_kind, profile.routing_model or profile.model),
+            routing_model=profile.routing_model or profile.model,
+        )
+        for profile_id, profile in profiles.items()
+    }
 
 
 def _local_gemma_profile_options(profile_id: str) -> dict[str, Any]:
@@ -478,13 +714,16 @@ def _effective_max_tokens_for_profile(max_tokens: int, profile: str | None) -> i
 def provider_profiles() -> dict[str, ProviderProfile]:
     profiles = _builtin_provider_profiles()
     profiles.update(_configured_provider_profiles())
-    return profiles
+    from src.model_fabric.configuration import effective_provider_profiles
+
+    return effective_provider_profiles(profiles)
 
 
 def _provider_profile(profile: str | None) -> ProviderProfile | None:
     if not profile:
         return None
-    return provider_profiles().get(_normal_profile_id(profile))
+    normalized = _normal_profile_id(profile)
+    return provider_profiles().get(normalized)
 
 
 def _is_local_profile(profile: str | None) -> bool:
@@ -517,8 +756,9 @@ def provider_profile_statuses() -> list[dict[str, Any]]:
         status = {
             "id": profile.id,
             "provider_kind": profile.provider_kind,
-            "model": profile.model,
-            "api_base": profile.api_base,
+            "model": profile.routing_model or profile.model,
+            "transport_model": profile.model,
+            "api_base": _sanitized_api_base(profile.api_base),
             "enabled": profile.enabled,
             "keyless": profile.keyless,
             "env_secret": profile.secret_env,
@@ -534,12 +774,29 @@ def provider_profile_statuses() -> list[dict[str, Any]]:
             "latency_tier": profile.latency_tier,
             "task": profile.task_class,
             "task_class": profile.task_class,
+            "task_classes": list(profile.task_classes),
             "budget": profile.budget_class,
             "budget_class": profile.budget_class,
             "fallback": list(profile.fallback_models),
             "fallback_models": list(profile.fallback_models),
             "safety_notes": profile.safety_notes,
+            "transport_adapter": profile.transport_adapter,
+            "context_window_tokens": profile.context_window_tokens,
+            "max_output_tokens": profile.max_output_tokens,
+            "cost_microusd": profile.cost_microusd,
+            "cost_source": profile.cost_source,
+            "cost_source_updated_at": profile.cost_source_updated_at,
+            "local_resource_ms": profile.local_resource_ms,
+            "max_latency_ms": profile.max_latency_ms,
+            "follow_redirects": profile.follow_redirects,
+            "schema_version": profile.schema_version,
+            "contract_hash": profile.contract_hash,
         }
+        from src.model_fabric.selector import active_provider_exclusion_reason
+
+        exclusion_reason = active_provider_exclusion_reason(profile)
+        status["model_fabric_eligible"] = exclusion_reason is None
+        status["model_fabric_exclusion_reason"] = exclusion_reason
         profile_id = _local_gemma_runtime_profile_id(profile.id)
         if profile_id:
             runtime_profile = local_runtime_profile(profile_id)
@@ -884,7 +1141,22 @@ def runtime_profile_candidates(
     """Return the ordered runtime profiles to try for an implicit runtime path."""
     if profile:
         normalized_profile = _normalize_runtime_profile(profile)
+        from src.model_fabric.caller_context import is_canonical_inference_route
+
+        if runtime_path and is_canonical_inference_route(runtime_path) and normalized_profile == "default":
+            return ["openrouter"]
         return [normalized_profile] if normalized_profile else ["default"]
+
+    # Canonical production routes have a fixed provider boundary.  Persisted
+    # local preferences and model overrides are historical data for those
+    # routes and must never select a disabled local/GPU path.  Keep the broad
+    # resolver below available for readback and transitional helper callers;
+    # their actual transport still requires a canonical context and the active
+    # selector rejects non-OpenRouter candidates at that boundary.
+    from src.model_fabric.caller_context import is_canonical_inference_route
+
+    if runtime_path and is_canonical_inference_route(runtime_path):
+        return ["openrouter"]
 
     candidates: list[str] = []
     override = _runtime_model_override(runtime_path)
@@ -939,6 +1211,14 @@ def _resolved_primary_model_id(
     runtime_path: str | None = None,
     profile: str = "default",
 ) -> str:
+    if runtime_path:
+        from src.model_fabric.caller_context import is_canonical_inference_route
+
+        # Persisted path overrides belong to the historical provider matrix.
+        # Canonical routes are bound to their governed OpenRouter profile so
+        # status, transport, and receipts cannot disagree about the model.
+        if is_canonical_inference_route(runtime_path):
+            return _profile_model_id(profile)
     override = _runtime_model_override(runtime_path)
     if override:
         override_profile, override_model_id = override
@@ -947,12 +1227,25 @@ def _resolved_primary_model_id(
     return _profile_model_id(profile)
 
 
+def effective_runtime_model_id(*, runtime_path: str, profile: str | None = None) -> str:
+    """Return the effective primary model after profile and path overrides."""
+    resolved_profile = resolve_runtime_profile(runtime_path=runtime_path, profile=profile)
+    return _resolved_primary_model_id(runtime_path=runtime_path, profile=resolved_profile)
+
+
+def reject_removed_external_agent_route(*, runtime_path: str, profile: str | None = None) -> str:
+    """Fail closed when an effective runtime route selects a removed agent CLI."""
+    model_id = effective_runtime_model_id(runtime_path=runtime_path, profile=profile)
+    reject_legacy_external_agent_model(model_id)
+    return model_id
+
+
 def _profile_model_id(profile: str) -> str:
     if profile == "local" and has_local_model_profile():
         return settings.local_model
     provider_profile = _provider_profile(profile)
     if provider_profile is not None:
-        return provider_profile.model
+        return provider_profile.routing_model or provider_profile.model
     return settings.default_model
 
 
@@ -980,11 +1273,11 @@ def _profile_api_key(profile: str) -> str:
 
 def _profile_api_base(profile: str) -> str:
     if profile == "local" and has_local_model_profile():
-        return settings.local_llm_api_base or settings.llm_api_base
+        return _sanitized_api_base(settings.local_llm_api_base or settings.llm_api_base)
     provider_profile = _provider_profile(profile)
     if provider_profile is not None:
-        return provider_profile.api_base
-    return settings.llm_api_base
+        return _sanitized_api_base(provider_profile.api_base)
+    return _sanitized_api_base(settings.llm_api_base)
 
 
 def _profile_options(profile: str) -> dict[str, Any]:
@@ -992,6 +1285,40 @@ def _profile_options(profile: str) -> dict[str, Any]:
     if provider_profile is None:
         return {}
     return dict(provider_profile.options or {})
+
+
+def _openrouter_runtime_controls(profile: str | None) -> dict[str, Any]:
+    """Return private, persisted controls for the active OpenRouter profile."""
+    provider_profile = _provider_profile(profile)
+    if provider_profile is None or provider_profile.provider_kind != "openrouter":
+        return {}
+    options = provider_profile.options or {}
+    controls = options.get("_seraph_openrouter")
+    return dict(controls) if isinstance(controls, dict) else {}
+
+
+def _apply_openrouter_runtime_controls(
+    kwargs: dict[str, Any],
+    *,
+    profile: str | None,
+    requested_max_tokens: int,
+) -> dict[str, Any]:
+    """Make setup values actual request authority, with caller limits narrowing."""
+    controls = _openrouter_runtime_controls(profile)
+    if not controls:
+        return kwargs
+    effective_model = str(_profile_model_id(str(profile)) or "")
+    if "model" in kwargs:
+        kwargs["model"] = effective_model
+    else:
+        kwargs["model_id"] = effective_model
+    kwargs["temperature"] = float(controls["temperature"])
+    kwargs["max_tokens"] = min(
+        int(requested_max_tokens),
+        int(controls["output_limit"]),
+    )
+    kwargs["timeout"] = float(controls["timeout_seconds"])
+    return kwargs
 
 
 def fallback_model_ids(*, runtime_path: str | None = None) -> list[str]:
@@ -1026,44 +1353,31 @@ def _profile_fallback_targets(profile: str | None) -> list[dict[str, Any]]:
     targets: list[dict[str, Any]] = []
     for fallback_entry in provider_profile.fallback_models:
         fallback_profile = _provider_profile(fallback_entry)
-        if fallback_profile is not None:
-            try:
-                fallback_api_key = _profile_api_key(fallback_profile.id)
-            except ProviderProfileConfigurationError:
-                logger.warning(
-                    "Skipping unusable provider profile fallback '%s' for profile '%s'",
-                    fallback_profile.id,
-                    provider_profile.id,
-                )
-                continue
-            targets.append(
-                {
-                    "model_id": fallback_profile.model,
-                    "api_base": _profile_api_base(fallback_profile.id),
-                    "api_key": fallback_api_key,
-                    "profile": fallback_profile.id,
-                    "source": "profile_fallback_chain",
-                    "options": _profile_options(fallback_profile.id),
-                }
+        if fallback_profile is None:
+            logger.warning(
+                "Skipping raw model fallback '%s' for profile '%s'; "
+                "governed profile fallbacks must reference a profile id",
+                fallback_entry,
+                provider_profile.id,
             )
             continue
         try:
-            fallback_api_key = _profile_api_key(provider_profile.id)
+            fallback_api_key = _profile_api_key(fallback_profile.id)
         except ProviderProfileConfigurationError:
             logger.warning(
-                "Skipping unusable model fallback '%s' for profile '%s'",
-                fallback_entry,
+                "Skipping unusable provider profile fallback '%s' for profile '%s'",
+                fallback_profile.id,
                 provider_profile.id,
             )
             continue
         targets.append(
             {
-                "model_id": fallback_entry,
-                "api_base": _profile_api_base(provider_profile.id),
+                "model_id": fallback_profile.routing_model or fallback_profile.model,
+                "api_base": _profile_api_base(fallback_profile.id),
                 "api_key": fallback_api_key,
-                "profile": provider_profile.id,
+                "profile": fallback_profile.id,
                 "source": "profile_fallback_chain",
-                "options": _profile_options(provider_profile.id),
+                "options": _profile_options(fallback_profile.id),
             }
         )
     return targets
@@ -1095,7 +1409,12 @@ def build_model_kwargs(
         "runtime_profile": resolved_profile,
         "runtime_path": runtime_path,
     }
-    kwargs.update(_profile_options(resolved_profile))
+    kwargs.update(_transport_options(_profile_options(resolved_profile)))
+    _apply_openrouter_runtime_controls(
+        kwargs,
+        profile=resolved_profile,
+        requested_max_tokens=max_tokens,
+    )
     _apply_local_runtime_request_metadata(kwargs, resolved_profile)
     api_key = _profile_api_key(resolved_profile)
     if api_key:
@@ -1132,7 +1451,7 @@ def build_completion_kwargs(
             "temperature": temperature,
             "max_tokens": _effective_max_tokens_for_profile(max_tokens, fallback_profile),
         }
-        kwargs.update(fallback_options or {})
+        kwargs.update(_transport_options(fallback_options or {}))
         api_key = (
             fallback_api_key
             if fallback_api_key is not None
@@ -1159,7 +1478,12 @@ def build_completion_kwargs(
             "temperature": temperature,
             "max_tokens": _effective_max_tokens_for_profile(max_tokens, resolved_profile),
         }
-        kwargs.update(_profile_options(resolved_profile))
+        kwargs.update(_transport_options(_profile_options(resolved_profile)))
+        _apply_openrouter_runtime_controls(
+            kwargs,
+            profile=resolved_profile,
+            requested_max_tokens=max_tokens,
+        )
         _apply_local_runtime_request_metadata(kwargs, resolved_profile)
         api_key = _profile_api_key(resolved_profile)
         api_base = _profile_api_base(resolved_profile)
@@ -1177,23 +1501,137 @@ def _message_value(message: Any, key: str, default: Any = None) -> Any:
     return getattr(message, key, default)
 
 
-def _messages_to_local_operator_prompt(messages: list[Any]) -> str:
-    parts: list[str] = []
-    for message in messages:
-        role = str(_message_value(message, "role", "user") or "user").strip() or "user"
-        content = str(_message_value(message, "content", "") or "").strip()
-        if content:
-            parts.append(f"{role}: {content}")
-    return "\n\n".join(parts).strip()
+def _openai_message_payload(message: Any) -> dict[str, Any]:
+    if isinstance(message, dict):
+        return dict(message)
+    result = {
+        "role": str(_message_value(message, "role", "user")),
+        "content": _message_value(message, "content", ""),
+    }
+    tool_calls = _message_value(message, "tool_calls")
+    if tool_calls is not None:
+        result["tool_calls"] = tool_calls
+    return result
 
 
-def _local_operator_completion_response(content: str) -> SimpleNamespace:
-    return SimpleNamespace(
-        choices=[
-            SimpleNamespace(
-                message=SimpleNamespace(content=content),
-            )
-        ],
+def _transport_json_value(value: Any) -> Any:
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, dict):
+        return {str(key): _transport_json_value(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_transport_json_value(item) for item in value]
+    for method_name in ("model_dump", "to_dict", "dict"):
+        method = getattr(value, method_name, None)
+        if callable(method):
+            return _transport_json_value(method())
+    return str(value)
+
+
+_TRANSPORT_RESERVED_KWARGS = frozenset(
+    {
+        "model",
+        "model_id",
+        "messages",
+        "api_key",
+        "api_base",
+        "temperature",
+        "max_tokens",
+        "stream",
+        "timeout",
+    }
+)
+
+
+def _transport_options(kwargs: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: value
+        for key, value in kwargs.items()
+        if key not in _TRANSPORT_RESERVED_KWARGS and not str(key).startswith("_seraph_")
+    }
+
+
+def _target_transport_model(target: dict[str, Any]) -> str:
+    profile_id = str(target.get("profile") or "")
+    resolved_id = "local-ollama" if profile_id == "local" else profile_id
+    profile = _provider_profile(resolved_id)
+    if profile is not None:
+        return profile.model
+    api_base = str(target.get("api_base") or "").lower()
+    provider_kind = (
+        "openrouter"
+        if "openrouter.ai" in api_base
+        else "openai"
+        if "api.openai.com" in api_base
+        else "local"
+        if _strict_local_endpoint(api_base)
+        else "openai_compatible"
+    )
+    return transport_model_for_provider(provider_kind, str(target.get("model_id") or ""))
+
+
+def _governed_openai_chat_completion(
+    *,
+    decision: Any,
+    context: Any,
+    body: dict[str, Any],
+    api_key: str | None,
+) -> tuple[SimpleNamespace, dict[str, Any]]:
+    """Send the exact body with redirects disabled and a transport-native deadline.
+
+    HTTPX owns cancellation at the socket/request boundary; this synchronous path
+    does not create or claim cancellation of a detached worker thread.
+    """
+    import httpx
+
+    assert_runtime_not_revoked()
+    if decision is None or not decision.allowed or decision.selected is None:
+        raise NoCompliantModelRouteError()
+    candidate = decision.selected
+    if candidate.adapter != "openai_compatible_chat":
+        raise ProviderProfileConfigurationError("unsupported governed chat adapter")
+    remaining = float(context.deadline_at) - time.time()
+    if remaining <= 0:
+        raise TimeoutError("model_fabric_deadline_exceeded")
+    headers = {"content-type": "application/json"}
+    if api_key:
+        headers["authorization"] = f"Bearer {api_key}"
+    with httpx.Client(follow_redirects=False, timeout=httpx.Timeout(remaining)) as client:
+        response = client.post(candidate.endpoint, headers=headers, json=body)
+    # A synchronous provider call cannot be force-killed from the event loop;
+    # discard its result if the operator was revoked while it was in flight.
+    assert_runtime_not_revoked()
+    if 300 <= response.status_code < 400:
+        raise RuntimeError("model_fabric_redirect_denied")
+    response.raise_for_status()
+    payload = response.json()
+    try:
+        raw_message = payload["choices"][0]["message"]
+        if not isinstance(raw_message, dict):
+            raise TypeError("assistant message is not an object")
+        message_payload = dict(raw_message)
+        message_payload.setdefault("role", "assistant")
+        if message_payload.get("content") is None and not message_payload.get("tool_calls"):
+            raise ValueError("assistant message has neither content nor tool calls")
+        message = ChatMessage.from_dict(message_payload, raw=payload)
+    except (KeyError, IndexError, TypeError, ValueError) as error:
+        raise RuntimeError("model_fabric_invalid_response") from error
+    return SimpleNamespace(choices=[SimpleNamespace(message=message)]), payload
+
+
+def _token_usage_from_payload(payload: object) -> Any:
+    from src.model_fabric import TokenUsage
+
+    usage = payload.get("usage") if isinstance(payload, dict) else None
+    if not isinstance(usage, dict):
+        return TokenUsage()
+    def token(name: str, alternate: str) -> int | None:
+        value = usage.get(name, usage.get(alternate))
+        return value if isinstance(value, int) and value >= 0 else None
+    return TokenUsage(
+        input_tokens=token("prompt_tokens", "input_tokens"),
+        output_tokens=token("completion_tokens", "output_tokens"),
+        total_tokens=token("total_tokens", "total_tokens"),
     )
 
 
@@ -1210,36 +1648,35 @@ def _trim_after_stop_sequences(content: str, stop_sequences: list[str] | None) -
     return content[:earliest_stop]
 
 
-def _local_operator_chat_message(
-    content: str,
+def _governed_agent_chat_message(
+    response: SimpleNamespace,
     *,
-    raw: Any | None = None,
-    stop_sequences: list[str] | None = None,
+    raw: Any,
+    stop_sequences: list[str] | None,
 ) -> ChatMessage:
-    return ChatMessage(
-        role=MessageRole.ASSISTANT,
-        content=_trim_after_stop_sequences(content, stop_sequences),
-        raw=raw,
-    )
-
-
-def _run_local_codex_completion(prompt: str, *, session_id: str | None) -> dict[str, Any]:
-    async def _run() -> dict[str, Any]:
-        return await run_local_codex(
-            prompt,
-            timeout_seconds=local_codex_chat_timeout_seconds(),
-            session_id=session_id,
-        )
-
-    try:
-        asyncio.get_running_loop()
-    except RuntimeError:
-        return asyncio.run(_run())
-
-    return {
-        "ok": False,
-        "stderr": "Local Codex completion is unavailable from synchronous code inside an active event loop.",
-    }
+    """Preserve governed assistant tool calls while applying local stop trimming."""
+    message = response.choices[0].message
+    if not isinstance(message, ChatMessage):
+        raw_role = getattr(message, "role", "assistant")
+        if isinstance(raw_role, MessageRole):
+            raw_role = raw_role.value
+        if not isinstance(raw_role, str):
+            raw_role = "assistant"
+        message_payload = {
+            "role": raw_role,
+            "content": getattr(message, "content", None),
+        }
+        tool_calls = getattr(message, "tool_calls", None)
+        if isinstance(tool_calls, list):
+            message_payload["tool_calls"] = tool_calls
+        try:
+            message = ChatMessage.from_dict(message_payload, raw=raw)
+        except (TypeError, ValueError) as error:
+            raise RuntimeError("model_fabric_invalid_response") from error
+    content = message.content
+    if isinstance(content, str):
+        content = _trim_after_stop_sequences(content, stop_sequences)
+    return replace(message, content=content, raw=raw)
 
 
 def has_fallback_model(*, runtime_path: str | None = None) -> bool:
@@ -1368,7 +1805,91 @@ def _fallback_targets(
 
 def _target_uses_local_runtime_profile(target: dict[str, Any]) -> bool:
     profile = target.get("profile")
-    return bool(profile and is_local_runtime_profile(str(profile)))
+    if not profile:
+        return False
+    profile_id = _normal_profile_id(str(profile))
+    if profile_id == "local":
+        return True
+    resolved = _provider_profile(profile_id)
+    if resolved is None:
+        return False
+    if resolved.provider_kind in {"local", "ollama"}:
+        return True
+    builtin = _builtin_provider_profiles().get(profile_id)
+    return bool(
+        profile_id.startswith("local-gemma-")
+        and builtin is not None
+        and resolved == builtin
+    )
+
+
+_STRICT_LOCAL_PRIVATE_NETWORKS = tuple(
+    ipaddress.ip_network(cidr)
+    for cidr in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "fc00::/7")
+)
+
+
+def _strict_local_endpoint(api_base: object) -> bool:
+    """Return whether an inference endpoint is a literal local/private target."""
+    parsed = urlparse(str(api_base or ""))
+    hostname = (parsed.hostname or "").strip().lower()
+    if parsed.scheme not in {"http", "https"} or not hostname:
+        return False
+    if hostname == "localhost":
+        return True
+    try:
+        address = ipaddress.ip_address(hostname)
+    except ValueError:
+        return False
+    if address.is_unspecified:
+        return False
+    return (
+        address.is_loopback
+        or address.is_link_local
+        or any(address in network for network in _STRICT_LOCAL_PRIVATE_NETWORKS)
+    )
+
+
+def _strict_local_target_destination_class(target: dict[str, Any]) -> DestinationClass:
+    if _target_uses_local_runtime_profile(target) and _strict_local_endpoint(target.get("api_base")):
+        return DestinationClass.TRUSTED_LAN_RUNTIME
+    return DestinationClass.REMOTE_PROVIDER
+
+
+def _strict_local_inference_decision(
+    target: dict[str, Any],
+    *,
+    messages: list[dict[str, Any]],
+    runtime_path: str,
+) -> TrustDecision:
+    """Evaluate one candidate for a caller that declared a strict-local boundary."""
+    data_digest = hashlib.sha256(
+        json.dumps(messages, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
+    ).hexdigest()
+    destination_identity = hashlib.sha256(
+        json.dumps(
+            {
+                "profile": str(target.get("profile") or ""),
+                "model_id": str(target.get("model_id") or ""),
+                "api_base": str(target.get("api_base") or ""),
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    destination = TrustDestination(
+        destination_id=f"model:{destination_identity}",
+        destination_class=_strict_local_target_destination_class(target),
+        endpoint=str(target.get("api_base") or ""),
+    )
+    request = strict_local_inference_request(
+        principal_id=f"seraph-runtime:{runtime_path}",
+        capability_id=f"llm:{runtime_path}",
+        data_digest=data_digest,
+        destination=destination,
+        source_id=runtime_path,
+    )
+    return evaluate_trust(request)
 
 
 def _target_cooldown_seconds() -> int:
@@ -2138,7 +2659,7 @@ def _build_routing_decision_details(
                 "healthy": healthy,
                 "decision": decision,
                 "matched_policy_intents": _matched_policy_intents(
-                    model_id=str(target["model_id"]),
+                    model_id=_target_transport_model(target),
                     profile=target.get("profile"),
                     policy_intents=policy_intents,
                 ),
@@ -2387,15 +2908,320 @@ def _build_routing_decision_details(
 
 def _attemptable_targets(
     ordered_targets: list[dict[str, Any]],
+    *,
+    max_retries: int | None = None,
 ) -> list[dict[str, Any]]:
-    """Skip non-compliant targets when at least one compliant option exists."""
-    if any(target["policy_assessment"]["policy_compliant"] for target in ordered_targets):
-        return [
-            target
-            for target in ordered_targets
-            if target["policy_assessment"]["policy_compliant"]
-        ]
-    return ordered_targets
+    """Return only compliant targets; absence of one is a fail-closed route."""
+    targets = [
+        target
+        for target in ordered_targets
+        if target["policy_assessment"]["policy_compliant"]
+    ]
+    if max_retries is None:
+        return targets
+    return targets[: max(int(max_retries), 0) + 1]
+
+
+async def _governed_preflight_target_async(
+    target: dict[str, Any],
+    request_context: Any,
+) -> tuple[Any, Any]:
+    """Preflight one exact concrete target immediately before its attempt."""
+    from dataclasses import replace
+    from src.model_fabric import (
+        active_provider_exclusion_reason,
+        candidate_from_profile,
+        profile_exclusion_reason,
+        select_route,
+    )
+    from src.model_fabric.repository import model_fabric_repository
+
+    profile_id = str(target.get("profile") or "")
+    resolved_id = "local-ollama" if profile_id == "local" else profile_id
+    base_profile = _provider_profile(resolved_id)
+    if base_profile is None:
+        return None, ()
+    if not _is_target_healthy(
+        model_id=str(target.get("model_id") or ""),
+        api_base=target.get("api_base"),
+        api_key=target.get("api_key"),
+    ):
+        return None, ()
+    profile = replace(
+        base_profile,
+        model=base_profile.model,
+        routing_model=base_profile.routing_model or base_profile.model,
+        api_base=str(target.get("api_base") or ""),
+    )
+    candidate = candidate_from_profile(profile, source=str(target.get("source") or "primary"))
+    target_model_id = target.get("model_id")
+    target_api_key = target.get("api_key")
+    exclusion = (
+        active_provider_exclusion_reason
+        if "openrouter" in getattr(request_context, "allowed_provider_kinds", ())
+        else profile_exclusion_reason
+    )
+    if exclusion(profile) is not None:
+        decision = select_route(
+            request_context,
+            (candidate,),
+            (),
+            target_model_id=str(target_model_id) if target_model_id is not None else None,
+            target_api_key=target_api_key,
+        )
+        return decision, ()
+    capabilities = set(request_context.requirements.capabilities)
+    capabilities.update({"latency_ms", "health"})
+    proofs = []
+    for capability in sorted(capabilities):
+        proof = await model_fabric_repository.latest_capability_proof(
+            profile_schema_version=profile.schema_version,
+            profile_contract_hash=profile.contract_hash,
+            profile_id=profile.id,
+            model=profile.model,
+            endpoint=candidate.endpoint,
+            endpoint_class=candidate.endpoint_class,
+            adapter=candidate.adapter,
+            capability=capability,
+        )
+        if proof is not None:
+            proofs.append(proof)
+    decision = select_route(
+        request_context,
+        (candidate,),
+        tuple(proofs),
+        target_model_id=str(target_model_id) if target_model_id is not None else None,
+        target_api_key=target_api_key,
+    )
+    return decision, tuple(proof.proof_hash for proof in proofs)
+
+
+def _governed_preflight_target(
+    target: dict[str, Any],
+    request_context: Any | None,
+) -> tuple[Any, Any]:
+    if request_context is None:
+        return None, None
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(_governed_preflight_target_async(target, request_context))
+    raise RuntimeError("governed synchronous inference must run outside an active event loop")
+
+
+def _run_receipt_hook_sync(hook: Any) -> Any:
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(hook)
+    raise RuntimeError("governed synchronous receipt hooks require a worker thread")
+
+
+def _new_route_receipt_session(request_context: Any | None) -> Any | None:
+    if request_context is None:
+        return None
+    from src.model_fabric.hooks import RouteReceiptSession
+
+    return RouteReceiptSession(context=request_context)
+
+
+def _finalize_route_receipt_sync(
+    session: Any,
+    *,
+    outcome: str,
+    request_id: str | None,
+    fallback_reason_code: str | None = None,
+    degradation_codes: tuple[str, ...] = (),
+) -> None:
+    result = _run_receipt_hook_sync(
+        session.finalize(
+            outcome=outcome,
+            fallback_reason_code=fallback_reason_code,
+            degradation_codes=degradation_codes,
+        )
+    )
+    if result is not None and getattr(session, "workload", None) is not None:
+        from src.model_fabric.runtime_status import publish_receipt_persistence
+
+        runtime_path = session.runtime_path
+        if not runtime_path:
+            raise RuntimeError("route receipt session is missing runtime-path identity")
+        publish_receipt_persistence(
+            runtime_path=runtime_path,
+            status=str(getattr(result, "status", "degraded")),
+            error_code=getattr(result, "error_code", None),
+            receipt_id=str(getattr(result, "receipt_id", "unknown")),
+        )
+    if result is not None and not bool(getattr(result, "persisted", False)):
+        _log_llm_runtime_event_sync(
+            event_type="model_route_receipt_degraded",
+            summary="Model route completed but its receipt was not durably persisted",
+            details={"outcome": outcome, "error_code": getattr(result, "error_code", "receipt_persistence_failed")},
+            request_id=request_id,
+        )
+
+
+def _persist_denied_route_sync(
+    context: Any,
+    decision: Any,
+    reasons: tuple[str, ...],
+    *,
+    fallback_reason_code: str = "no_compliant_route",
+) -> None:
+    from src.model_fabric import persist_denied_route
+
+    result = _run_receipt_hook_sync(
+        persist_denied_route(
+            context=context,
+            decision=decision,
+            reason_codes=reasons,
+            fallback_reason_code=fallback_reason_code,
+        )
+    )
+    if result is not None and not bool(getattr(result, "persisted", False)):
+        _log_llm_runtime_event_sync(
+            event_type="model_route_receipt_degraded",
+            summary="Model route completed but its receipt was not durably persisted",
+            details={"outcome": "denied", "error_code": getattr(result, "error_code", "receipt_persistence_failed")},
+            request_id=getattr(context, "request_id", None),
+        )
+
+
+def _requires_sync_gpu_admission(context: Any | None) -> bool:
+    """Return whether a sync completion carries the canonical broker contract."""
+    if context is None:
+        return False
+    if isinstance(context, InferenceRequestContext):
+        return True
+    # Test doubles and transitional callers may still provide a context-like
+    # object. Only a registered string route opts that object into admission;
+    # malformed canonical contexts fail closed below once identified.
+    runtime_path = getattr(context, "runtime_path", None)
+    if not isinstance(runtime_path, str):
+        return False
+    from src.model_fabric.caller_context import is_canonical_inference_route
+
+    return is_canonical_inference_route(runtime_path)
+
+
+def _persist_sync_gpu_admission_denial(
+    *,
+    context: Any,
+    decision: Any,
+    reason_codes: tuple[str, ...],
+) -> None:
+    """Best-effort route denial persistence while preserving the admission error."""
+    try:
+        _persist_denied_route_sync(
+            context,
+            decision,
+            reason_codes,
+            fallback_reason_code="gpu_admission_rejected",
+        )
+    except Exception:
+        # Admission remains fail-closed even when the optional persistence hook
+        # is unavailable during shutdown or an isolated test.
+        logger.warning("Failed to persist synchronous GPU admission denial", exc_info=True)
+
+
+def _persist_bound_sync_admission_receipt(
+    operation_id: str,
+    *,
+    receipt: Any | None = None,
+    readback: bool = False,
+) -> None:
+    """Adopt a completed sync broker receipt into the bound durable job."""
+    binding = current_remote_inference_receipt_binding()
+    if binding is None:
+        return
+    persisted_receipt = receipt
+    if persisted_receipt is None and readback:
+        try:
+            persisted_receipt = gpu_admission_broker.receipt_for(operation_id)
+        except (AttributeError, KeyError):
+            return
+    if persisted_receipt is None:
+        return
+    _run_receipt_hook_sync(
+        gpu_admission_broker.persist_receipt(
+            persisted_receipt,
+            repository=binding.repository,
+            owner=binding.owner,
+            fencing_token=binding.fencing_token,
+        )
+    )
+
+
+def _execute_sync_with_gpu_admission(
+    *,
+    context: Any | None,
+    decision: Any,
+    operation_id: str,
+    operation: Callable[[], Any],
+) -> Any:
+    """Run one blocking route callback under the shared one-GPU broker."""
+    if not _requires_sync_gpu_admission(context):
+        return operation()
+    try:
+        request = GpuAdmissionRequest.from_inference_context(
+            context,
+            operation_id=operation_id,
+            uncertain_on_error=(
+                getattr(getattr(getattr(decision, "selected", None), "profile", None), "provider_kind", "")
+                == "openrouter"
+            ),
+        )
+    except (TypeError, ValueError) as error:
+        reasons = ("gpu_admission_rejected", "gpu_admission_identity_conflict")
+        _persist_sync_gpu_admission_denial(
+            context=context,
+            decision=decision,
+            reason_codes=reasons,
+        )
+        raise GpuAdmissionIdentityError(
+            "canonical synchronous inference requires a valid GPU admission owner context"
+        ) from error
+    try:
+        result = gpu_admission_broker.execute_sync(request, operation)
+    except GpuAdmissionError as error:
+        _persist_bound_sync_admission_receipt(
+            operation_id,
+            receipt=getattr(error, "receipt", None),
+            readback=True,
+        )
+        # A post-callback deadline is an uncertain provider result, not a
+        # zero-attempt admission denial.  Its blocked receipt keeps the active
+        # lease held for reconciliation; the surrounding route receipt owns
+        # the failed/uncertain outcome and must not record a second denial.
+        if getattr(getattr(error, "receipt", None), "status", None) != "blocked":
+            _persist_sync_gpu_admission_denial(
+                context=context,
+                decision=decision,
+                reason_codes=(
+                    "gpu_admission_rejected",
+                    f"gpu_admission_{error.code}",
+                ),
+            )
+        raise
+    except GpuAdmissionIdentityError:
+        _persist_sync_gpu_admission_denial(
+            context=context,
+            decision=decision,
+            reason_codes=(
+                "gpu_admission_rejected",
+                "gpu_admission_identity_conflict",
+            ),
+        )
+        raise
+    except BaseException:
+        # The broker can finalize a failed operation before the provider
+        # exception escapes. Read back that terminal/uncertain receipt so a
+        # durable caller never loses the provider outcome just because the
+        # exception was not an admission error subtype.
+        _persist_bound_sync_admission_receipt(operation_id, readback=True)
+        raise
+    _persist_bound_sync_admission_receipt(operation_id, readback=True)
+    return result
 
 
 def _reserved_output_tokens_from_kwargs(
@@ -2557,6 +3383,7 @@ class FallbackLiteLLMModel(BaseLiteLLMModel):
         self._runtime_profile = runtime_profile or "default"
         self._runtime_path = runtime_path
         self._seraph_max_tokens = kwargs.get("max_tokens")
+        self._seraph_transport_options = _transport_options(dict(kwargs))
         super().__init__(
             model_id=model_id,
             api_base=api_base,
@@ -2584,15 +3411,27 @@ class FallbackLiteLLMModel(BaseLiteLLMModel):
                 **fallback_kwargs,
                 **dict(target.get("options") or {}),
             }
+            # BaseLiteLLMModel is retained only as the transitional, ungoverned
+            # completion transport.  Its model id must remain the provider-
+            # prefixed routing label expected by LiteLLM.  Governed requests do
+            # not trust this value: they resolve the canonical profile and use
+            # profile.model when finalizing and proving the transport body.
+            fallback_profile = _provider_profile(str(target.get("profile") or ""))
+            legacy_model_id = (
+                fallback_profile.routing_model
+                if fallback_profile is not None and fallback_profile.routing_model
+                else str(target["model_id"])
+            )
             fallback_model = BaseLiteLLMModel(
-                    model_id=str(target["model_id"]),
-                    api_base=target["api_base"] or None,
-                    api_key=target["api_key"] or None,
-                    custom_role_conversions=custom_role_conversions,
-                    **target_kwargs,
-                )
+                model_id=legacy_model_id,
+                api_base=target["api_base"] or None,
+                api_key=target["api_key"] or None,
+                custom_role_conversions=custom_role_conversions,
+                **target_kwargs,
+            )
             setattr(fallback_model, "runtime_profile", target.get("profile"))
             setattr(fallback_model, "runtime_source", target.get("source"))
+            setattr(fallback_model, "runtime_options", dict(target.get("options") or {}))
             fallback_models.append(fallback_model)
 
         self._fallback_models = tuple(fallback_models)
@@ -2606,12 +3445,67 @@ class FallbackLiteLLMModel(BaseLiteLLMModel):
         tools_to_call_from=None,
         **kwargs,
     ):
+        assert_runtime_not_revoked()
+        request_context = kwargs.pop("request_context", None)
         primary_model = self.model_id
+        reject_legacy_external_agent_model(primary_model)
         runtime_path = self._runtime_path or "agent_generate"
+        runtime_controls = _openrouter_runtime_controls(self._runtime_profile)
+        if runtime_controls:
+            kwargs["temperature"] = float(runtime_controls["temperature"])
+            kwargs["max_tokens"] = min(
+                int(kwargs.get("max_tokens", getattr(self, "_seraph_max_tokens", 1) or 1)),
+                int(runtime_controls["output_limit"]),
+            )
+            kwargs["timeout"] = float(runtime_controls["timeout_seconds"])
+            primary_model = _profile_model_id(self._runtime_profile)
         reserved_output_tokens = _reserved_output_tokens_from_kwargs(
             kwargs=kwargs,
             fallback=getattr(self, "_seraph_max_tokens", None),
         )
+        if request_context is None:
+            from src.model_fabric.caller_context import (
+                build_canonical_inference_context,
+                is_canonical_inference_route,
+            )
+            from src.model_fabric.contracts import ModelCapability
+
+            if is_canonical_inference_route(runtime_path):
+                principal = get_current_trust_principal()
+                if principal is None:
+                    raise PermissionError("canonical agent inference requires explicit runtime principal")
+                extra_capabilities = []
+                if tools_to_call_from:
+                    extra_capabilities.append(ModelCapability.TOOL_USE)
+                if response_format is not None:
+                    extra_capabilities.append(ModelCapability.STRUCTURED_OUTPUT)
+                request_context = build_canonical_inference_context(
+                    runtime_path,
+                    payload={
+                        "messages": _transport_json_value(messages),
+                        "tools": _transport_json_value(tools_to_call_from),
+                        "response_format": _transport_json_value(response_format),
+                        "options": _transport_json_value(kwargs),
+                    },
+                    output_tokens=reserved_output_tokens,
+                    timeout_seconds=(
+                        float(runtime_controls["timeout_seconds"])
+                        if runtime_controls
+                        else float(settings.agent_chat_timeout)
+                    ),
+                    principal=principal,
+                    session_id=principal.session_id,
+                    job_id=principal.job_id,
+                    extra_capabilities=tuple(extra_capabilities),
+                )
+            else:
+                # An unregistered route has no caller-owned authority
+                # envelope and must not fall through to raw LiteLLM transport
+                # during the OpenRouter-only phase.
+                if bool(getattr(settings, "openrouter_provider_only", True)):
+                    raise PermissionError(
+                        "active OpenRouter-only inference requires a registered canonical runtime path"
+                    )
         request_id = _current_llm_request_id()
         primary_target = {
             "model_id": primary_model,
@@ -2619,6 +3513,7 @@ class FallbackLiteLLMModel(BaseLiteLLMModel):
             "api_key": self.api_key,
             "profile": self._runtime_profile,
             "source": "primary",
+            "options": dict(self._seraph_transport_options),
         }
         fallback_targets = [
             {
@@ -2628,14 +3523,17 @@ class FallbackLiteLLMModel(BaseLiteLLMModel):
                 "model": fallback_model,
                 "profile": getattr(fallback_model, "runtime_profile", None),
                 "source": getattr(fallback_model, "runtime_source", "fallback_chain"),
+                "options": dict(getattr(fallback_model, "runtime_options", {}) or {}),
             }
             for fallback_model in self._fallback_models
         ]
         ordered_targets = _ordered_candidate_targets(
             primary_target=primary_target,
             fallback_targets=fallback_targets,
-            runtime_path="agent_generate",
+            runtime_path=runtime_path,
         )
+        for target in ordered_targets:
+            reject_legacy_external_agent_model(target.get("model_id"))
         primary_unhealthy = not _is_target_healthy(
             model_id=primary_model,
             api_base=self.api_base,
@@ -2653,7 +3551,7 @@ class FallbackLiteLLMModel(BaseLiteLLMModel):
                     f"{selected_target['model_id']}"
                 ),
                 details=_build_routing_decision_details(
-                    runtime_path="agent_generate",
+                    runtime_path=runtime_path,
                     runtime_profile=self._runtime_profile,
                     primary_model=primary_model,
                     primary_api_base=self.api_base,
@@ -2674,7 +3572,7 @@ class FallbackLiteLLMModel(BaseLiteLLMModel):
                     f"to {selected_target['model_id']}"
                 ),
                 details={
-                    "runtime_path": "agent_generate",
+                    "runtime_path": runtime_path,
                     "primary_model": primary_model,
                     "rerouted_model": selected_target["model_id"],
                     "rerouted_profile": selected_target.get("profile"),
@@ -2692,10 +3590,21 @@ class FallbackLiteLLMModel(BaseLiteLLMModel):
 
         last_error: Exception = RuntimeError("No fallback targets available")
 
-        attempt_targets = _attemptable_targets(ordered_targets)
+        attempt_targets = _attemptable_targets(
+            ordered_targets,
+            max_retries=getattr(gpu_admission_broker, "max_retries", None),
+        )
+        receipt_session = _new_route_receipt_session(request_context)
+        governed_attempted = False
+        denied_decision = None
+        denial_reasons: list[str] = []
+        primary_preflight_rejected = False
 
         for index, target in enumerate(attempt_targets):
+            assert_runtime_not_revoked()
+            reject_legacy_external_agent_model(target.get("model_id"))
             is_primary = target["source"] == "primary"
+            route_attempt_started = False
             try:
                 target_messages = _messages_for_local_target(
                     messages,
@@ -2703,34 +3612,91 @@ class FallbackLiteLLMModel(BaseLiteLLMModel):
                     runtime_path=runtime_path,
                     reserved_output_tokens=reserved_output_tokens,
                 )
+                effective_temperature = kwargs.get(
+                    "temperature",
+                    dict(getattr(self, "kwargs", {}) or {}).get("temperature"),
+                )
+                additional_fields = {}
+                if stop_sequences:
+                    additional_fields["stop"] = list(stop_sequences)
+                if response_format is not None:
+                    additional_fields["response_format"] = _transport_json_value(response_format)
+                if tools_to_call_from:
+                    additional_fields["tools"] = _transport_json_value(tools_to_call_from)
+                transport_body = finalized_openai_compatible_body(
+                    model_id=_target_transport_model(target),
+                    messages=[_openai_message_payload(message) for message in target_messages],
+                    options=_transport_json_value(dict(target.get("options") or {})),
+                    temperature=effective_temperature,
+                    max_tokens=reserved_output_tokens,
+                    additional_fields=additional_fields,
+                )
+                governed_context = request_context
+                if request_context is not None:
+                    from src.model_fabric import bind_final_inference_payload
+
+                    governed_context = bind_final_inference_payload(request_context, transport_body)
+                route_decision, proof_hashes = _governed_preflight_target(target, governed_context)
+                if request_context is not None and (
+                    route_decision is None or not route_decision.allowed
+                ):
+                    if is_primary:
+                        primary_preflight_rejected = True
+                    denied_decision = route_decision
+                    denial_reasons.extend(
+                        rejection.reason_code
+                        for rejection in getattr(route_decision, "rejections", ())
+                    )
+                    continue
+                admission_operation_id = (
+                    getattr(route_decision, "attempt_id", None)
+                    or f"{getattr(governed_context, 'request_id', request_id)}:{target.get('profile') or target['model_id']}"
+                )
                 if is_primary:
                     primary_attempted = True
-                    if is_local_codex_model(primary_model):
-                        local_result = _run_local_codex_completion(
-                            _messages_to_local_operator_prompt(target_messages),
-                            session_id=get_current_session_id(),
-                        )
-                        if not local_result.get("ok", False):
-                            raise RuntimeError(
-                                str(
-                                    local_result.get("stderr")
-                                    or local_result.get("stdout")
-                                    or "Local Codex operator failed."
-                                ).strip()
+
+                    def invoke_primary_transport() -> tuple[Any, Any]:
+                        nonlocal governed_attempted, route_attempt_started
+                        if receipt_session is not None:
+                            receipt_session.attempt_started(
+                                route_decision,
+                                capability_proof_hashes=proof_hashes,
                             )
-                        response = _local_operator_chat_message(
-                            str(local_result.get("stdout") or "").strip(),
-                            raw=local_result,
-                            stop_sequences=stop_sequences,
+                            route_attempt_started = True
+                        governed_attempted = request_context is not None
+                        if governed_context is not None:
+                            governed_response, raw_payload = _governed_openai_chat_completion(
+                                decision=route_decision,
+                                context=governed_context,
+                                body=transport_body,
+                                api_key=target.get("api_key"),
+                            )
+                            return (
+                                _governed_agent_chat_message(
+                                    governed_response,
+                                    raw=raw_payload,
+                                    stop_sequences=stop_sequences,
+                                ),
+                                raw_payload,
+                            )
+                        return (
+                            BaseLiteLLMModel.generate(
+                                self,
+                                target_messages,
+                                stop_sequences=stop_sequences,
+                                response_format=response_format,
+                                tools_to_call_from=tools_to_call_from,
+                                **kwargs,
+                            ),
+                            None,
                         )
-                    else:
-                        response = super().generate(
-                            target_messages,
-                            stop_sequences=stop_sequences,
-                            response_format=response_format,
-                            tools_to_call_from=tools_to_call_from,
-                            **kwargs,
-                        )
+
+                    response, raw_payload = _execute_sync_with_gpu_admission(
+                        context=governed_context,
+                        decision=route_decision,
+                        operation_id=str(admission_operation_id),
+                        operation=invoke_primary_transport,
+                    )
                     _mark_target_succeeded(
                         model_id=primary_model,
                         api_base=self.api_base,
@@ -2738,7 +3704,7 @@ class FallbackLiteLLMModel(BaseLiteLLMModel):
                     )
                     if _can_log_request(request_id):
                         details = {
-                            "runtime_path": "agent_generate",
+                            "runtime_path": runtime_path,
                             "primary_model": primary_model,
                             "used_fallback": False,
                         }
@@ -2751,36 +3717,64 @@ class FallbackLiteLLMModel(BaseLiteLLMModel):
                             details=details,
                             request_id=request_id,
                         )
+                    if receipt_session is not None:
+                        receipt_session.attempt_finished(
+                            outcome="succeeded",
+                            error_code=None,
+                            decision=route_decision,
+                            usage=_token_usage_from_payload(raw_payload) if governed_context is not None else None,
+                        )
+                        _finalize_route_receipt_sync(
+                            receipt_session,
+                            outcome="succeeded",
+                            request_id=request_id,
+                        )
                     return response
 
                 fallback_model = target["model"]
                 attempted_fallback_models.append(fallback_model.model_id)
-                if is_local_codex_model(fallback_model.model_id):
-                    local_result = _run_local_codex_completion(
-                        _messages_to_local_operator_prompt(target_messages),
-                        session_id=get_current_session_id(),
-                    )
-                    if not local_result.get("ok", False):
-                        raise RuntimeError(
-                            str(
-                                local_result.get("stderr")
-                                or local_result.get("stdout")
-                                or "Local Codex operator failed."
-                            ).strip()
+
+                def invoke_fallback_transport() -> tuple[Any, Any]:
+                    nonlocal governed_attempted, route_attempt_started
+                    if receipt_session is not None:
+                        receipt_session.attempt_started(
+                            route_decision,
+                            capability_proof_hashes=proof_hashes,
                         )
-                    response = _local_operator_chat_message(
-                        str(local_result.get("stdout") or "").strip(),
-                        raw=local_result,
-                        stop_sequences=stop_sequences,
+                        route_attempt_started = True
+                    governed_attempted = request_context is not None
+                    if governed_context is not None:
+                        governed_response, raw_payload = _governed_openai_chat_completion(
+                            decision=route_decision,
+                            context=governed_context,
+                            body=transport_body,
+                            api_key=target.get("api_key"),
+                        )
+                        return (
+                            _governed_agent_chat_message(
+                                governed_response,
+                                raw=raw_payload,
+                                stop_sequences=stop_sequences,
+                            ),
+                            raw_payload,
+                        )
+                    return (
+                        fallback_model.generate(
+                            target_messages,
+                            stop_sequences=stop_sequences,
+                            response_format=response_format,
+                            tools_to_call_from=tools_to_call_from,
+                            **kwargs,
+                        ),
+                        None,
                     )
-                else:
-                    response = fallback_model.generate(
-                        target_messages,
-                        stop_sequences=stop_sequences,
-                        response_format=response_format,
-                        tools_to_call_from=tools_to_call_from,
-                        **kwargs,
-                    )
+
+                response, raw_payload = _execute_sync_with_gpu_admission(
+                    context=governed_context,
+                    decision=route_decision,
+                    operation_id=str(admission_operation_id),
+                    operation=invoke_fallback_transport,
+                )
                 _mark_target_succeeded(
                     model_id=fallback_model.model_id,
                     api_base=fallback_model.api_base,
@@ -2788,7 +3782,7 @@ class FallbackLiteLLMModel(BaseLiteLLMModel):
                 )
                 if _can_log_request(request_id):
                     details = {
-                        "runtime_path": "agent_generate",
+                        "runtime_path": runtime_path,
                         "primary_model": primary_model,
                         "fallback_model": fallback_model.model_id,
                         "attempted_fallback_models": attempted_fallback_models,
@@ -2808,8 +3802,66 @@ class FallbackLiteLLMModel(BaseLiteLLMModel):
                         details=details,
                         request_id=request_id,
                     )
+                if receipt_session is not None and route_attempt_started:
+                    receipt_session.attempt_finished(
+                        outcome="succeeded",
+                        error_code=None,
+                        decision=route_decision,
+                        usage=_token_usage_from_payload(raw_payload) if governed_context is not None else None,
+                        degradation_code=(
+                            "preflight_fallback" if primary_preflight_rejected else "fallback_used"
+                        ),
+                    )
+                    _finalize_route_receipt_sync(
+                        receipt_session,
+                        outcome="succeeded",
+                        request_id=request_id,
+                        fallback_reason_code=(
+                            "primary_preflight_rejected"
+                            if primary_preflight_rejected
+                            else "primary_transport_failed"
+                        ),
+                        degradation_codes=(
+                            "preflight_fallback" if primary_preflight_rejected else "fallback_used",
+                        ),
+                    )
                 return response
+            except RuntimeRevokedError:
+                # Revocation is a terminal authority decision; never route a
+                # revoked request through a fallback target.
+                raise
+            except GpuAdmissionError as error:
+                if receipt_session is not None and route_attempt_started:
+                    receipt_session.attempt_finished(
+                        outcome="failed",
+                        error_code=f"gpu_admission_{error.code}",
+                        decision=route_decision,
+                        degradation_code="gpu_admission_rejected",
+                    )
+                    _finalize_route_receipt_sync(
+                        receipt_session,
+                        outcome="failed",
+                        request_id=request_id,
+                        fallback_reason_code="gpu_admission_rejected",
+                        degradation_codes=(
+                            "gpu_admission_rejected",
+                            f"gpu_admission_{error.code}",
+                        ),
+                    )
+                raise
+            except GpuAdmissionIdentityError:
+                # Identity validation and operation conflicts are admission
+                # denials; the helper has already attempted a zero-attempt
+                # receipt, and no fallback candidate may run.
+                raise
             except Exception as error:
+                if receipt_session is not None and route_attempt_started:
+                    receipt_session.attempt_finished(
+                        outcome="failed",
+                        error_code="transport_failed",
+                        decision=route_decision,
+                        degradation_code="transport_failed",
+                    )
                 last_error = error
                 if is_primary:
                     primary_error = error
@@ -2841,9 +3893,23 @@ class FallbackLiteLLMModel(BaseLiteLLMModel):
                         exc_info=True,
                     )
 
+        if request_context is not None and not governed_attempted:
+            _persist_denied_route_sync(
+                request_context,
+                denied_decision,
+                tuple(denial_reasons or ("no_compliant_route",)),
+            )
+            last_error = NoCompliantModelRouteError()
+        if receipt_session is not None and governed_attempted:
+            _finalize_route_receipt_sync(
+                receipt_session,
+                outcome="failed",
+                request_id=request_id,
+                degradation_codes=("all_transports_failed",),
+            )
         if attempted_fallback_models and _can_log_request(request_id):
             details = {
-                "runtime_path": "agent_generate",
+                "runtime_path": runtime_path,
                 "primary_model": primary_model,
                 "fallback_model": attempted_fallback_models[-1],
                 "attempted_fallback_models": attempted_fallback_models,
@@ -2870,7 +3936,7 @@ class FallbackLiteLLMModel(BaseLiteLLMModel):
                 event_type="llm_primary_failure",
                 summary=f"Primary agent model generate failed via {primary_model}",
                 details={
-                    "runtime_path": "agent_generate",
+                    "runtime_path": runtime_path,
                     "primary_model": primary_model,
                     "used_fallback": False,
                     "error": _safe_error(primary_error),
@@ -2890,32 +3956,79 @@ def completion_with_fallback_sync(
     runtime_path: str = "completion",
     profile: str | None = None,
     local_runtime_only: bool = False,
+    request_context: Any | None = None,
 ):
-    """Execute a litellm completion with an optional fallback target."""
+    """Execute a completion with governed canonical or transitional legacy routing."""
     import litellm
 
+    assert_runtime_not_revoked()
+    resolved_profile = resolve_runtime_profile(runtime_path=runtime_path, profile=profile)
+    runtime_controls = _openrouter_runtime_controls(resolved_profile)
+    effective_temperature = (
+        float(runtime_controls["temperature"])
+        if runtime_controls
+        else float(temperature)
+    )
+    effective_max_tokens = (
+        min(int(max_tokens), int(runtime_controls["output_limit"]))
+        if runtime_controls
+        else int(max_tokens)
+    )
+    effective_timeout = (
+        float(runtime_controls["timeout_seconds"])
+        if runtime_controls
+        else float(settings.agent_chat_timeout)
+    )
+    if request_context is None:
+        from src.model_fabric.caller_context import (
+            build_canonical_inference_context,
+            is_canonical_inference_route,
+        )
+
+        if is_canonical_inference_route(runtime_path):
+            principal = get_current_trust_principal()
+            if principal is None:
+                raise PermissionError("canonical completion requires explicit runtime principal")
+            request_context = build_canonical_inference_context(
+                runtime_path,
+                payload={
+                    "messages": _transport_json_value(messages),
+                    "temperature": effective_temperature,
+                    "max_tokens": effective_max_tokens,
+                    "requested_model": model_id,
+                    "requested_profile": profile,
+                },
+                output_tokens=effective_max_tokens,
+                timeout_seconds=effective_timeout,
+                principal=principal,
+                session_id=principal.session_id,
+                job_id=principal.job_id,
+            )
+        else:
+            if bool(getattr(settings, "openrouter_provider_only", True)):
+                raise PermissionError(
+                    "active OpenRouter-only inference requires a registered canonical runtime path"
+                )
+
     try:
-        resolved_profile = resolve_runtime_profile(runtime_path=runtime_path, profile=profile)
         primary_kwargs = build_completion_kwargs(
             messages=messages,
-            temperature=temperature,
-            max_tokens=max_tokens,
+            temperature=effective_temperature,
+            max_tokens=effective_max_tokens,
             model_id=model_id,
             runtime_path=runtime_path,
             profile=profile,
         )
         primary_model = _safe_model_name(primary_kwargs)
+        reject_legacy_external_agent_model(primary_model)
         primary_target = {
             "model_id": primary_model,
             "api_base": primary_kwargs.get("api_base"),
             "api_key": primary_kwargs.get("api_key"),
             "profile": resolved_profile,
             "source": "primary",
+            "options": _transport_options(primary_kwargs),
         }
-        if local_runtime_only and not _target_uses_local_runtime_profile(primary_target):
-            raise ProviderProfileConfigurationError(
-                f"Runtime path '{runtime_path}' requires a local runtime profile"
-            )
         fallback_targets = _fallback_targets(
             primary_model_id=primary_model,
             primary_api_base=primary_kwargs.get("api_base"),
@@ -2925,14 +4038,46 @@ def completion_with_fallback_sync(
             profile=profile,
         )
         if local_runtime_only:
-            fallback_targets = [
-                target for target in fallback_targets if _target_uses_local_runtime_profile(target)
-            ]
+            allowed_fallback_targets: list[dict[str, Any]] = []
+            for target in [primary_target, *fallback_targets]:
+                decision = _strict_local_inference_decision(
+                    target,
+                    messages=messages,
+                    runtime_path=runtime_path,
+                )
+                if decision.allowed:
+                    if target is not primary_target:
+                        allowed_fallback_targets.append(target)
+                    continue
+                if _can_log_request(request_id):
+                    _log_llm_runtime_event_sync(
+                        event_type="llm_target_policy_denied",
+                        summary=f"Strict-local inference denied {target['model_id']}",
+                        details={
+                            "runtime_path": runtime_path,
+                            "runtime_profile": resolved_profile,
+                            "model": str(target["model_id"]),
+                            "target_source": str(target.get("source") or "unknown"),
+                            "trust_schema_version": decision.schema_version,
+                            "trust_decision_id": decision.decision_id,
+                            "trust_reason": decision.reason_code,
+                            "destination_class": decision.destination_class,
+                        },
+                        request_id=request_id,
+                    )
+                if target is primary_target:
+                    raise ProviderProfileConfigurationError(
+                        f"Runtime path '{runtime_path}' strict-local inference denied primary target: "
+                        f"{decision.reason_code}"
+                    )
+            fallback_targets = allowed_fallback_targets
         ordered_targets = _ordered_candidate_targets(
             primary_target=primary_target,
             fallback_targets=fallback_targets,
             runtime_path=runtime_path,
         )
+        for target in ordered_targets:
+            reject_legacy_external_agent_model(target.get("model_id"))
         primary_unhealthy = not _is_target_healthy(
             model_id=primary_model,
             api_base=primary_kwargs.get("api_base"),
@@ -2990,38 +4135,88 @@ def completion_with_fallback_sync(
 
         last_error: Exception = RuntimeError("No fallback targets available")
 
-        attempt_targets = _attemptable_targets(ordered_targets)
+        attempt_targets = _attemptable_targets(
+            ordered_targets,
+            max_retries=getattr(gpu_admission_broker, "max_retries", None),
+        )
+        receipt_session = _new_route_receipt_session(request_context)
+        governed_attempted = False
+        denied_decision = None
+        denial_reasons: list[str] = []
+        primary_preflight_rejected = False
 
         for index, target in enumerate(attempt_targets):
+            assert_runtime_not_revoked()
+            reject_legacy_external_agent_model(target.get("model_id"))
             is_primary = target["source"] == "primary"
+            route_attempt_started = False
             try:
                 target_messages = _messages_for_local_target(
                     messages,
                     target=target,
                     runtime_path=runtime_path,
-                    reserved_output_tokens=max_tokens,
+                    reserved_output_tokens=effective_max_tokens,
+                )
+                transport_body = finalized_openai_compatible_body(
+                    model_id=_target_transport_model(target),
+                    messages=[_openai_message_payload(message) for message in target_messages],
+                    options=_transport_json_value(dict(target.get("options") or {})),
+                    temperature=effective_temperature,
+                    max_tokens=effective_max_tokens,
+                )
+                governed_context = request_context
+                if request_context is not None:
+                    from src.model_fabric import bind_final_inference_payload
+
+                    governed_context = bind_final_inference_payload(request_context, transport_body)
+                route_decision, proof_hashes = _governed_preflight_target(target, governed_context)
+                if request_context is not None and (
+                    route_decision is None or not route_decision.allowed
+                ):
+                    if is_primary:
+                        primary_preflight_rejected = True
+                    denied_decision = route_decision
+                    denial_reasons.extend(
+                        rejection.reason_code
+                        for rejection in getattr(route_decision, "rejections", ())
+                    )
+                    continue
+                admission_operation_id = (
+                    getattr(route_decision, "attempt_id", None)
+                    or f"{getattr(governed_context, 'request_id', request_id)}:{target.get('profile') or target['model_id']}"
                 )
                 if is_primary:
                     primary_attempted = True
-                    if is_local_codex_model(primary_model):
-                        local_prompt = _messages_to_local_operator_prompt(target_messages)
-                        if not local_prompt:
-                            raise ValueError("Local Codex completion requires at least one non-empty message")
-                        local_result = _run_local_codex_completion(
-                            local_prompt,
-                            session_id=get_current_session_id(),
-                        )
-                        if not local_result.get("ok"):
-                            if local_result.get("timed_out"):
-                                raise TimeoutError("Local Codex completion timed out")
-                            raise RuntimeError(
-                                (local_result.get("stderr") or local_result.get("stdout") or "Local Codex completion failed").strip()
+
+                    def invoke_primary_transport() -> tuple[Any, Any]:
+                        nonlocal governed_attempted, route_attempt_started
+                        if receipt_session is not None:
+                            receipt_session.attempt_started(
+                                route_decision,
+                                capability_proof_hashes=proof_hashes,
                             )
-                        response = _local_operator_completion_response(str(local_result.get("stdout") or "").strip())
-                    else:
-                        response = litellm.completion(
-                            **{**primary_kwargs, "messages": target_messages}
+                            route_attempt_started = True
+                        governed_attempted = request_context is not None
+                        if governed_context is not None:
+                            return _governed_openai_chat_completion(
+                                decision=route_decision,
+                                context=governed_context,
+                                body=transport_body,
+                                api_key=target.get("api_key"),
+                            )
+                        return (
+                            litellm.completion(
+                                **{**primary_kwargs, "messages": target_messages}
+                            ),
+                            None,
                         )
+
+                    response, _raw_payload = _execute_sync_with_gpu_admission(
+                        context=governed_context,
+                        decision=route_decision,
+                        operation_id=str(admission_operation_id),
+                        operation=invoke_primary_transport,
+                    )
                     _mark_target_succeeded(
                         model_id=primary_model,
                         api_base=primary_kwargs.get("api_base"),
@@ -3043,12 +4238,24 @@ def completion_with_fallback_sync(
                             details=details,
                             request_id=request_id,
                         )
+                    if receipt_session is not None:
+                        receipt_session.attempt_finished(
+                            outcome="succeeded",
+                            error_code=None,
+                            decision=route_decision,
+                            usage=_token_usage_from_payload(_raw_payload) if governed_context is not None else None,
+                        )
+                        _finalize_route_receipt_sync(
+                            receipt_session,
+                            outcome="succeeded",
+                            request_id=request_id,
+                        )
                     return response
 
                 fallback_kwargs = build_completion_kwargs(
                     messages=target_messages,
-                    temperature=temperature,
-                    max_tokens=max_tokens,
+                    temperature=effective_temperature,
+                    max_tokens=effective_max_tokens,
                     use_fallback=True,
                     fallback_model_id=str(target["model_id"]),
                     fallback_api_key=target["api_key"],
@@ -3059,7 +4266,31 @@ def completion_with_fallback_sync(
                 )
                 fallback_model = _safe_model_name(fallback_kwargs)
                 attempted_fallback_models.append(fallback_model)
-                response = litellm.completion(**fallback_kwargs)
+
+                def invoke_fallback_transport() -> tuple[Any, Any]:
+                    nonlocal governed_attempted, route_attempt_started
+                    if receipt_session is not None:
+                        receipt_session.attempt_started(
+                            route_decision,
+                            capability_proof_hashes=proof_hashes,
+                        )
+                        route_attempt_started = True
+                    governed_attempted = request_context is not None
+                    if governed_context is not None:
+                        return _governed_openai_chat_completion(
+                            decision=route_decision,
+                            context=governed_context,
+                            body=transport_body,
+                            api_key=target.get("api_key"),
+                        )
+                    return litellm.completion(**fallback_kwargs), None
+
+                response, _raw_payload = _execute_sync_with_gpu_admission(
+                    context=governed_context,
+                    decision=route_decision,
+                    operation_id=str(admission_operation_id),
+                    operation=invoke_fallback_transport,
+                )
                 _mark_target_succeeded(
                     model_id=fallback_model,
                     api_base=target["api_base"],
@@ -3088,8 +4319,63 @@ def completion_with_fallback_sync(
                         details=details,
                         request_id=request_id,
                     )
+                if receipt_session is not None and route_attempt_started:
+                    receipt_session.attempt_finished(
+                        outcome="succeeded",
+                        error_code=None,
+                        decision=route_decision,
+                        usage=_token_usage_from_payload(_raw_payload) if governed_context is not None else None,
+                        degradation_code=(
+                            "preflight_fallback" if primary_preflight_rejected else "fallback_used"
+                        ),
+                    )
+                    _finalize_route_receipt_sync(
+                        receipt_session,
+                        outcome="succeeded",
+                        request_id=request_id,
+                        fallback_reason_code=(
+                            "primary_preflight_rejected"
+                            if primary_preflight_rejected
+                            else "primary_transport_failed"
+                        ),
+                        degradation_codes=(
+                            "preflight_fallback" if primary_preflight_rejected else "fallback_used",
+                        ),
+                    )
                 return response
+            except RuntimeRevokedError:
+                raise
+            except GpuAdmissionError as error:
+                if receipt_session is not None and route_attempt_started:
+                    receipt_session.attempt_finished(
+                        outcome="failed",
+                        error_code=f"gpu_admission_{error.code}",
+                        decision=route_decision,
+                        degradation_code="gpu_admission_rejected",
+                    )
+                    _finalize_route_receipt_sync(
+                        receipt_session,
+                        outcome="failed",
+                        request_id=request_id,
+                        fallback_reason_code="gpu_admission_rejected",
+                        degradation_codes=(
+                            "gpu_admission_rejected",
+                            f"gpu_admission_{error.code}",
+                        ),
+                    )
+                raise
+            except GpuAdmissionIdentityError:
+                # Admission identity and operation conflicts are terminal for
+                # this request; a fallback candidate must not run.
+                raise
             except Exception as error:
+                if receipt_session is not None and route_attempt_started:
+                    receipt_session.attempt_finished(
+                        outcome="failed",
+                        error_code="transport_failed",
+                        decision=route_decision,
+                        degradation_code="transport_failed",
+                    )
                 last_error = error
                 if is_primary:
                     primary_error = error
@@ -3121,6 +4407,20 @@ def completion_with_fallback_sync(
                         exc_info=True,
                     )
 
+        if request_context is not None and not governed_attempted:
+            _persist_denied_route_sync(
+                request_context,
+                denied_decision,
+                tuple(denial_reasons or ("no_compliant_route",)),
+            )
+            last_error = NoCompliantModelRouteError()
+        if receipt_session is not None and governed_attempted:
+            _finalize_route_receipt_sync(
+                receipt_session,
+                outcome="failed",
+                request_id=request_id,
+                degradation_codes=("all_transports_failed",),
+            )
         if attempted_fallback_models and _can_log_request(request_id):
             details = {
                 "runtime_path": runtime_path,
@@ -3175,6 +4475,7 @@ async def completion_with_fallback(
     runtime_path: str = "completion",
     profile: str | None = None,
     local_runtime_only: bool = False,
+    request_context: Any | None = None,
 ):
     """Async wrapper around the shared completion fallback flow."""
     request_id = uuid4().hex
@@ -3190,6 +4491,7 @@ async def completion_with_fallback(
         runtime_path=runtime_path,
         profile=profile,
         local_runtime_only=local_runtime_only,
+        request_context=request_context,
     )
     try:
         if timeout is None:
@@ -3213,3 +4515,105 @@ async def completion_with_fallback(
     finally:
         if timeout is None:
             _finish_request(request_id)
+
+
+async def stream_completion_with_fallback(
+    messages: list[dict[str, Any]],
+    temperature: float,
+    max_tokens: int,
+    runtime_path: str,
+    request_context: Any,
+    request_id: str | None = None,
+):
+    """Yield governed inference deltas without reconstructing caller authority."""
+    from src.model_fabric import RouteReceiptSession, candidate_from_profile, execute_streaming
+    from src.model_fabric.repository import ModelFabricRepository
+
+    if request_context is None:
+        raise ProviderProfileConfigurationError("governed streaming requires explicit request context")
+    if request_id is not None and request_id != request_context.request_id:
+        raise ProviderProfileConfigurationError("request id does not match inference context")
+
+    profile_ids = (
+        [request_context.requested_profile_id]
+        if request_context.requested_profile_id
+        else runtime_profile_candidates(runtime_path=runtime_path)
+    )
+    candidates = []
+    for index, profile_id in enumerate(profile_ids):
+        resolved_id = "local-ollama" if profile_id == "local" else profile_id
+        provider_profile = _provider_profile(resolved_id)
+        if provider_profile is None:
+            continue
+        candidates.append(
+            candidate_from_profile(
+                provider_profile,
+                source="primary" if index == 0 else "fallback",
+            )
+        )
+    if not candidates:
+        raise ProviderProfileConfigurationError("no canonical provider profile for governed streaming")
+
+    repository = ModelFabricRepository()
+    proofs = []
+    base_capabilities = set(request_context.requirements.capabilities)
+    base_capabilities.update({"latency_ms", "health"})
+    for candidate in candidates:
+        capabilities = set(base_capabilities)
+        for capability in sorted(capabilities):
+            proof = await repository.latest_capability_proof(
+                profile_schema_version=candidate.profile.schema_version,
+                profile_contract_hash=candidate.profile.contract_hash,
+                profile_id=candidate.profile.id,
+                model=candidate.profile.model,
+                endpoint=candidate.endpoint,
+                endpoint_class=candidate.endpoint_class,
+                adapter=candidate.adapter,
+                capability=capability,
+            )
+            if proof is not None:
+                proofs.append(proof)
+
+    async def default_transport(candidate, transport_body, follow_redirects):
+        import httpx
+
+        if follow_redirects:
+            raise ProviderProfileConfigurationError("model-fabric redirects must remain disabled")
+        headers = {"Content-Type": "application/json"}
+        if candidate.profile.api_key:
+            headers["Authorization"] = f"Bearer {candidate.profile.api_key}"
+        timeout_seconds = request_context.deadline_at - time.time()
+        if timeout_seconds <= 0:
+            raise TimeoutError("model_fabric_deadline_exceeded")
+        async with httpx.AsyncClient(follow_redirects=False, timeout=timeout_seconds) as client:
+            async with client.stream(
+                "POST", candidate.endpoint, headers=headers, json=transport_body
+            ) as response:
+                response.raise_for_status()
+                async for line in response.aiter_lines():
+                    if not line.startswith("data:"):
+                        continue
+                    data = line[5:].strip()
+                    if data == "[DONE]":
+                        break
+                    try:
+                        event = json.loads(data)
+                        delta = event["choices"][0]["delta"].get("content")
+                    except (KeyError, IndexError, TypeError, json.JSONDecodeError):
+                        continue
+                    if isinstance(delta, str) and delta:
+                        yield delta
+
+    transport = _model_fabric_streaming_transport or default_transport
+    hooks = _model_fabric_receipt_hooks or RouteReceiptSession(context=request_context)
+    async for delta in execute_streaming(
+        context=request_context,
+        candidates=tuple(candidates),
+        proofs=tuple(proofs),
+        messages=tuple(dict(message) for message in messages),
+        temperature=temperature,
+        max_tokens=max_tokens,
+        transport=transport,
+        hooks=hooks,
+    ):
+        yield delta

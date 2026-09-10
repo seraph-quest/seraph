@@ -1,11 +1,217 @@
-from unittest.mock import patch
+import asyncio
+import json
+from dataclasses import replace
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 
+from fastapi import HTTPException
 import pytest
 
-from src.db.models import MemoryEdgeType, MemoryKind
+from config.settings import settings
+from src.api import memory as memory_api
+from src.auth.service import test_bypass_operator
+from src.db.models import MemoryEdgeType, MemoryKind, MemoryStatus
+from src.memory import control as memory_control
 from src.memory.hybrid_retrieval import retrieve_hybrid_memory
 from src.memory.repository import memory_repository
 from src.memory.retrieval_planner import plan_memory_retrieval
+from src.security.trust_contract import PrincipalType
+
+
+def test_memory_correction_route_binds_test_bypass_principal_without_database():
+    operator = test_bypass_operator()
+    request = SimpleNamespace(state=SimpleNamespace(operator=operator))
+
+    async def capture(**kwargs):
+        return kwargs
+
+    async def invoke_route():
+        with patch.object(memory_api, "correct_memory", capture):
+            return await memory_api.create_memory_correction(
+                request,
+                memory_api.MemoryCorrectionRequest(
+                    content="Route-binding unit test memory.",
+                    actor="attacker",
+                ),
+            )
+
+    receipt = asyncio.run(invoke_route())
+
+    assert receipt["actor"] == "operator:test-bypass"
+
+
+def test_memory_actor_rejects_non_operator_or_mismatched_session():
+    operator = test_bypass_operator()
+    request = SimpleNamespace(state=SimpleNamespace(operator=operator))
+
+    for principal in (
+        replace(operator.principal, principal_type=PrincipalType.SERVICE),
+        replace(operator.principal, session_id="other-session"),
+    ):
+        forged_request = SimpleNamespace(
+            state=SimpleNamespace(operator=replace(operator, principal=principal))
+        )
+        with pytest.raises(HTTPException) as raised:
+            memory_api.authenticated_memory_actor(forged_request)
+        assert raised.value.status_code == 401
+
+    assert memory_api.authenticated_memory_actor(request) == "operator:test-bypass"
+
+
+@pytest.mark.parametrize(
+    "metadata,content,summary",
+    [
+        ({"archived_reason": "operator_delete_export"}, "original", "original"),
+        (
+            {"operator_control": {"delete_export_state": "canonical_memory_redacted"}},
+            "original",
+            "original",
+        ),
+        ({"delete_export_state": "canonical_memory_redacted"}, "original", "original"),
+        (
+            {"operator_control": {"last_action": "propagate_delete_export"}},
+            "original",
+            "original",
+        ),
+        (
+            {"operator_control": {"last_action": "operator_delete_export"}},
+            "original",
+            "original",
+        ),
+        ({}, "[delete/export propagated by operator]", "original"),
+        ({}, "original", "[delete/export propagated by operator]"),
+    ],
+)
+def test_memory_rollback_rejects_canonical_tombstone_before_mutation(
+    metadata,
+    content,
+    summary,
+):
+    deleted = SimpleNamespace(
+        metadata_json=json.dumps(metadata),
+        content=content,
+        summary=summary,
+    )
+
+    async def invoke():
+        with (
+            patch.object(memory_control.memory_repository, "get_memory", return_value=deleted),
+            patch.object(
+                memory_control.memory_repository,
+                "rollback_memory_if_unchanged",
+                side_effect=AssertionError("rollback mutated a canonical tombstone"),
+            ) as update,
+        ):
+            with pytest.raises(ValueError, match="operator delete/export redaction"):
+                await memory_control.apply_memory_live_control_action(
+                    action="rollback_memory",
+                    acknowledged=True,
+                    memory_id="deleted-memory",
+                    privacy_boundary="operator_visible",
+                )
+            update.assert_not_called()
+
+    asyncio.run(invoke())
+
+
+def test_memory_rollback_keeps_ordinary_archived_memory_reversible():
+    existing = SimpleNamespace(
+        metadata_json="{}",
+        content="Ordinary rollback candidate.",
+        summary="Ordinary rollback candidate",
+        updated_at="read-version",
+        status=MemoryStatus.archived,
+        confidence=0.2,
+        importance=0.2,
+        reinforcement=0.2,
+    )
+    restored = SimpleNamespace(id="ordinary-memory", source_session_id=None)
+
+    async def invoke():
+        with (
+            patch.object(memory_control.memory_repository, "get_memory", return_value=existing),
+            patch.object(
+                memory_control.memory_repository,
+                "rollback_memory_if_unchanged",
+                return_value=restored,
+            ) as update,
+            patch.object(
+                memory_control,
+                "_log_live_control_event",
+                new=AsyncMock(return_value=SimpleNamespace(id="audit-ordinary-rollback")),
+            ),
+            patch.object(
+                memory_control,
+                "get_memory_live_controls_snapshot",
+                new=AsyncMock(return_value={}),
+            ),
+            patch.object(memory_control, "_memory_payload", return_value={"status": "active"}),
+        ):
+            result = await memory_control.apply_memory_live_control_action(
+                action="rollback_memory",
+                acknowledged=True,
+                memory_id="ordinary-memory",
+                privacy_boundary="operator_visible",
+            )
+
+        update.assert_awaited_once()
+        assert result["memory"]["status"] == "active"
+        assert result["receipt"]["changed_memory"] is True
+
+    asyncio.run(invoke())
+
+
+def test_memory_rollback_cas_loses_to_delete_export_interleaving():
+    original = SimpleNamespace(
+        metadata_json="{}",
+        content="Original content must stay deleted.",
+        summary="Original content must stay deleted",
+        updated_at="read-version",
+        status=MemoryStatus.archived,
+        confidence=0.2,
+        importance=0.2,
+        reinforcement=0.2,
+    )
+    deleted = SimpleNamespace(
+        metadata_json=json.dumps(
+            {
+                "archived_reason": "operator_delete_export",
+                "operator_control": {"delete_export_state": "canonical_memory_redacted"},
+            }
+        ),
+        content="[delete/export propagated by operator]",
+        summary="[delete/export propagated by operator]",
+        status=MemoryStatus.archived,
+    )
+    state = {"memory": original}
+
+    async def delete_wins(*_args, **_kwargs):
+        state["memory"] = deleted
+        raise ValueError("memory changed before rollback; canonical deletion won")
+
+    async def invoke():
+        with (
+            patch.object(memory_control.memory_repository, "get_memory", return_value=original),
+            patch.object(
+                memory_control.memory_repository,
+                "rollback_memory_if_unchanged",
+                new=AsyncMock(side_effect=delete_wins),
+            ) as rollback,
+        ):
+            with pytest.raises(ValueError, match="canonical deletion"):
+                await memory_control.apply_memory_live_control_action(
+                    action="rollback_memory",
+                    acknowledged=True,
+                    memory_id="interleaved-memory",
+                    privacy_boundary="operator_visible",
+                )
+
+        rollback.assert_awaited_once()
+        assert state["memory"] is deleted
+        assert state["memory"].status is MemoryStatus.archived
+        assert state["memory"].content == "[delete/export propagated by operator]"
+
+    asyncio.run(invoke())
 
 
 @pytest.mark.asyncio
@@ -343,6 +549,33 @@ async def test_memory_live_controls_decay_and_delete_export_are_bounded_operator
     assert exported.json()["receipt"]["blocked_claims"]
     assert exported.json()["receipt"]["privacy_boundary"] == "sensitive"
 
+    rollback = await client.post(
+        "/api/operator/guardian-memory-live-control/actions",
+        json={
+            "action": "rollback_memory",
+            "acknowledge_rollback_boundary": True,
+            "memory_id": created.memory_id,
+            "reason": "A deleted canonical memory must not be revived.",
+        },
+    )
+    stored_after_rollback = await memory_repository.get_memory(created.memory_id)
+
+    assert rollback.status_code == 400
+    assert "operator delete/export redaction" in rollback.json()["detail"]
+    assert stored_after_rollback is not None
+    assert stored_after_rollback.status.value == "archived"
+    assert stored_after_rollback.content == "[delete/export propagated by operator]"
+    assert stored_after_rollback.summary == "[delete/export propagated by operator]"
+
+    with patch("src.memory.hybrid_retrieval.search_with_status", return_value=([], False)):
+        retrieval = await retrieve_hybrid_memory(
+            query="legacy export token",
+            active_projects=(),
+            limit=4,
+        )
+    assert "seraph-delete-me" not in retrieval.context
+    assert retrieval.context == ""
+
 
 @pytest.mark.asyncio
 async def test_memory_live_controls_rollback_requires_specific_boundary_acknowledgement(client):
@@ -433,3 +666,102 @@ async def test_memory_live_controls_quarantine_and_reinstate_provider_runtime_st
         assert reinstated.status_code == 200
         providers = reinstated.json()["snapshot"]["provider_states"]["providers"]
         assert providers[0]["runtime_state"] == "ready"
+
+
+@pytest.mark.asyncio
+async def test_memory_mutation_routes_bind_authenticated_principal_and_ignore_body_actor(client):
+    """Every canonical memory mutation and compatibility alias uses middleware identity."""
+
+    principal_id = "operator:test-bypass"
+    created = await memory_repository.create_memory(
+        content="Principal-bound memory control candidate.",
+        kind=MemoryKind.fact,
+        summary="Principal-bound candidate",
+        confidence=0.6,
+        importance=0.6,
+    )
+
+    correction = await client.post(
+        "/api/memory/corrections",
+        json={
+            "content": "Principal-bound corrected memory.",
+            "kind": "fact",
+            "corrects_memory_id": created.memory_id,
+            "actor": "attacker",
+            "reason": "Correction actor must come from the authenticated operator.",
+        },
+    )
+    assert correction.status_code == 200
+    corrected_id = correction.json()["memory"]["id"]
+    assert correction.json()["receipt"]["actor"] == principal_id
+    assert correction.json()["memory"]["provenance"]["actor"] == principal_id
+    assert correction.json()["memory"]["operator_control"]["last_actor"] == principal_id
+
+    pinned = await client.post(
+        f"/api/memory/{corrected_id}/pin",
+        json={"actor": "attacker", "reason": "Pin through the canonical route."},
+    )
+    forgotten = await client.post(
+        f"/api/memory/{corrected_id}/forget",
+        json={"actor": "attacker", "reason": "Forget through the canonical route."},
+    )
+    audited = await client.post(
+        f"/api/memory/{corrected_id}/audit",
+        json={"actor": "attacker", "reason": "Audit through the canonical route."},
+    )
+    assert pinned.status_code == 200
+    assert forgotten.status_code == 200
+    assert audited.status_code == 200
+    assert all(response.json()["receipt"]["actor"] == principal_id for response in (pinned, forgotten, audited))
+
+    live_control_routes = (
+        "/api/memory/live-controls/actions",
+        "/api/memory/guardian-memory-live-control/actions",
+        "/api/operator/memory-live-controls/actions",
+        "/api/operator/guardian-memory-live-control/actions",
+    )
+    for route in live_control_routes:
+        response = await client.post(
+            route,
+            json={
+                "action": "decay_stale_evidence",
+                "acknowledged": True,
+                "memory_id": corrected_id,
+                "actor": "attacker",
+                "reason": f"Live-control alias identity check for {route}.",
+            },
+        )
+        assert response.status_code == 200
+        assert response.json()["receipt"]["actor"] == principal_id
+
+    legacy_control = await client.post(
+        f"/api/operator/memory-control/{corrected_id}",
+        json={
+            "action": "audit",
+            "note": "Legacy operator alias identity check.",
+            "actor": "attacker",
+        },
+    )
+    assert legacy_control.status_code == 200
+    assert legacy_control.json()["receipt"]["actor"] == principal_id
+
+    audit = await client.get("/api/memory/audit", params={"memory_id": corrected_id, "limit": 50})
+    assert audit.status_code == 200
+    assert "attacker" not in audit.text
+    assert {event["actor"] for event in audit.json()["events"]} == {principal_id}
+
+
+@pytest.mark.asyncio
+async def test_memory_mutations_remain_blocked_when_test_auth_bypass_is_disabled(client, monkeypatch):
+    monkeypatch.setattr(settings, "operator_auth_allow_unauthenticated_tests", False)
+
+    response = await client.post(
+        "/api/memory/corrections",
+        json={
+            "content": "Unauthenticated correction must not be persisted.",
+            "actor": "attacker",
+        },
+    )
+
+    assert response.status_code == 503
+    assert response.json()["detail"]["code"] == "auth_not_configured"

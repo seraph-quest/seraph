@@ -3,6 +3,8 @@ from __future__ import annotations
 from typing import Any
 
 from src.memory.decay import memory_reconciliation_policy_payload, summarize_memory_reconciliation_state
+from src.memory.gate_a_baseline import build_gate_a_baseline_receipt
+from src.memory.gate_b_provider_decision import build_gate_b_provider_decision_receipt
 
 
 GUARDIAN_MEMORY_BENCHMARK_SUITE_NAME = "guardian_memory_quality"
@@ -100,6 +102,16 @@ def guardian_memory_benchmark_policy_payload() -> dict[str, Any]:
             "repo_pr_continuity",
         ],
         "ci_gate_mode": "required_benchmark_suite",
+        "gate_a_baseline_policy": "frozen_content_free_corpus_before_runtime_or_provider_measurement",
+        "gate_a_baseline_receipt_surfaces": [
+            "/api/operator/memory-benchmark",
+            "/api/memory/providers",
+        ],
+        "gate_b_provider_decision_policy": "defer_openrouter_pilot_until_credential_capability_egress_consent_and_outcome_proof",
+        "gate_b_provider_decision_receipt_surfaces": [
+            "/api/operator/memory-benchmark",
+            "/api/memory/providers",
+        ],
     }
 
 
@@ -195,6 +207,8 @@ async def build_guardian_memory_benchmark_report(
     benchmark_failures = _guardian_memory_suite_failure_report(summary) if run_suite else []
     reconciliation_failures = _memory_failure_report(reconciliation_summary)
     failure_report = (benchmark_failures + reconciliation_failures)[:6]
+    gate_a_baseline = build_gate_a_baseline_receipt()
+    gate_b_provider_decision = build_gate_b_provider_decision_receipt()
     contradiction_state = str(reconciliation_summary.get("state") or "steady")
     if run_suite:
         benchmark_posture = (
@@ -236,4 +250,6 @@ async def build_guardian_memory_benchmark_report(
             "executed": run_suite,
         },
         "canonical_memory_reconciliation": reconciliation_summary,
+        "gate_a_baseline": gate_a_baseline,
+        "gate_b_provider_decision": gate_b_provider_decision,
     }

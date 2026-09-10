@@ -1,35 +1,53 @@
 import asyncio
 import contextvars
+import hashlib
 import json
 import logging
+from contextlib import suppress
+from datetime import datetime, timezone
+from dataclasses import replace
+from threading import Event
 from time import perf_counter
+from uuid import NAMESPACE_URL, uuid4, uuid5
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request as HttpRequest
 
 from src.approval.exceptions import ApprovalRequired
 from src.approval.repository import approval_repository
-from src.approval.runtime import reset_runtime_context, set_runtime_context
+from src.approval.runtime import (
+    get_current_approval_mode,
+    get_current_trust_principal,
+    reset_runtime_context,
+    set_runtime_context,
+)
 from src.agent.exceptions import ClarificationRequired
 from config.settings import settings
 from src.agent.direct_chat import run_direct_local_chat, should_use_direct_local_chat
 from src.agent.factory import build_agent
 from src.agent.onboarding import create_onboarding_agent
-from src.agent.session import session_manager
+from src.agent.session import (
+    MessageIngressConflictError,
+    SessionNotFoundError,
+    SessionOwnerMismatchError,
+    session_manager,
+)
 from src.audit.runtime import log_agent_run_event
 from src.audit.repository import audit_repository
 from src.api.profile import get_or_create_profile, mark_onboarding_complete
-from src.guardian.state import build_guardian_state
-from src.models.schemas import ChatRequest, ChatResponse
-from src.operators.local_codex import (
-    LocalCodexConfigurationError,
-    is_local_codex_model,
-    local_codex_chat_sandbox,
-    local_codex_chat_timeout_seconds,
-    run_local_codex,
+from src.auth.cancellation import (
+    RuntimeRevokedError,
+    assert_runtime_not_revoked,
+    reset_revocation_guard,
+    set_revocation_guard,
 )
+from src.auth.service import AuthFailure, auth_enabled, authenticate_token, bind_operator_principal
+from src.guardian.state import build_guardian_state
+from src.models.schemas import ChatIngressEnvelope, ChatRequest, ChatResponse
+from src.operators.local_codex import ExternalAgentRuntimeRemovedError
 from src.tools.policy import get_current_tool_policy_mode
 from src.vault.redaction import redact_secrets_in_text
 from src.vlm_runtime import direct_local_chat_route_error
+from src.security.trust_contract import AuthorityGrant, PrincipalType, TrustPrincipal
 from src.llm_runtime import (
     _finish_request,
     _mark_request_timed_out,
@@ -43,91 +61,445 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
+async def _watch_rest_operator_session(
+    auth_cookie: str | None,
+    revocation_guard: Event,
+    stop_event: asyncio.Event,
+) -> None:
+    """Fail closed when an authenticated REST turn loses its session."""
+    if not auth_cookie or not auth_enabled():
+        return
+    poll_seconds = max(float(settings.operator_auth_revocation_poll_seconds), 0.25)
+    while not stop_event.is_set():
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=poll_seconds)
+            return
+        except asyncio.TimeoutError:
+            pass
+        try:
+            await authenticate_token(auth_cookie, touch=False)
+        except AuthFailure:
+            revocation_guard.set()
+            return
+        except Exception:
+            logger.exception("REST operator-session validation failed; failing closed")
+            revocation_guard.set()
+            return
+
+
+def _begin_rest_revocation_watch(http_request: HttpRequest):
+    """Install a context-propagated revocation guard for one REST inference."""
+    auth_cookie = http_request.cookies.get(settings.operator_auth_cookie_name)
+    if not auth_cookie or not auth_enabled():
+        return None
+    revocation_guard = Event()
+    stop_event = asyncio.Event()
+    watcher = asyncio.create_task(
+        _watch_rest_operator_session(auth_cookie, revocation_guard, stop_event),
+        name="rest-operator-revocation-watch",
+    )
+    token = set_revocation_guard(revocation_guard)
+    return revocation_guard, stop_event, watcher, token
+
+
+async def _end_rest_revocation_watch(scope) -> None:
+    if scope is None:
+        return
+    _revocation_guard, stop_event, watcher, token = scope
+    reset_revocation_guard(token)
+    stop_event.set()
+    if not watcher.done():
+        watcher.cancel()
+    with suppress(asyncio.CancelledError):
+        await watcher
+
+
+async def _ensure_rest_authorized(http_request: HttpRequest, scope) -> None:
+    """Recheck authority before REST transcript or outcome side effects."""
+    if scope is None:
+        return
+    try:
+        assert_runtime_not_revoked()
+        if scope[0].is_set():
+            raise RuntimeRevokedError("authenticated operator session was revoked")
+        await authenticate_token(
+            http_request.cookies.get(settings.operator_auth_cookie_name),
+            touch=False,
+        )
+        # The watcher may revoke the session while token authentication is
+        # awaiting its result. Recheck both the context guard and the watcher
+        # event after that await, before the caller performs its side effect.
+        assert_runtime_not_revoked()
+        if scope[0].is_set():
+            raise RuntimeRevokedError("authenticated operator session was revoked")
+    except (AuthFailure, RuntimeRevokedError) as exc:
+        raise HTTPException(
+            status_code=401,
+            detail={"code": "session_revoked", "message": "Operator session was revoked."},
+        ) from exc
+
+
+class ChatAuthorityError(Exception):
+    """Raised when an interactive chat turn has no usable operator authority."""
+
+    def __init__(self, message: str, *, status_code: int, code: str):
+        super().__init__(message)
+        self.message = message
+        self.status_code = status_code
+        self.code = code
+
+
+class ChatIngressValidationError(Exception):
+    """Raised when a web ingress payload cannot resolve safely."""
+
+    def __init__(self, message: str, *, code: str):
+        super().__init__(message)
+        self.message = message
+        self.status_code = 422
+        self.code = code
+
+
+def _bind_chat_principal(
+    session_id: str,
+    *,
+    principal: TrustPrincipal | None = None,
+    operator=None,
+) -> TrustPrincipal:
+    """Bind an already authenticated operator to the server-owned chat session.
+
+    The API route has no authority to mint an operator identity.  A trusted
+    ingress boundary must bind the principal to the current runtime context;
+    this helper only validates that identity and narrows it to the chat
+    session selected by Seraph.
+    """
+    if operator is not None:
+        principal = bind_operator_principal(operator, session_id)
+    if principal is None:
+        principal = get_current_trust_principal()
+    if principal is None:
+        raise ChatAuthorityError(
+            "Chat requires an authenticated operator before OpenRouter inference.",
+            status_code=401,
+            code="chat_authentication_required",
+        )
+    try:
+        principal_type = PrincipalType(principal.principal_type)
+    except (TypeError, ValueError):
+        raise ChatAuthorityError(
+            "Chat principal identity is invalid; inference is blocked.",
+            status_code=401,
+            code="chat_principal_invalid",
+        ) from None
+    if (
+        not principal.authenticated
+        or principal.revoked
+        or not principal.principal_id
+        or principal_type is PrincipalType.ANONYMOUS
+    ):
+        raise ChatAuthorityError(
+            "Chat requires an authenticated, active operator principal.",
+            status_code=401,
+            code="chat_principal_unauthorized",
+        )
+    if principal_type is not PrincipalType.OPERATOR:
+        raise ChatAuthorityError(
+            "Interactive chat requires an operator principal.",
+            status_code=403,
+            code="chat_principal_forbidden",
+        )
+    grants = set()
+    for grant in principal.grants:
+        try:
+            grants.add(AuthorityGrant(grant))
+        except (TypeError, ValueError):
+            continue
+    if AuthorityGrant.MODEL_INFERENCE not in grants:
+        raise ChatAuthorityError(
+            "Chat principal lacks model-inference authority.",
+            status_code=403,
+            code="chat_model_inference_forbidden",
+        )
+    normalized_session_id = str(session_id or "").strip()
+    if not normalized_session_id:
+        raise ChatAuthorityError(
+            "Chat requires a server-owned session identity.",
+            status_code=403,
+            code="chat_session_missing",
+        )
+    if principal.session_id and principal.session_id != normalized_session_id:
+        raise ChatAuthorityError(
+            "Chat principal is not bound to this session.",
+            status_code=403,
+            code="chat_principal_session_mismatch",
+        )
+    return replace(principal, session_id=normalized_session_id)
+
+
+def build_chat_ingress_envelope(
+    *,
+    message: str,
+    session_id: str,
+    principal: TrustPrincipal,
+    operator_session_id: str,
+    transport: str,
+    client_message_id: str | None = None,
+    idempotency_key: str | None = None,
+) -> ChatIngressEnvelope:
+    """Create server-owned metadata for one authenticated web ingress.
+
+    A caller may provide either identity field to make a retry deterministic.
+    If both aliases are supplied, they must carry the same normalized value so
+    one canonical retry identity can be reserved. The canonical persisted
+    message ID is derived by Seraph and is scoped to the bound principal and
+    session; caller identity never grants authority.
+    """
+    normalized_client_message_id, normalized_idempotency_key = validate_chat_ingress_identity(
+        client_message_id=client_message_id,
+        idempotency_key=idempotency_key,
+    )
+    identity_material = normalized_idempotency_key or normalized_client_message_id
+    if identity_material:
+        server_message_id = uuid5(
+            NAMESPACE_URL,
+            f"seraph-chat:{principal.principal_id}:{session_id}:{identity_material}",
+        ).hex
+    else:
+        server_message_id = uuid4().hex
+        identity_material = server_message_id
+    idempotency_key_digest = hashlib.sha256(identity_material.encode("utf-8")).hexdigest()
+    return ChatIngressEnvelope(
+        message_id=server_message_id,
+        client_message_id=normalized_client_message_id,
+        idempotency_key=f"sha256:{idempotency_key_digest}",
+        idempotency_key_digest=idempotency_key_digest,
+        principal_id=principal.principal_id,
+        operator_session_id=operator_session_id,
+        device_id=f"web-operator-session:{operator_session_id}",
+        transport=transport,
+        session_id=session_id,
+        correlation_id=f"chat:{server_message_id}",
+        content_digest=hashlib.sha256(message.encode("utf-8")).hexdigest(),
+        received_at=datetime.now(timezone.utc),
+    )
+
+
+def validate_chat_ingress_identity(
+    *,
+    client_message_id: str | None = None,
+    idempotency_key: str | None = None,
+) -> tuple[str | None, str | None]:
+    """Normalize caller identity and reject ambiguous dual identities.
+
+    The two request fields are aliases for this web ingress slice.  When both
+    are present they must resolve to the same opaque value; otherwise there is
+    no single retry identity to reserve.  This check is pure and can run before
+    session creation or audit/model dispatch.
+    """
+
+    normalized_client_message_id = str(client_message_id).strip() if client_message_id is not None else None
+    normalized_idempotency_key = str(idempotency_key).strip() if idempotency_key is not None else None
+    if client_message_id is not None and not normalized_client_message_id:
+        raise ChatIngressValidationError(
+            "client message_id must not be blank.",
+            code="chat_message_identity_invalid",
+        )
+    if idempotency_key is not None and not normalized_idempotency_key:
+        raise ChatIngressValidationError(
+            "idempotency_key must not be blank.",
+            code="chat_message_identity_invalid",
+        )
+    if (
+        normalized_client_message_id is not None
+        and normalized_idempotency_key is not None
+        and normalized_client_message_id != normalized_idempotency_key
+    ):
+        raise ChatIngressValidationError(
+            "client message_id and idempotency_key must resolve to one identity.",
+            code="chat_message_identity_conflict",
+        )
+    return normalized_client_message_id, normalized_idempotency_key
+
+
+def validate_chat_message(message: str) -> None:
+    """Reject empty or whitespace-only interactive messages before effects."""
+
+    if not isinstance(message, str) or not message.strip():
+        raise ChatIngressValidationError(
+            "Chat message must not be blank.",
+            code="chat_message_invalid",
+        )
+
+
+def chat_ingress_metadata(envelope: ChatIngressEnvelope) -> str:
+    """Serialize only typed, non-content ingress metadata for the transcript."""
+    return json.dumps(
+        {"ingress": envelope.model_dump(mode="json")},
+        sort_keys=True,
+    )
+
+
+async def log_chat_ingress_event(
+    *,
+    session_id: str,
+    envelope: ChatIngressEnvelope,
+    status: str,
+) -> None:
+    """Write an operator-readable receipt without exposing message content."""
+    await audit_repository.log_event(
+        session_id=session_id,
+        actor="operator",
+        event_type="chat_message_ingress",
+        tool_name="chat_ingress",
+        risk_level="low",
+        policy_mode=get_current_tool_policy_mode(),
+        summary=f"Chat message ingress {status}.",
+        details={
+            "status": status,
+            "schema_version": envelope.schema_version,
+            "message_id": envelope.message_id,
+            "idempotency_key_digest": envelope.idempotency_key_digest,
+            "content_digest": envelope.content_digest,
+            "principal_id": envelope.principal_id,
+            "operator_session_id": envelope.operator_session_id,
+            "device_id": envelope.device_id,
+            "channel": envelope.channel,
+            "transport": envelope.transport,
+            "session_id": envelope.session_id,
+            "correlation_id": envelope.correlation_id,
+        },
+    )
+
+
 @router.post("/chat", response_model=ChatResponse)
-async def chat(request: ChatRequest):
+async def chat(request: ChatRequest, http_request: HttpRequest):
     """Send a message and receive an AI response."""
-    session = await session_manager.get_or_create(request.session_id)
-    await session_manager.add_message(session.id, "user", request.message)
+    try:
+        operator = getattr(http_request.state, "operator", None)
+        if operator is None:
+            raise ChatAuthorityError(
+                "Chat requires an authenticated operator ingress session.",
+                status_code=401,
+                code="chat_authentication_required",
+            )
+    except ChatAuthorityError as exc:
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail={"code": exc.code, "message": exc.message},
+        ) from exc
+    try:
+        validate_chat_message(request.message)
+        validate_chat_ingress_identity(
+            client_message_id=request.message_id,
+            idempotency_key=request.idempotency_key,
+        )
+    except ChatIngressValidationError as exc:
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail={"code": exc.code, "message": exc.message},
+        ) from exc
+    if request.session_id is not None and not request.session_id.strip():
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "chat_session_required"},
+        )
+    try:
+        session = await session_manager.get_for_ingress(
+            request.session_id,
+            owner_principal_id=operator.principal.principal_id,
+        )
+    except SessionNotFoundError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "code": "chat_session_not_found",
+                "session_id": exc.session_id,
+            },
+        ) from exc
+    except SessionOwnerMismatchError as exc:
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "code": "chat_session_owner_forbidden",
+                "session_id": exc.session_id,
+            },
+        ) from exc
+    try:
+        chat_principal = _bind_chat_principal(
+            session.id,
+            operator=operator,
+        )
+    except ChatAuthorityError as exc:
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail={"code": exc.code, "message": exc.message},
+        ) from exc
+    ingress = build_chat_ingress_envelope(
+        message=request.message,
+        session_id=session.id,
+        principal=chat_principal,
+        operator_session_id=operator.session_id,
+        transport="rest",
+        client_message_id=request.message_id,
+        idempotency_key=request.idempotency_key,
+    )
+    try:
+        _ingress_message, duplicate = await session_manager.reserve_ingress_message(
+            session.id,
+            request.message,
+            message_id=ingress.message_id,
+            metadata_json=chat_ingress_metadata(ingress),
+        )
+    except MessageIngressConflictError as exc:
+        await log_chat_ingress_event(
+            session_id=session.id,
+            envelope=ingress,
+            status="identity_conflict",
+        )
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "chat_message_identity_conflict",
+                "message": "This message identity is already bound to another request.",
+                "message_id": exc.message_id,
+            },
+        ) from exc
+    if duplicate:
+        await log_chat_ingress_event(
+            session_id=session.id,
+            envelope=ingress,
+            status="duplicate_rejected",
+        )
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "chat_message_duplicate",
+                "message": "This message was already accepted for this session.",
+                "message_id": ingress.message_id,
+            },
+        )
+    await log_chat_ingress_event(
+        session_id=session.id,
+        envelope=ingress,
+        status="accepted",
+    )
 
     # Check onboarding status
     profile = await get_or_create_profile()
-    if is_local_codex_model(settings.default_model):
-        started_at = perf_counter()
-        timeout_seconds = local_codex_chat_timeout_seconds()
-        try:
-            result = await run_local_codex(
-                request.message,
-                session_id=session.id,
-                timeout_seconds=timeout_seconds,
-                sandbox=local_codex_chat_sandbox(),
-            )
-            output = (result.get("stdout") or "").strip()
-            stderr = (result.get("stderr") or "").strip()
-            if result.get("timed_out"):
-                raise asyncio.TimeoutError
-            if not result.get("ok"):
-                raise LocalCodexConfigurationError(stderr or "Local Codex returned a non-zero exit code.")
-            response_text = await redact_secrets_in_text(
-                output or stderr or "Local Codex completed without output."
-            )
-        except asyncio.TimeoutError:
-            safe_detail = await redact_secrets_in_text(f"Local Codex timed out after {timeout_seconds}s.")
-            await log_agent_run_event(
-                session_id=session.id,
-                transport="rest",
-                is_onboarding=not profile.onboarding_completed,
-                outcome="timed_out",
-                policy_mode=get_current_tool_policy_mode(),
-                details={
-                    "duration_ms": int((perf_counter() - started_at) * 1000),
-                    "message_length": len(request.message),
-                    "timeout_seconds": timeout_seconds,
-                    "runtime": "codex-local",
-                },
-            )
-            raise HTTPException(status_code=504, detail=safe_detail)
-        except LocalCodexConfigurationError as exc:
-            safe_detail = await redact_secrets_in_text(f"Local Codex unavailable: {exc}")
-            await log_agent_run_event(
-                session_id=session.id,
-                transport="rest",
-                is_onboarding=not profile.onboarding_completed,
-                outcome="failed",
-                policy_mode=get_current_tool_policy_mode(),
-                details={
-                    "duration_ms": int((perf_counter() - started_at) * 1000),
-                    "message_length": len(request.message),
-                    "error": safe_detail,
-                    "runtime": "codex-local",
-                },
-            )
-            raise HTTPException(status_code=503, detail=safe_detail)
-
-        await session_manager.add_message(session.id, "assistant", response_text)
-        await log_agent_run_event(
-            session_id=session.id,
-            transport="rest",
-            is_onboarding=not profile.onboarding_completed,
-            outcome="succeeded",
-            policy_mode=get_current_tool_policy_mode(),
-            details={
-                "duration_ms": int((perf_counter() - started_at) * 1000),
-                "message_length": len(request.message),
-                "response_length": len(response_text),
-                "runtime": "codex-local",
-            },
-        )
-        return ChatResponse(response=response_text, session_id=session.id)
-
     is_onboarding = not profile.onboarding_completed
     direct_runtime_path = "onboarding_agent" if is_onboarding else "chat_agent"
+    try:
+        from src.llm_runtime import reject_removed_external_agent_route
+
+        reject_removed_external_agent_route(runtime_path=direct_runtime_path)
+    except ExternalAgentRuntimeRemovedError as exc:
+        raise HTTPException(status_code=410, detail=exc.payload()) from exc
     if should_use_direct_local_chat(
         request.message,
         runtime_path=direct_runtime_path,
         is_onboarding=is_onboarding,
     ):
         started_at = perf_counter()
-        route_error = await direct_local_chat_route_error()
+        route_error = await direct_local_chat_route_error(runtime_path=direct_runtime_path)
         if route_error:
             safe_detail = await redact_secrets_in_text(route_error)
             await log_agent_run_event(
@@ -140,24 +512,37 @@ async def chat(request: ChatRequest):
                     "duration_ms": int((perf_counter() - started_at) * 1000),
                     "message_length": len(request.message),
                     "error": safe_detail,
-                    "runtime": "direct-local-chat",
+                    "runtime": "direct-openrouter-chat",
                     "failure_stage": "route_preflight",
                 },
             )
             raise HTTPException(status_code=503, detail=safe_detail)
         llm_request_id = f"direct-rest:{session.id}:{started_at}"
         _register_request(llm_request_id)
+        auth_tokens = set_runtime_context(
+            session.id,
+            get_current_approval_mode(),
+            trust_principal=chat_principal,
+        )
+        revocation_scope = _begin_rest_revocation_watch(http_request)
         try:
             response_text = await asyncio.wait_for(
                 run_direct_local_chat(
                     request.message,
                     runtime_path=direct_runtime_path,
                     is_onboarding=is_onboarding,
+                    session_id=session.id,
                     request_id=llm_request_id,
                 ),
                 timeout=min(settings.agent_chat_timeout, 60),
             )
             response_text = await redact_secrets_in_text(response_text)
+            assert_runtime_not_revoked()
+        except RuntimeRevokedError as exc:
+            raise HTTPException(
+                status_code=401,
+                detail={"code": "session_revoked", "message": "Operator session was revoked during inference."},
+            ) from exc
         except asyncio.TimeoutError:
             _mark_request_timed_out(llm_request_id)
             await log_agent_run_event(
@@ -171,12 +556,12 @@ async def chat(request: ChatRequest):
                     "message_length": len(request.message),
                     "timeout_seconds": min(settings.agent_chat_timeout, 60),
                     "request_id": llm_request_id,
-                    "runtime": "direct-local-chat",
+                    "runtime": "direct-openrouter-chat",
                 },
             )
-            raise HTTPException(status_code=504, detail="Local chat timed out — try again")
+            raise HTTPException(status_code=504, detail="OpenRouter chat timed out — try again")
         except Exception as e:
-            logger.exception("Direct local chat failed")
+            logger.exception("Direct OpenRouter chat failed")
             safe_detail = await redact_secrets_in_text(f"Agent error: {e}")
             await log_agent_run_event(
                 session_id=session.id,
@@ -189,13 +574,16 @@ async def chat(request: ChatRequest):
                     "message_length": len(request.message),
                     "error": safe_detail,
                     "request_id": llm_request_id,
-                    "runtime": "direct-local-chat",
+                    "runtime": "direct-openrouter-chat",
                 },
             )
             raise HTTPException(status_code=500, detail=safe_detail)
         finally:
+            reset_runtime_context(auth_tokens)
             _finish_request(llm_request_id)
+            await _end_rest_revocation_watch(revocation_scope)
 
+        await _ensure_rest_authorized(http_request, revocation_scope)
         await session_manager.add_message(session.id, "assistant", response_text)
         await log_agent_run_event(
             session_id=session.id,
@@ -208,7 +596,7 @@ async def chat(request: ChatRequest):
                 "message_length": len(request.message),
                 "response_length": len(response_text),
                 "request_id": llm_request_id,
-                "runtime": "direct-local-chat",
+                "runtime": "direct-openrouter-chat",
             },
         )
         return ChatResponse(response=response_text, session_id=session.id)
@@ -232,12 +620,18 @@ async def chat(request: ChatRequest):
             )
             agent = build_agent()
 
+    revocation_scope = None
     try:
         from src.observer.manager import context_manager as obs_manager
         started_at = perf_counter()
         llm_request_id = f"agent-rest:{session.id}:{started_at}"
         _register_request(llm_request_id)
-        tokens = set_runtime_context(session.id, obs_manager.get_context().approval_mode)
+        revocation_scope = _begin_rest_revocation_watch(http_request)
+        tokens = set_runtime_context(
+            session.id,
+            obs_manager.get_context().approval_mode,
+            trust_principal=chat_principal,
+        )
         llm_request_token = set_current_llm_request_id(llm_request_id)
         run_ctx = contextvars.copy_context()
         reset_runtime_context(tokens)
@@ -248,7 +642,14 @@ async def chat(request: ChatRequest):
         )
         response_text = str(result.output) if hasattr(result, "output") else str(result)
         response_text = await redact_secrets_in_text(response_text)
+        assert_runtime_not_revoked()
+    except RuntimeRevokedError as exc:
+        raise HTTPException(
+            status_code=401,
+            detail={"code": "session_revoked", "message": "Operator session was revoked during inference."},
+        ) from exc
     except ApprovalRequired as exc:
+        await _ensure_rest_authorized(http_request, revocation_scope)
         await approval_repository.merge_details(
             exc.approval_id,
             {"resume_message": request.message},
@@ -276,6 +677,7 @@ async def chat(request: ChatRequest):
             },
         )
     except ClarificationRequired as exc:
+        await _ensure_rest_authorized(http_request, revocation_scope)
         rendered = await redact_secrets_in_text(exc.render_message())
         await session_manager.add_message(
             session.id,
@@ -349,7 +751,9 @@ async def chat(request: ChatRequest):
     finally:
         if "llm_request_id" in locals():
             _finish_request(llm_request_id)
+        await _end_rest_revocation_watch(revocation_scope)
 
+    await _ensure_rest_authorized(http_request, revocation_scope)
     await session_manager.add_message(session.id, "assistant", response_text)
     await log_agent_run_event(
         session_id=session.id,

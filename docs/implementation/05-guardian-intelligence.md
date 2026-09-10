@@ -70,6 +70,278 @@
 - [ ] stronger linkage between guardian state, execution choices, and feedback-driven policy adaptation
 - [ ] deeper memory-provider use beyond the shipped additive retrieval, additive user/project modeling, stale/usefulness-ranked provider diagnostics, guarded post-canonical writeback, inventory/governance layer, the pre-context provider quality gate, the guardian-memory benchmark plus contradiction-aware selective-forgetting proof, Batch BZ provider usefulness/degradation/quarantine plus canonical reconciliation receipts, Batch CF live-regression monitors, Batch CM dimension-scoped provider parity matrix, Batch CV longitudinal provider-operation receipts, and Batch DD expanded provider-matrix receipts, especially broader ecosystem coverage, live-provider attestation, richer provider-specific quality tuning, stronger long-horizon usefulness diagnostics, and exact claim-ledger permission before any memory-superiority or full provider-parity wording
 
+## Branch-local #745 goal-conditioned slice
+
+**Status:** Partial on the milestone branch; not Shipped on `develop`.
+
+The first additive slice stores an inspectable success criterion and monotonic
+goal revision on the existing `Goal` record. `POST /api/goals/{goal_id}/candidates`
+creates a deterministic candidate decision with `act`, `clarify`, `defer`, or
+`silent` action, while `GET /api/goals/{goal_id}/loop` exposes the criterion and
+redacted candidate/outcome/no-learning receipts. Candidates retain the goal
+revision and cannot dispatch after a goal is paused, abandoned, edited, or
+expired. Candidate identity now includes a canonical input digest.
+
+The branch-local `goal-snapshot-to-file` adapter re-reads the active goal and
+revision, admits one service-owned, bounded, idempotent job through the existing
+durable workflow state repository, and invokes only the governed
+`WorkflowManager` tool for that named workflow. Admission binds the canonical
+workflow name, capability version, and exact ordered `get_goals -> write_file`
+step sequence digest; unregistered, extra, missing, or reordered definitions
+are blocked before dispatch. It records fenced execution,
+artifact, effect, and readback receipts; verifies a workspace-contained output,
+its content digest, and the goal ID; then returns the result through the
+existing goal-conditioned loop with explicit `no_learning`. Stale, cancelled,
+unavailable, failed, and unreadable paths remain blocked or failed with no
+learning.
+
+The branch-local authenticated `POST /api/goals/{goal_id}/snapshot` endpoint is
+the first operator-triggered canary boundary for this adapter. It accepts only
+the middleware-authenticated operator session, delegates to the fixed
+least-privilege `service:goal-snapshot` identity, and returns separate
+execution, verification, artifact, learning, durable, operator, and audit
+receipts. It rejects stale revisions and body-supplied actor identities; an
+audit-store failure is returned as an explicit degraded response. This endpoint
+is operator-triggered; the separate scheduler opt-in below does not prove a
+live provider or public-source run.
+
+Autonomous scheduler admission is now explicitly opt-in per goal through the
+authenticated `proactive_enabled` field. Legacy goals and newly created goals
+default to disabled; enabling records the authenticated grant before work can
+be admitted, while disabling applies first and then records the revocation
+receipt so an audit outage cannot leave autonomous work enabled. The existing
+strategist tick considers at most one enabled active goal with an
+artifact-readback verifier and consent evidence. An explicit criterion target
+with `query` and `file_path` selects the registered `web-brief-to-file`
+workflow; other eligible goals use `goal-snapshot-to-file`. Both paths reuse
+the same parent durable effect receipt and record no learning by default.
+Missing criteria, malformed targets, paused/retired goals, and disabled
+permissions produce an inspectable skip/no-learning state. This remains a
+bounded canary; it does not claim broad autonomous planning.
+
+The branch-local correction slice adds an authenticated
+`POST /api/goals/{goal_id}/strategy-corrections` boundary for the explicit
+web-brief target. An operator can revise only the bounded query, workspace
+relative output path, or scheduler priority while supplying the current goal
+revision; the change is stored as a durable `StrategyDelta`, included as a
+strategy evidence reference on the next scheduled child, and applied with
+the existing goal compare-and-swap revision. The matching rollback endpoint
+restores the prior target only when the goal still contains the exact corrected
+target. Both operations require middleware-authenticated capability-execute
+authority, preserve the existing proactive permission and public-source scope,
+emit audit receipts, and fail closed on stale revisions, target drift, malformed
+paths, unsupported fields, or unavailable strategy-delta storage. An audit-store
+outage returns an explicit degraded response after the bounded delta mutation;
+the durable delta remains the operator-visible recovery record and does not
+grant new authority or source scope. `GET /api/goals/{id}/loop` exposes bounded
+correction history for operator inspection. Later candidate and outcome
+receipts preserve a redacted decision-input digest and expose a strategy-delta
+ID only after it resolves to an applied, goal-owned delta whose revision and
+exact target still match the current choice. Missing, ambiguous, stale, or
+unreadable correction evidence is retained as `strategy_delta_provenance=unresolved`
+with no claimed ID. The same digest and provenance status are
+included in direct snapshot and web-brief result payloads. Raw query and
+correction content are not stored in the goal-loop audit detail. Caller-supplied
+evidence references are bounded opaque typed digests; only a safe generated
+strategy-delta identifier remains readable for durable lookup. Stored positive
+provenance is revalidated against the current goal, revision, target, and
+decision-input digest or downgraded to unresolved, and priority is part of that
+linkage. The web-brief candidate keeps the selected priority in its
+decision-input digest, so a persisted correction that changes source, output
+format, or scheduling priority can establish verified influence on the later
+choice. If the target names a missing, stale, proposed, or rolled-back delta,
+the shared dispatch seam records `strategy_delta_unresolved` with
+`learning=no_learning` before invoking the workflow. This is governed strategy
+adaptation with explicit no-learning execution receipts; it is not silent
+prompt, tool, authority, or harness self-modification.
+The scheduler effect receipt likewise copies the delta identity only from that
+verified service result, so blocked or revoked corrections cannot appear as
+positive provenance merely because a goal target contains an ID. A higher
+priority brief blocked specifically by an unresolved correction records its
+blocked admission and yields to at most one next sorted eligible goal; the
+correction-only fallback is capped at two candidates total. Other blocked or
+failed outcomes stop the bounded tick.
+
+Scheduled child admission binds the work to the strategist occurrence's live
+durable fence before creating or replaying work. The child identity is stable
+within its capability-specific scheduler idempotency scope, so a repeated tick
+replays the same goal/revision candidate instead of creating another workspace
+write; operator-triggered runs use a separate scope. A stale, expired, or
+non-running parent is rejected before child admission.
+
+**Live/runtime limits:** This is a partial branch-local slice, not the full
+guardian brief journey. Its provider requires the app-started workflow
+registry, governed tool wrappers, and a migrated durable-state database; the
+focused tests monkeypatch only that existing tool boundary and perform a real
+temporary-file readback, including a source-URL predicate for the brief. No
+live service, scheduler run, operator approval, external public-source
+readback, or full #736 journey receipt was produced here, and no completion or
+learning claim is made.
+
+## Branch-local #753 canonical memory actor boundary
+
+**Status:** Partial on the milestone branch; not Shipped on `develop`.
+
+Canonical memory correction, pin, forget, audit, and live-control mutations now
+bind their service and audit actor to the authenticated operator principal from
+`request.state.operator`. The test-only unauthenticated middleware bypass uses
+the same `operator:test-bypass` principal contract. Request-body `actor` fields
+remain accepted for wire compatibility, but are ignored for authority and
+receipt identity; forged values such as `attacker` cannot be persisted or
+audited. The `/api/memory/guardian-memory-live-control/actions` alias and the
+legacy `/api/operator/memory-live-controls/actions`,
+`/api/operator/guardian-memory-live-control/actions`, and
+`/api/operator/memory-control/{memory_id}` routes use the same binding. Existing
+middleware rejection remains the first boundary for unauthenticated or invalid
+sessions, and read-only memory routes are unchanged. Caller-supplied source or
+session metadata such as `source_session_id`, `owner_session_id`, and legacy
+`session_id` retains its existing scoped metadata behavior; this slice does not
+promote those fields to authority or add ownership validation.
+
+Focused route tests cover the canonical mutations, all live-control aliases,
+legacy operator control, audit actor persistence, and disabled test-bypass
+rejection. Static compilation and route registration checks pass. The focused
+pytest run was attempted with the requested 45-second bound; the sandbox could
+not download the isolated worktree dependency set, and the pre-existing backend
+virtualenv stalled during async SQLite fixture setup, so no passing pytest
+receipt is claimed here.
+
+## Branch-local #753 Gate A canonical-first provider conflict boundary
+
+**Status:** Partial on the milestone branch; not Shipped on `develop`.
+
+The retrieval planner now treats canonical context as the active authority when
+assembling additive provider evidence. A provider claim that has the same
+memory scope and contradicts an active canonical claim is suppressed before it
+reaches guardian context; unrelated provider evidence remains advisory and can
+still augment the canonical context. The planner emits a content-free
+`canonical_first_provider_conflict_suppression` diagnostic and decision-receipt
+count, filters the suppressed claim from memory buckets, and remains stateless
+so retries produce the same result. Provider failure and recovery continue to
+fall back to or rejoin canonical retrieval without granting provider authority.
+
+The deterministic boundary does not implement the remaining #753 Gate A
+corpus/metrics artifact, remote provider deletion, or later #745 behavioral
+usefulness proof. A local `memory_tombstones` ledger now records canonical
+delete/export authority without retaining deleted content. The operator delete
+path writes the ledger and redaction atomically and invalidates the bounded
+guardian snapshot cache; repeated requests preserve the first actor, reason,
+and timestamp.
+
+The branch-local live-control rollback guard now treats canonical delete/export
+redaction as terminal: records marked with the operator delete/export archive
+reason, the canonical redaction state, or the equivalent propagated redaction
+marker remain archived and content-free, and rollback fails before any memory
+or audit mutation. Ordinary archived or superseded records remain rollbackable.
+This proves the local no-recall boundary only; advisory-provider remote
+deletion remains asynchronous and receipt-bound, with pending or failed
+propagation still requiring bounded retry and operator-visible reconciliation.
+The scoped learning/provider ingress path also suppresses non-empty echoes when
+an existing canonical tombstone is found, before it can change content,
+metadata, scope, timestamps, or source state. `reconcile_memory_tombstones`
+re-applies content-free redaction after a stale row restore, and
+`list_memories_for_reindex` reconciles before admitting active canonical rows to
+a local deterministic reindex. Snapshot reads and writes carry a content-free
+tombstone-ledger revision and fail closed when that authority is unavailable or
+changes during assembly. `MemoryEpisode` rows remain outside this Gate A
+tombstone ledger and require the deferred episodic-retention/deletion slice.
+Hybrid retrieval performs the same reconciliation
+and fails closed with an explicit degraded/no-learning receipt if the local
+authority check is unavailable. External provider deletion remains
+asynchronous and receipt-bound; the review-outcome and pin reactivation paths
+remain deferred follow-up scope for broader provider and restore orchestration.
+## Branch-local #753 Gate A frozen baseline contract
+
+**Status:** Partial on the milestone branch; the deterministic baseline contract
+is shipped on this branch and is not Shipped on `develop`.
+
+`backend/src/memory/gate_a_baseline.py` now freezes the content-free
+`guardian-memory-gate-a-v1` corpus and `guardian-memory-metrics-v1` threshold
+contract before any runtime or provider measurement. The 14 cases cover exact
+and semantic recall, freshness, contradiction suppression, provenance,
+deletion/export, restore/rebuild tombstone safety, provider outage continuity,
+malformed advisory input, untrusted observation isolation, and unknown derived
+identities. Cases contain handles and classifications only; they do not embed
+user memory text, credentials, private paths, or provider payloads. The artifact
+records a stable corpus SHA-256 and a canonical/derived record schema so a
+future measurement cannot silently change its input set.
+
+`GET /api/operator/memory-benchmark` and `GET /api/memory/providers` now expose
+the same `gate_a_baseline` receipt. It reports fixture coverage separately from
+runtime measurement: the current receipt has `artifact_status=pass` and
+`measurement_status=blocked` with `runtime_measurement_not_supplied`, so its
+overall status is `degraded`. A complete ratio mapping is accepted only with a
+typed measurement receipt bound to both frozen hashes, a runner identity, and
+an execution receipt; missing or mismatched binding remains `blocked`. Any
+corpus, metric-schema, or hash drift forces both measurement and per-metric
+statuses to `blocked`, even when values were supplied. A bound ratio mapping
+can yield an explicit `pass`, `degraded`, or `blocked` measurement. The receipt
+is metadata-only and carries the claim boundary
+`frozen_deterministic_memory_contract_and_fixture_coverage_not_runtime_quality_or_provider_superiority`.
+
+This slice does not claim semantic quality, latency, cost, live provider
+quality, or later #745 decision usefulness. Runtime measurement, real restore
+and reindex receipts, provider deletion propagation, and the full Gate B pilot
+remain open.
+
+## Branch-local #753 Gate B deterministic provider decision boundary
+
+**Status:** Partial on the milestone branch; not Shipped on `develop`.
+
+The existing operator-readable memory report now includes a frozen
+`guardian-memory-gate-b-provider-v1` decision receipt at
+`gate_b_provider_decision`. It binds the provider decision to the Gate A
+corpus and metric-contract versions and SHA-256 values, reports
+`status=degraded` with `provider_status=blocked`, `decision=deferred`,
+`measurement_status=blocked`, and `pilot_status=not_run`, and makes the
+canonical-memory status visible. The degraded status means the frozen
+canonical contract is covered but unmeasured; it is not a provider-quality or
+live-memory-readback result.
+
+This deterministic boundary intentionally does not read or persist an
+OpenRouter credential, probe the network, send retrieval payloads, invoke a
+model, or fabricate a provider measurement. `credential_state` records that a
+credential was not provided to this boundary and `probe_status=not_run` keeps
+that distinction explicit. The receipt is metadata-only: it contains no
+memory content, provider payload, secret, or private path. The provider lane
+remains advisory and cannot override canonical memory; no learning is allowed
+without a verified outcome and governed writeback.
+
+The #745 goal-conditioned contract already provides the deterministic
+correction path used by this Gate B boundary: an applied, goal-owned strategy
+delta changes the later candidate input digest and can produce verified
+provenance, while missing or unresolved correction evidence stops dispatch
+with `learning=no_learning`. The Gate A canonical-first corpus also covers
+delete/tombstone/rebuild and provider-outage continuity. These are focused
+contract proofs, not a live end-to-end provider or human-outcome result.
+
+The shared `guardian-memory-canonical-decision-v1` record is emitted alongside
+#745 candidate and outcome receipts. Its contract can bind `goal_id`, goal and
+plan revisions, the decision-input digest, strategy-delta ID/provenance, an
+authenticated control-owner attestation, and the current memory/recovery
+state. The current goal-loop seam does not own an authoritative plan revision,
+control-owner handle, or reconciled memory/restart state, so it emits those
+records as blocked with `learning=no_learning` rather than manufacturing
+positive bindings. A governed caller that supplies the complete current state
+may produce the verified later-decision binding. `learning=applied` additionally
+requires a helpful verified outcome and an opaque governed-writeback handle;
+otherwise the record remains `learning=no_learning`. Unresolved evidence
+records `no_learning`, while tombstoned or revoked memory and an unreconciled
+restart are `blocked`. The owner field is a bounded attestation handle; the
+authoritative owner identity remains on the existing `StrategyDelta` record
+and is validated before a caller emits the handle. The pure contract helper
+does not authenticate that handle or perform writeback, so only a trusted
+adapter may supply an authenticated owner proof to a runtime caller.
+Stored/readback receipts cross-check their outer and nested bindings and clear
+learning claims when the outer provenance cannot be revalidated.
+
+Remaining Gate B work requires a trusted OpenRouter adapter with explicit
+credential, capability, consent, egress, serial-admission, and budget proof;
+one bounded advisory pilot with held-out evaluation and rollback; provider
+deletion propagation; and a real verified outcome receipt. Until those
+receipts exist, the claim boundary remains
+`deterministic_no_pilot_admission_decision_not_live_provider_quality_or_memory_superiority`.
+
 ## Memory Upgrade Program Record
 
 The upgraded memory system is now complete through Batches A, B, and C.

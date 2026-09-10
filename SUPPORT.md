@@ -8,7 +8,8 @@ Start with:
 
 - [`README.md`](README.md)
 - [`docs/implementation/STATUS.md`](docs/implementation/STATUS.md)
-- [`docs/implementation/00-master-roadmap.md`](docs/implementation/00-master-roadmap.md)
+- [`docs/implementation/00-project-constitution.md`](docs/implementation/00-project-constitution.md)
+- [Public documentation](https://docs.seraph.quest)
 
 For local development:
 

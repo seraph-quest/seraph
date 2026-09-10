@@ -107,6 +107,7 @@ class Session(SQLModel, table=True):
     __tablename__ = "sessions"
 
     id: str = Field(default_factory=_uuid, primary_key=True)
+    owner_principal_id: Optional[str] = Field(default=None, index=True)
     title: str = Field(default="New Conversation")
     created_at: datetime = Field(default_factory=_now)
     updated_at: datetime = Field(default_factory=_now)
@@ -188,6 +189,14 @@ class ScheduledJobRun(SQLModel, table=True):
 
 class WorkflowRunState(SQLModel, table=True):
     __tablename__ = "workflow_run_states"
+    __table_args__ = (
+        Index(
+            "ux_workflow_run_states_idempotency_binding",
+            "idempotency_binding",
+            unique=True,
+            sqlite_where=text("idempotency_binding IS NOT NULL"),
+        ),
+    )
 
     id: str = Field(default_factory=_uuid, primary_key=True)
     run_identity: str = Field(index=True, unique=True)
@@ -212,6 +221,44 @@ class WorkflowRunState(SQLModel, table=True):
     updated_at: datetime = Field(default_factory=_now, index=True)
     finished_at: Optional[datetime] = Field(default=None, index=True)
     metadata_json: Optional[str] = Field(default=None)
+    # Durable invocation contract (additive to the legacy workflow projection).
+    record_schema_version: int = Field(default=2, index=True)
+    parent_job_id: Optional[str] = Field(default=None, index=True)
+    parent_fencing_token: Optional[int] = Field(default=None, index=True)
+    job_kind: str = Field(default="workflow", index=True)
+    owner_kind: str = Field(default="legacy", index=True)
+    owner_principal_id: Optional[str] = Field(default=None, index=True)
+    service_id: Optional[str] = Field(default=None, index=True)
+    goal_id: Optional[str] = Field(default=None, index=True)
+    goal_revision: Optional[int] = Field(default=None, index=True)
+    plan_revision: Optional[int] = Field(default=None, index=True)
+    candidate_id: Optional[str] = Field(default=None, index=True)
+    capability_version: str = Field(default="workflow-v1", index=True)
+    input_digest: Optional[str] = Field(default=None, index=True)
+    authority_digest: Optional[str] = Field(default=None, index=True)
+    idempotency_scope: Optional[str] = Field(default=None, index=True)
+    idempotency_key: Optional[str] = Field(default=None, index=True)
+    idempotency_binding: Optional[str] = Field(default=None, index=True)
+    priority: int = Field(default=50, index=True)
+    dependencies_json: str = Field(default="[]")
+    resource_claims_json: str = Field(default="[]")
+    declared_authority_json: Optional[str] = Field(default=None)
+    deadline_at: Optional[datetime] = Field(default=None, index=True)
+    lease_owner: Optional[str] = Field(default=None, index=True)
+    lease_expires_at: Optional[datetime] = Field(default=None, index=True)
+    fencing_token: int = Field(default=0, index=True)
+    # Monotonic compare-and-swap revision for typed durable-job writes. This
+    # is separate from ``fencing_token``: receipt writes may advance the row
+    # revision without transferring ownership.
+    revision: int = Field(default=0, index=True)
+    attempt_count: int = Field(default=0, index=True)
+    max_attempts: int = Field(default=1, index=True)
+    failure_reason: Optional[str] = Field(default=None, index=True)
+    checkpoint_receipts_json: str = Field(default="[]")
+    artifact_receipts_json: str = Field(default="[]")
+    effect_receipts_json: str = Field(default="[]")
+    result_digest: Optional[str] = Field(default=None)
+    result_summary: Optional[str] = Field(default=None)
 
 
 class WorkflowStepState(SQLModel, table=True):
@@ -354,6 +401,23 @@ class Memory(SQLModel, table=True):
     last_confirmed_at: Optional[datetime] = Field(default=None)
 
 
+class MemoryTombstone(SQLModel, table=True):
+    """Durable local deletion authority for a canonical memory row.
+
+    This ledger intentionally stores no memory content.  It survives a stale
+    row restore and lets the canonical repository re-apply redaction before a
+    deterministic read or reindex path exposes the row again.
+    """
+
+    __tablename__ = "memory_tombstones"
+
+    id: str = Field(default_factory=_uuid, primary_key=True)
+    memory_id: str = Field(foreign_key="memories.id", index=True, unique=True)
+    actor: str = Field(default="operator", index=True)
+    reason: str = Field(default="operator_delete_export")
+    created_at: datetime = Field(default_factory=_now, index=True)
+
+
 class MemoryEntity(SQLModel, table=True):
     __tablename__ = "memory_entities"
 
@@ -385,6 +449,7 @@ class MemorySnapshot(SQLModel, table=True):
     kind: MemorySnapshotKind = Field(default=MemorySnapshotKind.bounded_guardian_context, index=True, unique=True)
     content: str = Field(default="")
     source_hash: Optional[str] = Field(default=None)
+    canonical_tombstone_revision: Optional[str] = Field(default=None, index=True)
     created_at: datetime = Field(default_factory=_now)
     updated_at: datetime = Field(default_factory=_now)
 
@@ -437,7 +502,45 @@ class Goal(SQLModel, table=True):
     start_date: Optional[datetime] = Field(default=None)
     due_date: Optional[datetime] = Field(default=None)
     sort_order: int = Field(default=0)
+    # Additive v1 goal-conditioned planning fields.  Legacy goals remain
+    # readable and proposal-only until an operator supplies a criterion.
+    revision: int = Field(default=1, index=True)
+    success_criterion_json: Optional[str] = Field(default=None)
+    # Autonomous goal work is opt-in and remains disabled for legacy goals.
+    # The authenticated goals API records the operator grant; the scheduler
+    # must never infer permission from an active status or criterion alone.
+    proactive_enabled: bool = Field(default=False, index=True)
     created_at: datetime = Field(default_factory=_now)
+    updated_at: datetime = Field(default_factory=_now)
+
+
+class StrategyDelta(SQLModel, table=True):
+    """Durable, reversible goal-scoped planning correction."""
+
+    __tablename__ = "strategy_deltas"
+    __table_args__ = (
+        Index(
+            "ux_strategy_deltas_source_event_id",
+            "source_event_id",
+            unique=True,
+        ),
+    )
+
+    delta_id: str = Field(default_factory=_uuid, primary_key=True)
+    goal_id: str = Field(index=True)
+    scope: str = Field(default="goal", index=True)
+    field_name: str = Field(default="web_brief_target", index=True)
+    before_json: str = Field(default="{}")
+    after_json: str = Field(default="{}")
+    source_event_id: str = Field(index=True)
+    author_id: str = Field(default="")
+    evaluator_id: Optional[str] = Field(default=None)
+    goal_revision_before: int = Field(default=1, index=True)
+    goal_revision_after: Optional[int] = Field(default=None, index=True)
+    status: str = Field(default="proposed", index=True)
+    rollback_target_id: Optional[str] = Field(default=None, index=True)
+    reason: str = Field(default="")
+    created_at: datetime = Field(default_factory=_now, index=True)
     updated_at: datetime = Field(default_factory=_now)
 
 
@@ -506,6 +609,88 @@ class GuardianIntervention(SQLModel, table=True):
     feedback_at: Optional[datetime] = Field(default=None, index=True)
 
 
+# ─── Native notification outbox ────────────────────────
+
+class NativeNotificationOutbox(SQLModel, table=True):
+    """Durable, bounded state for the built-in native notification path.
+
+    This row is a delivery intent and receipt, not proof that an external
+    desktop notification was displayed. ``unknown`` is retained whenever a
+    daemon handoff is ambiguous because it may have displayed the notification
+    before Seraph received a receipt.
+    """
+
+    __tablename__ = "native_notification_outbox"
+    __table_args__ = (
+        Index(
+            "ix_native_notification_outbox_pending_order",
+            "status",
+            "created_at",
+            "urgency",
+        ),
+        Index(
+            "ix_native_notification_outbox_lease",
+            "status",
+            "lease_expires_at",
+        ),
+    )
+
+    id: str = Field(default_factory=_uuid, primary_key=True)
+    idempotency_key: str = Field(unique=True, index=True)
+    payload_digest: str = Field(index=True)
+    intervention_id: Optional[str] = Field(default=None, index=True)
+    owner_principal_id: Optional[str] = Field(default=None, index=True)
+    title: str
+    body: str
+    intervention_type: Optional[str] = Field(default=None, index=True)
+    urgency: Optional[int] = Field(default=None, index=True)
+    surface: str = Field(default="notification", index=True)
+    session_id: Optional[str] = Field(default=None, index=True)
+    thread_id: Optional[str] = Field(default=None, index=True)
+    thread_source: str = Field(default="ambient", index=True)
+    continuation_mode: str = Field(default="open_thread", index=True)
+    resume_message: Optional[str] = Field(default=None)
+    status: str = Field(default="queued", index=True)
+    attempt_count: int = Field(default=0, index=True)
+    max_attempts: int = Field(default=3, index=True)
+    deadline_at: datetime = Field(index=True)
+    lease_owner: Optional[str] = Field(default=None, index=True)
+    lease_expires_at: Optional[datetime] = Field(default=None, index=True)
+    fencing_token: int = Field(default=0, index=True)
+    last_error: Optional[str] = Field(default=None, index=True)
+    created_at: datetime = Field(default_factory=_now, index=True)
+    updated_at: datetime = Field(default_factory=_now, index=True)
+    delivered_at: Optional[datetime] = Field(default=None, index=True)
+    cancelled_at: Optional[datetime] = Field(default=None, index=True)
+
+
+class NativeNotificationDeliveryAttempt(SQLModel, table=True):
+    """One claimed native notification attempt with a fenced receipt."""
+
+    __tablename__ = "native_notification_delivery_attempts"
+    __table_args__ = (
+        Index(
+            "ux_native_notification_delivery_attempt_order",
+            "notification_id",
+            "attempt_index",
+            unique=True,
+        ),
+    )
+
+    id: str = Field(default_factory=_uuid, primary_key=True)
+    notification_id: str = Field(
+        foreign_key="native_notification_outbox.id",
+        index=True,
+    )
+    attempt_index: int = Field(index=True)
+    lease_owner: str = Field(index=True)
+    fencing_token: int = Field(index=True)
+    status: str = Field(default="claimed", index=True)
+    error_code: Optional[str] = Field(default=None, index=True)
+    started_at: datetime = Field(default_factory=_now, index=True)
+    finished_at: Optional[datetime] = Field(default=None, index=True)
+
+
 # ─── ScreenObservation ─────────────────────────────────
 
 class ScreenObservation(SQLModel, table=True):
@@ -554,6 +739,114 @@ class AuditEvent(SQLModel, table=True):
     created_at: datetime = Field(default_factory=_now, index=True)
 
 
+# ─── Model Fabric Proofs And Receipts ─────────────────────────
+
+class ModelCapabilityProofRecord(SQLModel, table=True):
+    """Sanitized empirical proof for one exact model capability binding."""
+
+    __tablename__ = "model_capability_proofs"
+    __table_args__ = (
+        Index("ix_model_capability_proofs_binding", "profile_id", "model", "adapter", "capability"),
+    )
+
+    id: str = Field(default_factory=_uuid, primary_key=True)
+    proof_hash: str = Field(unique=True, index=True)
+    profile_schema_version: str = Field(index=True)
+    profile_contract_hash: str = Field(index=True)
+    profile_id: str = Field(index=True)
+    model: str = Field(index=True)
+    endpoint: str
+    endpoint_digest: str = Field(index=True)
+    endpoint_class: str = Field(index=True)
+    adapter: str = Field(index=True)
+    capability: str = Field(index=True)
+    canary_version: str
+    outcome: str = Field(index=True)
+    checked_at: float = Field(index=True)
+    expires_at: float = Field(index=True)
+    proven_value_json: Optional[str] = Field(default=None)
+    receipt_id: str = Field(index=True)
+    receipt_hash: str = Field(index=True)
+    created_at: datetime = Field(default_factory=_now, index=True)
+
+
+class ModelRouteReceiptRecord(SQLModel, table=True):
+    """Sanitized final inference-route receipt."""
+
+    __tablename__ = "model_route_receipts"
+    __table_args__ = (
+        Index("ix_model_route_receipts_workload_success", "workload", "outcome", "finished_at"),
+    )
+
+    id: str = Field(default_factory=_uuid, primary_key=True)
+    receipt_id: str = Field(unique=True, index=True)
+    receipt_hash: str = Field(unique=True, index=True)
+    request_id: str = Field(index=True)
+    route_decision_id: str = Field(index=True)
+    runtime_path: str = Field(index=True)
+    workload: str = Field(index=True)
+    outcome: str = Field(index=True)
+    actual_profile_id: Optional[str] = Field(default=None, index=True)
+    actual_model: Optional[str] = Field(default=None)
+    actual_adapter: Optional[str] = Field(default=None)
+    destination_class: Optional[str] = Field(default=None)
+    egress_class: str = Field(index=True)
+    trust_decision_id: Optional[str] = Field(default=None)
+    fallback_used: bool = Field(default=False)
+    fallback_reason_code: Optional[str] = Field(default=None)
+    degradation_codes_json: str = Field(default="[]")
+    cost_kind: str = Field(default="unknown")
+    cost_amount: Optional[float] = Field(default=None)
+    cost_currency: Optional[str] = Field(default=None)
+    cost_source: Optional[str] = Field(default=None)
+    cost_source_updated_at: Optional[datetime] = Field(default=None)
+    usage_input_tokens: Optional[int] = Field(default=None)
+    usage_output_tokens: Optional[int] = Field(default=None)
+    usage_total_tokens: Optional[int] = Field(default=None)
+    started_at: datetime = Field(index=True)
+    finished_at: datetime = Field(index=True)
+    latency_ms: int
+    created_at: datetime = Field(default_factory=_now, index=True)
+
+
+class ModelRouteAttemptReceiptRecord(SQLModel, table=True):
+    """Sanitized receipt for one model transport attempt."""
+
+    __tablename__ = "model_route_attempt_receipts"
+    __table_args__ = (
+        Index("ux_model_route_attempt_receipts_order", "route_receipt_id", "attempt_index", unique=True),
+    )
+
+    id: str = Field(default_factory=_uuid, primary_key=True)
+    route_receipt_id: str = Field(foreign_key="model_route_receipts.receipt_id", index=True)
+    attempt_id: str = Field(unique=True, index=True)
+    attempt_index: int
+    profile_id: str = Field(index=True)
+    model: str
+    endpoint: str
+    endpoint_digest: str = Field(index=True)
+    adapter: str
+    destination_class: str
+    egress_class: str
+    trust_decision_id: str
+    capability_proof_hashes_json: str = Field(default="[]")
+    outcome: str = Field(index=True)
+    error_code: Optional[str] = Field(default=None)
+    degradation_code: Optional[str] = Field(default=None)
+    usage_input_tokens: Optional[int] = Field(default=None)
+    usage_output_tokens: Optional[int] = Field(default=None)
+    usage_total_tokens: Optional[int] = Field(default=None)
+    cost_kind: str = Field(default="unknown")
+    cost_amount: Optional[float] = Field(default=None)
+    cost_currency: Optional[str] = Field(default=None)
+    cost_source: Optional[str] = Field(default=None)
+    cost_source_updated_at: Optional[datetime] = Field(default=None)
+    started_at: datetime
+    finished_at: datetime
+    latency_ms: int
+    created_at: datetime = Field(default_factory=_now, index=True)
+
+
 # ─── ApprovalRequest ────────────────────────────────────
 
 class ApprovalRequest(SQLModel, table=True):
@@ -569,3 +862,18 @@ class ApprovalRequest(SQLModel, table=True):
     details_json: Optional[str] = Field(default=None)
     created_at: datetime = Field(default_factory=_now, index=True)
     resolved_at: Optional[datetime] = Field(default=None)
+
+
+class OperatorSession(SQLModel, table=True):
+    """Revocable single-operator browser session; raw bearer tokens never persist."""
+
+    __tablename__ = "operator_sessions"
+
+    id: str = Field(default_factory=_uuid, primary_key=True)
+    token_hash: str = Field(unique=True, index=True)
+    created_at: datetime = Field(default_factory=_now, index=True)
+    last_seen_at: datetime = Field(default_factory=_now, index=True)
+    idle_expires_at: datetime = Field(index=True)
+    absolute_expires_at: datetime = Field(index=True)
+    revoked_at: Optional[datetime] = Field(default=None, index=True)
+    replaced_by_id: Optional[str] = Field(default=None, index=True)

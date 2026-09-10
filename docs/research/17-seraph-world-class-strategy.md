@@ -4,11 +4,20 @@ title: 17. Seraph World-Class Strategy
 
 # 17. Seraph World-Class Strategy
 
+**State:** Research
+
+This document preserves a prior strategy proposal and comparative evidence. It
+does not define Seraph's accepted product target, milestone order, or execution
+instructions. The [Project Constitution](/) and ADRs are the sole product and
+accepted-target authority; Epic #736 and the GitHub Project own current work.
+
 ## Purpose
 
-This is the canonical strategy document for Seraph becoming the strongest capability-first guardian agent OS/workspace for a power-user operator.
+This research examined a capability-first guardian workspace for a power-user operator.
 
-It does not define a calendar roadmap. Seraph strategy is milestone-based only and must never be converted into time-bounded quarters, months, or dated promises. This document defines the priority stack, milestone order, moat logic, proof requirements, and product boundary rules that should govern every future decision.
+The priority stack, milestone order, moat logic, and proof requirements below
+are historical proposals. They provide evidence and vocabulary only; they do
+not govern current decisions.
 
 Use this document with:
 
@@ -24,7 +33,7 @@ Use this document with:
 - [19. Strategy Claim Ledger](./19-strategy-claim-ledger.md)
 - [19. Strategy Claim Ledger](./19-strategy-claim-ledger.md)
 
-## Locked Product Shape
+## Historical Product-Shape Proposal
 
 Seraph is a **capability-first guardian agent OS/workspace**.
 
@@ -249,7 +258,7 @@ If any answer is vague, the item is not ready.
 
 This is the strategy order. It is intentionally not time-bounded.
 
-- `M0. Competition truth and execution governance`: GitHub Project owns live execution state; docs own strategy, milestone definitions, acceptance rules, and primary-source competitive truth.
+- `M0. Competition truth and execution governance`: historical proposal; current product decisions belong to the constitution/ADRs and execution state belongs to GitHub.
 - `M1. Capability kernel and manifest contract`: one coherent map and contract for core tools, workflows, skills, MCP, connectors, automations, browser/computer-use surfaces, memory providers, runbooks, and extension-owned contributions.
 - `M2. Execution supremacy`: terminal, process, browser/computer use, files, patching, artifacts, sandboxes, background sessions, and repair flows are excellent enough to compete with serious task agents.
 - `M3. Trusted execution boundaries`: tool, workflow, browser, connector, secret, filesystem, process, delegation, and provider paths have explicit least-privilege boundaries and proof.
@@ -264,8 +273,8 @@ This is the strategy order. It is intentionally not time-bounded.
 
 Strategy and execution state must not drift.
 
-- Research docs define product strategy, milestone order, competitive frame, and acceptance standards.
-- Implementation docs translate strategy into delivery rules and shipped/missing status.
+- Research docs supply evidence, alternatives, and dated competitive context.
+- The constitution and ADRs solely define accepted product strategy; implementation docs record shipped/partial behavior and durable contracts.
 - The GitHub Project owns active execution: issues, priority, assignment, dependency state, PR links, review state, and completion.
 - PRs own the integration truth until merged.
 - Completed work should update implementation docs only when it changes the strategic delivery picture.

@@ -29,6 +29,7 @@ from sqlalchemy.pool import StaticPool
 from smolagents import ActionStep, FinalAnswerStep, Tool, ToolCall
 from smolagents.monitoring import Timing
 from sqlmodel import SQLModel
+from starlette.requests import Request
 from starlette.testclient import TestClient
 
 from config.settings import settings
@@ -795,7 +796,10 @@ from src.workflows.post_dx_live_durable_orchestration import (
 )
 from src.evolution.engine import evolution_benchmark_gate_policy
 from src.approval.exceptions import ApprovalRequired
-from src.approval.runtime import reset_runtime_context, set_runtime_context
+from src.approval.runtime import get_current_trust_principal, reset_runtime_context, set_runtime_context
+from src.auth.service import test_bypass_operator
+from src.security.trust_contract import AuthorityGrant, EgressClass, PrincipalType, TrustPrincipal
+from src.model_fabric.configuration import WorkloadPolicy
 from src.agent.session import SessionManager, session_manager
 from src.agent.context_window import _summarize_middle, _summary_cache
 from src.agent.factory import create_agent, create_orchestrator, get_model
@@ -804,9 +808,12 @@ from src.agent.specialists import build_all_specialists, create_mcp_specialist, 
 from src.agent.strategist import create_strategist_agent
 from src.guardian.state import build_guardian_state
 from src.guardian.feedback import GuardianLearningSignal
+from src.model_fabric.contracts import NoCompliantModelRouteError
 from src.api.mcp import test_server as test_mcp_server
 from src.api.observer import (
     InterventionFeedbackRequest,
+    NotificationAckRequest,
+    NotificationDisplayAttemptRequest,
     ScreenContextRequest,
     ScreenObservationData,
     ack_native_notification,
@@ -815,6 +822,7 @@ from src.api.observer import (
     dismiss_native_notification,
     enqueue_test_native_notification,
     get_next_native_notification,
+    mark_native_notification_display_attempted,
     get_observer_continuity,
     list_native_notifications,
     post_intervention_feedback,
@@ -825,8 +833,14 @@ from src.audit.repository import audit_repository
 from src.audit.runtime import reset_integration_timeout_rate_limit_state
 from src.app import create_app
 from src.db.models import MemoryKind
-from src.llm_runtime import FallbackLiteLLMModel, _reset_target_health, completion_with_fallback_sync
-from src.memory.embedder import _reset_embedder_state, embed
+from src.llm_runtime import (
+    FallbackLiteLLMModel,
+    _reset_target_health,
+    build_completion_kwargs,
+    completion_with_fallback_sync,
+)
+from src.memory import embedder as embedder_module
+from src.memory.embedder import EmbeddingMetadata, EmbeddingUnavailableError, _reset_embedder_state, embed
 from src.memory.repository import memory_repository
 from src.memory.superiority_benchmark import (
     M6_MEMORY_SUPERIORITY_BENCHMARK_SCENARIO_NAMES,
@@ -960,6 +974,7 @@ from src.observer.screen_repository import ScreenObservationRepository
 from src.observer.sources.time_source import gather_time
 from src.memory.consolidator import consolidate_session
 from src.memory import soul as soul_mod
+from src.memory.hybrid_retrieval import HybridMemoryRetrievalResult
 from src.memory.vector_store import _reset_vector_store_state, add_memory, search
 from src.observer.context import CurrentContext
 from src.observer.manager import ContextManager
@@ -975,6 +990,7 @@ from src.scheduler.jobs.evening_review import run_evening_review
 from src.scheduler.jobs.strategist_tick import run_strategist_tick
 from src.scheduler.jobs.weekly_activity_review import run_weekly_activity_review
 from src.scheduler.connection_manager import BroadcastResult
+from src.scheduler.engine import _async_job_wrapper
 from src.tools.audit import wrap_tools_for_audit
 from src.tools.browser_tool import browse_webpage
 from src.tools.delegate_task_tool import delegate_task
@@ -1004,8 +1020,313 @@ Runner = Callable[[], dict[str, Any] | Awaitable[dict[str, Any]]]
 _TIMING = Timing(start_time=0.0, end_time=1.0)
 
 
+def _authenticated_daemon_request(worker_id: str) -> Request:
+    """Build the authenticated daemon request context used by direct evals."""
+    return Request(
+        {
+            "type": "http",
+            "method": "GET",
+            "path": "/api/observer/notifications/next",
+            "headers": [(b"x-seraph-daemon-id", worker_id.encode("utf-8"))],
+            "state": {"operator": object()},
+        }
+    )
+
+
 async def _browse_webpage_async(url: str, *, action: str = "extract") -> str:
     return await asyncio.to_thread(browse_webpage, url, action=action)
+
+
+async def _run_scheduler_eval_job(job_id: str, job: Callable[[], Awaitable[Any]]) -> Any:
+    """Run a scheduler-backed eval through the production service authority seam."""
+    wrapper = _async_job_wrapper(
+        job,
+        asyncio.get_running_loop(),
+        job_id=f"eval:{job_id}",
+        allow_model_inference=True,
+    )
+    return await wrapper()
+
+
+@asynccontextmanager
+async def _eval_model_authority(job_id: str, *, session_id: str = ""):
+    """Bind a scoped service identity for a direct model-using eval helper."""
+    normalized_job_id = str(job_id or "").strip()
+    if not normalized_job_id:
+        raise ValueError("model eval authority requires a job identity")
+    normalized_session_id = str(session_id or "").strip()
+    principal = TrustPrincipal(
+        principal_id=f"service:eval:{normalized_job_id}",
+        principal_type=PrincipalType.SERVICE,
+        grants=(AuthorityGrant.MODEL_INFERENCE,),
+        session_id=normalized_session_id,
+        job_id=f"eval:{normalized_job_id}",
+    )
+    tokens = set_runtime_context(
+        normalized_session_id or None,
+        "high_risk",
+        trust_principal=principal,
+    )
+    try:
+        yield principal
+    finally:
+        reset_runtime_context(tokens)
+
+
+async def _run_model_eval_job(
+    job_id: str,
+    job: Callable[[], Awaitable[Any]],
+    *,
+    session_id: str = "",
+) -> Any:
+    """Run one direct async model eval with explicit bounded service authority."""
+    async with _eval_model_authority(job_id, session_id=session_id):
+        return await job()
+
+
+async def _run_governed_completion_fixture(
+    job_id: str,
+    *,
+    runtime_path: str,
+    response: Any,
+    settings_overrides: dict[str, Any] | None = None,
+    session_id: str = "eval-runtime-routing",
+    expect_no_compliant_route: bool = False,
+) -> dict[str, Any]:
+    """Exercise one canonical completion with a deterministic OpenRouter transport.
+
+    The fixture keeps the production authority and context construction paths in
+    place, while replacing the provider preflight and network transport with a
+    small local proof.  Any target other than the canonical OpenRouter primary
+    is denied by the fixture, so stale local/provider fallback settings cannot
+    become passing eval behavior.
+    """
+    policy = WorkloadPolicy(
+        runtime_path=runtime_path,
+        egress_class=EgressClass.CLOUD_ALLOWED_FULL,
+        cloud_egress_acknowledged=True,
+        allowed_provider_kinds=("openrouter",),
+        fallback_allowed=False,
+        max_cost_microusd=500,
+    )
+    observed: dict[str, Any] = {
+        "preflight_targets": [],
+        "transport_bodies": [],
+        "route_events": [],
+    }
+    principal_holder: dict[str, Any] = {}
+
+    class _ReceiptFixture:
+        workload = "background"
+
+        def __init__(self) -> None:
+            self.runtime_path = runtime_path
+            self.attempts: list[dict[str, Any]] = []
+            self.finalize_args: dict[str, Any] | None = None
+
+        def attempt_started(self, decision: Any, *, capability_proof_hashes: tuple[str, ...]) -> None:
+            self.attempts.append(
+                {
+                    "phase": "started",
+                    "allowed": bool(getattr(decision, "allowed", False)),
+                    "proof_hash_count": len(capability_proof_hashes),
+                }
+            )
+
+        def attempt_finished(
+            self,
+            *,
+            outcome: str,
+            error_code: str | None,
+            decision: Any,
+            usage: Any = None,
+            degradation_code: str | None = None,
+        ) -> None:
+            self.attempts.append(
+                {
+                    "phase": "finished",
+                    "outcome": outcome,
+                    "error_code": error_code,
+                    "allowed": bool(getattr(decision, "allowed", False)),
+                    "degradation_code": degradation_code,
+                }
+            )
+
+        async def finalize(
+            self,
+            *,
+            outcome: str,
+            fallback_reason_code: str | None = None,
+            degradation_codes: tuple[str, ...] = (),
+        ) -> None:
+            self.finalize_args = {
+                "outcome": outcome,
+                "fallback_reason_code": fallback_reason_code,
+                "degradation_codes": degradation_codes,
+            }
+
+    receipt = _ReceiptFixture()
+    # The production receipt/admission seams consume the route identity even
+    # when the eval replaces the model-fabric decision with a deterministic
+    # double.  Keep the double shaped like a real RouteDecision so a denied
+    # stale fallback cannot mask the scenario result with an AttributeError.
+    allowed_decision = types.SimpleNamespace(
+        allowed=True,
+        selected=types.SimpleNamespace(),
+        attempt_id=f"fixture-attempt:{job_id}",
+        trust_decision_id=f"fixture-trust:{job_id}",
+        route_decision_id=f"fixture-route:{job_id}",
+        rejections=(),
+    )
+    denied_decision = types.SimpleNamespace(
+        allowed=False,
+        selected=None,
+        attempt_id=f"fixture-attempt:{job_id}:denied",
+        trust_decision_id=f"fixture-trust:{job_id}:denied",
+        route_decision_id=f"fixture-route:{job_id}:denied",
+        rejections=(types.SimpleNamespace(reason_code="fallback_forbidden"),),
+    )
+
+    def _preflight(target: dict[str, Any], context: Any) -> tuple[Any, tuple[str, ...]]:
+        observed["preflight_targets"].append(
+            {
+                "model_id": str(target.get("model_id") or ""),
+                "profile": str(target.get("profile") or ""),
+                "api_base": str(target.get("api_base") or ""),
+                "source": str(target.get("source") or ""),
+            }
+        )
+        if target.get("source") != "primary":
+            return denied_decision, ()
+        if target.get("profile") != "openrouter" or "openrouter.ai" not in str(target.get("api_base") or ""):
+            raise AssertionError("canonical eval fixture received a non-OpenRouter primary target")
+        if tuple(getattr(context, "allowed_provider_kinds", ())) != ("openrouter",):
+            raise AssertionError("canonical eval fixture requires the OpenRouter provider policy")
+        if bool(getattr(context, "fallback_allowed", True)):
+            raise AssertionError("canonical eval fixture must forbid provider fallback")
+        if not bool(getattr(getattr(context, "principal", None), "authenticated", False)):
+            raise AssertionError("canonical eval fixture requires an authenticated principal")
+        observed["context"] = context
+        return allowed_decision, ("fixture-proof",)
+
+    def _transport(**kwargs: Any) -> tuple[Any, dict[str, Any]]:
+        observed["transport_bodies"].append(dict(kwargs["body"]))
+        observed["transport_api_key_present"] = bool(kwargs.get("api_key"))
+        observed["transport_context"] = kwargs["context"]
+        return response, {"usage": {"prompt_tokens": 1, "completion_tokens": 1}}
+
+    def _route_event(**kwargs: Any) -> None:
+        observed["route_events"].append(kwargs)
+
+    effective_settings = {
+        "default_model": "openrouter/anthropic/claude-sonnet-4",
+        "llm_api_key": "primary-key",
+        "openrouter_api_key": "primary-key",
+        "llm_api_base": "https://openrouter.ai/api/v1",
+        "openrouter_provider_only": True,
+        "openrouter_allowed_upstreams": "openai",
+        "openrouter_allow_fallbacks": False,
+        "openrouter_require_parameters": True,
+        "openrouter_data_collection": "deny",
+        "openrouter_zero_data_retention": True,
+        "fallback_model": "",
+        "fallback_models": "",
+        "fallback_llm_api_key": "",
+        "fallback_llm_api_base": "",
+        "local_model": "ollama/llama3.2",
+        "local_llm_api_key": "",
+        "local_llm_api_base": "http://localhost:11434/v1",
+        "local_runtime_paths": "",
+        "runtime_model_overrides": "",
+        "runtime_fallback_overrides": "",
+        "runtime_profile_preferences": "",
+        "runtime_policy_intents": "",
+        "runtime_policy_requirements": "",
+        "runtime_policy_scores": "",
+    }
+    effective_settings.update(settings_overrides or {})
+
+    with ExitStack() as stack:
+        for name, value in effective_settings.items():
+            stack.enter_context(patch.object(settings, name, value))
+        stack.enter_context(
+            patch("src.model_fabric.caller_context.effective_workload_policy", return_value=policy)
+        )
+        stack.enter_context(patch("src.llm_runtime._governed_preflight_target", side_effect=_preflight))
+        stack.enter_context(patch("src.llm_runtime._governed_openai_chat_completion", side_effect=_transport))
+        stack.enter_context(patch("src.llm_runtime._new_route_receipt_session", return_value=receipt))
+        stack.enter_context(patch("src.llm_runtime._log_llm_runtime_event_sync", side_effect=_route_event))
+        def _run_completion() -> Any:
+            from src.approval.runtime import get_current_trust_principal
+
+            principal_holder["principal"] = get_current_trust_principal()
+            return completion_with_fallback_sync(
+                messages=[{"role": "user", "content": f"deterministic eval for {runtime_path}"}],
+                temperature=0.2,
+                max_tokens=128,
+                runtime_path=runtime_path,
+            )
+
+        try:
+            await _run_model_eval_job(
+                job_id,
+                lambda: asyncio.to_thread(_run_completion),
+                session_id=session_id,
+            )
+        except NoCompliantModelRouteError:
+            if not expect_no_compliant_route:
+                raise
+
+    principal = principal_holder["principal"]
+    if "context" not in observed:
+        if not expect_no_compliant_route:
+            raise AssertionError("governed eval fixture completed without an inference context")
+        return {
+            "attempted_models": [],
+            "attempted_api_bases": [],
+            "preflight_targets": observed["preflight_targets"],
+            "transport_call_count": len(observed["transport_bodies"]),
+            "transport_api_key_present": observed.get("transport_api_key_present", False),
+            "principal_id": principal.principal_id,
+            "principal_authenticated": principal.authenticated,
+            "principal_grants": [str(grant.value if hasattr(grant, "value") else grant) for grant in principal.grants],
+            "session_id": session_id,
+            "job_id": f"eval:{job_id}",
+            "allowed_provider_kinds": ["openrouter"],
+            "fallback_allowed": False,
+            "egress_class": EgressClass.CLOUD_ALLOWED_FULL.value,
+            "receipt_attempt_count": len(receipt.attempts),
+            "receipt_finalized": receipt.finalize_args is not None,
+            "receipt_outcome": receipt.finalize_args["outcome"] if receipt.finalize_args else None,
+            "route_event_count": len(observed["route_events"]),
+            "route_events": observed["route_events"],
+            "response_excerpt": None,
+            "no_compliant_route": True,
+        }
+
+    context = observed["context"]
+    principal = context.principal
+    return {
+        "attempted_models": [body.get("model") for body in observed["transport_bodies"]],
+        "attempted_api_bases": [target["api_base"] for target in observed["preflight_targets"]],
+        "preflight_targets": observed["preflight_targets"],
+        "transport_call_count": len(observed["transport_bodies"]),
+        "transport_api_key_present": observed.get("transport_api_key_present", False),
+        "principal_id": principal.principal_id,
+        "principal_authenticated": principal.authenticated,
+        "principal_grants": [str(grant.value if hasattr(grant, "value") else grant) for grant in principal.grants],
+        "session_id": context.session_id,
+        "job_id": context.job_id,
+        "allowed_provider_kinds": list(context.allowed_provider_kinds),
+        "fallback_allowed": context.fallback_allowed,
+        "egress_class": str(context.egress_class.value if hasattr(context.egress_class, "value") else context.egress_class),
+        "receipt_attempt_count": len(receipt.attempts),
+        "receipt_finalized": receipt.finalize_args is not None,
+        "receipt_outcome": receipt.finalize_args["outcome"] if receipt.finalize_args else None,
+        "route_event_count": len(observed["route_events"]),
+        "route_events": observed["route_events"],
+        "response_excerpt": response.choices[0].message.content,
+    }
 
 
 EVAL_SYNC_CLIENT_DB_PATCH_TARGETS: tuple[str, ...] = (
@@ -1109,6 +1430,27 @@ def _make_context(**overrides: Any) -> CurrentContext:
     )
     defaults.update(overrides)
     return CurrentContext(**defaults)
+
+
+def _make_hybrid_memory_fixture(
+    texts: tuple[str, ...] = (),
+    *,
+    degraded: bool = False,
+    reason: str | None = None,
+) -> HybridMemoryRetrievalResult:
+    """Build a typed result at the canonical daily-briefing retrieval seam."""
+    diagnostics = (
+        ({"reason": reason, "status": "degraded_no_learning"},)
+        if reason
+        else ()
+    )
+    return HybridMemoryRetrievalResult(
+        context="\n".join(f"- [memory] {text}" for text in texts),
+        buckets={"memory": texts} if texts else {},
+        degraded=degraded,
+        hits=(),
+        diagnostics=diagnostics,
+    )
 
 
 def _tool_names(agent: Any) -> list[str]:
@@ -2094,103 +2436,69 @@ def _eval_workflow_composition_behavior() -> dict[str, Any]:
 
 
 def _eval_provider_fallback_chain() -> dict[str, Any]:
-    completion_response = _make_litellm_response("Resolved after ordered fallback chain.")
+    """Retain the historical scenario name while proving fallback is blocked."""
+    with (
+        patch.object(settings, "default_model", "openrouter/anthropic/claude-sonnet-4"),
+        patch.object(settings, "fallback_model", ""),
+        patch.object(settings, "fallback_models", "openai/gpt-4o-mini,openai/gpt-4.1-mini"),
+        patch.object(settings, "llm_api_key", "primary-key"),
+        patch.object(settings, "llm_api_base", "https://openrouter.ai/api/v1"),
+        patch("litellm.completion") as mock_completion,
+    ):
+        try:
+            completion_with_fallback_sync(
+                messages=[{"role": "user", "content": "route around provider issues"}],
+                temperature=0.2,
+                max_tokens=128,
+            )
+        except PermissionError as exc:
+            blocked_reason = str(exc)
+        else:
+            raise AssertionError("unregistered fallback chain was not blocked")
 
-    with patch.object(settings, "default_model", "openrouter/anthropic/claude-sonnet-4"), \
-         patch.object(settings, "fallback_model", ""), \
-         patch.object(
-             settings,
-             "fallback_models",
-             "openai/gpt-4o-mini,openai/gpt-4.1-mini",
-         ), \
-         patch.object(settings, "llm_api_key", "primary-key"), \
-         patch.object(settings, "llm_api_base", "https://openrouter.ai/api/v1"), \
-         patch(
-             "litellm.completion",
-             side_effect=[
-                 RuntimeError("primary down"),
-                 RuntimeError("first fallback down"),
-                 completion_response,
-             ],
-         ) as mock_completion:
-        response = completion_with_fallback_sync(
-            messages=[{"role": "user", "content": "route around provider issues"}],
-            temperature=0.2,
-            max_tokens=128,
-        )
-
-    attempted_models = [call.kwargs["model"] for call in mock_completion.call_args_list]
-    assert attempted_models == [
-        "openrouter/anthropic/claude-sonnet-4",
-        "openai/gpt-4o-mini",
-        "openai/gpt-4.1-mini",
-    ]
+    attempted_models: list[str] = [call.kwargs["model"] for call in mock_completion.call_args_list]
+    assert attempted_models == []
     return {
         "attempted_models": attempted_models,
-        "final_model": attempted_models[-1],
-        "response_excerpt": response.choices[0].message.content,
+        "final_model": None,
+        "blocked_reason": blocked_reason,
+        "response_excerpt": None,
     }
 
 
 def _eval_provider_health_reroute() -> dict[str, Any]:
-    first_fallback_response = _make_litellm_response("Recovered through the fallback chain.")
-    rerouted_response = _make_litellm_response("Rerouted straight to the healthy fallback.")
-
-    _reset_target_health()
-    try:
-        with ExitStack() as stack:
-            stack.enter_context(
-                patch.object(settings, "default_model", "openrouter/anthropic/claude-sonnet-4")
-            )
-            stack.enter_context(patch.object(settings, "fallback_model", ""))
-            stack.enter_context(patch.object(settings, "fallback_models", "openai/gpt-4o-mini"))
-            stack.enter_context(patch.object(settings, "llm_api_key", "primary-key"))
-            stack.enter_context(
-                patch.object(settings, "llm_api_base", "https://openrouter.ai/api/v1")
-            )
-            stack.enter_context(
-                patch.object(settings, "llm_target_cooldown_seconds", 300)
-            )
-            mock_completion = stack.enter_context(
-                patch(
-                    "litellm.completion",
-                    side_effect=[
-                        RuntimeError("primary down"),
-                        first_fallback_response,
-                        rerouted_response,
-                    ],
-                )
-            )
+    """Health-based vendor rerouting is retired with the active provider boundary."""
+    with (
+        patch.object(settings, "default_model", "openrouter/anthropic/claude-sonnet-4"),
+        patch.object(settings, "fallback_model", ""),
+        patch.object(settings, "fallback_models", "openai/gpt-4o-mini"),
+        patch.object(settings, "llm_api_key", "primary-key"),
+        patch.object(settings, "llm_api_base", "https://openrouter.ai/api/v1"),
+        patch("litellm.completion") as mock_completion,
+    ):
+        try:
             completion_with_fallback_sync(
                 messages=[{"role": "user", "content": "recover once"}],
                 temperature=0.2,
                 max_tokens=128,
             )
-            response = completion_with_fallback_sync(
-                messages=[{"role": "user", "content": "recover again"}],
-                temperature=0.2,
-                max_tokens=128,
-            )
-    finally:
-        _reset_target_health()
+        except PermissionError as exc:
+            blocked_reason = str(exc)
+        else:
+            raise AssertionError("unregistered health reroute was not blocked")
 
-    attempted_models = [call.kwargs["model"] for call in mock_completion.call_args_list]
-    assert attempted_models == [
-        "openrouter/anthropic/claude-sonnet-4",
-        "openai/gpt-4o-mini",
-        "openai/gpt-4o-mini",
-    ]
+    attempted_models: list[str] = [call.kwargs["model"] for call in mock_completion.call_args_list]
+    assert attempted_models == []
     return {
-        "cooldown_seconds": 300,
-        "rerouted_model": attempted_models[-1],
+        "cooldown_seconds": None,
+        "rerouted_model": None,
         "attempted_models": attempted_models,
-        "response_excerpt": response.choices[0].message.content,
+        "blocked_reason": blocked_reason,
+        "response_excerpt": None,
     }
 
 
 def _eval_local_runtime_profile() -> dict[str, Any]:
-    completion_response = _make_litellm_response("Handled by a local helper profile.")
-
     with (
         patch.object(settings, "default_model", "openrouter/anthropic/claude-sonnet-4"),
         patch.object(settings, "llm_api_key", "primary-key"),
@@ -2205,29 +2513,25 @@ def _eval_local_runtime_profile() -> dict[str, Any]:
         ),
         patch.object(settings, "fallback_model", ""),
         patch.object(settings, "fallback_models", ""),
-        patch("litellm.completion", return_value=completion_response) as mock_completion,
     ):
-        response = completion_with_fallback_sync(
+        completion_kwargs = build_completion_kwargs(
             messages=[{"role": "user", "content": "keep helper work local"}],
             temperature=0.2,
             max_tokens=128,
             runtime_path="session_consolidation",
         )
 
-    assert mock_completion.call_count == 1
-    assert mock_completion.call_args.kwargs["model"] == "ollama/llama3.2"
-    assert mock_completion.call_args.kwargs["api_base"] == "http://localhost:11434/v1"
+    assert completion_kwargs["model"] == "openrouter/anthropic/claude-sonnet-4"
+    assert completion_kwargs["api_base"] == "https://openrouter.ai/api/v1"
     return {
         "runtime_path": "session_consolidation",
-        "runtime_profile": "local",
-        "routed_model": mock_completion.call_args.kwargs["model"],
-        "response_excerpt": response.choices[0].message.content,
+        "runtime_profile": "openrouter",
+        "routed_model": completion_kwargs["model"],
+        "response_excerpt": "route configuration verified without transport",
     }
 
 
 def _eval_helper_local_runtime_paths() -> dict[str, Any]:
-    completion_response = _make_litellm_response("Handled by a local helper profile.")
-
     with (
         patch.object(settings, "default_model", "openrouter/anthropic/claude-sonnet-4"),
         patch.object(settings, "llm_api_key", "primary-key"),
@@ -2242,7 +2546,6 @@ def _eval_helper_local_runtime_paths() -> dict[str, Any]:
         ),
         patch.object(settings, "fallback_model", ""),
         patch.object(settings, "fallback_models", ""),
-        patch("litellm.completion", return_value=completion_response) as mock_completion,
     ):
         routed_models: dict[str, str] = {}
         for runtime_path in (
@@ -2250,17 +2553,17 @@ def _eval_helper_local_runtime_paths() -> dict[str, Any]:
             "session_title_generation",
             "session_consolidation",
         ):
-            completion_with_fallback_sync(
+            completion_kwargs = build_completion_kwargs(
                 messages=[{"role": "user", "content": f"keep {runtime_path} local"}],
                 temperature=0.2,
                 max_tokens=128,
                 runtime_path=runtime_path,
             )
-            routed_models[runtime_path] = mock_completion.call_args.kwargs["model"]
+            routed_models[runtime_path] = completion_kwargs["model"]
 
-    assert set(routed_models.values()) == {"ollama/llama3.2"}
+    assert set(routed_models.values()) == {"openrouter/anthropic/claude-sonnet-4"}
     return {
-        "runtime_profile": "local",
+        "runtime_profile": "openrouter",
         "routed_models": routed_models,
     }
 
@@ -2270,6 +2573,16 @@ async def _eval_context_window_summary_audit() -> dict[str, Any]:
     success_response = _make_litellm_response("Condensed summary from local helper path.")
     messages = [{"role": "user", "content": "important context " * 10}]
 
+    runtime_tokens = set_runtime_context(
+        "context-window-eval",
+        "high_risk",
+        trust_principal=TrustPrincipal(
+            principal_id="operator:context-window-eval",
+            principal_type=PrincipalType.OPERATOR,
+            grants=(AuthorityGrant.MODEL_INFERENCE,),
+            session_id="context-window-eval",
+        ),
+    )
     try:
         with (
             patch.object(settings, "default_model", "openrouter/anthropic/claude-sonnet-4"),
@@ -2281,7 +2594,10 @@ async def _eval_context_window_summary_audit() -> dict[str, Any]:
             patch.object(settings, "local_runtime_paths", "context_window_summary"),
             patch.object(settings, "fallback_model", ""),
             patch.object(settings, "fallback_models", ""),
-            patch("litellm.completion", return_value=success_response) as mock_completion,
+            patch(
+                "src.agent.context_window.completion_with_fallback_sync",
+                return_value=success_response,
+            ),
             patch.object(audit_repository, "log_event", AsyncMock()) as mock_log_event,
         ):
             success_summary = _summarize_middle(messages, session_id="ctx-success", range_key="0-1")
@@ -2302,13 +2618,14 @@ async def _eval_context_window_summary_audit() -> dict[str, Any]:
         )
         return {
             "success_summary": success_summary,
-            "success_model": mock_completion.call_args.kwargs["model"],
+            "routing_verification": "not_in_scope_transport_mocked_above_model_route",
             "success_runtime_path": success["details"]["runtime_path"],
             "degraded_fallback": degraded["details"]["fallback"],
             "degraded_runtime_path": degraded["details"]["runtime_path"],
             "degraded_contains_truncation": "truncated" in degraded_summary,
         }
     finally:
+        reset_runtime_context(runtime_tokens)
         _summary_cache.clear()
 
 
@@ -2343,9 +2660,9 @@ def _eval_agent_local_runtime_profile() -> dict[str, Any]:
         "strategist_agent": strategist_agent.model.model_id,
         "memory_keeper": specialist.model.model_id,
     }
-    assert set(routed_models.values()) == {"ollama/llama3.2"}
+    assert set(routed_models.values()) == {"openrouter/anthropic/claude-sonnet-4"}
     return {
-        "runtime_profile": "local",
+        "runtime_profile": "openrouter",
         "routed_models": routed_models,
     }
 
@@ -2403,9 +2720,9 @@ def _eval_delegation_local_runtime_profile() -> dict[str, Any]:
         "web_researcher": web_researcher.model.model_id,
         "file_worker": file_worker.model.model_id,
     }
-    assert set(routed_models.values()) == {"ollama/llama3.2"}
+    assert set(routed_models.values()) == {"openrouter/anthropic/claude-sonnet-4"}
     return {
-        "runtime_profile": "local",
+        "runtime_profile": "openrouter",
         "routed_models": routed_models,
     }
 
@@ -2491,6 +2808,18 @@ def _eval_delegation_secret_boundary_behavior() -> dict[str, Any]:
     }
 
 
+def _eval_secret_ref_operator_principal(session_id: str) -> TrustPrincipal:
+    return TrustPrincipal(
+        principal_id="operator:runtime-eval",
+        principal_type=PrincipalType.OPERATOR,
+        grants=(
+            AuthorityGrant.CAPABILITY_EXECUTE,
+            AuthorityGrant.CREDENTIAL_EGRESS,
+        ),
+        session_id=session_id,
+    )
+
+
 def _eval_secret_ref_egress_boundary_behavior() -> dict[str, Any]:
     class _EvalMCPTool:
         def __init__(self, name: str, allowed_hosts: list[str] | None) -> None:
@@ -2517,7 +2846,11 @@ def _eval_secret_ref_egress_boundary_behavior() -> dict[str, Any]:
                 self.observed_authorization = headers.get("Authorization")
             return {"status": "sent", "headers": {"Authorization": "[REDACTED]"}}
 
-    context_tokens = set_runtime_context("session-1", "high_risk")
+    context_tokens = set_runtime_context(
+        "session-1",
+        "high_risk",
+        trust_principal=_eval_secret_ref_operator_principal("session-1"),
+    )
     try:
         raw_allowlisted_tool = _EvalMCPTool("mcp_allowlisted", ["api.example.com"])
         secret_ref = issue_secret_ref(
@@ -2588,7 +2921,11 @@ def _eval_secure_host_secret_ref_fail_closed_behavior() -> dict[str, Any]:
                 self.observed_authorization = headers.get("Authorization")
             return {"status": "sent", "headers": {"Authorization": "[REDACTED]"}}
 
-    context_tokens = set_runtime_context("secure-host-session", "high_risk")
+    context_tokens = set_runtime_context(
+        "secure-host-session",
+        "high_risk",
+        trust_principal=_eval_secret_ref_operator_principal("secure-host-session"),
+    )
     try:
         raw_tool = _EvalMCPTool()
         secret_ref = issue_secret_ref(
@@ -2617,7 +2954,13 @@ def _eval_secure_host_secret_ref_fail_closed_behavior() -> dict[str, Any]:
     finally:
         reset_runtime_context(context_tokens)
 
-    other_tokens = set_runtime_context("other-secure-host-session", "high_risk")
+    other_tokens = set_runtime_context(
+        "other-secure-host-session",
+        "high_risk",
+        trust_principal=_eval_secret_ref_operator_principal(
+            "other-secure-host-session"
+        ),
+    )
     try:
         cross_session_error = ""
         try:
@@ -4423,64 +4766,110 @@ def _eval_mcp_specialist_local_runtime_profile() -> dict[str, Any]:
         specialist = create_mcp_specialist("github-actions", [tool], description="GitHub workflows MCP")
 
     assert specialist.name == runtime_path
-    assert specialist.model.model_id == "ollama/llama3.2"
+    assert specialist.model.model_id == "openrouter/anthropic/claude-sonnet-4"
     return {
-        "runtime_profile": "local",
+        "runtime_profile": "openrouter",
         "runtime_path": runtime_path,
         "routed_model": specialist.model.model_id,
     }
 
 
 async def _eval_embedding_runtime_audit() -> dict[str, Any]:
-    class _Vector:
-        def __init__(self, payload: Any):
-            self._payload = payload
+    embedding_name = "openrouter/openai/text-embedding-3-small"
+    policy = WorkloadPolicy(
+        runtime_path="memory_embedding",
+        egress_class=EgressClass.CLOUD_ALLOWED_FULL,
+        cloud_egress_acknowledged=True,
+        allowed_provider_kinds=("openrouter",),
+        fallback_allowed=False,
+        max_cost_microusd=500,
+    )
 
-        def tolist(self) -> Any:
-            return self._payload
-
-    class _FakeSentenceTransformer:
-        def __init__(self, model_name: str):
-            self.model_name = model_name
-
-        def encode(self, value: Any, normalize_embeddings: bool = True) -> _Vector:
-            if value == "fail":
-                raise RuntimeError("encode crashed")
-            if isinstance(value, list):
-                return _Vector([[0.1, 0.2] for _ in value])
-            return _Vector([0.1, 0.2])
+    def _fake_request(*, model: str, texts: list[str], request_id: str) -> dict[str, Any]:
+        if texts == ["fail"]:
+            embedder_module._log_embedding_event(
+                "failed",
+                details=embedder_module._safe_details(
+                    stage="request",
+                    reason_code="provider_transport_failed",
+                    batch_size=len(texts),
+                    request_id=request_id,
+                    model=model,
+                ),
+            )
+            raise EmbeddingUnavailableError(
+                "provider_transport_failed",
+                stage="request",
+                request_id=request_id,
+                retryable=True,
+            )
+        return {
+            "model": model,
+            "data": [
+                {"index": index, "embedding": [0.1, 0.2]}
+                for index, _text in enumerate(texts)
+            ],
+        }
 
     _reset_embedder_state()
-    fake_module = types.SimpleNamespace(SentenceTransformer=_FakeSentenceTransformer)
+    principal = TrustPrincipal(
+        principal_id="eval:embedding",
+        principal_type=PrincipalType.SERVICE,
+        grants=(AuthorityGrant.MODEL_INFERENCE,),
+        session_id="eval-embedding-session",
+        job_id="eval-embedding-job",
+    )
+
+    def _execute_sync_adapter(*, context, candidates, proofs, adapter, **_kwargs):
+        # The eval owns the provider fixture; canonical context construction and
+        # the adapter seam are still exercised without a live provider or DB.
+        return adapter(candidates[0], False)
 
     try:
         with (
-            patch.dict(sys.modules, {"sentence_transformers": fake_module}),
+            patch.object(settings, "embedding_model", embedding_name),
+            patch.object(settings, "openrouter_api_key", "test-key"),
+            patch.object(settings, "llm_api_base", "https://openrouter.ai/api/v1"),
+            patch.object(settings, "openrouter_provider_only", True),
+            patch.object(settings, "openrouter_allowed_upstreams", "openai"),
+            patch.object(settings, "openrouter_allow_fallbacks", False),
+            patch.object(settings, "openrouter_require_parameters", True),
+            patch.object(settings, "openrouter_data_collection", "deny"),
+            patch.object(settings, "openrouter_zero_data_retention", True),
+            patch.object(embedder_module, "effective_workload_policy", return_value=policy),
+            patch.object(embedder_module, "get_current_trust_principal", return_value=principal),
+            patch.object(embedder_module, "_load_embedding_proofs", return_value=()),
+            patch.object(embedder_module, "execute_sync_adapter", side_effect=_execute_sync_adapter),
+            patch.object(embedder_module, "_request_embeddings", side_effect=_fake_request),
             patch.object(audit_repository, "log_event", AsyncMock()) as mock_log_event,
         ):
             vector = embed("hello")
             try:
                 embed("fail")
-            except RuntimeError:
+            except EmbeddingUnavailableError:
                 pass
+            # The sync audit wrapper schedules onto the active loop; yield
+            # twice so the task itself and the mocked repository call both
+            # get a turn before assertions inspect the receipt.
+            await asyncio.sleep(0)
             await asyncio.sleep(0)
 
         loaded = _find_audit_call(
             mock_log_event,
             event_type="integration_loaded",
-            tool_name=f"embedding_model:{settings.embedding_model}",
+            tool_name=f"embedding_model:{embedding_name}",
         )
         failed = _find_audit_call(
             mock_log_event,
             event_type="integration_failed",
-            tool_name=f"embedding_model:{settings.embedding_model}",
+            tool_name=f"embedding_model:{embedding_name}",
         )
         return {
             "loaded_model": loaded["details"]["name"],
             "loaded_integration_type": loaded["details"]["integration_type"],
             "vector_length": len(vector),
             "failure_stage": failed["details"]["stage"],
-            "failure_error": failed["details"]["error"],
+            "failure_reason_code": failed["details"]["reason_code"],
         }
     finally:
         _reset_embedder_state()
@@ -4494,21 +4883,38 @@ async def _eval_vector_store_runtime_audit() -> dict[str, Any]:
     empty_table = MagicMock()
     empty_table.count_rows.return_value = 0
 
+    metadata = EmbeddingMetadata(
+        schema_version="seraph.memory.embedding.v1",
+        provider="openrouter",
+        model="openai/text-embedding-3-small",
+        dimension=2,
+    )
+
     _reset_vector_store_state()
     try:
         with patch.object(audit_repository, "log_event", AsyncMock()) as mock_log_event:
             with (
                 patch("src.memory.vector_store._get_or_create_table", return_value=success_table),
                 patch("src.memory.vector_store.embed", return_value=[0.1, 0.2]),
+                patch("src.memory.vector_store.embedding_metadata", return_value=metadata),
             ):
                 memory_id = add_memory("remember this", category="fact", source_session_id="sess-1")
 
-            with patch("src.memory.vector_store._get_or_create_table", return_value=empty_table):
+            with (
+                patch("src.memory.vector_store._get_or_create_table", return_value=empty_table),
+                patch("src.memory.vector_store.embed", return_value=[0.1, 0.2]),
+                patch("src.memory.vector_store.embedding_metadata", return_value=metadata),
+            ):
                 results = search("missing memory", top_k=3)
 
-            with patch("src.memory.vector_store._get_or_create_table", side_effect=RuntimeError("db down")):
+            with (
+                patch("src.memory.vector_store._get_or_create_table", side_effect=RuntimeError("db down")),
+                patch("src.memory.vector_store.embed", return_value=[0.1, 0.2]),
+                patch("src.memory.vector_store.embedding_metadata", return_value=metadata),
+            ):
                 failed_id = add_memory("broken", category="fact", source_session_id="sess-2")
 
+            await asyncio.sleep(0)
             await asyncio.sleep(0)
 
         success = _find_audit_call(
@@ -4736,171 +5142,121 @@ async def _eval_vault_runtime_audit() -> dict[str, Any]:
     }
 
 
-def _eval_runtime_model_overrides() -> dict[str, Any]:
-    completion_response = _make_litellm_response("Handled by a runtime-specific remote override.")
-
-    with (
-        patch.object(settings, "default_model", "openrouter/anthropic/claude-sonnet-4"),
-        patch.object(settings, "llm_api_key", "primary-key"),
-        patch.object(settings, "llm_api_base", "https://openrouter.ai/api/v1"),
-        patch.object(settings, "local_model", "ollama/llama3.2"),
-        patch.object(settings, "local_llm_api_key", ""),
-        patch.object(settings, "local_llm_api_base", "http://localhost:11434/v1"),
-        patch.object(settings, "local_runtime_paths", "chat_agent,session_consolidation"),
-        patch.object(
-            settings,
-            "runtime_model_overrides",
-            (
-                "chat_agent=default:openai/gpt-4.1-mini,"
-                "session_consolidation=default:openai/gpt-4o-mini"
-            ),
+async def _eval_runtime_model_overrides() -> dict[str, Any]:
+    overrides = {
+        "local_runtime_paths": "chat_agent,session_consolidation",
+        "runtime_model_overrides": (
+            "chat_agent=default:openai/gpt-4.1-mini,"
+            "session_consolidation=default:openai/gpt-4o-mini"
         ),
-        patch.object(settings, "fallback_model", ""),
-        patch.object(settings, "fallback_models", ""),
-        patch("litellm.completion", return_value=completion_response) as mock_completion,
-    ):
-        response = completion_with_fallback_sync(
-            messages=[{"role": "user", "content": "keep this helper remote"}],
-            temperature=0.2,
-            max_tokens=128,
-            runtime_path="session_consolidation",
-        )
+    }
+    with ExitStack() as stack:
+        for name, value in {
+            "default_model": "openrouter/anthropic/claude-sonnet-4",
+            "llm_api_key": "primary-key",
+            "openrouter_api_key": "primary-key",
+            "llm_api_base": "https://openrouter.ai/api/v1",
+            **overrides,
+        }.items():
+            stack.enter_context(patch.object(settings, name, value))
         chat_model = get_model(runtime_path="chat_agent")
 
-    assert mock_completion.call_count == 1
-    assert mock_completion.call_args.kwargs["model"] == "openai/gpt-4o-mini"
-    assert mock_completion.call_args.kwargs["api_base"] == "https://openrouter.ai/api/v1"
-    assert chat_model.model_id == "openai/gpt-4.1-mini"
-    assert chat_model.api_base == "https://openrouter.ai/api/v1"
+    details = await _run_governed_completion_fixture(
+        "runtime_model_overrides",
+        runtime_path="session_consolidation",
+        response=_make_litellm_response("Handled by the governed OpenRouter route."),
+        settings_overrides=overrides,
+    )
     return {
-        "completion_runtime_profile": "default",
-        "completion_model": mock_completion.call_args.kwargs["model"],
+        "completion_runtime_profile": details["preflight_targets"][0]["profile"],
+        "completion_model": details["preflight_targets"][0]["model_id"],
         "agent_runtime_profile": chat_model._runtime_profile,
         "agent_model": chat_model.model_id,
-        "response_excerpt": response.choices[0].message.content,
+        "agent_fallback_models": [fallback.model_id for fallback in chat_model._fallback_models],
+        "override_ignored": (
+            details["preflight_targets"][0]["model_id"] == "openrouter/anthropic/claude-sonnet-4"
+            and chat_model.model_id == "openrouter/anthropic/claude-sonnet-4"
+        ),
+        **details,
     }
 
 
-def _eval_runtime_fallback_overrides() -> dict[str, Any]:
-    completion_response = _make_litellm_response("Recovered through a runtime-specific fallback chain.")
+async def _eval_runtime_fallback_overrides() -> dict[str, Any]:
+    overrides = {
+        "fallback_model": "openai/gpt-4o-mini",
+        "runtime_fallback_overrides": (
+            "chat_agent=openai/gpt-4.1-mini|openai/gpt-4.1-nano;"
+            "session_consolidation=openai/gpt-4.1-mini|openai/gpt-4.1-nano"
+        ),
+    }
+    with ExitStack() as stack:
+        for name, value in {
+            "default_model": "openrouter/anthropic/claude-sonnet-4",
+            "llm_api_key": "primary-key",
+            "openrouter_api_key": "primary-key",
+            "llm_api_base": "https://openrouter.ai/api/v1",
+            **overrides,
+        }.items():
+            stack.enter_context(patch.object(settings, name, value))
+        chat_model = get_model(runtime_path="chat_agent")
 
-    _reset_target_health()
-    try:
-        with (
-            patch.object(settings, "default_model", "openrouter/anthropic/claude-sonnet-4"),
-            patch.object(settings, "llm_api_key", "primary-key"),
-            patch.object(settings, "llm_api_base", "https://openrouter.ai/api/v1"),
-            patch.object(settings, "fallback_model", ""),
-            patch.object(settings, "fallback_models", "openai/gpt-4o-mini"),
-            patch.object(settings, "local_runtime_paths", ""),
-            patch.object(settings, "runtime_model_overrides", ""),
-            patch.object(settings, "runtime_profile_preferences", ""),
-            patch.object(
-                settings,
-                "runtime_fallback_overrides",
-                (
-                    "chat_agent=openai/gpt-4.1-mini|openai/gpt-4.1-nano;"
-                    "session_consolidation=openai/gpt-4.1-mini|openai/gpt-4.1-nano"
-                ),
-            ),
-            patch.object(settings, "fallback_llm_api_key", ""),
-            patch.object(settings, "fallback_llm_api_base", ""),
-            patch(
-                "litellm.completion",
-                side_effect=[
-                    RuntimeError("primary down"),
-                    RuntimeError("first runtime fallback down"),
-                    completion_response,
-                ],
-            ) as mock_completion,
-        ):
-            response = completion_with_fallback_sync(
-                messages=[{"role": "user", "content": "keep the shared fallback chain path-specific"}],
-                temperature=0.2,
-                max_tokens=128,
-                runtime_path="session_consolidation",
-            )
-            chat_model = get_model(runtime_path="chat_agent")
-
-        attempted_models = [call.kwargs["model"] for call in mock_completion.call_args_list]
-        assert attempted_models == [
-            "openrouter/anthropic/claude-sonnet-4",
-            "openai/gpt-4.1-mini",
-            "openai/gpt-4.1-nano",
-        ]
-        assert [fallback.model_id for fallback in chat_model._fallback_models] == [
-            "openai/gpt-4.1-mini",
-            "openai/gpt-4.1-nano",
-        ]
-        return {
-            "completion_attempted_models": attempted_models,
-            "completion_final_model": attempted_models[-1],
-            "agent_fallback_models": [fallback.model_id for fallback in chat_model._fallback_models],
-            "response_excerpt": response.choices[0].message.content,
-        }
-    finally:
-        _reset_target_health()
+    details = await _run_governed_completion_fixture(
+        "runtime_fallback_overrides",
+        runtime_path="session_consolidation",
+        response=_make_litellm_response("Completed through the governed OpenRouter route."),
+        settings_overrides=overrides,
+    )
+    return {
+        "completion_attempted_models": [target["model_id"] for target in details["preflight_targets"]],
+        "completion_final_model": details["preflight_targets"][0]["model_id"],
+        "agent_fallback_models": [fallback.model_id for fallback in chat_model._fallback_models],
+        "fallback_forbidden": details["fallback_allowed"] is False and len(details["preflight_targets"]) == 1,
+        **details,
+    }
 
 
-def _eval_runtime_profile_preferences() -> dict[str, Any]:
-    completion_response = _make_litellm_response("Recovered through the preferred remote profile.")
+async def _eval_runtime_profile_preferences() -> dict[str, Any]:
+    overrides = {
+        "runtime_profile_preferences": "chat_agent=local|default;session_consolidation=local|default",
+        "local_model": "ollama/llama3.2",
+        "fallback_model": "openai/gpt-4.1-mini",
+    }
+    with ExitStack() as stack:
+        for name, value in {
+            "default_model": "openrouter/anthropic/claude-sonnet-4",
+            "llm_api_key": "primary-key",
+            "openrouter_api_key": "primary-key",
+            "llm_api_base": "https://openrouter.ai/api/v1",
+            **overrides,
+        }.items():
+            stack.enter_context(patch.object(settings, name, value))
+        chat_model = get_model(runtime_path="chat_agent")
 
-    _reset_target_health()
-    try:
-        with (
-            patch.object(settings, "default_model", "openrouter/anthropic/claude-sonnet-4"),
-            patch.object(settings, "llm_api_key", "primary-key"),
-            patch.object(settings, "llm_api_base", "https://openrouter.ai/api/v1"),
-            patch.object(settings, "local_model", "ollama/llama3.2"),
-            patch.object(settings, "local_llm_api_key", ""),
-            patch.object(settings, "local_llm_api_base", "http://localhost:11434/v1"),
-            patch.object(
-                settings,
-                "runtime_profile_preferences",
-                "chat_agent=local|default;session_consolidation=local|default",
-            ),
-            patch.object(settings, "fallback_model", "openai/gpt-4.1-mini"),
-            patch.object(settings, "fallback_models", ""),
-            patch.object(settings, "fallback_llm_api_key", ""),
-            patch.object(settings, "fallback_llm_api_base", ""),
-            patch(
-                "litellm.completion",
-                side_effect=[RuntimeError("local down"), completion_response],
-            ) as mock_completion,
-        ):
-            response = completion_with_fallback_sync(
-                messages=[{"role": "user", "content": "prefer the local runtime, then remote"}],
-                temperature=0.2,
-                max_tokens=128,
-                runtime_path="session_consolidation",
-            )
-            chat_model = get_model(runtime_path="chat_agent")
-
-        attempted_models = [call.kwargs["model"] for call in mock_completion.call_args_list]
-        assert attempted_models == [
-            "ollama/llama3.2",
-            "openrouter/anthropic/claude-sonnet-4",
-        ]
-        assert [fallback.model_id for fallback in chat_model._fallback_models] == [
-            "openrouter/anthropic/claude-sonnet-4",
-            "openai/gpt-4.1-mini",
-        ]
-        return {
-            "completion_runtime_profile": "local",
-            "completion_attempted_models": attempted_models,
-            "completion_final_model": attempted_models[-1],
-            "agent_runtime_profile": chat_model._runtime_profile,
-            "agent_fallback_models": [fallback.model_id for fallback in chat_model._fallback_models],
-            "response_excerpt": response.choices[0].message.content,
-        }
-    finally:
-        _reset_target_health()
+    details = await _run_governed_completion_fixture(
+        "runtime_profile_preferences",
+        runtime_path="session_consolidation",
+        response=_make_litellm_response("Completed through the governed OpenRouter route."),
+        settings_overrides=overrides,
+    )
+    return {
+        "completion_runtime_profile": details["preflight_targets"][0]["profile"],
+        "completion_attempted_models": [target["model_id"] for target in details["preflight_targets"]],
+        "completion_final_model": details["preflight_targets"][0]["model_id"],
+        "agent_runtime_profile": chat_model._runtime_profile,
+        "agent_fallback_models": [fallback.model_id for fallback in chat_model._fallback_models],
+        "local_preference_ignored": (
+            details["preflight_targets"][0]["profile"] == "openrouter"
+            and chat_model._runtime_profile == "openrouter"
+        ),
+        **details,
+    }
 
 
 def _eval_runtime_path_patterns() -> dict[str, Any]:
     with (
         patch.object(settings, "default_model", "openrouter/anthropic/claude-sonnet-4"),
         patch.object(settings, "llm_api_key", "primary-key"),
+        patch.object(settings, "openrouter_api_key", "primary-key"),
         patch.object(settings, "llm_api_base", "https://openrouter.ai/api/v1"),
         patch.object(settings, "local_model", "ollama/llama3.2"),
         patch.object(settings, "local_llm_api_key", ""),
@@ -4923,20 +5279,11 @@ def _eval_runtime_path_patterns() -> dict[str, Any]:
         wildcard_model = get_model(runtime_path="mcp_linear")
         exact_model = get_model(runtime_path="mcp_github_actions")
 
-    assert wildcard_model.model_id == "openai/gpt-4.1-mini"
-    assert wildcard_model._runtime_profile == "local"
-    assert [fallback.model_id for fallback in wildcard_model._fallback_models] == [
-        "openai/gpt-4.1-mini",
-        "openai/gpt-4.1-nano",
-    ]
+    assert wildcard_model.model_id == "openrouter/anthropic/claude-sonnet-4"
+    assert wildcard_model._runtime_profile == "openrouter"
 
-    assert exact_model.model_id == "ollama/coder"
-    assert exact_model._runtime_profile == "local"
-    assert [fallback.model_id for fallback in exact_model._fallback_models] == [
-        "openrouter/anthropic/claude-sonnet-4",
-        "openai/gpt-4o-mini",
-        "openai/gpt-4.1-mini",
-    ]
+    assert exact_model.model_id == "openrouter/anthropic/claude-sonnet-4"
+    assert exact_model._runtime_profile == "openrouter"
 
     return {
         "wildcard_runtime_path": "mcp_linear",
@@ -4947,257 +5294,164 @@ def _eval_runtime_path_patterns() -> dict[str, Any]:
         "exact_runtime_profile": exact_model._runtime_profile,
         "exact_model": exact_model.model_id,
         "exact_fallback_models": [fallback.model_id for fallback in exact_model._fallback_models],
+        "legacy_path_rules_ignored": (
+            wildcard_model._runtime_profile == "openrouter"
+            and exact_model._runtime_profile == "openrouter"
+            and wildcard_model.model_id == "openrouter/anthropic/claude-sonnet-4"
+            and exact_model.model_id == "openrouter/anthropic/claude-sonnet-4"
+        ),
     }
 
 
-def _eval_provider_policy_capabilities() -> dict[str, Any]:
-    completion_response = _make_litellm_response("Policy matched the fast fallback.")
+async def _eval_provider_policy_capabilities() -> dict[str, Any]:
+    overrides = {
+        "local_model": "ollama/llama3.2",
+        "local_runtime_paths": "chat_agent",
+        "fallback_models": "openai/gpt-4.1-nano,openai/gpt-4o-mini,openai/gpt-4.1-mini",
+        "provider_capability_overrides": (
+            "openrouter/anthropic/claude-sonnet-4=reasoning|tool_use;"
+            "openai/gpt-4.1-nano=cheap;"
+            "openai/gpt-4.1-mini=reasoning|tool_use;"
+            "openai/gpt-4o-mini=fast|cheap"
+        ),
+        "runtime_policy_intents": (
+            "chat_agent=local_first|reasoning|tool_use;"
+            "session_title_generation=fast|cheap"
+        ),
+    }
+    with ExitStack() as stack:
+        for name, value in {
+            "default_model": "openrouter/anthropic/claude-sonnet-4",
+            "llm_api_key": "primary-key",
+            "openrouter_api_key": "primary-key",
+            "llm_api_base": "https://openrouter.ai/api/v1",
+            **overrides,
+        }.items():
+            stack.enter_context(patch.object(settings, name, value))
+        chat_model = get_model(runtime_path="chat_agent")
 
-    _reset_target_health()
-    try:
-        with (
-            patch.object(settings, "default_model", "openrouter/anthropic/claude-sonnet-4"),
-            patch.object(settings, "llm_api_key", "primary-key"),
-            patch.object(settings, "llm_api_base", "https://openrouter.ai/api/v1"),
-            patch.object(settings, "local_model", "ollama/llama3.2"),
-            patch.object(settings, "local_llm_api_key", ""),
-            patch.object(settings, "local_llm_api_base", "http://localhost:11434/v1"),
-            patch.object(settings, "runtime_profile_preferences", ""),
-            patch.object(settings, "local_runtime_paths", "chat_agent"),
-            patch.object(settings, "fallback_model", ""),
-            patch.object(
-                settings,
-                "fallback_models",
-                "openai/gpt-4.1-nano,openai/gpt-4o-mini,openai/gpt-4.1-mini",
-            ),
-            patch.object(
-                settings,
-                "provider_capability_overrides",
-                (
-                    "openrouter/anthropic/claude-sonnet-4=reasoning|tool_use;"
-                    "openai/gpt-4.1-nano=cheap;"
-                    "openai/gpt-4.1-mini=reasoning|tool_use;"
-                    "openai/gpt-4o-mini=fast|cheap"
-                ),
-            ),
-            patch.object(
-                settings,
-                "runtime_policy_intents",
-                (
-                    "chat_agent=local_first|reasoning|tool_use;"
-                    "session_title_generation=fast|cheap"
-                ),
-            ),
-            patch(
-                "litellm.completion",
-                side_effect=[RuntimeError("primary down"), completion_response],
-            ) as mock_completion,
-        ):
-            response = completion_with_fallback_sync(
-                messages=[{"role": "user", "content": "pick the best fast fallback"}],
-                temperature=0.2,
-                max_tokens=128,
-                runtime_path="session_title_generation",
-            )
-            chat_model = get_model(runtime_path="chat_agent")
-    finally:
-        _reset_target_health()
-
-    attempted_models = [call.kwargs["model"] for call in mock_completion.call_args_list]
-    assert attempted_models == [
-        "openrouter/anthropic/claude-sonnet-4",
-        "openai/gpt-4o-mini",
-    ]
-    assert chat_model._runtime_profile == "local"
-    assert [fallback.model_id for fallback in chat_model._fallback_models] == [
-        "openai/gpt-4.1-mini",
-        "openrouter/anthropic/claude-sonnet-4",
-        "openai/gpt-4.1-nano",
-        "openai/gpt-4o-mini",
-    ]
+    details = await _run_governed_completion_fixture(
+        "provider_policy_capabilities",
+        runtime_path="session_title_generation",
+        response=_make_litellm_response("Completed through the governed OpenRouter route."),
+        settings_overrides=overrides,
+    )
     return {
         "chat_runtime_profile": chat_model._runtime_profile,
         "chat_fallback_models": [fallback.model_id for fallback in chat_model._fallback_models],
-        "completion_attempted_models": attempted_models,
-        "completion_final_model": attempted_models[-1],
-        "response_excerpt": response.choices[0].message.content,
+        "completion_attempted_models": [target["model_id"] for target in details["preflight_targets"]],
+        "completion_final_model": details["preflight_targets"][0]["model_id"],
+        "legacy_capability_policy_ignored": chat_model._runtime_profile == "openrouter",
+        **details,
     }
 
 
-def _eval_provider_policy_scoring() -> dict[str, Any]:
-    completion_response = _make_litellm_response("Weighted policy score chose the strongest fallback.")
+async def _eval_provider_policy_scoring() -> dict[str, Any]:
+    overrides = {
+        "runtime_fallback_overrides": (
+            "session_title_generation=openai/gpt-4o-mini|openai/gpt-4.1-nano;"
+            "chat_agent=openai/gpt-4o-mini|openai/gpt-4.1-mini"
+        ),
+        "provider_capability_overrides": (
+            "openrouter/anthropic/claude-sonnet-4=reasoning|tool_use;"
+            "openai/gpt-4o-mini=fast;"
+            "openai/gpt-4.1-nano=cheap|tool_use;"
+            "openai/gpt-4.1-mini=reasoning|tool_use"
+        ),
+        "runtime_policy_intents": (
+            "session_title_generation=fast|cheap|tool_use;"
+            "chat_agent=fast|reasoning|tool_use"
+        ),
+        "runtime_policy_scores": (
+            "session_title_generation=fast:5|cheap:4|tool_use:4;"
+            "chat_agent=fast:6|reasoning:4|tool_use:4"
+        ),
+    }
+    with ExitStack() as stack:
+        for name, value in {
+            "default_model": "openrouter/anthropic/claude-sonnet-4",
+            "llm_api_key": "primary-key",
+            "openrouter_api_key": "primary-key",
+            "llm_api_base": "https://openrouter.ai/api/v1",
+            **overrides,
+        }.items():
+            stack.enter_context(patch.object(settings, name, value))
+        chat_model = get_model(runtime_path="chat_agent")
 
-    _reset_target_health()
-    try:
-        with (
-            patch.object(settings, "default_model", "openrouter/anthropic/claude-sonnet-4"),
-            patch.object(settings, "llm_api_key", "primary-key"),
-            patch.object(settings, "llm_api_base", "https://openrouter.ai/api/v1"),
-            patch.object(settings, "fallback_model", ""),
-            patch.object(settings, "fallback_models", ""),
-            patch.object(settings, "local_runtime_paths", ""),
-            patch.object(settings, "runtime_model_overrides", ""),
-            patch.object(settings, "runtime_profile_preferences", ""),
-            patch.object(
-                settings,
-                "runtime_fallback_overrides",
-                (
-                    "session_title_generation=openai/gpt-4o-mini|openai/gpt-4.1-nano;"
-                    "chat_agent=openai/gpt-4o-mini|openai/gpt-4.1-mini"
-                ),
-            ),
-            patch.object(
-                settings,
-                "provider_capability_overrides",
-                (
-                    "openrouter/anthropic/claude-sonnet-4=reasoning|tool_use;"
-                    "openai/gpt-4o-mini=fast;"
-                    "openai/gpt-4.1-nano=cheap|tool_use;"
-                    "openai/gpt-4.1-mini=reasoning|tool_use"
-                ),
-            ),
-            patch.object(
-                settings,
-                "runtime_policy_intents",
-                (
-                    "session_title_generation=fast|cheap|tool_use;"
-                    "chat_agent=fast|reasoning|tool_use"
-                ),
-            ),
-            patch.object(
-                settings,
-                "runtime_policy_scores",
-                (
-                    "session_title_generation=fast:5|cheap:4|tool_use:4;"
-                    "chat_agent=fast:6|reasoning:4|tool_use:4"
-                ),
-            ),
-            patch(
-                "litellm.completion",
-                side_effect=[RuntimeError("primary down"), completion_response],
-            ) as mock_completion,
-        ):
-            response = completion_with_fallback_sync(
-                messages=[{"role": "user", "content": "pick the highest weighted fallback"}],
-                temperature=0.2,
-                max_tokens=128,
-                runtime_path="session_title_generation",
-            )
-            chat_model = FallbackLiteLLMModel(
-                model_id="openrouter/anthropic/claude-sonnet-4",
-                api_key="primary-key",
-                api_base="https://openrouter.ai/api/v1",
-                runtime_profile="default",
-                runtime_path="chat_agent",
-            )
-    finally:
-        _reset_target_health()
-
-    attempted_models = [call.kwargs["model"] for call in mock_completion.call_args_list]
-    assert attempted_models == [
-        "openrouter/anthropic/claude-sonnet-4",
-        "openai/gpt-4.1-nano",
-    ]
-    assert [fallback.model_id for fallback in chat_model._fallback_models] == [
-        "openai/gpt-4.1-mini",
-        "openai/gpt-4o-mini",
-    ]
-
+    details = await _run_governed_completion_fixture(
+        "provider_policy_scoring",
+        runtime_path="session_title_generation",
+        response=_make_litellm_response("Completed through the governed OpenRouter route."),
+        settings_overrides=overrides,
+    )
     return {
-        "completion_attempted_models": attempted_models,
-        "completion_final_model": attempted_models[-1],
-        "completion_weighted_scores": {"fast": 5.0, "cheap": 4.0, "tool_use": 4.0},
-        "agent_weighted_scores": {"fast": 6.0, "reasoning": 4.0, "tool_use": 4.0},
+        "completion_attempted_models": [target["model_id"] for target in details["preflight_targets"]],
+        "completion_final_model": details["preflight_targets"][0]["model_id"],
+        "completion_weighted_scores": {},
+        "agent_weighted_scores": {},
         "agent_fallback_models": [fallback.model_id for fallback in chat_model._fallback_models],
-        "response_excerpt": response.choices[0].message.content,
+        "policy_scoring_ignored": details["fallback_allowed"] is False and chat_model._runtime_profile == "openrouter",
+        **details,
     }
 
 
 async def _eval_provider_policy_safeguards() -> dict[str, Any]:
-    completion_response = _make_litellm_response("Guardrails selected the compliant target.")
-
-    _reset_target_health()
-    try:
-        async with _patched_async_db("src.audit.repository.get_session"):
-            with ExitStack() as stack:
-                stack.enter_context(patch.object(settings, "default_model", "openrouter/anthropic/claude-sonnet-4"))
-                stack.enter_context(patch.object(settings, "llm_api_key", "primary-key"))
-                stack.enter_context(patch.object(settings, "llm_api_base", "https://openrouter.ai/api/v1"))
-                stack.enter_context(patch.object(settings, "runtime_profile_preferences", ""))
-                stack.enter_context(patch.object(settings, "local_runtime_paths", ""))
-                stack.enter_context(patch.object(settings, "fallback_model", ""))
-                stack.enter_context(patch.object(settings, "fallback_models", "openai/gpt-4o-mini,openai/gpt-4.1-nano"))
-                stack.enter_context(
-                    patch.object(
-                        settings,
-                        "provider_capability_overrides",
-                        (
-                            "openrouter/anthropic/claude-sonnet-4=reasoning;"
-                            "openai/gpt-4o-mini=tool_use|fast;"
-                            "openai/gpt-4.1-nano=cheap"
-                        ),
-                    )
-                )
-                stack.enter_context(
-                    patch.object(
-                        settings,
-                        "provider_cost_tiers",
-                        "openrouter/anthropic/claude-sonnet-4=high;openai/gpt-4o-mini=low;openai/gpt-4.1-nano=medium",
-                    )
-                )
-                stack.enter_context(
-                    patch.object(
-                        settings,
-                        "provider_latency_tiers",
-                        "openrouter/anthropic/claude-sonnet-4=high;openai/gpt-4o-mini=low;openai/gpt-4.1-nano=medium",
-                    )
-                )
-                stack.enter_context(
-                    patch.object(
-                        settings,
-                        "provider_task_classes",
-                        "openrouter/anthropic/claude-sonnet-4=analysis;openai/gpt-4o-mini=chat;openai/gpt-4.1-nano=analysis",
-                    )
-                )
-                stack.enter_context(
-                    patch.object(
-                        settings,
-                        "provider_budget_classes",
-                        "openrouter/anthropic/claude-sonnet-4=high;openai/gpt-4o-mini=low;openai/gpt-4.1-nano=medium",
-                    )
-                )
-                stack.enter_context(patch.object(settings, "runtime_policy_intents", "chat_agent=tool_use|fast"))
-                stack.enter_context(patch.object(settings, "runtime_policy_requirements", "chat_agent=tool_use"))
-                stack.enter_context(patch.object(settings, "runtime_max_cost_tier", "chat_agent=medium"))
-                stack.enter_context(patch.object(settings, "runtime_max_latency_tier", "chat_agent=medium"))
-                stack.enter_context(patch.object(settings, "runtime_task_class", "chat_agent=chat"))
-                stack.enter_context(patch.object(settings, "runtime_max_budget_class", "chat_agent=medium"))
-                mock_completion = stack.enter_context(patch("litellm.completion", return_value=completion_response))
-                response = completion_with_fallback_sync(
-                    messages=[{"role": "user", "content": "pick the guardrail-compliant provider"}],
-                    temperature=0.2,
-                    max_tokens=128,
-                    runtime_path="chat_agent",
-                )
-                await asyncio.sleep(0)
-                events = await audit_repository.list_events(limit=10)
-    finally:
-        _reset_target_health()
-
-    routing_event = next(event for event in events if event["event_type"] == "llm_routing_decision")
+    overrides = {
+        "fallback_models": "openai/gpt-4o-mini,openai/gpt-4.1-nano",
+        "provider_capability_overrides": (
+            "openrouter/anthropic/claude-sonnet-4=reasoning;"
+            "openai/gpt-4o-mini=tool_use|fast;"
+            "openai/gpt-4.1-nano=cheap"
+        ),
+        "provider_cost_tiers": (
+            "openrouter/anthropic/claude-sonnet-4=high;"
+            "openai/gpt-4o-mini=low;openai/gpt-4.1-nano=medium"
+        ),
+        "provider_latency_tiers": (
+            "openrouter/anthropic/claude-sonnet-4=high;"
+            "openai/gpt-4o-mini=low;openai/gpt-4.1-nano=medium"
+        ),
+        "provider_task_classes": (
+            "openrouter/anthropic/claude-sonnet-4=analysis;"
+            "openai/gpt-4o-mini=chat;openai/gpt-4.1-nano=analysis"
+        ),
+        "provider_budget_classes": (
+            "openrouter/anthropic/claude-sonnet-4=high;"
+            "openai/gpt-4o-mini=low;openai/gpt-4.1-nano=medium"
+        ),
+        "runtime_policy_intents": "chat_agent=tool_use|fast",
+        "runtime_policy_requirements": "chat_agent=tool_use",
+        "runtime_max_cost_tier": "chat_agent=medium",
+        "runtime_max_latency_tier": "chat_agent=medium",
+        "runtime_task_class": "chat_agent=chat",
+        "runtime_max_budget_class": "chat_agent=medium",
+    }
+    details = await _run_governed_completion_fixture(
+        "provider_policy_safeguards",
+        runtime_path="chat_agent",
+        response=_make_litellm_response("Completed through the governed OpenRouter route."),
+        settings_overrides=overrides,
+        expect_no_compliant_route=True,
+    )
+    routing_event = next(
+        event for event in details["route_events"] if event["event_type"] == "llm_routing_decision"
+    )
+    routing_details = routing_event["details"]
     primary_candidate = next(
-        candidate for candidate in routing_event["details"]["candidate_targets"] if candidate["source"] == "primary"
+        candidate
+        for candidate in routing_details["candidate_targets"]
+        if candidate["source"] == "primary"
     )
     return {
-        "attempted_models": [call.kwargs["model"] for call in mock_completion.call_args_list],
-        "response_excerpt": response.choices[0].message.content,
-        "selected_model": routing_event["details"]["selected_model"],
-        "rerouted_from_policy_guardrails": routing_event["details"]["rerouted_from_policy_guardrails"],
-        "required_policy_intents": routing_event["details"]["required_policy_intents"],
-        "max_cost_tier": routing_event["details"]["max_cost_tier"],
-        "max_latency_tier": routing_event["details"]["max_latency_tier"],
-        "required_task_class": routing_event["details"]["required_task_class"],
-        "max_budget_class": routing_event["details"]["max_budget_class"],
+        "attempted_models": details["attempted_models"],
+        "selected_model": routing_details["selected_model"],
+        "governed_primary_model": routing_details["primary_model"],
+        "rerouted_from_policy_guardrails": routing_details["rerouted_from_policy_guardrails"],
+        "required_policy_intents": routing_details["required_policy_intents"],
+        "max_cost_tier": routing_details["max_cost_tier"],
+        "max_latency_tier": routing_details["max_latency_tier"],
+        "required_task_class": routing_details["required_task_class"],
+        "max_budget_class": routing_details["max_budget_class"],
         "primary_missing_required_intents": primary_candidate["missing_required_intents"],
         "primary_cost_guardrail": primary_candidate["within_cost_guardrail"],
         "primary_latency_guardrail": primary_candidate["within_latency_guardrail"],
@@ -5205,141 +5459,50 @@ async def _eval_provider_policy_safeguards() -> dict[str, Any]:
         "primary_task_guardrail": primary_candidate["matched_task_class"],
         "primary_budget_class": primary_candidate["budget_class"],
         "primary_budget_guardrail": primary_candidate["within_budget_guardrail"],
+        "guardrails_cannot_select_legacy_provider": (
+            details["fallback_allowed"] is False
+            and details["no_compliant_route"] is True
+            and details["transport_call_count"] == 0
+        ),
+        "transport_suppressed": details["transport_call_count"] == 0,
+        **details,
     }
 
 
 async def _eval_provider_routing_decision_audit() -> dict[str, Any]:
-    completion_response = _make_litellm_response("Policy matched the fast fallback.")
-    first_agent_response = MagicMock()
-    rerouted_agent_response = MagicMock()
-
-    _reset_target_health()
-    try:
-        with (
-            patch.object(settings, "default_model", "openrouter/anthropic/claude-sonnet-4"),
-            patch.object(settings, "llm_api_key", "primary-key"),
-            patch.object(settings, "llm_api_base", "https://openrouter.ai/api/v1"),
-            patch.object(settings, "fallback_model", "ollama/llama3.2"),
-            patch.object(settings, "fallback_models", "openai/gpt-4.1-nano,openai/gpt-4o-mini"),
-            patch.object(settings, "fallback_llm_api_key", ""),
-            patch.object(settings, "fallback_llm_api_base", "http://localhost:11434/v1"),
-            patch.object(settings, "local_runtime_paths", ""),
-            patch.object(settings, "runtime_model_overrides", ""),
-            patch.object(settings, "runtime_profile_preferences", ""),
-            patch.object(
-                settings,
-                "runtime_fallback_overrides",
-                "session_title_generation=openai/gpt-4o-mini|openai/gpt-4.1-nano|openai/gpt-4.1-mini",
-            ),
-            patch.object(
-                settings,
-                "provider_capability_overrides",
-                "openai/gpt-4.1-nano=cheap;openai/gpt-4o-mini=fast|cheap",
-            ),
-            patch.object(settings, "runtime_policy_intents", "session_title_generation=fast|cheap"),
-            patch.object(settings, "llm_target_cooldown_seconds", 300),
-            patch.object(audit_repository, "log_event", AsyncMock()) as mock_log_event,
-            patch(
-                "litellm.completion",
-                side_effect=[RuntimeError("primary down"), completion_response],
-            ),
-            patch(
-                "src.llm_runtime.BaseLiteLLMModel.generate",
-                autospec=True,
-                side_effect=[
-                    RuntimeError("primary down"),
-                    first_agent_response,
-                    rerouted_agent_response,
-                ],
-            ),
-        ):
-            completion_with_fallback_sync(
-                messages=[{"role": "user", "content": "pick the fastest fallback"}],
-                temperature=0.2,
-                max_tokens=128,
-                runtime_path="session_title_generation",
-            )
-
-            first_model = FallbackLiteLLMModel(
-                model_id="openrouter/anthropic/claude-sonnet-4",
-                api_key="primary-key",
-                api_base="https://openrouter.ai/api/v1",
-                temperature=0.3,
-                max_tokens=256,
-            )
-            first_model.generate([{"role": "user", "content": "hello"}])
-
-            rerouted_model = FallbackLiteLLMModel(
-                model_id="openrouter/anthropic/claude-sonnet-4",
-                api_key="primary-key",
-                api_base="https://openrouter.ai/api/v1",
-                temperature=0.3,
-                max_tokens=256,
-            )
-            rerouted_model.generate([{"role": "user", "content": "hello again"}])
-            await asyncio.sleep(0)
-    finally:
-        _reset_target_health()
-
-    routing_calls = [
-        call.kwargs
-        for call in mock_log_event.call_args_list
-        if call.kwargs.get("event_type") == "llm_routing_decision"
-    ]
-    completion_decision = next(
-        call
-        for call in routing_calls
-        if call["details"]["runtime_path"] == "session_title_generation"
+    details = await _run_governed_completion_fixture(
+        "provider_routing_decision_audit",
+        runtime_path="session_title_generation",
+        response=_make_litellm_response("Completed through the governed OpenRouter route."),
     )
-    rerouted_agent_decision = next(
-        call
-        for call in routing_calls
-        if call["details"]["runtime_path"] == "agent_generate"
-        and call["details"]["rerouted_from_unhealthy_primary"] is True
+    routing_event = next(
+        event for event in details["route_events"] if event["event_type"] == "llm_routing_decision"
     )
-    primary_candidate = next(
-        candidate
-        for candidate in rerouted_agent_decision["details"]["candidate_targets"]
-        if candidate["source"] == "primary"
-    )
+    routing_details = routing_event["details"]
     return {
-        "completion_selected_model": completion_decision["details"]["selected_model"],
-        "completion_attempt_order": completion_decision["details"]["attempt_order"],
-        "completion_budget_steering_mode": completion_decision["details"]["budget_steering_mode"],
-        "completion_selected_route_score": completion_decision["details"]["selected_route_score"],
-        "completion_selection_policy_mode": completion_decision["details"]["selection_policy_mode"],
-        "completion_planning_winner_model": completion_decision["details"]["planning_winner_model"],
-        "completion_planning_winner_selected": completion_decision["details"]["planning_winner_selected"],
-        "completion_best_alternate_model": completion_decision["details"]["best_alternate_model"],
-        "completion_selected_vs_best_alternate_margin": completion_decision["details"][
-            "selected_vs_best_alternate_margin"
-        ],
-        "completion_selected_failure_risk_score": completion_decision["details"]["selected_failure_risk_score"],
-        "completion_selected_production_readiness": completion_decision["details"]["selected_production_readiness"],
-        "completion_route_explanation": completion_decision["details"]["route_explanation"],
-        "completion_route_comparison_summary": completion_decision["details"]["route_comparison_summary"],
-        "completion_simulated_route_count": len(completion_decision["details"]["simulated_routes"]),
-        "completion_first_route_entry": completion_decision["details"]["simulated_routes"][0]["entry_model"],
-        "completion_rejected_summary_count": len(completion_decision["details"]["rejected_target_summaries"]),
-        "completion_rejected_models": [
-            candidate["model_id"]
-            for candidate in completion_decision["details"]["rejected_targets"]
-        ],
-        "agent_selected_model": rerouted_agent_decision["details"]["selected_model"],
-        "agent_attempt_order": rerouted_agent_decision["details"]["attempt_order"],
-        "agent_budget_steering_mode": rerouted_agent_decision["details"]["budget_steering_mode"],
-        "agent_selection_policy_mode": rerouted_agent_decision["details"]["selection_policy_mode"],
-        "agent_planning_winner_model": rerouted_agent_decision["details"]["planning_winner_model"],
-        "agent_planning_winner_selected": rerouted_agent_decision["details"]["planning_winner_selected"],
-        "agent_best_alternate_model": rerouted_agent_decision["details"]["best_alternate_model"],
-        "agent_selected_vs_best_alternate_margin": rerouted_agent_decision["details"][
-            "selected_vs_best_alternate_margin"
-        ],
-        "agent_primary_decision": primary_candidate["decision"],
-        "agent_primary_reason_codes": primary_candidate["reason_codes"],
-        "agent_primary_feedback_state": primary_candidate["feedback_state"],
-        "agent_primary_failure_risk_score": primary_candidate["failure_risk_score"],
-        "agent_route_comparison_summary": rerouted_agent_decision["details"]["route_comparison_summary"],
+        "completion_selected_model": routing_details["selected_model"],
+        "completion_attempt_order": routing_details["attempt_order"],
+        "completion_budget_steering_mode": routing_details["budget_steering_mode"],
+        "completion_selected_route_score": routing_details["selected_route_score"],
+        "completion_selection_policy_mode": routing_details["selection_policy_mode"],
+        "completion_planning_winner_model": routing_details["planning_winner_model"],
+        "completion_planning_winner_selected": routing_details["planning_winner_selected"],
+        "completion_best_alternate_model": routing_details["best_alternate_model"],
+        "completion_selected_vs_best_alternate_margin": routing_details["selected_vs_best_alternate_margin"],
+        "completion_selected_failure_risk_score": routing_details["selected_failure_risk_score"],
+        "completion_selected_production_readiness": routing_details["selected_production_readiness"],
+        "completion_route_explanation": routing_details["route_explanation"],
+        "completion_route_comparison_summary": routing_details["route_comparison_summary"],
+        "completion_simulated_route_count": len(routing_details["simulated_routes"]),
+        "completion_first_route_entry": routing_details["simulated_routes"][0]["entry_model"],
+        "completion_rejected_summary_count": len(routing_details["rejected_target_summaries"]),
+        "completion_rejected_models": [candidate["model_id"] for candidate in routing_details["rejected_targets"]],
+        "route_is_single_governed_openrouter": (
+            routing_details["selected_model"] == "openrouter/anthropic/claude-sonnet-4"
+            and routing_details["attempt_order"] == ["openrouter/anthropic/claude-sonnet-4"]
+            and len(routing_details["simulated_routes"]) == 1
+        ),
+        **details,
     }
 
 
@@ -5370,8 +5533,61 @@ async def _eval_session_bound_llm_trace() -> dict[str, Any]:
             "soul_updates": {},
         }))
 
+        transport_responses = [title_response, consolidation_response]
+        preflight_targets: list[dict[str, Any]] = []
+        route_events: list[dict[str, Any]] = []
+
+        policy = WorkloadPolicy(
+            runtime_path="session_title_generation",
+            egress_class=EgressClass.CLOUD_ALLOWED_FULL,
+            cloud_egress_acknowledged=True,
+            allowed_provider_kinds=("openrouter",),
+            fallback_allowed=False,
+            max_cost_microusd=500,
+        )
+
+        def _preflight(target: dict[str, Any], context: Any) -> tuple[Any, tuple[str, ...]]:
+            preflight_targets.append(
+                {
+                    "model_id": str(target.get("model_id") or ""),
+                    "profile": str(target.get("profile") or ""),
+                    "api_base": str(target.get("api_base") or ""),
+                    "source": str(target.get("source") or ""),
+                    "runtime_path": context.runtime_path,
+                }
+            )
+            if target.get("source") != "primary":
+                return types.SimpleNamespace(allowed=False, selected=None), ()
+            if target.get("profile") != "openrouter" or "openrouter.ai" not in str(target.get("api_base") or ""):
+                raise AssertionError("session trace fixture received a non-OpenRouter primary target")
+            if tuple(context.allowed_provider_kinds) != ("openrouter",) or context.fallback_allowed:
+                raise AssertionError("session trace fixture lost the governed OpenRouter policy")
+            return types.SimpleNamespace(allowed=True, selected=types.SimpleNamespace()), ("fixture-proof",)
+
+        def _transport(**kwargs: Any) -> tuple[Any, dict[str, Any]]:
+            if not transport_responses:
+                raise AssertionError("session trace fixture made more transport calls than expected")
+            return transport_responses.pop(0), {"usage": {"prompt_tokens": 1, "completion_tokens": 1}}
+
+        def _route_event(**kwargs: Any) -> None:
+            route_events.append(kwargs)
+
         with (
-            patch("litellm.completion", side_effect=[title_response, consolidation_response]),
+            patch.object(settings, "default_model", "openrouter/anthropic/claude-sonnet-4"),
+            patch.object(settings, "llm_api_key", "primary-key"),
+            patch.object(settings, "openrouter_api_key", "primary-key"),
+            patch.object(settings, "llm_api_base", "https://openrouter.ai/api/v1"),
+            patch.object(settings, "openrouter_provider_only", True),
+            patch.object(settings, "openrouter_allowed_upstreams", "openai"),
+            patch.object(settings, "openrouter_allow_fallbacks", False),
+            patch.object(settings, "openrouter_require_parameters", True),
+            patch.object(settings, "openrouter_data_collection", "deny"),
+            patch.object(settings, "openrouter_zero_data_retention", True),
+            patch("src.model_fabric.caller_context.effective_workload_policy", return_value=policy),
+            patch("src.llm_runtime._governed_preflight_target", side_effect=_preflight),
+            patch("src.llm_runtime._governed_openai_chat_completion", side_effect=_transport),
+            patch("src.llm_runtime._new_route_receipt_session", return_value=None),
+            patch("src.llm_runtime._log_llm_runtime_event_sync", side_effect=_route_event),
             patch(
                 "src.memory.consolidator.sync_soul_file_to_profile",
                 AsyncMock(return_value={"Identity": "Hero"}),
@@ -5379,27 +5595,47 @@ async def _eval_session_bound_llm_trace() -> dict[str, Any]:
             patch("src.memory.consolidator.add_memory"),
             patch("src.memory.consolidator.update_profile_soul_section", AsyncMock()),
         ):
-            await session_manager.generate_title("trace-session")
-            await consolidate_session("trace-session")
+            await _run_model_eval_job(
+                "session_bound_llm_trace:title",
+                lambda: session_manager.generate_title("trace-session"),
+                session_id="trace-session",
+            )
+            await _run_model_eval_job(
+                "session_bound_llm_trace:consolidation",
+                lambda: consolidate_session("trace-session"),
+                session_id="trace-session",
+            )
 
-        events = await audit_repository.list_events(limit=20, session_id="trace-session")
+        events = [
+            event
+            for event in route_events
+            if event.get("event_type") == "llm_primary_success"
+            and event.get("details", {}).get("runtime_path") in {
+                "session_title_generation",
+                "session_consolidation",
+            }
+        ]
         title_event = next(
             event
             for event in events
-            if event["event_type"] == "llm_primary_success"
-            and event["details"]["runtime_path"] == "session_title_generation"
+            if event["details"]["runtime_path"] == "session_title_generation"
         )
         consolidation_event = next(
             event
             for event in events
-            if event["event_type"] == "llm_primary_success"
-            and event["details"]["runtime_path"] == "session_consolidation"
+            if event["details"]["runtime_path"] == "session_consolidation"
         )
         return {
             "session_id": "trace-session",
-            "title_trace_has_request_id": bool(title_event["details"]["request_id"]),
-            "consolidation_trace_has_request_id": bool(consolidation_event["details"]["request_id"]),
-            "request_ids_differ": title_event["details"]["request_id"] != consolidation_event["details"]["request_id"],
+            "title_trace_has_request_id": bool(title_event.get("request_id")),
+            "consolidation_trace_has_request_id": bool(consolidation_event.get("request_id")),
+            "request_ids_differ": title_event.get("request_id") != consolidation_event.get("request_id"),
+            "governed_openrouter_targets": all(
+                target["profile"] == "openrouter"
+                and target["api_base"] == "https://openrouter.ai/api/v1"
+                for target in preflight_targets
+            ),
+            "transport_call_count": 2 - len(transport_responses),
         }
 
 
@@ -5449,34 +5685,49 @@ async def _eval_daily_briefing_fallback() -> dict[str, Any]:
     mock_context_manager = MagicMock()
     mock_context_manager.refresh = AsyncMock(return_value=ctx)
     mock_deliver = AsyncMock()
-    fallback_response = _make_litellm_response("Morning briefing via fallback.")
-    primary_error = RuntimeError("primary down")
+    memory_fixture = _make_hybrid_memory_fixture(("Prioritize reliability",))
+    no_route = NoCompliantModelRouteError()
 
     with (
         patch.object(settings, "default_model", "openrouter/anthropic/claude-sonnet-4"),
         patch.object(settings, "llm_api_key", "primary-key"),
+        patch.object(settings, "openrouter_api_key", "primary-key"),
         patch.object(settings, "llm_api_base", "https://openrouter.ai/api/v1"),
+        patch.object(settings, "openrouter_provider_only", True),
+        patch.object(settings, "openrouter_allowed_upstreams", "openai"),
+        patch.object(settings, "openrouter_allow_fallbacks", False),
+        patch.object(settings, "openrouter_require_parameters", True),
+        patch.object(settings, "openrouter_data_collection", "deny"),
+        patch.object(settings, "openrouter_zero_data_retention", True),
         patch.object(settings, "fallback_model", "ollama/llama3.2"),
         patch.object(settings, "fallback_llm_api_key", ""),
         patch.object(settings, "fallback_llm_api_base", "http://localhost:11434/v1"),
         patch("src.observer.manager.context_manager", mock_context_manager),
         patch("src.memory.soul.read_soul", return_value="# Soul\nName: Hero"),
-        patch("src.memory.vector_store.search_with_status", return_value=([{"category": "memory", "text": "Prioritize reliability"}], False)),
+        patch(
+            "src.scheduler.jobs.daily_briefing.retrieve_hybrid_memory",
+            new=AsyncMock(return_value=memory_fixture),
+        ) as mock_memory,
         patch("src.llm_runtime.logger.warning"),
-        patch("litellm.completion", side_effect=[primary_error, fallback_response]) as mock_completion,
+        patch(
+            "src.scheduler.jobs.daily_briefing.completion_with_fallback",
+            AsyncMock(side_effect=no_route),
+        ) as mock_completion,
         patch("src.observer.delivery.deliver_or_queue", mock_deliver),
     ):
-        await run_daily_briefing()
+        await _run_scheduler_eval_job("daily_briefing", run_daily_briefing)
 
-    assert mock_completion.call_count == 2
-    assert mock_completion.call_args_list[0].kwargs["model"] == "openrouter/anthropic/claude-sonnet-4"
-    assert mock_completion.call_args_list[1].kwargs["model"] == "ollama/llama3.2"
-    mock_deliver.assert_called_once()
-    delivered_message = mock_deliver.call_args.args[0]
+    mock_memory.assert_awaited_once_with(query="daily priorities and routines", limit=3)
+    mock_completion.assert_awaited_once()
+    prompt = mock_completion.await_args.kwargs["messages"][0]["content"]
+    assert "Prioritize reliability" in prompt
+    mock_deliver.assert_not_called()
     return {
-        "primary_model": mock_completion.call_args_list[0].kwargs["model"],
-        "fallback_model": mock_completion.call_args_list[1].kwargs["model"],
-        "delivered_excerpt": delivered_message.content,
+        "primary_model": "openrouter/anthropic/claude-sonnet-4",
+        "fallback_model": None,
+        "fallback_forbidden": True,
+        "delivery_suppressed": mock_deliver.await_count == 0,
+        "no_compliant_route": True,
     }
 
 
@@ -5486,11 +5737,18 @@ async def _eval_daily_briefing_degraded_memories_audit() -> dict[str, Any]:
     mock_context_manager.refresh = AsyncMock(return_value=ctx)
     mock_deliver = AsyncMock()
     mock_log_event = AsyncMock()
+    memory_fixture = _make_hybrid_memory_fixture(
+        degraded=True,
+        reason="vector_store_search_failed",
+    )
 
     with (
         patch("src.observer.manager.context_manager", mock_context_manager),
         patch("src.memory.soul.read_soul", return_value="# Soul\nName: Hero"),
-        patch("src.memory.vector_store.search_with_status", return_value=([], True)),
+        patch(
+            "src.scheduler.jobs.daily_briefing.retrieve_hybrid_memory",
+            new=AsyncMock(return_value=memory_fixture),
+        ) as mock_memory,
         patch(
             "src.scheduler.jobs.daily_briefing.completion_with_fallback",
             AsyncMock(return_value=_make_litellm_response("Good morning. Here is the plan.")),
@@ -5498,8 +5756,9 @@ async def _eval_daily_briefing_degraded_memories_audit() -> dict[str, Any]:
         patch("src.observer.delivery.deliver_or_queue", mock_deliver),
         patch.object(audit_repository, "log_event", mock_log_event),
     ):
-        await run_daily_briefing()
+        await _run_scheduler_eval_job("daily_briefing", run_daily_briefing)
 
+    mock_memory.assert_awaited_once_with(query="daily priorities and routines", limit=3)
     degraded = _find_audit_call(
         mock_log_event,
         event_type="background_task_degraded",
@@ -5528,14 +5787,15 @@ async def _eval_daily_briefing_delivery_behavior() -> dict[str, Any]:
     mock_context_manager.refresh = AsyncMock(return_value=ctx)
     mock_deliver = AsyncMock(return_value=DeliveryDecision.deliver)
     mock_log_event = AsyncMock()
+    memory_fixture = _make_hybrid_memory_fixture(("Morning briefings should be concrete.",))
 
     with (
         patch("src.observer.manager.context_manager", mock_context_manager),
         patch("src.memory.soul.read_soul", return_value="# Soul\nName: Hero"),
         patch(
-            "src.memory.vector_store.search_with_status",
-            return_value=([{"category": "fact", "text": "Morning briefings should be concrete."}], False),
-        ),
+            "src.scheduler.jobs.daily_briefing.retrieve_hybrid_memory",
+            new=AsyncMock(return_value=memory_fixture),
+        ) as mock_memory,
         patch(
             "src.scheduler.jobs.daily_briefing.completion_with_fallback",
             AsyncMock(
@@ -5543,12 +5803,15 @@ async def _eval_daily_briefing_delivery_behavior() -> dict[str, Any]:
                     "Good morning. Design review at 09:30. Focus on proactive eval coverage."
                 )
             ),
-        ),
+        ) as mock_completion,
         patch("src.observer.delivery.deliver_or_queue", mock_deliver),
         patch.object(audit_repository, "log_event", mock_log_event),
     ):
-        await run_daily_briefing()
+        await _run_scheduler_eval_job("daily_briefing", run_daily_briefing)
 
+    mock_memory.assert_awaited_once_with(query="daily priorities and routines", limit=3)
+    prompt = mock_completion.await_args.kwargs["messages"][0]["content"]
+    assert "Morning briefings should be concrete." in prompt
     delivered_message = mock_deliver.await_args.args[0]
     delivered_kwargs = mock_deliver.await_args.kwargs
     succeeded = _find_audit_call(
@@ -5586,7 +5849,7 @@ async def _eval_activity_digest_degraded_summary_audit() -> dict[str, Any]:
         patch("src.observer.delivery.deliver_or_queue", mock_deliver),
         patch.object(audit_repository, "log_event", mock_log_event),
     ):
-        await run_activity_digest()
+        await _run_scheduler_eval_job("activity_digest", run_activity_digest)
 
     degraded = _find_audit_call(
         mock_log_event,
@@ -5627,7 +5890,7 @@ async def _eval_activity_digest_degraded_delivery_behavior() -> dict[str, Any]:
         patch("src.observer.delivery.deliver_or_queue", mock_deliver),
         patch.object(audit_repository, "log_event", mock_log_event),
     ):
-        await run_activity_digest()
+        await _run_scheduler_eval_job("activity_digest", run_activity_digest)
 
     delivered_message = mock_deliver.await_args.args[0]
     delivered_kwargs = mock_deliver.await_args.kwargs
@@ -5670,7 +5933,7 @@ async def _eval_evening_review_degraded_inputs_audit() -> dict[str, Any]:
         patch("src.observer.delivery.deliver_or_queue", mock_deliver),
         patch.object(audit_repository, "log_event", mock_log_event),
     ):
-        await run_evening_review()
+        await _run_scheduler_eval_job("evening_review", run_evening_review)
 
     succeeded = _find_audit_call(
         mock_log_event,
@@ -5705,7 +5968,7 @@ async def _eval_evening_review_degraded_delivery_behavior() -> dict[str, Any]:
         patch("src.observer.delivery.deliver_or_queue", mock_deliver),
         patch.object(audit_repository, "log_event", mock_log_event),
     ):
-        await run_evening_review()
+        await _run_scheduler_eval_job("evening_review", run_evening_review)
 
     delivered_message = mock_deliver.await_args.args[0]
     delivered_kwargs = mock_deliver.await_args.kwargs
@@ -5746,58 +6009,117 @@ async def _eval_scheduled_local_runtime_profile() -> dict[str, Any]:
         "by_project": {"seraph": 28800},
         "daily_breakdown": [{"date": "2026-03-17", "tracked_minutes": 180, "observations": 4}],
     }
-    local_responses = [
-        _make_litellm_response("Morning briefing via local profile."),
-        _make_litellm_response("Evening review via local profile."),
-        _make_litellm_response("Activity digest via local profile."),
-        _make_litellm_response("Weekly review via local profile."),
+    transport_responses = [
+        _make_litellm_response("Morning briefing via the governed OpenRouter route."),
+        _make_litellm_response("Evening review via the governed OpenRouter route."),
+        _make_litellm_response("Activity digest via the governed OpenRouter route."),
+        _make_litellm_response("Weekly review via the governed OpenRouter route."),
     ]
+    transport_targets: list[dict[str, Any]] = []
+    route_events: list[dict[str, Any]] = []
+    policy = WorkloadPolicy(
+        runtime_path="daily_briefing",
+        egress_class=EgressClass.CLOUD_ALLOWED_FULL,
+        cloud_egress_acknowledged=True,
+        allowed_provider_kinds=("openrouter",),
+        fallback_allowed=False,
+        max_cost_microusd=500,
+    )
 
-    with (
-        patch.object(settings, "default_model", "openrouter/anthropic/claude-sonnet-4"),
-        patch.object(settings, "llm_api_key", "primary-key"),
-        patch.object(settings, "llm_api_base", "https://openrouter.ai/api/v1"),
-        patch.object(settings, "local_model", "ollama/llama3.2"),
-        patch.object(settings, "local_llm_api_key", ""),
-        patch.object(settings, "local_llm_api_base", "http://localhost:11434/v1"),
-        patch.object(settings, "local_runtime_paths", "daily_briefing,evening_review,activity_digest,weekly_activity_review"),
-        patch.object(settings, "fallback_model", ""),
-        patch.object(settings, "fallback_models", ""),
-        patch("src.observer.manager.context_manager", mock_context_manager),
-        patch("src.observer.screen_repository.screen_observation_repo.get_daily_summary", AsyncMock(return_value=daily_summary)),
-        patch("src.observer.screen_repository.screen_observation_repo.get_weekly_summary", AsyncMock(return_value=weekly_summary)),
-        patch("src.memory.soul.read_soul", return_value="# Soul\nName: Hero"),
-        patch("src.scheduler.jobs.evening_review._count_messages_today", AsyncMock(return_value=(5, False))),
-        patch("src.scheduler.jobs.evening_review._get_completed_goals_today", AsyncMock(return_value=(["Close routing gap"], False))),
-        patch("src.memory.vector_store.search_with_status", return_value=([{"category": "memory", "text": "Prefer local summaries"}], False)),
-        patch("litellm.completion", side_effect=local_responses) as mock_completion,
-        patch("src.observer.delivery.deliver_or_queue", mock_deliver),
-    ):
-        await run_daily_briefing()
-        await run_evening_review()
-        await run_activity_digest()
-        await run_weekly_activity_review()
+    def _preflight(target: dict[str, Any], context: Any) -> tuple[Any, tuple[str, ...]]:
+        transport_targets.append(
+            {
+                "model_id": str(target.get("model_id") or ""),
+                "profile": str(target.get("profile") or ""),
+                "api_base": str(target.get("api_base") or ""),
+                "source": str(target.get("source") or ""),
+                "runtime_path": context.runtime_path,
+            }
+        )
+        if target.get("source") != "primary":
+            return types.SimpleNamespace(allowed=False, selected=None), ()
+        if target.get("profile") != "openrouter" or "openrouter.ai" not in str(target.get("api_base") or ""):
+            raise AssertionError("scheduled eval fixture received a non-OpenRouter primary target")
+        if tuple(context.allowed_provider_kinds) != ("openrouter",) or context.fallback_allowed:
+            raise AssertionError("scheduled eval fixture lost the governed OpenRouter policy")
+        return types.SimpleNamespace(allowed=True, selected=types.SimpleNamespace()), ("fixture-proof",)
 
-    assert mock_completion.call_count == 4
+    def _transport(**_kwargs: Any) -> tuple[Any, dict[str, Any]]:
+        if not transport_responses:
+            raise AssertionError("scheduled eval fixture made more transport calls than expected")
+        return transport_responses.pop(0), {"usage": {"prompt_tokens": 1, "completion_tokens": 1}}
+
+    def _route_event(**kwargs: Any) -> None:
+        route_events.append(kwargs)
+
+    with ExitStack() as stack:
+        for name, value in {
+            "default_model": "openrouter/anthropic/claude-sonnet-4",
+            "llm_api_key": "primary-key",
+            "openrouter_api_key": "primary-key",
+            "llm_api_base": "https://openrouter.ai/api/v1",
+            "openrouter_provider_only": True,
+            "openrouter_allowed_upstreams": "openai",
+            "openrouter_allow_fallbacks": False,
+            "openrouter_require_parameters": True,
+            "openrouter_data_collection": "deny",
+            "openrouter_zero_data_retention": True,
+            "local_model": "ollama/llama3.2",
+            "local_llm_api_key": "",
+            "local_llm_api_base": "http://localhost:11434/v1",
+            "local_runtime_paths": "daily_briefing,evening_review,activity_digest,weekly_activity_review",
+            "fallback_model": "",
+            "fallback_models": "",
+        }.items():
+            stack.enter_context(patch.object(settings, name, value))
+        for target, replacement in (
+            ("src.model_fabric.caller_context.effective_workload_policy", patch("src.model_fabric.caller_context.effective_workload_policy", return_value=policy)),
+            ("src.llm_runtime._governed_preflight_target", patch("src.llm_runtime._governed_preflight_target", side_effect=_preflight)),
+            ("src.llm_runtime._governed_openai_chat_completion", patch("src.llm_runtime._governed_openai_chat_completion", side_effect=_transport)),
+            ("src.llm_runtime._new_route_receipt_session", patch("src.llm_runtime._new_route_receipt_session", return_value=None)),
+            ("src.llm_runtime._log_llm_runtime_event_sync", patch("src.llm_runtime._log_llm_runtime_event_sync", side_effect=_route_event)),
+            ("src.observer.manager.context_manager", patch("src.observer.manager.context_manager", mock_context_manager)),
+            ("src.observer.screen_repository.screen_observation_repo.get_daily_summary", patch("src.observer.screen_repository.screen_observation_repo.get_daily_summary", AsyncMock(return_value=daily_summary))),
+            ("src.observer.screen_repository.screen_observation_repo.get_weekly_summary", patch("src.observer.screen_repository.screen_observation_repo.get_weekly_summary", AsyncMock(return_value=weekly_summary))),
+            ("src.memory.soul.read_soul", patch("src.memory.soul.read_soul", return_value="# Soul\nName: Hero")),
+            ("src.scheduler.jobs.evening_review._count_messages_today", patch("src.scheduler.jobs.evening_review._count_messages_today", AsyncMock(return_value=(5, False)))),
+            ("src.scheduler.jobs.evening_review._get_completed_goals_today", patch("src.scheduler.jobs.evening_review._get_completed_goals_today", AsyncMock(return_value=(["Close routing gap"], False)))),
+            (
+                "src.scheduler.jobs.daily_briefing.retrieve_hybrid_memory",
+                patch(
+                    "src.scheduler.jobs.daily_briefing.retrieve_hybrid_memory",
+                    new=AsyncMock(
+                        return_value=_make_hybrid_memory_fixture(("Prefer local summaries",)),
+                    ),
+                ),
+            ),
+            ("src.observer.delivery.deliver_or_queue", patch("src.observer.delivery.deliver_or_queue", mock_deliver)),
+        ):
+            stack.enter_context(replacement)
+        await _run_scheduler_eval_job("daily_briefing", run_daily_briefing)
+        await _run_scheduler_eval_job("evening_review", run_evening_review)
+        await _run_scheduler_eval_job("activity_digest", run_activity_digest)
+        await _run_scheduler_eval_job("weekly_activity_review", run_weekly_activity_review)
+
+    assert len(transport_targets) == 4
     routed_models = {
-        "daily_briefing": mock_completion.call_args_list[0].kwargs["model"],
-        "evening_review": mock_completion.call_args_list[1].kwargs["model"],
-        "activity_digest": mock_completion.call_args_list[2].kwargs["model"],
-        "weekly_activity_review": mock_completion.call_args_list[3].kwargs["model"],
+        target["runtime_path"]: target["model_id"]
+        for target in transport_targets
     }
     routed_api_bases = {
-        "daily_briefing": mock_completion.call_args_list[0].kwargs["api_base"],
-        "evening_review": mock_completion.call_args_list[1].kwargs["api_base"],
-        "activity_digest": mock_completion.call_args_list[2].kwargs["api_base"],
-        "weekly_activity_review": mock_completion.call_args_list[3].kwargs["api_base"],
+        target["runtime_path"]: target["api_base"]
+        for target in transport_targets
     }
-    assert set(routed_models.values()) == {"ollama/llama3.2"}
-    assert set(routed_api_bases.values()) == {"http://localhost:11434/v1"}
+    assert set(routed_models.values()) == {"openrouter/anthropic/claude-sonnet-4"}
+    assert set(routed_api_bases.values()) == {"https://openrouter.ai/api/v1"}
+    assert all(target["profile"] == "openrouter" for target in transport_targets)
     return {
-        "runtime_profile": "local",
+        "runtime_profile": "openrouter",
         "routed_models": routed_models,
         "routed_api_bases": routed_api_bases,
         "delivery_count": mock_deliver.await_count,
+        "fallback_forbidden": all(target["source"] == "primary" for target in transport_targets),
+        "route_event_count": len([event for event in route_events if event.get("event_type") == "llm_primary_success"]),
     }
 
 
@@ -6293,7 +6615,7 @@ async def _eval_strategist_tick_tool_audit() -> dict[str, Any]:
         ),
         patch.object(audit_repository, "log_event", mock_log_event),
     ):
-        await run_strategist_tick()
+        await _run_model_eval_job("strategist_tick_tool_audit", run_strategist_tick)
 
     tool_call = _find_audit_call(mock_log_event, event_type="tool_call", tool_name="get_goals")
     return {
@@ -6322,7 +6644,7 @@ async def _eval_strategist_tick_behavior() -> dict[str, Any]:
         patch("src.observer.delivery.deliver_or_queue", mock_deliver),
         patch.object(audit_repository, "log_event", mock_log_event),
     ):
-        await run_strategist_tick()
+        await _run_model_eval_job("strategist_tick_behavior", run_strategist_tick)
 
     delivered_message = mock_deliver.await_args.args[0]
     succeeded = _find_audit_call(
@@ -6416,7 +6738,10 @@ async def _eval_strategist_tick_learning_continuity_behavior() -> dict[str, Any]
             patch("src.scheduler.connection_manager.ws_manager", mock_ws_manager),
             patch.object(audit_repository, "log_event", mock_log_event),
         ):
-            await run_strategist_tick()
+            await _run_model_eval_job(
+                "strategist_tick_learning_continuity_behavior",
+                run_strategist_tick,
+            )
             continuity = await get_observer_continuity()
 
         scheduler_event = _find_audit_call(
@@ -6480,7 +6805,11 @@ async def _eval_session_consolidation_background_audit() -> dict[str, Any]:
             patch("src.memory.consolidator.add_memory", return_value="vec-memory-1"),
             patch.object(audit_repository, "log_event", mock_log_event),
         ):
-            await consolidate_session("eval-session")
+            await _run_model_eval_job(
+                "session_consolidation_background_audit",
+                lambda: consolidate_session("eval-session"),
+                session_id="eval-session",
+            )
 
     success = _find_audit_call(
         mock_log_event,
@@ -6523,7 +6852,11 @@ async def _eval_session_consolidation_behavior() -> dict[str, Any]:
             patch("src.memory.consolidator.update_profile_soul_section", AsyncMock()) as mock_update_soul,
             patch.object(audit_repository, "log_event", mock_log_event),
         ):
-            await consolidate_session("guardian-session")
+            await _run_model_eval_job(
+                "session_consolidation_behavior",
+                lambda: consolidate_session("guardian-session"),
+                session_id="guardian-session",
+            )
 
     success = _find_audit_call(
         mock_log_event,
@@ -7649,6 +7982,16 @@ async def _eval_memory_provider_writeback_behavior() -> dict[str, Any]:
 
         adapter = EvalMemoryProviderAdapter()
         register_memory_provider_adapter(adapter)
+        runtime_tokens = set_runtime_context(
+            "provider-writeback-session",
+            "high_risk",
+            trust_principal=TrustPrincipal(
+                principal_id="service:memory-provider-writeback-eval",
+                principal_type=PrincipalType.SERVICE,
+                grants=(AuthorityGrant.MODEL_INFERENCE,),
+                session_id="provider-writeback-session",
+            ),
+        )
         try:
             vector_ids = itertools.count(1)
             with (
@@ -7670,9 +8013,14 @@ async def _eval_memory_provider_writeback_behavior() -> dict[str, Any]:
                     AsyncMock(),
                 ) as mock_log_background_task_event,
             ):
-                await consolidate_session("provider-writeback-session")
+                await _run_model_eval_job(
+                    "memory_provider_writeback_behavior",
+                    lambda: consolidate_session("provider-writeback-session"),
+                    session_id="provider-writeback-session",
+                )
                 inventory = await list_memory_providers()
         finally:
+            reset_runtime_context(runtime_tokens)
             clear_memory_provider_adapters()
 
         consolidation_event = mock_log_background_task_event.await_args.kwargs["details"]
@@ -8736,7 +9084,11 @@ async def _eval_session_title_generation_background_audit() -> dict[str, Any]:
         patch("src.llm_runtime.completion_with_fallback", AsyncMock(return_value=llm_response)),
         patch.object(audit_repository, "log_event", mock_log_event),
     ):
-        title = await sm.generate_title("eval-session")
+        title = await _run_model_eval_job(
+            "session_title_generation_background_audit",
+            lambda: sm.generate_title("eval-session"),
+            session_id="eval-session",
+        )
 
     success = _find_audit_call(
         mock_log_event,
@@ -10190,18 +10542,36 @@ async def _eval_native_presence_notification_behavior() -> dict[str, Any]:
         patch.object(audit_repository, "log_event", mock_log_event),
     ):
         decision = await deliver_or_queue(message)
-        polled = await get_next_native_notification()
+        polled = await get_next_native_notification(
+            _authenticated_daemon_request("eval-daemon"),
+            worker_id="eval-daemon",
+        )
         notification = polled["notification"]
-        acked = await ack_native_notification(notification["id"])
+        await mark_native_notification_display_attempted(
+            notification["id"],
+            NotificationDisplayAttemptRequest(
+                worker_id="eval-daemon",
+                fencing_token=notification.get("fencing_token"),
+            ),
+            request=_authenticated_daemon_request("eval-daemon"),
+        )
+        acked = await ack_native_notification(
+            notification["id"],
+            NotificationAckRequest(
+                worker_id="eval-daemon",
+                fencing_token=notification.get("fencing_token"),
+            ),
+            request=_authenticated_daemon_request("eval-daemon"),
+        )
 
     delivered_event = _find_audit_call(
         mock_log_event,
-        event_type="observer_delivery_delivered",
+        event_type="observer_delivery_queued",
         tool_name="observer_delivery_gate",
     )
     integration_event = _find_audit_call(
         mock_log_event,
-        event_type="integration_succeeded",
+        event_type="integration_claimed",
         tool_name="observer_daemon:notifications",
     )
     ack_event = _find_audit_call(
@@ -10239,7 +10609,26 @@ async def _eval_native_desktop_shell_behavior() -> dict[str, Any]:
         initial_status = await daemon_status()
         queued = await enqueue_test_native_notification()
         queued_status = await daemon_status()
-        acked = await ack_native_notification(queued["id"])
+        polled = await get_next_native_notification(
+            _authenticated_daemon_request("eval-daemon"),
+            worker_id="eval-daemon",
+        )
+        await mark_native_notification_display_attempted(
+            queued["id"],
+            NotificationDisplayAttemptRequest(
+                worker_id="eval-daemon",
+                fencing_token=polled["notification"].get("fencing_token"),
+            ),
+            request=_authenticated_daemon_request("eval-daemon"),
+        )
+        acked = await ack_native_notification(
+            queued["id"],
+            NotificationAckRequest(
+                worker_id="eval-daemon",
+                fencing_token=polled["notification"].get("fencing_token"),
+            ),
+            request=_authenticated_daemon_request("eval-daemon"),
+        )
         acked_status = await daemon_status()
 
     queued_event = _find_audit_call(
@@ -10657,8 +11046,26 @@ async def _eval_desktop_notification_action_replay_behavior() -> dict[str, Any]:
         listed = await list_native_notifications()
         dismissed = await dismiss_native_notification(first["id"])
         second = await enqueue_test_native_notification()
-        polled = await get_next_native_notification()
-        acked = await ack_native_notification(second["id"])
+        polled = await get_next_native_notification(
+            _authenticated_daemon_request("eval-daemon"),
+            worker_id="eval-daemon",
+        )
+        await mark_native_notification_display_attempted(
+            second["id"],
+            NotificationDisplayAttemptRequest(
+                worker_id="eval-daemon",
+                fencing_token=polled["notification"].get("fencing_token"),
+            ),
+            request=_authenticated_daemon_request("eval-daemon"),
+        )
+        acked = await ack_native_notification(
+            second["id"],
+            NotificationAckRequest(
+                worker_id="eval-daemon",
+                fencing_token=polled["notification"].get("fencing_token"),
+            ),
+            request=_authenticated_daemon_request("eval-daemon"),
+        )
         final_status = await daemon_status()
 
     dismiss_event = _find_audit_call(
@@ -10673,7 +11080,7 @@ async def _eval_desktop_notification_action_replay_behavior() -> dict[str, Any]:
     )
     poll_event = _find_audit_call(
         mock_log_event,
-        event_type="integration_succeeded",
+        event_type="integration_claimed",
         tool_name="observer_daemon:notifications",
     )
     await native_notification_queue.clear()
@@ -10752,9 +11159,27 @@ async def _eval_guardian_feedback_loop() -> dict[str, Any]:
                 guardian_confidence="grounded",
                 session_id="feedback-current",
             )
-            polled = await get_next_native_notification()
+            polled = await get_next_native_notification(
+                _authenticated_daemon_request("eval-daemon"),
+                worker_id="eval-daemon",
+            )
             notification = polled["notification"]
-            acked = await ack_native_notification(notification["id"])
+            await mark_native_notification_display_attempted(
+                notification["id"],
+                NotificationDisplayAttemptRequest(
+                    worker_id="eval-daemon",
+                    fencing_token=notification.get("fencing_token"),
+                ),
+                request=_authenticated_daemon_request("eval-daemon"),
+            )
+            acked = await ack_native_notification(
+                notification["id"],
+                NotificationAckRequest(
+                    worker_id="eval-daemon",
+                    fencing_token=notification.get("fencing_token"),
+                ),
+                request=_authenticated_daemon_request("eval-daemon"),
+            )
             feedback = await post_intervention_feedback(
                 message.intervention_id or "",
                 InterventionFeedbackRequest(
@@ -10773,7 +11198,7 @@ async def _eval_guardian_feedback_loop() -> dict[str, Any]:
 
         delivery_event = _find_audit_call(
             mock_log_event,
-            event_type="observer_delivery_delivered",
+            event_type="observer_delivery_queued",
             tool_name="observer_delivery_gate",
         )
         ack_event = _find_audit_call(
@@ -12850,10 +13275,12 @@ async def _eval_approval_explainability_surface_behavior() -> dict[str, Any]:
 async def _eval_source_adapter_evidence_behavior() -> dict[str, Any]:
     import tempfile
 
-    from src.approval.runtime import reset_runtime_context, set_runtime_context
+    from src.approval.runtime import get_current_trust_principal, reset_runtime_context, set_runtime_context
     from src.api.capabilities import _build_capability_overview
     from src.browser.sessions import browser_session_runtime
     from src.extensions.source_operations import collect_source_evidence_bundle, list_source_adapter_inventory
+
+    observed_principals: list[TrustPrincipal | None] = []
 
     class _FakeTool:
         def __init__(self, name: str, payload: list[dict[str, Any]]) -> None:
@@ -12861,6 +13288,7 @@ async def _eval_source_adapter_evidence_behavior() -> dict[str, Any]:
             self._payload = payload
 
         def __call__(self, **kwargs):
+            observed_principals.append(get_current_trust_principal())
             return self._payload
 
     workspace_dir = tempfile.mkdtemp(prefix="seraph-source-adapters-")
@@ -12953,20 +13381,26 @@ async def _eval_source_adapter_evidence_behavior() -> dict[str, Any]:
         patch("src.extensions.source_operations.mcp_manager.get_server_tools", return_value=github_tools),
         patch(
             "src.extensions.source_operations.search_web_records",
-            return_value=(
-                [
-                    {
-                        "title": "Seraph roadmap",
-                        "href": "https://example.com/roadmap",
-                        "body": "Roadmap summary for the product.",
-                    }
-                ],
-                [],
+            side_effect=lambda *_args, **_kwargs: (
+                observed_principals.append(get_current_trust_principal())
+                or (
+                    [
+                        {
+                            "title": "Seraph roadmap",
+                            "href": "https://example.com/roadmap",
+                            "body": "Roadmap summary for the product.",
+                        }
+                    ],
+                    [],
+                )
             ),
         ),
         patch(
             "src.extensions.source_operations.browse_webpage",
-            return_value="Seraph can inspect public webpages and summarize them.",
+            side_effect=lambda *_args, **_kwargs: (
+                observed_principals.append(get_current_trust_principal())
+                or "Seraph can inspect public webpages and summarize them."
+            ),
         ),
         patch("src.api.capabilities.get_base_tools_and_active_skills", return_value=([], [], "disabled")),
         patch("src.api.capabilities.get_current_tool_policy_mode", return_value="safe"),
@@ -12983,34 +13417,56 @@ async def _eval_source_adapter_evidence_behavior() -> dict[str, Any]:
         ),
     ):
         adapter_inventory = list_source_adapter_inventory()
-        search_bundle = collect_source_evidence_bundle(
-            contract="source_discovery.read",
-            query="seraph roadmap",
-            max_results=1,
+        # Direct adapter eval calls use an explicit synthetic operator identity;
+        # production callers must obtain an authoritative principal from auth.
+        tokens = set_runtime_context(
+            "session-1",
+            "safe",
+            trust_principal=TrustPrincipal(
+                principal_id="operator:source-evidence-eval",
+                principal_type=PrincipalType.OPERATOR,
+                grants=(AuthorityGrant.CAPABILITY_EXECUTE,),
+                session_id="session-1",
+            ),
         )
-        page_bundle = collect_source_evidence_bundle(
-            contract="webpage.read",
-            url="https://example.com/about",
-        )
-        tokens = set_runtime_context("session-1", "safe")
         try:
+            search_bundle = collect_source_evidence_bundle(
+                contract="source_discovery.read",
+                query="seraph roadmap",
+                max_results=1,
+            )
+            page_bundle = collect_source_evidence_bundle(
+                contract="webpage.read",
+                url="https://example.com/about",
+            )
             session_bundle = collect_source_evidence_bundle(
                 contract="webpage.read",
                 source="browser_session",
                 owner_session_id="session-1",
                 ref=str(session_payload["latest_ref"]),
             )
+            github_bundle = collect_source_evidence_bundle(
+                contract="work_items.read",
+                source="github-managed",
+                query="is:issue source adapter",
+            )
         finally:
             reset_runtime_context(tokens)
-        github_bundle = collect_source_evidence_bundle(
-            contract="work_items.read",
-            source="github-managed",
-            query="is:issue source adapter",
-        )
         overview = _build_capability_overview()
 
     browser_session_runtime.reset_for_tests()
     github_adapter = next(item for item in adapter_inventory["adapters"] if item["name"] == "github-managed")
+    authority_bound = (
+        len(observed_principals) == 3
+        and all(
+            principal is not None
+            and principal.principal_id == "operator:source-evidence-eval"
+            and principal.principal_type is PrincipalType.OPERATOR
+            and principal.session_id == "session-1"
+            and AuthorityGrant.CAPABILITY_EXECUTE in principal.grants
+            for principal in observed_principals
+        )
+    )
     return {
         "adapter_count": adapter_inventory["summary"]["adapter_count"],
         "ready_adapter_count": adapter_inventory["summary"]["ready_adapter_count"],
@@ -13031,6 +13487,8 @@ async def _eval_source_adapter_evidence_behavior() -> dict[str, Any]:
         "github_runtime_server": github_bundle["items"][0]["metadata"]["runtime_server"],
         "overview_source_adapters_total": overview["summary"]["source_adapters_total"],
         "overview_source_adapters_ready": overview["summary"]["source_adapters_ready"],
+        "authority_bound": authority_bound,
+        "context_reset": get_current_trust_principal() is None,
     }
 
 
@@ -25139,31 +25597,51 @@ async def _eval_mcp_test_api_audit() -> dict[str, Any]:
     mock_client = MagicMock()
     mock_client.get_tools.return_value = [mock_tool]
     mock_log_event = AsyncMock()
+    observed_principals: list[TrustPrincipal | None] = []
+    credential_resolution_results = iter(
+        [
+            ({}, ["GITHUB_TOKEN"], [], ["env"]),
+            ({"Authorization": "Bearer ghp_test"}, [], [], ["env"]),
+            ({"Authorization": "Bearer ghp_test"}, [], [], ["env"]),
+        ]
+    )
+
+    def resolve_headers(_raw_headers):
+        observed_principals.append(get_current_trust_principal())
+        return next(credential_resolution_results)
 
     with (
+        patch.object(settings, "deployment_environment", "test"),
+        patch.object(settings, "operator_auth_allow_unauthenticated_tests", True),
         patch("src.api.mcp.mcp_manager") as mock_mgr,
         patch.object(audit_repository, "log_event", mock_log_event),
     ):
+        test_request = Request(
+            {
+                "type": "http",
+                "method": "POST",
+                "path": "/api/mcp/servers/gh/test",
+                "headers": [],
+                "query_string": b"",
+                "state": {"operator": test_bypass_operator()},
+            }
+        )
         mock_mgr._config = {
             "gh": {
                 "url": "http://gh/mcp",
                 "headers": {"Authorization": "Bearer ${GITHUB_TOKEN}"},
             }
         }
-        mock_mgr.resolve_headers.side_effect = [
-            ({}, ["GITHUB_TOKEN"], [], ["env"]),
-            ({"Authorization": "Bearer ghp_test"}, [], [], ["env"]),
-            ({"Authorization": "Bearer ghp_test"}, [], [], ["env"]),
-        ]
+        mock_mgr.resolve_headers.side_effect = resolve_headers
 
-        auth_required = await test_mcp_server("gh")
+        auth_required = await test_mcp_server("gh", test_request)
 
         with patch("smolagents.MCPClient", return_value=mock_client):
-            success = await test_mcp_server("gh")
+            success = await test_mcp_server("gh", test_request)
 
         with patch("smolagents.MCPClient", side_effect=ConnectionError("refused")):
             try:
-                await test_mcp_server("gh")
+                await test_mcp_server("gh", test_request)
             except HTTPException as exc:
                 failure_status_code = exc.status_code
             else:  # pragma: no cover - defensive guard
@@ -25184,6 +25662,20 @@ async def _eval_mcp_test_api_audit() -> dict[str, Any]:
         event_type="integration_failed",
         tool_name="mcp_test:gh",
     )
+    operator = test_request.state.operator
+    authority_bound = (
+        len(observed_principals) == 3
+        and all(
+            principal is not None
+            and principal.principal_id == operator.principal.principal_id
+            and principal.principal_type is PrincipalType.OPERATOR
+            and principal.session_id == operator.session_id
+            and AuthorityGrant.CAPABILITY_EXECUTE.value
+            in {str(getattr(grant, "value", grant)) for grant in principal.grants}
+            for principal in observed_principals
+        )
+    )
+    audit_payload = str(mock_log_event.call_args_list)
     return {
         "auth_required_status": auth_required["status"],
         "missing_env_vars": auth_required_event["details"]["missing_env_vars"],
@@ -25194,15 +25686,24 @@ async def _eval_mcp_test_api_audit() -> dict[str, Any]:
         "failure_status_code": failure_status_code,
         "failure_status": failed_event["details"]["status"],
         "failure_error": failed_event["details"]["error"],
+        "route_reached": len(observed_principals) == 3,
+        "authority_bound": authority_bound,
+        "receipts_redacted": "ghp_test" not in audit_payload,
     }
 
 
 async def _eval_skills_api_audit() -> dict[str, Any]:
     mock_log_event = AsyncMock()
     mock_skill_manager = MagicMock()
-    mock_skill_manager.disable.return_value = True
-    mock_skill_manager.enable.return_value = False
-    mock_skill_manager.reload.return_value = [
+    observed_principals: list[TrustPrincipal | None] = []
+
+    def observe_manager_call(result):
+        observed_principals.append(get_current_trust_principal())
+        return result
+
+    mock_skill_manager.disable.side_effect = lambda _name: observe_manager_call(True)
+    mock_skill_manager.enable.side_effect = lambda _name: observe_manager_call(False)
+    mock_skill_manager.reload.side_effect = lambda: observe_manager_call([
         {
             "name": "test-skill",
             "description": "A test skill",
@@ -25219,20 +25720,44 @@ async def _eval_skills_api_audit() -> dict[str, Any]:
             "enabled": True,
             "file_path": "/tmp/skills/simple-skill.md",
         },
-    ]
+    ])
 
     with (
+        patch.object(settings, "deployment_environment", "test"),
+        patch.object(settings, "operator_auth_allow_unauthenticated_tests", True),
         patch("src.api.skills.skill_manager", mock_skill_manager),
         patch.object(audit_repository, "log_event", mock_log_event),
     ):
-        updated = await update_skill_api("test-skill", UpdateSkillRequest(enabled=False))
+        operator = test_bypass_operator()
+
+        def build_request(path: str, method: str) -> Request:
+            return Request(
+                {
+                    "type": "http",
+                    "method": method,
+                    "path": path,
+                    "headers": [],
+                    "query_string": b"",
+                    "state": {"operator": operator},
+                }
+            )
+
+        updated = await update_skill_api(
+            "test-skill",
+            UpdateSkillRequest(enabled=False),
+            build_request("/api/skills/test-skill", "PUT"),
+        )
         try:
-            await update_skill_api("missing-skill", UpdateSkillRequest(enabled=True))
+            await update_skill_api(
+                "missing-skill",
+                UpdateSkillRequest(enabled=True),
+                build_request("/api/skills/missing-skill", "PUT"),
+            )
         except HTTPException as exc:
             missing_status_code = exc.status_code
         else:  # pragma: no cover - defensive guard
             raise AssertionError("Expected missing skill update to raise HTTPException")
-        reloaded = await reload_skill_api()
+        reloaded = await reload_skill_api(build_request("/api/skills/reload", "POST"))
 
     updated_event = _find_audit_call(
         mock_log_event,
@@ -25249,6 +25774,18 @@ async def _eval_skills_api_audit() -> dict[str, Any]:
         event_type="integration_succeeded",
         tool_name="skills:reload",
     )
+    authority_bound = (
+        len(observed_principals) == 3
+        and all(
+            principal is not None
+            and principal.principal_id == operator.principal.principal_id
+            and principal.principal_type is PrincipalType.OPERATOR
+            and principal.session_id == operator.session_id
+            and AuthorityGrant.CAPABILITY_EXECUTE.value
+            in {str(getattr(grant, "value", grant)) for grant in principal.grants}
+            for principal in observed_principals
+        )
+    )
     return {
         "updated_status": updated["status"],
         "updated_enabled": updated_event["details"]["enabled"],
@@ -25257,6 +25794,9 @@ async def _eval_skills_api_audit() -> dict[str, Any]:
         "reload_count": reloaded["count"],
         "reload_enabled_count": reloaded_event["details"]["enabled_count"],
         "reload_skill_names": reloaded_event["details"]["skill_names"],
+        "route_reached": len(observed_principals) == 3,
+        "authority_bound": authority_bound,
+        "context_reset": get_current_trust_principal() is None,
     }
 
 
@@ -27570,13 +28110,13 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
     EvalScenario(
         name="embedding_runtime_audit",
         category="observability",
-        description="The local embedding model boundary records load success and encode failures without live dependencies.",
+        description="The OpenRouter embedding boundary records governed load success and provider failures without live dependencies.",
         runner=_eval_embedding_runtime_audit,
     ),
     EvalScenario(
         name="vector_store_runtime_audit",
         category="observability",
-        description="The local vector-store boundary records add success, search empty-result, and storage failures without live dependencies.",
+        description="The local canonical vector-store boundary records namespaced add success, search empty-result, and storage failures without live dependencies.",
         runner=_eval_vector_store_runtime_audit,
     ),
     EvalScenario(
@@ -27600,19 +28140,19 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
     EvalScenario(
         name="runtime_model_overrides",
         category="runtime",
-        description="Runtime paths can override their primary model selection without changing the global default or local-routing baseline.",
+        description="Canonical runtime paths ignore persisted model overrides and keep the governed OpenRouter model identity.",
         runner=_eval_runtime_model_overrides,
     ),
     EvalScenario(
         name="runtime_fallback_overrides",
         category="runtime",
-        description="Runtime paths can override their ordered fallback chain without changing the global fallback baseline.",
+        description="Canonical runtime paths reject persisted provider fallback chains and keep the active no-fallback boundary.",
         runner=_eval_runtime_fallback_overrides,
     ),
     EvalScenario(
         name="runtime_profile_preferences",
         category="runtime",
-        description="Runtime paths can prefer an ordered local-vs-default profile chain before explicit fallback models.",
+        description="Canonical runtime paths ignore persisted local-vs-default preferences and resolve to the OpenRouter profile.",
         runner=_eval_runtime_profile_preferences,
     ),
     EvalScenario(
@@ -27624,19 +28164,19 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
     EvalScenario(
         name="provider_policy_capabilities",
         category="runtime",
-        description="Runtime-path policy intents can prefer local-first primary routing and capability-matched fallback targets.",
+        description="Legacy capability preferences cannot move canonical routes away from the OpenRouter boundary.",
         runner=_eval_provider_policy_capabilities,
     ),
     EvalScenario(
         name="provider_policy_scoring",
         category="runtime",
-        description="Runtime-path policy scoring can rank targets by weighted capability value instead of only intent order.",
+        description="Legacy weighted provider scoring cannot select a non-OpenRouter or fallback target on canonical routes.",
         runner=_eval_provider_policy_scoring,
     ),
     EvalScenario(
         name="provider_policy_safeguards",
         category="runtime",
-        description="Runtime-path safeguards can require specific capabilities and steer away from targets that violate cost or latency guardrails when compliant targets exist.",
+        description="Canonical route safeguards retain the OpenRouter primary and forbid provider fallback when legacy guardrails conflict.",
         runner=_eval_provider_policy_safeguards,
     ),
     EvalScenario(
@@ -29344,7 +29884,7 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
     EvalScenario(
         name="daily_briefing_fallback",
         category="proactive",
-        description="Daily briefing survives a primary provider failure and still delivers via fallback.",
+        description="Daily briefing fails closed when the governed OpenRouter route has no compliant target and does not deliver a misleading fallback.",
         runner=_eval_daily_briefing_fallback,
     ),
     EvalScenario(
@@ -29386,7 +29926,7 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
     EvalScenario(
         name="scheduled_local_runtime_profile",
         category="runtime",
-        description="All current scheduled completion-based jobs can route through the first-class local runtime profile.",
+        description="All current scheduled completion-based jobs use the governed OpenRouter profile and forbid local runtime fallback.",
         runner=_eval_scheduled_local_runtime_profile,
     ),
     EvalScenario(

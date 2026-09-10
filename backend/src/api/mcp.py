@@ -5,10 +5,14 @@ from __future__ import annotations
 import re
 from urllib.parse import urlparse
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
+from src.api.capabilities import _require_authenticated_capability_operator
+from src.approval.runtime import reset_runtime_context, set_runtime_context
+from src.auth.service import bind_operator_principal
 from src.audit.runtime import log_integration_event
+from src.observer.manager import context_manager
 from src.tools.mcp_manager import MCPManager, mcp_manager
 
 router = APIRouter()
@@ -160,180 +164,230 @@ async def validate_server(req: AddServerRequest):
 
 
 @router.post("/mcp/servers", status_code=201)
-async def add_server(req: AddServerRequest):
+async def add_server(req: AddServerRequest, request: Request):
     """Add a new MCP server."""
-    if req.name in mcp_manager._config:
-        raise HTTPException(status_code=409, detail=f"Server '{req.name}' already exists")
-    header_issues = _validate_header_credentials(req.headers)
-    endpoint_issues = _validate_mcp_endpoint_url(req.url)
-    validation_issues = [*header_issues, *endpoint_issues]
-    if validation_issues:
-        raise HTTPException(status_code=400, detail=" ".join(validation_issues))
-    mcp_manager.add_server(
-        name=req.name,
-        url=req.url,
-        description=req.description,
-        enabled=req.enabled,
-        headers=req.headers,
-        auth_hint=req.auth_hint,
+    operator = _require_authenticated_capability_operator(request)
+    active_session_id = operator.session_id
+    tokens = set_runtime_context(
+        active_session_id,
+        context_manager.get_context().approval_mode,
+        trust_principal=bind_operator_principal(operator, active_session_id),
     )
-    return {"status": "created", "name": req.name}
+    try:
+        if req.name in mcp_manager._config:
+            raise HTTPException(status_code=409, detail=f"Server '{req.name}' already exists")
+        header_issues = _validate_header_credentials(req.headers)
+        endpoint_issues = _validate_mcp_endpoint_url(req.url)
+        validation_issues = [*header_issues, *endpoint_issues]
+        if validation_issues:
+            raise HTTPException(status_code=400, detail=" ".join(validation_issues))
+        mcp_manager.add_server(
+            name=req.name,
+            url=req.url,
+            description=req.description,
+            enabled=req.enabled,
+            headers=req.headers,
+            auth_hint=req.auth_hint,
+        )
+        return {"status": "created", "name": req.name}
+    finally:
+        reset_runtime_context(tokens)
 
 
 @router.put("/mcp/servers/{name}")
-async def update_server(name: str, req: UpdateServerRequest):
+async def update_server(name: str, req: UpdateServerRequest, request: Request):
     """Update an MCP server (enable/disable, etc.)."""
-    config = mcp_manager._config.get(name)
-    if isinstance(config, dict) and config.get("source") == "extension":
-        raise HTTPException(status_code=409, detail=_packaged_server_detail(name, config, action="updates"))
-    updates = req.model_dump(exclude_none=True)
-    header_issues = _validate_header_credentials(
-        updates.get("headers") if isinstance(updates.get("headers"), dict) else updates.get("headers")
+    operator = _require_authenticated_capability_operator(request)
+    active_session_id = operator.session_id
+    tokens = set_runtime_context(
+        active_session_id,
+        context_manager.get_context().approval_mode,
+        trust_principal=bind_operator_principal(operator, active_session_id),
     )
-    endpoint_issues = _validate_mcp_endpoint_url(str(updates.get("url") or ""))
-    validation_issues = [*header_issues, *endpoint_issues]
-    if validation_issues:
-        raise HTTPException(status_code=400, detail=" ".join(validation_issues))
-    if not mcp_manager.update_server(name, **updates):
-        raise HTTPException(status_code=404, detail=f"Server '{name}' not found")
-    return {"status": "updated", "name": name}
+    try:
+        config = mcp_manager._config.get(name)
+        if isinstance(config, dict) and config.get("source") == "extension":
+            raise HTTPException(status_code=409, detail=_packaged_server_detail(name, config, action="updates"))
+        updates = req.model_dump(exclude_none=True)
+        header_issues = _validate_header_credentials(
+            updates.get("headers") if isinstance(updates.get("headers"), dict) else updates.get("headers")
+        )
+        endpoint_issues = _validate_mcp_endpoint_url(str(updates.get("url") or ""))
+        validation_issues = [*header_issues, *endpoint_issues]
+        if validation_issues:
+            raise HTTPException(status_code=400, detail=" ".join(validation_issues))
+        if not mcp_manager.update_server(name, **updates):
+            raise HTTPException(status_code=404, detail=f"Server '{name}' not found")
+        return {"status": "updated", "name": name}
+    finally:
+        reset_runtime_context(tokens)
 
 
 @router.delete("/mcp/servers/{name}")
-async def remove_server(name: str):
+async def remove_server(name: str, request: Request):
     """Remove an MCP server from config."""
-    config = mcp_manager._config.get(name)
-    if isinstance(config, dict) and config.get("source") == "extension":
-        raise HTTPException(status_code=409, detail=_packaged_server_detail(name, config, action="removal"))
-    if not mcp_manager.remove_server(name):
-        raise HTTPException(status_code=404, detail=f"Server '{name}' not found")
-    return {"status": "removed", "name": name}
+    operator = _require_authenticated_capability_operator(request)
+    active_session_id = operator.session_id
+    tokens = set_runtime_context(
+        active_session_id,
+        context_manager.get_context().approval_mode,
+        trust_principal=bind_operator_principal(operator, active_session_id),
+    )
+    try:
+        config = mcp_manager._config.get(name)
+        if isinstance(config, dict) and config.get("source") == "extension":
+            raise HTTPException(status_code=409, detail=_packaged_server_detail(name, config, action="removal"))
+        if not mcp_manager.remove_server(name):
+            raise HTTPException(status_code=404, detail=f"Server '{name}' not found")
+        return {"status": "removed", "name": name}
+    finally:
+        reset_runtime_context(tokens)
 
 
 @router.post("/mcp/servers/{name}/token")
-async def set_server_token(name: str, req: SetTokenRequest):
+async def set_server_token(name: str, req: SetTokenRequest, request: Request):
     """Set auth token for an MCP server. Reconnects if enabled."""
-    config = mcp_manager._config.get(name)
-    if isinstance(config, dict) and config.get("source") == "extension":
-        raise HTTPException(status_code=409, detail=_packaged_server_detail(name, config, action="token updates"))
-    if not mcp_manager.set_token(name, req.token):
-        raise HTTPException(status_code=404, detail=f"Server '{name}' not found")
-    configs = mcp_manager.get_config()
-    entry = next((c for c in configs if c["name"] == name), None)
-    return {"status": "updated", "server": entry}
+    operator = _require_authenticated_capability_operator(request)
+    active_session_id = operator.session_id
+    tokens = set_runtime_context(
+        active_session_id,
+        context_manager.get_context().approval_mode,
+        trust_principal=bind_operator_principal(operator, active_session_id),
+    )
+    try:
+        config = mcp_manager._config.get(name)
+        if isinstance(config, dict) and config.get("source") == "extension":
+            raise HTTPException(status_code=409, detail=_packaged_server_detail(name, config, action="token updates"))
+        if not mcp_manager.set_token(name, req.token):
+            raise HTTPException(status_code=404, detail=f"Server '{name}' not found")
+        configs = mcp_manager.get_config()
+        entry = next((c for c in configs if c["name"] == name), None)
+        return {"status": "updated", "server": entry}
+    finally:
+        reset_runtime_context(tokens)
 
 
 @router.post("/mcp/servers/{name}/test")
-async def test_server(name: str):
+async def test_server(name: str, request: Request):
     """Test connection to an MCP server. Connects, lists tools, disconnects."""
-    config = mcp_manager._config.get(name)
-    if not config:
-        raise HTTPException(status_code=404, detail=f"Server '{name}' not found")
-    if config.get("source") == "extension":
-        raise HTTPException(status_code=409, detail=_packaged_server_detail(name, config, action="tests"))
-    url = config["url"]
-    endpoint_issues = _validate_mcp_endpoint_url(str(url))
-    if endpoint_issues:
-        await log_integration_event(
-            integration_type="mcp_test",
-            name=name,
-            outcome="blocked",
-            details={
-                "url": url,
-                "status": "site_policy_blocked",
-                "issues": endpoint_issues,
-            },
-        )
-        raise HTTPException(status_code=400, detail=" ".join(endpoint_issues))
-
-    raw_headers = config.get("headers")
+    operator = _require_authenticated_capability_operator(request)
+    active_session_id = operator.session_id
+    tokens = set_runtime_context(
+        active_session_id,
+        context_manager.get_context().approval_mode,
+        trust_principal=bind_operator_principal(operator, active_session_id),
+    )
     try:
-        resolved_headers, missing_vars, missing_vault_keys, credential_sources = mcp_manager.resolve_headers(raw_headers)
-    except Exception as exc:
-        await log_integration_event(
-            integration_type="mcp_test",
-            name=name,
-            outcome="auth_required",
-            details={
-                "url": url,
-                "status": "credential_resolution_failed",
-                "error": str(exc),
-            },
-        )
-        return {
-            "status": "auth_required",
-            "message": f"Credential resolution failed: {exc}",
-            "missing_env_vars": [],
-            "missing_vault_keys": [],
-        }
-    if missing_vars or missing_vault_keys:
-        message_parts: list[str] = []
-        if missing_vars:
-            message_parts.append(f"Missing environment variables: {', '.join(missing_vars)}")
-        if missing_vault_keys:
-            message_parts.append(f"Missing vault secrets: {', '.join(missing_vault_keys)}")
-        await log_integration_event(
-            integration_type="mcp_test",
-            name=name,
-            outcome="auth_required",
-            details={
-                "url": url,
+        config = mcp_manager._config.get(name)
+        if not config:
+            raise HTTPException(status_code=404, detail=f"Server '{name}' not found")
+        if config.get("source") == "extension":
+            raise HTTPException(status_code=409, detail=_packaged_server_detail(name, config, action="tests"))
+        url = config["url"]
+        endpoint_issues = _validate_mcp_endpoint_url(str(url))
+        if endpoint_issues:
+            await log_integration_event(
+                integration_type="mcp_test",
+                name=name,
+                outcome="blocked",
+                details={
+                    "url": url,
+                    "status": "site_policy_blocked",
+                    "issues": endpoint_issues,
+                },
+            )
+            raise HTTPException(status_code=400, detail=" ".join(endpoint_issues))
+
+        raw_headers = config.get("headers")
+        try:
+            resolved_headers, missing_vars, missing_vault_keys, credential_sources = mcp_manager.resolve_headers(raw_headers)
+        except Exception as exc:
+            await log_integration_event(
+                integration_type="mcp_test",
+                name=name,
+                outcome="auth_required",
+                details={
+                    "url": url,
+                    "status": "credential_resolution_failed",
+                    "error": str(exc),
+                },
+            )
+            return {
+                "status": "auth_required",
+                "message": f"Credential resolution failed: {exc}",
+                "missing_env_vars": [],
+                "missing_vault_keys": [],
+            }
+        if missing_vars or missing_vault_keys:
+            message_parts: list[str] = []
+            if missing_vars:
+                message_parts.append(f"Missing environment variables: {', '.join(missing_vars)}")
+            if missing_vault_keys:
+                message_parts.append(f"Missing vault secrets: {', '.join(missing_vault_keys)}")
+            await log_integration_event(
+                integration_type="mcp_test",
+                name=name,
+                outcome="auth_required",
+                details={
+                    "url": url,
+                    "missing_env_vars": missing_vars,
+                    "missing_vault_keys": missing_vault_keys,
+                    "credential_sources": credential_sources,
+                },
+            )
+            return {
+                "status": "auth_required",
+                "message": "; ".join(message_parts),
                 "missing_env_vars": missing_vars,
                 "missing_vault_keys": missing_vault_keys,
-                "credential_sources": credential_sources,
-            },
-        )
-        return {
-            "status": "auth_required",
-            "message": "; ".join(message_parts),
-            "missing_env_vars": missing_vars,
-            "missing_vault_keys": missing_vault_keys,
-        }
+            }
 
-    try:
-        from smolagents import MCPClient
-        params: dict = {"url": url, "transport": "streamable-http"}
-        if resolved_headers:
-            params["headers"] = resolved_headers
-        client = MCPClient(params, structured_output=False)
-        tools = client.get_tools()
-        tool_names = [t.name for t in tools]
-        client.disconnect()
-        await log_integration_event(
-            integration_type="mcp_test",
-            name=name,
-            outcome="succeeded",
-            details={
-                "url": url,
-                "tool_count": len(tools),
-                "tool_names": tool_names,
-                "used_headers": bool(resolved_headers),
-                "credential_sources": credential_sources,
-            },
-        )
-        return {"status": "ok", "tool_count": len(tools), "tools": tool_names}
-    except Exception as e:
-        exc_str = str(e).lower()
-        if any(kw in exc_str for kw in ("401", "403", "unauthorized", "forbidden")):
+        try:
+            from smolagents import MCPClient
+            params: dict = {"url": url, "transport": "streamable-http"}
+            if resolved_headers:
+                params["headers"] = resolved_headers
+            client = MCPClient(params, structured_output=False)
+            tools = client.get_tools()
+            tool_names = [t.name for t in tools]
+            client.disconnect()
+            await log_integration_event(
+                integration_type="mcp_test",
+                name=name,
+                outcome="succeeded",
+                details={
+                    "url": url,
+                    "tool_count": len(tools),
+                    "tool_names": tool_names,
+                    "used_headers": bool(resolved_headers),
+                    "credential_sources": credential_sources,
+                },
+            )
+            return {"status": "ok", "tool_count": len(tools), "tools": tool_names}
+        except Exception as e:
+            exc_str = str(e).lower()
+            if any(kw in exc_str for kw in ("401", "403", "unauthorized", "forbidden")):
+                await log_integration_event(
+                    integration_type="mcp_test",
+                    name=name,
+                    outcome="failed",
+                    details={
+                        "url": url,
+                        "status": "auth_failed",
+                        "error": str(e),
+                    },
+                )
+                return {"status": "auth_failed", "message": f"Authentication failed: {e}"}
             await log_integration_event(
                 integration_type="mcp_test",
                 name=name,
                 outcome="failed",
                 details={
                     "url": url,
-                    "status": "auth_failed",
+                    "status": "connection_failed",
                     "error": str(e),
                 },
             )
-            return {"status": "auth_failed", "message": f"Authentication failed: {e}"}
-        await log_integration_event(
-            integration_type="mcp_test",
-            name=name,
-            outcome="failed",
-            details={
-                "url": url,
-                "status": "connection_failed",
-                "error": str(e),
-            },
-        )
-        raise HTTPException(status_code=502, detail=f"Connection failed: {e}")
+            raise HTTPException(status_code=502, detail=f"Connection failed: {e}")
+    finally:
+        reset_runtime_context(tokens)

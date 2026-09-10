@@ -111,6 +111,7 @@ export interface WorkflowRunRecord {
   checkpointContextAvailable?: boolean;
   checkpointCandidates?: Array<Record<string, unknown>>;
   resumePlan?: Record<string, unknown> | null;
+  actionHandle?: Record<string, unknown> | null;
   anticipatory_plan?: {
     risk_level?: string | null;
     summary?: string | null;

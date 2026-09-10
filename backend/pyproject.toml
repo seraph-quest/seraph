@@ -20,7 +20,6 @@ dependencies = [
     "aiosqlite>=0.21.0",
     "alembic>=1.14.0",
     "lancedb>=0.17.0",
-    "sentence-transformers>=3.4.0",
     # Phase 2 — Capable Executor
     "httpx>=0.28.0",
     "playwright>=1.49.0",
@@ -49,11 +48,3 @@ dev = [
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 addopts = "--cov=src --cov-report=term-missing"
-
-[tool.uv.sources]
-torch = { index = "pytorch-cpu" }
-
-[[tool.uv.index]]
-name = "pytorch-cpu"
-url = "https://download.pytorch.org/whl/cpu"
-explicit = true

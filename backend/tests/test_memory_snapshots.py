@@ -1,3 +1,6 @@
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
+
 import pytest
 
 from src.agent.session import SessionManager
@@ -5,6 +8,7 @@ from src.db.models import MemoryKind, MemorySnapshotKind
 from src.guardian.feedback import guardian_feedback_repository
 from src.memory.repository import memory_repository
 from src.memory.snapshots import (
+    _SESSION_BOUNDED_SNAPSHOT_CACHE,
     get_or_create_bounded_guardian_snapshot,
     refresh_bounded_guardian_snapshot,
 )
@@ -89,6 +93,45 @@ async def test_get_or_create_bounded_guardian_snapshot_reuses_stored_snapshot(as
     assert "Identity: Builder" in content
     assert "Atlas launch" in content
     assert "Stale snapshot" not in content
+
+
+@pytest.mark.asyncio
+async def test_session_snapshot_cache_rechecks_tombstone_revision_before_returning():
+    _SESSION_BOUNDED_SNAPSHOT_CACHE["session-revision"] = ("stale secret", "old-revision")
+    current = SimpleNamespace(
+        content="fresh canonical snapshot",
+        source_hash="fresh-hash",
+        canonical_tombstone_revision="new-revision",
+    )
+    with (
+        patch(
+            "src.memory.snapshots._reconcile_snapshot_memory",
+            new=AsyncMock(return_value=(True, {"status": "ready"})),
+        ),
+        patch(
+            "src.memory.snapshots._snapshot_tombstone_revision",
+            new=AsyncMock(return_value="new-revision"),
+        ),
+        patch(
+            "src.memory.snapshots.render_bounded_guardian_snapshot",
+            new=AsyncMock(return_value=("fresh canonical snapshot", "fresh-hash")),
+        ),
+        patch.object(
+            memory_repository,
+            "get_snapshot",
+            new=AsyncMock(return_value=current),
+        ),
+    ):
+        content = await get_or_create_bounded_guardian_snapshot(
+            soul_context="## Identity\nOperator",
+            session_id="session-revision",
+        )
+
+    assert content == "fresh canonical snapshot"
+    assert _SESSION_BOUNDED_SNAPSHOT_CACHE["session-revision"] == (
+        "fresh canonical snapshot",
+        "new-revision",
+    )
 
 
 @pytest.mark.asyncio

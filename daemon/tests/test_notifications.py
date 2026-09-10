@@ -17,7 +17,7 @@ httpx = pytest.importorskip("httpx")
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from seraph_daemon import ack_notification, fetch_next_notification, poll_loop
+from seraph_daemon import ack_notification, fail_notification, fetch_next_notification, poll_loop
 
 
 class TestNotificationPolling:
@@ -26,7 +26,7 @@ class TestNotificationPolling:
         mock_client = AsyncMock()
         mock_client.get = AsyncMock(side_effect=httpx.ConnectError("refused"))
 
-        result = await fetch_next_notification(mock_client, "http://localhost:8004")
+        result = await fetch_next_notification(mock_client, "http://localhost:8004", "test-daemon")
 
         assert result is None
 
@@ -44,7 +44,7 @@ class TestNotificationPolling:
         mock_client = AsyncMock()
         mock_client.get = AsyncMock(return_value=response)
 
-        result = await fetch_next_notification(mock_client, "http://localhost:8004")
+        result = await fetch_next_notification(mock_client, "http://localhost:8004", "test-daemon")
 
         assert result == {
             "id": "notif-1",
@@ -60,9 +60,39 @@ class TestNotificationPolling:
         mock_client = AsyncMock()
         mock_client.post = AsyncMock(return_value=response)
 
-        acked = await ack_notification(mock_client, "http://localhost:8004", "notif-1")
+        acked = await ack_notification(
+            mock_client,
+            "http://localhost:8004",
+            "notif-1",
+            fencing_token=7,
+            worker_id="test-daemon",
+        )
 
         assert acked is True
+
+    @pytest.mark.asyncio
+    async def test_fail_notification_sends_reason_and_fence(self):
+        response = MagicMock()
+        response.status_code = 200
+        response.json.return_value = {"failed": True}
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(return_value=response)
+
+        failed = await fail_notification(
+            mock_client,
+            "http://localhost:8004",
+            "notif-1",
+            reason="display unavailable",
+            fencing_token=7,
+            worker_id="test-daemon",
+        )
+
+        assert failed is True
+        mock_client.post.assert_awaited_once_with(
+            "http://localhost:8004/api/observer/notifications/notif-1/fail",
+            json={"reason": "display unavailable", "worker_id": "test-daemon", "fencing_token": 7},
+            headers={"X-Seraph-Daemon-Id": "test-daemon"},
+        )
 
     @pytest.mark.asyncio
     async def test_poll_loop_displays_and_acks_notification(self):
@@ -70,6 +100,7 @@ class TestNotificationPolling:
             "id": "notif-1",
             "title": "Seraph alert",
             "body": "Native path online",
+            "fencing_token": 1,
         }
         context_posts: list[dict] = []
         ack_posts: list[str] = []
@@ -88,7 +119,11 @@ class TestNotificationPolling:
                 ack_posts.append(url)
                 response = MagicMock()
                 response.status_code = 200
-                response.json.return_value = {"acked": True}
+                response.json.return_value = (
+                    {"display_attempted": True}
+                    if url.endswith("/display-attempted")
+                    else {"acked": True}
+                )
                 return response
             context_posts.append(kwargs.get("json", {}))
             return MagicMock(status_code=200)
@@ -115,7 +150,7 @@ class TestNotificationPolling:
                 pass
 
         mock_show.assert_called_once_with("Seraph alert", "Native path online")
-        assert len(ack_posts) == 1
+        assert len(ack_posts) == 2
         assert len(context_posts) >= 1
 
     @pytest.mark.asyncio
@@ -124,6 +159,7 @@ class TestNotificationPolling:
             "id": "notif-1",
             "title": "Seraph alert",
             "body": "Native path online",
+            "fencing_token": 1,
         }
         notifications = [notification_payload, notification_payload, notification_payload, None]
         ack_posts: list[str] = []
@@ -140,8 +176,12 @@ class TestNotificationPolling:
             if "/notifications/" in url:
                 ack_posts.append(url)
                 response = MagicMock()
-                response.status_code = 503
-                response.json.return_value = {"acked": False}
+                if url.endswith("/display-attempted"):
+                    response.status_code = 200
+                    response.json.return_value = {"display_attempted": True}
+                else:
+                    response.status_code = 503
+                    response.json.return_value = {"acked": False}
                 return response
             return MagicMock(status_code=200)
 

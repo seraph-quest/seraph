@@ -11,7 +11,7 @@ Make Seraph superior for a power-user guardian use case, not merely “more capa
 Implementation mirror:
 
 - `docs/implementation/10-superiority-delivery.md` owns the shipped-on-`develop` translation of this program
-- `docs/implementation/00-master-roadmap.md` owns the strategic implementation program and completed-program record
+- the Project Constitution owns accepted direction; the historical roadmap points to Git history for its completed-program record
 - the GitHub Project, issues, and PRs own active execution state
 - `docs/research/15-reference-systems-refresh-2026-04.md` records the benchmark refresh that sharpened the priorities below
 
@@ -107,5 +107,5 @@ This research program maps directly to the implementation tree, but active execu
 Use:
 
 - `docs/implementation/10-superiority-delivery.md` for the current implementation translation
-- `docs/implementation/00-master-roadmap.md` for the strategic implementation program and completed-program record
+- `docs/implementation/00-master-roadmap.md` for a historical summary and links to the completed-program record
 - the GitHub Project, issues, and PRs for active execution state

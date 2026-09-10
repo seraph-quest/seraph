@@ -8,12 +8,55 @@
 
 - primary design doc: [06. Presence And Reach](/research/presence-and-reach)
 
+## Branch-local #751 Audio Preflight Contract
+
+The `feat/751-audio-contract` branch adds a **Partial** provider-free
+push-to-talk (PTT) ingress contract in
+[`backend/src/guardian/audio_ingress.py`](../../backend/src/guardian/audio_ingress.py).
+This is branch-local work and is not shipped `develop` truth. It accepts
+server-owned session, message, attachment, and request identities from the
+canonical ingress owner (for example, the #750 web ingress slice), then
+returns typed `accepted`, `blocked`, `degraded`, or `duplicate` results with
+stable reason codes. The pure validator checks standard base64 shape and
+metadata-reported byte count, the 10 MiB audio cap, one stream, the
+MIME/container/codec allowlist, metadata-reported duration up to 60 seconds,
+normalized-WAV metadata up to 2 MiB, separate current capture and cloud-upload
+consent, a raw-audio retention deadline no more than 15 minutes after capture,
+request/attachment identity conflicts, and transcript confirmation before
+non-chat capabilities.
+
+The payload builder emits only the documented OpenRouter `input_audio` content
+shape. It performs no network call, decoding, codec inspection, shell command,
+Whisper/Piper/VLM invocation, local-model fallback, or canonical persistence.
+The default provider state is `unverified`, so an API key, model capability,
+route health, and live consent/runtime proof are required before a later
+adapter can treat a request as accepted for execution. Receipts contain IDs,
+digests, bounded metadata, consent handles, and provider state; raw audio and
+transcripts are explicitly excluded. Duration and normalized-WAV limits remain
+metadata assertions until a governed decoder/attachment owner supplies the
+runtime proof.
+
+`trusted_adapter_id`, `provider_proof_reference`, and
+`consent_proof_reference` are handles supplied by that later trusted adapter;
+the pure validator checks their shape but cannot establish their authenticity
+or perform a live provider/consent check. A `ready` provider without all three
+handles returns `degraded` with `trusted_adapter_proof_required`, so callers
+cannot treat caller-asserted provider or consent metadata as execution proof.
+
+The remaining work is the #750/#751 integration with canonical session,
+attachment, and outbox persistence, governed OpenRouter admission and key/model
+capability checks, actual codec/duration verification, deletion/retention
+execution, browser PTT capture, and live operator receipts. The input shape is
+based on the [OpenRouter audio guide](https://openrouter.ai/docs/guides/overview/multimodal/audio)
+and [speech-to-text input contract](https://openrouter.ai/docs/guides/overview/multimodal/stt),
+accessed 2026-09-10.
+
 ## Shipped On `develop`
 
 - [x] browser-based guardian cockpit as the only supported browser shell
 - [x] WebSocket conversation path
 - [x] native macOS observer daemon for screen and OCR ingest
-- [x] daemon screen analysis can now choose local Apple Vision, local `codex exec`, or explicit OpenRouter cloud OCR; local Codex writes only a temporary PNG for the CLI invocation and deletes it after analysis or failure unless local capture preservation is explicitly enabled
+- [x] daemon screen analysis can use configured local or remote inference routes; preserved captures expose provider-neutral image/output/analysis artifacts, while the removed `codex exec` path remains only as deprecated artifact-read compatibility under #739
 - [x] screen captures can be preserved as durable local artifacts for future re-analysis, pairing each allowed image with redacted provider output and normalized JSON behind localhost-only observer artifact endpoints
 - [x] observer refresh pipeline across time, calendar, git, goals, and screen context
 - [x] proactive delivery gating and queued-bundle delivery inside the current product
@@ -38,6 +81,46 @@
 - [x] Batch DC selected-channel reach/media campaign proof now adds `always_available_reach_operations_v1`, `voice_media_parity_runtime_v1`, `mobile_cross_surface_continuity_v1`, `reach_degraded_recovery_field_campaign`, plus `/api/operator/always-available-reach-media`, covering selected mobile/messaging/native/browser/web campaign windows, pairing/revocation, rate-limit and abuse recovery, 14-day equivalent degraded-recovery metrics, voice/media quality and latency receipts, correction/deletion/privacy controls, provider-regression fallback, cross-surface continuity, false/missed delivery metrics, operator repair, redacted receipts, and blocked claims without claiming OpenClaw-class reach, complete channel coverage, always-available operation, voice/media parity, production readiness, or full parity
 - [x] Batch CH browser-provider usability proof now adds `managed_browser_provider_attestation`, `live_multi_operator_usability_study`, `browser_computer_use_recovery_drill`, plus `/api/operator/browser-provider-usability-proof`, covering local/managed/remote browser provider identity, evidence mode, session partitioning, credential and download/upload boundaries, provider degradation, recorded-live multi-operator usability metrics, and fail-closed browser recovery drills without claiming safe autonomous browser/computer-use, full browser parity, best cockpit, solved operator control, production readiness, or full parity
 - [x] the one excellent reach-channel canary now selects native notifications as the only canary channel and exposes `one_excellent_reach_channel_canary`, `/api/operator/one-reach-channel-canary`, and the cockpit benchmark-proof card for pairing, revocation, health, retry/fallback, same-thread continuity, memory/context continuity, approval handoff, audit trail, degraded-state UI, and explicit rejection of Slack/Discord/Telegram/channel sprawl until one channel meets the bar
+
+## Web Ingress Contract (Partial On The Epic Branch)
+
+The #750 web slice adds a typed, server-owned `seraph.chat.message.v1`
+envelope to REST `/api/chat` and WebSocket `/ws/chat`.  Seraph binds the
+envelope to the authenticated principal, operator session, device label, and
+canonical conversation before model dispatch; a supplied `idempotency_key` or
+`message_id` produces a session-scoped UUID5 server message identity.  If both
+aliases are supplied, their normalized opaque values must match or the ingress
+is rejected before session reservation.  The
+redacted envelope and SHA-256 content/key digests are persisted in the user
+`Message.metadata_json`, and accepted, duplicate, and identity-conflict
+receipts are written to the canonical audit path without message content.
+REST and WebSocket turns reject empty or whitespace-only message content before
+reservation, audit, or model dispatch.
+
+Retries that reuse the same identity in the same session receive a deterministic
+409/error receipt before model dispatch.  Reuse with changed content or bound
+metadata is rejected as an identity conflict, and an explicit unknown session
+is rejected rather than created.  Attachments, durable outbox delivery, voice,
+and Telegram or other external channel adapters remain future integration
+slices.
+
+## Telegram Ingress Contract (Branch-Local #752 Partial)
+
+The `feat/752-telegram-contract` branch adds a provider-free, typed Telegram
+ingress contract. Telegram transit is an external channel and both the
+`telegram_transit` and `openrouter_inference` consent grants are checked again
+on replay and receipt serialization, with content-free redacted receipts.
+Ingress requires a server-owned pairing snapshot supplied by the authoritative
+#749 pairing owner and bound to the allow-listed operator and chat, with an
+active lifecycle and an optional expiry. An omitted expiry is valid only when
+that authority guarantees the pairing is current and non-expiring; missing,
+mismatched, revoked, or expired snapshots block before replay or consent
+handling. This pure contract cannot authenticate the Telegram transport. No
+live Telegram adapter, bot token, durable outbox, transport delivery, or
+provider runtime is shipped by this branch; browser behavior is unchanged.
+Even syntactically valid #751 proof references remain unverified metadata here,
+so voice stays quarantined and degraded until a trusted adapter verifies the
+handoff.
 
 ## Working On Now
 
@@ -81,6 +164,34 @@ System Settings > Privacy & Security > Automation to the terminal application
 running Seraph, then restart the daemon. Window-title presence also requires
 Accessibility permission. OCR or screenshot analysis requires Screen Recording
 or Screen & System Audio Recording permission.
+
+## Branch-local #749 pairing ingress contract
+
+The `feat/749-pairing-contract` branch adds a **Partial** server-side contract
+in `backend/src/extensions/node_pairing.py`. It is not shipped truth on
+`develop` and it does not claim a live Mac edge. The immutable request and
+state snapshots cover device, pairing, request, capture timestamp, monotonic
+sequence, content hash, media type, bounded size, policy version, capability
+scope, data purpose, and a scoped credential fingerprint. Pure validation
+returns the stable `accepted`, `duplicate`, `out_of_order`, `expired`,
+`revoked`, `oversized`, `blocked`, or `retryable` states. The bounded replay
+ledger advances only after an accepted request and never stores a raw token.
+
+Pairing lifecycle transitions are operator-owned `pair`, `rotate`, `revoke`,
+and `expire` snapshots. Rotation retires the previous fingerprint; revocation
+and expiry remove the active fingerprint. The ingress capability allow-list is
+read/observation-oriented and explicitly rejects action authority. Receipts
+contain metadata, digests, policy and state facts while redacting source paths,
+content, raw credentials, and full credential fingerprints. This contract does
+not authenticate a transport or read an artifact; callers still need to verify
+the payload hash before governed ingestion.
+
+The remaining #749 boundaries are an authenticated HTTPS/origin protocol,
+server-side artifact persistence and readback, real paired-Mac receipts,
+durable integration with the node state store, and operator UI/runtime wiring.
+Those boundaries must remain visibly blocked or partial until their own
+focused implementation and runtime evidence exists. No local GPU, VLM, or
+model/provider call is required by this contract.
 
 ## Still To Do On `develop`
 

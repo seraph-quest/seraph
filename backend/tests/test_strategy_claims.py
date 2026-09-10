@@ -45,7 +45,7 @@ def test_strategy_claim_gate_covers_security_docs_and_claim_rows() -> None:
     ledger = _read_doc("docs/research/19-strategy-claim-ledger.md")
     parity_goals = _read_doc("docs/research/20-seraph-agent-parity-and-exceedance-goals.md")
     roadmap = _read_doc("docs/implementation/16-agent-parity-execution-roadmap.md")
-    status = _read_doc("docs/implementation/STATUS.md")
+    constitution = _read_doc("docs/implementation/00-project-constitution.md")
 
     assert "20-seraph-agent-parity-and-exceedance-goals.md" in script
     assert "16-agent-parity-execution-roadmap.md" in script
@@ -56,81 +56,22 @@ def test_strategy_claim_gate_covers_security_docs_and_claim_rows() -> None:
     assert "SCL-029" in ledger
     assert "SCL-030" in ledger
     assert "SCL-031" in ledger
-    assert "Seraph ships a production secure-host hardening proof gate" in ledger
-    assert "Seraph ships Batch BW secure-host hardening" in ledger
-    assert "Batch CK bounded independent-review/hostile-drill/recovery-authority receipts" in ledger
-    assert "Seraph ships bounded independent secure-host review and isolation-hardening receipts" in ledger
-    assert "Seraph ships bounded broad-channel SLA, production voice/media quality-gate" in ledger
-    assert "Seraph ships bounded independent guardian-learning outcome and memory-provider parity-matrix receipts" in ledger
-    assert "Seraph ships bounded dense long-work operator debugging and recovery-control receipts" in ledger
-    assert "Seraph ships bounded independent package-security review" in ledger
-    assert "independent_secure_host_review" in parity_goals
-    assert "production_secure_host_hardening" in parity_goals
-    assert "broad_channel_sla_operations" in parity_goals
-    assert "production_voice_media_quality_gates" in parity_goals
-    assert "mobile_execution_continuity" in parity_goals
-    assert "independent_outcome_cohort_review" in parity_goals
-    assert "task_scoped_causal_learning" in parity_goals
-    assert "memory_provider_parity_matrix" in parity_goals
-    assert "long_work_debugging_recovery" in parity_goals
-    assert "operator_control_density" in parity_goals
-    assert "independent_operator_usability_accessibility" in parity_goals
-    assert "independent_package_security_review" in parity_goals
-    assert "package_network_incident_operations" in parity_goals
-    assert "/api/operator/secure-capability-host-hardening" in roadmap
-    assert "/api/operator/production-isolation-hardening" in roadmap
-    assert "/api/operator/independent-secure-host-review" in roadmap
-    assert "/api/operator/production-reach-voice-mobile" in roadmap
-    assert "/api/operator/independent-learning-memory-parity" in roadmap
-    assert "/api/operator/dense-operator-recovery-control" in roadmap
-    assert "/api/operator/production-marketplace-security" in roadmap
-    assert "secure/private-by-default" in status
-    assert "full memory-provider parity" in status
+    assert "**State:** Archived" in parity_goals
+    assert "**State:** Archived" in roadmap
+    assert "Git history" in parity_goals
+    assert "Git history" in roadmap
+    assert "sole accepted-target authority" in parity_goals
+    assert "sole product and accepted-target authority" in constitution
 
 
-def test_m1_capability_contract_docs_pin_downstream_acceptance_and_proof() -> None:
-    roadmap = _read_doc("docs/implementation/00-master-roadmap.md")
+def test_constitution_pins_capability_contract_and_locked_decisions() -> None:
+    constitution = _read_doc("docs/implementation/00-project-constitution.md")
     docs_contract = _read_doc("docs/implementation/08-docs-contract.md")
-    strategy_delivery = _read_doc("docs/implementation/11-world-class-strategy-delivery.md")
 
-    assert "## M1 Capability Contract" in roadmap
-    for downstream in ("M2", "M3", "M9"):
-        assert downstream in roadmap
-        assert downstream in strategy_delivery
-
-    required_contract_terms = (
-        "identity",
-        "manifest",
-        "permissions",
-        "provenance",
-        "mutation rights",
-        "health",
-        "compatibility",
-        "lifecycle state",
-        "trust level",
-    )
-    for term in required_contract_terms:
-        assert term in strategy_delivery
-
-    required_acceptance_terms = (
-        "capability classes covered",
-        "source and owner",
-        "declared permissions",
-        "the proof surface",
-        "Do not mark M1 complete from docs alone",
-    )
-    for term in required_acceptance_terms:
-        assert term in docs_contract
-
-    required_proof_receipts = (
-        "capability inventory payloads",
-        "lifecycle/validation output",
-        "audit or Activity Ledger receipts",
-        "deterministic tests",
-        "benchmark suites",
-        "issue links",
-        "PR validation",
-        "implementation-doc paths",
-    )
-    for receipt in required_proof_receipts:
-        assert receipt in strategy_delivery
+    for status in ("Shipped", "Partial", "Experimental", "Planned", "Deprecated", "Excluded"):
+        assert f"**{status}**" in constitution
+        assert f"**{status}**" in docs_contract
+    for adr in range(1, 6):
+        assert f"ADR-{adr:03d}" in constitution
+    assert "sole authority" in docs_contract
+    assert "A capability must never be labeled Target" in docs_contract

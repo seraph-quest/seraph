@@ -1,86 +1,63 @@
-# Docs
+# Seraph Documentation
 
-Seraph now uses a three-part docs layout:
+The documentation has four distinct owners:
 
-- `docs/research/` is the canonical target-shape, evidence, and product-thesis surface
-- `docs/implementation/` is the canonical shipped-status and strategic implementation surface
-- `docs/docs/` is a frozen archive for historical material that is no longer part of the active product contract
+| Surface | Authority |
+| --- | --- |
+| `implementation/` | Constitution, ADRs, shipped/partial truth, and durable operator contracts |
+| `research/` | Evidence, alternatives, and target research; never shipping proof |
+| `docs/` (`/legacy`) | Archived history that may contradict the current contract |
+| GitHub Project/issues/PRs | Live execution, review, and integration state |
 
-Current truth lives in `docs/research/` plus `docs/implementation/`.
-History lives in `docs/docs/`.
+Start here:
 
-GitHub owns execution state:
+1. [Project Constitution](implementation/00-project-constitution.md)
+2. [Current App Guide](implementation/12-current-app-guide.md)
+3. [Development Status](implementation/STATUS.md)
+4. [Documentation Contract](implementation/08-docs-contract.md)
+5. [Research Synthesis](research/00-synthesis.md)
 
-- the GitHub Project is the execution layer
-- issues and PRs are the active work-tracking layer
-- PR bodies carry branch-specific scope, validation, and review receipts
-- docs should not mirror live `Queue`, `Status`, `Code Review`, or `PR` state
+Public entry points include the [published docs](https://docs.seraph.quest),
+[Contributing guide](../CONTRIBUTING.md), [Support guide](../SUPPORT.md), and
+[Security policy](../SECURITY.md). Ask product and usage questions in
+[GitHub Discussions](https://github.com/seraph-quest/seraph/discussions); use
+[tracked issues](https://github.com/seraph-quest/seraph/issues) for bugs and
+planned work, then follow the review contract in [`AGENTS.md`](../AGENTS.md).
 
-The trees are meant to mirror each other without competing:
+The public site serves implementation docs at `/`, research at `/research`, and
+the historical archive at `/legacy`. The active entry points use the status
+capability vocabulary **Shipped**, **Partial**, **Experimental**, **Planned**,
+**Deprecated**, and **Excluded**. Target, Research, Archived, and Blocked are
+document/decision states. An open branch or deterministic fixture does not make
+a capability Shipped.
 
-- research owns target shape, benchmark logic, and superiority logic
-- implementation owns shipped truth, benchmark-status translation, superiority delivery, and strategic implementation translation
-- `docs/implementation/01-07` are workstreams; `08-10` are cross-cutting mirror docs
-- `docs/implementation/00-master-roadmap.md` is the strategic implementation program and completed-program record, not a live kanban
-
-Start with:
-
-- `docs/implementation/00-master-roadmap.md`
-- `docs/implementation/STATUS.md`
-- `docs/implementation/08-docs-contract.md`
-- `docs/implementation/09-benchmark-status.md`
-- `docs/implementation/10-superiority-delivery.md`
-- `docs/research/00-synthesis.md`
-
-The Docusaurus site now serves:
-
-- `/` from `docs/implementation/`
-- `/research` from `docs/research/`
-- `/legacy` from `docs/docs/` as the historical archive route
-
-This website is built using [Docusaurus](https://docusaurus.io/), a modern static website generator.
-
-## Installation
+## Validate
 
 ```bash
-npm ci
+python3 scripts/check_docs_contract.py
+python3 scripts/check_strategy_claims.py
+cd docs && npm run typecheck && npm run build
 ```
 
-## Local Development
+The contract check validates required owners, ADRs, navigation, status
+vocabulary, links between canonical entry points, and forbidden contradictions
+in those entry points. Docusaurus treats broken links as build failures.
 
-```bash
-npm run start
-```
-
-This command starts a local development server and opens up a browser window. Most changes are reflected live without having to restart the server.
-
-## Build
-
-```bash
-npm run build
-```
-
-This command generates static content into the `build` directory and can be served using any static contents hosting service.
-
-## Deployment
-
-The public docs site deploys through GitHub Pages Actions, not the legacy
-`gh-pages` branch flow.
-
-Normal docs changes still land through a PR to `develop`. The public site is
-published when `develop` is explicitly promoted to `main` with `docs/**`
-changes. The workflow is `.github/workflows/deploy-docs.yml` and runs:
+## Local Site
 
 ```bash
 cd docs
 npm ci
-npm run build
+npm run start
 ```
 
-The generated artifact in `docs/build` is uploaded with
-`actions/upload-pages-artifact` and deployed with `actions/deploy-pages` to the
-`github-pages` environment at `https://docs.seraph.quest`.
+## Publication
 
-Do not use direct `docusaurus deploy` or `gh-pages` branch publication for this
-repo. If a docs-only publication is needed outside the normal `develop` to
-`main` promotion, use the workflow dispatch on `Deploy Docs`.
+The public site is published through `.github/workflows/deploy-docs.yml` when
+documentation on `main` is deployed to GitHub Pages. Normal changes land through
+review into `develop`; direct `docusaurus deploy` and the old `gh-pages` branch
+flow are unsupported. A docs-only publication outside normal promotion uses the
+`Deploy Docs` workflow dispatch.
+
+Generated `build/`, `.docusaurus/`, and `node_modules/` content is not an active
+documentation source and should not be edited.

@@ -1,6 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
 
 import { appEventBus } from "../../lib/appEventBus";
+import {
+  isSuccessfulModelFabricOutcome,
+  normalizeModelFabricRuntime,
+  type ModelFabricRuntimeStatus,
+} from "../../lib/modelFabric";
 import { API_URL } from "../../config/constants";
 import { SERAPH_BUILD_ID } from "../../config/release";
 import { useChatStore } from "../../stores/chatStore";
@@ -54,6 +59,17 @@ interface ObserverState {
   upcoming_events?: Array<{ summary?: string; start?: string }>;
 }
 
+interface RuntimeInferenceReadiness {
+  status?: string;
+  reasons?: string[];
+  provider?: string;
+  active_only?: boolean;
+  cloud_egress?: string;
+  cloud_consent?: boolean;
+  cost_ceiling_microusd?: number | null;
+  profile_id?: string | null;
+}
+
 interface RuntimeStatus {
   version: string;
   build_id: string;
@@ -78,9 +94,13 @@ interface RuntimeStatus {
     queue_status_endpoint?: string;
     health_endpoint?: string;
     backend_health_endpoint?: string;
+    inference_ready?: boolean;
+    inference_readiness?: RuntimeInferenceReadiness;
+    legacy_local_route_blocked?: boolean;
   };
   timezone?: string;
   llm_logging_enabled?: boolean;
+  model_fabric?: ModelFabricRuntimeStatus;
 }
 
 type RuntimeReceiptSource = "runtime_status" | "operator_posture" | "retained";
@@ -5680,6 +5700,7 @@ interface WorkflowCheckpointHistoryEntry {
   sourceWorkflow: WorkflowRunRecord;
   scopeLabel: string;
   draft: string;
+  actionHandle?: Record<string, unknown> | null;
 }
 
 interface WorkflowLineageEventEntry {
@@ -5695,22 +5716,26 @@ interface WorkflowLineageEventEntry {
 
 function workflowCheckpointActions(
   workflow: WorkflowRunRecord,
-): Array<{ stepId: string; draft: string; label: string; kind: string }> {
+): Array<{ stepId: string; draft: string; label: string; kind: string; actionHandle?: Record<string, unknown> }> {
   if (!Array.isArray(workflow.checkpointCandidates)) {
     return [];
   }
-  return workflow.checkpointCandidates.reduce<Array<{ stepId: string; draft: string; label: string; kind: string }>>((actions, candidate) => {
+  return workflow.checkpointCandidates.reduce<Array<{ stepId: string; draft: string; label: string; kind: string; actionHandle?: Record<string, unknown> }>>((actions, candidate) => {
     if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) return actions;
     const record = candidate as Record<string, unknown>;
     const stepId = typeof record.step_id === "string" ? record.step_id : "";
     const draft = typeof record.resume_draft === "string" ? record.resume_draft : "";
-    if (!stepId || !draft) return actions;
+    const actionHandle = record.action_handle && typeof record.action_handle === "object" && !Array.isArray(record.action_handle)
+      ? record.action_handle as Record<string, unknown>
+      : undefined;
+    if (!stepId || (!draft && !actionHandle)) return actions;
     const kind = typeof record.kind === "string" ? record.kind : "branch_from_checkpoint";
     actions.push({
       stepId,
       draft,
       kind,
       label: kind === "retry_failed_step" ? `Retry ${stepId}` : `Branch ${stepId}`,
+      actionHandle,
     });
     return actions;
   }, []);
@@ -5812,6 +5837,13 @@ function normalizeWorkflowRun(value: Record<string, unknown>): WorkflowRunRecord
       return entries;
     }, [])
     : undefined;
+  const resumePlanRecord = value.resume_plan && typeof value.resume_plan === "object" && !Array.isArray(value.resume_plan)
+    ? value.resume_plan as Record<string, unknown>
+    : null;
+  const actionHandleValue = value.action_handle ?? resumePlanRecord?.action_handle;
+  const actionHandle = actionHandleValue && typeof actionHandleValue === "object" && !Array.isArray(actionHandleValue)
+    ? actionHandleValue as Record<string, unknown>
+    : null;
 
   return {
     id: String(value.id ?? ""),
@@ -5914,9 +5946,10 @@ function normalizeWorkflowRun(value: Record<string, unknown>): WorkflowRunRecord
         )
       : undefined,
     resumePlan:
-      value.resume_plan && typeof value.resume_plan === "object" && !Array.isArray(value.resume_plan)
-        ? (value.resume_plan as Record<string, unknown>)
+      resumePlanRecord
+        ? resumePlanRecord
         : null,
+    actionHandle,
     timeline: normalizedTimeline,
   };
 }
@@ -6664,6 +6697,7 @@ function normalizeRuntimeStatus(value: unknown): RuntimeStatus | null {
     model_label: modelLabel || model,
     api_base: typeof record.api_base === "string" ? record.api_base : undefined,
     effective_runtime: effectiveRuntime ?? undefined,
+    model_fabric: normalizeModelFabricRuntime(record.model_fabric) ?? undefined,
     timezone: typeof record.timezone === "string" ? record.timezone : undefined,
     llm_logging_enabled: typeof record.llm_logging_enabled === "boolean" ? record.llm_logging_enabled : undefined,
   };
@@ -6672,6 +6706,7 @@ function normalizeRuntimeStatus(value: unknown): RuntimeStatus | null {
 function normalizeEffectiveRuntime(value: unknown): RuntimeStatus["effective_runtime"] | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const record = value as Record<string, unknown>;
+  const inferenceReadiness = normalizeRuntimeInferenceReadiness(record.inference_readiness);
   return {
     runtime_path: typeof record.runtime_path === "string" ? record.runtime_path : undefined,
     active_profile: typeof record.active_profile === "string" ? record.active_profile : undefined,
@@ -6689,6 +6724,63 @@ function normalizeEffectiveRuntime(value: unknown): RuntimeStatus["effective_run
     queue_status_endpoint: typeof record.queue_status_endpoint === "string" ? record.queue_status_endpoint : undefined,
     health_endpoint: typeof record.health_endpoint === "string" ? record.health_endpoint : undefined,
     backend_health_endpoint: typeof record.backend_health_endpoint === "string" ? record.backend_health_endpoint : undefined,
+    inference_ready: typeof record.inference_ready === "boolean" ? record.inference_ready : undefined,
+    inference_readiness: inferenceReadiness ?? undefined,
+    legacy_local_route_blocked: typeof record.legacy_local_route_blocked === "boolean"
+      ? record.legacy_local_route_blocked
+      : undefined,
+  };
+}
+
+function normalizeRuntimeInferenceReadiness(value: unknown): RuntimeInferenceReadiness | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const record = value as Record<string, unknown>;
+  return {
+    status: typeof record.status === "string" ? record.status : undefined,
+    reasons: Array.isArray(record.reasons)
+      ? record.reasons.filter((reason): reason is string => typeof reason === "string")
+      : undefined,
+    provider: typeof record.provider === "string" ? record.provider : undefined,
+    active_only: typeof record.active_only === "boolean" ? record.active_only : undefined,
+    cloud_egress: typeof record.cloud_egress === "string" ? record.cloud_egress : undefined,
+    cloud_consent: typeof record.cloud_consent === "boolean" ? record.cloud_consent : undefined,
+    cost_ceiling_microusd: typeof record.cost_ceiling_microusd === "number" && Number.isFinite(record.cost_ceiling_microusd)
+      ? record.cost_ceiling_microusd
+      : record.cost_ceiling_microusd === null
+        ? null
+        : undefined,
+    profile_id: typeof record.profile_id === "string" ? record.profile_id : record.profile_id === null ? null : undefined,
+  };
+}
+
+function runtimeReadinessPresent(value: RuntimeStatus["effective_runtime"] | undefined): boolean {
+  return value?.inference_ready !== undefined
+    || value?.inference_readiness?.status !== undefined
+    || value?.inference_readiness?.reasons !== undefined;
+}
+
+function mergeRuntimeReadiness(current: RuntimeStatus | null, next: RuntimeStatus): RuntimeStatus {
+  const currentEffective = current?.effective_runtime;
+  if (!currentEffective || !runtimeReadinessPresent(currentEffective)) return next;
+
+  const nextEffective = next.effective_runtime;
+  return {
+    ...next,
+    effective_runtime: {
+      ...currentEffective,
+      ...(nextEffective ?? {}),
+      // Operator posture can carry newer route/model metadata even when its
+      // runtime shape predates the readiness fields from /api/runtime/status.
+      provider: nextEffective?.provider ?? next.provider ?? currentEffective.provider,
+      provider_label: nextEffective?.provider_label ?? next.provider ?? currentEffective.provider_label,
+      model: nextEffective?.model ?? next.model ?? currentEffective.model,
+      model_label: nextEffective?.model_label ?? next.model_label ?? currentEffective.model_label,
+      route_label: nextEffective?.route_label ?? next.provider ?? currentEffective.route_label,
+      inference_ready: nextEffective?.inference_ready ?? currentEffective.inference_ready,
+      inference_readiness: runtimeReadinessPresent(nextEffective)
+        ? nextEffective?.inference_readiness
+        : currentEffective.inference_readiness,
+    },
   };
 }
 
@@ -7010,7 +7102,9 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       () => fetchCockpitJson(`${API_URL}/api/approvals/pending?limit=8`, 5000, isCancelled),
       () => fetchCockpitJson(`${API_URL}/api/capabilities/overview`, 5000, isCancelled),
       () => fetchCockpitJson(`${API_URL}/api/extensions`, 5000, isCancelled),
-      () => fetchCockpitJson(`${API_URL}/api/browser/providers`, 5000, isCancelled),
+      () => sessionId
+        ? fetchCockpitJson(`${API_URL}/api/browser/providers?owner_session_id=${encodeURIComponent(sessionId)}`, 5000, isCancelled)
+        : Promise.resolve({ ok: false, payload: null }),
       () => sessionId
         ? fetchCockpitJson(`${API_URL}/api/operator/browser-computer-use-control?owner_session_id=${encodeURIComponent(sessionId)}`, 5000, isCancelled)
         : Promise.resolve({ ok: true, payload: { sessions: [] } }),
@@ -7179,14 +7273,18 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       setOperatorControlPlane(nextOperatorControlPlane);
       const operatorPostureRuntime = normalizeRuntimeStatus(nextOperatorControlPlane?.runtime_posture.runtime);
       if (operatorPostureRuntime) {
-        storeRuntimeReceipt(operatorPostureRuntime);
-        setRuntimeReceipt({ status: operatorPostureRuntime, source: "operator_posture" });
+        const mergedRuntime = mergeRuntimeReadiness(runtimeReceipt?.status ?? null, operatorPostureRuntime);
+        storeRuntimeReceipt(mergedRuntime);
+        setRuntimeReceipt({
+          status: mergedRuntime,
+          source: runtimeReceipt?.source === "retained" ? "retained" : "operator_posture",
+        });
       }
       markDeepPaneLoaded("control_plane", Boolean(nextOperatorControlPlane));
       return;
     }
     markDeepPaneLoaded("control_plane", false);
-  }, [fetchCockpitJson, markDeepPaneLoaded, updateDeepPaneState]);
+  }, [fetchCockpitJson, markDeepPaneLoaded, runtimeReceipt, updateDeepPaneState]);
 
   const loadWorkflowOrchestration = useCallback(async () => {
     updateDeepPaneState("workflow_orchestration", "loading");
@@ -8013,6 +8111,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
           sourceWorkflow: entry,
           scopeLabel,
           draft: action.draft,
+          actionHandle: action.actionHandle,
         });
       });
       if (entry.retryFromStepDraft) {
@@ -8030,6 +8129,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
             sourceWorkflow: entry,
             scopeLabel,
             draft: entry.retryFromStepDraft,
+            actionHandle: entry.actionHandle,
           });
         }
       }
@@ -8154,6 +8254,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     options: {
       action?: string;
       stepId?: string | null;
+      actionHandle?: Record<string, unknown> | null;
       fallbackDraft?: string | null;
       fallbackThreadId?: string | null;
       label?: string;
@@ -8178,6 +8279,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     setOperatorStatus(`Checking live recovery plan for ${label}...`);
     try {
       const action = options.action ?? "resume";
+      const actionHandle = options.actionHandle ?? resolved.actionHandle;
       const response = await fetch(
         `${API_URL}/api/workflows/runs/${encodeURIComponent(resolved.runIdentity)}/control`,
         {
@@ -8186,6 +8288,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
           body: JSON.stringify({
             action,
             step_id: options.stepId ?? undefined,
+            action_handle: actionHandle && actionHandle.action === action ? actionHandle : undefined,
             target: options.stepId ?? resolved.workflowName,
             owner: "cockpit",
             operator_context: {
@@ -8199,9 +8302,18 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       );
       const payload = await response.json().catch(() => null);
       if (!response.ok) {
-        const detail = payload && typeof payload === "object" && "detail" in payload
-          ? String((payload as { detail?: unknown }).detail)
-          : `Could not build a live recovery plan for ${label}`;
+        const rawDetail = payload && typeof payload === "object" && "detail" in payload
+          ? (payload as { detail?: unknown }).detail
+          : null;
+        const detail = rawDetail && typeof rawDetail === "object" && !Array.isArray(rawDetail)
+          ? String(
+            (rawDetail as { message?: unknown; code?: unknown }).message
+              ?? (rawDetail as { code?: unknown }).code
+              ?? `Could not build a live recovery plan for ${label}`,
+          )
+          : typeof rawDetail === "string"
+            ? rawDetail
+            : `Could not build a live recovery plan for ${label}`;
         setOperatorStatus(`Live recovery control refused ${label}: ${detail}`);
         return;
       }
@@ -8211,15 +8323,22 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       const planRecord = plan && typeof plan === "object" && !Array.isArray(plan)
         ? plan as Record<string, unknown>
         : null;
+      const returnedActionHandle = planRecord?.action_handle && typeof planRecord.action_handle === "object" && !Array.isArray(planRecord.action_handle)
+        ? planRecord.action_handle as Record<string, unknown>
+        : null;
       const draft = typeof planRecord?.draft === "string" && planRecord.draft.trim()
         ? planRecord.draft
         : (
-          typeof planRecord?.continue_message === "string" && planRecord.continue_message.trim()
+          !returnedActionHandle && typeof planRecord?.continue_message === "string" && planRecord.continue_message.trim()
             ? planRecord.continue_message
-            : fallbackDraft
+            : returnedActionHandle ? null : fallbackDraft
         );
       if (!draft) {
-        setOperatorStatus(`No recovery draft is available for ${label}`);
+        setOperatorStatus(
+          returnedActionHandle
+            ? `Live recovery control recorded for ${label}`
+            : `No recovery draft is available for ${label}`,
+        );
         return;
       }
       const threadId = options.fallbackThreadId ?? resolved.threadId ?? resolved.sessionId;
@@ -8266,6 +8385,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
         onClick={() => void queueLiveWorkflowResumePlan(workflow, {
           action: action.kind === "retry_failed_step" ? "retry" : "branch",
           stepId: action.stepId,
+          actionHandle: action.actionHandle,
           fallbackDraft: action.draft,
           label: `${scopeLabel} ${workflow.workflowName}`,
         })}
@@ -8407,11 +8527,37 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     || runtimeStatus?.provider
     || "unknown";
   const runtimeProviderBaseLabel = runtimeRouteLabel.replace(/[_.-]+/g, " ").toUpperCase();
-  const runtimeProviderLabel = runtimeReceipt?.source === "retained"
-    ? `${runtimeProviderBaseLabel} STALE`
-    : runtimeProviderBaseLabel;
+  const interactiveFabricRoute = runtimeStatus?.model_fabric?.runtime_paths.chat_agent
+    ?? runtimeStatus?.model_fabric?.workloads.interactive;
+  const actualFabricRoute = interactiveFabricRoute?.succeeded;
+  const attemptedFabricRoute = interactiveFabricRoute?.attempted;
+  const selectedFabricRoute = interactiveFabricRoute?.selected;
+  const runtimeProviderLabelBase = actualFabricRoute
+    ? `TEXT ${actualFabricRoute.profile_id.replace(/[_.-]+/g, " ").toUpperCase()}`
+    : attemptedFabricRoute
+      ? `ATTEMPTED ${attemptedFabricRoute.profile_id.replace(/[_.-]+/g, " ").toUpperCase()} ${attemptedFabricRoute.outcome.replace(/[_.-]+/g, " ").toUpperCase()}`
+      : selectedFabricRoute
+        ? `SELECTED ${selectedFabricRoute.profile_id.replace(/[_.-]+/g, " ").toUpperCase()}`
+        : runtimeProviderBaseLabel;
+  const runtimeDegraded = runtimeStatus?.model_fabric?.status === "degraded"
+    || (interactiveFabricRoute?.last_outcome != null && !isSuccessfulModelFabricOutcome(interactiveFabricRoute.last_outcome))
+    || (interactiveFabricRoute?.persistence != null && interactiveFabricRoute.persistence !== "persisted");
+  const runtimeReadinessStatus = runtimeStatus?.effective_runtime?.inference_readiness?.status;
+  const runtimeBlocked = runtimeStatus?.effective_runtime?.inference_ready === false
+    || runtimeReadinessStatus === "configuration_required";
+  const runtimeReadinessDegraded = runtimeReadinessStatus === "degraded";
+  const runtimeProviderLabel = [
+    runtimeProviderLabelBase,
+    interactiveFabricRoute?.fallback_used ? "FALLBACK" : "",
+    runtimeBlocked ? "BLOCKED" : "",
+    runtimeDegraded || runtimeReadinessDegraded ? "DEGRADED" : "",
+    runtimeReceipt?.source === "retained" ? "STALE" : "",
+  ].filter(Boolean).join(" ");
   const runtimeModelLabel = (
-    runtimeStatus?.effective_runtime?.model_label
+    actualFabricRoute?.model
+    ?? attemptedFabricRoute?.model
+    ?? selectedFabricRoute?.model
+    ?? runtimeStatus?.effective_runtime?.model_label
     ?? runtimeStatus?.effective_runtime?.model
     ?? runtimeStatus?.model_label
     ?? runtimeStatus?.model
@@ -12117,6 +12263,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                         onClick={() => void queueLiveWorkflowResumePlan(selectedWorkflow, {
                           action: action.kind === "retry_failed_step" ? "retry" : "branch",
                           stepId: action.stepId,
+                          actionHandle: action.actionHandle,
                           fallbackDraft: action.draft,
                           label: selectedWorkflow.workflowName,
                         })}
@@ -12885,6 +13032,9 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
 	                        onClick={() => void queueLiveWorkflowResumePlan(selectedWorkflow, {
 	                          action: "retry",
 	                          stepId: checkpointStepId,
+                          actionHandle: selectedWorkflowCheckpointActions.find(
+                            (action) => action.stepId === checkpointStepId,
+                          )?.actionHandle,
 	                          fallbackDraft: checkpointDraft,
 	                          label: selectedWorkflowName,
 	                        })}
@@ -12996,9 +13146,10 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
 	                    className="cockpit-feedback-button"
 	                    aria-label={`${entry.actionLabel} from ${entry.scopeLabel} for checkpoint history ${entry.stepId}`}
 	                    onClick={() => void queueLiveWorkflowResumePlan(entry.sourceWorkflow, {
-	                      action: entry.kind === "retry_failed_step" ? "retry" : "branch",
-	                      stepId: entry.stepId,
-	                      fallbackDraft: entry.draft,
+                      action: entry.kind === "retry_failed_step" ? "retry" : "branch",
+                      stepId: entry.stepId,
+                      actionHandle: entry.actionHandle,
+                      fallbackDraft: entry.draft,
 	                      label: `${entry.scopeLabel} ${entry.sourceWorkflow.workflowName}`,
 	                    })}
 	                  >

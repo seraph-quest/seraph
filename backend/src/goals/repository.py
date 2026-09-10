@@ -1,18 +1,58 @@
 import logging
+import json
 import uuid
 from datetime import datetime, timezone
 from typing import Optional
 
+from sqlalchemy import update
 from sqlmodel import select, col
 
 from src.db.engine import get_session
 from src.db.models import Goal, GoalLevel, GoalDomain, GoalStatus
+from src.goals.contracts import GoalSuccessCriterion
 
 logger = logging.getLogger(__name__)
 
 _VALID_LEVELS = {e.value for e in GoalLevel}
 _VALID_DOMAINS = {e.value for e in GoalDomain}
 _VALID_STATUSES = {e.value for e in GoalStatus}
+
+
+class GoalRevisionConflict(ValueError):
+    """Raised when an optimistic goal update uses an old revision."""
+
+    def __init__(self, goal_id: str, expected: int, current: int):
+        self.goal_id = goal_id
+        self.expected = expected
+        self.current = current
+        super().__init__(
+            f"Goal '{goal_id}' changed since revision {expected}; current revision is {current}"
+        )
+
+
+def serialize_success_criterion(
+    criterion: GoalSuccessCriterion | dict | None,
+) -> str | None:
+    if criterion is None:
+        return None
+    parsed = (
+        criterion
+        if isinstance(criterion, GoalSuccessCriterion)
+        else GoalSuccessCriterion.model_validate(criterion)
+    )
+    return parsed.model_dump_json()
+
+
+def deserialize_success_criterion(goal: Goal) -> GoalSuccessCriterion | None:
+    if not goal.success_criterion_json:
+        return None
+    try:
+        return GoalSuccessCriterion.model_validate(json.loads(goal.success_criterion_json))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        # Legacy or manually edited rows stay inspectable as missing/unknown
+        # evidence and can never authorize execution.
+        logger.warning("Invalid success criterion stored for goal %s", goal.id)
+        return None
 
 
 class GoalRepository:
@@ -26,6 +66,8 @@ class GoalRepository:
         parent_id: Optional[str] = None,
         description: Optional[str] = None,
         due_date: Optional[datetime] = None,
+        success_criterion: GoalSuccessCriterion | dict | None = None,
+        proactive_enabled: bool = False,
     ) -> Goal:
         if level not in _VALID_LEVELS:
             raise ValueError(f"Invalid level '{level}'. Must be one of: {_VALID_LEVELS}")
@@ -60,6 +102,9 @@ class GoalRepository:
                 domain=domain,
                 due_date=due_date,
                 sort_order=sort_order,
+                revision=1,
+                success_criterion_json=serialize_success_criterion(success_criterion),
+                proactive_enabled=bool(proactive_enabled),
             )
             db.add(goal)
             await db.flush()
@@ -75,9 +120,18 @@ class GoalRepository:
         goal_id: str,
         title: Optional[str] = None,
         description: Optional[str] = None,
+        level: Optional[str] = None,
+        domain: Optional[str] = None,
         status: Optional[str] = None,
         due_date: Optional[datetime] = None,
+        success_criterion: GoalSuccessCriterion | dict | None = None,
+        proactive_enabled: bool | None = None,
+        expected_revision: int | None = None,
     ) -> Optional[Goal]:
+        if level is not None and level not in _VALID_LEVELS:
+            raise ValueError(f"Invalid level '{level}'. Must be one of: {_VALID_LEVELS}")
+        if domain is not None and domain not in _VALID_DOMAINS:
+            raise ValueError(f"Invalid domain '{domain}'. Must be one of: {_VALID_DOMAINS}")
         if status is not None and status not in _VALID_STATUSES:
             raise ValueError(f"Invalid status '{status}'. Must be one of: {_VALID_STATUSES}")
         async with get_session() as db:
@@ -85,17 +139,52 @@ class GoalRepository:
             goal = result.scalars().first()
             if not goal:
                 return None
+            current_revision = max(int(goal.revision or 1), 1)
+            if expected_revision is not None and expected_revision != current_revision:
+                raise GoalRevisionConflict(goal_id, expected_revision, current_revision)
+            changed = False
+            values: dict[str, object] = {}
             if title is not None:
-                goal.title = title
+                values["title"] = title
+                changed = True
             if description is not None:
-                goal.description = description
+                values["description"] = description
+                changed = True
+            if level is not None:
+                values["level"] = level
+                changed = True
+            if domain is not None:
+                values["domain"] = domain
+                changed = True
             if status is not None:
-                goal.status = status
+                values["status"] = status
+                changed = True
             if due_date is not None:
-                goal.due_date = due_date
-            goal.updated_at = datetime.now(timezone.utc)
-            db.add(goal)
-            return goal
+                values["due_date"] = due_date
+                changed = True
+            if success_criterion is not None:
+                values["success_criterion_json"] = serialize_success_criterion(success_criterion)
+                changed = True
+            if proactive_enabled is not None:
+                values["proactive_enabled"] = bool(proactive_enabled)
+                changed = True
+            values["updated_at"] = datetime.now(timezone.utc)
+            if changed:
+                values["revision"] = Goal.revision + 1
+            guards = [Goal.id == goal_id]
+            if changed:
+                # The revision predicate makes the read/check/write sequence a
+                # compare-and-swap even when callers omit expected_revision.
+                guards.append(Goal.revision == current_revision)
+            result = await db.execute(update(Goal).where(*guards).values(**values))
+            if result.rowcount != 1:
+                latest_result = await db.execute(select(Goal).where(Goal.id == goal_id))
+                latest = latest_result.scalars().first()
+                latest_revision = max(int(latest.revision or 1), 1) if latest else current_revision
+                raise GoalRevisionConflict(goal_id, expected_revision or current_revision, latest_revision)
+            await db.flush()
+            refreshed_result = await db.execute(select(Goal).where(Goal.id == goal_id))
+            return refreshed_result.scalars().first()
 
     async def delete(self, goal_id: str) -> bool:
         """Delete a goal and all its descendants."""
@@ -157,6 +246,7 @@ class GoalRepository:
         # Build tree structure
         goal_map = {}
         for g in all_goals:
+            criterion = deserialize_success_criterion(g)
             goal_map[g.id] = {
                 "id": g.id,
                 "parent_id": g.parent_id,
@@ -165,6 +255,9 @@ class GoalRepository:
                 "level": g.level,
                 "domain": g.domain,
                 "status": g.status,
+                "revision": max(int(g.revision or 1), 1),
+                "success_criterion": criterion.model_dump(mode="json") if criterion else None,
+                "proactive_enabled": bool(getattr(g, "proactive_enabled", False)),
                 "due_date": g.due_date.isoformat() if g.due_date else None,
                 "created_at": g.created_at.isoformat(),
                 "children": [],

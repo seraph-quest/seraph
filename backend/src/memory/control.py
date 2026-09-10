@@ -5,13 +5,23 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from typing import Any
 
+from sqlalchemy import update
 from sqlalchemy.exc import SQLAlchemyError
+from sqlmodel import select
 
 from src.audit.repository import audit_repository
-from src.db.models import Memory, MemoryEdgeType, MemoryKind, MemoryStatus
+from src.db.engine import get_session
+from src.db.models import Memory, MemoryEdgeType, MemoryKind, MemoryStatus, StrategyDelta
 from src.memory.decay import apply_memory_decay_policies, summarize_memory_reconciliation_state
 from src.memory.providers import list_memory_provider_inventory
-from src.memory.repository import memory_repository
+from src.memory.repository import (
+    _CANONICAL_MEMORY_DELETE_EXPORT_REASON,
+    _CANONICAL_MEMORY_DELETE_CONTENT,
+    _CANONICAL_MEMORY_REDACTED_STATE,
+    _canonical_memory_deletion_marker,
+    memory_repository,
+)
+from src.memory.snapshots import invalidate_bounded_guardian_snapshot_cache
 from src.memory.types import kind_to_category, normalize_memory_kind
 
 
@@ -57,7 +67,6 @@ _BLOCKED_LIVE_CONTROL_CLAIMS = [
     "reference_system_exceedance",
 ]
 _PROVIDER_QUARANTINES: dict[str, dict[str, Any]] = {}
-
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
@@ -148,6 +157,194 @@ class MemoryControlReceipt:
         return asdict(self)
 
 
+@dataclass(frozen=True)
+class StrategyDeltaReceipt:
+    """Operator-visible receipt for a reversible goal strategy change."""
+
+    delta_id: str
+    goal_id: str
+    scope: str
+    field_name: str
+    before: dict[str, Any]
+    after: dict[str, Any]
+    source_event_id: str
+    author_id: str
+    evaluator_id: str | None
+    goal_revision_before: int
+    goal_revision_after: int | None
+    status: str
+    rollback_target_id: str | None
+    reason: str
+    created_at: str
+    updated_at: str
+
+    def as_payload(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+def _strategy_delta_payload(delta: StrategyDelta) -> StrategyDeltaReceipt:
+    def _decode(value: str) -> dict[str, Any]:
+        try:
+            parsed = json.loads(value or "{}")
+        except json.JSONDecodeError:
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+
+    return StrategyDeltaReceipt(
+        delta_id=delta.delta_id,
+        goal_id=delta.goal_id,
+        scope=delta.scope,
+        field_name=delta.field_name,
+        before=_decode(delta.before_json),
+        after=_decode(delta.after_json),
+        source_event_id=delta.source_event_id,
+        author_id=delta.author_id,
+        evaluator_id=delta.evaluator_id,
+        goal_revision_before=delta.goal_revision_before,
+        goal_revision_after=delta.goal_revision_after,
+        status=delta.status,
+        rollback_target_id=delta.rollback_target_id,
+        reason=delta.reason,
+        created_at=delta.created_at.isoformat(),
+        updated_at=delta.updated_at.isoformat(),
+    )
+
+
+async def record_strategy_delta_proposal(
+    *,
+    goal_id: str,
+    source_event_id: str,
+    before: dict[str, Any],
+    after: dict[str, Any],
+    author_id: str,
+    goal_revision_before: int,
+    reason: str,
+    delta_id: str | None = None,
+    scope: str = "goal",
+    field_name: str = "web_brief_target",
+) -> StrategyDeltaReceipt:
+    """Create or replay one bounded operator strategy correction."""
+
+    if not goal_id.strip() or not source_event_id.strip() or not author_id.strip():
+        raise ValueError("strategy delta identity is required")
+    if len(source_event_id.strip()) > 160:
+        raise ValueError("strategy delta source_event_id is too long")
+    if delta_id is not None and (not delta_id.strip() or len(delta_id.strip()) > 128):
+        raise ValueError("strategy delta delta_id is invalid")
+    if len(json.dumps(before, sort_keys=True, separators=(",", ":"))) > 8_192:
+        raise ValueError("strategy delta before state is too large")
+    if len(json.dumps(after, sort_keys=True, separators=(",", ":"))) > 8_192:
+        raise ValueError("strategy delta after state is too large")
+    try:
+        async with get_session() as db:
+            existing_result = await db.execute(
+                select(StrategyDelta).where(StrategyDelta.source_event_id == source_event_id)
+            )
+            existing = existing_result.scalars().first()
+            if existing is not None:
+                return _strategy_delta_payload(existing)
+            delta = StrategyDelta(
+                **({"delta_id": delta_id.strip()} if delta_id else {}),
+                goal_id=goal_id,
+                scope=scope,
+                field_name=field_name,
+                before_json=json.dumps(before, sort_keys=True, separators=(",", ":")),
+                after_json=json.dumps(after, sort_keys=True, separators=(",", ":")),
+                source_event_id=source_event_id,
+                author_id=author_id,
+                goal_revision_before=goal_revision_before,
+                status="proposed",
+                reason=reason.strip()[:1_000],
+            )
+            db.add(delta)
+            await db.flush()
+            db.expunge(delta)
+            return _strategy_delta_payload(delta)
+    except SQLAlchemyError:
+        # A concurrent retry may win the unique source-event fence between the
+        # read and insert.  Re-read the committed winner; surface other DB
+        # failures instead of manufacturing a receipt.
+        existing = await get_strategy_delta_by_source_event(source_event_id)
+        if existing is not None:
+            return existing
+        raise
+
+
+async def get_strategy_delta(delta_id: str) -> StrategyDeltaReceipt | None:
+    async with get_session() as db:
+        result = await db.execute(select(StrategyDelta).where(StrategyDelta.delta_id == delta_id))
+        delta = result.scalars().first()
+        return _strategy_delta_payload(delta) if delta is not None else None
+
+
+async def get_strategy_delta_by_source_event(source_event_id: str) -> StrategyDeltaReceipt | None:
+    async with get_session() as db:
+        result = await db.execute(
+            select(StrategyDelta).where(StrategyDelta.source_event_id == source_event_id)
+        )
+        delta = result.scalars().first()
+        return _strategy_delta_payload(delta) if delta is not None else None
+
+
+async def list_strategy_deltas(
+    goal_id: str,
+    *,
+    limit: int = 50,
+) -> list[StrategyDeltaReceipt]:
+    """Return bounded, newest-first strategy corrections for operator inspection."""
+
+    bounded_limit = min(max(int(limit), 1), 200)
+    async with get_session() as db:
+        result = await db.execute(
+            select(StrategyDelta)
+            .where(StrategyDelta.goal_id == goal_id)
+            .order_by(StrategyDelta.created_at.desc())
+            .limit(bounded_limit)
+        )
+        return [_strategy_delta_payload(delta) for delta in result.scalars().all()]
+
+
+async def update_strategy_delta(
+    delta_id: str,
+    *,
+    status: str,
+    goal_revision_after: int | None = None,
+    rollback_target_id: str | None = None,
+    expected_status: str | tuple[str, ...] | None = None,
+) -> StrategyDeltaReceipt | None:
+    if status not in {"proposed", "applied", "rolled_back", "rejected"}:
+        raise ValueError("invalid strategy delta status")
+    async with get_session() as db:
+        guards = [StrategyDelta.delta_id == delta_id]
+        if expected_status is not None:
+            statuses = (expected_status,) if isinstance(expected_status, str) else expected_status
+            guards.append(StrategyDelta.status.in_(statuses))
+        result = await db.execute(
+            update(StrategyDelta)
+            .where(*guards)
+            .values(
+                status=status,
+                goal_revision_after=goal_revision_after,
+                rollback_target_id=rollback_target_id,
+                updated_at=_now(),
+            )
+        )
+        if result.rowcount != 1:
+            current_result = await db.execute(
+                select(StrategyDelta).where(StrategyDelta.delta_id == delta_id)
+            )
+            current = current_result.scalars().first()
+            return _strategy_delta_payload(current) if current is not None else None
+        refreshed_result = await db.execute(
+            select(StrategyDelta).where(StrategyDelta.delta_id == delta_id)
+        )
+        refreshed = refreshed_result.scalars().first()
+        if refreshed is None:
+            return None
+        db.expunge(refreshed)
+        return _strategy_delta_payload(refreshed)
+
+
 def memory_operator_policy_payload() -> dict[str, Any]:
     return {
         "authoritative_memory": "guardian",
@@ -228,6 +425,15 @@ async def correct_memory(
             extra={"pinned": False},
         ),
     }
+    superseded_metadata_updates = {
+        "superseded_reason": "operator_correction",
+        "operator_control": {
+            "last_action": "superseded_by_operator_correction",
+            "last_actor": actor,
+            "last_reason": str(reason or "").strip(),
+            "last_action_at": now.isoformat(),
+        },
+    }
 
     created = await memory_repository.create_memory(
         content=normalized_content,
@@ -242,6 +448,8 @@ async def correct_memory(
         reinforcement=1.5,
         metadata=metadata_updates,
         last_confirmed_at=now,
+        supersedes_memory_id=corrects_memory_id,
+        supersedes_metadata=superseded_metadata_updates if corrects_memory_id else None,
     )
     memory = await memory_repository.get_memory(created.memory_id)
     if memory is None:  # pragma: no cover - defensive, create_memory already flushed
@@ -249,20 +457,9 @@ async def correct_memory(
 
     corrected_memory = None
     if corrects_memory_id:
-        corrected_memory = await memory_repository.update_memory_control_metadata(
-            corrects_memory_id,
-            status=MemoryStatus.superseded,
-            metadata_updates={
-                "superseded_reason": "operator_correction",
-                "superseded_by_memory_id": memory.id,
-                "operator_control": {
-                    "last_action": "superseded_by_operator_correction",
-                    "last_actor": actor,
-                    "last_reason": str(reason or "").strip(),
-                    "last_action_at": now.isoformat(),
-                },
-            },
-        )
+        corrected_memory = await memory_repository.get_memory(corrects_memory_id)
+        if corrected_memory is None:  # pragma: no cover - atomic target update
+            raise ValueError(f"Unknown memory id: {corrects_memory_id}")
         await memory_repository.create_edge(
             from_memory_id=memory.id,
             to_memory_id=corrected_memory.id,
@@ -712,21 +909,36 @@ async def get_memory_live_controls_snapshot(
     provider_inventory = _apply_provider_quarantine_overlay(list_memory_provider_inventory())
     fetch_limit = bounded_limit if not owner_session_id else min(bounded_limit * 10, 200)
     try:
-        active = _scope_memories_to_owner(
-            await memory_repository.list_memories(status=MemoryStatus.active, limit=fetch_limit),
-            owner_session_id,
-        )[:bounded_limit]
-        superseded = _scope_memories_to_owner(
-            await memory_repository.list_memories(status=MemoryStatus.superseded, limit=fetch_limit),
-            owner_session_id,
-        )[:bounded_limit]
-        archived = _scope_memories_to_owner(
-            await memory_repository.list_memories(status=MemoryStatus.archived, limit=fetch_limit),
-            owner_session_id,
-        )[:bounded_limit]
-        receipts = await list_memory_audit_receipts(limit=bounded_limit)
-        reconciliation = await summarize_memory_reconciliation_state(limit=min(bounded_limit, 10))
-        operator_status = "guardian_memory_live_controls_visible"
+        tombstone_reconciliation = await memory_repository.reconcile_memory_tombstones()
+        if tombstone_reconciliation.get("status") != "ready":
+            active = []
+            superseded = []
+            archived = []
+            receipts = {"events": []}
+            reconciliation = {
+                "summary": {
+                    "status": "degraded_no_learning",
+                    "reason": "canonical tombstone reconciliation requires repair",
+                },
+                "tombstone_reconciliation": tombstone_reconciliation,
+            }
+            operator_status = "guardian_memory_live_controls_degraded"
+        else:
+            active = _scope_memories_to_owner(
+                await memory_repository.list_memories(status=MemoryStatus.active, limit=fetch_limit),
+                owner_session_id,
+            )[:bounded_limit]
+            superseded = _scope_memories_to_owner(
+                await memory_repository.list_memories(status=MemoryStatus.superseded, limit=fetch_limit),
+                owner_session_id,
+            )[:bounded_limit]
+            archived = _scope_memories_to_owner(
+                await memory_repository.list_memories(status=MemoryStatus.archived, limit=fetch_limit),
+                owner_session_id,
+            )[:bounded_limit]
+            receipts = await list_memory_audit_receipts(limit=bounded_limit)
+            reconciliation = await summarize_memory_reconciliation_state(limit=min(bounded_limit, 10))
+            operator_status = "guardian_memory_live_controls_visible"
     except SQLAlchemyError:
         active = []
         superseded = []
@@ -916,9 +1128,17 @@ async def apply_memory_live_control_action(
         existing = await memory_repository.get_memory(memory_id)
         if existing is None:
             raise ValueError(f"Unknown memory id: {memory_id}")
-        memory = await memory_repository.update_memory_control_metadata(
+        deletion_marker = _canonical_memory_deletion_marker(existing)
+        if deletion_marker is not None:
+            raise ValueError(
+                "cannot rollback canonical memory after operator delete/export "
+                f"redaction ({deletion_marker})"
+            )
+        memory = await memory_repository.rollback_memory_if_unchanged(
             memory_id,
-            status=MemoryStatus.active,
+            expected_updated_at=existing.updated_at,
+            expected_metadata_json=existing.metadata_json,
+            expected_status=existing.status,
             confidence=max(float(existing.confidence or 0.0), 0.55),
             importance=max(float(existing.importance or 0.0), 0.55),
             reinforcement=max(float(existing.reinforcement or 0.0), 1.0),
@@ -935,14 +1155,10 @@ async def apply_memory_live_control_action(
     elif normalized_action == "propagate_delete_export":
         if not memory_id:
             raise ValueError("memory_id is required for propagate_delete_export")
-        memory = await memory_repository.update_memory_control_metadata(
+        tombstone_result = await memory_repository.mark_memory_tombstoned(
             memory_id,
-            status=MemoryStatus.archived,
-            content="[delete/export propagated by operator]",
-            summary="[delete/export propagated by operator]",
-            confidence=0.0,
-            importance=0.0,
-            reinforcement=0.0,
+            actor=actor,
+            reason=reason,
             metadata_updates={
                 **_operator_metadata(
                     action="propagate_delete_export",
@@ -950,14 +1166,25 @@ async def apply_memory_live_control_action(
                     privacy_boundary=boundary,
                     reason=reason,
                     extra={
-                        "delete_export_state": "canonical_memory_redacted",
+                        "delete_export_state": _CANONICAL_MEMORY_REDACTED_STATE,
                         "provider_propagation_state": "runtime_receipt_only_no_full_provider_parity_claim",
                     },
                 ),
-                "archived_reason": "operator_delete_export",
+                "archived_reason": _CANONICAL_MEMORY_DELETE_EXPORT_REASON,
                 "archived_at": now.isoformat(),
             },
         )
+        memory = tombstone_result.memory
+        result["tombstone"] = {
+            "id": tombstone_result.tombstone.id,
+            "memory_id": tombstone_result.tombstone.memory_id,
+            "actor": tombstone_result.tombstone.actor,
+            "reason": tombstone_result.tombstone.reason,
+            "created_at": tombstone_result.tombstone.created_at.isoformat(),
+            "created": tombstone_result.created,
+            "state": _CANONICAL_MEMORY_REDACTED_STATE,
+        }
+        invalidate_bounded_guardian_snapshot_cache()
         changed_memory = True
     elif normalized_action in {"quarantine_provider", "reinstate_provider"}:
         normalized_provider = str(provider_name or "").strip()

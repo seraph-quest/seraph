@@ -451,11 +451,46 @@ def test_run_runtime_evals_can_filter_specific_scenarios():
     summary = asyncio.run(run_runtime_evals(["agent_local_runtime_profile", "observer_delivery_gate_audit"]))
 
     assert summary.total == 2
-    assert summary.failed == 0
+    failed_results = [
+        f"{result.name}: {result.error or result.details}"
+        for result in summary.results
+        if not result.passed
+    ]
+    assert summary.failed == 0, failed_results
     assert [result.name for result in summary.results] == [
         "agent_local_runtime_profile",
         "observer_delivery_gate_audit",
     ]
+
+
+def test_mcp_test_api_audit_runtime_eval_binds_authority_and_redacts_receipts():
+    summary = asyncio.run(run_runtime_evals(["mcp_test_api_audit"]))
+
+    assert summary.total == 1
+    assert summary.failed == 0, [
+        f"{result.name}: {result.error or result.details}"
+        for result in summary.results
+        if not result.passed
+    ]
+    details = summary.results[0].details
+    assert details["route_reached"] is True
+    assert details["authority_bound"] is True
+    assert details["receipts_redacted"] is True
+
+
+def test_skills_api_audit_runtime_eval_binds_authority():
+    summary = asyncio.run(run_runtime_evals(["skills_api_audit"]))
+
+    assert summary.total == 1
+    assert summary.failed == 0, [
+        f"{result.name}: {result.error or result.details}"
+        for result in summary.results
+        if not result.passed
+    ]
+    details = summary.results[0].details
+    assert details["route_reached"] is True
+    assert details["authority_bound"] is True
+    assert details["context_reset"] is True
 
 
 def test_run_runtime_evals_rejects_unknown_scenarios():
@@ -4471,6 +4506,92 @@ def test_eval_browser_helper_does_not_block_event_loop():
     assert asyncio.run(_run()) == "slow browser result"
 
 
+@pytest.mark.asyncio
+async def test_scheduler_eval_wrapper_binds_authenticated_model_principal():
+    from src.approval.runtime import get_current_trust_principal
+    from src.model_fabric.caller_context import build_canonical_inference_context
+    from src.security.trust_contract import AuthorityGrant, PrincipalType
+
+    observed: dict[str, object] = {}
+
+    async def model_job() -> str:
+        principal = get_current_trust_principal()
+        assert principal is not None
+        context = build_canonical_inference_context(
+            "daily_briefing",
+            payload="scheduler eval",
+            output_tokens=32,
+            timeout_seconds=5,
+            job_id=principal.job_id,
+        )
+        observed["principal"] = principal
+        observed["context_principal"] = context.principal
+
+    await harness._run_scheduler_eval_job("principal-contract", model_job)
+
+    principal = observed["principal"]
+    assert principal is observed["context_principal"]
+    assert principal.principal_type is PrincipalType.SERVICE
+    assert principal.authenticated is True
+    assert principal.grants == (AuthorityGrant.MODEL_INFERENCE,)
+    assert principal.job_id.startswith("scheduler:eval:principal-contract:")
+
+
+@pytest.mark.asyncio
+async def test_model_eval_job_binds_scoped_service_principal_and_restores_context():
+    from src.approval.runtime import get_current_trust_principal
+    from src.model_fabric.caller_context import build_canonical_inference_context
+    from src.security.trust_contract import AuthorityGrant, PrincipalType
+
+    observed: dict[str, object] = {}
+
+    async def model_job() -> None:
+        principal = get_current_trust_principal()
+        assert principal is not None
+        context = build_canonical_inference_context(
+            "session_consolidation",
+            payload="direct model eval",
+            output_tokens=32,
+            timeout_seconds=5,
+            session_id="model-eval-session",
+            job_id=principal.job_id,
+        )
+        observed["principal"] = principal
+        observed["context_principal"] = context.principal
+        return "model-completed"
+
+    result = await harness._run_model_eval_job(
+        "principal-contract",
+        model_job,
+        session_id="model-eval-session",
+    )
+
+    assert result == "model-completed"
+    principal = observed["principal"]
+    assert principal is observed["context_principal"]
+    assert principal.principal_id == "service:eval:principal-contract"
+    assert principal.principal_type is PrincipalType.SERVICE
+    assert principal.authenticated is True
+    assert principal.grants == (AuthorityGrant.MODEL_INFERENCE,)
+    assert principal.session_id == "model-eval-session"
+    assert principal.job_id == "eval:principal-contract"
+    assert get_current_trust_principal() is None
+
+
+def test_eval_inference_context_remains_fail_closed_without_principal():
+    from src.model_fabric.caller_context import build_canonical_inference_context
+
+    with patch("src.model_fabric.caller_context.get_current_trust_principal", return_value=None):
+        with pytest.raises(PermissionError, match="authenticated runtime principal"):
+            build_canonical_inference_context(
+                "daily_briefing",
+                payload="unauthenticated eval",
+                output_tokens=32,
+                timeout_seconds=5,
+                job_id="scheduler:eval:unauthenticated",
+            )
+
+
 def test_runtime_eval_scenarios_expose_expected_details():
     summary = asyncio.run(
         run_runtime_evals(
@@ -4580,27 +4701,30 @@ def test_runtime_eval_scenarios_expose_expected_details():
         )
     )
 
-    assert summary.failed == 0
+    failed_results = [
+        f"{result.name}: {result.error or result.details}"
+        for result in summary.results
+        if not result.passed
+    ]
+    assert summary.failed == 0, failed_results
     details_by_name = {result.name: result.details for result in summary.results}
 
-    assert details_by_name["provider_fallback_chain"]["attempted_models"] == [
-        "openrouter/anthropic/claude-sonnet-4",
-        "openai/gpt-4o-mini",
-        "openai/gpt-4.1-mini",
-    ]
-    assert details_by_name["provider_fallback_chain"]["final_model"] == "openai/gpt-4.1-mini"
-    assert details_by_name["provider_health_reroute"]["attempted_models"] == [
-        "openrouter/anthropic/claude-sonnet-4",
-        "openai/gpt-4o-mini",
-        "openai/gpt-4o-mini",
-    ]
-    assert details_by_name["provider_health_reroute"]["rerouted_model"] == "openai/gpt-4o-mini"
-    assert details_by_name["local_runtime_profile"]["runtime_profile"] == "local"
-    assert details_by_name["local_runtime_profile"]["routed_model"] == "ollama/llama3.2"
-    assert details_by_name["helper_local_runtime_paths"]["routed_models"]["context_window_summary"] == "ollama/llama3.2"
-    assert details_by_name["helper_local_runtime_paths"]["routed_models"]["session_title_generation"] == "ollama/llama3.2"
-    assert details_by_name["helper_local_runtime_paths"]["routed_models"]["session_consolidation"] == "ollama/llama3.2"
-    assert details_by_name["context_window_summary_audit"]["success_model"] == "ollama/llama3.2"
+    assert details_by_name["provider_fallback_chain"]["attempted_models"] == []
+    assert details_by_name["provider_fallback_chain"]["final_model"] is None
+    assert "registered canonical runtime path" in details_by_name["provider_fallback_chain"]["blocked_reason"]
+    assert details_by_name["provider_health_reroute"]["attempted_models"] == []
+    assert details_by_name["provider_health_reroute"]["rerouted_model"] is None
+    assert "registered canonical runtime path" in details_by_name["provider_health_reroute"]["blocked_reason"]
+    assert details_by_name["local_runtime_profile"]["runtime_profile"] == "openrouter"
+    assert details_by_name["local_runtime_profile"]["routed_model"] == "openrouter/anthropic/claude-sonnet-4"
+    assert details_by_name["helper_local_runtime_paths"]["routed_models"] == {
+        "context_window_summary": "openrouter/anthropic/claude-sonnet-4",
+        "session_title_generation": "openrouter/anthropic/claude-sonnet-4",
+        "session_consolidation": "openrouter/anthropic/claude-sonnet-4",
+    }
+    assert details_by_name["context_window_summary_audit"]["routing_verification"] == (
+        "not_in_scope_transport_mocked_above_model_route"
+    )
     assert details_by_name["context_window_summary_audit"]["success_runtime_path"] == "context_window_summary"
     assert details_by_name["context_window_summary_audit"]["degraded_runtime_path"] == "context_window_summary"
     assert details_by_name["context_window_summary_audit"]["degraded_fallback"] == "truncation"
@@ -4975,15 +5099,12 @@ def test_runtime_eval_scenarios_expose_expected_details():
     assert details_by_name["guardian_learning_policy_v2_behavior"]["blocked_reason"] == "learned_blocked_state_avoidance"
     assert details_by_name["guardian_learning_policy_v2_behavior"]["available_action"] == "act"
     assert details_by_name["guardian_learning_policy_v2_behavior"]["available_reason"] == "learned_available_window"
-    assert details_by_name["agent_local_runtime_profile"]["routed_models"]["chat_agent"] == "ollama/llama3.2"
-    assert details_by_name["agent_local_runtime_profile"]["routed_models"]["onboarding_agent"] == "ollama/llama3.2"
-    assert details_by_name["agent_local_runtime_profile"]["routed_models"]["strategist_agent"] == "ollama/llama3.2"
-    assert details_by_name["agent_local_runtime_profile"]["routed_models"]["memory_keeper"] == "ollama/llama3.2"
-    assert details_by_name["delegation_local_runtime_profile"]["routed_models"]["orchestrator_agent"] == "ollama/llama3.2"
-    assert details_by_name["delegation_local_runtime_profile"]["routed_models"]["vault_keeper"] == "ollama/llama3.2"
-    assert details_by_name["delegation_local_runtime_profile"]["routed_models"]["goal_planner"] == "ollama/llama3.2"
-    assert details_by_name["delegation_local_runtime_profile"]["routed_models"]["web_researcher"] == "ollama/llama3.2"
-    assert details_by_name["delegation_local_runtime_profile"]["routed_models"]["file_worker"] == "ollama/llama3.2"
+    assert set(details_by_name["agent_local_runtime_profile"]["routed_models"].values()) == {
+        "openrouter/anthropic/claude-sonnet-4"
+    }
+    assert set(details_by_name["delegation_local_runtime_profile"]["routed_models"].values()) == {
+        "openrouter/anthropic/claude-sonnet-4"
+    }
     assert details_by_name["delegation_secret_boundary_behavior"]["memory_excludes_secret_tools"] is True
     assert details_by_name["delegation_secret_boundary_behavior"]["vault_only_secret_tools"] is True
     assert details_by_name["delegation_secret_boundary_behavior"]["secret_task_routed_to_vault_keeper"] is True
@@ -5177,6 +5298,8 @@ def test_runtime_eval_scenarios_expose_expected_details():
     assert details_by_name["source_adapter_evidence_behavior"]["github_runtime_server"] == "github"
     assert details_by_name["source_adapter_evidence_behavior"]["overview_source_adapters_total"] >= 4
     assert details_by_name["source_adapter_evidence_behavior"]["overview_source_adapters_ready"] >= 3
+    assert details_by_name["source_adapter_evidence_behavior"]["authority_bound"] is True
+    assert details_by_name["source_adapter_evidence_behavior"]["context_reset"] is True
     assert details_by_name["source_review_routine_behavior"]["daily_plan_status"] == "ready"
     assert details_by_name["source_review_routine_behavior"]["daily_ready_step_count"] >= 4
     assert details_by_name["source_review_routine_behavior"]["daily_work_items_source"] == "github-managed"
@@ -5298,12 +5421,12 @@ def test_runtime_eval_scenarios_expose_expected_details():
         "installed_extension_contribution_types"
     ]
     assert details_by_name["mcp_specialist_local_runtime_profile"]["runtime_path"] == "mcp_github_actions"
-    assert details_by_name["mcp_specialist_local_runtime_profile"]["routed_model"] == "ollama/llama3.2"
+    assert details_by_name["mcp_specialist_local_runtime_profile"]["routed_model"] == "openrouter/anthropic/claude-sonnet-4"
     assert details_by_name["embedding_runtime_audit"]["loaded_integration_type"] == "embedding_model"
-    assert details_by_name["embedding_runtime_audit"]["loaded_model"] == "all-MiniLM-L6-v2"
+    assert details_by_name["embedding_runtime_audit"]["loaded_model"] == "openrouter/openai/text-embedding-3-small"
     assert details_by_name["embedding_runtime_audit"]["vector_length"] == 2
-    assert details_by_name["embedding_runtime_audit"]["failure_stage"] == "encode"
-    assert details_by_name["embedding_runtime_audit"]["failure_error"] == "encode crashed"
+    assert details_by_name["embedding_runtime_audit"]["failure_stage"] == "request"
+    assert details_by_name["embedding_runtime_audit"]["failure_reason_code"] == "provider_transport_failed"
     assert details_by_name["vector_store_runtime_audit"]["memory_created"] is True
     assert details_by_name["vector_store_runtime_audit"]["success_operation"] == "add"
     assert details_by_name["vector_store_runtime_audit"]["empty_reason"] == "empty_table"
@@ -5345,159 +5468,106 @@ def test_runtime_eval_scenarios_expose_expected_details():
     assert details_by_name["vault_runtime_audit"]["missing_delete_reason"] == "missing_secret"
     assert details_by_name["vault_runtime_audit"]["failed_operation"] == "get"
     assert details_by_name["vault_runtime_audit"]["failed_error"] == "bad decrypt"
-    assert details_by_name["runtime_model_overrides"]["completion_runtime_profile"] == "default"
-    assert details_by_name["runtime_model_overrides"]["completion_model"] == "openai/gpt-4o-mini"
-    assert details_by_name["runtime_model_overrides"]["agent_runtime_profile"] == "default"
-    assert details_by_name["runtime_model_overrides"]["agent_model"] == "openai/gpt-4.1-mini"
-    assert details_by_name["runtime_fallback_overrides"]["completion_attempted_models"] == [
-        "openrouter/anthropic/claude-sonnet-4",
-        "openai/gpt-4.1-mini",
-        "openai/gpt-4.1-nano",
-    ]
-    assert details_by_name["runtime_fallback_overrides"]["completion_final_model"] == "openai/gpt-4.1-nano"
-    assert details_by_name["runtime_fallback_overrides"]["agent_fallback_models"] == [
-        "openai/gpt-4.1-mini",
-        "openai/gpt-4.1-nano",
-    ]
-    assert details_by_name["runtime_profile_preferences"]["completion_runtime_profile"] == "local"
-    assert details_by_name["runtime_profile_preferences"]["completion_attempted_models"] == [
-        "ollama/llama3.2",
-        "openrouter/anthropic/claude-sonnet-4",
-    ]
-    assert details_by_name["runtime_profile_preferences"]["completion_final_model"] == "openrouter/anthropic/claude-sonnet-4"
-    assert details_by_name["runtime_profile_preferences"]["agent_runtime_profile"] == "local"
-    assert details_by_name["runtime_profile_preferences"]["agent_fallback_models"] == [
-        "openrouter/anthropic/claude-sonnet-4",
-        "openai/gpt-4.1-mini",
-    ]
-    assert details_by_name["runtime_path_patterns"]["wildcard_runtime_profile"] == "local"
-    assert details_by_name["runtime_path_patterns"]["wildcard_model"] == "openai/gpt-4.1-mini"
-    assert details_by_name["runtime_path_patterns"]["wildcard_fallback_models"] == [
-        "openai/gpt-4.1-mini",
-        "openai/gpt-4.1-nano",
-    ]
-    assert details_by_name["runtime_path_patterns"]["exact_runtime_profile"] == "local"
-    assert details_by_name["runtime_path_patterns"]["exact_model"] == "ollama/coder"
-    assert details_by_name["runtime_path_patterns"]["exact_fallback_models"] == [
-        "openrouter/anthropic/claude-sonnet-4",
-        "openai/gpt-4o-mini",
-        "openai/gpt-4.1-mini",
-    ]
-    assert details_by_name["provider_policy_capabilities"]["chat_runtime_profile"] == "local"
-    assert details_by_name["provider_policy_capabilities"]["chat_fallback_models"] == [
-        "openai/gpt-4.1-mini",
-        "openrouter/anthropic/claude-sonnet-4",
-        "openai/gpt-4.1-nano",
-        "openai/gpt-4o-mini",
-    ]
-    assert details_by_name["provider_policy_capabilities"]["completion_attempted_models"] == [
-        "openrouter/anthropic/claude-sonnet-4",
-        "openai/gpt-4o-mini",
-    ]
-    assert details_by_name["provider_policy_capabilities"]["completion_final_model"] == "openai/gpt-4o-mini"
-    assert details_by_name["provider_policy_scoring"]["completion_attempted_models"] == [
-        "openrouter/anthropic/claude-sonnet-4",
-        "openai/gpt-4.1-nano",
-    ]
-    assert details_by_name["provider_policy_scoring"]["completion_final_model"] == "openai/gpt-4.1-nano"
-    assert details_by_name["provider_policy_scoring"]["completion_weighted_scores"] == {
-        "fast": 5.0,
-        "cheap": 4.0,
-        "tool_use": 4.0,
-    }
-    assert details_by_name["provider_policy_scoring"]["agent_weighted_scores"] == {
-        "fast": 6.0,
-        "reasoning": 4.0,
-        "tool_use": 4.0,
-    }
-    assert details_by_name["provider_policy_scoring"]["agent_fallback_models"] == [
-        "openai/gpt-4.1-mini",
-        "openai/gpt-4o-mini",
-    ]
-    assert details_by_name["provider_policy_safeguards"]["attempted_models"] == ["openai/gpt-4o-mini"]
-    assert details_by_name["provider_policy_safeguards"]["selected_model"] == "openai/gpt-4o-mini"
-    assert details_by_name["provider_policy_safeguards"]["rerouted_from_policy_guardrails"] is True
-    assert details_by_name["provider_policy_safeguards"]["required_policy_intents"] == ["tool_use"]
-    assert details_by_name["provider_policy_safeguards"]["max_cost_tier"] == "medium"
-    assert details_by_name["provider_policy_safeguards"]["max_latency_tier"] == "medium"
-    assert details_by_name["provider_policy_safeguards"]["required_task_class"] == "chat"
-    assert details_by_name["provider_policy_safeguards"]["max_budget_class"] == "medium"
-    assert details_by_name["provider_policy_safeguards"]["primary_missing_required_intents"] == ["tool_use"]
-    assert details_by_name["provider_policy_safeguards"]["primary_cost_guardrail"] is False
-    assert details_by_name["provider_policy_safeguards"]["primary_latency_guardrail"] is False
-    assert details_by_name["provider_policy_safeguards"]["primary_task_class"] == "analysis"
-    assert details_by_name["provider_policy_safeguards"]["primary_task_guardrail"] is False
-    assert details_by_name["provider_policy_safeguards"]["primary_budget_class"] == "high"
-    assert details_by_name["provider_policy_safeguards"]["primary_budget_guardrail"] is False
-    assert details_by_name["provider_routing_decision_audit"]["completion_selected_model"] == (
-        "openrouter/anthropic/claude-sonnet-4"
-    )
-    assert details_by_name["provider_routing_decision_audit"]["completion_attempt_order"] == [
-        "openrouter/anthropic/claude-sonnet-4",
-        "openai/gpt-4o-mini",
-        "openai/gpt-4.1-nano",
-        "openai/gpt-4.1-mini",
-    ]
-    assert details_by_name["provider_routing_decision_audit"]["completion_budget_steering_mode"] == "prefer_lower_budget"
-    assert details_by_name["provider_routing_decision_audit"]["completion_selected_route_score"] < 0.0
-    assert details_by_name["provider_routing_decision_audit"]["completion_selection_policy_mode"] == (
-        "retain_primary_until_reroute"
-    )
-    assert details_by_name["provider_routing_decision_audit"]["completion_planning_winner_model"] == (
-        "openai/gpt-4o-mini"
-    )
-    assert details_by_name["provider_routing_decision_audit"]["completion_planning_winner_selected"] is False
-    assert details_by_name["provider_routing_decision_audit"]["completion_best_alternate_model"] == (
-        "openai/gpt-4o-mini"
-    )
-    assert details_by_name["provider_routing_decision_audit"]["completion_selected_vs_best_alternate_margin"] < 0.0
-    assert details_by_name["provider_routing_decision_audit"]["completion_selected_failure_risk_score"] == 0.0
-    assert details_by_name["provider_routing_decision_audit"]["completion_selected_production_readiness"] == "ready"
-    assert details_by_name["provider_routing_decision_audit"]["completion_route_explanation"].startswith(
-        "selected openrouter/anthropic/claude-sonnet-4"
-    )
-    assert details_by_name["provider_routing_decision_audit"]["completion_route_comparison_summary"].startswith(
-        "retained primary openrouter/anthropic/claude-sonnet-4 even though openai/gpt-4o-mini"
-    )
-    assert details_by_name["provider_routing_decision_audit"]["completion_simulated_route_count"] == 4
-    assert details_by_name["provider_routing_decision_audit"]["completion_first_route_entry"] == (
-        "openrouter/anthropic/claude-sonnet-4"
-    )
-    assert details_by_name["provider_routing_decision_audit"]["completion_rejected_summary_count"] == 3
-    assert details_by_name["provider_routing_decision_audit"]["completion_rejected_models"] == [
-        "openai/gpt-4o-mini",
-        "openai/gpt-4.1-nano",
-        "openai/gpt-4.1-mini",
-    ]
-    assert details_by_name["provider_routing_decision_audit"]["agent_selected_model"] == "ollama/llama3.2"
-    assert details_by_name["provider_routing_decision_audit"]["agent_attempt_order"] == [
-        "ollama/llama3.2",
-        "openai/gpt-4.1-nano",
-        "openai/gpt-4o-mini",
-    ]
-    assert details_by_name["provider_routing_decision_audit"]["agent_budget_steering_mode"] == "none"
-    assert details_by_name["provider_routing_decision_audit"]["agent_selection_policy_mode"] == (
-        "highest_ranked_attemptable"
-    )
-    assert details_by_name["provider_routing_decision_audit"]["agent_planning_winner_model"] == "ollama/llama3.2"
-    assert details_by_name["provider_routing_decision_audit"]["agent_planning_winner_selected"] is True
-    assert details_by_name["provider_routing_decision_audit"]["agent_best_alternate_model"] == (
-        "openai/gpt-4.1-nano"
-    )
-    assert details_by_name["provider_routing_decision_audit"]["agent_selected_vs_best_alternate_margin"] >= 0.0
-    assert details_by_name["provider_routing_decision_audit"]["agent_primary_decision"] == "skipped"
-    assert details_by_name["provider_routing_decision_audit"]["agent_primary_feedback_state"] == "cooldown"
-    assert details_by_name["provider_routing_decision_audit"]["agent_primary_failure_risk_score"] > 0.0
-    assert details_by_name["provider_routing_decision_audit"]["agent_route_comparison_summary"].startswith(
-        "selected ollama/llama3.2 over openai/gpt-4.1-nano"
-    )
-    assert "unhealthy_cooldown" in details_by_name["provider_routing_decision_audit"][
-        "agent_primary_reason_codes"
-    ]
+    governed_model = "openrouter/anthropic/claude-sonnet-4"
+    for scenario_name in (
+        "runtime_model_overrides",
+        "runtime_fallback_overrides",
+        "runtime_profile_preferences",
+        "provider_policy_capabilities",
+        "provider_policy_scoring",
+        "provider_routing_decision_audit",
+    ):
+        scenario_details = details_by_name[scenario_name]
+        assert scenario_details["principal_authenticated"] is True
+        assert scenario_details["principal_grants"] == ["model_inference"]
+        assert scenario_details["allowed_provider_kinds"] == ["openrouter"]
+        assert scenario_details["fallback_allowed"] is False
+        assert scenario_details["egress_class"] == "cloud_allowed_full"
+        assert scenario_details["transport_api_key_present"] is True
+        assert scenario_details["transport_call_count"] == 1
+        assert scenario_details["receipt_finalized"] is True
+        assert scenario_details["receipt_outcome"] == "succeeded"
+
+    assert details_by_name["runtime_model_overrides"]["completion_runtime_profile"] == "openrouter"
+    assert details_by_name["runtime_model_overrides"]["completion_model"] == governed_model
+    assert details_by_name["runtime_model_overrides"]["agent_runtime_profile"] == "openrouter"
+    assert details_by_name["runtime_model_overrides"]["agent_model"] == governed_model
+    assert details_by_name["runtime_model_overrides"]["agent_fallback_models"] == []
+    assert details_by_name["runtime_model_overrides"]["override_ignored"] is True
+
+    assert details_by_name["runtime_fallback_overrides"]["completion_attempted_models"] == [governed_model]
+    assert details_by_name["runtime_fallback_overrides"]["completion_final_model"] == governed_model
+    assert details_by_name["runtime_fallback_overrides"]["fallback_forbidden"] is True
+
+    assert details_by_name["runtime_profile_preferences"]["completion_runtime_profile"] == "openrouter"
+    assert details_by_name["runtime_profile_preferences"]["completion_attempted_models"] == [governed_model]
+    assert details_by_name["runtime_profile_preferences"]["completion_final_model"] == governed_model
+    assert details_by_name["runtime_profile_preferences"]["agent_runtime_profile"] == "openrouter"
+    assert details_by_name["runtime_profile_preferences"]["local_preference_ignored"] is True
+
+    assert details_by_name["runtime_path_patterns"]["wildcard_runtime_profile"] == "openrouter"
+    assert details_by_name["runtime_path_patterns"]["wildcard_model"] == governed_model
+    assert details_by_name["runtime_path_patterns"]["exact_runtime_profile"] == "openrouter"
+    assert details_by_name["runtime_path_patterns"]["exact_model"] == governed_model
+    assert details_by_name["runtime_path_patterns"]["legacy_path_rules_ignored"] is True
+
+    assert details_by_name["provider_policy_capabilities"]["chat_runtime_profile"] == "openrouter"
+    assert details_by_name["provider_policy_capabilities"]["completion_attempted_models"] == [governed_model]
+    assert details_by_name["provider_policy_capabilities"]["completion_final_model"] == governed_model
+    assert details_by_name["provider_policy_capabilities"]["legacy_capability_policy_ignored"] is True
+
+    assert details_by_name["provider_policy_scoring"]["completion_attempted_models"] == [governed_model]
+    assert details_by_name["provider_policy_scoring"]["completion_final_model"] == governed_model
+    assert details_by_name["provider_policy_scoring"]["completion_weighted_scores"] == {}
+    assert details_by_name["provider_policy_scoring"]["agent_weighted_scores"] == {}
+    assert details_by_name["provider_policy_scoring"]["policy_scoring_ignored"] is True
+
+    safeguards = details_by_name["provider_policy_safeguards"]
+    assert safeguards["attempted_models"] == []
+    assert safeguards["governed_primary_model"] == governed_model
+    assert safeguards["rerouted_from_policy_guardrails"] is True
+    assert safeguards["required_policy_intents"] == ["tool_use"]
+    assert safeguards["max_cost_tier"] == "medium"
+    assert safeguards["max_latency_tier"] == "medium"
+    assert safeguards["required_task_class"] == "chat"
+    assert safeguards["max_budget_class"] == "medium"
+    assert safeguards["primary_missing_required_intents"] == []
+    assert safeguards["primary_cost_guardrail"] is True
+    assert safeguards["primary_latency_guardrail"] is True
+    assert safeguards["primary_task_class"] == "general"
+    assert safeguards["primary_task_guardrail"] is False
+    assert safeguards["primary_budget_class"] == "medium"
+    assert safeguards["primary_budget_guardrail"] is True
+    assert safeguards["guardrails_cannot_select_legacy_provider"] is True
+    assert safeguards["transport_suppressed"] is True
+    assert safeguards["no_compliant_route"] is True
+    assert safeguards["transport_call_count"] == 0
+
+    routing = details_by_name["provider_routing_decision_audit"]
+    assert routing["completion_selected_model"] == governed_model
+    assert routing["completion_attempt_order"] == [governed_model]
+    assert routing["completion_budget_steering_mode"] == "none"
+    assert routing["completion_selected_route_score"] == 0.0
+    assert routing["completion_selection_policy_mode"] == "retain_primary_until_reroute"
+    assert routing["completion_planning_winner_model"] == governed_model
+    assert routing["completion_planning_winner_selected"] is True
+    assert routing["completion_best_alternate_model"] is None
+    assert routing["completion_selected_vs_best_alternate_margin"] is None
+    assert routing["completion_selected_failure_risk_score"] == 0.0
+    assert routing["completion_selected_production_readiness"] == "ready"
+    assert routing["completion_route_explanation"].startswith(f"selected {governed_model}")
+    assert routing["completion_route_comparison_summary"].startswith(f"selected {governed_model}")
+    assert routing["completion_simulated_route_count"] == 1
+    assert routing["completion_first_route_entry"] == governed_model
+    assert routing["completion_rejected_summary_count"] == 0
+    assert routing["completion_rejected_models"] == []
+    assert routing["route_is_single_governed_openrouter"] is True
     assert details_by_name["session_bound_llm_trace"]["session_id"] == "trace-session"
     assert details_by_name["session_bound_llm_trace"]["title_trace_has_request_id"] is True
     assert details_by_name["session_bound_llm_trace"]["consolidation_trace_has_request_id"] is True
     assert details_by_name["session_bound_llm_trace"]["request_ids_differ"] is True
+    assert details_by_name["session_bound_llm_trace"]["governed_openrouter_targets"] is True
+    assert details_by_name["session_bound_llm_trace"]["transport_call_count"] == 2
     assert details_by_name["session_consolidation_behavior"]["stored_memory_count"] == 2
     assert details_by_name["session_consolidation_behavior"]["soul_update_count"] == 1
     assert details_by_name["session_consolidation_behavior"]["memory_categories"] == ["fact", "goal"]
@@ -5607,20 +5677,22 @@ def test_runtime_eval_scenarios_expose_expected_details():
     assert details_by_name["procedural_memory_adaptation_behavior"]["adapted_bounded_context_has_timing_rule"] is True
     assert details_by_name["procedural_memory_adaptation_behavior"]["active_procedural_memory_count"] == 8
     assert details_by_name["procedural_memory_adaptation_behavior"]["bounded_snapshot_line_count"] <= 8
-    assert details_by_name["scheduled_local_runtime_profile"]["runtime_profile"] == "local"
+    assert details_by_name["scheduled_local_runtime_profile"]["runtime_profile"] == "openrouter"
     assert details_by_name["scheduled_local_runtime_profile"]["routed_models"] == {
-        "daily_briefing": "ollama/llama3.2",
-        "evening_review": "ollama/llama3.2",
-        "activity_digest": "ollama/llama3.2",
-        "weekly_activity_review": "ollama/llama3.2",
+        "daily_briefing": "openrouter/anthropic/claude-sonnet-4",
+        "evening_review": "openrouter/anthropic/claude-sonnet-4",
+        "activity_digest": "openrouter/anthropic/claude-sonnet-4",
+        "weekly_activity_review": "openrouter/anthropic/claude-sonnet-4",
     }
     assert details_by_name["scheduled_local_runtime_profile"]["routed_api_bases"] == {
-        "daily_briefing": "http://localhost:11434/v1",
-        "evening_review": "http://localhost:11434/v1",
-        "activity_digest": "http://localhost:11434/v1",
-        "weekly_activity_review": "http://localhost:11434/v1",
+        "daily_briefing": "https://openrouter.ai/api/v1",
+        "evening_review": "https://openrouter.ai/api/v1",
+        "activity_digest": "https://openrouter.ai/api/v1",
+        "weekly_activity_review": "https://openrouter.ai/api/v1",
     }
     assert details_by_name["scheduled_local_runtime_profile"]["delivery_count"] == 4
+    assert details_by_name["scheduled_local_runtime_profile"]["fallback_forbidden"] is True
+    assert details_by_name["scheduled_local_runtime_profile"]["route_event_count"] == 4
     assert details_by_name["process_recovery_boundary_behavior"]["session_scoped"] is True
     assert details_by_name["process_recovery_boundary_behavior"]["output_path_within_workspace"] is False
     assert details_by_name["process_recovery_boundary_behavior"]["output_path_under_runtime_tmp"] is True

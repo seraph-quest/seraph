@@ -62,6 +62,12 @@ class TestUpdate:
         updated = await repo.update(goal.id, status="completed")
         assert updated.status == "completed"
 
+    async def test_level_and_domain(self, async_db, repo):
+        goal = await repo.create("Test")
+        updated = await repo.update(goal.id, level="weekly", domain="health")
+        assert updated.level == "weekly"
+        assert updated.domain == "health"
+
     async def test_invalid_status(self, async_db, repo):
         goal = await repo.create("Test")
         with pytest.raises(ValueError, match="Invalid status"):
@@ -111,12 +117,18 @@ class TestListGoals:
 class TestGetTree:
     async def test_nested_structure(self, async_db, repo):
         parent = await repo.create("Vision", level="vision")
-        await repo.create("Annual", level="annual", parent_id=parent.id)
+        await repo.create(
+            "Annual",
+            level="annual",
+            parent_id=parent.id,
+            proactive_enabled=True,
+        )
         tree = await repo.get_tree()
         assert len(tree) == 1
         assert tree[0]["title"] == "Vision"
         assert len(tree[0]["children"]) == 1
         assert tree[0]["children"][0]["title"] == "Annual"
+        assert tree[0]["children"][0]["proactive_enabled"] is True
 
     async def test_empty(self, async_db, repo):
         tree = await repo.get_tree()

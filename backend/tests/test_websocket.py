@@ -17,8 +17,10 @@ from starlette.testclient import TestClient
 
 # Ensure models are registered in SQLModel.metadata before create_all
 import src.db.models  # noqa: F401
+from config.settings import settings
 from src.agent.direct_chat import should_use_direct_local_chat as real_should_use_direct_local_chat
 from src.api.ws import _build_agent
+from src.security.trust_contract import AuthorityGrant, PrincipalType, TrustPrincipal
 from src.utils.background import drain_tracked_tasks
 
 
@@ -77,6 +79,16 @@ def _make_sync_client_with_db():
     patches.append(patch("src.app.init_scheduler", return_value=None))
     patches.append(patch("src.app.shutdown_scheduler"))
     patches.append(patch("src.memory.flush.flush_session_memory", AsyncMock(return_value=None)))
+    patches.append(
+        patch(
+            "src.api.chat.get_current_trust_principal",
+            return_value=TrustPrincipal(
+                principal_id="operator:test",
+                principal_type=PrincipalType.OPERATOR,
+                grants=(AuthorityGrant.MODEL_INFERENCE,),
+            ),
+        )
+    )
     patches.append(patch("src.api.ws.should_use_direct_local_chat", return_value=False))
     for p in patches:
         p.start()
@@ -107,6 +119,38 @@ def _close_sync_client_with_db(patches, stack):
 
 
 class TestWebSocket:
+    def test_websocket_rejects_effective_legacy_runtime_override(self):
+        client, patches, stack = _make_sync_client_with_db()
+
+        async def _fake_stream(*args, **kwargs):
+            yield "OpenRouter ready."
+
+        try:
+            with (
+                patch.object(
+                    settings,
+                    "runtime_model_overrides",
+                    "chat_agent=codex-local,onboarding_agent=codex-local",
+                ),
+                patch("litellm.completion") as completion,
+                patch("src.api.ws.should_use_direct_local_chat", return_value=True),
+                patch("src.api.ws.direct_local_chat_route_error", new=AsyncMock(return_value=None)),
+                patch("src.api.ws.stream_direct_local_chat", _fake_stream),
+                client.websocket_connect("/ws/chat") as ws,
+            ):
+                _ = ws.receive_text()
+                ws.send_text(json.dumps({"type": "message", "message": "Hello"}))
+                received = [json.loads(ws.receive_text()) for _ in range(4)]
+
+            assert received[0]["type"] == "status"
+            assert received[-1]["type"] == "final"
+            assert received[-1]["content"] == "OpenRouter ready."
+            completion.assert_not_called()
+        finally:
+            stack.close()
+            for p in patches:
+                p.stop()
+
     def test_websocket_ping(self):
         client, patches, stack = _make_sync_client_with_db()
         try:
@@ -177,7 +221,7 @@ class TestWebSocket:
             assert received[0]["type"] == "status"
             assert received[0]["content"] == "Seraph received the message."
             assert received[1]["type"] == "status"
-            assert "local chat runtime" in received[1]["content"]
+            assert "governed OpenRouter chat runtime" in received[1]["content"]
             assert received[2]["type"] == "delta"
             assert received[2]["content"] == "Re"
             assert received[3]["type"] == "delta"
@@ -191,6 +235,115 @@ class TestWebSocket:
             assistant_messages = [message for message in messages if message["role"] == "assistant"]
             assert [message["content"] for message in assistant_messages] == ["Ready."]
             assert all("Response interrupted" not in message["content"] for message in messages)
+        finally:
+            stack.close()
+            for p in patches:
+                p.stop()
+
+    def test_websocket_ingress_rejects_duplicate_before_stream_dispatch(self):
+        client, patches, stack = _make_sync_client_with_db()
+        stream_calls = []
+
+        async def _fake_stream(*args, **kwargs):
+            stream_calls.append(args[0])
+            yield "Ready."
+
+        try:
+            with (
+                patch("src.api.ws.should_use_direct_local_chat", return_value=True),
+                patch("src.api.ws.direct_local_chat_route_error", new=AsyncMock(return_value=None)),
+                patch("src.api.ws.stream_direct_local_chat", _fake_stream),
+                patch("src.api.ws.run_direct_local_chat", new=AsyncMock(return_value="Unused.")),
+                client.websocket_connect("/ws/chat") as ws,
+            ):
+                _ = ws.receive_text()
+                first_payload = {
+                    "type": "message",
+                    "message": "Retry-safe websocket message",
+                    "idempotency_key": "ws-retry-1",
+                }
+                ws.send_text(json.dumps(first_payload))
+                first_responses = [json.loads(ws.receive_text()) for _ in range(4)]
+                session_id = first_responses[-1]["session_id"]
+
+                ws.send_text(
+                    json.dumps(
+                        {
+                            **first_payload,
+                            "session_id": session_id,
+                        }
+                    )
+                )
+                duplicate = json.loads(ws.receive_text())
+
+            assert first_responses[-1]["type"] == "final"
+            assert duplicate["type"] == "error"
+            assert duplicate["reason"] == "chat_message_duplicate"
+            assert stream_calls == ["Retry-safe websocket message"]
+        finally:
+            stack.close()
+            for p in patches:
+                p.stop()
+
+    def test_websocket_ingress_rejects_ambiguous_dual_identity_before_effects(self):
+        client, patches, stack = _make_sync_client_with_db()
+        stream_calls = []
+
+        async def _fake_stream(*args, **kwargs):
+            stream_calls.append(args[0])
+            yield "Unexpected."
+
+        try:
+            with (
+                patch("src.api.ws.log_chat_ingress_event", new=AsyncMock()) as mock_log,
+                patch("src.api.ws.stream_direct_local_chat", _fake_stream),
+                client.websocket_connect("/ws/chat") as ws,
+            ):
+                _ = ws.receive_text()
+                ws.send_text(
+                    json.dumps(
+                        {
+                            "type": "message",
+                            "message": "Do not reserve this",
+                            "message_id": "client-message-1",
+                            "idempotency_key": "ws-retry-1",
+                        }
+                    )
+                )
+                blocked = json.loads(ws.receive_text())
+
+            assert blocked["type"] == "error"
+            assert blocked["reason"] == "chat_message_identity_conflict"
+            assert stream_calls == []
+            mock_log.assert_not_awaited()
+        finally:
+            stack.close()
+            for p in patches:
+                p.stop()
+
+    @pytest.mark.parametrize("message", ["", " \t "])
+    def test_websocket_ingress_rejects_blank_message_before_effects(self, message):
+        client, patches, stack = _make_sync_client_with_db()
+        stream_calls = []
+
+        async def _fake_stream(*args, **kwargs):
+            stream_calls.append(args[0])
+            yield "Unexpected."
+
+        try:
+            with (
+                patch("src.api.ws.log_chat_ingress_event", new=AsyncMock()) as mock_log,
+                patch("src.api.ws.stream_direct_local_chat", _fake_stream),
+                client.websocket_connect("/ws/chat") as ws,
+            ):
+                _ = ws.receive_text()
+                ws.send_text(json.dumps({"type": "message", "message": message}))
+                blocked = json.loads(ws.receive_text())
+
+            assert blocked["type"] == "error"
+            assert blocked["reason"] == "chat_message_invalid"
+            assert stream_calls == []
+            mock_log.assert_not_awaited()
         finally:
             stack.close()
             for p in patches:
@@ -221,7 +374,7 @@ class TestWebSocket:
             assert received[0]["type"] == "status"
             assert received[0]["content"] == "Seraph received the message."
             assert received[1]["type"] == "status"
-            assert "local chat runtime" in received[1]["content"]
+            assert "governed OpenRouter chat runtime" in received[1]["content"]
             assert received[2]["type"] == "delta"
             assert received[2]["content"] == "Hello."
             assert received[3]["type"] == "final"
@@ -231,7 +384,7 @@ class TestWebSocket:
             for p in patches:
                 p.stop()
 
-    def test_websocket_direct_chat_falls_back_when_streaming_fails_before_delta(self):
+    def test_websocket_direct_chat_does_not_replay_after_streaming_failure(self):
         client, patches, stack = _make_sync_client_with_db()
 
         async def _fake_stream(*args, **kwargs):
@@ -243,22 +396,22 @@ class TestWebSocket:
                 patch("src.api.ws.should_use_direct_local_chat", return_value=True),
                 patch("src.api.ws.direct_local_chat_route_error", new=AsyncMock(return_value=None)),
                 patch("src.api.ws.stream_direct_local_chat", _fake_stream),
-                patch("src.api.ws.run_direct_local_chat", new=AsyncMock(return_value="Fallback ready.")),
+                patch("src.api.ws.run_direct_local_chat", new=AsyncMock(return_value="Fallback ready.")) as mock_direct,
                 client.websocket_connect("/ws/chat") as ws,
             ):
                 _ = ws.receive_text()
                 ws.send_text(json.dumps({"type": "message", "message": "Hello"}))
 
-                received = [json.loads(ws.receive_text()) for _ in range(4)]
+                received = [json.loads(ws.receive_text()) for _ in range(3)]
 
             assert received[0]["type"] == "status"
             assert received[0]["content"] == "Seraph received the message."
             assert received[1]["type"] == "status"
-            assert "local chat runtime" in received[1]["content"]
-            assert received[2]["type"] == "status"
-            assert "falling back" in received[2]["content"]
-            assert received[3]["type"] == "final"
-            assert received[3]["content"] == "Fallback ready."
+            assert "governed OpenRouter chat runtime" in received[1]["content"]
+            assert received[2]["type"] == "error"
+            assert "outcome is uncertain" in received[2]["content"]
+            assert "did not retry automatically" in received[2]["content"]
+            mock_direct.assert_not_awaited()
         finally:
             stack.close()
             for p in patches:
@@ -315,7 +468,7 @@ class TestWebSocket:
                 patch("src.api.ws.should_use_direct_local_chat", return_value=True),
                 patch("src.api.ws.direct_local_chat_route_error", new=AsyncMock(return_value=None)),
                 patch("src.api.ws.stream_direct_local_chat", _fake_stream),
-                patch("src.api.ws.run_direct_local_chat", new=AsyncMock(side_effect=RuntimeError("chat failed"))),
+                patch("src.api.ws.run_direct_local_chat", new=AsyncMock(side_effect=RuntimeError("chat failed"))) as mock_direct,
                 client.websocket_connect("/ws/chat") as ws,
             ):
                 _ = ws.receive_text()
@@ -330,7 +483,8 @@ class TestWebSocket:
                         break
 
             error = next(msg for msg in received if msg["type"] == "error")
-            assert "chat failed" in error["content"]
+            assert "outcome is uncertain" in error["content"]
+            mock_direct.assert_not_awaited()
             messages_response = client.get(f"/api/sessions/{error['session_id']}/messages")
             assert messages_response.status_code == 200
             messages = messages_response.json()

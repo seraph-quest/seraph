@@ -22,7 +22,8 @@ import httpx
 from config.settings import settings
 from src.audit.runtime import log_integration_event, log_scheduler_job_event
 from src.db.models import GoalStatus, MemoryEpisode, MemoryEpisodeType, ScreenObservation
-from src.llm_runtime import completion_with_fallback
+from src.llm_runtime import completion_with_fallback, provider_profiles
+from src.model_fabric.caller_context import build_canonical_inference_context
 from src.observer.image_metadata import image_metadata_label
 from src.observer.screenshot_folder_source import resolve_screenshot_folder
 from src.observer.screenshot_semantic_analysis import semantic_analysis_status_from_details
@@ -751,11 +752,8 @@ def _unique_values(values: list[str]) -> list[str]:
 
 
 def _report_llm_label(runtime_profile: str) -> str:
-    model = (
-        settings.local_model.strip()
-        or settings.local_vlm_model.strip()
-        or settings.default_model.strip()
-    )
+    profile = provider_profiles().get("openrouter")
+    model = (profile.model if profile is not None else settings.default_model).strip()
     if runtime_profile:
         return f"{runtime_profile}:{model}"
     return model
@@ -770,11 +768,12 @@ async def build_end_of_day_goal_report(report_day: date | None = None) -> dict[s
         _goals_for_report(target_day),
     )
     active_goals, completed_goals = goal_results
-    decision = screen_derived_llm_decision("end_of_day_goal_report")
+    decision = await screen_derived_llm_decision("end_of_day_goal_report")
     if not decision.allowed:
         body = (
             "End-of-day report LLM generation was blocked by Seraph's screen-data privacy policy. "
-            f"Reason: {decision.reason}. Configure a verified local runtime profile or explicitly allow remote routing."
+            f"Reason: {decision.reason}. Configure the governed OpenRouter model, cloud consent, "
+            "approved upstreams, and budget."
         )
         return {
             "date": target_day.isoformat(),
@@ -805,13 +804,23 @@ async def build_end_of_day_goal_report(report_day: date | None = None) -> dict[s
         completed_goals=_format_goals(completed_goals),
     )
 
+    transport_messages = [{"role": "user", "content": prompt}]
     response = await completion_with_fallback(
-        messages=[{"role": "user", "content": prompt}],
+        messages=transport_messages,
         temperature=0.4,
         max_tokens=900,
         timeout=settings.agent_briefing_timeout,
         runtime_path="end_of_day_goal_report",
-        local_runtime_only=not settings.screen_derived_llm_allow_remote,
+        # The active phase has one governed OpenRouter inference route.  The
+        # workload policy, rather than a legacy local-only flag, controls
+        # whether this cloud request may dispatch.
+        local_runtime_only=False,
+        request_context=build_canonical_inference_context(
+            "end_of_day_goal_report",
+            payload=transport_messages,
+            output_tokens=900,
+            timeout_seconds=settings.agent_briefing_timeout,
+        ),
     )
     body = str(response.choices[0].message.content or "").strip()
     if not body:

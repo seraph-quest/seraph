@@ -158,6 +158,28 @@ def test_browse_webpage_logs_timeout_runtime_audit(async_db):
     assert events[0]["details"]["timeout_rate_limited"] is True
 
 
+def test_browse_webpage_redacts_private_url_from_failure(async_db):
+    private_url = "https://user:password@example.com/private?token=secret#fragment"
+    with (
+        patch("src.tools.browser_tool._browse", new=AsyncMock(side_effect=RuntimeError("provider failed"))),
+        patch("concurrent.futures.ThreadPoolExecutor", return_value=_ImmediateExecutor()),
+    ):
+        result = browse_webpage(private_url)
+
+    assert result == "Error: browsing https://example.com/private?redacted failed."
+    assert "password" not in result
+    assert "secret" not in result
+    assert "fragment" not in result
+
+    async def _fetch():
+        events = await audit_repository.list_events(limit=5)
+        return [e for e in events if e["event_type"] == "integration_failed"]
+
+    events = asyncio.run(_fetch())
+    assert events
+    assert events[0]["details"]["error"] == "browser_request_failed"
+
+
 def test_browse_webpage_rate_limits_repeated_timeout_runtime_audit(async_db):
     with (
         patch("src.tools.browser_tool._browse", new=AsyncMock(side_effect=TimeoutError("Timed out"))),

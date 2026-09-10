@@ -39,12 +39,17 @@ class TestRestChatTimeout:
     @patch("src.memory.vector_store.search_formatted", return_value="")
     @patch("src.api.chat.build_agent")
     @patch("src.api.chat.create_onboarding_agent")
+    @patch("src.api.chat.run_direct_local_chat", new_callable=AsyncMock)
     async def test_returns_504_on_timeout(
-        self, mock_onboarding, mock_create_agent, mock_search, client
+        self,
+        mock_direct_chat,
+        mock_onboarding,
+        mock_create_agent,
+        mock_search,
+        client,
+        mocked_canonical_inference_context,
     ):
-        mock_agent = MagicMock()
-        mock_agent.run.side_effect = _slow_run
-        mock_onboarding.return_value = mock_agent
+        mock_direct_chat.side_effect = asyncio.TimeoutError
 
         original = settings.agent_chat_timeout
         settings.agent_chat_timeout = 0.1

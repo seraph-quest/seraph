@@ -4,22 +4,46 @@ from __future__ import annotations
 
 import json
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from smolagents import ToolCallingAgent
 
 from config.settings import settings
+from src.approval.runtime import get_current_trust_principal
 from src.guardian.state import GuardianState
 from src.llm_runtime import (
     FallbackLiteLLMModel as LiteLLMModel,
     build_model_kwargs,
     completion_with_fallback,
 )
+from src.model_fabric.caller_context import build_canonical_inference_context
+from src.model_fabric.remote_inference_admission import (
+    RemoteInferenceReceiptBinding,
+    reset_remote_inference_receipt_binding,
+    set_remote_inference_receipt_binding,
+)
+from src.tools.approval import wrap_tools_for_approval
 from src.tools.audit import wrap_tools_for_audit
 from src.tools.soul_tool import view_soul
 from src.tools.goal_tools import get_goals, get_goal_progress
+from src.goals.contracts import GoalCandidateDecision, GoalCandidateRequest
+from src.guardian.goal_conditioned_loop import build_goal_candidate_decision
+from src.db.models import Goal
 
 logger = logging.getLogger(__name__)
+
+
+def build_goal_conditioned_candidate(
+    goal: Goal,
+    request: GoalCandidateRequest,
+) -> GoalCandidateDecision:
+    """Expose the bounded goal candidate seam to strategist callers.
+
+    Strategist reasoning remains proposal-only; admission and execution stay
+    behind the goal-loop adapter and current goal revision checks.
+    """
+
+    return build_goal_candidate_decision(goal, request)
 
 STRATEGIST_INSTRUCTIONS = """\
 You are Seraph's strategic reasoning module. You periodically review the user's context \
@@ -90,7 +114,13 @@ def create_strategist_agent(
     )
 
     return ToolCallingAgent(
-        tools=wrap_tools_for_audit([view_soul, get_goals, get_goal_progress]),
+        # Strategist construction is also an executable agent boundary.  The
+        # read-only-looking tools still expose governed Seraph state, so they
+        # must carry the same authenticated capability decision as factory and
+        # workflow tools before they can dispatch.
+        tools=wrap_tools_for_approval(
+            wrap_tools_for_audit([view_soul, get_goals, get_goal_progress])
+        ),
         model=model,
         max_steps=5,
         instructions=instructions,
@@ -101,6 +131,10 @@ async def run_strategist_decision_completion(
     context_block: str = "",
     *,
     guardian_state: GuardianState | None = None,
+    durable_job_id: str | None = None,
+    admission_repository: object | None = None,
+    durable_lease_owner: str | None = None,
+    durable_fencing_token: int | None = None,
 ) -> str:
     """Run the strategist decision as a bounded JSON-only completion.
 
@@ -115,19 +149,60 @@ async def run_strategist_decision_completion(
         proactivity_level=settings.proactivity_level,
         context_block=context_block,
     )
-    response = await completion_with_fallback(
-        messages=[
+    transport_messages = [
             {
                 "role": "system",
                 "content": "You return only one valid JSON object. Do not call tools. Do not include markdown.",
             },
             {"role": "user", "content": prompt},
-        ],
-        temperature=0.2,
-        max_tokens=512,
-        timeout=settings.agent_strategist_timeout,
-        runtime_path="strategist_agent",
+        ]
+    if durable_job_id is None and any(
+        value is not None
+        for value in (admission_repository, durable_lease_owner, durable_fencing_token)
+    ):
+        raise ValueError("durable admission binding requires durable_job_id")
+    if durable_job_id is not None and (
+        admission_repository is None
+        or not str(durable_lease_owner or "").strip()
+        or durable_fencing_token is None
+    ):
+        raise ValueError("durable strategist inference requires the current job lease fence")
+
+    principal = get_current_trust_principal()
+    if durable_job_id is not None:
+        if principal is None:
+            raise PermissionError("durable strategist inference requires an authenticated principal")
+        principal = replace(principal, job_id=str(durable_job_id).strip())
+    request_context = build_canonical_inference_context(
+        "strategist_agent",
+        payload=transport_messages,
+        output_tokens=512,
+        timeout_seconds=settings.agent_strategist_timeout,
+        principal=principal,
+        session_id=principal.session_id if principal is not None else "",
+        job_id=principal.job_id if principal is not None else "",
     )
+    binding = (
+        RemoteInferenceReceiptBinding(
+            repository=admission_repository,
+            owner=str(durable_lease_owner).strip(),
+            fencing_token=int(durable_fencing_token),
+        )
+        if durable_job_id is not None
+        else None
+    )
+    binding_token = set_remote_inference_receipt_binding(binding)
+    try:
+        response = await completion_with_fallback(
+            messages=transport_messages,
+            temperature=0.2,
+            max_tokens=512,
+            timeout=settings.agent_strategist_timeout,
+            runtime_path="strategist_agent",
+            request_context=request_context,
+        )
+    finally:
+        reset_remote_inference_receipt_binding(binding_token)
     return str(response.choices[0].message.content or "").strip()
 
 

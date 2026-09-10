@@ -9,6 +9,7 @@ from smolagents import tool
 from config.settings import settings
 from src.artifacts.registry import build_artifact_record
 from src.audit.runtime import log_integration_event_sync
+from src.security.authority_envelope import check_filesystem_scope
 
 logger = logging.getLogger(__name__)
 
@@ -56,10 +57,16 @@ def _filesystem_details(file_path: str, operation: str, **extra: object) -> dict
 def _safe_resolve(file_path: str) -> Path:
     """Resolve a file path ensuring it stays within the workspace directory."""
     workspace = Path(settings.workspace_dir).resolve()
-    resolved = (workspace / file_path).resolve()
+    candidate = workspace / file_path
+    resolved = candidate.resolve()
     try:
         resolved.relative_to(workspace)
     except ValueError:
+        raise ValueError(f"Path traversal blocked: {file_path}")
+    boundary = check_filesystem_scope(str(candidate), (str(workspace),))
+    if not boundary.allowed:
+        if boundary.reason_code == "filesystem_symlink_blocked":
+            raise ValueError(f"Symlink traversal blocked: {file_path}")
         raise ValueError(f"Path traversal blocked: {file_path}")
     return resolved
 

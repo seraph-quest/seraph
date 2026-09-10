@@ -7,12 +7,14 @@ from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import urlparse
 
-from src.approval.runtime import get_current_session_id
+from src.approval.runtime import get_current_session_id, get_current_trust_principal
+from src.auth.cancellation import assert_runtime_not_revoked
 from src.browser.sessions import browser_session_runtime
 from src.extensions.source_capabilities import list_source_capability_inventory
 from src.audit.runtime import log_integration_event_sync
 from src.tools.browser_tool import browse_webpage
 from src.tools.mcp_manager import mcp_manager
+from src.tools.approval import require_capability_authority
 from src.tools.web_search_tool import search_web_records
 
 
@@ -1867,6 +1869,25 @@ def collect_source_evidence_bundle(
     owner_session_id: str = "",
     max_results: int = 5,
 ) -> dict[str, Any]:
+    # This adapter is also called directly by the public capabilities API, so
+    # the factory's AuthorityTool wrapper cannot be its only trust boundary.
+    # Check the authenticated runtime principal before inventory lookup or any
+    # provider/MCP dispatch.  The shared helper keeps denial content-free.
+    require_capability_authority(
+        session_id=get_current_session_id(),
+        principal=get_current_trust_principal(),
+        tool_name="collect_source_evidence",
+        arguments={
+            "contract": contract,
+            "source": source,
+            "query": query,
+            "url": url,
+            "ref": ref,
+            "session_id": session_id,
+            "owner_session_id": owner_session_id,
+            "max_results": max_results,
+        },
+    )
     inventory = list_source_capability_inventory()
     adapter_inventory = list_source_adapter_inventory(inventory)
     adapters = adapter_inventory["adapters"]
@@ -1921,6 +1942,12 @@ def collect_source_evidence_bundle(
         response["next_best_sources"] = list(selected_adapter.get("next_best_sources") or [])
         return response
 
+    if bool(selected_operation.get("mutating")) or _is_mutating_contract(contract):
+        response["status"] = "failed"
+        response["warnings"].append("Source evidence collection does not execute mutating contracts.")
+        response["next_best_sources"] = list(selected_adapter.get("next_best_sources") or [])
+        return response
+
     if not bool(selected_operation.get("executable")):
         reason = str(selected_operation.get("reason") or selected_adapter.get("degraded_reason") or "unavailable")
         response["warnings"].append(
@@ -1935,6 +1962,7 @@ def collect_source_evidence_bundle(
             response["status"] = "failed"
             response["warnings"].append("web_search evidence collection requires a non-empty query.")
             return response
+        assert_runtime_not_revoked()
         records, blocked = search_web_records(query.strip(), max_results=max_results)
         response["items"] = [_build_search_item(record, source_name) for record in records]
         if blocked:
@@ -1947,6 +1975,7 @@ def collect_source_evidence_bundle(
             response["status"] = "failed"
             response["warnings"].append("browse_webpage evidence collection requires an explicit URL.")
             return response
+        assert_runtime_not_revoked()
         content = browse_webpage(url.strip(), action="extract")
         if _is_error_result(content):
             response["status"] = "failed"
@@ -1976,6 +2005,7 @@ def collect_source_evidence_bundle(
             response["status"] = "failed"
             response["warnings"].append("The requested browser session ref or session_id was not found.")
             return response
+        assert_runtime_not_revoked()
         response["items"] = [_build_browser_item(payload, source_name)]
         response["status"] = "ok"
     elif selected_adapter["source_kind"] == "managed_connector":
@@ -1995,6 +2025,7 @@ def collect_source_evidence_bundle(
             )
             response["next_best_sources"] = list(selected_adapter.get("next_best_sources") or [])
             return response
+        assert_runtime_not_revoked()
         try:
             raw_result = _invoke_mcp_query(
                 tool,

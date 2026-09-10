@@ -50,10 +50,12 @@ function mockCockpitBaselineFetch(
   fetchMock: ReturnType<typeof vi.fn>,
   options: {
     runtimeStatus?: Record<string, unknown>;
+    runtimeStatusFailure?: number;
     capabilities?: Record<string, unknown>;
     extensions?: Record<string, unknown>;
     browserProviders?: Record<string, unknown>;
     browserSessions?: Record<string, unknown>;
+    operatorControlPlane?: Record<string, unknown>;
   },
 ) {
   fetchMock.mockImplementation((input: RequestInfo | URL) => {
@@ -64,13 +66,16 @@ function mockCockpitBaselineFetch(
       return Promise.resolve(mockResponse({ domains: {}, active_count: 0, completed_count: 0, total_count: 0 }));
     }
     if (url.includes("/api/runtime/status")) {
-      return Promise.resolve(mockResponse(options.runtimeStatus ?? {
+      const runtimeStatus = options.runtimeStatus ?? {
         version: "test",
         build_id: "test",
         provider: "test",
         model: "test",
         model_label: "test",
-      }));
+      };
+      return Promise.resolve(options.runtimeStatusFailure
+        ? mockResponse(runtimeStatus, false, options.runtimeStatusFailure)
+        : mockResponse(runtimeStatus));
     }
     if (url.includes("/api/observer/state")) return Promise.resolve(mockResponse({}));
     if (url.includes("/api/audit/events")) return Promise.resolve(mockResponse([]));
@@ -96,6 +101,9 @@ function mockCockpitBaselineFetch(
         ...(options.browserProviders ?? { providers: [] }),
         ...(options.browserSessions ?? { sessions: [] }),
       }));
+    }
+    if (url.includes("/api/operator/control-plane")) {
+      return Promise.resolve(mockResponse(options.operatorControlPlane ?? {}));
     }
     if (url.includes("/api/browser/sessions")) {
       return Promise.resolve(mockResponse(options.browserSessions ?? { sessions: [] }));
@@ -547,6 +555,10 @@ describe("CockpitView", () => {
     await waitFor(() =>
       expect(browserControls).toHaveTextContent(/1 providers · 1 sessions · 1 journaled · 1 degraded · no quarantine/i),
     );
+    expect(fetchMock).toHaveBeenCalledWith(
+      expect.stringContaining("/api/browser/providers?owner_session_id=session-1"),
+      expect.anything(),
+    );
     expect(browserControls).toHaveTextContent(/remote-cdp · remote cdp · staged local fallback · local fallback/i);
     expect(browserControls).toHaveTextContent(/degraded fallback labeled · silent fallback blocked/i);
     expect(browserControls).toHaveTextContent(/boundaries: profile · cookie · credential · download · upload · network/i);
@@ -686,6 +698,175 @@ describe("CockpitView", () => {
     expect(screen.queryByText("UNKNOWN · UNKNOWN")).not.toBeInTheDocument();
   });
 
+  it("surfaces backend OpenRouter configuration readiness as blocked", async () => {
+    mockCockpitBaselineFetch(fetchMock, {
+      runtimeStatus: {
+        version: "test",
+        build_id: "SERAPH_TEST",
+        provider: "openrouter",
+        model: "x-ai/grok-4.1-fast",
+        model_label: "grok-4.1-fast",
+        effective_runtime: {
+          runtime_path: "chat_agent",
+          active_profile: "openrouter",
+          provider: "openrouter",
+          provider_label: "openrouter",
+          model: "x-ai/grok-4.1-fast",
+          model_label: "grok-4.1-fast",
+          mode: "remote_provider",
+          route_label: "openrouter",
+          inference_ready: false,
+          inference_readiness: {
+            status: "configuration_required",
+            reasons: ["openrouter_api_key_missing"],
+          },
+        },
+      },
+    });
+
+    render(<CockpitView onSend={vi.fn()} />);
+
+    expect(await screen.findByText("OPENROUTER BLOCKED · GROK 4.1 FAST")).toBeInTheDocument();
+    expect(screen.queryByText("OPENROUTER · GROK 4.1 FAST")).not.toBeInTheDocument();
+  });
+
+  it("retains blocked readiness when control-plane posture omits readiness fields", async () => {
+    mockCockpitBaselineFetch(fetchMock, {
+      runtimeStatus: {
+        version: "test",
+        build_id: "SERAPH_TEST",
+        provider: "openrouter",
+        model: "x-ai/grok-4.1-fast",
+        model_label: "grok-4.1-fast",
+        effective_runtime: {
+          provider: "openrouter",
+          provider_label: "openrouter",
+          model: "x-ai/grok-4.1-fast",
+          model_label: "grok-4.1-fast",
+          route_label: "openrouter",
+          inference_ready: false,
+          inference_readiness: {
+            status: "configuration_required",
+            reasons: ["openrouter_api_key_missing"],
+          },
+        },
+      },
+      operatorControlPlane: mockOperatorControlPlaneRuntime({
+        version: "test",
+        build_id: "SERAPH_TEST_POSTURE",
+        provider: "openrouter",
+        model: "x-ai/grok-4.2",
+        model_label: "grok-4.2",
+      }),
+    });
+
+    render(<CockpitView onSend={vi.fn()} />);
+
+    expect(await screen.findByText("OPENROUTER BLOCKED · GROK 4.1 FAST")).toBeInTheDocument();
+    fireEvent.click(screen.getAllByRole("button", { name: "load control plane" })[0]);
+
+    await waitFor(() => {
+      expect(fetchMock.mock.calls.some(([input]) => String(input).includes("/api/operator/control-plane"))).toBe(true);
+      expect(screen.getByText("OPENROUTER BLOCKED · GROK 4.2")).toBeInTheDocument();
+    });
+    expect(screen.queryByText("OPENROUTER · GROK 4.2")).not.toBeInTheDocument();
+    expect(screen.queryByText("openrouter_api_key_missing")).not.toBeInTheDocument();
+  });
+
+  it("retains stale provenance and readiness when control-plane posture follows retained runtime", async () => {
+    const retainedRuntime = {
+      version: "test",
+      build_id: "SERAPH_RETAINED",
+      provider: "openrouter",
+      model: "x-ai/grok-4.1-fast",
+      model_label: "grok-4.1-fast",
+      effective_runtime: {
+        provider: "openrouter",
+        provider_label: "openrouter",
+        model: "x-ai/grok-4.1-fast",
+        model_label: "grok-4.1-fast",
+        route_label: "openrouter",
+        inference_ready: false,
+        inference_readiness: {
+          status: "degraded",
+          reasons: ["openrouter_api_key_missing"],
+        },
+      },
+    };
+    vi.stubGlobal("localStorage", {
+      getItem: vi.fn((key: string) => key === "seraph.cockpit.runtimeReceipt.v1" ? JSON.stringify(retainedRuntime) : null),
+      setItem: vi.fn(),
+      removeItem: vi.fn(),
+    });
+    mockCockpitBaselineFetch(fetchMock, {
+      runtimeStatusFailure: 503,
+      operatorControlPlane: mockOperatorControlPlaneRuntime({
+        version: "test",
+        build_id: "SERAPH_POSTURE",
+        provider: "openrouter",
+        model: "x-ai/grok-4.2",
+        model_label: "grok-4.2",
+      }),
+    });
+
+    render(<CockpitView onSend={vi.fn()} />);
+
+    expect(await screen.findByText("OPENROUTER BLOCKED DEGRADED STALE · GROK 4.1 FAST")).toBeInTheDocument();
+    fireEvent.click(screen.getAllByRole("button", { name: "load control plane" })[0]);
+
+    await waitFor(() => {
+      expect(fetchMock.mock.calls.some(([input]) => String(input).includes("/api/operator/control-plane"))).toBe(true);
+      expect(screen.getByText("OPENROUTER BLOCKED DEGRADED STALE · GROK 4.2")).toBeInTheDocument();
+    });
+    expect(screen.queryByText("OPENROUTER BLOCKED DEGRADED · GROK 4.2")).not.toBeInTheDocument();
+  });
+
+  it("keeps BLOCKED and DEGRADED telemetry tokens independent", async () => {
+    mockCockpitBaselineFetch(fetchMock, {
+      runtimeStatus: {
+        version: "test",
+        build_id: "SERAPH_TEST",
+        provider: "openrouter",
+        model: "x-ai/grok-4.1-fast",
+        model_label: "grok-4.1-fast",
+        effective_runtime: {
+          provider: "openrouter",
+          provider_label: "openrouter",
+          model: "x-ai/grok-4.1-fast",
+          model_label: "grok-4.1-fast",
+          route_label: "openrouter",
+          inference_ready: false,
+          inference_readiness: {
+            status: "configuration_required",
+            reasons: ["openrouter_api_key_missing"],
+          },
+        },
+        model_fabric: { status: "degraded" },
+      },
+    });
+
+    render(<CockpitView onSend={vi.fn()} />);
+
+    expect(await screen.findByText("OPENROUTER BLOCKED DEGRADED · GROK 4.1 FAST")).toBeInTheDocument();
+  });
+
+  it("preserves legacy runtime labels when readiness fields are absent", async () => {
+    mockCockpitBaselineFetch(fetchMock, {
+      runtimeStatus: {
+        version: "test",
+        build_id: "SERAPH_TEST",
+        provider: "legacy-provider",
+        model: "legacy-model",
+        model_label: "legacy-model",
+      },
+    });
+
+    render(<CockpitView onSend={vi.fn()} />);
+
+    expect(await screen.findByText("LEGACY PROVIDER · LEGACY MODEL")).toBeInTheDocument();
+    expect(screen.queryByText(/LEGACY PROVIDER (BLOCKED|DEGRADED)/)).not.toBeInTheDocument();
+  });
+
   it("renders GPU VLM route labels from effective runtime status", async () => {
     mockCockpitBaselineFetch(fetchMock, {
       runtimeStatus: {
@@ -721,6 +902,132 @@ describe("CockpitView", () => {
       expect(screen.getByText("GPU VLM · GEMMA 4 26B A4B IT QAT GGUF")).toBeInTheDocument();
     });
     expect(screen.queryByText("LOCAL GEMMA · GEMMA 4 26B A4B IT QAT GGUF")).not.toBeInTheDocument();
+  });
+
+  it("renders the last actual text route and marks a degraded fallback attempt", async () => {
+    mockCockpitBaselineFetch(fetchMock, {
+      runtimeStatus: {
+        version: "test",
+        build_id: "SERAPH_TEST",
+        provider: "configured-provider",
+        model: "configured-model",
+        model_label: "configured-model",
+        model_fabric: {
+          status: "degraded",
+          configuration_status: "ready",
+          configuration_error: null,
+          configured_chat_profile: "configured-primary",
+          profiles: [],
+          topology: { text: ["interactive", "background", "report"], vlm: ["vision"] },
+          workloads: {
+            interactive: {
+              selected: { profile_id: "configured-primary", model: "primary-model", adapter: "litellm", destination_class: "remote", outcome: "selected", latency_ms: 0 },
+              attempted: { profile_id: "fallback-attempt", model: "fallback-model", adapter: "litellm", destination_class: "remote", outcome: "timeout", latency_ms: 5000 },
+              attempt_count: 2,
+              last_outcome: "failed",
+              fallback_used: true,
+              fallback_reason_code: "primary_timeout",
+              degradation_codes: ["receipt_persistence_failed"],
+              succeeded: { profile_id: "last-actual", model: "actual-model", adapter: "litellm", receipt_id: "receipt-actual", finished_at: "2026-07-10T12:00:00Z" },
+              persistence: "degraded",
+              receipt_persistence_degraded: true,
+            },
+          },
+        },
+      },
+    });
+
+    render(<CockpitView onSend={vi.fn()} />);
+
+    await waitFor(() => {
+      expect(screen.getByText("TEXT LAST ACTUAL FALLBACK DEGRADED · ACTUAL MODEL")).toBeInTheDocument();
+    });
+    expect(screen.queryByText(/CONFIGURED PRIMARY/)).not.toBeInTheDocument();
+  });
+
+  it("does not mark a persisted succeeded text route degraded", async () => {
+    mockCockpitBaselineFetch(fetchMock, {
+      runtimeStatus: {
+        version: "test",
+        build_id: "SERAPH_TEST",
+        provider: "configured-provider",
+        model: "configured-model",
+        model_label: "configured-model",
+        model_fabric: {
+          status: "ready",
+          configuration_status: "ready",
+          configuration_error: null,
+          configured_chat_profile: "local-text",
+          profiles: [],
+          proofs: [],
+          topology: { text: ["interactive"], vlm: ["vision"] },
+          workloads: {
+            interactive: {
+              selected: { profile_id: "local-text", model: "gemma-text", adapter: "litellm", destination_class: "trusted_lan", outcome: "selected", latency_ms: 0 },
+              attempted: { profile_id: "local-text", model: "gemma-text", adapter: "litellm", destination_class: "trusted_lan", outcome: "succeeded", latency_ms: 22 },
+              attempt_count: 1,
+              last_outcome: "succeeded",
+              fallback_used: false,
+              fallback_reason_code: null,
+              degradation_codes: [],
+              succeeded: { profile_id: "local-text", model: "gemma-text", adapter: "litellm", receipt_id: "receipt-ok", finished_at: "2026-07-10T12:00:00Z" },
+              persistence: "persisted",
+              persistence_error_code: null,
+              receipt_persistence_degraded: false,
+            },
+          },
+        },
+      },
+    });
+
+    render(<CockpitView onSend={vi.fn()} />);
+
+    await waitFor(() => {
+      expect(screen.getByText("TEXT LOCAL TEXT · GEMMA TEXT")).toBeInTheDocument();
+    });
+    expect(screen.queryByText(/TEXT LOCAL TEXT DEGRADED/)).not.toBeInTheDocument();
+  });
+
+  it("labels a failed-only route as attempted instead of actual text", async () => {
+    mockCockpitBaselineFetch(fetchMock, {
+      runtimeStatus: {
+        version: "test",
+        build_id: "SERAPH_TEST",
+        provider: "configured-provider",
+        model: "configured-model",
+        model_fabric: {
+          status: "degraded",
+          configuration_status: "ready",
+          configuration_error: null,
+          configured_chat_profile: "local-text",
+          profiles: [],
+          proofs: [],
+          topology: { text: ["chat_agent"], vlm: ["screenshot_image_analysis"] },
+          workloads: {
+            interactive: {
+              selected: { profile_id: "local-text", model: "gemma-text", adapter: "litellm_chat", destination_class: "trusted_lan", outcome: "selected", latency_ms: 0 },
+              attempted: { profile_id: "local-text", model: "gemma-text", adapter: "litellm_chat", destination_class: "trusted_lan", outcome: "failed", latency_ms: 22 },
+              attempt_count: 1,
+              last_outcome: "failed",
+              fallback_used: false,
+              fallback_reason_code: null,
+              degradation_codes: [],
+              succeeded: null,
+              persistence: "persisted",
+              persistence_error_code: null,
+              receipt_persistence_degraded: false,
+            },
+          },
+        },
+      },
+    });
+
+    render(<CockpitView onSend={vi.fn()} />);
+
+    await waitFor(() => {
+      expect(screen.getByText("ATTEMPTED LOCAL TEXT FAILED DEGRADED · GEMMA TEXT")).toBeInTheDocument();
+    });
+    expect(screen.queryByText(/TEXT LOCAL TEXT/)).not.toBeInTheDocument();
   });
 
   it("uses operator runtime posture when runtime status is temporarily unavailable", async () => {
@@ -780,7 +1087,11 @@ describe("CockpitView", () => {
     fetchMock.mockImplementation((input: RequestInfo | URL) => {
       const url = String(input);
       if (url.includes("/api/workflows/runs/") && url.includes("/control")) {
-        return Promise.resolve(mockResponse({ detail: "approval_context_changed" }, false, 409));
+        return Promise.resolve(mockResponse(
+          { detail: { code: "session_revoked", message: "Operator session was revoked during workflow control." } },
+          false,
+          401,
+        ));
       }
       if (url.includes("/api/sessions")) return Promise.resolve(mockResponse([{ id: "session-2", title: "Atlas thread" }]));
       if (url.includes("/api/goals/tree")) return Promise.resolve(mockResponse([]));
@@ -848,6 +1159,14 @@ describe("CockpitView", () => {
               run_identity: "root-1",
               root_run_identity: "root-1",
               checkpoint_context_available: true,
+              action_handle: {
+                kind: "workflow_control",
+                action: "retry",
+                run_identity: "root-1",
+                step_id: "redacted_workflow_step_1234567890abcdef",
+                thread_id: "session-2",
+                requires_live_control: true,
+              },
             },
           ],
         }));
@@ -889,12 +1208,12 @@ describe("CockpitView", () => {
         expect.stringContaining("/api/workflows/runs/root-1/control"),
         expect.objectContaining({
           method: "POST",
-          body: expect.stringContaining('"action":"retry"'),
+          body: expect.stringContaining('"action_handle":{"kind":"workflow_control"'),
         }),
       ),
     );
     await waitFor(() =>
-      expect(screen.getByText("Live recovery control refused web-brief-to-file: approval_context_changed")).toBeInTheDocument(),
+      expect(screen.getByText("Live recovery control refused web-brief-to-file: Operator session was revoked during workflow control.")).toBeInTheDocument(),
     );
     expect(screen.queryByDisplayValue('Retry step "write_file" for workflow "web-brief-to-file".')).not.toBeInTheDocument();
   });

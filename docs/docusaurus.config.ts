@@ -77,7 +77,7 @@ const config: Config = {
           type: 'docSidebar',
           sidebarId: 'implementationSidebar',
           position: 'left',
-          label: 'Implementation',
+          label: 'Product & Implementation',
         },
         {
           type: 'doc',
@@ -113,7 +113,7 @@ const config: Config = {
           title: 'Documentation',
           items: [
             {
-              label: 'Master Roadmap',
+              label: 'Project Constitution',
               to: '/',
             },
             {

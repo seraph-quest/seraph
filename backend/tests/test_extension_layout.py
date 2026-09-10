@@ -5,6 +5,7 @@ from src.extensions.layout import (
     expected_layout_prefixes,
     is_package_manifest_path,
     iter_extension_manifest_paths,
+    reject_symlink_entries,
     resolve_package_reference,
     validate_contribution_layout,
 )
@@ -76,3 +77,19 @@ def test_resolve_package_reference_rejects_symlink_escape(tmp_path: Path):
         assert "escapes the package root" in str(exc)
     else:
         raise AssertionError("expected symlink escape to be rejected")
+
+
+def test_reject_symlink_entries_covers_unlisted_package_files(tmp_path: Path):
+    package_dir = tmp_path / "package"
+    package_dir.mkdir()
+    (package_dir / "manifest.yaml").write_text("id: package\n", encoding="utf-8")
+    outside = tmp_path / "host-secret.txt"
+    outside.write_text("host secret", encoding="utf-8")
+    (package_dir / "unlisted-link.txt").symlink_to(outside)
+
+    try:
+        reject_symlink_entries(package_dir)
+    except ValueError as exc:
+        assert "symlink" in str(exc)
+    else:
+        raise AssertionError("expected every package symlink to be rejected")

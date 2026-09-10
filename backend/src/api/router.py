@@ -1,6 +1,7 @@
 from fastapi import APIRouter
 
 from src.api.activity import router as activity_router
+from src.api.auth import router as auth_router
 from src.api.audit import router as audit_router
 from src.api.approvals import router as approvals_router
 from src.api.automation import router as automation_router
@@ -14,6 +15,7 @@ from src.api.evolution import router as evolution_router
 from src.api.goals import router as goals_router
 from src.api.mcp import router as mcp_router
 from src.api.memory import router as memory_router
+from src.api.model_fabric_settings import router as model_fabric_settings_router
 from src.api.nodes import router as nodes_router
 from src.api.operator import router as operator_router
 from src.api.profile import router as profile_router
@@ -27,6 +29,8 @@ from src.api.workflows import router as workflows_router
 from src.api.ws import router as ws_router
 
 api_router = APIRouter()
+
+api_router.include_router(auth_router, prefix="/api/auth", tags=["auth"])
 
 api_router.include_router(activity_router, prefix="/api", tags=["activity"])
 api_router.include_router(audit_router, prefix="/api", tags=["audit"])
@@ -45,6 +49,7 @@ api_router.include_router(profile_router, prefix="/api", tags=["profile"])
 api_router.include_router(tools_router, prefix="/api", tags=["tools"])
 api_router.include_router(mcp_router, prefix="/api", tags=["mcp"])
 api_router.include_router(memory_router, prefix="/api", tags=["memory"])
+api_router.include_router(model_fabric_settings_router, prefix="/api", tags=["settings"])
 api_router.include_router(nodes_router, prefix="/api", tags=["nodes"])
 api_router.include_router(operator_router, prefix="/api", tags=["operator"])
 api_router.include_router(skills_router, prefix="/api", tags=["skills"])

@@ -8,19 +8,16 @@ import logging
 import re
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
 from config.settings import settings
 from src.agent.session import session_manager
-from src.app import _runtime_model_label, _runtime_provider_label
-from src.llm_runtime import provider_profile_statuses, resolve_runtime_profile
+from src.app import _active_chat_runtime_status
+from src.llm_runtime import provider_profile_statuses
 from src.operators.local_codex import (
-    is_local_codex_model,
-    LocalCodexConfigurationError,
-    local_codex_status,
-    local_operator_statuses,
-    run_local_codex,
+    ExternalAgentRuntimeRemovedError,
+    removed_external_agent_payload,
 )
 from src.extensions.lifecycle import list_extensions
 from src.llm_logger import list_recent_llm_calls
@@ -28,14 +25,20 @@ from src.observer.manager import context_manager
 from src.api.observer import _continuity_surface, build_observer_continuity_snapshot
 from src.api.workflows import (
     _list_workflow_runs,
+    _safe_workflow_run_projection,
+    _workflow_owner_is_bound,
+    _workflow_session_fence,
     workflow_surface_continue_message,
     workflow_surface_recommended_actions,
     workflow_surface_replay_draft,
     workflow_surface_resume_metadata,
 )
+from src.api.capabilities import _require_authenticated_capability_operator
+from src.api.chat import _begin_rest_revocation_watch, _end_rest_revocation_watch
 from src.approval.repository import approval_repository
 from src.approval.surfaces import approval_surface_metadata
 from src.audit.repository import audit_repository
+from src.auth.cancellation import RuntimeRevokedError
 from src.browser.benchmark import build_computer_use_benchmark_report
 from src.cockpit.benchmark import build_m7_operator_cockpit_benchmark_report
 from src.cockpit.efficiency_benchmark import (
@@ -119,6 +122,7 @@ from src.memory.control import (
     apply_memory_operator_control,
     get_memory_live_controls_snapshot,
 )
+from src.api.memory import authenticated_memory_actor
 from src.memory.provider_quality_gate import build_memory_provider_quality_gate_report
 from src.memory.superiority import build_m6_memory_superiority_payload
 from src.memory.superiority_benchmark import build_m6_memory_superiority_benchmark_report
@@ -256,7 +260,7 @@ def _memory_live_control_acknowledgement(request: MemoryLiveControlActionRequest
 
 @router.get("/operator/local-codex/status")
 async def operator_local_codex_status():
-    return local_codex_status()
+    raise HTTPException(status_code=410, detail=removed_external_agent_payload("codex-local"))
 
 
 @router.get("/operator/database-doctor")
@@ -266,23 +270,7 @@ async def get_operator_database_doctor():
 
 @router.post("/operator/local-codex/exec")
 async def operator_local_codex_exec(request: LocalCodexExecRequest):
-    try:
-        return await run_local_codex(
-            request.prompt,
-            cwd=request.cwd,
-            model=request.model,
-            timeout_seconds=request.timeout_seconds,
-            session_id=request.session_id,
-        )
-    except LocalCodexConfigurationError as exc:
-        raise HTTPException(
-            status_code=503,
-            detail={
-                "adapter": "codex-local",
-                "status": "blocked",
-                "failure_reason": str(exc),
-            },
-        ) from exc
+    raise HTTPException(status_code=410, detail=removed_external_agent_payload(request.model or "codex-local"))
 
 
 _ENGINEERING_PULL_REQUEST_RE = re.compile(
@@ -1307,18 +1295,15 @@ def _continuity_operator_items(
 
 
 def _runtime_status_payload() -> dict[str, Any]:
-    model = settings.default_model.strip()
-    active_profile = "codex-local" if is_local_codex_model(model) else resolve_runtime_profile(runtime_path="chat_agent")
+    try:
+        runtime = _active_chat_runtime_status()
+    except ExternalAgentRuntimeRemovedError as exc:
+        raise HTTPException(status_code=410, detail=exc.payload()) from exc
     return {
         "version": "2026.4.11",
         "build_id": "SERAPH_PRIME_v2026.4.11",
-        "provider": _runtime_provider_label(),
-        "model": model,
-        "model_label": _runtime_model_label(model),
-        "api_base": settings.llm_api_base.strip(),
-        "active_profile": active_profile,
+        **runtime,
         "provider_profiles": provider_profile_statuses(),
-        "local_operators": local_operator_statuses(probe=False),
         "timezone": settings.user_timezone,
         "llm_logging_enabled": settings.llm_log_enabled,
     }
@@ -1482,7 +1467,7 @@ def _workflow_visible_artifact_paths(
 
 def _workflow_preserved_recovery_paths(run: dict[str, Any], *, step_records: list[dict[str, Any]]) -> list[str]:
     preserved: list[str] = []
-    if bool(run.get("retry_from_step_draft")):
+    if bool(run.get("retry_from_step_draft") or run.get("retry_from_step_available")):
         preserved.append("retry_from_step")
     checkpoint_candidates = run.get("checkpoint_candidates")
     if isinstance(checkpoint_candidates, list) and checkpoint_candidates:
@@ -1724,7 +1709,7 @@ def _workflow_recovery_density(run: dict[str, Any]) -> dict[str, Any]:
         or str(run.get("status") or "") == "awaiting_approval"
     )
     boundary_blocked = isinstance(run.get("replay_block_reason"), str) and bool(run.get("replay_block_reason"))
-    retry_ready = bool(run.get("retry_from_step_draft"))
+    retry_ready = bool(run.get("retry_from_step_draft") or run.get("retry_from_step_available"))
     checkpoint_ready = isinstance(checkpoint_candidates, list) and len(checkpoint_candidates) > 0
     repair_ready = bool(repair_actions) or bool(latest_failure and latest_failure.get("is_recoverable"))
     branch_ready = bool(
@@ -1877,7 +1862,13 @@ def _workflow_anticipatory_plan(
         and isinstance(step_focus, dict)
         and str(step_focus.get("kind") or "") in {"active", "latest"}
         and isinstance(backup_checkpoint, dict)
-        and backup_checkpoint.get("resume_draft")
+        # Safe projections intentionally remove executable drafts.  A live
+        # action handle is sufficient evidence that the checkpoint can still
+        # be offered to the authenticated control route.
+        and (
+            backup_checkpoint.get("resume_draft")
+            or backup_checkpoint.get("action_handle")
+        )
     )
     signals: list[str] = []
     if bool(compaction.get("is_long_running")):
@@ -2042,7 +2033,7 @@ def _workflow_orchestration_priority(run: dict[str, Any]) -> tuple[int, datetime
         priority = 90
     elif step_kind == "failure":
         priority = 88
-    elif run.get("retry_from_step_draft"):
+    elif run.get("retry_from_step_draft") or run.get("retry_from_step_available"):
         priority = 86
     elif step_focus and int(step_focus.get("recovery_action_count") or 0) > 0:
         priority = 84
@@ -2112,6 +2103,11 @@ def _workflow_orchestration_entries(
             "thread_continue_message": workflow_surface_continue_message(run),
             "output_path": output_path,
             "artifact_paths": visible_artifact_paths,
+            "artifact_registry": (
+                run.get("artifact_registry")
+                if isinstance(run.get("artifact_registry"), list)
+                else []
+            ),
             "step_records": visible_step_records,
             "pending_approval_count": int(run.get("pending_approval_count") or 0),
             "pending_approval_ids": run.get("pending_approval_ids") if isinstance(run.get("pending_approval_ids"), list) else [],
@@ -4353,12 +4349,15 @@ async def get_operator_guardian_memory_live_control(
 
 
 @router.post("/operator/memory-live-controls/actions")
-async def post_operator_memory_live_control_action(request: MemoryLiveControlActionRequest):
+async def post_operator_memory_live_control_action(
+    http_request: Request,
+    request: MemoryLiveControlActionRequest,
+):
     try:
         return await apply_memory_live_control_action(
             action=request.action,
             acknowledged=_memory_live_control_acknowledgement(request),
-            actor=request.actor,
+            actor=authenticated_memory_actor(http_request),
             reason=request.reason,
             owner_session_id=request.owner_session_id,
             memory_id=request.memory_id,
@@ -4371,8 +4370,11 @@ async def post_operator_memory_live_control_action(request: MemoryLiveControlAct
 
 
 @router.post("/operator/guardian-memory-live-control/actions")
-async def post_operator_guardian_memory_live_control_action(request: MemoryLiveControlActionRequest):
-    return await post_operator_memory_live_control_action(request)
+async def post_operator_guardian_memory_live_control_action(
+    http_request: Request,
+    request: MemoryLiveControlActionRequest,
+):
+    return await post_operator_memory_live_control_action(http_request, request)
 
 
 @router.get("/operator/post-dp-guardian-learning-memory-gap-closure")
@@ -4409,7 +4411,11 @@ async def get_operator_m6_memory_superiority(
 
 
 @router.post("/operator/memory-control/{memory_id}")
-async def post_operator_memory_control(memory_id: str, request: MemoryOperatorControlRequest):
+async def post_operator_memory_control(
+    memory_id: str,
+    http_request: Request,
+    request: MemoryOperatorControlRequest,
+):
     try:
         return await apply_memory_operator_control(
             memory_id=memory_id,
@@ -4419,6 +4425,7 @@ async def post_operator_memory_control(memory_id: str, request: MemoryOperatorCo
             summary=request.summary,
             privacy_boundary=request.privacy_boundary,
             session_id=request.session_id,
+            actor=authenticated_memory_actor(http_request),
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -4695,107 +4702,137 @@ async def get_operator_guardian_state(
 
 @router.get("/operator/workflow-orchestration")
 async def get_operator_workflow_orchestration(
+    request: Request,
     limit_sessions: int = Query(default=6, ge=1, le=12),
     limit_workflows: int = Query(default=8, ge=1, le=20),
 ):
-    session_titles = {
-        str(session["id"]): str(session.get("title") or "Untitled session")
-        for session in await session_manager.list_sessions()
-        if isinstance(session, dict) and session.get("id")
-    }
-    workflow_runs = await _list_workflow_runs(limit=max(limit_workflows * 6, 60), session_id=None)
-    active_workflows = sum(
-        1 for run in workflow_runs if not _workflow_terminal_status(str(run.get("status") or ""))
-    )
-    blocked_workflows = sum(
-        1 for run in workflow_runs if str(run.get("availability") or "") == "blocked"
-    )
-    awaiting_approval_workflows = sum(
-        1 for run in workflow_runs if str(run.get("status") or "") == "awaiting_approval"
-    )
-    compactions = [_workflow_state_compaction(run) for run in workflow_runs]
-    recovery_densities = [_workflow_recovery_density(run) for run in workflow_runs]
-    output_debuggers = [_workflow_output_debugger(run, workflow_runs) for run in workflow_runs]
-    condensation_fidelities = [
-        _workflow_condensation_fidelity(run, compaction=compaction, output_debugger=output_debugger)
-        for run, compaction, output_debugger in zip(workflow_runs, compactions, output_debuggers, strict=False)
-    ]
-    anticipatory_plans = [
-        _workflow_anticipatory_plan(
-            run,
-            workflow_runs,
-            compaction=compaction,
-            recovery_density=recovery_density,
-            output_debugger=output_debugger,
-            condensation_fidelity=condensation_fidelity,
+    operator = _require_authenticated_capability_operator(request)
+    revocation_scope = None
+    try:
+        revocation_scope = _begin_rest_revocation_watch(request)
+        await _workflow_session_fence(request, revocation_scope)
+        sessions = await session_manager.list_sessions()
+        await _workflow_session_fence(request, revocation_scope)
+        session_titles = {
+            str(session["id"]): str(session.get("title") or "Untitled session")
+            for session in sessions
+            if isinstance(session, dict) and session.get("id")
+        }
+        raw_workflow_runs = await _list_workflow_runs(
+            limit=max(limit_workflows * 6, 60),
+            session_id=None,
         )
-        for run, compaction, recovery_density, output_debugger, condensation_fidelity in zip(
-            workflow_runs,
-            compactions,
-            recovery_densities,
-            output_debuggers,
-            condensation_fidelities,
-            strict=False,
+        await _workflow_session_fence(request, revocation_scope)
+
+        # The orchestration helpers predate the authenticated workflow routes
+        # and expect a full run-shaped record.  Feed them only the durable
+        # owner-bound safe projection so their derived queue/debugger views can
+        # remain intact without returning arguments, paths, drafts, or raw
+        # checkpoint identities.
+        workflow_runs = [
+            projection
+            for run in raw_workflow_runs
+            if _workflow_owner_is_bound(run, operator.principal.principal_id)
+            if (projection := _safe_workflow_run_projection(run)) is not None
+        ]
+        active_workflows = sum(
+            1 for run in workflow_runs if not _workflow_terminal_status(str(run.get("status") or ""))
         )
-    ]
-    recoverable_workflows = sum(
-        1
-        for run in workflow_runs
-        if bool(run.get("retry_from_step_draft"))
-        or (
-            isinstance(_workflow_step_focus(run), dict)
-            and int((_workflow_step_focus(run) or {}).get("recovery_action_count") or 0) > 0
+        blocked_workflows = sum(
+            1 for run in workflow_runs if str(run.get("availability") or "") == "blocked"
         )
-    )
-    session_ids = {
-        str(run.get("thread_id"))
-        for run in workflow_runs
-        if isinstance(run.get("thread_id"), str)
-    }
-    return {
-        "summary": {
-            "tracked_sessions": len(session_ids),
-            "workflow_count": len(workflow_runs),
-            "active_workflows": active_workflows,
-            "blocked_workflows": blocked_workflows,
-            "awaiting_approval_workflows": awaiting_approval_workflows,
-            "recoverable_workflows": recoverable_workflows,
-            "long_running_workflows": sum(1 for item in compactions if bool(item["is_long_running"])),
-            "compacted_workflows": sum(1 for item in compactions if bool(item["is_compacted"])),
-            "total_step_count": sum(int(item["total_step_count"]) for item in compactions),
-            "compacted_step_count": sum(int(item["compacted_step_count"]) for item in compactions),
-            "boundary_blocked_workflows": sum(1 for item in recovery_densities if bool(item["boundary_blocked"])),
-            "repair_ready_workflows": sum(1 for item in recovery_densities if bool(item["repair_ready"])),
-            "branch_ready_workflows": sum(1 for item in recovery_densities if bool(item["branch_ready"])),
-            "anticipatory_ready_workflows": sum(1 for item in anticipatory_plans if bool(item["anticipatory_ready"])),
-            "backup_branch_ready_workflows": sum(1 for item in anticipatory_plans if bool(item["backup_branch_ready"])),
-            "fidelity_watch_workflows": sum(1 for item in condensation_fidelities if bool(item["watch_required"])),
-            "stalled_workflows": sum(1 for item in recovery_densities if bool(item["stalled"])),
-            "output_debugger_ready_workflows": sum(
-                1
-                for item in output_debuggers
-                if bool(item["comparison_ready"]) or int(item["history_output_count"]) > 1
-            ),
-            "attention_sessions": sum(
-                1
-                for session in _workflow_orchestration_sessions(
-                    workflow_runs,
-                    session_titles=session_titles,
-                    limit=None,
-                )
-                if str(session.get("queue_state") or "") not in {"idle", "active"}
-            ),
-        },
-        "sessions": _workflow_orchestration_sessions(
+        awaiting_approval_workflows = sum(
+            1 for run in workflow_runs if str(run.get("status") or "") == "awaiting_approval"
+        )
+        compactions = [_workflow_state_compaction(run) for run in workflow_runs]
+        recovery_densities = [_workflow_recovery_density(run) for run in workflow_runs]
+        output_debuggers = [_workflow_output_debugger(run, workflow_runs) for run in workflow_runs]
+        condensation_fidelities = [
+            _workflow_condensation_fidelity(run, compaction=compaction, output_debugger=output_debugger)
+            for run, compaction, output_debugger in zip(workflow_runs, compactions, output_debuggers, strict=False)
+        ]
+        anticipatory_plans = [
+            _workflow_anticipatory_plan(
+                run,
+                workflow_runs,
+                compaction=compaction,
+                recovery_density=recovery_density,
+                output_debugger=output_debugger,
+                condensation_fidelity=condensation_fidelity,
+            )
+            for run, compaction, recovery_density, output_debugger, condensation_fidelity in zip(
+                workflow_runs,
+                compactions,
+                recovery_densities,
+                output_debuggers,
+                condensation_fidelities,
+                strict=False,
+            )
+        ]
+        recoverable_workflows = sum(
+            1
+            for run in workflow_runs
+            if bool(run.get("retry_from_step_draft") or run.get("retry_from_step_available"))
+            or (
+                isinstance(_workflow_step_focus(run), dict)
+                and int((_workflow_step_focus(run) or {}).get("recovery_action_count") or 0) > 0
+            )
+        )
+        session_ids = {
+            str(run.get("thread_id"))
+            for run in workflow_runs
+            if isinstance(run.get("thread_id"), str)
+        }
+        sessions_payload = _workflow_orchestration_sessions(
             workflow_runs,
             session_titles=session_titles,
             limit=limit_sessions,
-        ),
-        "workflows": _workflow_orchestration_entries(
+        )
+        workflows_payload = _workflow_orchestration_entries(
             workflow_runs,
             limit=limit_workflows,
-        ),
-    }
+        )
+        await _workflow_session_fence(request, revocation_scope)
+        return {
+            "summary": {
+                "tracked_sessions": len(session_ids),
+                "workflow_count": len(workflow_runs),
+                "active_workflows": active_workflows,
+                "blocked_workflows": blocked_workflows,
+                "awaiting_approval_workflows": awaiting_approval_workflows,
+                "recoverable_workflows": recoverable_workflows,
+                "long_running_workflows": sum(1 for item in compactions if bool(item["is_long_running"])),
+                "compacted_workflows": sum(1 for item in compactions if bool(item["is_compacted"])),
+                "total_step_count": sum(int(item["total_step_count"]) for item in compactions),
+                "compacted_step_count": sum(int(item["compacted_step_count"]) for item in compactions),
+                "boundary_blocked_workflows": sum(1 for item in recovery_densities if bool(item["boundary_blocked"])),
+                "repair_ready_workflows": sum(1 for item in recovery_densities if bool(item["repair_ready"])),
+                "branch_ready_workflows": sum(1 for item in recovery_densities if bool(item["branch_ready"])),
+                "anticipatory_ready_workflows": sum(1 for item in anticipatory_plans if bool(item["anticipatory_ready"])),
+                "backup_branch_ready_workflows": sum(1 for item in anticipatory_plans if bool(item["backup_branch_ready"])),
+                "fidelity_watch_workflows": sum(1 for item in condensation_fidelities if bool(item["watch_required"])),
+                "stalled_workflows": sum(1 for item in recovery_densities if bool(item["stalled"])),
+                "output_debugger_ready_workflows": sum(
+                    1
+                    for item in output_debuggers
+                    if bool(item["comparison_ready"]) or int(item["history_output_count"]) > 1
+                ),
+                "attention_sessions": sum(
+                    1
+                    for session in sessions_payload
+                    if str(session.get("queue_state") or "") not in {"idle", "active"}
+                ),
+            },
+            "sessions": sessions_payload,
+            "workflows": workflows_payload,
+        }
+    except RuntimeRevokedError as exc:
+        raise HTTPException(
+            status_code=401,
+            detail={"code": "session_revoked", "message": "Operator session was revoked while loading workflow orchestration."},
+        ) from exc
+    finally:
+        await _end_rest_revocation_watch(revocation_scope)
 
 
 @router.get("/operator/background-sessions")

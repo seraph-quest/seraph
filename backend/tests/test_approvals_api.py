@@ -1,9 +1,26 @@
 """Tests for approval request APIs."""
 
+from dataclasses import replace
 import pytest
+from fastapi import HTTPException
+from starlette.requests import Request
 from unittest.mock import patch
 
 from src.approval.repository import approval_repository
+from src.auth.service import test_bypass_operator as _test_bypass_operator
+
+
+def _approval_request(operator) -> Request:
+    return Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/api/approvals/test/approve",
+            "headers": [],
+            "query_string": b"",
+            "state": {"operator": operator},
+        }
+    )
 
 
 @pytest.mark.asyncio
@@ -16,7 +33,7 @@ async def test_list_pending_approvals_empty(client):
 @pytest.mark.asyncio
 async def test_approve_pending_request(client):
     request = await approval_repository.get_or_create_pending(
-        session_id="s1",
+        session_id="test-auth-bypass",
         tool_name="shell_execute",
         risk_level="high",
         summary="Calling tool: shell_execute({\"code\": \"[redacted]\"})",
@@ -26,14 +43,14 @@ async def test_approve_pending_request(client):
     resp = await client.post(f"/api/approvals/{request.id}/approve")
     assert resp.status_code == 200
     assert resp.json()["status"] == "approved"
-    assert resp.json()["session_id"] == "s1"
+    assert resp.json()["session_id"] == "test-auth-bypass"
     assert resp.json()["resume_message"] == "run this snippet"
 
 
 @pytest.mark.asyncio
 async def test_deny_pending_request(client):
     request = await approval_repository.get_or_create_pending(
-        session_id="s1",
+        session_id="test-auth-bypass",
         tool_name="get_secret",
         risk_level="high",
         summary="Calling tool: get_secret({\"key\": \"[redacted]\"})",
@@ -43,6 +60,118 @@ async def test_deny_pending_request(client):
     resp = await client.post(f"/api/approvals/{request.id}/deny")
     assert resp.status_code == 200
     assert resp.json()["status"] == "denied"
+
+
+@pytest.mark.asyncio
+async def test_approval_decision_rejects_cross_session_operator(async_db):
+    from src.api.approvals import approve_request
+
+    owner = _test_bypass_operator()
+    request = await approval_repository.get_or_create_pending(
+        session_id=owner.session_id,
+        tool_name="extension_install",
+        risk_level="high",
+        summary="Install extension",
+        fingerprint="cross-session",
+        details={"approval_owner_session_id": owner.session_id},
+    )
+    other = replace(
+        owner,
+        session_id="other-session",
+        principal=replace(owner.principal, session_id="other-session"),
+    )
+
+    with pytest.raises(HTTPException) as error:
+        await approve_request(request.id, _approval_request(other))
+
+    assert error.value.status_code == 403
+    assert error.value.detail == {"code": "approval_owner_mismatch"}
+    pending = await approval_repository.get(request.id)
+    assert pending is not None
+    assert pending.status == "pending"
+
+
+@pytest.mark.asyncio
+async def test_approval_owner_uses_auth_session_separate_from_conversation(async_db):
+    from src.api.approvals import approve_request, deny_request
+
+    owner = _test_bypass_operator()
+    request = await approval_repository.get_or_create_pending(
+        session_id="conversation-owner-1",
+        tool_name="extension_install",
+        risk_level="high",
+        summary="Install extension",
+        fingerprint="auth-owner-1",
+        details={
+            "approval_conversation_id": "conversation-owner-1",
+            "approval_owner_operator_session_id": owner.session_id,
+            "approval_owner_principal_id": owner.principal.principal_id,
+        },
+    )
+
+    approved = await approve_request(request.id, _approval_request(owner))
+    assert approved["status"] == "approved"
+    resolved = await approval_repository.get(request.id)
+    assert resolved is not None
+    assert resolved.session_id == "conversation-owner-1"
+
+    cross_owner = replace(
+        owner,
+        session_id="other-auth-session",
+        principal=replace(
+            owner.principal,
+            principal_id="operator:other",
+            session_id="other-auth-session",
+            operator_session_id="other-auth-session",
+        ),
+    )
+    cross_request = await approval_repository.get_or_create_pending(
+        session_id="conversation-owner-2",
+        tool_name="extension_install",
+        risk_level="high",
+        summary="Install extension",
+        fingerprint="auth-owner-2",
+        details={
+            "approval_conversation_id": "conversation-owner-2",
+            "approval_owner_operator_session_id": owner.session_id,
+            "approval_owner_principal_id": owner.principal.principal_id,
+        },
+    )
+
+    with pytest.raises(HTTPException) as cross_error:
+        await deny_request(cross_request.id, _approval_request(cross_owner))
+
+    assert cross_error.value.status_code == 403
+    assert cross_error.value.detail == {"code": "approval_owner_mismatch"}
+    pending = await approval_repository.get(cross_request.id)
+    assert pending is not None
+    assert pending.status == "pending"
+
+    revoked_owner = replace(
+        owner,
+        principal=replace(owner.principal, revoked=True),
+    )
+    revoked_request = await approval_repository.get_or_create_pending(
+        session_id="conversation-owner-3",
+        tool_name="extension_install",
+        risk_level="high",
+        summary="Install extension",
+        fingerprint="auth-owner-3",
+        details={
+            "approval_conversation_id": "conversation-owner-3",
+            "approval_owner_operator_session_id": owner.session_id,
+            "approval_owner_principal_id": owner.principal.principal_id,
+        },
+    )
+
+    with pytest.raises(HTTPException) as revoked_error:
+        await approve_request(revoked_request.id, _approval_request(revoked_owner))
+
+    assert revoked_error.value.status_code == 401
+    assert revoked_error.value.detail == {"code": "authentication_required"}
+    pending = await approval_repository.get(revoked_request.id)
+    assert pending is not None
+    assert pending.status == "pending"
 
 
 @pytest.mark.asyncio

@@ -13,7 +13,11 @@ from sqlmodel import select, col
 
 from config.settings import settings
 from src.approval.exceptions import ApprovalRequired
-from src.approval.runtime import reset_runtime_context, set_runtime_context
+from src.approval.runtime import (
+    reset_runtime_context,
+    scheduled_workflow_service_principal,
+    set_runtime_context,
+)
 from src.audit.runtime import log_scheduler_job_event
 from src.db.engine import get_session
 from src.db.models import ScheduledJob, ScheduledJobRun
@@ -683,7 +687,15 @@ async def _run_scheduled_workflow(job: dict[str, Any]) -> None:
         raise RuntimeError(f"Workflow tool '{workflow.tool_name}' is not executable.")
 
     approval_mode = context_manager.get_context().approval_mode
-    tokens = set_runtime_context(session_id, approval_mode)
+    principal = scheduled_workflow_service_principal(
+        scheduled_job_id=str(job.get("id") or ""),
+        session_id=session_id,
+    )
+    tokens = set_runtime_context(
+        session_id,
+        approval_mode,
+        trust_principal=principal,
+    )
     try:
         workflow_tool(**dict(action_spec.get("workflow_args") or {}))
     finally:

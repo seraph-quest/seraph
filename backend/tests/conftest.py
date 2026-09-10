@@ -2,9 +2,11 @@ import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 from unittest.mock import MagicMock, patch
+import time
 
 import pytest
 import pytest_asyncio
+from types import SimpleNamespace
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import event
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
@@ -27,10 +29,12 @@ from src.utils.background import drain_tracked_tasks
 # Every place get_session is imported — use the local attribute name.
 _PATCH_TARGETS = [
     "src.db.engine.get_session",
+    "src.auth.service.get_session",
     "src.agent.session.get_session",
     "src.approval.repository.get_session",
     "src.goals.repository.get_session",
     "src.audit.repository.get_session",
+    "src.model_fabric.repository.get_session",
     "src.profile.service.get_db",
     "src.api.settings.get_db",  # aliased: `import get_session as get_db`
     "src.api.observer.get_session",
@@ -44,6 +48,7 @@ _PATCH_TARGETS = [
     "src.observer.screen_repository.get_session",
     "src.memory.repository.get_session",
     "src.memory.decay.get_session",
+    "src.memory.control.get_session",
     "src.memory.flush.get_session",
     "src.memory.hybrid_retrieval.get_session",
     "src.workflows.durable_state.get_session",
@@ -199,3 +204,93 @@ def clear_ambient_screenshot_analysis_provider():
 @pytest.fixture(autouse=True)
 def ensure_test_workspace_dir():
     Path(os.environ["WORKSPACE_DIR"]).mkdir(parents=True, exist_ok=True)
+@pytest.fixture
+def mocked_canonical_inference_context(monkeypatch):
+    """Keep legacy caller tests focused while adoption tests exercise real identity binding."""
+    from src.security.trust_contract import canonical_digest
+
+    def context_for_payload(*_args, **kwargs):
+        runtime_path = str(_args[0]) if _args else "test_inference"
+        return SimpleNamespace(
+            request_id="test-inference-request",
+            data_digest=canonical_digest(kwargs.get("payload")),
+            runtime_path=runtime_path,
+            deadline_at=time.time() + float(kwargs.get("timeout_seconds", 300)),
+            workload=SimpleNamespace(value="test"),
+            egress_class=SimpleNamespace(value="local_only"),
+        )
+    targets = (
+        "src.agent.context_window.build_canonical_inference_context",
+        "src.agent.direct_chat.build_canonical_inference_context",
+        "src.agent.session.build_canonical_inference_context",
+        "src.agent.strategist.build_canonical_inference_context",
+        "src.memory.pipeline.extract.build_canonical_inference_context",
+        "src.observer.screenshot_semantic_analysis.build_canonical_inference_context",
+        "src.scheduler.jobs.activity_digest.build_canonical_inference_context",
+        "src.scheduler.jobs.daily_briefing.build_canonical_inference_context",
+        "src.scheduler.jobs.end_of_day_goal_report.build_canonical_inference_context",
+        "src.scheduler.jobs.evening_review.build_canonical_inference_context",
+        "src.scheduler.jobs.screenshot_observation_digest.build_canonical_inference_context",
+        "src.scheduler.jobs.weekly_activity_review.build_canonical_inference_context",
+    )
+    for target in targets:
+        monkeypatch.setattr(target, context_for_payload)
+
+    async def completion_transport_stub(**kwargs):
+        import asyncio
+        import inspect
+        import litellm
+
+        result = litellm.completion(
+            messages=kwargs["messages"],
+            temperature=kwargs["temperature"],
+            max_tokens=kwargs["max_tokens"],
+        )
+        if inspect.isawaitable(result):
+            timeout = kwargs.get("timeout")
+            result = await asyncio.wait_for(result, timeout=timeout) if timeout is not None else await result
+        from src.llm_runtime import _log_llm_runtime_event_sync
+
+        runtime_path = str(kwargs.get("runtime_path") or "test_inference")
+        _log_llm_runtime_event_sync(
+            event_type="llm_primary_success",
+            summary="Legacy caller fixture completed through the governed boundary",
+            details={
+                "runtime_path": runtime_path,
+                "request_id": "test-inference-request",
+                "used_fallback": False,
+            },
+            request_id="test-inference-request",
+        )
+        return result
+
+    completion_targets = (
+        "src.llm_runtime.completion_with_fallback",
+        "src.memory.consolidator.completion_with_fallback",
+        "src.agent.strategist.completion_with_fallback",
+        "src.scheduler.jobs.activity_digest.completion_with_fallback",
+        "src.scheduler.jobs.daily_briefing.completion_with_fallback",
+        "src.scheduler.jobs.end_of_day_goal_report.completion_with_fallback",
+        "src.scheduler.jobs.evening_review.completion_with_fallback",
+        "src.scheduler.jobs.screenshot_observation_digest.completion_with_fallback",
+        "src.scheduler.jobs.weekly_activity_review.completion_with_fallback",
+    )
+    for target in completion_targets:
+        monkeypatch.setattr(target, completion_transport_stub)
+    return context_for_payload
+
+
+@pytest.fixture
+def mocked_vlm_model_fabric_adoption(monkeypatch, mocked_canonical_inference_context):
+    """Let legacy HTTP adapter tests stay transport-focused."""
+    async def passthrough(*, context, profile, transport):
+        from src.model_fabric.contracts import transport_endpoint
+
+        candidate = SimpleNamespace(endpoint=transport_endpoint(profile))
+        return await transport(candidate, False)
+
+    monkeypatch.setattr(
+        "src.observer.screenshot_semantic_analysis._run_governed_vlm_adapter",
+        passthrough,
+    )
+    return mocked_canonical_inference_context

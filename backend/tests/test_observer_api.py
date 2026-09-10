@@ -17,6 +17,9 @@ from src.observer.native_notification_queue import native_notification_queue
 from src.observer.screen_repository import ScreenObservationRepository
 
 
+_DAEMON_HEADERS = {"X-Seraph-Daemon-Id": "test-daemon"}
+
+
 class TestObserverAPI:
     @pytest.mark.asyncio
     async def test_get_state(self, client):
@@ -367,7 +370,23 @@ class TestObserverAPI:
             urgency=5,
         )
 
-        resp = await client.get("/api/observer/notifications/next")
+        missing_identity = await client.get(
+            "/api/observer/notifications/next",
+            params={"worker_id": "test-daemon"},
+        )
+        assert missing_identity.status_code == 401
+        mismatched_identity = await client.get(
+            "/api/observer/notifications/next",
+            params={"worker_id": "test-daemon"},
+            headers={"X-Seraph-Daemon-Id": "other-daemon"},
+        )
+        assert mismatched_identity.status_code == 401
+
+        resp = await client.get(
+            "/api/observer/notifications/next",
+            params={"worker_id": "test-daemon"},
+            headers=_DAEMON_HEADERS,
+        )
 
         assert resp.status_code == 200
         payload = resp.json()["notification"]
@@ -378,7 +397,7 @@ class TestObserverAPI:
 
         events = await audit_repository.list_events(limit=10)
         assert any(
-            event["event_type"] == "integration_succeeded"
+            event["event_type"] == "integration_claimed"
             and event["tool_name"] == "observer_daemon:notifications"
             and event["details"]["notification_id"] == notification.id
             for event in events
@@ -390,7 +409,11 @@ class TestObserverAPI:
     async def test_get_next_native_notification_empty(self, async_db, client):
         await native_notification_queue.clear()
 
-        resp = await client.get("/api/observer/notifications/next")
+        resp = await client.get(
+            "/api/observer/notifications/next",
+            params={"worker_id": "test-daemon"},
+            headers=_DAEMON_HEADERS,
+        )
 
         assert resp.status_code == 200
         assert resp.json()["notification"] is None
@@ -946,7 +969,24 @@ class TestObserverAPI:
             urgency=3,
         )
 
-        resp = await client.post(f"/api/observer/notifications/{notification.id}/ack")
+        poll = await client.get(
+            f"/api/observer/notifications/next",
+            params={"worker_id": "test-daemon"},
+            headers=_DAEMON_HEADERS,
+        )
+        fence = poll.json()["notification"]["fencing_token"]
+        assert (
+            await client.post(
+                f"/api/observer/notifications/{notification.id}/display-attempted",
+                json={"worker_id": "test-daemon", "fencing_token": fence},
+                headers=_DAEMON_HEADERS,
+            )
+        ).json() == {"display_attempted": True}
+        resp = await client.post(
+            f"/api/observer/notifications/{notification.id}/ack",
+            json={"worker_id": "test-daemon", "fencing_token": fence},
+            headers=_DAEMON_HEADERS,
+        )
 
         assert resp.status_code == 200
         assert resp.json() == {"acked": True}

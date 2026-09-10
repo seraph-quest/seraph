@@ -8,8 +8,9 @@ from functools import lru_cache
 import tiktoken
 
 from config.settings import settings
-from src.approval.runtime import reset_runtime_context, set_runtime_context
+from src.approval.runtime import get_current_trust_principal, reset_runtime_context, set_runtime_context
 from src.audit.runtime import log_background_task_event_sync
+from src.model_fabric.caller_context import build_canonical_inference_context
 
 logger = logging.getLogger(__name__)
 
@@ -75,19 +76,30 @@ def _summarize_middle(messages: list[dict], session_id: str, range_key: str) -> 
             completion_with_fallback_sync = _completion_with_fallback_sync
 
         if session_id:
-            runtime_tokens = set_runtime_context(session_id, "high_risk")
-        response = completion_with_fallback_sync(
-            messages=[{
+            runtime_tokens = set_runtime_context(
+                session_id,
+                "high_risk",
+                trust_principal=get_current_trust_principal(),
+            )
+        transport_messages = [{
                 "role": "user",
                 "content": (
                     "Summarize this conversation excerpt in one concise paragraph. "
                     "Focus on key topics, decisions, and any commitments made.\n\n"
                     f"{text[:8000]}"
                 ),
-            }],
+            }]
+        response = completion_with_fallback_sync(
+            messages=transport_messages,
             temperature=0.3,
             max_tokens=200,
             runtime_path="context_window_summary",
+            request_context=build_canonical_inference_context(
+                "context_window_summary",
+                payload=transport_messages,
+                output_tokens=200,
+                timeout_seconds=settings.agent_chat_timeout,
+            ),
         )
         summary = response.choices[0].message.content.strip()
         log_background_task_event_sync(

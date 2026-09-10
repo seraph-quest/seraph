@@ -2,6 +2,7 @@ import asyncio
 import contextvars
 import json
 import logging
+from threading import Event
 from contextlib import suppress
 from time import perf_counter
 
@@ -11,25 +12,37 @@ from smolagents import ActionStep, ToolCall, FinalAnswerStep
 from config.settings import settings
 from src.approval.exceptions import ApprovalRequired
 from src.approval.repository import approval_repository
-from src.approval.runtime import reset_runtime_context, set_runtime_context
+from src.approval.runtime import get_current_approval_mode, reset_runtime_context, set_runtime_context
+from src.auth.cancellation import reset_revocation_guard, set_revocation_guard
 from src.agent.exceptions import ClarificationRequired
 from src.agent.direct_chat import run_direct_local_chat, should_use_direct_local_chat, stream_direct_local_chat
 from src.agent.factory import build_agent
 from src.agent.onboarding import create_onboarding_agent
-from src.agent.session import session_manager
+from src.agent.session import (
+    MessageIngressConflictError,
+    SessionNotFoundError,
+    SessionOwnerMismatchError,
+    session_manager,
+)
 from src.audit.formatting import format_tool_call_summary
 from src.audit.runtime import log_agent_run_event
 from src.audit.repository import audit_repository
 from src.api.profile import get_or_create_profile, mark_onboarding_complete, reset_onboarding
+from src.api.chat import (
+    ChatAuthorityError,
+    ChatIngressValidationError,
+    _bind_chat_principal,
+    build_chat_ingress_envelope,
+    chat_ingress_metadata,
+    log_chat_ingress_event,
+    validate_chat_ingress_identity,
+    validate_chat_message,
+)
+from src.auth.middleware import authenticate_websocket
+from src.auth.service import AuthFailure, auth_enabled, authenticate_token, bind_operator_principal
 from src.guardian.state import build_guardian_state
 from src.models.schemas import WSMessage, WSResponse
-from src.operators.local_codex import (
-    LocalCodexConfigurationError,
-    is_local_codex_model,
-    local_codex_chat_sandbox,
-    local_codex_chat_timeout_seconds,
-    run_local_codex,
-)
+from src.operators.local_codex import ExternalAgentRuntimeRemovedError
 from src.scheduler.connection_manager import ws_manager
 from src.tools.policy import get_current_tool_policy_mode
 from src.vault.redaction import redact_secrets_for_streaming_snapshot, redact_secrets_in_text
@@ -52,6 +65,99 @@ _INTERRUPTED_TURN_MESSAGE = (
     "Response interrupted because the browser connection closed before Seraph could finish. "
     "Please send that turn again."
 )
+
+
+class _DirectStreamOutcomeUncertain(Exception):
+    """A remote stream failed without a confirmed complete response."""
+
+
+class _OperatorSessionRevoked(Exception):
+    """The authenticated operator lost authority during a live turn."""
+
+
+async def _await_authorized(awaitable, revoked_event: asyncio.Event, *, timeout: float | None = None):
+    """Await work while allowing session revocation to cancel the work."""
+    work_task = asyncio.ensure_future(awaitable)
+    revoked_task = asyncio.create_task(revoked_event.wait(), name="operator-revocation-wait")
+    try:
+        wait_kwargs = {"return_when": asyncio.FIRST_COMPLETED}
+        if timeout is None:
+            done, _ = await asyncio.wait({work_task, revoked_task}, **wait_kwargs)
+        else:
+            done, _ = await asyncio.wait({work_task, revoked_task}, timeout=timeout, **wait_kwargs)
+            if not done:
+                work_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await work_task
+                raise asyncio.TimeoutError
+        if revoked_task in done and revoked_event.is_set():
+            work_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await work_task
+            raise _OperatorSessionRevoked
+        return await work_task
+    finally:
+        if not work_task.done():
+            work_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await work_task
+        if not revoked_task.done():
+            revoked_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await revoked_task
+
+
+async def watch_operator_session(
+    websocket,
+    auth_cookie: str | None,
+    revoked_event: asyncio.Event,
+    revocation_guard: Event,
+) -> None:
+    """Poll the authenticated session and close a socket after revocation/expiry."""
+    if not auth_cookie:
+        return
+    poll_seconds = max(float(settings.operator_auth_revocation_poll_seconds), 0.25)
+    while True:
+        await asyncio.sleep(poll_seconds)
+        try:
+            await authenticate_token(auth_cookie, touch=False)
+        except AuthFailure as exc:
+            revoked_event.set()
+            revocation_guard.set()
+            with suppress(Exception):
+                await websocket.close(code=4401, reason=exc.code)
+            return
+        except Exception:
+            # Losing the auth-store connection is an authorization failure. Do
+            # not leave an already accepted socket usable while revocation
+            # state is unavailable.
+            logger.exception("WebSocket operator-session validation failed; closing fail-closed")
+            revoked_event.set()
+            revocation_guard.set()
+            with suppress(Exception):
+                await websocket.close(code=1011, reason="auth_state_unavailable")
+            return
+
+
+async def _authorized_with_timeout(
+    awaitable,
+    revoked_event: asyncio.Event,
+    *,
+    timeout: float,
+):
+    """Keep a concrete timeout boundary while cleaning up on patched/cancelled waits."""
+    authorized_task = asyncio.create_task(
+        _await_authorized(awaitable, revoked_event),
+        name="operator-authorized-work",
+    )
+    try:
+        return await asyncio.wait_for(authorized_task, timeout=timeout)
+    except BaseException:
+        if not authorized_task.done():
+            authorized_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await authorized_task
+        raise
 
 
 def _format_tool_step(step_name: str, arguments: dict, specialist_names: set[str]) -> str:
@@ -106,11 +212,25 @@ async def _build_agent(session_id: str, message: str):
 @router.websocket("/chat")
 async def websocket_chat(websocket: WebSocket):
     """WebSocket endpoint for streaming chat responses."""
+    try:
+        operator = await authenticate_websocket(websocket)
+    except AuthFailure as exc:
+        await websocket.close(code=4401, reason=exc.code)
+        return
     await websocket.accept()
     ws_manager.connect(websocket)
+    auth_revoked = asyncio.Event()
+    revocation_guard = Event()
+    auth_cookie = websocket.cookies.get(settings.operator_auth_cookie_name) if auth_enabled() else None
+
+    revocation_task = asyncio.create_task(
+        watch_operator_session(websocket, auth_cookie, auth_revoked, revocation_guard),
+        name=f"ws-auth-watch:{operator.session_id[:8]}",
+    )
     _seq = 0
     active_turn_session_id: str | None = None
     active_turn_completed = True
+    revocation_guard_token = None
 
     def _next_seq() -> int:
         nonlocal _seq
@@ -124,6 +244,10 @@ async def websocket_chat(websocket: WebSocket):
         active_turn_completed = True
         with suppress(Exception):
             await session_manager.add_message(active_turn_session_id, "assistant", _INTERRUPTED_TURN_MESSAGE)
+
+    async def _ensure_operator_active() -> None:
+        if auth_revoked.is_set():
+            raise _OperatorSessionRevoked
 
     # Send welcome message if user hasn't completed onboarding
     try:
@@ -148,23 +272,43 @@ async def websocket_chat(websocket: WebSocket):
 
     try:
         while True:
+            await _ensure_operator_active()
             raw = await websocket.receive_text()
+            if auth_cookie:
+                try:
+                    operator = await authenticate_token(auth_cookie, touch=True)
+                except AuthFailure:
+                    auth_revoked.set()
+                    revocation_guard.set()
+                    raise _OperatorSessionRevoked
+                except Exception:
+                    logger.exception("WebSocket operator-session refresh failed; closing fail-closed")
+                    auth_revoked.set()
+                    revocation_guard.set()
+                    raise _OperatorSessionRevoked
             try:
                 data = json.loads(raw)
                 ws_msg = WSMessage(**data)
-            except (json.JSONDecodeError, Exception) as e:
+            except Exception as e:
                 await websocket.send_text(
-                    WSResponse(type="error", content=f"Invalid message: {e}", seq=_next_seq()).model_dump_json()
+                    WSResponse(
+                        type="error",
+                        content=f"Invalid message: {e}",
+                        reason="chat_message_invalid" if isinstance(e, ValueError) else None,
+                        seq=_next_seq(),
+                    ).model_dump_json()
                 )
                 continue
 
             if ws_msg.type == "ping":
+                await _ensure_operator_active()
                 await websocket.send_text(
                     WSResponse(type="pong", content="pong").model_dump_json()
                 )
                 continue
 
             if ws_msg.type == "skip_onboarding":
+                await _ensure_operator_active()
                 await mark_onboarding_complete()
                 await websocket.send_text(
                     WSResponse(
@@ -178,9 +322,142 @@ async def websocket_chat(websocket: WebSocket):
                 )
                 continue
 
-            session = await session_manager.get_or_create(ws_msg.session_id)
             if ws_msg.type != "resume_message":
-                await session_manager.add_message(session.id, "user", ws_msg.message)
+                try:
+                    validate_chat_message(ws_msg.message)
+                    validate_chat_ingress_identity(
+                        client_message_id=ws_msg.message_id,
+                        idempotency_key=ws_msg.idempotency_key,
+                    )
+                except ChatIngressValidationError as exc:
+                    active_turn_completed = True
+                    await websocket.send_text(
+                        WSResponse(
+                            type="error",
+                            content=exc.message,
+                            reason=exc.code,
+                            seq=_next_seq(),
+                        ).model_dump_json()
+                    )
+                    continue
+
+            if ws_msg.session_id is not None and not ws_msg.session_id.strip():
+                active_turn_completed = True
+                await websocket.send_text(
+                    WSResponse(
+                        type="error",
+                        content="Chat session id must not be blank.",
+                        seq=_next_seq(),
+                    ).model_dump_json()
+                )
+                continue
+
+            try:
+                session = await session_manager.get_for_ingress(
+                    ws_msg.session_id,
+                    owner_principal_id=operator.principal.principal_id,
+                )
+            except SessionNotFoundError as exc:
+                active_turn_session_id = exc.session_id
+                active_turn_completed = True
+                await websocket.send_text(
+                    WSResponse(
+                        type="error",
+                        content="This chat session was not found.",
+                        session_id=exc.session_id,
+                        reason="chat_session_not_found",
+                        seq=_next_seq(),
+                    ).model_dump_json()
+                )
+                continue
+            except SessionOwnerMismatchError as exc:
+                active_turn_session_id = exc.session_id
+                active_turn_completed = True
+                await websocket.send_text(
+                    WSResponse(
+                        type="error",
+                        content="This conversation belongs to another operator.",
+                        session_id=exc.session_id,
+                        seq=_next_seq(),
+                    ).model_dump_json()
+                )
+                continue
+            try:
+                chat_principal = _bind_chat_principal(
+                    session.id,
+                    principal=bind_operator_principal(operator, session.id),
+                )
+            except ChatAuthorityError as exc:
+                active_turn_session_id = session.id
+                active_turn_completed = True
+                await websocket.send_text(
+                    WSResponse(
+                        type="error",
+                        content=exc.message,
+                        session_id=session.id,
+                        seq=_next_seq(),
+                    ).model_dump_json()
+                )
+                continue
+            ingress = None
+            if ws_msg.type != "resume_message":
+                ingress = build_chat_ingress_envelope(
+                    message=ws_msg.message,
+                    session_id=session.id,
+                    principal=chat_principal,
+                    operator_session_id=operator.session_id,
+                    transport="websocket",
+                    client_message_id=ws_msg.message_id,
+                    idempotency_key=ws_msg.idempotency_key,
+                )
+                try:
+                    _ingress_message, duplicate = await session_manager.reserve_ingress_message(
+                        session.id,
+                        ws_msg.message,
+                        message_id=ingress.message_id,
+                        metadata_json=chat_ingress_metadata(ingress),
+                    )
+                except MessageIngressConflictError as exc:
+                    await log_chat_ingress_event(
+                        session_id=session.id,
+                        envelope=ingress,
+                        status="identity_conflict",
+                    )
+                    active_turn_session_id = session.id
+                    active_turn_completed = True
+                    await websocket.send_text(
+                        WSResponse(
+                            type="error",
+                            content="This message identity is already bound to another request.",
+                            session_id=session.id,
+                            reason="chat_message_identity_conflict",
+                            seq=_next_seq(),
+                        ).model_dump_json()
+                    )
+                    continue
+                if duplicate:
+                    await log_chat_ingress_event(
+                        session_id=session.id,
+                        envelope=ingress,
+                        status="duplicate_rejected",
+                    )
+                    active_turn_session_id = session.id
+                    active_turn_completed = True
+                    await websocket.send_text(
+                        WSResponse(
+                            type="error",
+                            content="This message was already accepted for this session.",
+                            session_id=session.id,
+                            reason="chat_message_duplicate",
+                            seq=_next_seq(),
+                        ).model_dump_json()
+                    )
+                    continue
+                await log_chat_ingress_event(
+                    session_id=session.id,
+                    envelope=ingress,
+                    status="accepted",
+                )
             active_turn_session_id = session.id
             active_turn_completed = False
             await websocket.send_text(
@@ -197,111 +474,32 @@ async def websocket_chat(websocket: WebSocket):
             except Exception:
                 pass
 
-            if is_local_codex_model(settings.default_model):
-                started_at = perf_counter()
-                timeout_seconds = local_codex_chat_timeout_seconds()
-                try:
-                    result = await run_local_codex(
-                        ws_msg.message,
-                        session_id=session.id,
-                        timeout_seconds=timeout_seconds,
-                        sandbox=local_codex_chat_sandbox(),
-                    )
-                    output = (result.get("stdout") or "").strip()
-                    stderr = (result.get("stderr") or "").strip()
-                    if result.get("timed_out"):
-                        raise asyncio.TimeoutError
-                    if not result.get("ok"):
-                        raise LocalCodexConfigurationError(stderr or "Local Codex returned a non-zero exit code.")
-                    final_result = await redact_secrets_in_text(
-                        output or stderr or "Local Codex completed without output."
-                    )
-                except asyncio.TimeoutError:
-                    safe_error = await redact_secrets_in_text(f"Local Codex timed out after {timeout_seconds}s.")
-                    await log_agent_run_event(
-                        session_id=session.id,
-                        transport="websocket",
-                        is_onboarding=False,
-                        outcome="timed_out",
-                        policy_mode=get_current_tool_policy_mode(),
-                        details={
-                            "duration_ms": int((perf_counter() - started_at) * 1000),
-                            "message_length": len(ws_msg.message),
-                            "timeout_seconds": timeout_seconds,
-                            "runtime": "codex-local",
-                        },
-                    )
-                    active_turn_completed = True
-                    await websocket.send_text(
-                        WSResponse(
-                            type="error",
-                            content=safe_error,
-                            session_id=session.id,
-                            seq=_next_seq(),
-                        ).model_dump_json()
-                    )
-                    continue
-                except LocalCodexConfigurationError as exc:
-                    safe_error = await redact_secrets_in_text(f"Local Codex unavailable: {exc}")
-                    await log_agent_run_event(
-                        session_id=session.id,
-                        transport="websocket",
-                        is_onboarding=False,
-                        outcome="failed",
-                        policy_mode=get_current_tool_policy_mode(),
-                        details={
-                            "duration_ms": int((perf_counter() - started_at) * 1000),
-                            "message_length": len(ws_msg.message),
-                            "error": safe_error,
-                            "runtime": "codex-local",
-                        },
-                    )
-                    active_turn_completed = True
-                    await websocket.send_text(
-                        WSResponse(
-                            type="error",
-                            content=safe_error,
-                            session_id=session.id,
-                            seq=_next_seq(),
-                        ).model_dump_json()
-                    )
-                    continue
+            profile = await get_or_create_profile()
+            direct_is_onboarding = not profile.onboarding_completed
+            direct_runtime_path = "onboarding_agent" if direct_is_onboarding else "chat_agent"
+            try:
+                from src.llm_runtime import reject_removed_external_agent_route
 
-                await session_manager.add_message(session.id, "assistant", final_result)
+                reject_removed_external_agent_route(runtime_path=direct_runtime_path)
+            except ExternalAgentRuntimeRemovedError as exc:
                 active_turn_completed = True
-                await log_agent_run_event(
-                    session_id=session.id,
-                    transport="websocket",
-                    is_onboarding=False,
-                    outcome="succeeded",
-                    policy_mode=get_current_tool_policy_mode(),
-                    details={
-                        "duration_ms": int((perf_counter() - started_at) * 1000),
-                        "message_length": len(ws_msg.message),
-                        "response_length": len(final_result),
-                        "runtime": "codex-local",
-                    },
-                )
                 await websocket.send_text(
                     WSResponse(
-                        type="final",
-                        content=final_result,
+                        type="error",
+                        content=json.dumps(exc.payload()),
                         session_id=session.id,
                         seq=_next_seq(),
                     ).model_dump_json()
                 )
                 continue
 
-            profile = await get_or_create_profile()
-            direct_is_onboarding = not profile.onboarding_completed
-            direct_runtime_path = "onboarding_agent" if direct_is_onboarding else "chat_agent"
             if should_use_direct_local_chat(
                 ws_msg.message,
                 runtime_path=direct_runtime_path,
                 is_onboarding=direct_is_onboarding,
             ):
                 started_at = perf_counter()
-                route_error = await direct_local_chat_route_error()
+                route_error = await direct_local_chat_route_error(runtime_path=direct_runtime_path)
                 if route_error:
                     safe_error = await redact_secrets_in_text(route_error)
                     await log_agent_run_event(
@@ -314,7 +512,7 @@ async def websocket_chat(websocket: WebSocket):
                             "duration_ms": int((perf_counter() - started_at) * 1000),
                             "message_length": len(ws_msg.message),
                             "error": safe_error,
-                            "runtime": "direct-local-chat",
+                            "runtime": "direct-openrouter-chat",
                             "failure_stage": "route_preflight",
                         },
                     )
@@ -330,11 +528,17 @@ async def websocket_chat(websocket: WebSocket):
                     continue
                 llm_request_id = f"direct-ws:{session.id}:{started_at}"
                 _register_request(llm_request_id)
+                auth_tokens = set_runtime_context(
+                    session.id,
+                    get_current_approval_mode(),
+                    trust_principal=chat_principal,
+                )
+                revocation_guard_token = set_revocation_guard(revocation_guard)
                 try:
                     await websocket.send_text(
                         WSResponse(
                             type="status",
-                            content="Seraph is using the local chat runtime.",
+                            content="Seraph is using the governed OpenRouter chat runtime.",
                             session_id=session.id,
                             seq=_next_seq(),
                         ).model_dump_json()
@@ -348,6 +552,7 @@ async def websocket_chat(websocket: WebSocket):
                             ws_msg.message,
                             runtime_path=direct_runtime_path,
                             is_onboarding=direct_is_onboarding,
+                            session_id=session.id,
                         ):
                             streamed_parts.append(delta)
                             safe_delta, emitted_safe_chars = await redact_secrets_for_streaming_snapshot(
@@ -366,32 +571,22 @@ async def websocket_chat(websocket: WebSocket):
                         return "".join(streamed_parts).strip()
 
                     try:
-                        final_result = await asyncio.wait_for(
+                        final_result = await _authorized_with_timeout(
                             _stream_direct_reply(),
+                            auth_revoked,
                             timeout=min(settings.agent_chat_timeout, 60),
                         )
-                    except Exception:
-                        if streamed_parts:
-                            raise
-                        logger.warning("Direct local websocket streaming unavailable; falling back to non-streaming chat")
-                        await websocket.send_text(
-                            WSResponse(
-                                type="status",
-                                content="Local streaming is unavailable; Seraph is falling back to the local chat runtime.",
-                                session_id=session.id,
-                                seq=_next_seq(),
-                            ).model_dump_json()
-                        )
-                        final_result = ""
+                    except asyncio.TimeoutError:
+                        raise
+                    except _OperatorSessionRevoked:
+                        raise
+                    except Exception as exc:
+                        raise _DirectStreamOutcomeUncertain(str(exc)) from exc
 
-                    if not final_result:
-                        final_result = await run_direct_local_chat(
-                            ws_msg.message,
-                            runtime_path=direct_runtime_path,
-                            is_onboarding=direct_is_onboarding,
-                            request_id=llm_request_id,
-                        )
                     final_result = await redact_secrets_in_text(final_result, fail_closed=True)
+                except _OperatorSessionRevoked:
+                    active_turn_completed = True
+                    raise
                 except asyncio.TimeoutError:
                     _mark_request_timed_out(llm_request_id)
                     await log_agent_run_event(
@@ -405,21 +600,59 @@ async def websocket_chat(websocket: WebSocket):
                             "message_length": len(ws_msg.message),
                             "timeout_seconds": min(settings.agent_chat_timeout, 60),
                             "request_id": llm_request_id,
-                            "runtime": "direct-local-chat",
+                            "runtime": "direct-openrouter-chat",
                         },
                     )
                     active_turn_completed = True
                     await websocket.send_text(
                         WSResponse(
                             type="error",
-                            content="Local chat timed out — try again",
+                            content="OpenRouter chat timed out — try again",
+                            session_id=session.id,
+                            seq=_next_seq(),
+                        ).model_dump_json()
+                    )
+                    continue
+                except _DirectStreamOutcomeUncertain as exc:
+                    logger.warning(
+                        "Direct OpenRouter websocket stream ended with an uncertain outcome; automatic retry suppressed",
+                        exc_info=True,
+                    )
+                    safe_error = await redact_secrets_in_text(str(exc) or "provider stream failed")
+                    uncertain_message = (
+                        "OpenRouter streaming ended before Seraph received a confirmed complete response. "
+                        "The remote outcome is uncertain, so Seraph did not retry automatically. "
+                        "Retry this message explicitly if you want to try again."
+                    )
+                    await log_agent_run_event(
+                        session_id=session.id,
+                        transport="websocket",
+                        is_onboarding=direct_is_onboarding,
+                        outcome="uncertain",
+                        policy_mode=get_current_tool_policy_mode(),
+                        details={
+                            "duration_ms": int((perf_counter() - started_at) * 1000),
+                            "message_length": len(ws_msg.message),
+                            "error": safe_error,
+                            "request_id": llm_request_id,
+                            "runtime": "direct-openrouter-chat",
+                            "failure_stage": "streaming",
+                            "remote_outcome": "uncertain",
+                            "retry_required": True,
+                        },
+                    )
+                    active_turn_completed = True
+                    await websocket.send_text(
+                        WSResponse(
+                            type="error",
+                            content=uncertain_message,
                             session_id=session.id,
                             seq=_next_seq(),
                         ).model_dump_json()
                     )
                     continue
                 except Exception as e:
-                    logger.exception("Direct local websocket chat failed")
+                    logger.exception("Direct OpenRouter websocket chat failed")
                     safe_error = await redact_secrets_in_text(f"Agent error: {e}")
                     await log_agent_run_event(
                         session_id=session.id,
@@ -432,7 +665,7 @@ async def websocket_chat(websocket: WebSocket):
                             "message_length": len(ws_msg.message),
                             "error": safe_error,
                             "request_id": llm_request_id,
-                            "runtime": "direct-local-chat",
+                            "runtime": "direct-openrouter-chat",
                         },
                     )
                     active_turn_completed = True
@@ -446,6 +679,10 @@ async def websocket_chat(websocket: WebSocket):
                     )
                     continue
                 finally:
+                    if revocation_guard_token is not None:
+                        reset_revocation_guard(revocation_guard_token)
+                        revocation_guard_token = None
+                    reset_runtime_context(auth_tokens)
                     _finish_request(llm_request_id)
 
                 await session_manager.add_message(session.id, "assistant", final_result)
@@ -461,7 +698,7 @@ async def websocket_chat(websocket: WebSocket):
                         "message_length": len(ws_msg.message),
                         "response_length": len(final_result),
                         "request_id": llm_request_id,
-                        "runtime": "direct-local-chat",
+                        "runtime": "direct-openrouter-chat",
                     },
                 )
                 await websocket.send_text(
@@ -486,7 +723,7 @@ async def websocket_chat(websocket: WebSocket):
             await websocket.send_text(
                 WSResponse(
                     type="status",
-                    content="Seraph is running the local model.",
+                    content="Seraph is using the governed OpenRouter chat runtime.",
                     session_id=session.id,
                     seq=_next_seq(),
                 ).model_dump_json()
@@ -503,7 +740,12 @@ async def websocket_chat(websocket: WebSocket):
                 loop = asyncio.get_running_loop()
                 llm_request_id = f"agent-ws:{session.id}:{started_at}"
                 _register_request(llm_request_id)
-                tokens = set_runtime_context(session.id, context_manager.get_context().approval_mode)
+                tokens = set_runtime_context(
+                    session.id,
+                    context_manager.get_context().approval_mode,
+                    trust_principal=chat_principal,
+                )
+                revocation_guard_token = set_revocation_guard(revocation_guard)
                 llm_request_token = set_current_llm_request_id(llm_request_id)
                 run_ctx = contextvars.copy_context()
                 reset_runtime_context(tokens)
@@ -557,7 +799,11 @@ async def websocket_chat(websocket: WebSocket):
                     name=f"ws-drain:{session.id[:8]}",
                 )
                 try:
-                    await asyncio.wait_for(drain_task, timeout=settings.agent_chat_timeout)
+                    await _authorized_with_timeout(
+                        drain_task,
+                        auth_revoked,
+                        timeout=settings.agent_chat_timeout,
+                    )
                 except Exception:
                     if not drain_task.done():
                         drain_task.cancel()
@@ -565,6 +811,9 @@ async def websocket_chat(websocket: WebSocket):
                             await drain_task
                     raise
 
+            except _OperatorSessionRevoked:
+                active_turn_completed = True
+                raise
             except asyncio.TimeoutError:
                 logger.warning("Agent timed out after %ds for session %s", settings.agent_chat_timeout, session.id)
                 run_outcome = "timed_out"
@@ -685,6 +934,9 @@ async def websocket_chat(websocket: WebSocket):
                 )
                 continue
             finally:
+                if revocation_guard_token is not None:
+                    reset_revocation_guard(revocation_guard_token)
+                    revocation_guard_token = None
                 if "llm_request_id" in locals():
                     _finish_request(llm_request_id)
 
@@ -734,8 +986,12 @@ async def websocket_chat(websocket: WebSocket):
                 except Exception:
                     logger.debug("Failed to schedule memory consolidation", exc_info=True)
 
+    except _OperatorSessionRevoked:
+        ws_manager.disconnect(websocket)
+        logger.info("WebSocket closed because the operator session was revoked or expired")
     except WebSocketDisconnect:
-        await _record_interrupted_turn()
+        if not auth_revoked.is_set():
+            await _record_interrupted_turn()
         ws_manager.disconnect(websocket)
         logger.info("WebSocket client disconnected")
     except RuntimeError as exc:
@@ -745,3 +1001,8 @@ async def websocket_chat(websocket: WebSocket):
             logger.info("WebSocket client disconnected before next receive")
             return
         raise
+    finally:
+        if not revocation_task.done():
+            revocation_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await revocation_task

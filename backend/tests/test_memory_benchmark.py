@@ -289,4 +289,8 @@ async def test_guardian_memory_benchmark_report_exposes_gate_a_baseline_receipt(
 
     assert report["gate_a_baseline"]["summary"]["status"] == "degraded"
     assert report["gate_a_baseline"]["artifact"]["corpus_sha256"] == GATE_A_BASELINE_CORPUS_SHA256
+    assert report["gate_b_provider_decision"]["summary"]["status"] == "degraded"
+    assert report["gate_b_provider_decision"]["summary"]["provider_status"] == "blocked"
+    assert report["gate_b_provider_decision"]["summary"]["pilot_status"] == "not_run"
     assert report["policy"]["gate_a_baseline_policy"].startswith("frozen_")
+    assert report["policy"]["gate_b_provider_decision_policy"].startswith("defer_")

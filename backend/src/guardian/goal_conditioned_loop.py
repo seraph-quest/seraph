@@ -31,6 +31,7 @@ from src.goals.contracts import (
 )
 from src.goals.repository import deserialize_success_criterion, goal_repository
 from src.memory.control import get_strategy_delta
+from src.memory.gate_b_provider_decision import build_gate_b_canonical_decision_record
 
 logger = logging.getLogger(__name__)
 
@@ -234,6 +235,20 @@ def _candidate_receipt_details(
 ) -> dict[str, Any]:
     """Return an inspectable receipt without persisting input values."""
 
+    canonical_decision = build_gate_b_canonical_decision_record(
+        goal_id=decision.goal_id,
+        goal_revision=decision.goal_revision,
+        plan_revision=decision.goal_revision,
+        decision_input_digest=_safe_digest(decision.inputs),
+        memory_delta_id=strategy_delta_id,
+        memory_delta_provenance=strategy_delta_provenance,
+        memory_control_owner=(
+            "operator:authenticated-strategy-delta-owner"
+            if strategy_delta_provenance == "verified"
+            else None
+        ),
+        decision=decision.action.value,
+    )
     return {
         "receipt_version": GOAL_LOOP_RECEIPT_VERSION,
         "receipt_type": "candidate",
@@ -252,6 +267,7 @@ def _candidate_receipt_details(
         "input_digest": _safe_digest(decision.inputs),
         "strategy_delta_id": strategy_delta_id,
         "strategy_delta_provenance": strategy_delta_provenance,
+        "canonical_decision_record": canonical_decision.as_payload(),
         "expected_outcome": _safe_text(decision.expected_outcome),
         "expires_at": decision.expires_at.isoformat() if decision.expires_at else None,
         "content_redacted": True,
@@ -263,6 +279,22 @@ def _outcome_receipt_details(
     *,
     capability_id: str | None = None,
 ) -> dict[str, Any]:
+    canonical_decision = build_gate_b_canonical_decision_record(
+        goal_id=receipt.goal_id,
+        goal_revision=receipt.goal_revision,
+        plan_revision=receipt.goal_revision,
+        decision_input_digest=receipt.decision_input_digest,
+        memory_delta_id=receipt.strategy_delta_id,
+        memory_delta_provenance=receipt.strategy_delta_provenance,
+        memory_control_owner=(
+            "operator:authenticated-strategy-delta-owner"
+            if receipt.strategy_delta_provenance == "verified"
+            else None
+        ),
+        decision="act",
+        verification=receipt.verification,
+        requested_learning=receipt.learning,
+    )
     details = {
         "receipt_version": GOAL_LOOP_RECEIPT_VERSION,
         "receipt_type": receipt.receipt_type,
@@ -272,6 +304,7 @@ def _outcome_receipt_details(
         "decision_input_digest": receipt.decision_input_digest,
         "strategy_delta_id": receipt.strategy_delta_id,
         "strategy_delta_provenance": receipt.strategy_delta_provenance,
+        "canonical_decision_record": canonical_decision.as_payload(),
         "goal_id": receipt.goal_id,
         "goal_revision": receipt.goal_revision,
         "execution_status": receipt.execution_status,
@@ -309,6 +342,7 @@ _SAFE_RECEIPT_FIELDS = frozenset(
         "decision_input_digest",
         "strategy_delta_id",
         "strategy_delta_provenance",
+        "canonical_decision_record",
         "expected_outcome",
         "expires_at",
         "execution_status",
@@ -336,13 +370,47 @@ def _redact_receipt_details(details: dict[str, Any]) -> dict[str, Any]:
             safe_details["evidence_refs"] = list(_safe_evidence_refs(*evidence_refs))
         else:
             safe_details["evidence_refs"] = []
+    if "canonical_decision_record" in safe_details:
+        safe_details["canonical_decision_record"] = _sanitize_canonical_decision_record(
+            safe_details.get("canonical_decision_record")
+        )
     return safe_details
+
+
+def _sanitize_canonical_decision_record(value: object) -> dict[str, Any] | None:
+    """Rebuild the Gate B record from bounded fields before audit persistence."""
+
+    if not isinstance(value, dict):
+        return None
+    try:
+        record = build_gate_b_canonical_decision_record(
+            goal_id=value.get("goal_id"),
+            goal_revision=value.get("goal_revision"),
+            plan_revision=value.get("plan_revision"),
+            decision_input_digest=value.get("decision_input_digest"),
+            memory_delta_id=value.get("memory_delta_id"),
+            memory_delta_provenance=value.get("memory_delta_provenance"),
+            memory_control_owner=value.get("memory_control_owner"),
+            memory_state=value.get("memory_state"),
+            tombstone_ledger_revision=value.get("tombstone_ledger_revision"),
+            recovery_state=value.get("recovery_state"),
+            decision=value.get("decision"),
+            verification=value.get("verification"),
+            requested_learning=value.get("learning"),
+        )
+    except Exception:
+        return None
+    return record.as_payload()
 
 
 def _sanitize_strategy_delta_receipt(details: dict[str, Any]) -> dict[str, Any]:
     """Keep legacy audit rows from exposing an unverified correction ID."""
 
     safe_details = dict(details)
+    if "canonical_decision_record" in safe_details:
+        safe_details["canonical_decision_record"] = _sanitize_canonical_decision_record(
+            safe_details.get("canonical_decision_record")
+        )
     if "evidence_refs" in safe_details:
         evidence_refs = safe_details.get("evidence_refs")
         if isinstance(evidence_refs, (list, tuple, set)):

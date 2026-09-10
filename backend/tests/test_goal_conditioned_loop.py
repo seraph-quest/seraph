@@ -248,6 +248,9 @@ async def test_unresolved_web_brief_correction_blocks_adapter_and_records_no_lea
     )
     assert no_learning["reason"] == "strategy_delta_unresolved"
     assert no_learning["strategy_delta_provenance"] == "unresolved"
+    assert no_learning["canonical_decision_record"]["status"] == "no_learning"
+    assert no_learning["canonical_decision_record"]["learning"] == "no_learning"
+    assert no_learning["canonical_decision_record"]["goal_revision"] == candidate.goal_revision
 
 
 async def test_stale_corrected_outcome_is_not_replayed_before_delta_validation():
@@ -439,6 +442,13 @@ async def test_correction_changes_later_choice_and_persists_provenance():
     assert later["strategy_delta_id"] == "delta-correction-1"
     assert later["strategy_delta_provenance"] == "verified"
     assert later["decision_input_digest"] == new_outcome.decision_input_digest
+    assert later["canonical_decision_record"]["status"] == "verified"
+    assert later["canonical_decision_record"]["goal_revision"] == 2
+    assert later["canonical_decision_record"]["plan_revision"] == 2
+    assert later["canonical_decision_record"]["memory_delta_id"] == "delta-correction-1"
+    assert later["canonical_decision_record"]["memory_control_owner"] == (
+        "operator:authenticated-strategy-delta-owner"
+    )
 
 
 async def test_strategy_delta_provenance_requires_applied_goal_target_linkage():

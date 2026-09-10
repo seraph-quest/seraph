@@ -12,7 +12,7 @@ from src.memory.consolidator import ConsolidationResult
 from src.db.models import MemoryKind
 from src.memory.flush import flush_session_memory
 from src.memory.repository import memory_repository
-from src.tools.process_tools import process_runtime_manager
+from src.tools.process_tools import SessionProcessCleanupError, process_runtime_manager
 from src.workflows.loader import Workflow, WorkflowStep
 from src.workflows.manager import WorkflowTool
 
@@ -256,10 +256,11 @@ async def test_delete_holds_process_cleanup_fence_through_database_teardown(asyn
         events.append("flush")
         assert "delete-fence-session" in process_runtime_manager._stopping_sessions
 
-    def stop(session_id, *, cleanup_fence_held):
+    def stop(session_id, *, cleanup_fence_held, fail_closed):
         events.append("stop")
         assert session_id == "delete-fence-session"
         assert cleanup_fence_held is True
+        assert fail_closed is True
         assert session_id in process_runtime_manager._stopping_sessions
         return 0
 
@@ -287,6 +288,38 @@ async def test_delete_fails_closed_when_process_cleanup_fence_is_owned(async_db)
         assert await manager.get(session_id) is not None
     finally:
         process_runtime_manager.end_session_cleanup(session_id)
+
+
+async def test_delete_fails_closed_when_process_cleanup_is_incomplete(async_db):
+    manager = SessionManager()
+    session_id = "delete-process-unknown"
+    await manager.get_or_create(session_id)
+    receipt = {
+        "session_id": session_id,
+        "requested": 1,
+        "stopped": 0,
+        "unknown": 1,
+        "failed": 0,
+        "conflict": 0,
+    }
+
+    with (
+        patch("src.agent.session.flush_session_memory", new_callable=AsyncMock),
+        patch.object(
+            process_runtime_manager,
+            "stop_processes_for_session",
+            side_effect=SessionProcessCleanupError(receipt),
+        ) as stop_processes,
+    ):
+        deleted = await manager.delete(session_id)
+
+    assert deleted is False
+    stop_processes.assert_called_once_with(
+        session_id,
+        cleanup_fence_held=True,
+        fail_closed=True,
+    )
+    assert await manager.get(session_id) is not None
 
 
 def test_workflow_completion_triggers_memory_flush():

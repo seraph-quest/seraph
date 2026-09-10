@@ -41,14 +41,35 @@ const payload: GoalLoopPayload = {
   criterion: goal.success_criterion ?? null,
   receipts: [
     {
+      audit_event_id: "audit-1",
+      event_type: "goal_loop_outcome",
+      receipt_version: "goal_conditioned_loop_v1",
       receipt_type: "outcome",
+      proposal_only: false,
+      outcome_id: "outcome-1",
+      candidate_id: "candidate-1",
+      dedupe_key: "candidate-key",
+      goal_id: "g1",
+      goal_revision: 4,
+      criterion_id: "artifact",
+      action: "write_artifact",
+      capability_id: "workflow.goal-snapshot-to-file",
+      capability_version: "v1",
+      input_digest: "a".repeat(64),
       created_at: "2026-09-09T08:00:00Z",
       execution_status: "completed",
       verification: "passed",
       usefulness: "useful",
       learning: "applied",
+      learning_record_id: "learning-1",
+      expected_outcome: "A verified artifact exists",
+      decision_input_digest: "b".repeat(64),
       artifact_ref: "artifacts/guardian.md",
       evidence_refs: ["artifact:guardian"],
+      input_keys: ["evidence_refs", "file_path"],
+      expires_at: "2026-09-10T08:00:00Z",
+      reason: "goal snapshot read back",
+      content_redacted: true,
     },
   ],
   strategy_deltas: [],
@@ -111,6 +132,23 @@ describe("GoalLoopPanel", () => {
       evidence_refs: ["artifact:guardian"],
     })));
     expect(screen.getByTestId("goal-loop-panel")).toHaveAttribute("data-state", "recovered");
+  });
+
+  it("keeps the exact safe receipt fields inspectable through a keyboard disclosure", () => {
+    render(<GoalLoopPanel goal={goal} />);
+
+    const details = screen.getByTestId("goal-loop-receipt-details");
+    expect(details).not.toHaveAttribute("open");
+    fireEvent.click(screen.getByText("Inspect exact backend receipt fields"));
+
+    expect(details).toHaveAttribute("open");
+    expect(screen.getByTestId("goal-loop-receipt-audit-event-id")).toHaveTextContent("audit-1");
+    expect(screen.getByTestId("goal-loop-receipt-proposal-only")).toHaveTextContent("false");
+    expect(screen.getByTestId("goal-loop-receipt-action")).toHaveTextContent("write_artifact");
+    expect(screen.getByTestId("goal-loop-receipt-capability-id")).toHaveTextContent("workflow.goal-snapshot-to-file");
+    expect(screen.getByTestId("goal-loop-receipt-input-digest")).toHaveTextContent("a".repeat(64));
+    expect(screen.getByTestId("goal-loop-receipt-evidence-refs")).toHaveTextContent("artifact:guardian");
+    expect(screen.getByTestId("goal-loop-receipt-expires-at")).toHaveTextContent("2026-09-10T08:00:00Z");
   });
 
   it("binds pause, correction, and rollback to their existing bounded controls", async () => {

@@ -45,6 +45,7 @@ class Criterion:
     summary: str
     recovery: str
     paths: tuple[str, ...] = ()
+    evidence_mode: str = "static"
 
 
 # Keep this list in sync with scripts/epic_736_health_matrix.yaml.  The Python
@@ -57,19 +58,16 @@ CRITERIA: tuple[Criterion, ...] = (
     Criterion("runtime.openrouter_model_fabric", 741, True, "OpenRouter model-fabric policy and configuration contracts are present.", "Repair the provider policy and persisted setup before enabling inference.", ("backend/src/model_fabric", "backend/src/llm_runtime.py")),
     Criterion("runtime.remote_inference_admission", 744, True, "Remote inference admission contract is present.", "Restore admission, budget, and cancellation enforcement before inference.", ("backend/src/model_fabric/remote_inference_admission.py", "backend/src/model_fabric/execution.py")),
     Criterion("runtime.effect_reconciliation", 743, True, "Durable effect and reconciliation contracts are present.", "Repair durable effect reconciliation before retrying external work.", ("backend/src/workflows/durable_state.py", "backend/src/workflows/production_workflow_guarantees.py")),
-    Criterion("runtime.openrouter_text_receipt", 741, False, "Live OpenRouter text canary was not run by this keyless command.", "Run the separately authorised provider canary with a supplied key and retain its redacted receipt.", ()),
-    Criterion("runtime.openrouter_multimodal_receipt", 751, False, "Live OpenRouter multimodal canary was not run by this keyless command.", "Run isolated audio and vision canaries when provider credentials and test media are authorised.", ()),
+    Criterion("runtime.openrouter_text_receipt", 741, False, "Live OpenRouter text behavior is unverified by this keyless command.", "Provider capability and quality remain outside this implementation receipt.", (), "external_unverified"),
+    Criterion("runtime.openrouter_multimodal_receipt", 751, False, "Live OpenRouter multimodal behavior is unverified by this keyless command.", "Provider capability and quality remain outside this implementation receipt.", (), "external_unverified"),
     Criterion("runtime.no_local_inference_dependency", 775, True, "Production configuration has no local model, GPU, VLM, Whisper, or Piper route.", "Clear local inference variables and remove any hidden fallback before deployment.", ()),
     Criterion("scheduler.priority_queue", 744, True, "Bounded scheduler and admission source contracts are present.", "Restore priority, serial admission, cancellation, and recovery handling.", ("backend/src/scheduler", "backend/src/model_fabric/remote_inference_admission.py")),
     Criterion("security.capability_caller_enforcement", 747, True, "Capability caller and egress enforcement contracts are present.", "Restore caller authorization and fail-closed egress checks.", ("backend/src/native_tools", "backend/src/security")),
     Criterion("guardian.goal_revision_stop", 745, True, "Goal revision and stale-plan stop contracts are present.", "Repair goal snapshot and stale-plan checks before proactive execution.", ("backend/src/guardian", "backend/src/goals")),
     Criterion("guardian.verified_progress", 746, True, "Guardian outcome and verification contracts are present.", "Restore outcome verification and operator-visible degraded states.", ("backend/src/guardian", "backend/src/api/operator.py")),
-    Criterion("memory.embedding_capability", 775, False, "Live embedding receipt was not run by this keyless command.", "Run the separately authorised embedding canary and record model, version, dimension, and rollback evidence.", ("backend/src/memory/embedder.py", "backend/src/memory")),
+    Criterion("memory.embedding_capability", 775, False, "Live embedding behavior is unverified by this keyless command.", "Provider capability and semantic quality remain outside this implementation receipt.", ("backend/src/memory/embedder.py", "backend/src/memory"), "external_unverified"),
     Criterion("memory.correction_delete_restore", 753, True, "Memory correction, deletion, and restore contracts are present.", "Restore canonical-memory correction and deletion guards before learning.", ("backend/src/memory", "backend/tests/test_memory_control.py")),
-    Criterion("evolution.staged_candidate", 771, True, "Evolution candidates remain staged and reviewable.", "Keep candidate assets staged until human review and explicit promotion.", ("backend/src/evolution/runtime.py", "backend/src/api/evolution.py")),
-    Criterion("evolution.hidden_evaluation", 771, True, "Evolution evaluation and hidden-split contracts are present.", "Restore held-out evaluation and version binding before evaluating a candidate.", ("backend/src/evolution/runtime.py", "backend/src/evolution/benchmark.py")),
-    Criterion("evolution.scoped_canary_rollback", 771, True, "Scoped canary and rollback contracts are present.", "Restore approval-bound canary rollback and baseline recovery.", ("backend/src/evolution/runtime.py",)),
-    Criterion("evaluation.comparator_scope_coverage", 754, True, "Comparator scope and evidence-boundary contracts are present.", "Refresh frozen-source comparator evidence and retain unknown coverage explicitly.", ("docs/implementation/09-benchmark-status.md", "docs/research")),
+    Criterion("research.harness_improvement", 771, False, "Harness improvement evaluation is deferred outside Epic #736.", "Keep #771 separately tracked; no benchmark, comparator, canary, or provider call is required here.", (), "excluded"),
     Criterion("backup.restore", 742, True, "Workspace backup and restore contracts are present.", "Repair backup verification and restore recovery before production use.", ("backend/src/workspace", "backend/tests/test_workspace_lifecycle.py")),
     Criterion("edge.mac", 746, False, "Mac edge live readiness was not probed by this keyless command.", "Run the operator-shell edge probe in the target deployment and retain its redacted receipt.", ("backend/src/edge",)),
     Criterion("voice.audio", 751, False, "Voice and audio provider readiness was not probed by this keyless command.", "Run an isolated provider canary with test media and explicit consent.", ("backend/src/guardian/audio_ingress.py", "backend/src/guardian/multimodal_voice.py")),
@@ -111,13 +109,14 @@ def _nonempty_env(names: Iterable[str]) -> list[str]:
     return [name for name in names if os.environ.get(name, "").strip()]
 
 
-def _check(identifier: str, owner: int, status: str, summary: str, recovery: str, *, required: bool, artifact_refs: Iterable[str] = ()) -> dict[str, Any]:
+def _check(identifier: str, owner: int, status: str, summary: str, recovery: str, *, required: bool, artifact_refs: Iterable[str] = (), evidence_mode: str = "static") -> dict[str, Any]:
     if status not in VALID_STATUSES:
         raise ValueError(f"invalid health status for {identifier}")
     return {
         "id": identifier,
         "owner_issue": owner,
         "required": required,
+        "evidence_mode": evidence_mode,
         "status": status,
         "summary": summary,
         "artifact_refs": list(artifact_refs),
@@ -134,9 +133,12 @@ def _openrouter_config_check() -> dict[str, Any]:
         max_tokens = int(os.environ.get("MODEL_MAX_TOKENS", ""))
     except ValueError:
         temperature, max_tokens = -1.0, -1
+    model_is_bounded = bool(model) and len(model) <= 256 and not any(
+        token in model.lower() for token in ("local", "ollama", "gpu", "vlm", "whisper", "piper")
+    ) and all(not character.isspace() for character in model)
     expected = (
         base == "https://openrouter.ai/api/v1"
-        and model == "openrouter/z-ai/glm-5.3-flash"
+        and model_is_bounded
         and _truthy(os.environ.get("OPENROUTER_PROVIDER_ONLY"))
         and not _truthy(os.environ.get("OPENROUTER_ALLOW_FALLBACKS"))
         and _truthy(os.environ.get("OPENROUTER_REQUIRE_PARAMETERS"))
@@ -153,6 +155,7 @@ def _openrouter_config_check() -> dict[str, Any]:
         "Set the governed OpenRouter base, model, upstream allowlist, no-fallback policy, consent policy, temperature, and token bound.",
         required=True,
         artifact_refs=("config:openrouter-policy",),
+        evidence_mode="configuration",
     )
 
 
@@ -180,6 +183,7 @@ def _no_local_inference_check() -> dict[str, Any]:
         "Clear local inference variables and keep OpenRouter as the sole model route." if configured else "A later deployment probe may verify process absence; this keyless check makes no network call.",
         required=True,
         artifact_refs=("config:local-inference-absence",),
+        evidence_mode="configuration",
     )
 
 
@@ -202,6 +206,7 @@ def _contract_check(criterion: Criterion) -> dict[str, Any]:
         criterion.recovery,
         required=criterion.required,
         artifact_refs=("source-contract:" + criterion.identifier,),
+        evidence_mode=criterion.evidence_mode,
     )
 
 
@@ -213,6 +218,19 @@ def _optional_live_check(criterion: Criterion) -> dict[str, Any]:
         criterion.summary + " No provider, connector, edge, or media call was made.",
         criterion.recovery,
         required=False,
+        evidence_mode=criterion.evidence_mode,
+    )
+
+
+def _excluded_check(criterion: Criterion) -> dict[str, Any]:
+    return _check(
+        criterion.identifier,
+        criterion.owner_issue,
+        "skipped",
+        criterion.summary,
+        criterion.recovery,
+        required=False,
+        evidence_mode="excluded",
     )
 
 
@@ -264,7 +282,9 @@ def build_receipt() -> tuple[dict[str, Any], int, str]:
     for criterion in CRITERIA:
         if criterion.identifier in {"runtime.openrouter_model_fabric", "runtime.no_local_inference_dependency"}:
             continue
-        if not criterion.required and not criterion.paths:
+        if criterion.evidence_mode == "excluded":
+            checks.append(_excluded_check(criterion))
+        elif not criterion.required and not criterion.paths:
             checks.append(_optional_live_check(criterion))
         else:
             checks.append(_contract_check(criterion))
@@ -280,12 +300,13 @@ def build_receipt() -> tuple[dict[str, Any], int, str]:
         "Source-contract presence does not replace focused tests, runtime/UI receipts, or isolated mutating drills.",
     ]
     receipt: dict[str, Any] = {
-        "schema_version": 1,
+        "schema_version": 2,
         "epic": 736,
         "generated_at": _timestamp(generated),
         "environment": "prod",
         "commit": _safe_commit(),
         "overall_status": overall_status,
+        "claim_boundary": "static_and_local_contract_evidence_only; external_provider_quality_and_harness_improvement_excluded",
         "checks": checks,
         "redactions": {"count": 0, "classes": ["credentials", "message_content", "raw_media", "sensitive_paths"]},
         "skipped": skipped,

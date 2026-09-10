@@ -4,6 +4,15 @@ title: 09. Benchmark Status
 
 # 09. Benchmark Status
 
+## Epic #736 keyless health receipt (2026-09-10)
+
+`scripts/epic_736_health.py` emits schema v2 receipts without opening provider,
+GPU, VLM, speech, connector, or comparator sockets. Configuration and source
+checks carry explicit `evidence_mode` values and are not presented as exercised
+runtime behavior. OpenRouter capability, model quality, embeddings, and edge or
+media readiness remain `external_unverified`; the HarnessDev improvement work in
+#771 and comparator campaigns are explicitly `excluded` from Epic #736 closure.
+
 ## Status On `develop`
 
 When this file is updated on an open feature branch, checked items describe the intended post-merge `develop` state. The open PR remains the integration truth until it merges.

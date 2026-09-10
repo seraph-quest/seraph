@@ -1,4 +1,4 @@
-schema_version: 1
+schema_version: 2
 epic: 736
 description: >-
   Keyless, read-only release-gate criteria. Source-contract checks do not
@@ -58,22 +58,10 @@ criteria:
     owner_issue: 753
     required: true
     evidence: source_contract
-  - id: evolution.staged_candidate
+  - id: research.harness_improvement
     owner_issue: 771
-    required: true
-    evidence: source_contract
-  - id: evolution.hidden_evaluation
-    owner_issue: 771
-    required: true
-    evidence: source_contract
-  - id: evolution.scoped_canary_rollback
-    owner_issue: 771
-    required: true
-    evidence: source_contract
-  - id: evaluation.comparator_scope_coverage
-    owner_issue: 754
-    required: true
-    evidence: documentation_contract
+    required: false
+    evidence: excluded
   - id: core.authenticated_origin
     owner_issue: 747
     required: true
@@ -122,3 +110,5 @@ notes:
   - A configured key, catalog row, fixture, or source file is never a live provider receipt.
   - This command never calls OpenRouter, a GPU host, a VLM wrapper, Whisper, Piper, or a connector.
   - Mutating drills belong in isolated staging/test profiles and are referenced by logical receipts.
+  - Source-contract and configuration checks are explicitly static/configuration evidence; they do not claim exercised behavior.
+  - Harness improvement, comparator, and paid/live evaluation work are excluded from Epic #736 closure.

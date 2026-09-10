@@ -37,7 +37,9 @@ logical receipts under `operator-receipts/epic-736-health/`, makes no provider,
 GPU/VLM, speech, or connector calls, and records unprobed live evidence as
 `skipped`/`degraded` with recovery guidance. Source-contract checks are evidence
 of the checked revision, not claims of live execution or competitive
-superiority.
+superiority. Receipt schema v2 labels each check as static, configuration,
+integration, external-unverified, or excluded; the deferred HarnessDev work in
+#771 and comparator campaigns are excluded from Epic #736 closure.
 
 ## Legend
 

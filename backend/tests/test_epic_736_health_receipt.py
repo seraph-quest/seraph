@@ -43,7 +43,7 @@ def test_keyless_receipt_has_schema_and_logical_artifact(tmp_path: Path, monkeyp
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
     receipt, exit_code, logical = health.build_receipt()
 
-    assert receipt["schema_version"] == 1
+    assert receipt["schema_version"] == 2
     assert receipt["epic"] == 736
     assert receipt["environment"] == "prod"
     assert receipt["overall_status"] == "degraded"
@@ -52,6 +52,11 @@ def test_keyless_receipt_has_schema_and_logical_artifact(tmp_path: Path, monkeyp
     assert (tmp_path / logical).is_file()
     assert {item["status"] for item in receipt["checks"]} <= health.VALID_STATUSES
     assert any(item["id"] == "runtime.openrouter_text_receipt" and item["status"] == "skipped" for item in receipt["checks"])
+    harness = next(item for item in receipt["checks"] if item["id"] == "research.harness_improvement")
+    assert harness["status"] == "skipped"
+    assert harness["required"] is False
+    assert harness["evidence_mode"] == "excluded"
+    assert not any(item["required"] and item["owner_issue"] == 771 for item in receipt["checks"])
 
 
 def test_receipt_never_contains_key_or_raw_content(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -69,11 +74,21 @@ def test_receipt_never_contains_key_or_raw_content(tmp_path: Path, monkeypatch: 
 
 def test_malformed_provider_config_fails_without_network(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _configured(monkeypatch, tmp_path)
-    monkeypatch.setenv("DEFAULT_MODEL", "openrouter/other/model")
+    monkeypatch.setenv("DEFAULT_MODEL", "local model with spaces")
     receipt, exit_code, _ = health.build_receipt()
     assert receipt["overall_status"] == "failed"
     assert exit_code == 4
     assert next(item for item in receipt["checks"] if item["id"] == "runtime.openrouter_model_fabric")["status"] == "failed"
+
+
+def test_provider_model_is_generic_and_not_tied_to_a_single_catalog_entry(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _configured(monkeypatch, tmp_path)
+    monkeypatch.setenv("DEFAULT_MODEL", "openrouter/another-provider/model-v2")
+    receipt, exit_code, _ = health.build_receipt()
+    check = next(item for item in receipt["checks"] if item["id"] == "runtime.openrouter_model_fabric")
+    assert check["status"] == "pass"
+    assert check["evidence_mode"] == "configuration"
+    assert exit_code == 2
 
 
 def test_local_inference_configuration_fails_closed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

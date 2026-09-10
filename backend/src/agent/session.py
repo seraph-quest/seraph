@@ -13,6 +13,7 @@ from sqlmodel import select, col
 from config.settings import settings
 from src.approval.runtime import get_current_trust_principal, reset_runtime_context, set_runtime_context
 from src.audit.runtime import log_background_task_event
+from src.conversation.identity import ConversationIdentityError, validate_attachment_refs
 from src.model_fabric.caller_context import build_canonical_inference_context
 from src.db.engine import get_session
 from src.db.models import (
@@ -22,6 +23,7 @@ from src.db.models import (
     MemoryEpisode,
     MemoryEpisodeType,
     Message,
+    NativeNotificationOutbox,
     QueuedInsight,
     ScheduledJob,
     Session,
@@ -220,9 +222,17 @@ class SessionManager:
             db.expunge(session)
             return session
 
-    async def get(self, session_id: str) -> Session | None:
+    async def get(
+        self,
+        session_id: str,
+        *,
+        owner_principal_id: str | None = None,
+    ) -> Session | None:
         async with get_session() as db:
-            result = await db.execute(select(Session).where(Session.id == session_id))
+            stmt = select(Session).where(Session.id == session_id)
+            if owner_principal_id is not None:
+                stmt = stmt.where(Session.owner_principal_id == owner_principal_id)
+            result = await db.execute(stmt)
             session = result.scalars().first()
             if session:
                 db.expunge(session)
@@ -237,23 +247,49 @@ class SessionManager:
                 db.expunge(message)
             return message
 
-    async def delete(self, session_id: str) -> bool:
+    async def delete(
+        self,
+        session_id: str,
+        *,
+        owner_principal_id: str | None = None,
+    ) -> bool:
+        if owner_principal_id is not None:
+            # Claiming an unowned legacy session is safe only through the
+            # authenticated ingress path. Once claimed, deletion cannot race
+            # another principal without failing this check.
+            await self.get_for_ingress(
+                session_id,
+                owner_principal_id=owner_principal_id,
+            )
         cleanup_fence_acquired = process_runtime_manager.begin_session_cleanup(session_id)
         if not cleanup_fence_acquired:
             return False
         try:
-            return await self._delete_session_records(session_id)
+            return await self._delete_session_records(
+                session_id,
+                owner_principal_id=owner_principal_id,
+            )
         finally:
             if cleanup_fence_acquired:
                 process_runtime_manager.end_session_cleanup(session_id)
 
-    async def _delete_session_records(self, session_id: str) -> bool:
+    async def _delete_session_records(
+        self,
+        session_id: str,
+        *,
+        owner_principal_id: str | None = None,
+    ) -> bool:
         await flush_session_memory(session_id, trigger="session_end", manager=self)
         async with get_session() as db:
             result = await db.execute(select(Session).where(Session.id == session_id))
             session = result.scalars().first()
             if not session:
                 return False
+            if (
+                owner_principal_id is not None
+                and session.owner_principal_id != owner_principal_id
+            ):
+                raise SessionOwnerMismatchError(session_id)
             try:
                 process_runtime_manager.stop_processes_for_session(
                     session_id,
@@ -318,10 +354,35 @@ class SessionManager:
             )
             for intervention in interventions.scalars().all():
                 await db.delete(intervention)
+            # A deleted conversation can never resume an old native delivery.
+            # Preserve the outbox receipt while cancelling active handoffs so
+            # a restarted daemon cannot dispatch stale content.
+            await db.execute(
+                update(NativeNotificationOutbox)
+                .where(
+                    NativeNotificationOutbox.session_id == session_id,
+                    NativeNotificationOutbox.status.in_(
+                        {"queued", "claimed", "display_attempted"}
+                    ),
+                )
+                .values(
+                    status="cancelled",
+                    last_error="conversation_deleted",
+                    degraded_state="conversation_deleted",
+                    lease_owner=None,
+                    lease_expires_at=None,
+                    cancelled_at=datetime.now(timezone.utc),
+                    updated_at=datetime.now(timezone.utc),
+                )
+            )
             await db.delete(session)
             return True
 
-    async def list_sessions(self) -> list[dict]:
+    async def list_sessions(
+        self,
+        *,
+        owner_principal_id: str | None = None,
+    ) -> list[dict]:
         try:
             async with get_session() as db:
                 # Single query: fetch sessions with their latest message using window function
@@ -336,9 +397,10 @@ class SessionManager:
                                ROW_NUMBER() OVER (PARTITION BY session_id ORDER BY created_at DESC) AS rn
                         FROM messages
                     ) lm ON lm.session_id = s.id AND lm.rn = 1
+                    WHERE (:owner_principal_id IS NULL OR s.owner_principal_id = :owner_principal_id)
                     ORDER BY s.updated_at DESC
                     """
-                ))).all()
+                ), {"owner_principal_id": owner_principal_id})).all()
 
                 return [
                     {
@@ -561,6 +623,7 @@ class SessionManager:
         limit: int = 5,
         exclude_session_id: str | None = None,
         snippet_chars: int = 180,
+        owner_principal_id: str | None = None,
     ) -> list[dict]:
         normalized_query = query.strip().lower()
         if not normalized_query:
@@ -570,6 +633,10 @@ class SessionManager:
             session_stmt = select(Session)
             if exclude_session_id:
                 session_stmt = session_stmt.where(Session.id != exclude_session_id)
+            if owner_principal_id is not None:
+                session_stmt = session_stmt.where(
+                    Session.owner_principal_id == owner_principal_id
+                )
             session_rows = await db.execute(session_stmt)
             sessions = session_rows.scalars().all()
             if not sessions:
@@ -693,9 +760,18 @@ class SessionManager:
                 for item in ordered[:limit]
             ]
 
-    async def update_title(self, session_id: str, title: str) -> bool:
+    async def update_title(
+        self,
+        session_id: str,
+        title: str,
+        *,
+        owner_principal_id: str | None = None,
+    ) -> bool:
         async with get_session() as db:
-            result = await db.execute(select(Session).where(Session.id == session_id))
+            stmt = select(Session).where(Session.id == session_id)
+            if owner_principal_id is not None:
+                stmt = stmt.where(Session.owner_principal_id == owner_principal_id)
+            result = await db.execute(stmt)
             session = result.scalars().first()
             if not session:
                 return False
@@ -728,6 +804,12 @@ class SessionManager:
                 "principal_id",
                 "device_id",
                 "session_id",
+                "conversation_id",
+                "thread_id",
+                "channel",
+                "transport",
+                "correlation_id",
+                "attachment_refs",
             )
         )
 
@@ -738,6 +820,7 @@ class SessionManager:
         *,
         message_id: str,
         metadata_json: str,
+        attachment_refs: object = None,
     ) -> tuple[Message, bool]:
         """Persist one user ingress before dispatch and detect safe retries.
 
@@ -761,6 +844,7 @@ class SessionManager:
                 content,
                 metadata_json=metadata_json,
                 message_id=message_id,
+                attachment_refs=attachment_refs,
             )
         except IntegrityError:
             # A concurrent request won the primary-key reservation.  Read its
@@ -786,6 +870,7 @@ class SessionManager:
         tool_used: str | None = None,
         metadata_json: str | None = None,
         message_id: str | None = None,
+        attachment_refs: object = None,
     ) -> Message:
         # Truncate oversized content (50 KB)
         if len(content) > 50_000:
@@ -798,10 +883,51 @@ class SessionManager:
                 parsed_metadata = None
             if isinstance(parsed_metadata, dict):
                 episode_metadata = parsed_metadata
+        lineage = episode_metadata.get("lineage") if isinstance(episode_metadata, dict) else None
+        if not isinstance(lineage, dict) and isinstance(episode_metadata, dict):
+            # Web ingress metadata predates the explicit lineage block.  Keep
+            # old rows readable while still projecting their canonical fields.
+            candidate = episode_metadata.get("ingress")
+            lineage = candidate if isinstance(candidate, dict) else None
+        if not isinstance(lineage, dict):
+            lineage = {}
+        lineage_owner_principal_id = str(
+            lineage.get("owner_principal_id") or lineage.get("principal_id") or ""
+        ).strip() or None
+        lineage_attachment_refs = lineage.get("attachment_refs")
+        attachment_input = (
+            attachment_refs
+            if attachment_refs is not None
+            else lineage_attachment_refs
+        )
+        safe_attachment_refs = validate_attachment_refs(
+            attachment_input,
+            owner_principal_id=lineage_owner_principal_id,
+        )
+        lineage_conversation_id = str(
+            lineage.get("conversation_id") or lineage.get("session_id") or session_id
+        ).strip() or session_id
+        lineage_thread_id = str(
+            lineage.get("thread_id") or lineage_conversation_id
+        ).strip() or lineage_conversation_id
         async with get_session() as db:
             msg = Message(
                 id=message_id or uuid.uuid4().hex,
                 session_id=session_id,
+                conversation_id=lineage_conversation_id,
+                thread_id=lineage_thread_id,
+                owner_principal_id=(
+                    lineage_owner_principal_id
+                ),
+                operator_session_id=(
+                    str(lineage.get("operator_session_id") or "").strip() or None
+                ),
+                device_id=str(lineage.get("device_id") or "").strip() or None,
+                channel=str(lineage.get("channel") or "").strip() or None,
+                transport=str(lineage.get("transport") or "").strip() or None,
+                correlation_id=str(lineage.get("correlation_id") or "").strip() or None,
+                causation_id=str(lineage.get("causation_id") or "").strip() or None,
+                attachment_refs_json=json.dumps(safe_attachment_refs, sort_keys=True),
                 role=role,
                 content=content,
                 step_number=step_number,
@@ -917,18 +1043,49 @@ class SessionManager:
             messages = result.scalars().all()
             if newest_first:
                 messages.reverse()
-            return [
-                {
-                    "id": m.id,
-                    "role": m.role,
-                    "content": m.content,
-                    "metadata": json.loads(m.metadata_json) if m.metadata_json else None,
-                    "step_number": m.step_number,
-                    "tool_used": m.tool_used,
-                    "created_at": m.created_at.isoformat(),
-                }
-                for m in messages
-            ]
+            output: list[dict] = []
+            for message in messages:
+                try:
+                    metadata = json.loads(message.metadata_json) if message.metadata_json else None
+                except (TypeError, json.JSONDecodeError):
+                    metadata = None
+                attachment_refs_status = "available"
+                try:
+                    attachment_refs = validate_attachment_refs(
+                        message.attachment_refs_json and json.loads(message.attachment_refs_json),
+                        owner_principal_id=message.owner_principal_id,
+                    )
+                except ConversationIdentityError as exc:
+                    attachment_refs = []
+                    attachment_refs_status = (
+                        "expired" if exc.code == "attachment_receipt_expired" else "unavailable"
+                    )
+                except Exception:
+                    attachment_refs = []
+                    attachment_refs_status = "unavailable"
+                output.append(
+                    {
+                        "id": message.id,
+                        "role": message.role,
+                        "content": message.content,
+                        "metadata": metadata,
+                        "step_number": message.step_number,
+                        "tool_used": message.tool_used,
+                        "created_at": message.created_at.isoformat(),
+                        "conversation_id": message.conversation_id or message.session_id,
+                        "thread_id": message.thread_id or message.session_id,
+                        "owner_principal_id": message.owner_principal_id,
+                        "operator_session_id": message.operator_session_id,
+                        "device_id": message.device_id,
+                        "channel": message.channel,
+                        "transport": message.transport,
+                        "correlation_id": message.correlation_id,
+                        "causation_id": message.causation_id,
+                        "attachment_refs": attachment_refs,
+                        "attachment_refs_status": attachment_refs_status,
+                    }
+                )
+            return output
 
     async def get_todos(self, session_id: str) -> list[dict]:
         async with get_session() as db:
@@ -1104,10 +1261,18 @@ class SessionManager:
                 return items[index]
         return None
 
-    async def generate_title(self, session_id: str) -> str | None:
+    async def generate_title(
+        self,
+        session_id: str,
+        *,
+        owner_principal_id: str | None = None,
+    ) -> str | None:
         """Generate a short title for a session using LLM."""
         started_at = perf_counter()
-        session = await self.get(session_id)
+        session = await self.get(
+            session_id,
+            owner_principal_id=owner_principal_id,
+        )
         if not session or session.title != "New Conversation":
             await log_background_task_event(
                 task_name="session_title_generation",

@@ -38,11 +38,15 @@ class InsightQueue:
         reasoning: str = "",
         intervention_id: str | None = None,
         session_id: str | None = None,
+        owner_principal_id: str | None = None,
+        operator_session_id: str | None = None,
     ) -> QueuedInsight:
         """Add an insight to the queue."""
         insight = QueuedInsight(
             intervention_id=intervention_id,
             session_id=session_id,
+            owner_principal_id=owner_principal_id,
+            operator_session_id=operator_session_id,
             content=content,
             intervention_type=intervention_type,
             urgency=urgency,

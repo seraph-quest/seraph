@@ -398,7 +398,6 @@ async def lifespan(app: FastAPI):
         if profile.approval_mode:
             context_manager.update_approval_mode(profile.approval_mode)
     except Exception:
-        import logging
         logging.getLogger(__name__).warning("Failed to load persisted settings", exc_info=True)
     defaults_dir = os.path.join(os.path.dirname(__file__), "defaults")
     mcp_config = os.path.join(settings.workspace_dir, "mcp-servers.json")
@@ -438,7 +437,6 @@ async def lifespan(app: FastAPI):
         from src.observer.manager import context_manager
         await context_manager.refresh()
     except Exception:
-        import logging
         logging.getLogger(__name__).warning("Initial context refresh failed", exc_info=True)
     yield
     shutdown_scheduler()

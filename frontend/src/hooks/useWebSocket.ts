@@ -1,5 +1,7 @@
 import { useEffect, useRef, useCallback } from "react";
 import { API_URL, WS_URL, WS_RECONNECT_DELAY_MS, WS_PING_INTERVAL_MS } from "../config/constants";
+import { apiFetch } from "../lib/api";
+import { signalAuthRequired } from "../lib/operatorAuthEvents";
 import { useChatStore } from "../stores/chatStore";
 import { detectToolFromStep } from "../lib/toolParser";
 import { getIdleState, getThinkingState } from "../lib/animationStateMachine";
@@ -295,7 +297,7 @@ export function useWebSocket() {
     const timeoutId = setTimeout(() => controller.abort(), REST_RESPONSE_TIMEOUT_MS);
 
     try {
-      const response = await fetch(`${API_URL}/api/chat`, {
+      const response = await apiFetch(`${API_URL}/api/chat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         signal: controller.signal,
@@ -579,7 +581,7 @@ export function useWebSocket() {
       }
     };
 
-    ws.onclose = () => {
+    ws.onclose = (event) => {
       if (wsRef.current !== ws) return;
       clearResponseTimeout();
       clearStreamingMessage();
@@ -594,6 +596,10 @@ export function useWebSocket() {
       setConnectionStatus("disconnected");
       wsRef.current = null;
       if (pingRef.current) clearInterval(pingRef.current);
+      if (event.code === 4401) {
+        signalAuthRequired();
+        return;
+      }
       reconnectRef.current = setTimeout(connect, backoffRef.current);
       backoffRef.current = Math.min(backoffRef.current * 2, WS_BACKOFF_MAX_MS);
     };

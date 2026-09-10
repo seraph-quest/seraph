@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { API_URL } from "../../config/constants";
+import { apiFetch } from "../../lib/api";
 
 interface AuditEvent {
   id: string;
@@ -32,7 +33,7 @@ export function AuditLogPanel() {
 
   useEffect(() => {
     const fetchEvents = () => {
-      fetch(`${API_URL}/api/audit/events?limit=8`)
+      apiFetch(`${API_URL}/api/audit/events?limit=8`)
         .then((r) => (r.ok ? r.json() : []))
         .then((data) => setEvents(Array.isArray(data) ? data : []))
         .catch(() => {});

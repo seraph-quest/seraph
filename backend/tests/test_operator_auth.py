@@ -410,3 +410,22 @@ async def test_unconfigured_websocket_closes_before_accept(monkeypatch):
     await websocket_chat(websocket)
     assert websocket.accepted is False
     assert websocket.closed == (4401, "auth_not_configured")
+
+
+@pytest.mark.asyncio
+async def test_authenticated_operator_can_read_runtime_and_settings_without_provider_transport(client, monkeypatch):
+    _, token = await _login(client)
+    monkeypatch.setattr(
+        "src.api.model_fabric_settings.httpx.AsyncClient",
+        lambda *args, **kwargs: pytest.fail("metadata reads must not call provider transport"),
+    )
+
+    runtime = await client.get("/api/runtime/status")
+    settings_response = await client.get("/api/settings/model-fabric")
+
+    assert runtime.status_code == 200
+    assert settings_response.status_code == 200
+    assert runtime.json()["model_fabric"]["status"] in {"configuration_required", "ready", "degraded"}
+    assert "api_key" not in runtime.text
+    assert "api_key" not in settings_response.text
+    assert client.cookies.get(settings.operator_auth_cookie_name) == token

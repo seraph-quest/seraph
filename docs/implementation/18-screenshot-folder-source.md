@@ -430,13 +430,21 @@ This means "GPU constantly working" is enforced as a joint contract: Seraph cont
 
 ## Local Gemma Profile Proof
 
-Seraph ships a proof harness for local Gemma profile behavior:
+The local Gemma proof harness is historical diagnostic tooling on the active
+OpenRouter-only branch. Its default behavior is fail-closed: it writes a
+redacted, operator-visible blocked receipt and does not probe the local or GPU
+gateway. A legacy diagnostic run requires both `OPENROUTER_PROVIDER_ONLY=false`
+and the explicit `--allow-legacy-local-probe` flag; those receipts do not make
+local inference an active route.
+
+For that explicitly opted-in historical check:
 
 ```bash
-PYTHONPATH=. WORKSPACE_DIR=/tmp/seraph-dev-data \
+PYTHONPATH=. WORKSPACE_DIR=/tmp/seraph-dev-data OPENROUTER_PROVIDER_ONLY=false \
   uv run python ../scripts/verify_local_gemma_profiles.py \
   --base-url http://192.168.1.26:8001/v1 \
-  --timeout-seconds 120
+  --timeout-seconds 120 \
+  --allow-legacy-local-probe
 ```
 
 The harness verifies `screenshot_fast`, `report_thinking`, `chat_thinking`, and `strategist_fast` against the live OpenAI-compatible gateway, writes a sanitized JSON receipt under `local-runtime-profile-receipts`, and reports whether one backend is safe for profile routing.

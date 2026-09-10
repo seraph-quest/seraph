@@ -407,12 +407,12 @@ _REVIEWED_EXCEPTIONS = (
     ),
     _review(
         "local_runtime_profile_verifier.py",
-        221,
+        263,
         "_verify_profile",
         "client.post",
-        "capability_probe",
-        "Operator profile verifier performs bounded empirical chat checks and writes a redacted proof receipt.",
-        "Route empirical verification through an admitted capability-probe adapter before treating it as shared routing evidence.",
+        "transitional_provider_call",
+        "Legacy profile verification sends generation only after explicit diagnostic opt-in with active OpenRouter-only mode disabled; the active path blocks before client construction.",
+        "Replace the legacy diagnostic transport with an admitted capability-probe adapter before treating local profile evidence as active routing proof.",
     ),
     _review(
         "local_runtime_profile_verifier.py",

@@ -333,7 +333,10 @@ async def _run_opted_in_goal_web_brief(
         await durable_job_repository.record_effect(
             parent_job_id,
             effect_type="web_brief_admission",
-            status="unknown",
+            # No child admission was attempted.  This is a verified
+            # no-op, so it must not poison the parent success transition as
+            # an unresolved external effect.
+            status="succeeded",
             details=details,
             owner=_STRATEGIST_RUNNER_ID,
             fencing_token=parent_fencing_token,
@@ -433,7 +436,10 @@ async def _run_opted_in_goal_snapshot(
         await durable_job_repository.record_effect(
             parent_job_id,
             effect_type="goal_snapshot_admission",
-            status="unknown",
+            # No child admission was attempted.  This is a verified
+            # no-op, so it must not poison the parent success transition as
+            # an unresolved external effect.
+            status="succeeded",
             details=details,
             owner=_STRATEGIST_RUNNER_ID,
             fencing_token=parent_fencing_token,
@@ -653,24 +659,31 @@ async def run_strategist_tick() -> None:
         )
         await _transition_tick(
             durable_job_id,
-            status="succeeded",
+            # ``deliver_or_queue`` only records the policy decision here. The
+            # transport acknowledgement is persisted by the delivery
+            # coordinator, so the parent job must remain explicitly uncertain
+            # until that effect is read back or reconciled by an authorized
+            # owner. A policy decision is never a proof of user delivery.
+            status="unknown_external_effect",
             fencing_token=durable_fencing_token,
+            reason="delivery_receipt_pending",
             result={
                 "should_intervene": True,
                 "delivery": delivery_value,
                 "policy_action": policy_action_value,
             },
-            result_summary="proactive decision completed; delivery has a separate transport receipt",
+            result_summary="proactive decision recorded; delivery acknowledgement is pending",
         )
         await log_scheduler_job_event(
             job_name="strategist_tick",
-            outcome="succeeded",
+            outcome="unknown_external_effect",
             details={
                 "duration_ms": int((perf_counter() - started_at) * 1000),
                 "intervention_type": decision.intervention_type,
                 "urgency": decision.urgency,
                 "delivery": _delivery_value(result),
                 "policy_action": _policy_action_value(result),
+                "recovery_action": "reconcile_delivery_receipt_before_retry",
                 "request_id": llm_request_id,
                 "durable_job_id": durable_job_id,
             },

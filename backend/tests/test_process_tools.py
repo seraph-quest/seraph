@@ -17,8 +17,8 @@ from src.audit.repository import audit_repository
 from src.tools.audit import wrap_tools_for_audit
 from src.tools import process_tools as process_tools_module
 from src.tools.process_tools import (
+    _ProcessDescendantIdentity,
     _ProcessLeaderIdentity,
-    _runtime_root,
     list_processes,
     process_runtime_manager,
     read_process_output,
@@ -97,7 +97,12 @@ def test_run_command_timeout_does_not_wait_for_descendant_held_pipes():
     )
 
     assert result["timed_out"] is True
+    assert result["cleanup_status"] == "unknown"
+    retained_worker_root = Path(result["worker_root"])
+    assert retained_worker_root.exists()
     assert time.monotonic() - started < 4
+    time.sleep(2.2)
+    assert process_tools_module._delete_runtime_dir(retained_worker_root) is True
 
 
 def test_run_command_reports_unknown_after_parent_exits_before_cleanup():
@@ -136,10 +141,13 @@ def test_run_command_reports_unknown_after_parent_exits_before_cleanup():
 
     assert result["timed_out"] is True
     assert result["cleanup_status"] == "unknown"
+    retained_worker_root = Path(result["worker_root"])
+    assert retained_worker_root.exists()
     assert parent_marker.is_file()
     assert time.monotonic() - started < 4
     time.sleep(2.2)
     assert survivor_marker.read_text(encoding="utf-8") == "survived"
+    assert process_tools_module._delete_runtime_dir(retained_worker_root) is True
 
 
 def test_run_command_cancel_event_kills_in_flight_process_within_bound():
@@ -173,6 +181,56 @@ def test_run_command_cancel_event_kills_in_flight_process_within_bound():
     assert result_holder["result"]["timed_out"] is False
 
 
+def test_stop_process_reports_unknown_for_live_detached_descendant(monkeypatch):
+    script_name = _write_script(
+        "wave_process_live_detached_snapshot.py",
+        """
+        import time
+        time.sleep(30)
+        """,
+    )
+
+    started = start_process(command="python3", args_json=f'["{script_name}"]')
+    process_id = started.split("process=")[1].split(",")[0]
+    managed_payload = next(
+        process
+        for process in process_runtime_manager.list_processes()
+        if process["process_id"] == process_id
+    )
+    output_path = Path(managed_payload["output_path"])
+    worker_root = Path(managed_payload["worker_root"])
+
+    current_identity = process_tools_module._read_process_identity(os.getpid())
+    assert current_identity is not None
+    monkeypatch.setattr(
+        process_tools_module,
+        "_snapshot_process_descendants",
+        lambda _process, _leader: (
+            _ProcessDescendantIdentity(
+                pid=current_identity.pid,
+                process_group_id=current_identity.process_group_id,
+                start_time=current_identity.start_time,
+            ),
+        ),
+    )
+
+    stopped = process_runtime_manager.stop_process(process_id=process_id, force=True)
+
+    assert stopped is not None
+    assert stopped["cleanup_status"] == "unknown"
+    assert stopped["stopped"] is False
+    assert stopped["remaining_descendants"] is not None
+    assert stopped["remaining_descendants"] >= 1
+    assert stopped["registry_removed"] is False
+    assert stopped["artifacts_removed"] is False
+    assert any(
+        process["process_id"] == process_id
+        for process in process_runtime_manager.list_processes()
+    )
+    assert output_path.exists()
+    assert worker_root.exists()
+
+
 def test_run_command_uses_disposable_worker_home_and_cleans_up():
     script_name = _write_script(
         "wave1_process_worker_env.py",
@@ -192,8 +250,7 @@ def test_run_command_uses_disposable_worker_home_and_cleans_up():
     assert len(lines) == 2
     assert not lines[0].startswith(str(Path(settings.workspace_dir).resolve()))
     assert lines[0] == lines[1]
-    workers_root = _runtime_root() / "workers"
-    assert not workers_root.exists() or not any(workers_root.iterdir())
+    assert not Path(lines[0]).exists()
 
 
 def test_run_command_scrubs_ambient_secret_environment(monkeypatch):
@@ -671,6 +728,24 @@ def test_session_cleanup_fences_new_process_and_records_receipt(monkeypatch):
         process["process_id"] == process_id
         for process in process_runtime_manager.list_all_processes()
     )
+
+
+def test_session_cleanup_fails_closed_when_fence_is_already_owned():
+    session_id = "session-cleanup-conflict"
+    assert process_runtime_manager.begin_session_cleanup(session_id) is True
+    try:
+        with pytest.raises(RuntimeError, match="session cleanup is already in progress"):
+            process_runtime_manager.stop_processes_for_session(session_id)
+        assert process_runtime_manager.last_session_cleanup_receipt == {
+            "session_id": session_id,
+            "requested": 0,
+            "stopped": 0,
+            "unknown": 0,
+            "failed": 0,
+            "conflict": 1,
+        }
+    finally:
+        process_runtime_manager.end_session_cleanup(session_id)
 
 
 def test_session_cleanup_removes_process_registry_and_artifacts():

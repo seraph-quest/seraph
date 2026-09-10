@@ -275,6 +275,20 @@ async def test_delete_holds_process_cleanup_fence_through_database_teardown(asyn
     assert "delete-fence-session" not in process_runtime_manager._stopping_sessions
 
 
+async def test_delete_fails_closed_when_process_cleanup_fence_is_owned(async_db):
+    manager = SessionManager()
+    session_id = "delete-fence-conflict"
+    await manager.get_or_create(session_id)
+    assert process_runtime_manager.begin_session_cleanup(session_id) is True
+    try:
+        with patch("src.agent.session.flush_session_memory", new_callable=AsyncMock) as mock_flush:
+            assert await manager.delete(session_id) is False
+        mock_flush.assert_not_awaited()
+        assert await manager.get(session_id) is not None
+    finally:
+        process_runtime_manager.end_session_cleanup(session_id)
+
+
 def test_workflow_completion_triggers_memory_flush():
     workflow = Workflow(
         name="atlas-workflow",

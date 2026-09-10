@@ -600,6 +600,22 @@ class _ProcessLeaderIdentity:
 
 
 @dataclass(frozen=True)
+class _ProcessTreeEntry:
+    pid: int
+    parent_pid: int
+    process_group_id: int
+    start_time: int
+    state: str
+
+
+@dataclass(frozen=True)
+class _ProcessDescendantIdentity:
+    pid: int
+    process_group_id: int
+    start_time: int
+
+
+@dataclass(frozen=True)
 class _GroupTerminationResult:
     process_group_id: int | None
     ownership_verified: bool
@@ -607,10 +623,11 @@ class _GroupTerminationResult:
     group_signal_failed: bool
     group_missing: bool
     parent_reaped: bool
+    descendant_identities: tuple[_ProcessDescendantIdentity, ...] | None
 
 
-def _read_process_identity(pid: int) -> _ProcessLeaderIdentity | None:
-    """Read the Linux process start time and process group for a leader PID."""
+def _read_process_stat(pid: int) -> _ProcessTreeEntry | None:
+    """Read the process identity fields needed for a bounded descendant scan."""
     try:
         stat_text = (Path("/proc") / str(pid) / "stat").read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError):
@@ -619,21 +636,36 @@ def _read_process_identity(pid: int) -> _ProcessLeaderIdentity | None:
     if closing_paren < 0:
         return None
     fields = stat_text[closing_paren + 2 :].split()
-    # After comm, state is field 0, process-group ID is field 2, and the
-    # kernel start time (field 22 in /proc documentation) is field 19.
+    # After comm, state is field 0, ppid field 1, process-group ID field 2,
+    # and kernel start time (field 22 in /proc documentation) is field 19.
     if len(fields) <= 19:
         return None
     try:
+        parent_pid = int(fields[1])
         process_group_id = int(fields[2])
         start_time = int(fields[19])
     except (IndexError, ValueError):
         return None
-    if process_group_id <= 0:
+    if parent_pid < 0 or process_group_id <= 0 or start_time < 0:
+        return None
+    return _ProcessTreeEntry(
+        pid=pid,
+        parent_pid=parent_pid,
+        process_group_id=process_group_id,
+        start_time=start_time,
+        state=fields[0],
+    )
+
+
+def _read_process_identity(pid: int) -> _ProcessLeaderIdentity | None:
+    """Read the Linux process start time and process group for a leader PID."""
+    entry = _read_process_stat(pid)
+    if entry is None:
         return None
     return _ProcessLeaderIdentity(
         pid=pid,
-        process_group_id=process_group_id,
-        start_time=start_time,
+        process_group_id=entry.process_group_id,
+        start_time=entry.start_time,
     )
 
 
@@ -670,6 +702,82 @@ def _verified_process_group_id(
     ):
         return None
     return current_identity.process_group_id
+
+
+def _snapshot_process_descendants(
+    process: subprocess.Popen[Any],
+    leader_identity: _ProcessLeaderIdentity | None,
+) -> tuple[_ProcessDescendantIdentity, ...] | None:
+    """Capture descendant PID/start-time identities immediately before stop.
+
+    A process-group scan cannot see a child that calls ``setsid``.  This
+    bounded process-tree snapshot lets cleanup check those children after the
+    original group is signaled.  Any incomplete scan is treated as unknown so
+    a disappearing ``/proc`` entry cannot turn into a false success receipt.
+    """
+    if _verified_process_group_id(process, leader_identity) is None:
+        return None
+    proc_root = Path("/proc")
+    if not proc_root.is_dir():
+        return None
+
+    for attempt in range(_PROCESS_IDENTITY_RETRY_ATTEMPTS):
+        try:
+            entries = tuple(proc_root.iterdir())
+        except OSError:
+            return None
+        process_entries: dict[int, _ProcessTreeEntry] = {}
+        complete = True
+        for entry in entries:
+            if not entry.name.isdecimal():
+                continue
+            try:
+                pid = int(entry.name)
+            except ValueError:
+                complete = False
+                continue
+            stat_entry = _read_process_stat(pid)
+            if stat_entry is None:
+                complete = False
+                continue
+            process_entries[pid] = stat_entry
+
+        root_entry = process_entries.get(process.pid)
+        if root_entry is None:
+            return None
+        if (
+            root_entry.start_time != leader_identity.start_time
+            or root_entry.process_group_id != leader_identity.process_group_id
+        ):
+            return None
+        if not complete:
+            if attempt + 1 == _PROCESS_IDENTITY_RETRY_ATTEMPTS:
+                return None
+            time.sleep(_PROCESS_IDENTITY_RETRY_DELAY_SECONDS)
+            continue
+
+        children_by_parent: dict[int, list[_ProcessTreeEntry]] = {}
+        for stat_entry in process_entries.values():
+            children_by_parent.setdefault(stat_entry.parent_pid, []).append(stat_entry)
+        descendants: list[_ProcessDescendantIdentity] = []
+        pending = [process.pid]
+        seen = {process.pid}
+        while pending:
+            parent_pid = pending.pop()
+            for child in children_by_parent.get(parent_pid, []):
+                if child.pid in seen:
+                    continue
+                seen.add(child.pid)
+                descendants.append(
+                    _ProcessDescendantIdentity(
+                        pid=child.pid,
+                        process_group_id=child.process_group_id,
+                        start_time=child.start_time,
+                    )
+                )
+                pending.append(child.pid)
+        return tuple(sorted(descendants, key=lambda item: item.pid))
+    return None
 
 
 def _signal_verified_process_group(
@@ -732,6 +840,7 @@ def _kill_process_group(
     process: subprocess.Popen[Any],
     *,
     leader_identity: _ProcessLeaderIdentity | None,
+    descendant_identities: tuple[_ProcessDescendantIdentity, ...] | None,
     wait_timeout: float = _PROCESS_STOP_WAIT_SECONDS,
 ) -> _GroupTerminationResult:
     """Stop a command and every same-group child within a bound.
@@ -786,6 +895,7 @@ def _kill_process_group(
         group_signal_failed=group_signal_failed,
         group_missing=group_missing,
         parent_reaped=process.poll() is not None,
+        descendant_identities=descendant_identities,
     )
 
 
@@ -842,20 +952,48 @@ def _remaining_process_group_members(
         time.sleep(0.01)
 
 
-def _termination_cleanup_status(termination: _GroupTerminationResult) -> str:
-    """Translate verified group termination into an operator-facing status."""
+def _remaining_process_descendants(
+    descendant_identities: tuple[_ProcessDescendantIdentity, ...] | None,
+    *,
+    wait_timeout: float = _PROCESS_STOP_WAIT_SECONDS,
+) -> int | None:
+    """Count captured descendants that still have the same PID/start time."""
+    if descendant_identities is None:
+        return None
+    deadline = time.monotonic() + max(0.01, float(wait_timeout))
+    while True:
+        remaining = 0
+        for identity in descendant_identities:
+            current = _read_process_identity(identity.pid)
+            if current is not None and current.start_time == identity.start_time:
+                remaining += 1
+        if remaining == 0:
+            return 0
+        if time.monotonic() >= deadline:
+            return remaining
+        time.sleep(0.01)
+
+
+def _termination_cleanup_status(
+    termination: _GroupTerminationResult,
+) -> tuple[str, int | None]:
+    """Translate verified group/tree termination into status and survivor count."""
     if not termination.ownership_verified:
-        return "unknown"
+        return "unknown", None
     if termination.group_signal_failed:
-        return "failed"
+        return "failed", _remaining_process_group_members(termination.process_group_id)
     if not (termination.group_signal_sent or termination.group_missing):
-        return "failed"
-    remaining = _remaining_process_group_members(termination.process_group_id)
+        return "failed", None
+    group_remaining = _remaining_process_group_members(termination.process_group_id)
+    descendant_remaining = _remaining_process_descendants(termination.descendant_identities)
+    if group_remaining is None or descendant_remaining is None:
+        return "unknown", None
+    remaining = max(group_remaining, descendant_remaining)
     if termination.parent_reaped and remaining == 0:
-        return "stopped"
+        return "stopped", 0
     if termination.parent_reaped and termination.group_signal_sent:
-        return "unknown"
-    return "failed"
+        return "unknown", remaining
+    return "failed", remaining
 
 
 def _bounded_reap_process(process: subprocess.Popen[Any], *, timeout: float = 1.0) -> tuple[str, str]:
@@ -987,6 +1125,10 @@ class ProcessRuntimeManager:
     @staticmethod
     def _stop_managed_process(process: ManagedProcess, *, force: bool) -> dict[str, Any]:
         process_group_id = process.process_group_id
+        descendant_identities = _snapshot_process_descendants(
+            process.popen,
+            process.leader_identity,
+        )
         group_signal_sent = False
         group_signal_failed = False
         ownership_verified = False
@@ -995,12 +1137,8 @@ class ProcessRuntimeManager:
             termination = _kill_process_group(
                 process.popen,
                 leader_identity=process.leader_identity,
+                descendant_identities=descendant_identities,
             )
-            group_signal_sent = termination.group_signal_sent
-            group_signal_failed = termination.group_signal_failed
-            ownership_verified = termination.ownership_verified
-            group_missing = termination.group_missing
-            parent_reaped = termination.parent_reaped
         else:
             (
                 term_group_id,
@@ -1028,32 +1166,34 @@ class ProcessRuntimeManager:
                 termination = _kill_process_group(
                     process.popen,
                     leader_identity=process.leader_identity,
+                    descendant_identities=descendant_identities,
                 )
                 process_group_id = process_group_id or termination.process_group_id
                 ownership_verified = ownership_verified or termination.ownership_verified
                 group_signal_sent = group_signal_sent or termination.group_signal_sent
                 group_signal_failed = group_signal_failed or termination.group_signal_failed
                 group_missing = group_missing or termination.group_missing
-                parent_reaped = termination.parent_reaped
+                termination = _GroupTerminationResult(
+                    process_group_id=process_group_id,
+                    ownership_verified=ownership_verified,
+                    group_signal_sent=group_signal_sent,
+                    group_signal_failed=group_signal_failed,
+                    group_missing=group_missing,
+                    parent_reaped=termination.parent_reaped,
+                    descendant_identities=descendant_identities,
+                )
             else:
-                parent_reaped = process.popen.poll() is not None
+                termination = _GroupTerminationResult(
+                    process_group_id=process_group_id,
+                    ownership_verified=ownership_verified,
+                    group_signal_sent=group_signal_sent,
+                    group_signal_failed=group_signal_failed,
+                    group_missing=group_missing,
+                    parent_reaped=process.popen.poll() is not None,
+                    descendant_identities=descendant_identities,
+                )
 
-        if not ownership_verified:
-            cleanup_status = "unknown"
-            remaining_descendants = None
-        elif group_signal_failed:
-            cleanup_status = "failed"
-            remaining_descendants = _remaining_process_group_members(process_group_id)
-        else:
-            remaining_descendants = _remaining_process_group_members(process_group_id)
-            if remaining_descendants == 0 and (group_signal_sent or group_missing):
-                cleanup_status = "stopped"
-            elif parent_reaped and group_signal_sent:
-                # The leader disappeared before a safe follow-up KILL. Keep
-                # the handle because the surviving group is unverifiable.
-                cleanup_status = "unknown"
-            else:
-                cleanup_status = "failed"
+        cleanup_status, remaining_descendants = _termination_cleanup_status(termination)
         process.cleanup_status = cleanup_status
         payload = process.status_payload()
         payload.update(
@@ -1113,6 +1253,7 @@ class ProcessRuntimeManager:
         process: subprocess.Popen[str] | None = None
         leader_identity: _ProcessLeaderIdentity | None = None
         runtime_cleanup_status = "not_requested"
+        remaining_descendants: int | None = None
         try:
             if cancel_event is not None and cancel_event.is_set():
                 return {
@@ -1150,11 +1291,16 @@ class ProcessRuntimeManager:
                     break
                 except subprocess.TimeoutExpired:
                     if cancel_event is not None and cancel_event.is_set():
+                        descendant_identities = _snapshot_process_descendants(
+                            process,
+                            leader_identity,
+                        )
                         termination = _kill_process_group(
                             process,
                             leader_identity=leader_identity,
+                            descendant_identities=descendant_identities,
                         )
-                        runtime_cleanup_status = _termination_cleanup_status(termination)
+                        runtime_cleanup_status, remaining_descendants = _termination_cleanup_status(termination)
                         stdout, stderr = _bounded_reap_process(process)
                         return {
                             "ok": False,
@@ -1167,14 +1313,25 @@ class ProcessRuntimeManager:
                             "cwd": str(resolved_cwd),
                             "timeout_seconds": timeout,
                             "cleanup_status": runtime_cleanup_status,
+                            "remaining_descendants": remaining_descendants,
+                            "worker_root": (
+                                str(worker_root)
+                                if runtime_cleanup_status not in {"not_requested", "stopped"}
+                                else None
+                            ),
                         }
         except subprocess.TimeoutExpired as exc:
             if process is not None:
+                descendant_identities = _snapshot_process_descendants(
+                    process,
+                    leader_identity,
+                )
                 termination = _kill_process_group(
                     process,
                     leader_identity=leader_identity,
+                    descendant_identities=descendant_identities,
                 )
-                runtime_cleanup_status = _termination_cleanup_status(termination)
+                runtime_cleanup_status, remaining_descendants = _termination_cleanup_status(termination)
                 stdout, stderr = _bounded_reap_process(process)
             else:
                 stdout, stderr = exc.stdout or "", exc.stderr or ""
@@ -1189,14 +1346,22 @@ class ProcessRuntimeManager:
                 "cwd": str(resolved_cwd),
                 "timeout_seconds": timeout,
                 "cleanup_status": runtime_cleanup_status,
+                "remaining_descendants": remaining_descendants,
+                "worker_root": (
+                    str(worker_root)
+                    if runtime_cleanup_status not in {"not_requested", "stopped"}
+                    else None
+                ),
             }
         except OSError:
             raise
         finally:
-            # run_command has no durable recovery handle.  Its bounded result
-            # remains operator-visible even when ownership is unknown, while
-            # the invocation-scoped worker root is still reclaimed here.
-            _delete_runtime_dir(worker_root)
+            # Preserve the worker root when cleanup is unknown or failed so an
+            # operator can inspect the retained state while the detached
+            # descendant remains alive.  Successful bounded cleanup reclaims
+            # the invocation-scoped root.
+            if runtime_cleanup_status in {"not_requested", "stopped"}:
+                _delete_runtime_dir(worker_root)
 
         return {
             "ok": process.returncode == 0,
@@ -1209,6 +1374,12 @@ class ProcessRuntimeManager:
             "cwd": str(resolved_cwd),
             "timeout_seconds": timeout,
             "cleanup_status": runtime_cleanup_status,
+            "remaining_descendants": remaining_descendants,
+            "worker_root": (
+                str(worker_root)
+                if runtime_cleanup_status not in {"not_requested", "stopped"}
+                else None
+            ),
         }
 
     def start_process(
@@ -1400,6 +1571,17 @@ class ProcessRuntimeManager:
                     raise RuntimeError("session cleanup fence must be held by the caller")
         else:
             fence_acquired = self.begin_session_cleanup(session_id)
+            if not fence_acquired:
+                with self._lock:
+                    self._last_session_cleanup_receipt = {
+                        "session_id": session_id,
+                        "requested": 0,
+                        "stopped": 0,
+                        "unknown": 0,
+                        "failed": 0,
+                        "conflict": 1,
+                    }
+                raise RuntimeError("session cleanup is already in progress")
 
         processes: list[ManagedProcess] = []
         claimed: list[ManagedProcess] = []
@@ -1526,6 +1708,8 @@ class RunCommandTool(Tool):
                 "exit_code": result["exit_code"],
                 "timed_out": result["timed_out"],
                 "cleanup_status": result["cleanup_status"],
+                "remaining_descendants": result.get("remaining_descendants"),
+                "worker_root": result.get("worker_root"),
                 "stdout_chars": len(result["stdout"]),
                 "stderr_chars": len(result["stderr"]),
                 "output_truncated": truncated,
@@ -1533,7 +1717,19 @@ class RunCommandTool(Tool):
         ))
 
         if result["timed_out"]:
+            if result.get("cleanup_status") not in {"not_requested", "stopped"}:
+                return (
+                    f"Error: command timed out after {result['timeout_seconds']}s; "
+                    f"cleanup_status={result.get('cleanup_status', 'unknown')} "
+                    f"(worker state retained at {result.get('worker_root', 'unknown')})."
+                )
             return f"Error: command timed out after {result['timeout_seconds']}s."
+        if result.get("cancelled") and result.get("cleanup_status") not in {"not_requested", "stopped"}:
+            return (
+                "Error: command cancellation cleanup is "
+                f"{result.get('cleanup_status', 'unknown')} "
+                f"(worker state retained at {result.get('worker_root', 'unknown')})."
+            )
         if result["exit_code"] == 0:
             return rendered_output if rendered_output else "(no output)"
         return (

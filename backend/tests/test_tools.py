@@ -27,6 +27,65 @@ class TestFilesystemTool:
         with pytest.raises(ValueError, match="Path traversal blocked"):
             _safe_resolve("../../etc/passwd")
 
+    @pytest.mark.parametrize(
+        ("operation", "file_path"),
+        (
+            ("read", "alias.txt"),
+            ("write", "alias.txt"),
+            ("preview", "alias.txt"),
+            ("apply", "alias.txt"),
+            ("read", "alias-dir/file.txt"),
+            ("write", "alias-dir/file.txt"),
+            ("preview", "alias-dir/file.txt"),
+            ("apply", "alias-dir/file.txt"),
+        ),
+    )
+    def test_filesystem_operations_reject_workspace_symlinks(
+        self, tmp_path, monkeypatch, operation, file_path
+    ):
+        monkeypatch.setattr("src.tools.filesystem_tool.settings.workspace_dir", str(tmp_path))
+        target = tmp_path / "target.txt"
+        target.write_text("before\n", encoding="utf-8")
+        (tmp_path / "alias.txt").symlink_to(target)
+        target_dir = tmp_path / "target-dir"
+        target_dir.mkdir()
+        (target_dir / "file.txt").write_text("before\n", encoding="utf-8")
+        (tmp_path / "alias-dir").symlink_to(target_dir, target_is_directory=True)
+
+        with pytest.raises(ValueError, match="Symlink traversal blocked"):
+            if operation == "read":
+                read_file.forward(file_path)
+            elif operation == "write":
+                write_file.forward(file_path, "after\n")
+            elif operation == "preview":
+                preview_workspace_patch.forward(file_path, "before", "after")
+            else:
+                apply_workspace_patch.forward(file_path, "before", "after")
+
+        assert target.read_text(encoding="utf-8") == "before\n"
+        assert (target_dir / "file.txt").read_text(encoding="utf-8") == "before\n"
+
+    def test_read_file_symlink_block_emits_blocked_receipt(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("src.tools.filesystem_tool.settings.workspace_dir", str(tmp_path))
+        target = tmp_path / "target.txt"
+        target.write_text("safe\n", encoding="utf-8")
+        (tmp_path / "alias.txt").symlink_to(target)
+
+        with patch("src.tools.filesystem_tool.log_integration_event_sync") as log_event:
+            with pytest.raises(ValueError, match="Symlink traversal blocked"):
+                read_file.forward("alias.txt")
+
+        log_event.assert_called_once_with(
+            integration_type="filesystem",
+            name="workspace",
+            outcome="blocked",
+            details={
+                "file_path": "alias.txt",
+                "operation": "read",
+                "error": "Symlink traversal blocked: alias.txt",
+            },
+        )
+
     def test_read_file_not_found(self, tmp_path, monkeypatch):
         monkeypatch.setattr("src.tools.filesystem_tool.settings.workspace_dir", str(tmp_path))
         result = read_file.forward("nonexistent.txt")

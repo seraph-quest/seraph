@@ -270,9 +270,13 @@ future measurement cannot silently change its input set.
 the same `gate_a_baseline` receipt. It reports fixture coverage separately from
 runtime measurement: the current receipt has `artifact_status=pass` and
 `measurement_status=blocked` with `runtime_measurement_not_supplied`, so its
-overall status is `degraded`. A complete ratio mapping can be evaluated against
-the frozen thresholds and yields an explicit `pass`, `degraded`, or `blocked`
-measurement. The receipt is metadata-only and carries the claim boundary
+overall status is `degraded`. A complete ratio mapping is accepted only with a
+typed measurement receipt bound to both frozen hashes, a runner identity, and
+an execution receipt; missing or mismatched binding remains `blocked`. Any
+corpus, metric-schema, or hash drift forces both measurement and per-metric
+statuses to `blocked`, even when values were supplied. A bound ratio mapping
+can yield an explicit `pass`, `degraded`, or `blocked` measurement. The receipt
+is metadata-only and carries the claim boundary
 `frozen_deterministic_memory_contract_and_fixture_coverage_not_runtime_quality_or_provider_superiority`.
 
 This slice does not claim semantic quality, latency, cost, live provider

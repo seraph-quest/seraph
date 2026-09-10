@@ -33,6 +33,7 @@ GATE_A_BASELINE_BLOCKED_CLAIMS = (
 
 _CASE_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_]{2,63}$")
 _EVIDENCE_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{2,63}$")
+_RECEIPT_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 _SAFE_RECEIPT_FIELDS = frozenset(
     {
         "provenance",
@@ -51,6 +52,16 @@ _SAFE_RECEIPT_FIELDS = frozenset(
 )
 _ALLOWED_AUTHORITIES = frozenset({"canonical", "advisory", "none"})
 _ALLOWED_FIXTURE_CLASSES = frozenset({"positive", "negative"})
+_METRIC_DIMENSIONS = {
+    "exact_evidence_recall": "exact_recall",
+    "temporal_freshness": "temporal_freshness",
+    "semantic_recall": "semantic_recall",
+    "contradiction_suppression": "contradiction_suppression",
+    "provenance_coverage": "exact_recall",
+    "delete_exclusion": "deletion_exclusion",
+    "restore_tombstone_exclusion": "restore_safety",
+    "provider_outage_canonical_continuity": "provider_outage_continuity",
+}
 _REQUIRED_NEGATIVE_CASES = frozenset(
     {
         "malformed_provider_hit",
@@ -88,6 +99,19 @@ class GateAMetric:
     unit: str
     direction: str
     threshold: float
+
+    def as_payload(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class GateAMeasurementReceipt:
+    """Typed binding for a runtime measurement of the frozen contract."""
+
+    corpus_sha256: str
+    metric_contract_sha256: str
+    runner_id: str
+    execution_receipt_id: str
 
     def as_payload(self) -> dict[str, Any]:
         return asdict(self)
@@ -339,6 +363,8 @@ def gate_a_baseline_metric_sha256() -> str:
 
 def _validate_metric_contract() -> list[str]:
     errors: list[str] = []
+    if not _GATE_A_METRICS:
+        return ["metric_contract_empty"]
     seen_names: set[str] = set()
     for metric in _GATE_A_METRICS:
         if not metric.name or metric.name in seen_names:
@@ -385,28 +411,27 @@ def _validate_corpus() -> list[str]:
 def _fixture_coverage() -> dict[str, float | int | str]:
     case_ids = {case.case_id for case in _GATE_A_BASELINE_CASES}
     required_dimensions = {metric.name for metric in _GATE_A_METRICS}
-    dimension_map = {
-        "exact_evidence_recall": "exact_recall",
-        "temporal_freshness": "temporal_freshness",
-        "semantic_recall": "semantic_recall",
-        "contradiction_suppression": "contradiction_suppression",
-        "provenance_coverage": "exact_recall",
-        "delete_exclusion": "deletion_exclusion",
-        "restore_tombstone_exclusion": "restore_safety",
-        "provider_outage_canonical_continuity": "provider_outage_continuity",
-    }
     covered = sum(
         1
         for metric_name in required_dimensions
-        if any(case.dimension == dimension_map[metric_name] for case in _GATE_A_BASELINE_CASES)
+        if any(
+            case.dimension == _METRIC_DIMENSIONS.get(metric_name)
+            for case in _GATE_A_BASELINE_CASES
+        )
     )
     return {
         "case_schema_coverage": 1.0 if not _validate_corpus() else 0.0,
-        "metric_dimension_coverage": covered / len(required_dimensions),
-        "negative_case_coverage": len(_REQUIRED_NEGATIVE_CASES & case_ids) / len(_REQUIRED_NEGATIVE_CASES),
+        "metric_dimension_coverage": covered / len(required_dimensions) if required_dimensions else 0.0,
+        "negative_case_coverage": (
+            len(_REQUIRED_NEGATIVE_CASES & case_ids) / len(_REQUIRED_NEGATIVE_CASES)
+            if _REQUIRED_NEGATIVE_CASES
+            else 0.0
+        ),
         "safe_receipt_field_coverage": (
             sum(bool(set(case.required_receipt_fields) <= _SAFE_RECEIPT_FIELDS) for case in _GATE_A_BASELINE_CASES)
             / len(_GATE_A_BASELINE_CASES)
+            if _GATE_A_BASELINE_CASES
+            else 0.0
         ),
         "case_count": len(_GATE_A_BASELINE_CASES),
         "dimension_count": len({case.dimension for case in _GATE_A_BASELINE_CASES}),
@@ -437,9 +462,36 @@ def _safe_observed_metrics(observed_metrics: Mapping[str, Any]) -> tuple[dict[st
     return values, errors
 
 
+def _validate_measurement_receipt(
+    measurement_receipt: GateAMeasurementReceipt | None,
+) -> list[str]:
+    """Require a safe, frozen-contract binding for supplied measurements."""
+
+    if measurement_receipt is None:
+        return ["measurement_receipt_required"]
+    if not isinstance(measurement_receipt, GateAMeasurementReceipt):
+        return ["measurement_receipt_type_invalid"]
+
+    errors: list[str] = []
+    if measurement_receipt.corpus_sha256 != GATE_A_BASELINE_CORPUS_SHA256:
+        errors.append("measurement_corpus_hash_mismatch")
+    if measurement_receipt.metric_contract_sha256 != GATE_A_BASELINE_METRIC_SHA256:
+        errors.append("measurement_metric_contract_hash_mismatch")
+    if not isinstance(measurement_receipt.runner_id, str) or not _RECEIPT_ID_RE.fullmatch(
+        measurement_receipt.runner_id
+    ):
+        errors.append("measurement_runner_id_invalid")
+    if not isinstance(measurement_receipt.execution_receipt_id, str) or not _RECEIPT_ID_RE.fullmatch(
+        measurement_receipt.execution_receipt_id
+    ):
+        errors.append("measurement_execution_receipt_id_invalid")
+    return errors
+
+
 def build_gate_a_baseline_receipt(
     *,
     observed_metrics: Mapping[str, Any] | None = None,
+    measurement_receipt: GateAMeasurementReceipt | None = None,
 ) -> dict[str, Any]:
     """Build the operator-readable Gate A artifact and optional measurement.
 
@@ -447,7 +499,9 @@ def build_gate_a_baseline_receipt(
     ``measurement_status=blocked`` are intentional: the frozen contract is
     valid, but runtime measurements have not been supplied.  Callers may pass
     a complete ratio mapping in a later deterministic runner to obtain a
-    ``pass`` or ``degraded`` measurement.  Malformed or incomplete input is
+    ``pass`` or ``degraded`` measurement.  Supplied measurements must carry a
+    typed receipt bound to both frozen hashes, a runner identity, and an
+    execution receipt.  Malformed, incomplete, unbound, or drifted input is
     ``blocked`` and never coerced into a passing result.
     """
 
@@ -466,41 +520,51 @@ def build_gate_a_baseline_receipt(
     metric_payloads: list[dict[str, Any]] = []
     observed_values: dict[str, float] = {}
     observed_errors: list[str] = []
+    measurement_binding_errors: list[str] = []
     measurement_status = "blocked"
+    artifact_valid = fixture_status == "pass"
     if observed_metrics is None:
         observed_errors = ["runtime_measurement_not_supplied"]
     else:
         observed_values, observed_errors = _safe_observed_metrics(observed_metrics)
         if observed_errors:
             measurement_status = "blocked"
+        elif not artifact_valid:
+            measurement_binding_errors = _validate_measurement_receipt(measurement_receipt)
+            measurement_status = "blocked"
         else:
-            metric_results = [
-                observed_values[metric.name] >= metric.threshold
-                for metric in _GATE_A_METRICS
-            ]
-            measurement_status = "pass" if all(metric_results) else "degraded"
+            measurement_binding_errors = _validate_measurement_receipt(measurement_receipt)
+            if measurement_binding_errors:
+                measurement_status = "blocked"
+            else:
+                metric_results = [
+                    observed_values[metric.name] >= metric.threshold
+                    for metric in _GATE_A_METRICS
+                ]
+                measurement_status = "pass" if all(metric_results) else "degraded"
+
+    measurement_blocked = bool(
+        observed_errors or measurement_binding_errors or not artifact_valid
+    )
 
     for metric in _GATE_A_METRICS:
         item = metric.as_payload()
-        item["fixture_coverage"] = fixture_coverage[
-            {
-                "exact_evidence_recall": "metric_dimension_coverage",
-                "temporal_freshness": "metric_dimension_coverage",
-                "semantic_recall": "metric_dimension_coverage",
-                "contradiction_suppression": "metric_dimension_coverage",
-                "provenance_coverage": "safe_receipt_field_coverage",
-                "delete_exclusion": "metric_dimension_coverage",
-                "restore_tombstone_exclusion": "metric_dimension_coverage",
-                "provider_outage_canonical_continuity": "metric_dimension_coverage",
-            }[metric.name]
-        ]
+        metric_dimension = _METRIC_DIMENSIONS.get(metric.name)
+        item["fixture_coverage"] = (
+            1.0
+            if metric_dimension
+            and any(case.dimension == metric_dimension for case in _GATE_A_BASELINE_CASES)
+            else 0.0
+        )
+        if metric.name == "provenance_coverage":
+            item["fixture_coverage"] = float(fixture_coverage["safe_receipt_field_coverage"])
         item["fixture_status"] = "pass" if item["fixture_coverage"] >= metric.threshold else "blocked"
-        item["observed_value"] = observed_values.get(metric.name)
+        item["observed_value"] = None if measurement_blocked else observed_values.get(metric.name)
         item["observed_status"] = (
             "not_run"
             if observed_metrics is None
             else "blocked"
-            if observed_errors
+            if measurement_blocked
             else "pass"
             if observed_values[metric.name] >= metric.threshold
             else "degraded"
@@ -520,7 +584,14 @@ def build_gate_a_baseline_receipt(
             blocked_reasons.append("frozen_corpus_hash_mismatch")
         if metric_hash != GATE_A_BASELINE_METRIC_SHA256:
             blocked_reasons.append("frozen_metric_contract_hash_mismatch")
-    blocked_reasons.extend(observed_errors)
+    blocked_reasons.extend([*observed_errors, *measurement_binding_errors])
+    measurement_binding_status = (
+        "not_run"
+        if observed_metrics is None
+        else "blocked"
+        if measurement_blocked
+        else "verified"
+    )
     return {
         "artifact": {
             "artifact_id": f"{GATE_A_BASELINE_VERSION}:{corpus_hash[:16]}",
@@ -544,6 +615,7 @@ def build_gate_a_baseline_receipt(
             "status": status,
             "artifact_status": fixture_status,
             "measurement_status": measurement_status,
+            "measurement_binding_status": measurement_binding_status,
             "operator_status": (
                 "gate_a_baseline_ready_measurement_blocked"
                 if observed_metrics is None and status == "degraded"
@@ -557,6 +629,13 @@ def build_gate_a_baseline_receipt(
         },
         "corpus": gate_a_baseline_corpus(),
         "metrics": metric_payloads,
+        "measurement_receipt": (
+            measurement_receipt.as_payload()
+            if isinstance(measurement_receipt, GateAMeasurementReceipt)
+            and observed_metrics is not None
+            and not measurement_blocked
+            else None
+        ),
         "fixture_coverage": fixture_coverage,
         "blocked_reasons": blocked_reasons,
         "policy": {

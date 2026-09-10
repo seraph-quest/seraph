@@ -4,16 +4,27 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from src.memory.benchmark import build_guardian_memory_benchmark_report
+from src.memory import gate_a_baseline as gate_a_baseline_module
 from src.memory.gate_a_baseline import (
     GATE_A_BASELINE_CLAIM_BOUNDARY,
     GATE_A_BASELINE_CORPUS_SHA256,
     GATE_A_BASELINE_METRIC_SHA256,
     GATE_A_BASELINE_METRIC_VERSION,
+    GateAMeasurementReceipt,
     build_gate_a_baseline_receipt,
     gate_a_baseline_corpus,
     gate_a_baseline_corpus_sha256,
     gate_a_baseline_metric_sha256,
 )
+
+
+def _valid_measurement_receipt() -> GateAMeasurementReceipt:
+    return GateAMeasurementReceipt(
+        corpus_sha256=GATE_A_BASELINE_CORPUS_SHA256,
+        metric_contract_sha256=GATE_A_BASELINE_METRIC_SHA256,
+        runner_id="gate-a-runner-v1",
+        execution_receipt_id="exec-gate-a-001",
+    )
 
 
 @pytest.mark.asyncio
@@ -149,19 +160,72 @@ def test_gate_a_baseline_measurement_has_explicit_pass_and_degraded_states():
     metric_names = [item["name"] for item in build_gate_a_baseline_receipt()["metrics"]]
 
     passing = build_gate_a_baseline_receipt(
-        observed_metrics={name: 1.0 for name in metric_names}
+        observed_metrics={name: 1.0 for name in metric_names},
+        measurement_receipt=_valid_measurement_receipt(),
     )
     degraded = build_gate_a_baseline_receipt(
-        observed_metrics={name: (0.0 if name == "delete_exclusion" else 1.0) for name in metric_names}
+        observed_metrics={name: (0.0 if name == "delete_exclusion" else 1.0) for name in metric_names},
+        measurement_receipt=_valid_measurement_receipt(),
     )
 
     assert passing["summary"]["status"] == "pass"
     assert passing["summary"]["measurement_status"] == "pass"
+    assert passing["summary"]["measurement_binding_status"] == "verified"
     assert passing["summary"]["operator_status"] == "gate_a_baseline_passed"
     assert degraded["summary"]["status"] == "degraded"
     assert degraded["summary"]["measurement_status"] == "degraded"
+    assert degraded["summary"]["measurement_binding_status"] == "verified"
     assert degraded["summary"]["operator_status"] == "gate_a_baseline_measurement_degraded"
     assert next(item for item in degraded["metrics"] if item["name"] == "delete_exclusion")["observed_status"] == "degraded"
+    assert passing["measurement_receipt"]["runner_id"] == "gate-a-runner-v1"
+
+
+def test_gate_a_baseline_requires_a_typed_measurement_binding():
+    metric_names = [item["name"] for item in build_gate_a_baseline_receipt()["metrics"]]
+    unbound = build_gate_a_baseline_receipt(
+        observed_metrics={name: 1.0 for name in metric_names},
+    )
+
+    assert unbound["summary"]["status"] == "blocked"
+    assert unbound["summary"]["measurement_status"] == "blocked"
+    assert unbound["summary"]["measurement_binding_status"] == "blocked"
+    assert "measurement_receipt_required" in unbound["blocked_reasons"]
+    assert unbound["measurement_receipt"] is None
+    assert all(item["observed_status"] == "blocked" for item in unbound["metrics"])
+    assert all(item["observed_value"] is None for item in unbound["metrics"])
+
+    invalid = build_gate_a_baseline_receipt(
+        observed_metrics={name: 1.0 for name in metric_names},
+        measurement_receipt=GateAMeasurementReceipt(
+            corpus_sha256="0" * 64,
+            metric_contract_sha256=GATE_A_BASELINE_METRIC_SHA256,
+            runner_id="gate-a-runner-v1",
+            execution_receipt_id="exec-gate-a-001",
+        ),
+    )
+    assert invalid["summary"]["status"] == "blocked"
+    assert "measurement_corpus_hash_mismatch" in invalid["blocked_reasons"]
+
+
+def test_gate_a_baseline_blocks_measurement_when_frozen_corpus_drifts():
+    metric_names = [item["name"] for item in build_gate_a_baseline_receipt()["metrics"]]
+    with patch.object(
+        gate_a_baseline_module,
+        "_GATE_A_BASELINE_CASES",
+        gate_a_baseline_module._GATE_A_BASELINE_CASES[:-1],
+    ):
+        receipt = build_gate_a_baseline_receipt(
+            observed_metrics={name: 1.0 for name in metric_names},
+            measurement_receipt=_valid_measurement_receipt(),
+        )
+
+    assert receipt["summary"]["status"] == "blocked"
+    assert receipt["summary"]["artifact_status"] == "blocked"
+    assert receipt["summary"]["measurement_status"] == "blocked"
+    assert receipt["summary"]["measurement_binding_status"] == "blocked"
+    assert "frozen_corpus_hash_mismatch" in receipt["blocked_reasons"]
+    assert all(item["observed_status"] == "blocked" for item in receipt["metrics"])
+    assert all(item["observed_value"] is None for item in receipt["metrics"])
 
 
 def test_gate_a_baseline_blocks_incomplete_or_unknown_measurement():

@@ -27,6 +27,7 @@ from src.workflows.job_runtime import (
     _canonical_reconciliation_receipt,
     _canonical_remote_inference_receipt,
     _digest,
+    _effect_ledger_or_raise,
     _safe_inputs_digest,
     _safe_structure,
     _validate_admission_authority,
@@ -41,6 +42,14 @@ def test_transition_table_is_the_single_normative_lifecycle_contract():
     assert DURABLE_JOB_TRANSITIONS["failed"] == frozenset({"queued"})
     assert DURABLE_JOB_TRANSITIONS["succeeded"] == frozenset()
     assert DURABLE_JOB_TRANSITIONS["cancelled"] == frozenset()
+
+
+def test_corrupt_effect_history_is_not_coerced_to_empty():
+    assert _effect_ledger_or_raise(None) == []
+    with pytest.raises(DurableJobTransitionError, match="malformed"):
+        _effect_ledger_or_raise("not-json")
+    with pytest.raises(DurableJobTransitionError, match="malformed"):
+        _effect_ledger_or_raise('{"effect": "not-a-list"}')
 
 
 def test_invalid_legacy_statuses_block_and_idempotency_index_is_unique():
@@ -453,6 +462,74 @@ async def test_admission_is_idempotent_and_lifecycle_records_safe_receipts(async
     assert retried["status"] == "queued"
     assert retried["receipt"]["reconciliation_receipt_digest"]
     assert retried["effects"][0]["status"] == "reconciled"
+
+
+@pytest.mark.asyncio
+async def test_unresolved_effect_cannot_be_marked_succeeded(async_db):
+    admitted = await durable_job_repository.admit_job(
+        replace(_spec(job_id="job-743-uncertain-success", dedupe_key="candidate-uncertain-success"), max_attempts=2)
+    )
+    await durable_job_repository.queue_job(admitted["job_id"])
+    claimed = await durable_job_repository.claim_job(admitted["job_id"], owner="runner-uncertain-success")
+    await durable_job_repository.record_effect(
+        admitted["job_id"],
+        effect_type="destination_write",
+        status="unknown",
+        details={"destination": "controlled"},
+        owner="runner-uncertain-success",
+        fencing_token=claimed["lease"]["fencing_token"],
+    )
+    with pytest.raises(DurableJobTransitionError, match="unresolved external effect"):
+        await durable_job_repository.transition_job(
+            admitted["job_id"],
+            "succeeded",
+            owner="runner-uncertain-success",
+            fencing_token=claimed["lease"]["fencing_token"],
+        )
+    current = await durable_job_repository.get_job(admitted["job_id"])
+    assert current is not None
+    assert current["status"] == "running"
+
+
+@pytest.mark.asyncio
+async def test_effect_bound_retry_rejects_corrupt_or_missing_history(async_db):
+    for job_id, raw_effects in (
+        ("job-743-corrupt-effects", "not-json"),
+        # SQLite enforces the production column's non-null contract; an empty
+        # ledger is the persisted representation of missing history.
+        ("job-743-missing-effects", ""),
+    ):
+        admitted = await durable_job_repository.admit_job(
+            replace(_spec(job_id=job_id, dedupe_key=job_id), max_attempts=2)
+        )
+        await durable_job_repository.queue_job(admitted["job_id"])
+        claimed = await durable_job_repository.claim_job(admitted["job_id"], owner=f"runner:{job_id}")
+        await durable_job_repository.transition_job(
+            admitted["job_id"],
+            "failed",
+            owner=f"runner:{job_id}",
+            fencing_token=claimed["lease"]["fencing_token"],
+            reason="provider_error",
+        )
+        async with async_db() as db:
+            await db.execute(
+                update(WorkflowRunState)
+                .where(WorkflowRunState.run_identity == job_id)
+                .values(effect_receipts_json=raw_effects)
+            )
+        with pytest.raises(DurableJobTransitionError, match="effect history"):
+            await durable_job_repository.retry_job(
+                job_id,
+                owner_kind="service",
+                owner_principal_id="service:strategist",
+                service_id="service:strategist",
+                reconciliation_receipt={
+                    "effect_id": "missing",
+                    "effect_type": "remote_inference_admission",
+                    "status": "read_back",
+                    "outcome": "absent",
+                },
+            )
 
 
 @pytest.mark.asyncio

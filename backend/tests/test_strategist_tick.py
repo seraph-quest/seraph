@@ -88,7 +88,9 @@ async def test_proactive_goal_snapshot_skips_without_explicit_opt_in():
         )
 
     assert receipt == {"status": "skipped", "reason": "no_eligible_proactive_goal"}
-    assert jobs.effects[0][1]["status"] == "unknown"
+    # No child admission occurred, so the parent records a verified no-op
+    # rather than an unresolved external effect.
+    assert jobs.effects[0][1]["status"] == "succeeded"
 
 
 @pytest.mark.asyncio
@@ -296,7 +298,7 @@ async def test_strategist_tick_logs_success(async_db):
     events = await audit_repository.list_events(limit=10)
     assert mock_deliver.await_args.kwargs["guardian_confidence"] == "grounded"
     assert any(
-        event["event_type"] == "scheduler_job_succeeded"
+        event["event_type"] == "scheduler_job_unknown_external_effect"
         and event["tool_name"] == "strategist_tick"
         and event["details"]["delivery"] == "deliver"
         and event["details"]["policy_action"] is None
@@ -304,7 +306,7 @@ async def test_strategist_tick_logs_success(async_db):
     )
     durable_job = await durable_job_repository.get_job(_occurrence_identity())
     assert durable_job is not None
-    assert durable_job["status"] == "succeeded"
+    assert durable_job["status"] == "unknown_external_effect"
     delivery_effect = next(item for item in durable_job["effects"] if item["effect_type"] == "proactive_delivery")
     assert delivery_effect["status"] == "unknown"
     assert "Focus drift" not in str(durable_job["effects"])

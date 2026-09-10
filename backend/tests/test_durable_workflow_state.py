@@ -14,6 +14,7 @@ from src.workflows.durable_state import (
     durable_workflow_snapshot_dict,
     workflow_state_repository,
 )
+from src.workflows.job_runtime import DurableJobIdentity, DurableJobSpec, durable_job_repository
 
 
 def test_durable_workflow_snapshot_is_deterministic_from_projection_dicts():
@@ -290,6 +291,56 @@ async def test_workflow_state_repository_persists_run_steps_and_checkpoint(async
     assert checkpoint is not None
     assert checkpoint["checkpoint_context"]["draft"]["result"] == "done"
     assert checkpoint["state_source"] == "durable_workflow_state"
+
+
+@pytest.mark.asyncio
+async def test_legacy_projection_cannot_mutate_typed_durable_job(async_db):
+    typed = await durable_job_repository.admit_job(
+        DurableJobSpec(
+            identity=DurableJobIdentity(
+                job_id="typed-legacy-guard",
+                owner_kind="service",
+                owner_principal_id="service:test",
+                job_kind="test_job",
+                capability_version="1",
+                idempotency_scope="test",
+                idempotency_key="typed-legacy-guard",
+            ),
+            inputs={"test": True},
+            declared_authority={"principal": "service:test", "service_id": "service:test"},
+            service_id="service:test",
+        )
+    )
+
+    with pytest.raises(RuntimeError, match="DurableJobRepository"):
+        await workflow_state_repository.create_run(
+            run_identity=typed["job_id"],
+            workflow_name="legacy",
+            tool_name="legacy",
+            session_id=None,
+            run_fingerprint="legacy",
+            arguments={},
+            approval_context={},
+        )
+    with pytest.raises(RuntimeError, match="DurableJobRepository"):
+        await workflow_state_repository.record_step_started(
+            run_identity=typed["job_id"],
+            workflow_name="legacy",
+            step_id="step",
+            step_index=0,
+            tool_name="legacy",
+            arguments={},
+        )
+    with pytest.raises(RuntimeError, match="DurableJobRepository"):
+        await workflow_state_repository.record_step_completed(
+            run_identity=typed["job_id"],
+            step_id="step",
+            status="succeeded",
+        )
+    with pytest.raises(RuntimeError, match="DurableJobRepository"):
+        await workflow_state_repository.finish_run(run_identity=typed["job_id"], status="succeeded")
+    with pytest.raises(RuntimeError, match="DurableJobRepository"):
+        await workflow_state_repository.mark_heartbeat(typed["job_id"])
 
 
 @pytest.mark.asyncio

@@ -107,6 +107,28 @@ def _as_list(value: Any) -> list[Any]:
     return value if isinstance(value, list) else []
 
 
+def _is_typed_durable_run(run: WorkflowRunState) -> bool:
+    """Return whether a row belongs to the #743 typed job contract.
+
+    The legacy projection has its own serializer and mutation methods. Once a
+    row has a typed schema version or an idempotency binding, those methods
+    must not be able to reset ownership or terminal state behind the durable
+    repository's CAS/fencing checks.
+    """
+    try:
+        schema_version = int(getattr(run, "record_schema_version", 1) or 1)
+    except (TypeError, ValueError):
+        schema_version = 1
+    return schema_version >= 2 or bool(getattr(run, "idempotency_binding", None))
+
+
+def _assert_legacy_mutable(run: WorkflowRunState) -> None:
+    if _is_typed_durable_run(run):
+        raise RuntimeError(
+            "typed durable jobs must be mutated through DurableJobRepository"
+        )
+
+
 def _parse_iso(value: Any) -> datetime | None:
     if isinstance(value, datetime):
         return value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
@@ -529,6 +551,8 @@ class WorkflowStateRepository:
             existing = (
                 await db.execute(select(WorkflowRunState).where(WorkflowRunState.run_identity == run_identity))
             ).scalars().first()
+            if existing is not None:
+                _assert_legacy_mutable(existing)
             run = existing or WorkflowRunState(
                 run_identity=run_identity,
                 root_run_identity=root_run_identity or run_identity,
@@ -537,6 +561,9 @@ class WorkflowStateRepository:
                 tool_name=tool_name,
                 session_id=session_id,
                 run_fingerprint=run_fingerprint,
+                # Rows created through this compatibility projection remain
+                # legacy until explicitly admitted by DurableJobRepository.
+                record_schema_version=1,
             )
             run.status = "running"
             run.arguments_json = _dumps(arguments)
@@ -574,6 +601,11 @@ class WorkflowStateRepository:
     ) -> dict[str, Any]:
         now = _utc_now()
         async with get_session() as db:
+            run = (
+                await db.execute(select(WorkflowRunState).where(WorkflowRunState.run_identity == run_identity))
+            ).scalars().first()
+            if run is not None:
+                _assert_legacy_mutable(run)
             existing = (
                 await db.execute(
                     select(WorkflowStepState)
@@ -593,9 +625,6 @@ class WorkflowStateRepository:
             step.updated_at = now
             if existing is None:
                 db.add(step)
-            run = (
-                await db.execute(select(WorkflowRunState).where(WorkflowRunState.run_identity == run_identity))
-            ).scalars().first()
             if run is not None:
                 run.heartbeat_at = now
                 run.updated_at = now
@@ -618,6 +647,11 @@ class WorkflowStateRepository:
     ) -> dict[str, Any]:
         now = _utc_now()
         async with get_session() as db:
+            run = (
+                await db.execute(select(WorkflowRunState).where(WorkflowRunState.run_identity == run_identity))
+            ).scalars().first()
+            if run is not None:
+                _assert_legacy_mutable(run)
             step = (
                 await db.execute(
                     select(WorkflowStepState)
@@ -643,9 +677,6 @@ class WorkflowStateRepository:
             step.error_summary = error_summary
             step.completed_at = now
             step.updated_at = now
-            run = (
-                await db.execute(select(WorkflowRunState).where(WorkflowRunState.run_identity == run_identity))
-            ).scalars().first()
             if run is not None:
                 run.heartbeat_at = now
                 run.updated_at = now
@@ -676,6 +707,7 @@ class WorkflowStateRepository:
             ).scalars().first()
             if run is None:
                 return None
+            _assert_legacy_mutable(run)
             run.status = status
             run.checkpoint_context_json = _dumps(checkpoint_context or {})
             run.artifact_paths_json = _dumps(artifact_paths or [])
@@ -703,6 +735,7 @@ class WorkflowStateRepository:
             ).scalars().first()
             if run is None:
                 return None
+            _assert_legacy_mutable(run)
             run.heartbeat_at = now
             run.updated_at = now
             await db.flush()

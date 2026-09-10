@@ -486,6 +486,45 @@ def test_recovery_preflights_all_records_before_moving_any_root(tmp_path):
     assert (workspace_restore_staging_dir(root) / valid_id).is_dir()
 
 
+def test_recovery_skips_superseded_terminal_restore_records(tmp_path):
+    root, registry = _workspace(tmp_path)
+    archive = Path(backup_workspace(root, registry=registry)["archive_path"])
+    terminal_id = "restore-old-terminal-01"
+    restore_workspace(
+        root,
+        archive,
+        registry=registry,
+        confirm=True,
+        restore_id=terminal_id,
+    )
+
+    terminal_journal_path = workspace_backup_dir(root) / terminal_id / "restore-journal.json"
+    terminal_journal = json.loads(terminal_journal_path.read_text(encoding="utf-8"))
+    terminal_journal["created_at"] = "2020-01-01T00:00:00+00:00"
+    workspace_lifecycle._refresh_journal_digest(terminal_journal)
+    terminal_journal_path.write_text(json.dumps(terminal_journal), encoding="utf-8")
+
+    in_flight_id = "restore-new-inflight-01"
+    with pytest.raises(InterruptedWorkspaceRestore):
+        restore_workspace(
+            root,
+            archive,
+            registry=registry,
+            confirm=True,
+            restore_id=in_flight_id,
+            interrupt_after_active_move=True,
+        )
+    assert not root.exists()
+
+    recovery = recover_interrupted_restore(root, registry=registry)
+    assert recovery["status"] == "recovered"
+    assert recovery["recovered"] == [
+        {"restore_id": in_flight_id, "action": "promoted_staging"}
+    ]
+    assert (root / "soul.md").read_text(encoding="utf-8") == "original soul\n"
+    assert (workspace_backup_dir(root) / terminal_id / "previous-workspace").is_dir()
+
+
 def test_recovery_binds_journal_to_the_target_workspace_identity(tmp_path):
     root, registry = _workspace(tmp_path)
     archive = Path(backup_workspace(root, registry=registry)["archive_path"])
@@ -516,6 +555,40 @@ def test_recovery_binds_journal_to_the_target_workspace_identity(tmp_path):
     assert not root.exists()
     assert (workspace_backup_dir(root) / restore_id / "previous-workspace").is_dir()
     assert (workspace_restore_staging_dir(root) / restore_id).is_dir()
+
+
+def test_rollback_binds_journal_to_the_target_workspace_identity(tmp_path):
+    root, registry = _workspace(tmp_path)
+    archive = Path(backup_workspace(root, registry=registry)["archive_path"])
+    (root / "soul.md").write_text("changed soul\n", encoding="utf-8")
+    restore_id = "restore-rollback-identity-01"
+    restore_workspace(
+        root,
+        archive,
+        registry=registry,
+        confirm=True,
+        restore_id=restore_id,
+    )
+
+    config = registry.config
+    other_registry = WorkspaceStateRegistry(
+        WorkspaceConfig(
+            identity=WorkspaceIdentity("workspace-other", root),
+            declared_paths=config.declared_paths,
+            database_path=config.database_path,
+            workspace_version=config.workspace_version,
+            external_references=config.external_references,
+            expected_database_objects=config.expected_database_objects,
+        )
+    )
+    with pytest.raises(WorkspaceLifecycleError, match="workspace identity"):
+        rollback_workspace(root, restore_id, registry=other_registry)
+    assert (root / "soul.md").read_text(encoding="utf-8") == "original soul\n"
+    assert (workspace_backup_dir(root) / restore_id / "previous-workspace").is_dir()
+
+    rollback = rollback_workspace(root, restore_id, registry=registry)
+    assert rollback["status"] == "rolled_back"
+    assert (root / "soul.md").read_text(encoding="utf-8") == "changed soul\n"
 
 
 def test_recovery_rejects_legacy_v1_journal_before_moving_any_root(tmp_path):
@@ -594,6 +667,90 @@ def test_recovery_rejects_free_form_stage_receipt_data(tmp_path):
     assert not root.exists()
     assert (workspace_backup_dir(root) / restore_id / "previous-workspace").is_dir()
     assert (workspace_restore_staging_dir(root) / restore_id).is_dir()
+
+
+def test_recovery_rejects_secret_like_stage_receipt_identifier(tmp_path):
+    root, registry = _workspace(tmp_path)
+    archive = Path(backup_workspace(root, registry=registry)["archive_path"])
+    restore_id = "restore-receipt-secret-01"
+    with pytest.raises(InterruptedWorkspaceRestore):
+        restore_workspace(
+            root,
+            archive,
+            registry=registry,
+            confirm=True,
+            restore_id=restore_id,
+            interrupt_after_active_move=True,
+        )
+
+    journal_path = workspace_backup_dir(root) / restore_id / "restore-journal.json"
+    journal = json.loads(journal_path.read_text(encoding="utf-8"))
+    journal["stage_receipt"]["restore_reconciliation"] = {
+        "status": "ready",
+        "derived_rebuild": {
+            "status": "clean_targets_recreated",
+            "rebuilt_directories": [],
+            "stored_derived_files": 0,
+        },
+        "authority_invalidation": {
+            "status": "applied",
+            "tables_present": ["SECRET-SENTINEL"],
+            "operator_sessions_invalidated": 0,
+            "workflow_authority_rows_blocked": 0,
+        },
+        "token_invalidation": {
+            "status": "applied",
+            "optional_credentials_invalidated": [],
+        },
+        "secret_values_included": False,
+    }
+    workspace_lifecycle._refresh_journal_digest(journal)
+    journal_path.write_text(json.dumps(journal), encoding="utf-8")
+
+    with pytest.raises(WorkspaceLifecycleError, match="secret-like"):
+        recover_interrupted_restore(root, registry=registry)
+    assert not root.exists()
+    assert (workspace_backup_dir(root) / restore_id / "previous-workspace").is_dir()
+    assert (workspace_restore_staging_dir(root) / restore_id).is_dir()
+
+
+def test_recovery_discards_empty_unjournaled_record_without_moving_root(tmp_path):
+    root, registry = _workspace(tmp_path)
+    restore_id = "restore-unjournaled-empty-01"
+    record_root = workspace_backup_dir(root) / restore_id
+    stage = workspace_restore_staging_dir(root) / restore_id
+    record_root.mkdir(parents=True)
+    stage.mkdir(parents=True)
+
+    recovery = recover_interrupted_restore(root, registry=registry)
+
+    assert recovery == {
+        "status": "recovered",
+        "recovered": [
+            {"restore_id": restore_id, "action": "discarded_unjournaled_record"}
+        ],
+    }
+    assert root.is_dir()
+    assert (root / "soul.md").read_text(encoding="utf-8") == "original soul\n"
+    assert not record_root.exists()
+    assert not stage.exists()
+
+
+def test_recovery_keeps_evidence_for_unjournaled_moved_root(tmp_path):
+    root, registry = _workspace(tmp_path)
+    restore_id = "restore-unjournaled-moved-01"
+    record_root = workspace_backup_dir(root) / restore_id
+    previous = record_root / "previous-workspace"
+    record_root.mkdir(parents=True)
+    previous.mkdir()
+    (previous / "soul.md").write_text("previous\n", encoding="utf-8")
+    shutil.rmtree(root)
+
+    with pytest.raises(WorkspaceLifecycleError, match="manual recovery"):
+        recover_interrupted_restore(root, registry=registry)
+    assert not root.exists()
+    assert previous.is_dir()
+    assert record_root.is_dir()
 
 
 def test_restore_requires_existing_secret_material_and_rejects_secret_symlink(tmp_path):

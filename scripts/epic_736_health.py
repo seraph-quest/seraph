@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import fcntl
 import json
 import os
 from pathlib import Path
@@ -159,13 +160,20 @@ def _check(identifier: str, owner: int, status: str, summary: str, recovery: str
 def _openrouter_config_check() -> dict[str, Any]:
     base = os.environ.get("LLM_API_BASE", "").strip().rstrip("/")
     model = os.environ.get("DEFAULT_MODEL", "").strip()
-    allowed = {item.strip() for item in os.environ.get("OPENROUTER_ALLOWED_UPSTREAMS", "").split(",") if item.strip()}
+    allowed = {
+        item.strip().lower()
+        for item in os.environ.get("OPENROUTER_ALLOWED_UPSTREAMS", "").split(",")
+        if item.strip()
+    }
     try:
         temperature = float(os.environ.get("MODEL_TEMPERATURE", ""))
         max_tokens = int(os.environ.get("MODEL_MAX_TOKENS", ""))
     except ValueError:
         temperature, max_tokens = -1.0, -1
     canonical_model = _canonical_openrouter_model(model)
+    model_provider = None
+    if canonical_model is not None:
+        model_provider = canonical_model.removeprefix("openrouter/").split("/", 1)[0].lower()
     expected = (
         base == "https://openrouter.ai/api/v1"
         and canonical_model is not None
@@ -173,7 +181,8 @@ def _openrouter_config_check() -> dict[str, Any]:
         and not _truthy(os.environ.get("OPENROUTER_ALLOW_FALLBACKS"))
         and _truthy(os.environ.get("OPENROUTER_REQUIRE_PARAMETERS"))
         and os.environ.get("OPENROUTER_DATA_COLLECTION", "").strip().lower() == "deny"
-        and "z-ai" in allowed
+        and model_provider is not None
+        and model_provider in allowed
         and 0.0 <= temperature <= 2.0
         and 1 <= max_tokens <= 32768
     )
@@ -332,27 +341,38 @@ def _write_receipt(receipt: dict[str, Any], generated_at: datetime) -> str:
     _reject_symlink_components(directory)
     directory.mkdir(parents=True, exist_ok=True)
     _reject_symlink_components(directory)
-    filename = generated_at.strftime("%Y%m%dT%H%M%SZ") + ".json"
-    target = directory / filename
-    if target.exists():
-        filename = generated_at.strftime("%Y%m%dT%H%M%SZ") + "-" + uuid.uuid4().hex[:12] + ".json"
-        target = directory / filename
-    payload = (json.dumps(receipt, indent=2, sort_keys=True) + "\n").encode("utf-8")
-    temporary: Path | None = None
+    lock_path = directory / ".health-receipt.lock"
+    lock_fd = os.open(
+        lock_path,
+        os.O_CREAT | os.O_RDWR | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
+        0o600,
+    )
     try:
-        with tempfile.NamedTemporaryFile("wb", dir=directory, prefix=".health-", suffix=".tmp", delete=False) as handle:
-            temporary = Path(handle.name)
-            handle.write(payload)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary, target)
-        _sync_directory(directory)
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        filename = generated_at.strftime("%Y%m%dT%H%M%SZ") + ".json"
+        target = directory / filename
+        while target.exists():
+            filename = generated_at.strftime("%Y%m%dT%H%M%SZ") + "-" + uuid.uuid4().hex[:12] + ".json"
+            target = directory / filename
+        payload = (json.dumps(receipt, indent=2, sort_keys=True) + "\n").encode("utf-8")
+        temporary: Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile("wb", dir=directory, prefix=".health-", suffix=".tmp", delete=False) as handle:
+                temporary = Path(handle.name)
+                handle.write(payload)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, target)
+            _sync_directory(directory)
+        finally:
+            if temporary is not None:
+                try:
+                    temporary.unlink()
+                except FileNotFoundError:
+                    pass
     finally:
-        if temporary is not None:
-            try:
-                temporary.unlink()
-            except FileNotFoundError:
-                pass
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        os.close(lock_fd)
     return f"operator-receipts/epic-736-health/{filename}"
 
 

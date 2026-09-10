@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 import socket
@@ -87,11 +88,21 @@ def test_malformed_provider_config_fails_without_network(tmp_path: Path, monkeyp
 def test_provider_model_is_generic_and_not_tied_to_a_single_catalog_entry(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _configured(monkeypatch, tmp_path)
     monkeypatch.setenv("DEFAULT_MODEL", "openrouter/another-provider/model-v2")
+    monkeypatch.setenv("OPENROUTER_ALLOWED_UPSTREAMS", "another-provider")
     receipt, exit_code, _ = health.build_receipt()
     check = next(item for item in receipt["checks"] if item["id"] == "runtime.openrouter_model_fabric")
     assert check["status"] == "pass"
     assert check["evidence_mode"] == "configuration"
     assert exit_code == 3
+
+
+def test_provider_model_must_match_configured_upstream_allowlist(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _configured(monkeypatch, tmp_path)
+    monkeypatch.setenv("DEFAULT_MODEL", "openrouter/another-provider/model-v2")
+    receipt, exit_code, _ = health.build_receipt()
+    check = next(item for item in receipt["checks"] if item["id"] == "runtime.openrouter_model_fabric")
+    assert check["status"] == "failed"
+    assert exit_code == 4
 
 
 def test_provider_model_uses_canonical_openrouter_syntax(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -222,6 +233,18 @@ def test_receipt_timestamp_collision_keeps_both_atomic_artifacts(tmp_path: Path,
     receipts = sorted((tmp_path / "operator-receipts/epic-736-health").glob("*.json"))
     assert len(receipts) == 2
     assert {json.loads(path.read_text())["marker"] for path in receipts} == {"first", "second"}
+
+
+def test_concurrent_receipt_timestamp_collision_keeps_every_artifact(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _configured(monkeypatch, tmp_path)
+    generated = datetime(2026, 1, 2, 3, 4, 5, tzinfo=timezone.utc)
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        paths = list(pool.map(lambda marker: health._write_receipt({"marker": marker}, generated), range(8)))
+
+    assert len(set(paths)) == 8
+    receipts = sorted((tmp_path / "operator-receipts/epic-736-health").glob("*.json"))
+    assert len(receipts) == 8
+    assert {json.loads(path.read_text())["marker"] for path in receipts} == set(range(8))
 
 
 def test_cli_redacts_secret_from_stdout_and_stderr(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:

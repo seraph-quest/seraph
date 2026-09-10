@@ -385,6 +385,11 @@ async def test_operator_journey_timeout_and_cancellation_retain_cleanup_receipts
     )
     cancelled = await asyncio.wait_for(runner, timeout=10)
     assert cancel_result["status"] == "cancelled"
+    patch_effect = next(
+        item for item in cancel_result["effects"] if item.get("effect_type") == "workspace_patch"
+    )
+    assert patch_effect["status"] == "succeeded"
+    assert patch_effect["reconciled"] is True
     assert cancelled["status"] == "cancelled"
     assert cancelled["cancellation"]["success_eligible"] is False
     assert cancelled["process_cleanup"]["cleanup_status"] in {"stopped", "unknown", "failed"}

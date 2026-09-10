@@ -51,6 +51,7 @@ from src.security.trust_contract import AuthorityGrant, PrincipalType
 from src.tools.filesystem_tool import _safe_resolve, _write_workspace_text_bounded
 from src.workflows.job_runtime import (
     DurableJobIdentity,
+    DurableJobLeaseError,
     DurableJobSpec,
     durable_job_repository,
 )
@@ -79,6 +80,9 @@ _MAX_TEST_TIMEOUT_SECONDS = 300
 _MAX_NATIVE_ATTEMPTS = 2
 _MAX_ARTIFACT_BYTES = 1 * 1024 * 1024
 _GENERATED_FIXTURE_DIRS = frozenset({".git", "__pycache__", ".pytest_cache"})
+_NATIVE_CANCEL_SETTLE_SECONDS = 1.0
+_NATIVE_CANCEL_POLL_SECONDS = 0.02
+_NATIVE_CANCEL_CAS_ATTEMPTS = 6
 _SAFE_JOB_ID = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
 _SHELL_META_CHARS = set("|&;<>()`$\\\n\r\t")
 _ROLE_IDENTITIES = frozenset(
@@ -2051,6 +2055,90 @@ async def resume_native_software_engineering_fixture(
     }
 
 
+def _native_effect_is_unresolved(effect: Any) -> bool:
+    """Mirror the durable unresolved-effect shape for cancellation gating."""
+    if not isinstance(effect, dict):
+        return False
+    if effect.get("reconciled") is True or effect.get("reconciliation_status") in {
+        "reconciled",
+        "resolved",
+    }:
+        return False
+    if str(effect.get("status") or "") in {"unknown", "intent", "dispatched"}:
+        return True
+    details = effect.get("details")
+    if isinstance(details, dict):
+        if details.get("reconciliation_required") or details.get("unknown_cost_outstanding"):
+            return True
+        nested = details.get("receipt")
+        if isinstance(nested, dict) and (
+            nested.get("reconciliation_required") or nested.get("unknown_cost_outstanding")
+        ):
+            return True
+    return False
+
+
+def _native_local_patch_effect(effect: Any, *, job_id: str) -> bool:
+    """Recognize only this job's workspace patch as locally reconcilable."""
+    if not isinstance(effect, dict) or str(effect.get("effect_type") or "") != "workspace_patch":
+        return False
+    token = _job_token(job_id)
+    prefix = f".seraph/native-software-engineering/jobs/{token}/workspace/"
+    target_path = str(effect.get("target_path") or "")
+    if not target_path.startswith(prefix) or target_path == prefix:
+        return False
+    details = effect.get("details")
+    return not isinstance(details, dict) or details.get("effect_boundary") in {
+        None,
+        "apply_workspace_patch",
+    }
+
+
+def _native_only_local_patch_pending(job: dict[str, Any] | None) -> bool:
+    """Return true only while the native job's local patch readback is pending.
+
+    Cancellation must continue to preserve ``unknown_external_effect`` for a
+    job with any other unresolved receipt.  The native patch is the one
+    bounded, in-workspace effect whose runner can finish an exact readback
+    without contacting an external system.
+    """
+    if not isinstance(job, dict) or job.get("job_kind") != NATIVE_SOFTWARE_ENGINEERING_JOB_KIND:
+        return False
+    effects = job.get("effects")
+    if not isinstance(effects, list):
+        return False
+    unresolved = [item for item in effects if _native_effect_is_unresolved(item)]
+    return bool(unresolved) and all(
+        _native_local_patch_effect(item, job_id=str(job.get("job_id") or ""))
+        for item in unresolved
+    )
+
+
+async def _wait_for_native_local_patch_readback(
+    job_id: str,
+    current: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Let the in-flight local patch settle before fencing cancellation.
+
+    ``patch.json`` is intentionally written before its durable readback, so a
+    caller can observe the artifact while that readback CAS is still queued.
+    A short bounded wait closes that harmless local race.  If the readback
+    does not settle, the normal durable transition remains fail-closed.
+    """
+    if not _native_only_local_patch_pending(current):
+        return current
+    deadline = asyncio.get_running_loop().time() + _NATIVE_CANCEL_SETTLE_SECONDS
+    while _native_only_local_patch_pending(current):
+        remaining = deadline - asyncio.get_running_loop().time()
+        if remaining <= 0:
+            break
+        await asyncio.sleep(min(_NATIVE_CANCEL_POLL_SECONDS, remaining))
+        current = await durable_job_repository.get_job(job_id)
+        if current is None:
+            break
+    return current
+
+
 async def cancel_native_software_engineering_job(
     job_id: str,
     *,
@@ -2065,15 +2153,46 @@ async def cancel_native_software_engineering_job(
     caller cannot kill another job's test process; a runner that observes the
     event cannot produce a success receipt.
     """
-    current = await durable_job_repository.get_job(job_id)
-    expected_revision = current.get("revision") if isinstance(current, dict) else None
-    result = await durable_job_repository.cancel_job(
-        job_id,
-        owner=owner,
-        fencing_token=fencing_token,
-        expected_revision=(int(expected_revision) if expected_revision is not None else None),
-        reason=reason,
-    )
+    last_lease_error: DurableJobLeaseError | None = None
+    result: dict[str, Any] | None = None
+    for _attempt in range(_NATIVE_CANCEL_CAS_ATTEMPTS):
+        current = await durable_job_repository.get_job(job_id)
+        current = await _wait_for_native_local_patch_readback(job_id, current)
+        expected_revision = current.get("revision") if isinstance(current, dict) else None
+        try:
+            result = await durable_job_repository.cancel_job(
+                job_id,
+                owner=owner,
+                fencing_token=fencing_token,
+                expected_revision=(int(expected_revision) if expected_revision is not None else None),
+                reason=reason,
+            )
+            break
+        except DurableJobLeaseError as exc:
+            last_lease_error = exc
+            latest = await durable_job_repository.get_job(job_id)
+            if not isinstance(latest, dict):
+                raise
+            latest_status = str(latest.get("status") or "")
+            if latest_status in {"cancelled", "unknown_external_effect", "cost_liability", "blocked"}:
+                result = latest
+                break
+            lease = latest.get("lease")
+            if (
+                latest_status != "running"
+                or not isinstance(lease, dict)
+                or lease.get("owner") != owner
+                or int(lease.get("fencing_token") or 0) != int(fencing_token)
+            ):
+                raise
+            # A runner checkpoint may have advanced only the revision. Retry
+            # against the freshly read fenced row; owner and fence never
+            # change as part of this retry.
+            await asyncio.sleep(0)
+    if result is None:
+        if last_lease_error is not None:
+            raise last_lease_error
+        raise DurableJobLeaseError("native cancellation did not produce a durable result")
     if result.get("status") in {"cancelled", "unknown_external_effect", "cost_liability", "blocked"}:
         control = _native_execution_for_job(job_id)
         if control is not None and control.owner == owner and control.fencing_token == fencing_token:

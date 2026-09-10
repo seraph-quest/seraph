@@ -8,12 +8,15 @@ import { AUTH_REQUIRED_EVENT } from "./operatorAuthEvents";
  * Keeping this at one boundary also lets an expired/revoked session return the
  * mounted cockpit to its login screen without putting tokens in JavaScript.
  */
-export async function apiFetch(input: RequestInfo | URL, init: RequestInit = {}): Promise<Response> {
+export type ApiFetchInit = RequestInit & { authRequired?: boolean };
+
+export async function apiFetch(input: RequestInfo | URL, init: ApiFetchInit = {}): Promise<Response> {
+  const { authRequired = true, ...requestInit } = init;
   const response = await fetch(input, {
-    ...init,
-    credentials: init.credentials ?? "include",
+    ...requestInit,
+    credentials: requestInit.credentials ?? "include",
   });
-  if (response.status === 401 && typeof window !== "undefined") {
+  if (authRequired && response.status === 401 && typeof window !== "undefined") {
     window.dispatchEvent(new Event(AUTH_REQUIRED_EVENT));
   }
   return response;

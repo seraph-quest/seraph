@@ -15,6 +15,14 @@ function makeId(): string {
 const WS_BACKOFF_MAX_MS = 30_000;
 export const WS_RESPONSE_TIMEOUT_MS = 130_000;
 export const REST_RESPONSE_TIMEOUT_MS = 130_000;
+
+/** Resolve proxy-relative WebSocket paths against the cockpit origin. */
+export function resolveWebSocketUrl(value: string, locationHref?: string): string {
+  if (!value.startsWith("/")) return value;
+  const base = locationHref ?? window.location.href;
+  const origin = base.replace(/^http:/, "ws:").replace(/^https:/, "wss:");
+  return new URL(value, origin).toString();
+}
 const ACTIVE_RESPONSE_TYPES = new Set([
   "status",
   "step",
@@ -388,7 +396,7 @@ export function useWebSocket() {
     if (wsRef.current?.readyState === WebSocket.OPEN) return;
 
     setConnectionStatus("connecting");
-    const ws = new WebSocket(WS_URL);
+    const ws = new WebSocket(resolveWebSocketUrl(WS_URL));
     wsRef.current = ws;
     if (connectTimeoutRef.current) {
       clearTimeout(connectTimeoutRef.current);

@@ -1282,4 +1282,13 @@ def _attempt_summary(attempt) -> dict[str, object]:
 
 def _is_local_request(request: Request) -> bool:
     host = request.client.host if request.client is not None else ""
-    return host in {"127.0.0.1", "::1", "localhost", "testclient"}
+    if host in {"127.0.0.1", "::1", "localhost", "testclient"}:
+        return True
+    # The endpoint is already behind OperatorAuthMiddleware, which validates
+    # the configured host/origin allow-list and binds a server-minted
+    # principal. Permit an authenticated operator on the configured LAN
+    # profile without treating arbitrary remote callers as local. This keeps
+    # the keyless setup path usable across the frontend/backend ports while
+    # preserving the existing auth and origin boundary.
+    operator = getattr(getattr(request, "state", None), "operator", None)
+    return bool(getattr(operator, "principal", None) and getattr(operator.principal, "authenticated", False))

@@ -1,6 +1,7 @@
 from datetime import datetime, timedelta, timezone
 import asyncio
 from threading import Event
+from types import SimpleNamespace
 
 import pytest
 from fastapi import HTTPException, Response
@@ -17,6 +18,7 @@ from src.auth.cancellation import RuntimeRevokedError, reset_revocation_guard, s
 from src.llm_runtime import _governed_openai_chat_completion
 from src.api.auth import _reset_login_throttle_for_tests, _login_source
 from src.api.auth import LoginRequest, login
+from src.api.model_fabric_settings import _is_local_request
 
 
 def _request(peer: str = "127.0.0.1", headers: list[tuple[bytes, bytes]] | None = None) -> Request:
@@ -187,6 +189,23 @@ def test_websocket_boundary_requires_exact_host_and_origin(monkeypatch):
 )
 def test_websocket_boundary_rejects_malformed_host_authorities(host):
     assert validate_request_boundary(host=host, origin=ORIGIN, method="POST") == "origin_forbidden"
+
+
+def test_authenticated_lan_operator_can_use_model_setup_without_being_loopback(monkeypatch):
+    operator = SimpleNamespace(
+        principal=SimpleNamespace(authenticated=True),
+    )
+    request = SimpleNamespace(
+        client=SimpleNamespace(host="192.168.1.50"),
+        state=SimpleNamespace(operator=operator),
+    )
+    assert _is_local_request(request) is True
+
+    anonymous = SimpleNamespace(
+        client=SimpleNamespace(host="192.168.1.50"),
+        state=SimpleNamespace(),
+    )
+    assert _is_local_request(anonymous) is False
 
 
 @pytest.mark.asyncio

@@ -191,12 +191,13 @@ export function OperatorAuthGate({ children }: { children: ReactNode }) {
     try {
       const response = await apiFetch(`${API_URL}/api/auth/login`, {
         method: "POST",
+        authRequired: false,
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ password }),
       });
       const payload = await readPayload(response);
       if (response.ok && payload && typeof payload === "object" && (payload as Record<string, unknown>).authenticated === true) {
-        const sessionResponse = await apiFetch(`${API_URL}/api/auth/session`);
+        const sessionResponse = await apiFetch(`${API_URL}/api/auth/session`, { authRequired: false });
         const sessionPayload = await readPayload(sessionResponse);
         if (sessionResponse.ok && sessionPayload && typeof sessionPayload === "object" && (sessionPayload as Record<string, unknown>).authenticated === true) {
           setSession(sessionPayload as OperatorSession);
@@ -208,7 +209,13 @@ export function OperatorAuthGate({ children }: { children: ReactNode }) {
       if (response.status === 503 && code === "auth_not_configured") {
         setView("setup");
       } else {
-        setLoginError(code === "login_rate_limited" ? "Too many attempts. Wait a minute and try again." : "Invalid operator credentials.");
+        setLoginError(
+          code === "login_rate_limited"
+            ? "Too many attempts. Wait a minute and try again."
+            : response.ok
+              ? "The server session could not be established. Retry."
+              : "Invalid operator credentials.",
+        );
         setView("login");
       }
     } catch {

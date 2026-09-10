@@ -303,12 +303,42 @@ async def fetch_next_notification(client: httpx.AsyncClient, url: str) -> dict |
     return None
 
 
-async def ack_notification(client: httpx.AsyncClient, url: str, notification_id: str) -> bool:
-    """Acknowledge a displayed native notification."""
+async def ack_notification(
+    client: httpx.AsyncClient,
+    url: str,
+    notification_id: str,
+    fencing_token: int | None = None,
+) -> bool:
+    """Acknowledge a displayed native notification under its lease fence."""
     try:
-        r = await client.post(f"{url}/api/observer/notifications/{notification_id}/ack")
+        kwargs = {"json": {"fencing_token": fencing_token}} if fencing_token is not None else {}
+        r = await client.post(f"{url}/api/observer/notifications/{notification_id}/ack", **kwargs)
         if r.status_code == 200:
             return bool(r.json().get("acked"))
+    except Exception:
+        pass
+    return False
+
+
+async def fail_notification(
+    client: httpx.AsyncClient,
+    url: str,
+    notification_id: str,
+    *,
+    reason: str = "display_failed",
+    fencing_token: int | None = None,
+) -> bool:
+    """Record a failed display so the backend can perform bounded retry."""
+    try:
+        payload: dict[str, object] = {"reason": reason}
+        if fencing_token is not None:
+            payload["fencing_token"] = fencing_token
+        r = await client.post(
+            f"{url}/api/observer/notifications/{notification_id}/fail",
+            json=payload,
+        )
+        if r.status_code == 200:
+            return bool(r.json().get("failed"))
     except Exception:
         pass
     return False
@@ -567,8 +597,9 @@ async def poll_loop(
                 notification = await fetch_next_notification(client, url)
                 if notification is not None:
                     notification_id = notification.get("id")
+                    fencing_token = notification.get("fencing_token")
                     if notification_id in shown_notification_ids:
-                        acked = await ack_notification(client, url, notification_id)
+                        acked = await ack_notification(client, url, notification_id, fencing_token)
                         if acked:
                             shown_notification_ids.discard(notification_id)
                     else:
@@ -580,12 +611,24 @@ async def poll_loop(
                         if displayed:
                             if notification_id:
                                 shown_notification_ids.add(notification_id)
-                            acked = await ack_notification(client, url, notification["id"])
+                            acked = await ack_notification(
+                                client,
+                                url,
+                                notification["id"],
+                                fencing_token,
+                            )
                             if acked and notification_id:
                                 shown_notification_ids.discard(notification_id)
                             if verbose:
                                 ts = time.strftime("%H:%M:%S")
                                 logger.info("[%s] notification \u2192 %s", ts, notification.get("title", "Seraph"))
+                        elif notification_id:
+                            await fail_notification(
+                                client,
+                                url,
+                                notification_id,
+                                fencing_token=fencing_token,
+                            )
 
                 # Check idle state
                 idle_secs = get_idle_seconds()

@@ -46,6 +46,8 @@ OPERATOR_REQUIRED_TABLES = (
     "workflow_run_states",
     "workflow_step_states",
     "queued_insights",
+    "native_notification_outbox",
+    "native_notification_delivery_attempts",
     "guardian_interventions",
     "strategy_deltas",
     "memory_tombstones",

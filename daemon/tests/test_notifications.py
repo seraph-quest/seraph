@@ -17,7 +17,7 @@ httpx = pytest.importorskip("httpx")
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from seraph_daemon import ack_notification, fetch_next_notification, poll_loop
+from seraph_daemon import ack_notification, fail_notification, fetch_next_notification, poll_loop
 
 
 class TestNotificationPolling:
@@ -63,6 +63,28 @@ class TestNotificationPolling:
         acked = await ack_notification(mock_client, "http://localhost:8004", "notif-1")
 
         assert acked is True
+
+    @pytest.mark.asyncio
+    async def test_fail_notification_sends_reason_and_fence(self):
+        response = MagicMock()
+        response.status_code = 200
+        response.json.return_value = {"failed": True}
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(return_value=response)
+
+        failed = await fail_notification(
+            mock_client,
+            "http://localhost:8004",
+            "notif-1",
+            reason="display unavailable",
+            fencing_token=7,
+        )
+
+        assert failed is True
+        mock_client.post.assert_awaited_once_with(
+            "http://localhost:8004/api/observer/notifications/notif-1/fail",
+            json={"reason": "display unavailable", "fencing_token": 7},
+        )
 
     @pytest.mark.asyncio
     async def test_poll_loop_displays_and_acks_notification(self):

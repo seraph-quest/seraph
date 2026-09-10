@@ -812,6 +812,7 @@ from src.model_fabric.contracts import NoCompliantModelRouteError
 from src.api.mcp import test_server as test_mcp_server
 from src.api.observer import (
     InterventionFeedbackRequest,
+    NotificationAckRequest,
     ScreenContextRequest,
     ScreenObservationData,
     ack_native_notification,
@@ -10528,7 +10529,10 @@ async def _eval_native_presence_notification_behavior() -> dict[str, Any]:
         decision = await deliver_or_queue(message)
         polled = await get_next_native_notification()
         notification = polled["notification"]
-        acked = await ack_native_notification(notification["id"])
+        acked = await ack_native_notification(
+            notification["id"],
+            NotificationAckRequest(fencing_token=notification.get("fencing_token")),
+        )
 
     delivered_event = _find_audit_call(
         mock_log_event,
@@ -10994,7 +10998,10 @@ async def _eval_desktop_notification_action_replay_behavior() -> dict[str, Any]:
         dismissed = await dismiss_native_notification(first["id"])
         second = await enqueue_test_native_notification()
         polled = await get_next_native_notification()
-        acked = await ack_native_notification(second["id"])
+        acked = await ack_native_notification(
+            second["id"],
+            NotificationAckRequest(fencing_token=polled["notification"].get("fencing_token")),
+        )
         final_status = await daemon_status()
 
     dismiss_event = _find_audit_call(
@@ -11090,7 +11097,10 @@ async def _eval_guardian_feedback_loop() -> dict[str, Any]:
             )
             polled = await get_next_native_notification()
             notification = polled["notification"]
-            acked = await ack_native_notification(notification["id"])
+            acked = await ack_native_notification(
+                notification["id"],
+                NotificationAckRequest(fencing_token=notification.get("fencing_token")),
+            )
             feedback = await post_intervention_feedback(
                 message.intervention_id or "",
                 InterventionFeedbackRequest(

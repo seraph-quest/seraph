@@ -11,7 +11,11 @@ from sqlmodel import select, col
 from src.db.engine import get_session
 from src.db.models import ApprovalRequest
 from src.db.session_refs import ensure_sessions_exist
-from src.approval.runtime import _seal_capability_approval
+from src.approval.runtime import (
+    _CAPABILITY_APPROVAL_ISSUER_TOKEN,
+    _issue_capability_approval_nonce,
+    _seal_capability_approval,
+)
 
 
 def fingerprint_tool_call(
@@ -207,17 +211,23 @@ class ApprovalRepository:
             except (TypeError, ValueError):
                 parsed_details = {}
             details = dict(parsed_details) if isinstance(parsed_details, Mapping) else {}
+            binding_payload = {
+                "approval_id": str(request.id),
+                "status": "consumed",
+                "session_id": str(request.session_id or ""),
+                "tool_name": str(request.tool_name),
+                "fingerprint": str(request.fingerprint),
+                "owner_operator_session_id": str(owner_operator_session_id or ""),
+                "approval_expires_at": details.get("approval_expires_at"),
+                "consumed_at": consumed_at.isoformat(),
+            }
+            issuance_nonce = _issue_capability_approval_nonce(
+                binding_payload,
+                _issuer=_CAPABILITY_APPROVAL_ISSUER_TOKEN,
+            )
             return _seal_capability_approval(
-                {
-                    "approval_id": str(request.id),
-                    "status": "consumed",
-                    "session_id": str(request.session_id or ""),
-                    "tool_name": str(request.tool_name),
-                    "fingerprint": str(request.fingerprint),
-                    "owner_operator_session_id": str(owner_operator_session_id or ""),
-                    "approval_expires_at": details.get("approval_expires_at"),
-                    "consumed_at": consumed_at.isoformat(),
-                }
+                binding_payload,
+                issuance_nonce=issuance_nonce,
             )
 
     async def consume_approved_for_resume(

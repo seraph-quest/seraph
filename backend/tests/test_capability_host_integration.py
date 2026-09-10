@@ -5,12 +5,15 @@ from __future__ import annotations
 import json
 import inspect
 import multiprocessing
+from contextlib import asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from sqlalchemy.sql.dml import Update
 
 from config.settings import settings
+from src.approval.repository import approval_repository
 from src.approval.runtime import (
     _seal_capability_approval,
     reset_runtime_context,
@@ -432,26 +435,85 @@ def test_approval_binding_must_be_repository_sealed(tmp_path):
     with pytest.raises(RuntimeError, match="approval_seal_internal_only"):
         seal_capability_approval(forged)
 
-    # The repository-only seam can issue a short-lived opaque receipt.  The
-    # public helper above cannot mint this binding.
-    binding = _seal_capability_approval(forged)
+    with pytest.raises(RuntimeError, match="approval_seal_proof_missing"):
+        _seal_capability_approval(forged)
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_repository_consumed_approval_issues_one_use_host_binding(monkeypatch, tmp_path):
+    calls: list[dict] = []
+    host = _test_host(
+        tmp_path / "journal.json",
+        **{"test.echo": lambda arguments: calls.append(dict(arguments)) or "ok"},
+    )
+    request = SimpleNamespace(
+        id="approval:repository",
+        status="approved",
+        session_id="session:test",
+        tool_name="test.echo",
+        fingerprint="fingerprint",
+        details_json=None,
+    )
+
+    class _Result:
+        def scalars(self):
+            return self
+
+        def first(self):
+            return request if request.status == "approved" else None
+
+    class _Db:
+        async def execute(self, statement):
+            if isinstance(statement, Update):
+                if request.status != "approved":
+                    return SimpleNamespace(rowcount=0)
+                request.status = "consumed"
+                return SimpleNamespace(rowcount=1)
+            return _Result()
+
+    db = _Db()
+
+    @asynccontextmanager
+    async def _get_session():
+        yield db
+
+    monkeypatch.setattr("src.approval.repository.get_session", _get_session)
+
+    binding = await approval_repository.consume_approved(
+        session_id="session:test",
+        tool_name="test.echo",
+        fingerprint="fingerprint",
+    )
+    assert isinstance(binding, dict)
+    assert binding["approval_id"] == request.id
+    assert binding["status"] == "consumed"
+    assert binding["tool_name"] == "test.echo"
+    assert await approval_repository.consume_approved(
+        session_id="session:test",
+        tool_name="test.echo",
+        fingerprint="fingerprint",
+    ) is False
+
     result = host.execute(
         _request(
-            approval_id="approval:forged",
+            approval_id=request.id,
             approval_digest="fingerprint",
             approval_binding=binding,
         )
     )
     assert result.state == "succeeded"
     assert calls == [{"message": "hello", "count": 1}]
+
     with pytest.raises(CapabilityExecutionError, match="approval_binding_missing"):
         host.execute(
             _request(
-                approval_id="approval:forged",
+                approval_id=request.id,
                 approval_digest="fingerprint",
                 approval_binding=binding,
             )
         )
+    assert calls == [{"message": "hello", "count": 1}]
 
 
 def test_corrupt_journal_is_operator_visible_and_blocks_restart_execution(tmp_path):

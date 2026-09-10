@@ -126,6 +126,14 @@
   - two focused review passes were started for bugs, regressions, and hallucinated assumptions after the runtime plus cockpit slice landed
   - both reviewer runs stalled before returning usable findings, and the follow-up branch-family supervision slice used the same direct diff verification plus targeted backend/frontend validation instead of claiming an unreturned clean review
 
+### `capability-execution-host-v1` (#747 remediation on this branch)
+
+- [x] Adopted local filesystem and process calls cross one authority-wrapper-owned execution host after the existing principal, session, revocation, and approval checks. The public host API resolves registered adapters and accepts no caller-supplied effect callback.
+- [x] The host binds owner, capability/version, normalized destination, request digest, limits, and fencing material into a stable effect identity. Retries with the same binding are deduplicated; a conflicting reuse of an explicit idempotency key is denied.
+- [x] A `0600` atomic local journal records prepared, started, succeeded, failed, and uncertain states with digest-only arguments and bounded output summaries. Restart reconciliation marks unfinished effects uncertain and refuses automatic replay.
+- [x] Process children retain the existing workspace/path and process-group controls, with CPU, address-space, PID, file-output, timeout, bounded foreground display, and bounded background-log reads applied at the child boundary.
+- [ ] Full database-backed multi-process lease/fencing proof and host/container-grade isolation remain deferred. Detached descendants can still produce an operator-visible `unknown` cleanup state under the existing process contract.
+
 ## Non-Goals
 
 - adding tools just to increase the count

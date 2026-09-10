@@ -1,0 +1,767 @@
+"""Fail-closed execution records for locally adopted capabilities.
+
+The native tool registry describes capabilities, but it historically had no
+common execution boundary.  This module is deliberately small: it provides a
+local, provider-free journal and a single invocation path for the filesystem
+and process tools that are adopted by the authority wrappers.
+
+The journal is an operational recovery record, rather than an audit log.  It
+contains digests and bounded summaries only.  A record that was marked as
+started before a process restart is changed to ``uncertain`` and cannot be
+replayed automatically.  The effect handler is intentionally private to the
+adapter layer; callers of :meth:`CapabilityExecutionHost.execute` select a
+registered handler and cannot supply an arbitrary callback.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import math
+import os
+import posixpath
+import tempfile
+import threading
+import time
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Callable, Mapping
+from urllib.parse import urlsplit, urlunsplit
+
+from src.audit.formatting import redact_for_audit
+from src.security.trust_contract import canonical_digest
+
+_JOURNAL_VERSION = 1
+_DEFAULT_MAX_RECORDS = 256
+_DEFAULT_MAX_BYTES = 1_048_576
+_DEFAULT_OUTPUT_BYTES = 1_048_576
+_DEFAULT_CPU_SECONDS = 300.0
+_DEFAULT_MEMORY_BYTES = 512 * 1024 * 1024
+_DEFAULT_PROCESS_COUNT = 64
+_TERMINAL_STATES = frozenset({"succeeded", "failed"})
+_RECOVERABLE_STATES = frozenset({"prepared", "started", "uncertain", "failed"})
+_ADOPTED_CAPABILITIES = frozenset(
+    {
+        "read_file",
+        "write_file",
+        "preview_workspace_patch",
+        "apply_workspace_patch",
+        "run_command",
+        "start_process",
+        "list_processes",
+        "read_process_output",
+        "stop_process",
+    }
+)
+_JOURNAL_LOCKS: dict[Path, threading.RLock] = {}
+_JOURNAL_LOCKS_GUARD = threading.Lock()
+
+
+class CapabilityExecutionError(PermissionError):
+    """A capability call was denied or could not be made recoverably."""
+
+    def __init__(self, reason_code: str, message: str | None = None, *, recoverable: bool = False):
+        self.reason_code = reason_code
+        self.recoverable = recoverable
+        super().__init__(message or reason_code)
+
+
+class CapabilityJournalError(RuntimeError):
+    """The durable local execution journal cannot be trusted."""
+
+
+@dataclass(frozen=True)
+class CapabilityExecutionLimits:
+    """The local hard bounds carried into a capability request."""
+
+    cpu_seconds: float = _DEFAULT_CPU_SECONDS
+    memory_bytes: int = _DEFAULT_MEMORY_BYTES
+    process_count: int = _DEFAULT_PROCESS_COUNT
+    output_bytes: int = _DEFAULT_OUTPUT_BYTES
+    deadline_seconds: float = _DEFAULT_CPU_SECONDS
+
+    def __post_init__(self) -> None:
+        for value, name in (
+            (self.cpu_seconds, "cpu_seconds"),
+            (self.deadline_seconds, "deadline_seconds"),
+        ):
+            if not isinstance(value, (int, float)) or not math.isfinite(float(value)) or value <= 0:
+                raise ValueError(f"{name} must be a finite positive number")
+        for value, name in (
+            (self.memory_bytes, "memory_bytes"),
+            (self.process_count, "process_count"),
+            (self.output_bytes, "output_bytes"),
+        ):
+            if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+                raise ValueError(f"{name} must be a positive integer")
+
+    def as_dict(self) -> dict[str, int | float]:
+        return {
+            "cpu_seconds": float(self.cpu_seconds),
+            "memory_bytes": self.memory_bytes,
+            "process_count": self.process_count,
+            "output_bytes": self.output_bytes,
+            "deadline_seconds": float(self.deadline_seconds),
+        }
+
+    def digest(self) -> str:
+        return canonical_digest(self.as_dict())
+
+
+# Alias used by adapters that already call their bounds ResourceLimits.
+CapabilityLimits = CapabilityExecutionLimits
+
+
+def normalize_destination(destination: str) -> str:
+    """Return a stable destination representation without retaining secrets."""
+    value = str(destination or "").strip()
+    if not value:
+        raise ValueError("destination is required")
+    if "://" in value:
+        parsed = urlsplit(value)
+        return urlunsplit(
+            (
+                parsed.scheme.lower(),
+                parsed.netloc.lower(),
+                parsed.path.rstrip("/") or "/",
+                parsed.query,
+                "",
+            )
+        )
+    return posixpath.normpath(value.replace("\\", "/"))
+
+
+def _canonical_value(value: Any) -> Any:
+    """Make request identity deterministic without serializing object reprs."""
+    if isinstance(value, Mapping):
+        return {str(key): _canonical_value(inner) for key, inner in sorted(value.items(), key=lambda item: str(item[0]))}
+    if isinstance(value, (list, tuple)):
+        return [_canonical_value(item) for item in value]
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    if isinstance(value, (bytes, bytearray)):
+        return {"__bytes_sha256__": hashlib.sha256(bytes(value)).hexdigest(), "length": len(value)}
+    if isinstance(value, Path):
+        return str(value)
+    return str(value)
+
+
+def _digest(value: Any) -> str:
+    return canonical_digest(_canonical_value(value))
+
+
+def _bounded_json(value: Any, *, limit: int) -> tuple[Any, bool]:
+    """Bound a result for the caller while retaining its basic shape."""
+    if isinstance(value, str):
+        raw = value.encode("utf-8", errors="replace")
+        if len(raw) <= limit:
+            return value, False
+        marker = "\n...[truncated]..."
+        marker_bytes = marker.encode()
+        if limit <= len(marker_bytes):
+            return marker_bytes[:limit].decode("utf-8", errors="ignore"), True
+        clipped = raw[: limit - len(marker_bytes)].decode("utf-8", errors="ignore")
+        return clipped + marker, True
+    if isinstance(value, bytes):
+        if len(value) <= limit:
+            return value, False
+        return value[:limit], True
+    try:
+        encoded = json.dumps(_canonical_value(value), sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
+    except (TypeError, ValueError):
+        encoded = str(value).encode("utf-8", errors="replace")
+    if len(encoded) <= limit:
+        return value, False
+    # Structured outputs are retained as a bounded, explicit receipt.  This
+    # prevents a large provider/tool object from crossing the final boundary.
+    return {
+        "output_truncated": True,
+        "output_bytes": len(encoded),
+        "output_sha256": hashlib.sha256(encoded).hexdigest(),
+    }, True
+
+
+def _safe_summary(value: Any, *, output_bytes: int) -> dict[str, Any]:
+    safe_value = redact_for_audit(value)
+    bounded, truncated = _bounded_json(safe_value, limit=min(output_bytes, 4096))
+    try:
+        encoded = json.dumps(_canonical_value(value), sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
+    except (TypeError, ValueError):
+        encoded = str(value).encode("utf-8", errors="replace")
+    return {
+        "type": type(value).__name__,
+        "output_bytes": len(encoded),
+        "output_sha256": hashlib.sha256(encoded).hexdigest(),
+        "output_truncated": truncated,
+        "summary": bounded if isinstance(bounded, (str, int, float, bool, type(None), dict, list)) else str(bounded),
+    }
+
+
+@dataclass(frozen=True)
+class CapabilityExecutionRequest:
+    """Identity and authority material for one capability attempt."""
+
+    owner_principal_id: str
+    capability_id: str
+    capability_version: str
+    destination: str
+    arguments: Mapping[str, Any] = field(default_factory=dict)
+    principal_authenticated: bool = False
+    principal_revoked: bool = False
+    authority_granted: bool = False
+    session_id: str = ""
+    job_id: str = ""
+    request_id: str = ""
+    attempt_id: str = ""
+    idempotency_key: str = ""
+    approval_id: str = ""
+    approval_digest: str = ""
+    approved: bool = False
+    requires_approval: bool = False
+    approval_expires_at: float | None = None
+    fencing_token: str = ""
+    policy_version: str = "capability-execution-v1"
+    expires_at: float | None = None
+    limits: CapabilityExecutionLimits = field(default_factory=CapabilityExecutionLimits)
+    replayable: bool = True
+
+    def __post_init__(self) -> None:
+        for value, name in (
+            (self.owner_principal_id, "owner_principal_id"),
+            (self.capability_id, "capability_id"),
+            (self.capability_version, "capability_version"),
+        ):
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"{name} is required")
+        if self.capability_id not in _ADOPTED_CAPABILITIES and not self.capability_id.startswith("test."):
+            raise ValueError(f"capability '{self.capability_id}' is not adopted by the local host")
+        normalize_destination(self.destination)
+
+    @property
+    def normalized_destination(self) -> str:
+        return normalize_destination(self.destination)
+
+    @property
+    def arguments_digest(self) -> str:
+        return _digest(self.arguments)
+
+    @property
+    def request_digest(self) -> str:
+        # Request and attempt IDs intentionally do not participate in the
+        # effect identity. Retries of the same requested effect must collide.
+        return _digest(
+            {
+                "owner_principal_id": self.owner_principal_id,
+                "capability_id": self.capability_id,
+                "capability_version": self.capability_version,
+                "destination": self.normalized_destination,
+                "arguments": _canonical_value(self.arguments),
+                "session_id": self.session_id,
+                "job_id": self.job_id,
+                "approval_digest": self.approval_digest or self.approval_id,
+                "policy_version": self.policy_version,
+                "limits": self.limits.as_dict(),
+            }
+        )
+
+    @property
+    def binding_digest(self) -> str:
+        return _digest(
+            {
+                "owner_principal_id": self.owner_principal_id,
+                "capability_id": self.capability_id,
+                "capability_version": self.capability_version,
+                "destination": self.normalized_destination,
+                "request_digest": self.request_digest,
+            }
+        )
+
+    @property
+    def effect_digest(self) -> str:
+        return _digest(
+            {
+                "binding_digest": self.binding_digest,
+                "fencing_token": self.fencing_token,
+                "limits_digest": self.limits.digest(),
+            }
+        )
+
+    @property
+    def duplicate_key(self) -> str:
+        # An explicit key is scoped by the journal record's binding. A key can
+        # therefore never be reused by another owner/capability/destination.
+        return self.idempotency_key.strip() if self.idempotency_key.strip() else f"effect:{self.effect_digest}"
+
+    def journal_binding(self) -> dict[str, str]:
+        return {
+            "owner_principal_digest": _digest({"owner_principal_id": self.owner_principal_id}),
+            "capability_id": self.capability_id,
+            "capability_version": self.capability_version,
+            "destination_digest": _digest({"destination": self.normalized_destination}),
+            "request_digest": self.request_digest,
+            "binding_digest": self.binding_digest,
+            "effect_digest": self.effect_digest,
+        }
+
+
+@dataclass(frozen=True)
+class CapabilityExecutionReceipt:
+    effect_id: str
+    duplicate_key: str
+    request_digest: str
+    effect_digest: str
+    state: str
+    recoverable: bool
+    replay_blocked: bool
+    output_digest: str = ""
+    output_bytes: int = 0
+    output_truncated: bool = False
+    output_summary: Mapping[str, Any] = field(default_factory=dict)
+    error_code: str | None = None
+    result: Any = field(default=None, repr=False, compare=False)
+    started_at: float | None = None
+    completed_at: float | None = None
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "effect_id": self.effect_id,
+            "duplicate_key": self.duplicate_key,
+            "request_digest": self.request_digest,
+            "effect_digest": self.effect_digest,
+            "state": self.state,
+            "recoverable": self.recoverable,
+            "replay_blocked": self.replay_blocked,
+            "output_digest": self.output_digest,
+            "output_bytes": self.output_bytes,
+            "output_truncated": self.output_truncated,
+            "output_summary": dict(self.output_summary),
+            "error_code": self.error_code,
+            "started_at": self.started_at,
+            "completed_at": self.completed_at,
+        }
+
+
+CapabilityHandler = Callable[[Mapping[str, Any]], Any]
+
+
+def _default_journal_path() -> Path:
+    try:
+        from config.settings import settings
+
+        workspace = str(Path(settings.workspace_dir).expanduser().resolve())
+    except Exception:
+        workspace = "seraph-default-workspace"
+    workspace_tag = hashlib.sha256(workspace.encode("utf-8")).hexdigest()[:24]
+    return Path(tempfile.gettempdir()) / "seraph_runtime" / workspace_tag / "capability-executions.json"
+
+
+class CapabilityExecutionHost:
+    """Durable local chokepoint for adopted capability effects."""
+
+    def __init__(
+        self,
+        *,
+        journal_path: str | Path | None = None,
+        handlers: Mapping[str, CapabilityHandler] | None = None,
+        max_records: int = _DEFAULT_MAX_RECORDS,
+        max_bytes: int = _DEFAULT_MAX_BYTES,
+    ) -> None:
+        if max_records < 1 or max_bytes < 4096:
+            raise ValueError("journal retention bounds are invalid")
+        self.journal_path = Path(journal_path) if journal_path is not None else _default_journal_path()
+        self._handlers = dict(handlers or {})
+        self._max_records = max_records
+        self._max_bytes = max_bytes
+        with _JOURNAL_LOCKS_GUARD:
+            self._lock = _JOURNAL_LOCKS.setdefault(self.journal_path, threading.RLock())
+        self._recover_incomplete()
+
+    @property
+    def handlers(self) -> tuple[str, ...]:
+        return tuple(sorted(self._handlers))
+
+    def _register_handler(self, capability_id: str, handler: CapabilityHandler) -> None:
+        """Register an adapter from module-owned construction code."""
+        if capability_id not in _ADOPTED_CAPABILITIES and not capability_id.startswith("test."):
+            raise CapabilityExecutionError("capability_not_adopted")
+        if not callable(handler):
+            raise TypeError("capability handler must be callable")
+        with self._lock:
+            self._handlers[capability_id] = handler
+
+    def execute(self, request: CapabilityExecutionRequest) -> CapabilityExecutionReceipt:
+        """Execute a registered adapter through the durable effect boundary."""
+        handler = self._handlers.get(request.capability_id)
+        if handler is None:
+            raise CapabilityExecutionError("capability_handler_unregistered")
+        result, receipt = self._execute(request, handler)
+        return CapabilityExecutionReceipt(**{**receipt.as_dict(), "result": result})
+
+    def recover(self) -> list[CapabilityExecutionReceipt]:
+        """Return unresolved effects without replaying them."""
+        with self._lock:
+            records = self._read_records()
+            return [self._receipt_from_record(record) for record in records if record.get("state") == "uncertain"]
+
+    def journal_records(self) -> list[dict[str, Any]]:
+        """Expose bounded records for local tests/operator diagnostics."""
+        with self._lock:
+            return self._read_records()
+
+    def _execute_adopted(
+        self,
+        request: CapabilityExecutionRequest,
+        handler: CapabilityHandler,
+    ) -> tuple[Any, CapabilityExecutionReceipt]:
+        """Invoke an existing trusted Tool adapter after authority approval.
+
+        This method is intentionally private. The public host API has no
+        callback argument, preventing an arbitrary caller from using the host
+        as a way around capability registration.
+        """
+        if request.capability_id not in _ADOPTED_CAPABILITIES:
+            raise CapabilityExecutionError("capability_not_adopted")
+        if not callable(handler):
+            raise CapabilityExecutionError("capability_handler_invalid")
+        return self._execute(request, handler)
+
+    def _execute(self, request: CapabilityExecutionRequest, handler: CapabilityHandler) -> tuple[Any, CapabilityExecutionReceipt]:
+        now = time.time()
+        self._validate_authority(request, now=now)
+        with self._lock:
+            records = self._read_records()
+            existing = next((item for item in records if item.get("duplicate_key") == request.duplicate_key), None)
+            if existing is not None:
+                if existing.get("binding") != request.journal_binding():
+                    raise CapabilityExecutionError("duplicate_key_conflict")
+                state = str(existing.get("state"))
+                if state == "succeeded":
+                    replayed = self._result_from_record(existing)
+                    persisted_receipt = self._receipt_from_record(existing)
+                    return replayed, CapabilityExecutionReceipt(
+                        **{**persisted_receipt.as_dict(), "result": replayed}
+                    )
+                if state == "failed":
+                    raise CapabilityExecutionError("effect_failed", recoverable=True)
+                raise CapabilityExecutionError("effect_uncertain", recoverable=True)
+
+            started_at = time.time()
+            record = {
+                "journal_version": _JOURNAL_VERSION,
+                "duplicate_key": request.duplicate_key,
+                "effect_id": f"effect:{request.effect_digest}",
+                "binding": request.journal_binding(),
+                "owner_session_digest": _digest({"session_id": request.session_id}) if request.session_id else "",
+                "job_digest": _digest({"job_id": request.job_id}) if request.job_id else "",
+                "fencing_token_digest": _digest({"fencing_token": request.fencing_token}) if request.fencing_token else "",
+                "policy_version": request.policy_version,
+                "limits_digest": request.limits.digest(),
+                # Keep the durable record digest-only. Redacted argument
+                # shapes belong in short-lived audit projections; retaining
+                # even field names here can disclose credential conventions.
+                "arguments_digest": request.arguments_digest,
+                "state": "prepared",
+                "recoverable": True,
+                "replay_blocked": False,
+                "started_at": started_at,
+                "completed_at": None,
+            }
+            records.append(record)
+            self._write_records(records)
+            record["state"] = "started"
+            self._write_records(records)
+
+        try:
+            result = handler(request.arguments)
+        except Exception as exc:
+            # Ordinary effect failures are durable and retryable after the
+            # caller has repaired the input/environment. Keep the error code
+            # type-only so exception text cannot become a secret sink.
+            completed_at = time.time()
+            with self._lock:
+                records = self._read_records()
+                current = next(
+                    (item for item in records if item.get("duplicate_key") == request.duplicate_key),
+                    None,
+                )
+                if current is None:
+                    raise CapabilityJournalError("execution record disappeared before failure") from exc
+                current.update(
+                    {
+                        "state": "failed",
+                        "recoverable": True,
+                        "replay_blocked": False,
+                        "error_code": type(exc).__name__,
+                        "completed_at": completed_at,
+                    }
+                )
+                self._write_records(records)
+            return None, CapabilityExecutionReceipt(
+                effect_id=str(record["effect_id"]),
+                duplicate_key=request.duplicate_key,
+                request_digest=request.request_digest,
+                effect_digest=request.effect_digest,
+                state="failed",
+                recoverable=True,
+                replay_blocked=False,
+                error_code=type(exc).__name__,
+                started_at=started_at,
+                completed_at=completed_at,
+            )
+        except BaseException:
+            # A process crash or cancellation after the started marker is
+            # recoverable, but the host must never silently retry the effect.
+            with self._lock:
+                records = self._read_records()
+                current = next(
+                    (item for item in records if item.get("duplicate_key") == request.duplicate_key),
+                    None,
+                )
+                if current is not None:
+                    current["state"] = "uncertain"
+                    current["replay_blocked"] = True
+                    current["error_code"] = "handler_interrupted"
+                    current["completed_at"] = time.time()
+                    self._write_records(records)
+            raise
+
+        bounded_result, truncated = _bounded_json(result, limit=request.limits.output_bytes)
+        summary = _safe_summary(result, output_bytes=request.limits.output_bytes)
+        output_digest = _digest(result)
+        completed_at = time.time()
+        with self._lock:
+            records = self._read_records()
+            current = next(
+                (item for item in records if item.get("duplicate_key") == request.duplicate_key),
+                None,
+            )
+            if current is None:
+                raise CapabilityJournalError("execution record disappeared before completion")
+            current.update(
+                {
+                    "state": "succeeded",
+                    "recoverable": False,
+                    "replay_blocked": False,
+                    "output_digest": output_digest,
+                    "output_bytes": summary["output_bytes"],
+                    "output_truncated": truncated,
+                    "output_summary": {
+                        "type": summary["type"],
+                        "output_sha256": summary["output_sha256"],
+                        "output_bytes": summary["output_bytes"],
+                        "output_truncated": summary["output_truncated"],
+                    },
+                    "completed_at": completed_at,
+                }
+            )
+            self._write_records(records)
+        receipt = CapabilityExecutionReceipt(
+            effect_id=str(record["effect_id"]),
+            duplicate_key=request.duplicate_key,
+            request_digest=request.request_digest,
+            effect_digest=request.effect_digest,
+            state="succeeded",
+            recoverable=False,
+            replay_blocked=False,
+            output_digest=output_digest,
+            output_bytes=summary["output_bytes"],
+            output_truncated=truncated,
+            output_summary=summary,
+            started_at=started_at,
+            completed_at=completed_at,
+            result=bounded_result,
+        )
+        return bounded_result, receipt
+
+    @staticmethod
+    def _validate_authority(request: CapabilityExecutionRequest, *, now: float) -> None:
+        if request.expires_at is not None and now >= request.expires_at:
+            raise CapabilityExecutionError("authority_expired")
+        if request.approval_expires_at is not None and now >= request.approval_expires_at:
+            raise CapabilityExecutionError("approval_expired")
+        if request.requires_approval and not request.approved:
+            raise CapabilityExecutionError("approval_required")
+        if not request.owner_principal_id.strip():
+            raise CapabilityExecutionError("principal_missing")
+        if not request.principal_authenticated:
+            raise CapabilityExecutionError("principal_unauthenticated")
+        if request.principal_revoked:
+            raise CapabilityExecutionError("principal_revoked")
+        if not request.authority_granted:
+            raise CapabilityExecutionError("capability_grant_missing")
+
+    def _find_record(self, duplicate_key: str) -> dict[str, Any] | None:
+        for record in self._read_records():
+            if record.get("duplicate_key") == duplicate_key:
+                return record
+        return None
+
+    def _recover_incomplete(self) -> None:
+        with self._lock:
+            records = self._read_records()
+            changed = False
+            for record in records:
+                if record.get("state") in {"prepared", "started"}:
+                    record["state"] = "uncertain"
+                    record["recoverable"] = True
+                    record["replay_blocked"] = True
+                    record["error_code"] = "restart_reconciliation_required"
+                    record["completed_at"] = time.time()
+                    changed = True
+            if changed:
+                self._write_records(records)
+
+    def _read_records(self) -> list[dict[str, Any]]:
+        if not self.journal_path.exists():
+            return []
+        try:
+            payload = json.loads(self.journal_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise CapabilityJournalError("execution journal is unreadable") from exc
+        if not isinstance(payload, dict) or payload.get("journal_version") != _JOURNAL_VERSION:
+            raise CapabilityJournalError("execution journal version is unsupported")
+        records = payload.get("records")
+        if not isinstance(records, list) or any(not isinstance(item, dict) for item in records):
+            raise CapabilityJournalError("execution journal records are invalid")
+        return [dict(item) for item in records]
+
+    def _write_records(self, records: list[dict[str, Any]]) -> None:
+        retained = self._retain_records(records)
+        self.journal_path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            self.journal_path.parent.chmod(0o700)
+        except OSError:
+            pass
+        payload = {"journal_version": _JOURNAL_VERSION, "records": retained}
+        encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
+        fd, temporary = tempfile.mkstemp(prefix=f".{self.journal_path.name}.", dir=str(self.journal_path.parent))
+        temporary_path = Path(temporary)
+        try:
+            os.fchmod(fd, 0o600)
+            with os.fdopen(fd, "wb") as stream:
+                stream.write(encoded)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary_path, self.journal_path)
+            try:
+                self.journal_path.chmod(0o600)
+            except OSError:
+                pass
+        finally:
+            temporary_path.unlink(missing_ok=True)
+
+    def _retain_records(self, records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        # Never evict unresolved work. Completed records are dropped oldest
+        # first until both bounds hold; the journal remains bounded unless the
+        # unresolved set itself exceeds the configured record budget.
+        unresolved = [item for item in records if item.get("state") not in _TERMINAL_STATES]
+        completed = [item for item in records if item.get("state") in _TERMINAL_STATES]
+        available_completed = max(0, self._max_records - len(unresolved))
+        completed = completed[-available_completed:] if available_completed else []
+        while completed:
+            candidate = {"journal_version": _JOURNAL_VERSION, "records": unresolved + completed}
+            size = len(json.dumps(candidate, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode())
+            if size <= self._max_bytes:
+                break
+            completed.pop(0)
+        return unresolved + completed
+
+    @staticmethod
+    def _result_from_record(record: Mapping[str, Any]) -> Any:
+        # A duplicate invocation cannot safely reconstruct the original raw
+        # output from a digest-only journal. Return a bounded receipt marker so
+        # callers know the effect already happened and can read its artifact.
+        return {
+            "effect_id": record.get("effect_id"),
+            "state": record.get("state"),
+            "replayed": True,
+            "output_digest": record.get("output_digest", ""),
+            "output_bytes": record.get("output_bytes", 0),
+            "output_truncated": record.get("output_truncated", False),
+        }
+
+    @staticmethod
+    def _receipt_from_record(record: Mapping[str, Any]) -> CapabilityExecutionReceipt:
+        binding = record.get("binding") if isinstance(record.get("binding"), Mapping) else {}
+        return CapabilityExecutionReceipt(
+            effect_id=str(record.get("effect_id", "")),
+            duplicate_key=str(record.get("duplicate_key", "")),
+            request_digest=str(binding.get("request_digest", "")),
+            effect_digest=str(binding.get("effect_digest", "")),
+            state=str(record.get("state", "unknown")),
+            recoverable=bool(record.get("recoverable", True)),
+            replay_blocked=bool(record.get("replay_blocked", False)),
+            output_digest=str(record.get("output_digest", "")),
+            output_bytes=int(record.get("output_bytes", 0) or 0),
+            output_truncated=bool(record.get("output_truncated", False)),
+            output_summary=record.get("output_summary", {}) if isinstance(record.get("output_summary"), Mapping) else {},
+            error_code=record.get("error_code") if isinstance(record.get("error_code"), str) else None,
+            started_at=record.get("started_at") if isinstance(record.get("started_at"), (int, float)) else None,
+            completed_at=record.get("completed_at") if isinstance(record.get("completed_at"), (int, float)) else None,
+        )
+
+
+capability_execution_host = CapabilityExecutionHost()
+_workspace_hosts: dict[Path, CapabilityExecutionHost] = {}
+_workspace_hosts_lock = threading.Lock()
+
+
+def current_capability_execution_host() -> CapabilityExecutionHost:
+    """Return the journal host for the currently configured workspace."""
+    path = _default_journal_path()
+    with _workspace_hosts_lock:
+        host = _workspace_hosts.get(path)
+        if host is None:
+            host = CapabilityExecutionHost(journal_path=path)
+            _workspace_hosts[path] = host
+        return host
+
+
+def build_capability_request(
+    *,
+    capability_id: str,
+    arguments: Mapping[str, Any],
+    owner_principal_id: str,
+    principal_authenticated: bool = False,
+    principal_revoked: bool = False,
+    authority_granted: bool = False,
+    session_id: str | None = None,
+    job_id: str | None = None,
+    requires_approval: bool = False,
+    approved: bool = False,
+    approval_id: str = "",
+    approval_digest: str = "",
+    approval_expires_at: float | None = None,
+    idempotency_key: str = "",
+    fencing_token: str = "",
+    destination: str | None = None,
+    limits: CapabilityExecutionLimits | None = None,
+) -> CapabilityExecutionRequest:
+    """Build a wrapper request with a stable local destination identity."""
+    if destination is None:
+        if capability_id in {"read_file", "write_file", "preview_workspace_patch", "apply_workspace_patch"}:
+            destination = f"workspace:{arguments.get('file_path', arguments.get('path', ''))}"
+        elif capability_id in {"run_command", "start_process"}:
+            destination = f"workspace-process:{arguments.get('cwd', '') or '.'}"
+        else:
+            destination = "seraph:process-runtime"
+    return CapabilityExecutionRequest(
+        owner_principal_id=owner_principal_id,
+        capability_id=capability_id,
+        capability_version="native-v1",
+        destination=destination,
+        arguments=dict(arguments),
+        principal_authenticated=principal_authenticated,
+        principal_revoked=principal_revoked,
+        authority_granted=authority_granted,
+        session_id=session_id or "",
+        job_id=job_id or "",
+        requires_approval=requires_approval,
+        approved=approved,
+        approval_id=approval_id,
+        approval_digest=approval_digest or approval_id,
+        approval_expires_at=approval_expires_at,
+        idempotency_key=idempotency_key,
+        fencing_token=fencing_token,
+        limits=limits or CapabilityExecutionLimits(),
+    )

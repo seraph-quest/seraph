@@ -408,3 +408,15 @@ def apply_workspace_patch(
         )
         logger.exception("Failed to apply workspace patch")
         return f"Error: Failed to apply workspace patch: {exc}"
+
+
+# ``smolagents.tool`` returns a generic SimpleTool object, so its Python
+# module no longer identifies the adapter that owns the implementation. Keep
+# an explicit marker for the authority wrapper's final-host adoption check.
+for _native_filesystem_tool in (
+    read_file,
+    write_file,
+    preview_workspace_patch,
+    apply_workspace_patch,
+):
+    setattr(_native_filesystem_tool, "seraph_native_capability", True)

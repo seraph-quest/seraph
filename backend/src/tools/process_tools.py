@@ -6,6 +6,7 @@ import contextvars
 import json
 import logging
 import os
+import resource
 import shlex
 import signal
 import subprocess
@@ -103,6 +104,13 @@ _OUTPUT_CHAR_LIMIT = 12_000
 _PROCESS_OUTPUT_DEFAULT = 4_000
 _PROCESS_OUTPUT_MAX = 24_000
 _COMMAND_TIMEOUT_MAX = 120
+# The process manager already applies tighter display/timeout limits. These
+# resource ceilings are the hard local profile carried by every child. The
+# lower display limit remains an intentional operator/UI bound.
+_PROCESS_CPU_SECONDS = 300
+_PROCESS_MEMORY_BYTES = 512 * 1024 * 1024
+_PROCESS_PID_LIMIT = 64
+_PROCESS_OUTPUT_BYTES = 1 * 1024 * 1024
 _PROCESS_STOP_WAIT_SECONDS = 1.0
 _PROCESS_IDENTITY_RETRY_ATTEMPTS = 5
 _PROCESS_IDENTITY_RETRY_DELAY_SECONDS = 0.01
@@ -530,10 +538,46 @@ def _truncate_output(text: str, *, limit: int = _OUTPUT_CHAR_LIMIT) -> tuple[str
 def _tail_text(path: Path, *, max_chars: int) -> tuple[str, bool]:
     if not path.exists():
         return "", False
-    data = path.read_text(encoding="utf-8", errors="replace")
+    # Never load an unbounded background log into memory. The process profile
+    # caps the file itself, and this seek keeps reads bounded even if an older
+    # process predates that cap.
+    max_bytes = max(1, max_chars * 4)
+    try:
+        size = path.stat().st_size
+        with path.open("rb") as stream:
+            if size > max_bytes:
+                stream.seek(-max_bytes, os.SEEK_END)
+                data = stream.read(max_bytes).decode("utf-8", errors="replace")
+                return "...[truncated]...\n" + data[-max_chars:], True
+            data = stream.read().decode("utf-8", errors="replace")
+    except OSError:
+        return "", False
     if len(data) <= max_chars:
         return data, False
     return "...[truncated]...\n" + data[-max_chars:], True
+
+
+def _apply_process_limits() -> None:
+    """Apply the local process profile in the child before it executes."""
+    # The runtime is currently POSIX-only. Keep the import/module guard so a
+    # future non-POSIX test can still import the process tool module.
+    if os.name != "posix":
+        return
+    for limit_name, requested in (
+        (resource.RLIMIT_CPU, _PROCESS_CPU_SECONDS),
+        (resource.RLIMIT_AS, _PROCESS_MEMORY_BYTES),
+        (resource.RLIMIT_NPROC, _PROCESS_PID_LIMIT),
+        (resource.RLIMIT_FSIZE, _PROCESS_OUTPUT_BYTES),
+    ):
+        try:
+            current_soft, current_hard = resource.getrlimit(limit_name)
+            hard = current_hard if current_hard != resource.RLIM_INFINITY else requested
+            soft = min(requested, hard)
+            resource.setrlimit(limit_name, (soft, hard))
+        except (AttributeError, OSError, ValueError):
+            # A container may disallow one profile limit. The caller still
+            # retains the explicit timeout/output/process-tree safeguards.
+            logger.debug("Unable to apply child resource limit", exc_info=True)
 
 
 def _display_command(argv: list[str]) -> str:
@@ -1362,6 +1406,7 @@ class ProcessRuntimeManager:
                 shell=False,
                 env=_command_env(worker_root=worker_root),
                 start_new_session=True,
+                preexec_fn=_apply_process_limits if os.name == "posix" else None,
             )
             # start_new_session makes the child PID the process-group leader.
             # Retain its start time and PGID so a later timeout cannot signal a
@@ -1499,6 +1544,7 @@ class ProcessRuntimeManager:
                     shell=False,
                     env=_command_env(worker_root=worker_root),
                     start_new_session=True,
+                    preexec_fn=_apply_process_limits if os.name == "posix" else None,
                 )
             leader_identity = _capture_process_identity(popen)
             descendant_identities = _snapshot_process_descendants(popen, leader_identity)

@@ -270,6 +270,7 @@ class AudioIngressResult:
     # hand-built result cannot assert status in an operator receipt.  Only
     # ``_result`` below can attach the module-private provenance token.
     _provenance: object | None = field(default=None, init=False, repr=False, compare=False)
+    _policy_fingerprint: str | None = field(default=None, init=False, repr=False, compare=False)
 
     @property
     def terminal(self) -> bool:
@@ -478,6 +479,42 @@ def _valid_policy(policy: AudioIngressPolicy) -> bool:
         and not any(char.isspace() for char in capability)
         for capability in policy.allowed_capabilities
     ) and len(set(policy.allowed_capabilities)) == len(policy.allowed_capabilities)
+
+
+def _canonical_policy_fingerprint(policy: AudioIngressPolicy | None) -> str | None:
+    """Hash the bounded policy that admitted a result, without secrets."""
+
+    if not _valid_policy(policy):
+        return None
+    assert policy is not None
+    payload = {
+        "schema_version": AUDIO_INGRESS_SCHEMA_VERSION,
+        "max_audio_bytes": policy.max_audio_bytes,
+        "max_duration_seconds": policy.max_duration_seconds,
+        "max_normalized_wav_bytes": policy.max_normalized_wav_bytes,
+        "max_raw_retention_seconds": policy.max_raw_retention_seconds,
+        "clock_skew_seconds": policy.clock_skew_seconds,
+        "allowed_formats": [
+            {
+                "media_type": rule.media_type,
+                "container": rule.container,
+                "codec": rule.codec,
+            }
+            for rule in sorted(
+                policy.allowed_formats,
+                key=lambda rule: (rule.media_type, rule.container, rule.codec),
+            )
+        ],
+        "allowed_capabilities": sorted(policy.allowed_capabilities),
+        "provider": policy.provider,
+        "provider_status": policy.provider_status.value,
+        "openrouter_endpoint": policy.openrouter_endpoint,
+        "trusted_adapter_id": policy.trusted_adapter_id,
+        "provider_proof_reference": policy.provider_proof_reference,
+        "consent_proof_reference": policy.consent_proof_reference,
+    }
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
 def _request_structure_error(request: AudioIngressRequest, policy: AudioIngressPolicy) -> str | None:
@@ -691,6 +728,7 @@ def _result(
     reason_code: str,
     *,
     request_digest: str | None = None,
+    policy_fingerprint: str | None = None,
 ) -> AudioIngressResult:
     result = AudioIngressResult(
         status=status,
@@ -700,6 +738,8 @@ def _result(
         request_digest=request_digest,
     )
     object.__setattr__(result, "_provenance", _TRUSTED_RESULT_TOKEN)
+    if policy_fingerprint is not None and _DIGEST_RE.fullmatch(policy_fingerprint):
+        object.__setattr__(result, "_policy_fingerprint", policy_fingerprint)
     return result
 
 
@@ -719,30 +759,45 @@ def validate_audio_ingress(
     """
 
     effective_policy = policy if policy is not None else AudioIngressPolicy()
+    policy_fingerprint = _canonical_policy_fingerprint(effective_policy)
+
+    def validation_result(
+        status: AudioIngressStatus,
+        reason_code: str,
+        *,
+        request_digest: str | None = None,
+    ) -> AudioIngressResult:
+        return _result(
+            status,
+            reason_code,
+            request_digest=request_digest,
+            policy_fingerprint=policy_fingerprint,
+        )
+
     structure_error = _request_structure_error(request, effective_policy)
     if structure_error:
-        return _result(
+        return validation_result(
             AudioIngressStatus.BLOCKED,
             structure_error,
             request_digest=None,
         )
     current = _now(now)
     if current is None:
-        return _result(AudioIngressStatus.BLOCKED, "invalid_validation_clock")
+        return validation_result(AudioIngressStatus.BLOCKED, "invalid_validation_clock")
     captured_at = _utc(request.captured_at)
     assert captured_at is not None
     if captured_at > current + timedelta(seconds=effective_policy.clock_skew_seconds):
-        return _result(AudioIngressStatus.BLOCKED, "capture_timestamp_in_future")
+        return validation_result(AudioIngressStatus.BLOCKED, "capture_timestamp_in_future")
     request_digest = _canonical_request_digest(request)
     if not isinstance(known_identities, tuple) or any(not _valid_identity(identity) for identity in known_identities):
-        return _result(AudioIngressStatus.BLOCKED, "identity_lookup_invalid", request_digest=request_digest)
+        return validation_result(AudioIngressStatus.BLOCKED, "identity_lookup_invalid", request_digest=request_digest)
     for identity in known_identities:
         if identity.request_id == request.request_id:
             if identity.request_digest == request_digest:
-                return _result(AudioIngressStatus.DUPLICATE, "request_already_recorded", request_digest=request_digest)
-            return _result(AudioIngressStatus.BLOCKED, "request_identity_conflict", request_digest=request_digest)
+                return validation_result(AudioIngressStatus.DUPLICATE, "request_already_recorded", request_digest=request_digest)
+            return validation_result(AudioIngressStatus.BLOCKED, "request_identity_conflict", request_digest=request_digest)
         if identity.attachment_id == request.attachment_id:
-            return _result(AudioIngressStatus.BLOCKED, "attachment_identity_conflict", request_digest=request_digest)
+            return validation_result(AudioIngressStatus.BLOCKED, "attachment_identity_conflict", request_digest=request_digest)
 
     capture_consent_error = _consent_reason(
         request.capture_consent,
@@ -752,7 +807,7 @@ def validate_audio_ingress(
         capture_at=captured_at,
     )
     if capture_consent_error:
-        return _result(AudioIngressStatus.BLOCKED, capture_consent_error, request_digest=request_digest)
+        return validation_result(AudioIngressStatus.BLOCKED, capture_consent_error, request_digest=request_digest)
     cloud_consent_error = _consent_reason(
         request.cloud_upload_consent,
         boundary="cloud_upload",
@@ -760,33 +815,33 @@ def validate_audio_ingress(
         clock_skew_seconds=effective_policy.clock_skew_seconds,
     )
     if cloud_consent_error:
-        return _result(AudioIngressStatus.BLOCKED, cloud_consent_error, request_digest=request_digest)
+        return validation_result(AudioIngressStatus.BLOCKED, cloud_consent_error, request_digest=request_digest)
     assert request.capture_consent is not None
     assert request.cloud_upload_consent is not None
     if request.capture_consent.reference == request.cloud_upload_consent.reference:
-        return _result(AudioIngressStatus.BLOCKED, "consent_references_not_separate", request_digest=request_digest)
+        return validation_result(AudioIngressStatus.BLOCKED, "consent_references_not_separate", request_digest=request_digest)
 
     retention_deadline = _utc(request.raw_audio_retention_deadline)
     if retention_deadline is None:
-        return _result(AudioIngressStatus.BLOCKED, "raw_audio_retention_deadline_missing", request_digest=request_digest)
+        return validation_result(AudioIngressStatus.BLOCKED, "raw_audio_retention_deadline_missing", request_digest=request_digest)
     if retention_deadline <= current:
-        return _result(AudioIngressStatus.BLOCKED, "raw_audio_retention_expired", request_digest=request_digest)
+        return validation_result(AudioIngressStatus.BLOCKED, "raw_audio_retention_expired", request_digest=request_digest)
     if retention_deadline <= captured_at:
-        return _result(AudioIngressStatus.BLOCKED, "raw_audio_retention_before_capture", request_digest=request_digest)
+        return validation_result(AudioIngressStatus.BLOCKED, "raw_audio_retention_before_capture", request_digest=request_digest)
     max_deadline = captured_at + timedelta(seconds=effective_policy.max_raw_retention_seconds)
     if retention_deadline > max_deadline:
-        return _result(AudioIngressStatus.BLOCKED, "raw_audio_retention_exceeds_limit", request_digest=request_digest)
+        return validation_result(AudioIngressStatus.BLOCKED, "raw_audio_retention_exceeds_limit", request_digest=request_digest)
 
     if request.requested_capability not in effective_policy.allowed_capabilities:
-        return _result(AudioIngressStatus.BLOCKED, "requested_capability_not_allowed", request_digest=request_digest)
+        return validation_result(AudioIngressStatus.BLOCKED, "requested_capability_not_allowed", request_digest=request_digest)
     if request.requested_capability not in {"chat", "transcription"}:
         if not request.transcript_confirmed or not _valid_consent_ref(request.transcript_confirmation_ref):
-            return _result(AudioIngressStatus.BLOCKED, "transcript_confirmation_required", request_digest=request_digest)
+            return validation_result(AudioIngressStatus.BLOCKED, "transcript_confirmation_required", request_digest=request_digest)
 
     if effective_policy.provider_status is AudioProviderStatus.UNAVAILABLE:
-        return _result(AudioIngressStatus.DEGRADED, "openrouter_route_unavailable", request_digest=request_digest)
+        return validation_result(AudioIngressStatus.DEGRADED, "openrouter_route_unavailable", request_digest=request_digest)
     if effective_policy.provider_status is AudioProviderStatus.UNVERIFIED:
-        return _result(AudioIngressStatus.DEGRADED, "openrouter_capability_unverified", request_digest=request_digest)
+        return validation_result(AudioIngressStatus.DEGRADED, "openrouter_capability_unverified", request_digest=request_digest)
     if not all(
         (
             effective_policy.trusted_adapter_id,
@@ -794,8 +849,8 @@ def validate_audio_ingress(
             effective_policy.consent_proof_reference,
         )
     ):
-        return _result(AudioIngressStatus.DEGRADED, "trusted_adapter_proof_required", request_digest=request_digest)
-    return _result(AudioIngressStatus.ACCEPTED, "audio_ingress_preflight_accepted", request_digest=request_digest)
+        return validation_result(AudioIngressStatus.DEGRADED, "trusted_adapter_proof_required", request_digest=request_digest)
+    return validation_result(AudioIngressStatus.ACCEPTED, "audio_ingress_preflight_accepted", request_digest=request_digest)
 
 
 def build_openrouter_input_audio(request: AudioIngressRequest) -> OpenRouterInputAudio:
@@ -906,8 +961,9 @@ def _safe_receipt_request_metadata(
 def _trusted_result_for_receipt(
     result: AudioIngressResult,
     request: AudioIngressRequest | None,
+    policy: AudioIngressPolicy | None,
 ) -> AudioIngressResult:
-    """Fail closed when a result is forged or bound to another request."""
+    """Fail closed when a result is forged or bound to another request/policy."""
 
     if (
         isinstance(result, AudioIngressResult)
@@ -921,7 +977,13 @@ def _trusted_result_for_receipt(
         canonical_digest = _safe_canonical_request_digest(request)
         supplied_digest = _safe_request_digest(result.request_digest)
         if result.status is not AudioIngressStatus.BLOCKED:
-            if canonical_digest is None or supplied_digest != canonical_digest:
+            policy_fingerprint = _canonical_policy_fingerprint(policy)
+            if (
+                canonical_digest is None
+                or supplied_digest != canonical_digest
+                or policy_fingerprint is None
+                or result._policy_fingerprint != policy_fingerprint
+            ):
                 return _result(AudioIngressStatus.BLOCKED, "invalid_result_provenance")
         elif result.request_digest is not None and (
             canonical_digest is None or supplied_digest != canonical_digest
@@ -941,7 +1003,7 @@ def serialize_audio_ingress_receipt(
 
     if not isinstance(result, AudioIngressResult):
         raise TypeError("result must be an AudioIngressResult")
-    safe_result = _trusted_result_for_receipt(result, request)
+    safe_result = _trusted_result_for_receipt(result, request, policy)
     effective_policy = policy if policy is not None else AudioIngressPolicy()
     safe_reason_code = _safe_reason_code(safe_result.reason_code)
     if request is None:
@@ -969,10 +1031,10 @@ def serialize_audio_ingress_receipt(
             requested_capability=None,
             transcript_confirmed=False,
             provider=None,
-            provider_status=effective_policy.provider_status if _valid_policy(effective_policy) else None,
-            trusted_adapter_id=effective_policy.trusted_adapter_id if _valid_policy(effective_policy) else None,
-            provider_proof_reference=effective_policy.provider_proof_reference if _valid_policy(effective_policy) else None,
-            consent_proof_reference=effective_policy.consent_proof_reference if _valid_policy(effective_policy) else None,
+            provider_status=effective_policy.provider_status if policy is not None and _valid_policy(policy) else None,
+            trusted_adapter_id=effective_policy.trusted_adapter_id if policy is not None and _valid_policy(policy) else None,
+            provider_proof_reference=effective_policy.provider_proof_reference if policy is not None and _valid_policy(policy) else None,
+            consent_proof_reference=effective_policy.consent_proof_reference if policy is not None and _valid_policy(policy) else None,
         )
     metadata = _safe_receipt_request_metadata(
         request,
@@ -980,7 +1042,7 @@ def serialize_audio_ingress_receipt(
         reason_code=safe_reason_code,
         include_request_fields=safe_result.status is not AudioIngressStatus.BLOCKED,
     )
-    policy_valid = _valid_policy(effective_policy)
+    policy_valid = policy is not None and _valid_policy(policy)
     return AudioIngressReceipt(
         schema_version=AUDIO_INGRESS_RECEIPT_SCHEMA_VERSION,
         status=safe_result.status,

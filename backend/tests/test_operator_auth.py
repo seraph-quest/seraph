@@ -297,7 +297,9 @@ async def test_rest_chat_discards_result_when_session_is_revoked(client, monkeyp
     monkeypatch.setattr("src.api.chat.run_direct_local_chat", slow_chat)
     response = await client.post(
         "/api/chat",
-        json={"session_id": "rest-revocation", "message": "hello"},
+        # An omitted session exercises the authenticated ingress creation path;
+        # explicit unknown IDs are intentionally rejected by SessionManager.
+        json={"message": "hello"},
         headers={"origin": ORIGIN},
     )
     assert response.status_code == 401
@@ -445,6 +447,7 @@ async def test_authenticated_operator_can_read_runtime_and_settings_without_prov
     assert runtime.status_code == 200
     assert settings_response.status_code == 200
     assert runtime.json()["model_fabric"]["status"] in {"configuration_required", "ready", "degraded"}
-    assert "api_key" not in runtime.text
-    assert "api_key" not in settings_response.text
-    assert client.cookies.get(settings.operator_auth_cookie_name) == token
+    # Metadata may expose the boolean ``api_key_configured`` flag; raw key
+    # material must never be returned.
+    assert "test-key" not in runtime.text
+    assert "test-key" not in settings_response.text

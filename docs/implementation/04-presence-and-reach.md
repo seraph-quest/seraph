@@ -101,7 +101,26 @@ Retries that reuse the same identity in the same session receive a deterministic
 409/error receipt before model dispatch.  Reuse with changed content or bound
 metadata is rejected as an identity conflict, and an explicit unknown session
 is rejected rather than created.  Attachments, durable outbox delivery, voice,
-and Telegram or other external channel adapters remain future #750 slices.
+and Telegram or other external channel adapters remain future integration
+slices.
+
+## Telegram Ingress Contract (Branch-Local #752 Partial)
+
+The `feat/752-telegram-contract` branch adds a provider-free, typed Telegram
+ingress contract. Telegram transit is an external channel and both the
+`telegram_transit` and `openrouter_inference` consent grants are checked again
+on replay and receipt serialization, with content-free redacted receipts.
+Ingress requires a server-owned pairing snapshot supplied by the authoritative
+#749 pairing owner and bound to the allow-listed operator and chat, with an
+active lifecycle and an optional expiry. An omitted expiry is valid only when
+that authority guarantees the pairing is current and non-expiring; missing,
+mismatched, revoked, or expired snapshots block before replay or consent
+handling. This pure contract cannot authenticate the Telegram transport. No
+live Telegram adapter, bot token, durable outbox, transport delivery, or
+provider runtime is shipped by this branch; browser behavior is unchanged.
+Even syntactically valid #751 proof references remain unverified metadata here,
+so voice stays quarantined and degraded until a trusted adapter verifies the
+handoff.
 
 ## Working On Now
 

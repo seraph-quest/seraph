@@ -672,15 +672,6 @@ async def dispatch_goal_candidate(
     if tuple(candidate.evidence_refs) != safe_evidence_refs:
         candidate = candidate.model_copy(update={"evidence_refs": list(safe_evidence_refs)})
     goal = await goal_repository.get(candidate.goal_id)
-    existing = await _existing_receipt(
-        event_type=_OUTCOME_EVENT,
-        dedupe_key=candidate.dedupe_key,
-        candidate=candidate,
-        goal=goal,
-    )
-    if existing is not None:
-        return GoalOutcomeReceipt.model_validate(existing)
-
     strategy_delta_id, strategy_delta_provenance = await _resolve_strategy_delta_provenance(
         candidate=candidate,
         goal=goal,
@@ -736,6 +727,17 @@ async def dispatch_goal_candidate(
             strategy_delta_provenance="unresolved",
             goal=goal,
         )
+    # Revalidate the live goal and any required correction before replaying a
+    # cached outcome. A stale positive receipt must not bypass the correction
+    # gate merely because its dedupe key still matches.
+    existing = await _existing_receipt(
+        event_type=_OUTCOME_EVENT,
+        dedupe_key=candidate.dedupe_key,
+        candidate=candidate,
+        goal=goal,
+    )
+    if existing is not None:
+        return GoalOutcomeReceipt.model_validate(existing)
     if not candidate.dispatchable:
         return await _persist_no_learning(
             candidate,

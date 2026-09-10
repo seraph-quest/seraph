@@ -714,7 +714,10 @@ def _canonical_reconciliation_receipt(value: Any) -> tuple[str, str]:
 
 
 def _reconciliation_matches_effect(
-    effect: Mapping[str, Any], receipt: Mapping[str, Any]
+    effect: Mapping[str, Any],
+    receipt: Mapping[str, Any],
+    *,
+    require_unresolved: bool = True,
 ) -> None:
     """Require a reconciliation receipt to describe the exact ledger effect.
 
@@ -738,7 +741,11 @@ def _reconciliation_matches_effect(
             )
         observed_digest = _text(receipt.get("target_digest"))
         expected_digest = _text(effect.get("target_digest"))
-        if observed_digest and expected_digest and observed_digest != expected_digest:
+        if not observed_digest or not expected_digest:
+            raise DurableJobTransitionError(
+                "readback reconciliation requires the exact intended target digest"
+            )
+        if observed_digest != expected_digest:
             raise DurableJobIdempotencyConflict(
                 "readback reconciliation target digest does not match the intended effect"
             )
@@ -760,6 +767,53 @@ def _reconciliation_matches_effect(
             raise DurableJobTransitionError(
                 "settled reconciliation must bind the exact provider operation or adapter key"
             )
+    if require_unresolved and not _effect_is_unresolved(effect):
+        raise DurableJobTransitionError(
+            "reconciliation_receipt must identify an unresolved durable effect"
+        )
+
+
+def _retry_reconciliation_marker_matches(
+    effects: Iterable[Any],
+    effect: Mapping[str, Any],
+    receipt: Mapping[str, Any],
+    receipt_digest: str,
+) -> bool:
+    """Allow retry only for the exact receipt that already settled this effect.
+
+    ``reconcile_external_effect`` resolves an unresolved ledger item before a
+    retry is admitted.  The original item is consequently marked resolved, so
+    retry must use the durable reconciliation marker produced by that call;
+    a normal succeeded/readback item or an unrelated receipt is never enough.
+    """
+    if not effect.get("reconciled") and _text(effect.get("reconciliation_status")) not in {
+        "reconciled",
+        "resolved",
+    }:
+        return False
+    for item in effects:
+        if not isinstance(item, Mapping) or _text(item.get("kind")) != "reconciliation":
+            continue
+        if _text(item.get("receipt_digest")) != receipt_digest:
+            continue
+        marker_receipt = item.get("receipt")
+        if not isinstance(marker_receipt, Mapping):
+            continue
+        if (
+            _text(marker_receipt.get("effect_id")) != _text(effect.get("effect_id"))
+            or _text(marker_receipt.get("effect_type")) != _text(effect.get("effect_type"))
+        ):
+            continue
+        try:
+            _reconciliation_matches_effect(
+                effect,
+                receipt,
+                require_unresolved=False,
+            )
+        except DurableJobError:
+            return False
+        return True
+    return False
 
 
 def _validate_no_effect_retry_receipt(job_id: str, receipt: Mapping[str, Any]) -> None:
@@ -1383,6 +1437,7 @@ class DurableJobRepository:
                     reason = "deadline_expired"
             effect_ledger: list[dict[str, Any]] | None = None
             approval_resume_record: dict[str, Any] | None = None
+            approval_request_record: dict[str, Any] | None = None
             if current == "awaiting_approval" and to_status == "queued":
                 if approval_resume_receipt is None:
                     raise DurableJobTransitionError(
@@ -1394,6 +1449,37 @@ class DurableJobRepository:
                     now=_utc_now(),
                 )
                 effect_ledger = _effect_ledger_or_raise(run.effect_receipts_json)
+                if _job_has_unsafe_effects(effect_ledger):
+                    raise DurableJobTransitionError(
+                        "approval-held job retains an unresolved external effect; reconcile before resume"
+                    )
+                from src.approval.repository import approval_repository
+
+                approval_request_record = await approval_repository.consume_approved_for_resume(
+                    db=db,
+                    approval_id=approval_resume_record["approval_id"],
+                    owner_operator_session_id=approval_resume_record["operator_session_id"],
+                    operator_principal_id=approval_resume_record["operator_principal_id"],
+                    job_id=job_id,
+                    owner_kind=approval_resume_record["owner_kind"],
+                    owner_principal_id=approval_resume_record["owner_principal_id"],
+                    service_id=approval_resume_record["service_id"],
+                    authority_digest=approval_resume_record["authority_digest"],
+                    goal_id=approval_resume_record["goal_id"],
+                    goal_revision=approval_resume_record["goal_revision"],
+                    plan_revision=approval_resume_record["plan_revision"],
+                    capability_version=approval_resume_record["capability_version"],
+                    budget_digest=approval_resume_record["budget_digest"],
+                    expires_at=approval_resume_record["expires_at"],
+                )
+                if approval_request_record is None:
+                    raise DurableJobTransitionError(
+                        "approval resume requires the current authenticated ApprovalRequest"
+                    )
+                approval_resume_record["approval_request_status"] = approval_request_record.get("status")
+                approval_resume_record["approval_request_fingerprint"] = approval_request_record.get(
+                    "fingerprint"
+                )
             if current == "failed" and to_status == "queued":
                 raise DurableJobTransitionError(
                     "failed jobs require explicit retry with reconciliation"
@@ -1625,6 +1711,12 @@ class DurableJobRepository:
         if not isinstance(approval_receipt, Mapping):
             raise DurableJobTransitionError("approval resume requires a typed approval receipt")
         receipt_fields = dict(approval_receipt)
+        if _text(receipt_fields.get("status")) != "approved" or receipt_fields.get("authenticated") is not True:
+            raise DurableJobTransitionError(
+                "approval resume requires a current authenticated approval"
+            )
+        if receipt_fields.get("revoked") is True:
+            raise DurableJobTransitionError("approval resume approval has been revoked")
         if any(
             field_name in receipt_fields and receipt_fields[field_name] != expected
             for field_name, expected in {
@@ -1812,7 +1904,6 @@ class DurableJobRepository:
         if int(lease_seconds) <= 0:
             raise ValueError("lease_seconds must be positive")
         now = _utc_now()
-        expires = now + timedelta(seconds=int(lease_seconds))
         if expected_state != "queued":
             raise DurableJobTransitionError("durable job claims require the queued state")
         async with self._session() as db:
@@ -1834,6 +1925,54 @@ class DurableJobRepository:
             )
             if int(run.fencing_token or 0) != expected_fence:
                 raise DurableJobLeaseError("durable job fencing token is stale")
+            try:
+                persisted_deadline = _as_utc(run.deadline_at)
+            except ValueError as exc:
+                raise DurableJobTransitionError("job deadline metadata is malformed") from exc
+            if persisted_deadline and persisted_deadline <= now:
+                deadline_conditions = [
+                    WorkflowRunState.run_identity == job_id,
+                    WorkflowRunState.status == expected_state,
+                    WorkflowRunState.revision == current_revision,
+                    WorkflowRunState.fencing_token == expected_fence,
+                    or_(
+                        WorkflowRunState.lease_owner.is_(None),
+                        WorkflowRunState.lease_expires_at <= now,
+                    ),
+                ]
+                _append_parent_fence_condition(deadline_conditions, run, now=now)
+                expired = await db.execute(
+                    update(WorkflowRunState)
+                    .execution_options(synchronize_session=False)
+                    .where(*deadline_conditions)
+                    .values(
+                        status="failed",
+                        failure_reason="deadline_expired",
+                        lease_owner=None,
+                        lease_expires_at=None,
+                        updated_at=now,
+                        heartbeat_at=now,
+                        finished_at=now,
+                        revision=WorkflowRunState.revision + 1,
+                    )
+                )
+                if not _rowcount_is_one(expired):
+                    raise DurableJobLeaseError("job changed before deadline transition")
+                failed = await self._fetch(db, job_id)
+                db.expunge(failed)
+                return _serialize(
+                    failed,
+                    receipt={
+                        "kind": "claim",
+                        "status": "failed",
+                        "reason": "deadline_expired",
+                        "revision": _revision(failed),
+                        "operator_visible": True,
+                    },
+                )
+            expires = now + timedelta(seconds=int(lease_seconds))
+            if persisted_deadline is not None and expires > persisted_deadline:
+                expires = persisted_deadline
             try:
                 effect_ledger = _effect_ledger_or_raise(run.effect_receipts_json)
             except DurableJobTransitionError:
@@ -1914,47 +2053,6 @@ class DurableJobRepository:
                 }
                 db.expunge(recovered_job)
                 return _serialize(recovered_job, receipt=receipt)
-            try:
-                persisted_deadline = _as_utc(run.deadline_at)
-            except ValueError as exc:
-                raise DurableJobTransitionError("job deadline metadata is malformed") from exc
-            if persisted_deadline and persisted_deadline <= now:
-                deadline_conditions = [
-                    WorkflowRunState.run_identity == job_id,
-                    WorkflowRunState.status == expected_state,
-                    WorkflowRunState.revision == current_revision,
-                    WorkflowRunState.fencing_token == expected_fence,
-                ]
-                _append_parent_fence_condition(deadline_conditions, run, now=now)
-                expired = await db.execute(
-                    update(WorkflowRunState)
-                    .execution_options(synchronize_session=False)
-                    .where(*deadline_conditions)
-                    .values(
-                        status="failed",
-                        failure_reason="deadline_expired",
-                        lease_owner=None,
-                        lease_expires_at=None,
-                        updated_at=now,
-                        heartbeat_at=now,
-                        finished_at=now,
-                        revision=WorkflowRunState.revision + 1,
-                    )
-                )
-                if not _rowcount_is_one(expired):
-                    raise DurableJobLeaseError("job changed before deadline transition")
-                failed = await self._fetch(db, job_id)
-                db.expunge(failed)
-                return _serialize(
-                    failed,
-                    receipt={
-                        "kind": "claim",
-                        "status": "failed",
-                        "reason": "deadline_expired",
-                        "revision": _revision(failed),
-                        "operator_visible": True,
-                    },
-                )
             dependency_state, dependency_reason, dependency_id, dependency_status = await self._dependency_outcome(
                 db, run
             )
@@ -2186,6 +2284,14 @@ class DurableJobRepository:
                 if lease_seconds is not None
                 else persisted_expiry
             )
+            try:
+                persisted_deadline = _as_utc(run.deadline_at)
+            except ValueError as exc:
+                raise DurableJobLeaseError("job deadline metadata is malformed") from exc
+            if persisted_deadline is not None and expires > persisted_deadline:
+                expires = persisted_deadline
+            if expires <= now:
+                raise DurableJobLeaseError("job deadline has expired")
             heartbeat_conditions = [
                 WorkflowRunState.run_identity == job_id,
                 WorkflowRunState.status == expected_state,
@@ -2269,10 +2375,21 @@ class DurableJobRepository:
                 expiry = _as_utc(run.lease_expires_at)
             except ValueError as exc:
                 raise DurableJobLeaseError("job lease metadata is malformed") from exc
+            try:
+                persisted_deadline = _as_utc(run.deadline_at)
+            except ValueError as exc:
+                raise DurableJobLeaseError("job deadline metadata is malformed") from exc
+            if persisted_deadline is not None and persisted_deadline <= now:
+                raise DurableJobTransitionError("job deadline has expired")
             if run.lease_owner != old_owner:
                 raise DurableJobLeaseError("lease source owner does not match")
             if expiry is not None and expiry > now:
                 raise DurableJobLeaseError("active lease cannot be transferred before expiry")
+            transferred_expiry = now + timedelta(seconds=int(lease_seconds))
+            if persisted_deadline is not None and transferred_expiry > persisted_deadline:
+                transferred_expiry = persisted_deadline
+            if transferred_expiry <= now:
+                raise DurableJobTransitionError("job deadline has expired")
             transfer_conditions = [
                 WorkflowRunState.run_identity == job_id,
                 WorkflowRunState.status == expected_state,
@@ -2288,7 +2405,7 @@ class DurableJobRepository:
                 .where(*transfer_conditions)
                 .values(
                     lease_owner=new_owner,
-                    lease_expires_at=now + timedelta(seconds=int(lease_seconds)),
+                    lease_expires_at=transferred_expiry,
                     fencing_token=WorkflowRunState.fencing_token + 1,
                     revision=WorkflowRunState.revision + 1,
                     heartbeat_at=now,
@@ -2843,7 +2960,22 @@ class DurableJobRepository:
                     raise DurableJobTransitionError(
                         "retry reconciliation receipt does not match a durable effect"
                     )
-                _reconciliation_matches_effect(matched_effect, receipt_payload)
+                if not _effect_is_unresolved(matched_effect):
+                    if _text(matched_effect.get("status")) == "succeeded":
+                        raise DurableJobTransitionError(
+                            "retry reconciliation cannot reuse an already-succeeded effect"
+                        )
+                    if not _retry_reconciliation_marker_matches(
+                        existing_effects,
+                        matched_effect,
+                        receipt_payload,
+                        receipt_digest,
+                    ):
+                        raise DurableJobTransitionError(
+                            "retry reconciliation requires the exact receipt that resolved an unresolved effect"
+                        )
+                else:
+                    _reconciliation_matches_effect(matched_effect, receipt_payload)
             else:
                 _validate_no_effect_retry_receipt(job_id, receipt_payload)
             existing_effects.append(
@@ -3047,7 +3179,19 @@ class DurableJobRepository:
                 old_owner = run.lease_owner
                 expected_token = run.fencing_token
                 expected_revision = _revision(run)
-                recovered_status, recovery_reason = _restart_recovery_state(run)
+                try:
+                    persisted_deadline = _as_utc(run.deadline_at)
+                except ValueError:
+                    persisted_deadline = None
+                    recovered_status, recovery_reason = (
+                        "blocked",
+                        "stale_lease_malformed_deadline_requires_reconciliation",
+                    )
+                else:
+                    if persisted_deadline is not None and persisted_deadline <= observed_at:
+                        recovered_status, recovery_reason = "failed", "deadline_expired"
+                    else:
+                        recovered_status, recovery_reason = _restart_recovery_state(run)
                 updated = await db.execute(
                     update(WorkflowRunState)
                     .execution_options(synchronize_session=False)
@@ -3066,6 +3210,11 @@ class DurableJobRepository:
                         revision=WorkflowRunState.revision + 1,
                         updated_at=observed_at,
                         heartbeat_at=observed_at,
+                        finished_at=(
+                            observed_at
+                            if recovered_status == "failed"
+                            else None
+                        ),
                     )
                 )
                 if not _rowcount_is_one(updated):
@@ -3073,16 +3222,20 @@ class DurableJobRepository:
                 refreshed = await self._fetch(db, run.run_identity)
                 receipt = {
                     "kind": "restart_recovery",
-                    "status": "blocked",
+                    "status": "failed" if recovered_status == "failed" else "blocked",
                     "reason": recovery_reason,
                     "recovery_state": recovered_status,
                     "previous_owner": old_owner,
                     "fencing_token": refreshed.fencing_token,
                     "revision": _revision(refreshed),
                     "operator_action": (
-                        "reconcile_external_effect_and_cost_then_retry_or_cancel"
-                        if recovered_status in UNCERTAIN_EXTERNAL_EFFECT_STATUSES
-                        else "reconcile_effects_then_retry_or_cancel"
+                        "deadline_expired_no_retry"
+                        if recovered_status == "failed" and recovery_reason == "deadline_expired"
+                        else (
+                            "reconcile_external_effect_and_cost_then_retry_or_cancel"
+                            if recovered_status in UNCERTAIN_EXTERNAL_EFFECT_STATUSES
+                            else "reconcile_effects_then_retry_or_cancel"
+                        )
                     ),
                     "operator_visible": True,
                 }

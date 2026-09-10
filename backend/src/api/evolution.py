@@ -35,6 +35,7 @@ from src.evolution.engine import (
     rollback_evolution_proposal,
     write_evolution_recovery_receipt,
 )
+from src.evolution.runtime import EvolutionRuntime, EvolutionRuntimeError
 from src.extensions.registry import default_manifest_roots_for_workspace
 from src.observer.manager import context_manager
 from src.runbooks.manager import runbook_manager
@@ -625,6 +626,32 @@ def _evolution_audit_details(
 async def evolution_targets():
     _ensure_evolution_managers_loaded()
     return {"targets": list_evolution_targets()}
+
+
+@router.get("/evolution/runtime")
+async def evolution_runtime_status(request: Request):
+    """Return redacted staged harness proposals and recovery states.
+
+    The runtime store contains hashes, bounded counters, and operator actions;
+    candidate content and credentials remain in the existing staged engine.
+    This read uses the same authenticated operator boundary as evolution
+    mutators and never performs inference or activates a candidate.
+    """
+    try:
+        _operator, tokens = _bind_evolution_operator(request)
+    except (RuntimeRevokedError, AuthFailure) as exc:
+        raise HTTPException(
+            status_code=401,
+            detail={"code": "session_revoked", "message": "Operator session was revoked."},
+        ) from exc
+    try:
+        assert_runtime_not_revoked()
+        runtime = EvolutionRuntime(EvolutionRuntime.default_path(settings.workspace_dir))
+        return {"schema_version": 1, "proposals": runtime.list()}
+    except EvolutionRuntimeError as exc:
+        raise HTTPException(status_code=503, detail={"code": "evolution_runtime_unavailable", "message": str(exc)}) from exc
+    finally:
+        reset_runtime_context(tokens)
 
 
 @router.post("/evolution/validate")

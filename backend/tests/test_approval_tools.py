@@ -356,11 +356,12 @@ def test_workspace_read_runs_with_scoped_authority_without_approval():
         trust_principal=_operator_principal(),
     )
     try:
-        assert tool(path="README.md") == "read:README.md"
+        with pytest.raises(PermissionError, match="adapter is not registered"):
+            tool(path="README.md")
     finally:
         reset_runtime_context(tokens)
 
-    assert tool_impl.calls == ["README.md"]
+    assert tool_impl.calls == []
 
 
 def test_explicit_scoped_operator_can_run_capability_without_approval_mode(async_db):

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
@@ -12,13 +13,18 @@ from sqlmodel import select
 from src.audit.repository import audit_repository
 from src.db.engine import get_session
 from src.db.models import Memory, MemoryEdgeType, MemoryKind, MemoryStatus, StrategyDelta
-from src.memory.decay import apply_memory_decay_policies, summarize_memory_reconciliation_state
+from src.memory.decay import (
+    DecayMaintenanceResult,
+    apply_memory_decay_policies,
+    summarize_memory_reconciliation_state,
+)
 from src.memory.providers import list_memory_provider_inventory
 from src.memory.repository import (
     _CANONICAL_MEMORY_DELETE_EXPORT_REASON,
     _CANONICAL_MEMORY_DELETE_CONTENT,
     _CANONICAL_MEMORY_REDACTED_STATE,
     _canonical_memory_deletion_marker,
+    _recovery_authority,
     memory_repository,
 )
 from src.memory.snapshots import invalidate_bounded_guardian_snapshot_cache
@@ -349,7 +355,16 @@ def memory_operator_policy_payload() -> dict[str, Any]:
     return {
         "authoritative_memory": "guardian",
         "operator_authority": "operator_corrections_override_agent_extraction",
-        "control_primitives": ["correct", "pin", "forget", "audit", *sorted(_LIVE_CONTROL_ACTIONS)],
+        "control_primitives": [
+            "correct",
+            "pin",
+            "forget",
+            "audit",
+            "export",
+            "rebuild",
+            "restore",
+            *sorted(_LIVE_CONTROL_ACTIONS),
+        ],
         "provenance_values": [
             "operator_correction",
             "operator_pin",
@@ -362,6 +377,14 @@ def memory_operator_policy_payload() -> dict[str, Any]:
         "recency_policy": "operator_actions_refresh_last_confirmed_at",
         "receipt_policy": "every_operator_memory_action_emits_auditable_receipt",
         "acknowledgement_policy": "live_control_actions_require_explicit_operator_acknowledgement",
+        "recovery_authority": {
+            "owner_binding": "authenticated_operator_session",
+            "accepted_source_role": "operator",
+            "body_actor_is_ignored": True,
+            "tombstone_precedence": "current_ledger_beats_older_archive",
+            "derived_index_mode": "deterministic_canonical_lexical",
+        },
+        "recovery_states": ["ready", "degraded_no_learning", "blocked"],
         "claim_boundary": "live_controls_are_operator_receipts_not_solved_learning_superiority_or_full_provider_parity",
         "blocked_claims": list(_BLOCKED_LIVE_CONTROL_CLAIMS),
     }
@@ -408,7 +431,25 @@ async def correct_memory(
     importance: float = 0.9,
     privacy_boundary: str | None = None,
     metadata: dict[str, Any] | None = None,
+    authenticated_session_id: str | None = None,
+    source_role: str = "operator",
 ) -> dict[str, Any]:
+    normalized_source_role = str(source_role or "").strip().lower()
+    if normalized_source_role != "operator":
+        raise PermissionError("memory correction source role must be operator")
+    if authenticated_session_id is not None:
+        normalized_authenticated_session = str(authenticated_session_id).strip()
+        normalized_requested_session = str(source_session_id or "").strip()
+        if normalized_requested_session and normalized_requested_session != normalized_authenticated_session:
+            raise PermissionError("memory correction source session does not match the authenticated session")
+        source_session_id = normalized_authenticated_session
+        if corrects_memory_id:
+            existing_target = await memory_repository.get_memory(corrects_memory_id)
+            if existing_target is None:
+                raise ValueError(f"Unknown memory id: {corrects_memory_id}")
+            target_session_id = str(existing_target.source_session_id or "").strip()
+            if target_session_id and target_session_id != normalized_authenticated_session:
+                raise PermissionError("memory correction target belongs to another owner session")
     normalized_content = " ".join(str(content or "").strip().split())
     if not normalized_content:
         raise ValueError("content must be non-empty")
@@ -512,6 +553,177 @@ async def correct_memory(
         "receipt": receipt.as_payload(),
         "audit_event_id": audit_event.id,
         "policy": memory_operator_policy_payload(),
+    }
+
+
+async def export_memory_recovery(
+    *,
+    actor: str,
+    owner_session_id: str,
+    authenticated_session_id: str,
+    source_role: str = "operator",
+    limit: int = 10_000,
+) -> dict[str, Any]:
+    """Export canonical memory through the authenticated recovery boundary."""
+
+    result = await memory_repository.export_canonical_memory_state(
+        actor=actor,
+        owner_session_id=owner_session_id,
+        authenticated_session_id=authenticated_session_id,
+        source_role=source_role,
+        limit=limit,
+    )
+    if result.get("status") == "ready":
+        event = await audit_repository.log_event(
+            actor=actor,
+            event_type="memory_recovery_exported",
+            tool_name="memory_recovery",
+            risk_level="medium",
+            policy_mode="authenticated_operator",
+            session_id=owner_session_id,
+            summary="Authenticated operator exported canonical memory",
+            details={
+                "artifact_path": result.get("artifact_path"),
+                "artifact_sha256": result.get("artifact_sha256"),
+                "export_hash": result.get("export_hash"),
+                "counts": result.get("counts"),
+                "memory_ids": result.get("memory_ids"),
+                "tombstone_ids": result.get("tombstone_ids"),
+                "source_role": source_role,
+            },
+        )
+        result["audit_event_id"] = event.id
+    return result
+
+
+async def rebuild_memory_recovery(
+    *,
+    actor: str,
+    owner_session_id: str,
+    authenticated_session_id: str,
+    source_role: str = "operator",
+    limit: int = 10_000,
+) -> dict[str, Any]:
+    """Rebuild the local derived memory index without invoking a provider."""
+
+    result = await memory_repository.rebuild_canonical_memory_index(
+        actor=actor,
+        owner_session_id=owner_session_id,
+        authenticated_session_id=authenticated_session_id,
+        source_role=source_role,
+        limit=limit,
+    )
+    if result.get("status") == "ready":
+        event = await audit_repository.log_event(
+            actor=actor,
+            event_type="memory_recovery_rebuilt",
+            tool_name="memory_recovery",
+            risk_level="low",
+            policy_mode="authenticated_operator",
+            session_id=owner_session_id,
+            summary="Authenticated operator rebuilt local memory index",
+            details={
+                "artifact_path": result.get("artifact_path"),
+                "artifact_sha256": result.get("artifact_sha256"),
+                "index_hash": result.get("index_hash"),
+                "memory_ids": result.get("memory_ids"),
+                "semantic_index_status": result.get("semantic_index_status"),
+                "source_role": source_role,
+            },
+        )
+        result["audit_event_id"] = event.id
+    return result
+
+
+async def restore_memory_recovery(
+    *,
+    archive: dict[str, Any],
+    actor: str,
+    owner_session_id: str,
+    authenticated_session_id: str,
+    source_role: str = "operator",
+) -> dict[str, Any]:
+    """Restore an archive while preserving current canonical tombstones."""
+
+    result = await memory_repository.restore_canonical_memory_state(
+        archive,
+        actor=actor,
+        owner_session_id=owner_session_id,
+        authenticated_session_id=authenticated_session_id,
+        source_role=source_role,
+    )
+    event = await audit_repository.log_event(
+        actor=actor,
+        event_type="memory_recovery_restored",
+        tool_name="memory_recovery",
+        risk_level="medium",
+        policy_mode="authenticated_operator",
+        session_id=owner_session_id,
+        summary="Authenticated operator restored canonical memory archive",
+        details={
+            "archive_hash": result.get("archive_hash"),
+            "restored_memory_ids": result.get("restored_memory_ids"),
+            "tombstone_suppressed_memory_ids": result.get("tombstone_suppressed_memory_ids"),
+            "newer_conflict_memory_ids": result.get("newer_conflict_memory_ids"),
+            "reconciliation": result.get("reconciliation"),
+            "source_role": source_role,
+        },
+    )
+    result["audit_event_id"] = event.id
+    return result
+
+
+async def memory_recovery_status(
+    *,
+    owner_session_id: str,
+    authenticated_session_id: str,
+    actor: str,
+    source_role: str = "operator",
+) -> dict[str, Any]:
+    """Return operator-visible canonical recovery and no-learning state."""
+
+    normalized_actor, normalized_owner = _recovery_authority(
+        actor=actor,
+        owner_session_id=owner_session_id,
+        authenticated_session_id=authenticated_session_id,
+        source_role=source_role,
+    )
+    try:
+        reconciliation = await memory_repository.reconcile_memory_tombstones(
+            owner_session_id=normalized_owner,
+        )
+        revision = await memory_repository.get_memory_tombstone_revision(
+            owner_session_id=normalized_owner,
+        )
+    except SQLAlchemyError:
+        return {
+            "schema_version": "guardian.memory.recovery_status.v1",
+            "status": "degraded_no_learning",
+            "operator_status": "canonical_memory_recovery_unavailable",
+            "no_learning_reason": "canonical memory database unavailable",
+            "owner_session_id": normalized_owner,
+            "provenance": {"kind": "operator_memory_recovery_status", "actor": normalized_actor},
+            "reconciliation": {"status": "unavailable"},
+            "canonical_tombstone_revision": None,
+            "retrieval_mode": "disabled_until_canonical_recovery",
+        }
+    ready = reconciliation.get("status") == "ready"
+    return {
+        "schema_version": "guardian.memory.recovery_status.v1",
+        "status": "ready" if ready else "degraded_no_learning",
+        "operator_status": "canonical_memory_recovery_ready" if ready else "canonical_memory_recovery_degraded",
+        "no_learning_reason": None if ready else "canonical tombstone ledger requires repair",
+        "owner_session_id": normalized_owner,
+        "provenance": {
+            "kind": "operator_memory_recovery_status",
+            "actor": normalized_actor,
+            "source_role": source_role,
+        },
+        "reconciliation": reconciliation,
+        "canonical_tombstone_revision": revision,
+        "retrieval_mode": "deterministic_canonical_lexical" if ready else "disabled_until_canonical_recovery",
+        "semantic_index_status": "unavailable",
+        "provider_calls": 0,
     }
 
 
@@ -746,8 +958,13 @@ async def list_memory_audit_receipts(
     *,
     memory_id: str | None = None,
     limit: int = 20,
+    owner_session_id: str | None = None,
 ) -> dict[str, Any]:
-    events = await audit_repository.list_events(limit=max(limit, 1) * 3)
+    normalized_owner = str(owner_session_id or "").strip() or None
+    events = await audit_repository.list_events(
+        limit=max(limit, 1) * 3,
+        session_id=normalized_owner,
+    )
     filtered: list[dict[str, Any]] = []
     for event in events:
         event_type = str(event.get("event_type") or "")
@@ -764,13 +981,119 @@ async def list_memory_audit_receipts(
         "summary": {
             "event_count": len(filtered),
             "memory_id": memory_id,
+            "owner_session_id": normalized_owner,
             "audit_surface": "operator_memory_control",
         },
         "policy": memory_operator_policy_payload(),
     }
 
 
-def _apply_provider_quarantine_overlay(inventory: dict[str, Any]) -> dict[str, Any]:
+def _provider_quarantine_reason_digest(quarantine: dict[str, Any]) -> str | None:
+    reason = str(quarantine.get("reason") or "").strip()
+    if not reason:
+        return None
+    return hashlib.sha256(reason.encode("utf-8")).hexdigest()
+
+
+def _owner_scoped_provider_quarantine_overlay(
+    inventory: dict[str, Any],
+    *,
+    owner_session_id: str,
+) -> dict[str, Any]:
+    """Project global provider state into a content-free owner receipt.
+
+    Provider inventory and the in-process quarantine map are global runtime
+    state.  An authenticated owner may see bounded status and aggregate
+    counts, but must not receive another scope's free-form descriptions,
+    health notes, actors, or quarantine reasons.
+    """
+
+    providers: list[dict[str, Any]] = []
+    quarantine_entries: list[dict[str, Any]] = []
+    safe_runtime_states = {"disabled", "requires_config", "no_adapter", "unavailable", "degraded", "ready"}
+    for item in inventory.get("providers", []):
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "").strip()
+        if not name:
+            continue
+        base_runtime_state = str(item.get("runtime_state") or "unknown").strip()
+        if base_runtime_state not in safe_runtime_states:
+            base_runtime_state = "unknown"
+        quarantine = _PROVIDER_QUARANTINES.get(name)
+        if quarantine:
+            reason_digest = _provider_quarantine_reason_digest(quarantine)
+            quarantine_entries.append(
+                {
+                    "name": name,
+                    "state": "quarantined",
+                    "reason_digest": reason_digest,
+                }
+            )
+            provider = {
+                "name": name,
+                "provider_kind": str(item.get("provider_kind") or "unknown").strip() or "unknown",
+                "enabled": bool(item.get("enabled")),
+                "configured": bool(item.get("configured")),
+                "runtime_state_before_quarantine": base_runtime_state,
+                "runtime_state": "quarantined",
+                "quarantine": {
+                    "state": "quarantined",
+                    "reason_present": bool(str(quarantine.get("reason") or "").strip()),
+                    "reason_digest": reason_digest,
+                },
+            }
+        else:
+            provider = {
+                "name": name,
+                "provider_kind": str(item.get("provider_kind") or "unknown").strip() or "unknown",
+                "enabled": bool(item.get("enabled")),
+                "configured": bool(item.get("configured")),
+                "runtime_state": base_runtime_state,
+                "quarantine": {"state": "not_quarantined"},
+            }
+        providers.append(provider)
+
+    quarantine_digest = hashlib.sha256(
+        json.dumps(
+            sorted(quarantine_entries, key=lambda item: item["name"]),
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    summary = {
+        "provider_count": len(providers),
+        "ready_count": sum(1 for item in providers if item["runtime_state"] == "ready"),
+        "degraded_count": sum(1 for item in providers if item["runtime_state"] == "degraded"),
+        "configured_count": sum(1 for item in providers if item["configured"]),
+        "quarantined_count": len(quarantine_entries),
+    }
+    return {
+        "providers": providers,
+        "summary": summary,
+        "provider_runtime_controls": {
+            "quarantined_count": len(quarantine_entries),
+            "quarantine_digest": quarantine_digest,
+            "state_scope": "runtime_process_memory",
+            "persistent_provider_state_available": False,
+        },
+        "scope": "owner",
+        "owner_session_id": owner_session_id,
+        "content_free": True,
+    }
+
+
+def _apply_provider_quarantine_overlay(
+    inventory: dict[str, Any],
+    *,
+    owner_session_id: str | None = None,
+) -> dict[str, Any]:
+    normalized_owner = str(owner_session_id or "").strip()
+    if normalized_owner:
+        return _owner_scoped_provider_quarantine_overlay(
+            inventory,
+            owner_session_id=normalized_owner,
+        )
     providers = []
     for item in inventory.get("providers", []):
         if not isinstance(item, dict):
@@ -861,6 +1184,34 @@ def _scope_memories_to_owner(memories: list[Memory], owner_session_id: str | Non
     return [memory for memory in memories if memory.source_session_id == normalized_owner]
 
 
+async def _verify_live_control_memory_owner(
+    *,
+    memory_id: str,
+    owner_session_id: str,
+) -> None:
+    """Fence a direct live-control call to the authenticated memory owner."""
+
+    normalized_memory_id = str(memory_id or "").strip()
+    normalized_owner = str(owner_session_id or "").strip()
+    if not normalized_memory_id or not normalized_owner:
+        return
+    memory = await memory_repository.get_memory(
+        normalized_memory_id,
+        include_deleted=True,
+    )
+    if memory is None:
+        raise ValueError(f"Unknown memory id: {normalized_memory_id}")
+    bound_owner = str(memory.source_session_id or "").strip()
+    if not bound_owner:
+        raise PermissionError(
+            f"memory {normalized_memory_id} has no owner session"
+        )
+    if bound_owner != normalized_owner:
+        raise PermissionError(
+            f"memory {normalized_memory_id} belongs to another owner session"
+        )
+
+
 def _live_provider_control_payload(provider: dict[str, Any]) -> dict[str, Any]:
     name = str(provider.get("name") or "")
     runtime_state = str(provider.get("runtime_state") or "unknown")
@@ -906,10 +1257,15 @@ async def get_memory_live_controls_snapshot(
     owner_session_id: str | None = None,
 ) -> dict[str, Any]:
     bounded_limit = min(max(int(limit or 8), 1), 50)
-    provider_inventory = _apply_provider_quarantine_overlay(list_memory_provider_inventory())
+    provider_inventory = _apply_provider_quarantine_overlay(
+        list_memory_provider_inventory(),
+        owner_session_id=owner_session_id,
+    )
     fetch_limit = bounded_limit if not owner_session_id else min(bounded_limit * 10, 200)
     try:
-        tombstone_reconciliation = await memory_repository.reconcile_memory_tombstones()
+        tombstone_reconciliation = await memory_repository.reconcile_memory_tombstones(
+            owner_session_id=owner_session_id,
+        )
         if tombstone_reconciliation.get("status") != "ready":
             active = []
             superseded = []
@@ -936,8 +1292,15 @@ async def get_memory_live_controls_snapshot(
                 await memory_repository.list_memories(status=MemoryStatus.archived, limit=fetch_limit),
                 owner_session_id,
             )[:bounded_limit]
-            receipts = await list_memory_audit_receipts(limit=bounded_limit)
-            reconciliation = await summarize_memory_reconciliation_state(limit=min(bounded_limit, 10))
+            receipts = await list_memory_audit_receipts(
+                limit=bounded_limit,
+                owner_session_id=owner_session_id,
+            )
+            reconciliation = await summarize_memory_reconciliation_state(
+                limit=min(bounded_limit, 10),
+                owner_session_id=owner_session_id,
+                content_free=owner_session_id is not None,
+            )
             operator_status = "guardian_memory_live_controls_visible"
     except SQLAlchemyError:
         active = []
@@ -1053,7 +1416,28 @@ async def apply_memory_live_control_action(
     provider_name: str | None = None,
     outcome: str | None = None,
     privacy_boundary: str | None = None,
+    authenticated_session_id: str | None = None,
+    source_role: str = "operator",
 ) -> dict[str, Any]:
+    normalized_memory_id = str(memory_id or "").strip() or None
+    normalized_owner_session_id = str(owner_session_id or "").strip() or None
+    if normalized_memory_id and not normalized_owner_session_id:
+        raise PermissionError(
+            "memory live control requires an owner session for memory targets"
+        )
+    memory_id = normalized_memory_id
+    owner_session_id = normalized_owner_session_id
+    if authenticated_session_id is not None:
+        # API routes pass the middleware-bound session here.  Keep direct
+        # internal calls backwards-compatible, while making every externally
+        # reachable live-control route prove the same runtime authority as
+        # canonical recovery.
+        _recovery_authority(
+            actor=actor,
+            owner_session_id=owner_session_id,
+            authenticated_session_id=authenticated_session_id,
+            source_role=source_role,
+        )
     _require_acknowledged(acknowledged)
     normalized_action = str(action or "").strip().lower()
     if normalized_action not in _LIVE_CONTROL_ACTIONS:
@@ -1066,6 +1450,12 @@ async def apply_memory_live_control_action(
     changed_memory = False
     changed_provider = False
     result: dict[str, Any] = {}
+
+    if memory_id and owner_session_id:
+        await _verify_live_control_memory_owner(
+            memory_id=memory_id,
+            owner_session_id=owner_session_id,
+        )
 
     if normalized_action == "review_outcome":
         if not memory_id:
@@ -1118,6 +1508,20 @@ async def apply_memory_live_control_action(
                 "memory_id": memory.id,
                 "decayed_count": 1,
                 "global_decay_ran": False,
+            }
+        elif owner_session_id:
+            result["decay"] = {
+                **asdict(DecayMaintenanceResult()),
+                "target_scope": "owner",
+                "owner_session_id": owner_session_id,
+                "global_decay_ran": False,
+                "deferred": True,
+                "status": "deferred_no_learning",
+                "operator_status": "owner_scoped_decay_requires_explicit_memory_id",
+                "no_learning": True,
+                "no_learning_reason": (
+                    "owner-scoped stale-evidence decay requires an explicit memory_id"
+                ),
             }
         else:
             decay_result = await apply_memory_decay_policies(now=now)
@@ -1209,10 +1613,26 @@ async def apply_memory_live_control_action(
         else:
             _PROVIDER_QUARANTINES.pop(normalized_provider, None)
         changed_provider = True
-        result["provider_state"] = (
-            _PROVIDER_QUARANTINES.get(normalized_provider)
-            or {"state": "reinstated", "provider_name": normalized_provider}
-        )
+        provider_quarantine = _PROVIDER_QUARANTINES.get(normalized_provider)
+        if owner_session_id:
+            result["provider_state"] = {
+                "provider_name": normalized_provider,
+                "state": "quarantined" if provider_quarantine else "reinstated",
+                "reason_present": bool(
+                    provider_quarantine
+                    and str(provider_quarantine.get("reason") or "").strip()
+                ),
+                "reason_digest": (
+                    _provider_quarantine_reason_digest(provider_quarantine)
+                    if provider_quarantine
+                    else None
+                ),
+            }
+        else:
+            result["provider_state"] = (
+                provider_quarantine
+                or {"state": "reinstated", "provider_name": normalized_provider}
+            )
 
     audit_event = await _log_live_control_event(
         actor=actor,
@@ -1249,6 +1669,9 @@ async def apply_memory_live_control_action(
     return {
         "memory": _memory_payload(memory) if memory is not None else None,
         "receipt": receipt,
-        "snapshot": await get_memory_live_controls_snapshot(limit=8),
+        "snapshot": await get_memory_live_controls_snapshot(
+            limit=8,
+            owner_session_id=owner_session_id,
+        ),
         "policy": memory_operator_policy_payload(),
     }

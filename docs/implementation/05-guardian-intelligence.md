@@ -250,6 +250,54 @@ and fails closed with an explicit degraded/no-learning receipt if the local
 authority check is unavailable. External provider deletion remains
 asynchronous and receipt-bound; the review-outcome and pin reactivation paths
 remain deferred follow-up scope for broader provider and restore orchestration.
+
+## Branch-local #753 canonical recovery and restore boundary
+
+**Status:** Partial on the milestone branch; not Shipped on `develop`.
+
+The local canonical-memory recovery seam now has authenticated operator routes
+for export, deterministic local reindex, restore, and recovery status:
+`POST /api/memory/recovery/export`, `POST /api/memory/recovery/rebuild`,
+`POST /api/memory/recovery/restore`, and `GET /api/memory/recovery/status`.
+The API middleware binds the verified operator principal and session into the
+runtime context used by the repository. The repository re-resolves that
+principal, checks the capability grant and revocation state, requires the
+runtime operator session to match the owner/session envelope, and rejects
+self-attested actor values or non-operator source roles. Recovery audit events
+record only redacted artifact and identity handles.
+
+Exports are bounded, content-bearing canonical artifacts under the registered
+workspace `artifacts/` root. They carry a deterministic hash, tombstone-ledger
+revision, source IDs, and provenance; writes use a private temporary file,
+`fsync`, and atomic replacement. Rebuild writes a separate cache artifact with
+the same identity and content digests, filters current tombstones, and reports
+`semantic_index_status=unavailable` plus an explicit no-learning reason because
+this slice does not invoke an embedding or provider service. Restore requires
+and verifies the archive export hash, then validates schema, owner/source
+sessions, IDs, timestamps, metadata, sources, and bounded numeric fields before
+`BEGIN IMMEDIATE`; every restored record is owner-bound, archived tombstones
+are reinstated and redacted before row writes, and current tombstones suppress
+older archive rows. Restored metadata receives fresh operator provenance rather
+than trusting archive authority fields. Live-control and compatibility aliases
+derive owner/session identity from the authenticated runtime and reject caller
+supplied owner spoofing; canonical mutation targets without an owner binding are
+rejected before the control action.
+
+The focused proof uses a real temporary file-backed SQLite database and proves
+artifact readback, source/hash preservation, tombstone precedence after an
+older restore, missing-row repair, deterministic reindex filtering, concurrent
+merge/delete behavior, missing/forged archive-hash rejection, runtime
+principal/session/revocation enforcement, forged live-control owner rejection,
+restart-instance recovery, archived-tombstone reapplication, missing-owner
+restore rejection, and inferred-extraction provenance sanitization. The host's
+async SQLite fixture stalled at the 120 second bound, so this slice does not
+claim a full async test-suite receipt or a separate multi-process drill. The
+existing StrategyDelta goal-loop contract still owns correction-to-later-
+decision and rollback behavior; this recovery seam emits explicit
+no-learning/degraded state and does not synthesize a StrategyDelta. Production
+backup restore, episodic retention deletion, semantic quality, and
+external-provider deletion propagation remain open.
+
 ## Branch-local #753 Gate A frozen baseline contract
 
 **Status:** Partial on the milestone branch; the deterministic baseline contract

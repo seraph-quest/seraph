@@ -20,6 +20,7 @@ from src.operators.local_codex import (
     removed_external_agent_payload,
 )
 from src.extensions.lifecycle import list_extensions
+from src.extensions.capability_execution import current_capability_execution_host
 from src.llm_logger import list_recent_llm_calls
 from src.observer.manager import context_manager
 from src.api.observer import _continuity_surface, build_observer_continuity_snapshot
@@ -122,7 +123,11 @@ from src.memory.control import (
     apply_memory_operator_control,
     get_memory_live_controls_snapshot,
 )
-from src.api.memory import authenticated_memory_actor
+from src.api.memory import (
+    _bound_recovery_runtime,
+    _require_memory_owner,
+    authenticated_memory_context,
+)
 from src.memory.provider_quality_gate import build_memory_provider_quality_gate_report
 from src.memory.superiority import build_m6_memory_superiority_payload
 from src.memory.superiority_benchmark import build_m6_memory_superiority_benchmark_report
@@ -266,6 +271,13 @@ async def operator_local_codex_status():
 @router.get("/operator/database-doctor")
 async def get_operator_database_doctor():
     return await _operator_database_doctor_payload()
+
+
+@router.get("/operator/capability-execution")
+async def get_operator_capability_execution(request: Request):
+    """Expose local effect recovery state without raw arguments or paths."""
+    _require_authenticated_capability_operator(request)
+    return current_capability_execution_host().recovery_status()
 
 
 @router.post("/operator/local-codex/exec")
@@ -4334,18 +4346,34 @@ async def get_operator_live_guardian_memory_field_program():
 
 @router.get("/operator/memory-live-controls")
 async def get_operator_memory_live_controls(
+    http_request: Request,
     limit: int = 8,
     owner_session_id: str | None = Query(default=None),
 ):
-    return await get_memory_live_controls_snapshot(limit=limit, owner_session_id=owner_session_id)
+    context = authenticated_memory_context(
+        http_request,
+        requested_owner_session_id=owner_session_id,
+    )
+    return await get_memory_live_controls_snapshot(
+        limit=limit,
+        owner_session_id=context.session_id,
+    )
 
 
 @router.get("/operator/guardian-memory-live-control")
 async def get_operator_guardian_memory_live_control(
+    http_request: Request,
     limit: int = 8,
     owner_session_id: str | None = Query(default=None),
 ):
-    return await get_memory_live_controls_snapshot(limit=limit, owner_session_id=owner_session_id)
+    context = authenticated_memory_context(
+        http_request,
+        requested_owner_session_id=owner_session_id,
+    )
+    return await get_memory_live_controls_snapshot(
+        limit=limit,
+        owner_session_id=context.session_id,
+    )
 
 
 @router.post("/operator/memory-live-controls/actions")
@@ -4354,17 +4382,33 @@ async def post_operator_memory_live_control_action(
     request: MemoryLiveControlActionRequest,
 ):
     try:
-        return await apply_memory_live_control_action(
-            action=request.action,
-            acknowledged=_memory_live_control_acknowledgement(request),
-            actor=authenticated_memory_actor(http_request),
-            reason=request.reason,
-            owner_session_id=request.owner_session_id,
-            memory_id=request.memory_id,
-            provider_name=request.provider_name,
-            outcome=request.outcome,
-            privacy_boundary=request.privacy_boundary,
+        context = authenticated_memory_context(
+            http_request,
+            requested_owner_session_id=request.owner_session_id,
         )
+        if request.memory_id:
+            await _require_memory_owner(request.memory_id, context.session_id)
+        async with _bound_recovery_runtime(http_request, context):
+            return await apply_memory_live_control_action(
+                action=request.action,
+                acknowledged=_memory_live_control_acknowledgement(request),
+                actor=context.actor,
+                reason=request.reason,
+                owner_session_id=context.session_id,
+                memory_id=request.memory_id,
+                provider_name=request.provider_name,
+                outcome=request.outcome,
+                privacy_boundary=request.privacy_boundary,
+                authenticated_session_id=context.session_id,
+                source_role=context.source_role,
+            )
+    except HTTPException:
+        raise
+    except PermissionError as exc:
+        raise HTTPException(
+            status_code=403,
+            detail={"code": "memory_authority_forbidden", "reason": str(exc)},
+        ) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -4417,6 +4461,8 @@ async def post_operator_memory_control(
     request: MemoryOperatorControlRequest,
 ):
     try:
+        context = authenticated_memory_context(http_request)
+        await _require_memory_owner(memory_id, context.session_id)
         return await apply_memory_operator_control(
             memory_id=memory_id,
             action=request.action,
@@ -4424,9 +4470,11 @@ async def post_operator_memory_control(
             content=request.content,
             summary=request.summary,
             privacy_boundary=request.privacy_boundary,
-            session_id=request.session_id,
-            actor=authenticated_memory_actor(http_request),
+            session_id=context.session_id,
+            actor=context.actor,
         )
+    except HTTPException:
+        raise
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 

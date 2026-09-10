@@ -6,6 +6,7 @@ import contextvars
 import json
 import logging
 import os
+import resource
 import shlex
 import signal
 import subprocess
@@ -103,6 +104,14 @@ _OUTPUT_CHAR_LIMIT = 12_000
 _PROCESS_OUTPUT_DEFAULT = 4_000
 _PROCESS_OUTPUT_MAX = 24_000
 _COMMAND_TIMEOUT_MAX = 300
+# The process manager already applies tighter display/timeout limits. These
+# resource ceilings are the hard local profile carried by every child. The
+# lower display limit remains an intentional operator/UI bound.
+_PROCESS_CPU_SECONDS = 300
+_PROCESS_MEMORY_BYTES = 512 * 1024 * 1024
+_PROCESS_PID_LIMIT = 64
+_PROCESS_OUTPUT_BYTES = 1 * 1024 * 1024
+_PROCESS_PIPE_CHUNK_BYTES = 64 * 1024
 _PROCESS_STOP_WAIT_SECONDS = 1.0
 _PROCESS_IDENTITY_RETRY_ATTEMPTS = 5
 _PROCESS_IDENTITY_RETRY_DELAY_SECONDS = 0.01
@@ -166,6 +175,91 @@ _NETWORK_SCRIPT_MARKERS = (
     "require('https')",
     'require("https")',
 )
+_GIT_NETWORK_SUBCOMMANDS = frozenset(
+    {
+        "clone",
+        "fetch",
+        "pull",
+        "push",
+        "remote",
+        "submodule",
+        "fetch-pack",
+        "receive-pack",
+        "send-pack",
+    }
+)
+_NPM_NETWORK_SUBCOMMANDS = frozenset(
+    {
+        "install",
+        "ci",
+        "update",
+        "publish",
+        "pack",
+        "link",
+        "outdated",
+        "audit",
+        "view",
+        "info",
+        "search",
+        "exec",
+        "run",
+        "test",
+        "start",
+        "restart",
+        "uninstall",
+        "unpublish",
+        "deprecate",
+        "dist-tag",
+        "access",
+        "owner",
+        "team",
+        "token",
+        "profile",
+        "whoami",
+        "login",
+        "logout",
+        "adduser",
+        "fund",
+    }
+)
+_UV_NETWORK_SUBCOMMANDS = frozenset(
+    {
+        "run",
+        "pip",
+        "sync",
+        "lock",
+        "add",
+        "remove",
+        "tool",
+        "publish",
+        "build",
+        "python",
+    }
+)
+_NETWORK_CAPABLE_FLAGS = {
+    "--registry",
+    "--proxy",
+    "--https-proxy",
+    "--http-proxy",
+    "--fetch-retries",
+    "--fetch-retry-factor",
+    "--fetch-retry-maxtimeout",
+    "--index-url",
+    "--extra-index-url",
+    "--default-index",
+    "--find-links",
+    "--allow-insecure-host",
+    "--upload-pack",
+    "--receive-pack",
+    "--exec-path",
+    "--config",
+    "--config-env",
+    "--userconfig",
+    "--globalconfig",
+}
+_NETWORK_CAPABLE_FLAG_PREFIXES = tuple(f"{flag}=" for flag in _NETWORK_CAPABLE_FLAGS)
+_NETWORK_ARGUMENT_PREFIXES = ("http://", "https://", "ssh://", "git@")
+_GIT_SAFE_INLINE_CONFIG_KEYS = frozenset({"user.name", "user.email"})
 _ENV_ALLOWLIST = {
     "PATH",
     "LANG",
@@ -300,14 +394,14 @@ def _normalize_command(command: str) -> str:
         raise ValueError("command must be a single executable token without shell metacharacters.")
 
     if "/" in normalized:
-        resolved = (_workspace_root() / normalized).resolve() if not Path(normalized).is_absolute() else Path(normalized).resolve()
-        try:
-            resolved.relative_to(_workspace_root())
-        except ValueError as exc:
-            raise ValueError("command paths must stay within the workspace.") from exc
-        if not resolved.exists() or resolved.is_dir():
-            raise ValueError("command path must point to an existing executable file.")
-        return str(resolved)
+        # A workspace executable is still arbitrary code: a shebang, dynamic
+        # import, or child process can open a socket after the marker checks
+        # below have run.  Until the runtime has an OS-level egress boundary,
+        # only the named command allowlist is adopted.  Workspace scripts may
+        # still be passed as arguments to the allowlisted interpreters.
+        raise ValueError(
+            "workspace executable paths are not adopted; use an allowlisted command name."
+        )
 
     lowered = normalized.lower()
     if lowered in _COMMAND_NAME_BLOCKLIST:
@@ -350,6 +444,61 @@ def _validate_interpreter_args(executable: str, args: list[str]) -> None:
         raise ValueError("uv run -m is not allowed in the process runtime.")
 
 
+def _reject_network_capable_package_args(command_name: str, args: list[str]) -> None:
+    """Reject package/VCS operations that can contact a remote service."""
+    if command_name not in {"git", "npm", "uv"}:
+        return
+
+    for index, arg in enumerate(args):
+        lowered = arg.strip().lower()
+        if command_name == "git" and arg == "-c":
+            config_value = args[index + 1].strip().lower() if index + 1 < len(args) else ""
+            # Native fixture commits need identity settings. Every other
+            # inline setting remains denied because aliases, hooks, remote
+            # rewrites, and proxy values can add an egress or shell path.
+            config_key = config_value.split("=", 1)[0].strip()
+            if config_key not in _GIT_SAFE_INLINE_CONFIG_KEYS:
+                raise ValueError("git network-capable config is blocked in the process runtime.")
+            continue
+        if lowered.startswith(_NETWORK_ARGUMENT_PREFIXES):
+            raise ValueError(f"{command_name} network destinations are blocked in the process runtime.")
+        if lowered in _NETWORK_CAPABLE_FLAGS or lowered.startswith(_NETWORK_CAPABLE_FLAG_PREFIXES):
+            raise ValueError(f"{command_name} network-capable flags are blocked in the process runtime.")
+
+    # Options that take a value must be skipped while locating the subcommand;
+    # otherwise ``git -C workspace status`` would mistake the path for it.
+    value_options = {
+        "git": {"-C", "-c", "--config-env", "--upload-pack", "--receive-pack", "--exec-path"},
+        "npm": {"--registry", "--proxy", "--https-proxy", "--userconfig", "--globalconfig"},
+        "uv": {"--index-url", "--extra-index-url", "--default-index", "--find-links", "--proxy"},
+    }[command_name]
+    subcommand: str | None = None
+    index = 0
+    while index < len(args):
+        arg = args[index]
+        lowered = arg.lower()
+        if lowered in value_options:
+            index += 2
+            continue
+        if lowered == "--":
+            if index + 1 < len(args):
+                subcommand = args[index + 1].lower()
+            break
+        if lowered.startswith("-"):
+            index += 1
+            continue
+        subcommand = lowered
+        break
+
+    blocked = {
+        "git": _GIT_NETWORK_SUBCOMMANDS,
+        "npm": _NPM_NETWORK_SUBCOMMANDS,
+        "uv": _UV_NETWORK_SUBCOMMANDS,
+    }[command_name]
+    if subcommand in blocked:
+        raise ValueError(f"{command_name} subcommand '{subcommand}' is blocked in the process runtime.")
+
+
 def _reject_network_script_markers(script_path: Path) -> None:
     try:
         body = script_path.read_text(encoding="utf-8", errors="ignore").lower()
@@ -361,6 +510,8 @@ def _reject_network_script_markers(script_path: Path) -> None:
 
 def _validate_workspace_scoped_args(executable: str, args: list[str], cwd: Path) -> None:
     command_name = Path(executable).name
+
+    _reject_network_capable_package_args(command_name, args)
 
     if command_name == "git":
         index = 0
@@ -530,10 +681,53 @@ def _truncate_output(text: str, *, limit: int = _OUTPUT_CHAR_LIMIT) -> tuple[str
 def _tail_text(path: Path, *, max_chars: int) -> tuple[str, bool]:
     if not path.exists():
         return "", False
-    data = path.read_text(encoding="utf-8", errors="replace")
+    # Never load an unbounded background log into memory. The process profile
+    # caps the file itself, and this seek keeps reads bounded even if an older
+    # process predates that cap.
+    max_bytes = max(1, max_chars * 4)
+    try:
+        size = path.stat().st_size
+        with path.open("rb") as stream:
+            if size > max_bytes:
+                stream.seek(-max_bytes, os.SEEK_END)
+                data = stream.read(max_bytes).decode("utf-8", errors="replace")
+                return "...[truncated]...\n" + data[-max_chars:], True
+            data = stream.read().decode("utf-8", errors="replace")
+    except OSError:
+        return "", False
     if len(data) <= max_chars:
         return data, False
     return "...[truncated]...\n" + data[-max_chars:], True
+
+
+def _apply_process_limits() -> None:
+    """Apply the local process profile in the child before it executes."""
+    # The runtime is currently POSIX-only. Keep the import/module guard so a
+    # future non-POSIX test can still import the process tool module.
+    if os.name != "posix":
+        return
+    for limit_name, requested in (
+        (resource.RLIMIT_CPU, _PROCESS_CPU_SECONDS),
+        (resource.RLIMIT_AS, _PROCESS_MEMORY_BYTES),
+        (resource.RLIMIT_NPROC, _PROCESS_PID_LIMIT),
+        (resource.RLIMIT_FSIZE, _PROCESS_OUTPUT_BYTES),
+    ):
+        try:
+            current_soft, current_hard = resource.getrlimit(limit_name)
+            if limit_name == resource.RLIMIT_NPROC:
+                # Preserve an existing finite host limit. Linux may account
+                # the runner's threads toward RLIMIT_NPROC, so replacing a
+                # higher inherited limit with 64 can make a child unable to
+                # fork its own bounded helper. An unlimited host profile gets
+                # a finite fallback instead of losing the process ceiling.
+                requested = max(requested, current_soft) if current_soft != resource.RLIM_INFINITY else 1024
+            hard = current_hard if current_hard != resource.RLIM_INFINITY else requested
+            soft = min(requested, hard)
+            resource.setrlimit(limit_name, (soft, hard))
+        except (AttributeError, OSError, ValueError):
+            # A container may disallow one profile limit. The caller still
+            # retains the explicit timeout/output/process-tree safeguards.
+            logger.debug("Unable to apply child resource limit", exc_info=True)
 
 
 def _display_command(argv: list[str]) -> str:
@@ -572,6 +766,7 @@ def _process_approval_context(
         "recursive_secret_like_search_paths_blocked": True,
         "dangerous_find_actions_blocked": True,
         "script_network_client_markers_blocked": True,
+        "arbitrary_workspace_executables": False,
         "runtime_log_storage": "temp_runtime_outside_workspace",
         "runtime_worker_storage": "temp_runtime_outside_workspace",
         "disposable_worker_runtime": True,
@@ -1047,23 +1242,84 @@ def _termination_cleanup_status(
     return "failed", remaining
 
 
-def _bounded_reap_process(process: subprocess.Popen[Any], *, timeout: float = 1.0) -> tuple[str, str]:
-    """Reap pipes without allowing a descendant-held pipe to hang the caller."""
-    try:
-        stdout, stderr = process.communicate(timeout=timeout)
-        return stdout or "", stderr or ""
-    except subprocess.TimeoutExpired as exc:
-        for stream in (process.stdout, process.stderr):
-            if stream is not None:
-                try:
-                    stream.close()
-                except OSError:
-                    pass
+class _BoundedPipeCapture:
+    """Drain one child pipe while retaining only a bounded prefix."""
+
+    def __init__(self, stream: Any, *, limit: int = _PROCESS_OUTPUT_BYTES) -> None:
+        self._stream = stream
+        self._limit = max(1, int(limit))
+        self._buffer = bytearray()
+        self.truncated = False
+        self._done = threading.Event()
+        if stream is None:
+            self._thread: threading.Thread | None = None
+            self._done.set()
+            return
+        self._thread = threading.Thread(target=self._drain, daemon=True)
+        self._thread.start()
+
+    def _drain(self) -> None:
+        try:
+            while True:
+                chunk = self._stream.read(_PROCESS_PIPE_CHUNK_BYTES)
+                if not chunk:
+                    return
+                if isinstance(chunk, str):
+                    chunk = chunk.encode("utf-8", errors="replace")
+                remaining = self._limit - len(self._buffer)
+                if remaining > 0:
+                    self._buffer.extend(chunk[:remaining])
+                if len(chunk) > max(0, remaining):
+                    self.truncated = True
+        except (OSError, ValueError):
+            # The parent closes a descendant-held pipe after bounded cleanup.
+            return
+        finally:
+            self._done.set()
+
+    @property
+    def done(self) -> bool:
+        return self._done.is_set()
+
+    def finish(self, *, timeout: float = 1.0) -> None:
+        if self._thread is None:
+            return
+        self._thread.join(timeout=max(0.0, timeout))
+        if self._thread.is_alive():
+            try:
+                self._stream.close()
+            except (OSError, ValueError):
+                pass
+            self._thread.join(timeout=0.05)
+
+    def text(self) -> str:
+        return bytes(self._buffer).decode("utf-8", errors="replace")
+
+
+def _bounded_reap_process(
+    process: subprocess.Popen[Any],
+    *,
+    captures: tuple[_BoundedPipeCapture, _BoundedPipeCapture] | None = None,
+    timeout: float = 1.0,
+) -> tuple[str, str]:
+    """Reap bounded captures without reading an unbounded child pipe."""
+    if captures is not None:
         try:
             process.wait(timeout=timeout)
         except subprocess.TimeoutExpired:
             pass
-        return exc.stdout or "", exc.stderr or ""
+        deadline = time.monotonic() + max(0.0, timeout)
+        for capture in captures:
+            capture.finish(timeout=max(0.0, deadline - time.monotonic()))
+        return captures[0].text(), captures[1].text()
+
+    # Defensive callers that do not yet own capture threads still get the same
+    # bounded behavior; never fall back to ``communicate`` here.
+    fallback_captures = (
+        _BoundedPipeCapture(process.stdout),
+        _BoundedPipeCapture(process.stderr),
+    )
+    return _bounded_reap_process(process, captures=fallback_captures, timeout=timeout)
 
 
 def _command_env(*, worker_root: Path | None = None) -> dict[str, str]:
@@ -1072,6 +1328,19 @@ def _command_env(*, worker_root: Path | None = None) -> dict[str, str]:
         for key, value in os.environ.items()
         if key in _ENV_ALLOWLIST
     }
+    # Resolve allowlisted helper commands (for example ``pytest``) from the
+    # same interpreter environment that owns this runtime.  A caller's PATH
+    # can put a user-level wrapper ahead of the active virtualenv; that wrapper
+    # may point at a different Python installation and make an otherwise valid
+    # deterministic workflow fail before it reaches its governed handler.
+    # Preserve the virtualenv wrapper directory. ``sys.executable`` commonly
+    # points through a symlink into a shared interpreter installation, while
+    # sibling entry points such as ``pytest`` live beside the wrapper itself.
+    interpreter_bin = str(Path(sys.executable).absolute().parent)
+    caller_path = env.get("PATH", "")
+    env["PATH"] = os.pathsep.join(
+        entry for entry in (interpreter_bin, caller_path) if entry
+    )
     env.setdefault("PYTHONUNBUFFERED", "1")
     env["SERAPH_SANDBOX_ENV"] = "allowlisted"
     if worker_root is None:
@@ -1336,8 +1605,9 @@ class ProcessRuntimeManager:
         )
         timeout = _normalize_timeout_seconds(timeout_seconds)
         worker_root = _worker_runtime_root(uuid.uuid4().hex)
-        process: subprocess.Popen[str] | None = None
+        process: subprocess.Popen[bytes] | None = None
         leader_identity: _ProcessLeaderIdentity | None = None
+        captures: tuple[_BoundedPipeCapture, _BoundedPipeCapture] | None = None
         runtime_cleanup_status = "not_requested"
         remaining_descendants: int | None = None
         try:
@@ -1358,54 +1628,58 @@ class ProcessRuntimeManager:
                 cwd=str(resolved_cwd),
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                text=True,
+                text=False,
                 shell=False,
                 env=_command_env(worker_root=worker_root),
                 start_new_session=True,
+                preexec_fn=_apply_process_limits if os.name == "posix" else None,
             )
             # start_new_session makes the child PID the process-group leader.
             # Retain its start time and PGID so a later timeout cannot signal a
             # recycled PID's process group.
             leader_identity = _capture_process_identity(process)
+            captures = (
+                _BoundedPipeCapture(process.stdout),
+                _BoundedPipeCapture(process.stderr),
+            )
             deadline = time.monotonic() + timeout
             while True:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     raise subprocess.TimeoutExpired([executable, *args], timeout)
-                try:
-                    stdout, stderr = process.communicate(timeout=min(remaining, 0.25))
+                if process.poll() is not None and captures[0].done and captures[1].done:
                     break
-                except subprocess.TimeoutExpired:
-                    if cancel_event is not None and cancel_event.is_set():
-                        descendant_identities = _snapshot_process_descendants(
-                            process,
-                            leader_identity,
-                        )
-                        termination = _kill_process_group(
-                            process,
-                            leader_identity=leader_identity,
-                            descendant_identities=descendant_identities,
-                        )
-                        runtime_cleanup_status, remaining_descendants = _termination_cleanup_status(termination)
-                        stdout, stderr = _bounded_reap_process(process)
-                        return {
-                            "ok": False,
-                            "cancelled": True,
-                            "timed_out": False,
-                            "exit_code": process.returncode,
-                            "stdout": stdout or "",
-                            "stderr": stderr or "",
-                            "display_command": _display_command([executable, *args]),
-                            "cwd": str(resolved_cwd),
-                            "timeout_seconds": timeout,
-                            "cleanup_status": runtime_cleanup_status,
-                            "remaining_descendants": remaining_descendants,
-                            "worker_root": (
-                                str(worker_root)
-                                if runtime_cleanup_status not in {"not_requested", "stopped"}
-                                else None
-                            ),
-                        }
+                if cancel_event is not None and cancel_event.is_set():
+                    descendant_identities = _snapshot_process_descendants(
+                        process,
+                        leader_identity,
+                    )
+                    termination = _kill_process_group(
+                        process,
+                        leader_identity=leader_identity,
+                        descendant_identities=descendant_identities,
+                    )
+                    runtime_cleanup_status, remaining_descendants = _termination_cleanup_status(termination)
+                    stdout, stderr = _bounded_reap_process(process, captures=captures)
+                    return {
+                        "ok": False,
+                        "cancelled": True,
+                        "timed_out": False,
+                        "exit_code": process.returncode,
+                        "stdout": stdout,
+                        "stderr": stderr,
+                        "display_command": _display_command([executable, *args]),
+                        "cwd": str(resolved_cwd),
+                        "timeout_seconds": timeout,
+                        "cleanup_status": runtime_cleanup_status,
+                        "remaining_descendants": remaining_descendants,
+                        "worker_root": (
+                            str(worker_root)
+                            if runtime_cleanup_status not in {"not_requested", "stopped"}
+                            else None
+                        ),
+                    }
+                time.sleep(min(0.05, remaining))
         except subprocess.TimeoutExpired as exc:
             if process is not None:
                 descendant_identities = _snapshot_process_descendants(
@@ -1418,7 +1692,10 @@ class ProcessRuntimeManager:
                     descendant_identities=descendant_identities,
                 )
                 runtime_cleanup_status, remaining_descendants = _termination_cleanup_status(termination)
-                stdout, stderr = _bounded_reap_process(process)
+                if captures is not None:
+                    stdout, stderr = _bounded_reap_process(process, captures=captures)
+                else:
+                    stdout, stderr = _bounded_reap_process(process)
             else:
                 stdout, stderr = exc.stdout or "", exc.stderr or ""
             return {
@@ -1426,8 +1703,8 @@ class ProcessRuntimeManager:
                 "cancelled": False,
                 "timed_out": True,
                 "exit_code": process.returncode if process is not None else None,
-                "stdout": stdout or "",
-                "stderr": stderr or "",
+                "stdout": stdout,
+                "stderr": stderr,
                 "display_command": _display_command([executable, *args]),
                 "cwd": str(resolved_cwd),
                 "timeout_seconds": timeout,
@@ -1454,8 +1731,8 @@ class ProcessRuntimeManager:
             "cancelled": bool(cancel_event is not None and cancel_event.is_set()),
             "timed_out": False,
             "exit_code": process.returncode,
-            "stdout": stdout or "",
-            "stderr": stderr or "",
+            "stdout": captures[0].text() if captures is not None else "",
+            "stderr": captures[1].text() if captures is not None else "",
             "display_command": _display_command([executable, *args]),
             "cwd": str(resolved_cwd),
             "timeout_seconds": timeout,
@@ -1499,6 +1776,7 @@ class ProcessRuntimeManager:
                     shell=False,
                     env=_command_env(worker_root=worker_root),
                     start_new_session=True,
+                    preexec_fn=_apply_process_limits if os.name == "posix" else None,
                 )
             leader_identity = _capture_process_identity(popen)
             descendant_identities = _snapshot_process_descendants(popen, leader_identity)
@@ -1775,7 +2053,7 @@ class RunCommandTool(Tool):
             "Run an approved workspace-scoped command inside the Seraph runtime container and return its output."
         )
         self.inputs = {
-            "command": {"type": "string", "description": "Executable name or workspace-relative script path."},
+            "command": {"type": "string", "description": "Allowlisted executable name; workspace scripts must be interpreter arguments."},
             "args_json": {"type": "string", "description": "JSON array of command arguments.", "nullable": True},
             "cwd": {"type": "string", "description": "Workspace-relative working directory.", "nullable": True},
             "timeout_seconds": {"type": "integer", "description": "Execution timeout in seconds.", "nullable": True},
@@ -1880,7 +2158,7 @@ class StartProcessTool(Tool):
         self.name = "start_process"
         self.description = "Start an approved workspace-scoped background process inside the Seraph runtime container."
         self.inputs = {
-            "command": {"type": "string", "description": "Executable name or workspace-relative script path."},
+            "command": {"type": "string", "description": "Allowlisted executable name; workspace scripts must be interpreter arguments."},
             "args_json": {"type": "string", "description": "JSON array of command arguments.", "nullable": True},
             "cwd": {"type": "string", "description": "Workspace-relative working directory.", "nullable": True},
         }

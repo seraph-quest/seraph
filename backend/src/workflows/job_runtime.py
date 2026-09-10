@@ -1206,9 +1206,9 @@ class DurableJobRepository:
                 try:
                     parent_fence = int(spec.parent_fencing_token)
                 except (TypeError, ValueError) as exc:
-                    raise DurableJobLeaseError("parent fencing token is malformed") from exc
+                    raise DurableJobLeaseError("parent job fence is malformed") from exc
                 if parent_fence <= 0:
-                    raise DurableJobLeaseError("parent fencing token is malformed")
+                    raise DurableJobLeaseError("parent job fence is malformed")
                 if spec.parent_job_id == identity.job_id:
                     raise DurableJobTransitionError("a durable job cannot parent itself")
                 parent = (
@@ -1710,6 +1710,15 @@ class DurableJobRepository:
         """
         if not isinstance(approval_receipt, Mapping):
             raise DurableJobTransitionError("approval resume requires a typed approval receipt")
+        current = await self.get_job(job_id)
+        if current is not None and current.get("status") != "awaiting_approval":
+            # Check the one-shot approval capability before the generic CAS
+            # state error.  A replay after a successful resume must make the
+            # consumed ApprovalRequest visible to the operator rather than
+            # looking like an unexplained revision race.
+            raise DurableJobTransitionError(
+                "approval resume requires the current authenticated ApprovalRequest"
+            )
         receipt_fields = dict(approval_receipt)
         if _text(receipt_fields.get("status")) != "approved" or receipt_fields.get("authenticated") is not True:
             raise DurableJobTransitionError(
@@ -2436,6 +2445,7 @@ class DurableJobRepository:
         *,
         checkpoint_id: str,
         state: Any,
+        checkpoint_payload: Any | None = None,
         owner: str,
         fencing_token: int,
         safe: bool = True,
@@ -2464,6 +2474,11 @@ class DurableJobRepository:
                 "recorded_at": _utc_now().isoformat(),
                 "fencing_token": fencing_token,
             }
+            if safe and checkpoint_payload is not None:
+                # A caller that has already passed its capability-specific
+                # checkpoint policy may retain a bounded, JSON-safe payload
+                # for recovery.  The legacy/default path remains digest-only.
+                receipt["payload"] = _safe_structure(checkpoint_payload)
             existing = _json_load(run.checkpoint_receipts_json, [])
             existing = [item for item in existing if isinstance(item, dict) and item.get("checkpoint_id") != checkpoint_id]
             existing.append(receipt)
@@ -2704,6 +2719,13 @@ class DurableJobRepository:
                 raise DurableJobIdempotencyConflict(
                     "effect_id already identifies a different effect target"
                 )
+            if previous is not None:
+                # A readback is an observation of the original effect.  Keep
+                # its stable authority and adapter identity when the caller
+                # only supplies the target and verification fields.
+                for field_name in ("approval_id", "adapter_idempotency_key"):
+                    if not receipt.get(field_name):
+                        receipt[field_name] = previous.get(field_name)
             previous_status = _text(previous.get("status")) if previous is not None else ""
             if previous_status in UNRESOLVED_EFFECT_STATUSES:
                 if receipt_kind == "effect" and status not in UNRESOLVED_EFFECT_STATUSES:
@@ -3080,7 +3102,6 @@ class DurableJobRepository:
                     and _text(item.get("status")) in {"unknown", "intent", "dispatched"}
                 ):
                     receipt_status = _text(receipt_payload.get("status"))
-                    _reconciliation_matches_effect(item, receipt_payload)
                     details = item.get("details") if isinstance(item.get("details"), dict) else {}
                     nested_receipt = details.get("receipt") if isinstance(details, dict) else None
                     cost_outstanding = bool(
@@ -3094,6 +3115,7 @@ class DurableJobRepository:
                         raise DurableJobTransitionError(
                             "cost liability requires a settled receipt with actual cost and operation binding"
                         )
+                    _reconciliation_matches_effect(item, receipt_payload)
                     matched_effect = True
                     item = {
                         **item,

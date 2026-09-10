@@ -19,6 +19,7 @@ from src.guardian.audio_ingress import (
     AudioIngressStatus,
     AudioProviderStatus,
     AudioRequestIdentity,
+    MAX_AUDIO_BYTES,
     build_openrouter_input_audio,
     canonical_audio_request_digest,
     serialize_audio_ingress_receipt,
@@ -105,6 +106,7 @@ def test_ready_openrouter_preflight_accepts_chat_and_receipt_never_contains_audi
     payload = receipt.as_payload()
     encoded = json.dumps(payload, sort_keys=True)
     assert receipt.schema_version == AUDIO_INGRESS_RECEIPT_SCHEMA_VERSION
+    assert payload["status"] == AudioIngressStatus.ACCEPTED.value
     assert "YQ==" not in encoded
     assert "raw transcript" not in encoded.lower()
     assert payload["privacy"] == {"raw_audio_in_receipt": False, "transcript_in_receipt": False}
@@ -156,8 +158,9 @@ def test_forged_accepted_result_is_normalized_to_blocked_receipt():
 
 def test_valid_degraded_result_preserves_status_and_canonical_metadata_digest():
     request = _request()
-    result = validate_audio_ingress(request, now=NOW)
-    receipt = serialize_audio_ingress_receipt(request, result).as_payload()
+    policy = AudioIngressPolicy()
+    result = validate_audio_ingress(request, policy=policy, now=NOW)
+    receipt = serialize_audio_ingress_receipt(request, result, policy=policy).as_payload()
 
     assert result.status is AudioIngressStatus.DEGRADED
     assert receipt["status"] == AudioIngressStatus.DEGRADED.value
@@ -184,6 +187,25 @@ def test_non_blocked_result_digest_is_bound_to_the_supplied_request():
         "attachment_id": None,
         "request_id": None,
     }
+
+
+def test_non_blocked_receipt_requires_the_admitting_policy_fingerprint():
+    request = _request()
+    admitting_policy = _policy()
+    result = validate_audio_ingress(request, policy=admitting_policy, now=NOW)
+    mismatched_policy = _policy(provider_status=AudioProviderStatus.UNAVAILABLE)
+    invalid_policy = AudioIngressPolicy(max_audio_bytes=MAX_AUDIO_BYTES + 1)
+
+    for supplied_policy in (None, mismatched_policy, invalid_policy):
+        receipt = serialize_audio_ingress_receipt(
+            request,
+            result,
+            policy=supplied_policy,
+        ).as_payload()
+        assert receipt["status"] == AudioIngressStatus.BLOCKED.value
+        assert receipt["reason_code"] == "invalid_result_provenance"
+        assert receipt["request_digest"] is None
+        assert receipt["identity"]["request_id"] is None
 
 
 def test_blocked_result_without_digest_keeps_reason_but_remains_redacted():

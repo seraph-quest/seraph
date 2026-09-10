@@ -1957,6 +1957,12 @@ class GoalSnapshotToFileAdapter:
             "goal_id_read_back": readback.goal_id_read_back,
             "reason": readback.reason,
             "goal_id_digest": _safe_digest({"goal_id": self.request.goal_id}),
+            "verified": bool(
+                readback.output_exists
+                and readback.workspace_contained
+                and readback.goal_id_read_back
+                and readback.content is not None
+            ),
         }
         try:
             if hasattr(self.jobs, "record_readback"):

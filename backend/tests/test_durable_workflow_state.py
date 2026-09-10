@@ -347,6 +347,11 @@ async def test_legacy_projection_cannot_mutate_typed_durable_job(async_db):
             owner="legacy-v2-worker",
             lease_id="legacy-v2-lease",
         )
+    with pytest.raises(RuntimeError, match="DurableJobRepository"):
+        await workflow_state_repository.build_v2_recovery_plan(
+            run_identity=typed["job_id"],
+            owner="legacy-recovery-worker",
+        )
 
 
 @pytest.mark.asyncio

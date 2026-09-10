@@ -989,6 +989,7 @@ class WorkflowStateRepository:
             ).scalars().first()
             if run is None:
                 return None
+            _assert_legacy_mutable(run)
             stored_context = _loads(run.approval_context_json, {})
             metadata = _workflow_v2_metadata(_loads(run.metadata_json, {}))
             v2 = metadata["orchestration_v2"]

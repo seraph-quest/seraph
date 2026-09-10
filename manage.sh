@@ -910,9 +910,10 @@ if [ "$COMMAND" = "local" ]; then
     DEFAULT_MODEL="$LOCAL_DEFAULT_MODEL"
 fi
 
-# The health collector is intentionally outside Docker Compose.  It only reads
-# deployment configuration/source contracts and writes a redacted receipt; it
-# never contacts OpenRouter, the GPU/VLM edge, or a connector.
+# The health collector is intentionally outside Docker Compose.  It reads
+# deployment configuration/source contracts and writes through the canonical
+# production workspace resolver; it never contacts OpenRouter, the GPU/VLM
+# edge, or a connector.
 if [ "$COMMAND" = "health" ]; then
     if [ "$ENV" != "prod" ]; then
         error_exit "'health' is supported only with '-e prod'."

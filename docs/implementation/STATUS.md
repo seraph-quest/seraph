@@ -35,9 +35,25 @@ The final integration branch also provides the managed, keyless health receipt
 command `./manage.sh -e prod health --format json`. It writes only redacted
 logical receipts under `operator-receipts/epic-736-health/`, makes no provider,
 GPU/VLM, speech, or connector calls, and records unprobed live evidence as
-`skipped`/`degraded` with recovery guidance. Source-contract checks are evidence
-of the checked revision, not claims of live execution or competitive
-superiority.
+`skipped`/`degraded` with recovery guidance. The writer uses #742's canonical
+production workspace resolver and rejects symlink or ambiguous roots. Source-
+contract checks are evidence of the checked revision, not claims of live
+execution or competitive superiority. Receipt schema v2 labels each check as
+static, configuration, integration, external-unverified, or excluded; the
+stable #771 evolution IDs and #754 comparator coverage remain explicit excluded
+checks outside Epic #736 closure.
+Required child criteria map #750 conversation identity/outbox, #748 native
+software, #749 paired edge, #751 audio capture/decode/persistence, #752
+Telegram transport, and #755 capability-pack lifecycle. Static source checks
+are informational; each behavioral gate requires one current schema-v1,
+ownership- and revision-bound child receipt under the server-resolved,
+server-owned `operator-receipts/epic-736-child-evidence` directory. Receipt
+files and directories must be private to the health process user; caller-
+selected `--child-evidence` paths are rejected. Missing, malformed, stale,
+tampered, wrong-revision, or ambiguous evidence is visibly `unknown`/`degraded`
+with exit 2, and a child-reported non-pass result, including `failed`, is
+visibly `degraded` with exit 2; hard configuration or static failures remain
+`failed` with exit 4. Source presence cannot satisfy behavior.
 
 ## Legend
 

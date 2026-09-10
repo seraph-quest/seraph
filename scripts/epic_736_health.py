@@ -16,25 +16,46 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+import fcntl
+import hashlib
+import hmac
 import json
 import os
 from pathlib import Path
+import stat
 import subprocess
 import sys
 import tempfile
 from typing import Any, Iterable
+import uuid
 
 
 ROOT = Path(__file__).resolve().parents[1]
 VALID_STATUSES = {"pass", "degraded", "blocked", "skipped", "unknown", "failed"}
-OPTIONAL_STATUSES = {"degraded", "skipped"}
+VALID_EVIDENCE_MODES = {"configuration", "static", "integration", "external_unverified", "excluded"}
+OPTIONAL_STATUSES = {"blocked", "degraded", "skipped"}
 EXIT_PASS = 0
 EXIT_OPTIONAL_DEGRADED = 2
 EXIT_REQUIRED_BLOCKED = 3
 EXIT_FAILED = 4
 EXIT_USAGE = 64
 EXIT_INTERNAL = 70
+CHILD_EVIDENCE_SCHEMA_VERSION = 1
+CHILD_EVIDENCE_MAX_BYTES = 256 * 1024
+CHILD_EVIDENCE_MAX_AGE = timedelta(hours=24)
+CHILD_EVIDENCE_MAX_FUTURE_SKEW = timedelta(minutes=5)
+CHILD_EVIDENCE_DIRECTORY = Path("operator-receipts") / "epic-736-child-evidence"
+CHILD_CRITERION_IDS = frozenset(
+    {
+        "conversation.identity_outbox",
+        "native_software.loop",
+        "edge.paired_transport",
+        "audio.capture_decode_persistence",
+        "telegram.durable_transport",
+        "capability_pack.lifecycle",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -45,6 +66,30 @@ class Criterion:
     summary: str
     recovery: str
     paths: tuple[str, ...] = ()
+    evidence_mode: str = "static"
+    exclusion_reason: str = ""
+
+
+@dataclass(frozen=True)
+class ChildEvidence:
+    criterion_id: str
+    child_issue: int
+    commit: str
+    command: str
+    result: str
+    timestamp: datetime
+    digest: str
+
+
+@dataclass
+class ChildEvidenceBundle:
+    source: str
+    entries: dict[str, list[ChildEvidence]]
+    errors: dict[str, list[str]]
+
+    @property
+    def invalid_count(self) -> int:
+        return sum(len(reasons) for reasons in self.errors.values())
 
 
 # Keep this list in sync with scripts/epic_736_health_matrix.yaml.  The Python
@@ -54,26 +99,33 @@ CRITERIA: tuple[Criterion, ...] = (
     Criterion("core.frontend", 746, True, "Operator cockpit source contract is present.", "Restore the cockpit build and its operator status binding.", ("frontend/src",)),
     Criterion("core.api_ws", 746, True, "HTTP and WebSocket application entry points are present.", "Restore the application and WebSocket routes before accepting turns.", ("backend/src/app.py", "backend/src/api/ws.py")),
     Criterion("core.db_workspace", 742, True, "Canonical workspace and database contracts are present.", "Repair the canonical workspace mount and database preflight.", ("backend/src/workspace/production.py", "backend/src/db/engine.py")),
-    Criterion("runtime.openrouter_model_fabric", 741, True, "OpenRouter model-fabric policy and configuration contracts are present.", "Repair the provider policy and persisted setup before enabling inference.", ("backend/src/model_fabric", "backend/src/llm_runtime.py")),
+    Criterion("conversation.identity_outbox", 750, True, "Canonical conversation identity and durable outbox source contracts are present; behavioral proof is supplied by a child receipt.", "Merge or restore the #750 identity and durable outbox implementation before accepting cross-surface continuity.", ("backend/src/conversation/identity.py", "backend/src/observer/native_notification_queue.py"), "integration"),
+    Criterion("native_software.loop", 748, True, "Governed native software-engineering loop source contracts are present; behavioral proof is supplied by a child receipt.", "Merge or restore the #748 native software loop and bounded process surface before accepting repository work.", ("backend/src/workflows/native_software_engineering.py", "backend/src/tools/process_tools.py"), "integration"),
+    Criterion("edge.paired_transport", 749, True, "Paired edge transport source contract is present; behavioral proof is supplied by a child receipt.", "Merge or restore the #749 paired-edge identity, pairing, and revocation contract before accepting edge work.", ("backend/src/extensions/node_pairing.py",), "integration"),
+    Criterion("audio.capture_decode_persistence", 751, True, "Audio capture, decode, and persistence source contract is present; behavioral proof is supplied by a child receipt.", "Merge or restore the #751 governed audio capture, decode, and persistence contract before accepting audio work.", ("backend/src/guardian/audio_ingress.py",), "integration"),
+    Criterion("telegram.durable_transport", 752, True, "Telegram durable transport source contract is present; behavioral proof is supplied by a child receipt.", "Merge or restore the #752 paired Telegram transport, consent, and durable receipt contract before accepting Telegram work.", ("backend/src/extensions/telegram_ingress.py",), "integration"),
+    Criterion("capability_pack.lifecycle", 755, True, "Capability-pack lifecycle source contract is present; behavioral proof is supplied by a child receipt.", "Merge or restore the #755 governed capability-pack lifecycle, review, activation, and rollback contract before accepting packs.", ("backend/src/extensions/capability_pack.py",), "integration"),
+    Criterion("runtime.openrouter_model_fabric", 741, True, "OpenRouter model-fabric policy and configuration contracts are present.", "Repair the provider policy and persisted setup before enabling inference.", ("backend/src/model_fabric", "backend/src/llm_runtime.py"), "configuration"),
     Criterion("runtime.remote_inference_admission", 744, True, "Remote inference admission contract is present.", "Restore admission, budget, and cancellation enforcement before inference.", ("backend/src/model_fabric/remote_inference_admission.py", "backend/src/model_fabric/execution.py")),
     Criterion("runtime.effect_reconciliation", 743, True, "Durable effect and reconciliation contracts are present.", "Repair durable effect reconciliation before retrying external work.", ("backend/src/workflows/durable_state.py", "backend/src/workflows/production_workflow_guarantees.py")),
-    Criterion("runtime.openrouter_text_receipt", 741, False, "Live OpenRouter text canary was not run by this keyless command.", "Run the separately authorised provider canary with a supplied key and retain its redacted receipt.", ()),
-    Criterion("runtime.openrouter_multimodal_receipt", 751, False, "Live OpenRouter multimodal canary was not run by this keyless command.", "Run isolated audio and vision canaries when provider credentials and test media are authorised.", ()),
-    Criterion("runtime.no_local_inference_dependency", 775, True, "Production configuration has no local model, GPU, VLM, Whisper, or Piper route.", "Clear local inference variables and remove any hidden fallback before deployment.", ()),
+    Criterion("runtime.openrouter_text_receipt", 741, False, "Live OpenRouter text behavior is unverified by this keyless command.", "Provider capability and quality remain outside this implementation receipt.", (), "external_unverified"),
+    Criterion("runtime.openrouter_multimodal_receipt", 751, False, "Live OpenRouter multimodal behavior is unverified by this keyless command.", "Provider capability and quality remain outside this implementation receipt.", (), "external_unverified"),
+    Criterion("runtime.no_local_inference_dependency", 775, True, "Production configuration has no local model, GPU, VLM, Whisper, or Piper route.", "Clear local inference variables and remove any hidden fallback before deployment.", (), "configuration"),
     Criterion("scheduler.priority_queue", 744, True, "Bounded scheduler and admission source contracts are present.", "Restore priority, serial admission, cancellation, and recovery handling.", ("backend/src/scheduler", "backend/src/model_fabric/remote_inference_admission.py")),
     Criterion("security.capability_caller_enforcement", 747, True, "Capability caller and egress enforcement contracts are present.", "Restore caller authorization and fail-closed egress checks.", ("backend/src/native_tools", "backend/src/security")),
     Criterion("guardian.goal_revision_stop", 745, True, "Goal revision and stale-plan stop contracts are present.", "Repair goal snapshot and stale-plan checks before proactive execution.", ("backend/src/guardian", "backend/src/goals")),
     Criterion("guardian.verified_progress", 746, True, "Guardian outcome and verification contracts are present.", "Restore outcome verification and operator-visible degraded states.", ("backend/src/guardian", "backend/src/api/operator.py")),
-    Criterion("memory.embedding_capability", 775, False, "Live embedding receipt was not run by this keyless command.", "Run the separately authorised embedding canary and record model, version, dimension, and rollback evidence.", ("backend/src/memory/embedder.py", "backend/src/memory")),
+    Criterion("memory.embedding_capability", 775, False, "Live embedding behavior is unverified by this keyless command.", "Provider capability and semantic quality remain outside this implementation receipt.", ("backend/src/memory/embedder.py", "backend/src/memory"), "external_unverified"),
     Criterion("memory.correction_delete_restore", 753, True, "Memory correction, deletion, and restore contracts are present.", "Restore canonical-memory correction and deletion guards before learning.", ("backend/src/memory", "backend/tests/test_memory_control.py")),
-    Criterion("evolution.staged_candidate", 771, True, "Evolution candidates remain staged and reviewable.", "Keep candidate assets staged until human review and explicit promotion.", ("backend/src/evolution/runtime.py", "backend/src/api/evolution.py")),
-    Criterion("evolution.hidden_evaluation", 771, True, "Evolution evaluation and hidden-split contracts are present.", "Restore held-out evaluation and version binding before evaluating a candidate.", ("backend/src/evolution/runtime.py", "backend/src/evolution/benchmark.py")),
-    Criterion("evolution.scoped_canary_rollback", 771, True, "Scoped canary and rollback contracts are present.", "Restore approval-bound canary rollback and baseline recovery.", ("backend/src/evolution/runtime.py",)),
-    Criterion("evaluation.comparator_scope_coverage", 754, True, "Comparator scope and evidence-boundary contracts are present.", "Refresh frozen-source comparator evidence and retain unknown coverage explicitly.", ("docs/implementation/09-benchmark-status.md", "docs/research")),
+    Criterion("research.harness_improvement", 771, False, "Harness improvement evaluation is deferred outside Epic #736.", "Keep #771 separately tracked; no benchmark, comparator, canary, or provider call is required here.", (), "excluded"),
+    Criterion("evolution.staged_candidate", 771, False, "Evolution candidate proof is explicitly excluded from this keyless Epic #736 receipt.", "Retain #771's staged-candidate and promotion evidence in its separately reviewed workflow.", (), "excluded", "#771 evolution evidence is outside the keyless #736 closure gate."),
+    Criterion("evolution.hidden_evaluation", 771, False, "Evolution hidden-split evaluation is explicitly excluded from this keyless Epic #736 receipt.", "Retain #771's held-out evaluation and version-binding evidence in its separately reviewed workflow.", (), "excluded", "#771 evolution evidence is outside the keyless #736 closure gate."),
+    Criterion("evolution.scoped_canary_rollback", 771, False, "Evolution canary and rollback proof is explicitly excluded from this keyless Epic #736 receipt.", "Retain #771's approval-bound canary and rollback evidence in its separately reviewed workflow.", (), "excluded", "#771 evolution evidence is outside the keyless #736 closure gate."),
+    Criterion("evaluation.comparator_scope_coverage", 754, False, "Comparator scope coverage is explicitly excluded from this keyless Epic #736 receipt.", "Retain comparator scope, coverage, and uncertainty evidence in the separately reviewed evaluation record.", (), "excluded", "Comparator campaigns are outside the keyless #736 closure gate and cannot create a superiority claim."),
     Criterion("backup.restore", 742, True, "Workspace backup and restore contracts are present.", "Repair backup verification and restore recovery before production use.", ("backend/src/workspace", "backend/tests/test_workspace_lifecycle.py")),
-    Criterion("edge.mac", 746, False, "Mac edge live readiness was not probed by this keyless command.", "Run the operator-shell edge probe in the target deployment and retain its redacted receipt.", ("backend/src/edge",)),
-    Criterion("voice.audio", 751, False, "Voice and audio provider readiness was not probed by this keyless command.", "Run an isolated provider canary with test media and explicit consent.", ("backend/src/guardian/audio_ingress.py", "backend/src/guardian/multimodal_voice.py")),
-    Criterion("telegram", 752, False, "Telegram delivery readiness was not probed by this keyless command.", "Run an isolated paired-channel probe with a test account and revocation receipt.", ("backend/src/extensions/telegram_ingress.py",)),
+    Criterion("edge.mac", 746, False, "Mac edge live readiness was not probed by this keyless command.", "Run the operator-shell edge probe in the target deployment and retain its redacted receipt.", ("backend/src/edge",), "external_unverified"),
+    Criterion("voice.audio", 751, False, "Voice and audio provider readiness was not probed by this keyless command.", "Run an isolated provider canary with test media and explicit consent.", ("backend/src/guardian/audio_ingress.py", "backend/src/guardian/multimodal_voice.py"), "external_unverified"),
+    Criterion("telegram", 752, False, "Telegram delivery readiness was not probed by this keyless command.", "Run an isolated paired-channel probe with a test account and revocation receipt.", ("backend/src/extensions/telegram_ingress.py",), "external_unverified"),
     Criterion("storage.disk", 742, True, "Workspace storage contract is available for a read-only check.", "Restore writable canonical storage and retention limits.", ("backend/src/workspace/production.py",)),
     Criterion("docs.truth", 754, True, "Canonical implementation and research documentation surfaces are present.", "Reconcile shipped, partial, blocked, and research claims before release.", ("docs/implementation/STATUS.md", "docs/implementation/12-current-app-guide.md", "docs/implementation/08-docs-contract.md")),
 )
@@ -103,6 +155,158 @@ def _safe_commit() -> str:
     return commit if len(commit) == 40 and all(ch in "0123456789abcdef" for ch in commit.lower()) else "unknown"
 
 
+class ChildEvidenceError(ValueError):
+    """A child receipt cannot be trusted for an integration criterion."""
+
+    def __init__(self, reason: str, *, criterion_id: str | None = None):
+        super().__init__(reason)
+        self.reason = reason
+        self.criterion_id = criterion_id
+
+
+def _child_evidence_digest(payload: dict[str, Any]) -> str:
+    content = dict(payload)
+    content.pop("hash", None)
+    encoded = json.dumps(content, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _parse_child_timestamp(value: Any, *, now: datetime) -> datetime:
+    if not isinstance(value, str) or not value or len(value) > 64:
+        raise ChildEvidenceError("timestamp is missing or invalid")
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ChildEvidenceError("timestamp is not ISO-8601") from exc
+    if parsed.tzinfo is None:
+        raise ChildEvidenceError("timestamp must include a timezone")
+    parsed = parsed.astimezone(timezone.utc)
+    if parsed < now - CHILD_EVIDENCE_MAX_AGE:
+        raise ChildEvidenceError("evidence is stale")
+    if parsed > now + CHILD_EVIDENCE_MAX_FUTURE_SKEW:
+        raise ChildEvidenceError("evidence timestamp is in the future")
+    return parsed
+
+
+def _validate_child_evidence(
+    payload: Any,
+    *,
+    expected_commit: str,
+    now: datetime | None = None,
+) -> ChildEvidence:
+    if not isinstance(payload, dict):
+        raise ChildEvidenceError("receipt must be a JSON object")
+    candidate_id = payload.get("criterion_id")
+    if not isinstance(candidate_id, str) or candidate_id not in CHILD_CRITERION_IDS:
+        raise ChildEvidenceError("criterion_id is not an accepted required child criterion", criterion_id=candidate_id if isinstance(candidate_id, str) else None)
+    criterion = next(item for item in CRITERIA if item.identifier == candidate_id)
+    required_fields = {"schema_version", "child_issue", "criterion_id", "commit", "command", "result", "timestamp", "hash"}
+    missing = sorted(required_fields - payload.keys())
+    if missing:
+        raise ChildEvidenceError("missing required fields: " + ", ".join(missing), criterion_id=candidate_id)
+    if payload.get("schema_version") != CHILD_EVIDENCE_SCHEMA_VERSION:
+        raise ChildEvidenceError("unsupported evidence schema", criterion_id=candidate_id)
+    if payload.get("child_issue") != criterion.owner_issue:
+        raise ChildEvidenceError("child issue does not own criterion", criterion_id=candidate_id)
+    commit = payload.get("commit")
+    if not isinstance(commit, str) or len(commit) != 40 or any(character not in "0123456789abcdefABCDEF" for character in commit):
+        raise ChildEvidenceError("commit is not a revision hash", criterion_id=candidate_id)
+    if expected_commit == "unknown" or commit.lower() != expected_commit.lower():
+        raise ChildEvidenceError("evidence revision does not match the collector revision", criterion_id=candidate_id)
+    command = payload.get("command")
+    if not isinstance(command, str) or not command.strip() or len(command) > 4096 or "\x00" in command:
+        raise ChildEvidenceError("command is missing or invalid", criterion_id=candidate_id)
+    result = payload.get("result")
+    if isinstance(result, dict):
+        result = result.get("status")
+    if not isinstance(result, str) or result.lower() not in VALID_STATUSES:
+        raise ChildEvidenceError("result must contain a valid status", criterion_id=candidate_id)
+    digest = payload.get("hash")
+    if not isinstance(digest, str) or len(digest) != 64 or any(character not in "0123456789abcdefABCDEF" for character in digest):
+        raise ChildEvidenceError("hash is not a SHA-256 digest", criterion_id=candidate_id)
+    calculated = _child_evidence_digest(payload)
+    if not hmac.compare_digest(digest.lower(), calculated):
+        raise ChildEvidenceError("evidence hash mismatch", criterion_id=candidate_id)
+    timestamp = _parse_child_timestamp(payload.get("timestamp"), now=now or _utc_now())
+    return ChildEvidence(candidate_id, criterion.owner_issue, commit.lower(), command.strip(), result.lower(), timestamp, calculated)
+
+
+def _evidence_path(path: Path | str | None) -> tuple[Path | None, str]:
+    if path is not None:
+        raise RuntimeError(
+            "child evidence is server-owned; explicit evidence paths are not accepted"
+        )
+    canonical = _workspace_root() / CHILD_EVIDENCE_DIRECTORY
+    return (canonical, "canonical") if canonical.exists() else (None, "none")
+
+
+def _validate_server_owned_child_evidence(path: Path) -> None:
+    """Require the canonical, private child-evidence directory.
+
+    The health gate is allowed to consume receipts only from the production
+    workspace it resolves itself.  Caller-selected paths would let a local
+    invocation turn an arbitrary writable file into a release-gate pass.
+    """
+
+    workspace = _workspace_root()
+    canonical = workspace / CHILD_EVIDENCE_DIRECTORY
+    if os.path.normpath(str(path.absolute())) != os.path.normpath(str(canonical.absolute())):
+        raise RuntimeError("child evidence must use the server-owned canonical directory")
+    current = workspace
+    for component in CHILD_EVIDENCE_DIRECTORY.parts:
+        current = current / component
+        if not current.exists():
+            continue
+        metadata = current.lstat()
+        if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
+            raise RuntimeError("child evidence directory must be a regular directory")
+        if metadata.st_uid != os.getuid() or metadata.st_mode & 0o022:
+            raise RuntimeError("child evidence directory is not server-owned and private")
+
+
+def _load_child_evidence(path: Path | str | None, *, expected_commit: str) -> ChildEvidenceBundle:
+    requested, source = _evidence_path(path)
+    bundle = ChildEvidenceBundle(source, {}, {})
+    if requested is None:
+        return bundle
+    try:
+        _reject_symlink_components(requested.absolute())
+        _validate_server_owned_child_evidence(requested)
+        if not requested.exists() or requested.is_symlink():
+            bundle.errors["__global__"] = ["evidence path is missing or unsafe"]
+            return bundle
+        if requested.is_dir():
+            candidates = sorted(item for item in requested.iterdir() if item.suffix.lower() == ".json")
+            if len(candidates) > 256:
+                bundle.errors["__global__"] = ["evidence directory exceeds the bounded file limit"]
+                candidates = candidates[:256]
+        else:
+            candidates = [requested]
+    except OSError:
+        bundle.errors["__global__"] = ["evidence path is unreadable"]
+        return bundle
+    for candidate in candidates:
+        payload: Any = None
+        try:
+            metadata = candidate.stat()
+            if (
+                candidate.is_symlink()
+                or metadata.st_uid != os.getuid()
+                or metadata.st_mode & 0o022
+                or metadata.st_size > CHILD_EVIDENCE_MAX_BYTES
+            ):
+                raise ChildEvidenceError("evidence file is unsafe or too large")
+            payload = json.loads(candidate.read_text(encoding="utf-8"))
+            evidence = _validate_child_evidence(payload, expected_commit=expected_commit)
+        except (OSError, UnicodeError, json.JSONDecodeError, ChildEvidenceError) as exc:
+            candidate_id = payload.get("criterion_id") if isinstance(payload, dict) else None
+            key = candidate_id if isinstance(candidate_id, str) and candidate_id in CHILD_CRITERION_IDS else "__global__"
+            bundle.errors.setdefault(key, []).append(str(exc))
+            continue
+        bundle.entries.setdefault(evidence.criterion_id, []).append(evidence)
+    return bundle
+
+
 def _truthy(value: str | None) -> bool:
     return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
 
@@ -111,13 +315,32 @@ def _nonempty_env(names: Iterable[str]) -> list[str]:
     return [name for name in names if os.environ.get(name, "").strip()]
 
 
-def _check(identifier: str, owner: int, status: str, summary: str, recovery: str, *, required: bool, artifact_refs: Iterable[str] = ()) -> dict[str, Any]:
+def _canonical_openrouter_model(value: str) -> str | None:
+    """Validate a model id with the runtime's canonical OpenRouter parser."""
+    backend_root = ROOT / "backend"
+    if not backend_root.is_dir():
+        return None
+    backend_text = str(backend_root)
+    if backend_text not in sys.path:
+        sys.path.insert(0, backend_text)
+    try:
+        from src.model_fabric.configuration import normalize_openrouter_model_id
+
+        return normalize_openrouter_model_id(value)
+    except (ImportError, OSError, ValueError):
+        return None
+
+
+def _check(identifier: str, owner: int, status: str, summary: str, recovery: str, *, required: bool, artifact_refs: Iterable[str] = (), evidence_mode: str = "static") -> dict[str, Any]:
     if status not in VALID_STATUSES:
         raise ValueError(f"invalid health status for {identifier}")
+    if evidence_mode not in VALID_EVIDENCE_MODES:
+        raise ValueError(f"invalid evidence mode for {identifier}")
     return {
         "id": identifier,
         "owner_issue": owner,
         "required": required,
+        "evidence_mode": evidence_mode,
         "status": status,
         "summary": summary,
         "artifact_refs": list(artifact_refs),
@@ -128,20 +351,29 @@ def _check(identifier: str, owner: int, status: str, summary: str, recovery: str
 def _openrouter_config_check() -> dict[str, Any]:
     base = os.environ.get("LLM_API_BASE", "").strip().rstrip("/")
     model = os.environ.get("DEFAULT_MODEL", "").strip()
-    allowed = {item.strip() for item in os.environ.get("OPENROUTER_ALLOWED_UPSTREAMS", "").split(",") if item.strip()}
+    allowed = {
+        item.strip().lower()
+        for item in os.environ.get("OPENROUTER_ALLOWED_UPSTREAMS", "").split(",")
+        if item.strip()
+    }
     try:
         temperature = float(os.environ.get("MODEL_TEMPERATURE", ""))
         max_tokens = int(os.environ.get("MODEL_MAX_TOKENS", ""))
     except ValueError:
         temperature, max_tokens = -1.0, -1
+    canonical_model = _canonical_openrouter_model(model)
+    model_provider = None
+    if canonical_model is not None:
+        model_provider = canonical_model.removeprefix("openrouter/").split("/", 1)[0].lower()
     expected = (
         base == "https://openrouter.ai/api/v1"
-        and model == "openrouter/z-ai/glm-5.3-flash"
+        and canonical_model is not None
         and _truthy(os.environ.get("OPENROUTER_PROVIDER_ONLY"))
         and not _truthy(os.environ.get("OPENROUTER_ALLOW_FALLBACKS"))
         and _truthy(os.environ.get("OPENROUTER_REQUIRE_PARAMETERS"))
         and os.environ.get("OPENROUTER_DATA_COLLECTION", "").strip().lower() == "deny"
-        and "z-ai" in allowed
+        and model_provider is not None
+        and model_provider in allowed
         and 0.0 <= temperature <= 2.0
         and 1 <= max_tokens <= 32768
     )
@@ -153,6 +385,7 @@ def _openrouter_config_check() -> dict[str, Any]:
         "Set the governed OpenRouter base, model, upstream allowlist, no-fallback policy, consent policy, temperature, and token bound.",
         required=True,
         artifact_refs=("config:openrouter-policy",),
+        evidence_mode="configuration",
     )
 
 
@@ -180,28 +413,74 @@ def _no_local_inference_check() -> dict[str, Any]:
         "Clear local inference variables and keep OpenRouter as the sole model route." if configured else "A later deployment probe may verify process absence; this keyless check makes no network call.",
         required=True,
         artifact_refs=("config:local-inference-absence",),
+        evidence_mode="configuration",
     )
 
 
-def _contract_check(criterion: Criterion) -> dict[str, Any]:
+def _contract_check(
+    criterion: Criterion,
+    *,
+    identifier: str | None = None,
+    required: bool | None = None,
+) -> dict[str, Any]:
+    check_id = identifier or criterion.identifier
+    check_required = criterion.required if required is None else required
     missing = [path for path in criterion.paths if not (ROOT / path).exists()]
     if missing:
         return _check(
-            criterion.identifier,
+            check_id,
             criterion.owner_issue,
-            "blocked" if criterion.required else "skipped",
-            "Required implementation contract is unavailable in this revision." if criterion.required else "Optional implementation surface is unavailable in this revision; no live probe was attempted.",
+            "blocked" if check_required else "skipped",
+            "Implementation source contract is unavailable in this revision." if check_required else "Optional implementation surface is unavailable in this revision; no live probe was attempted.",
             criterion.recovery,
-            required=criterion.required,
+            required=check_required,
+            evidence_mode="static",
         )
+    return _check(
+        check_id,
+        criterion.owner_issue,
+        "pass",
+        criterion.summary + " Source presence is informational; live execution is not claimed by this receipt.",
+        criterion.recovery,
+        required=check_required,
+        artifact_refs=("source-contract:" + criterion.identifier,),
+        evidence_mode="static",
+    )
+
+
+def _child_evidence_check(criterion: Criterion, bundle: ChildEvidenceBundle) -> dict[str, Any]:
+    reasons = list(bundle.errors.get("__global__", ())) + list(bundle.errors.get(criterion.identifier, ()))
+    entries = bundle.entries.get(criterion.identifier, ())
+    if reasons:
+        status = "unknown"
+        summary = "Trusted child behavioral evidence is invalid: " + "; ".join(reasons[:2])
+        artifact_refs: tuple[str, ...] = ()
+    elif len(entries) == 0:
+        status = "unknown"
+        summary = "Trusted child behavioral evidence is missing; source presence cannot satisfy this required gate."
+        artifact_refs = ()
+    elif len(entries) != 1:
+        status = "unknown"
+        summary = "Trusted child behavioral evidence is ambiguous because multiple receipts claim this criterion."
+        artifact_refs = ()
+    else:
+        evidence = entries[0]
+        status = evidence.result
+        summary = (
+            "Trusted child behavioral evidence passed for the collector revision."
+            if status == "pass"
+            else f"Trusted child behavioral evidence reported {status}."
+        )
+        artifact_refs = ("child-evidence:" + evidence.digest[:16],)
     return _check(
         criterion.identifier,
         criterion.owner_issue,
-        "pass",
-        criterion.summary + " Source presence is checked; live execution is not claimed by this keyless receipt.",
+        status,
+        summary,
         criterion.recovery,
-        required=criterion.required,
-        artifact_refs=("source-contract:" + criterion.identifier,),
+        required=True,
+        artifact_refs=artifact_refs,
+        evidence_mode="integration",
     )
 
 
@@ -213,14 +492,51 @@ def _optional_live_check(criterion: Criterion) -> dict[str, Any]:
         criterion.summary + " No provider, connector, edge, or media call was made.",
         criterion.recovery,
         required=False,
+        evidence_mode=criterion.evidence_mode,
+    )
+
+
+def _excluded_check(criterion: Criterion) -> dict[str, Any]:
+    summary = criterion.summary
+    if criterion.exclusion_reason:
+        summary = f"{summary} {criterion.exclusion_reason}"
+    return _check(
+        criterion.identifier,
+        criterion.owner_issue,
+        "skipped",
+        summary,
+        criterion.recovery,
+        required=False,
+        artifact_refs=("exclusion:" + criterion.identifier,),
+        evidence_mode="excluded",
     )
 
 
 def _overall(checks: list[dict[str, Any]]) -> tuple[str, int]:
-    statuses = {str(item["status"]) for item in checks}
-    if "failed" in statuses:
+    def _is_required_integration(item: dict[str, Any]) -> bool:
+        return bool(item.get("required")) and item.get("evidence_mode") == "integration"
+
+    # A child runner's ``failed`` result is a valid, trusted integration
+    # receipt. It reports that the child behavior failed; it does not mean
+    # that the collector itself hit a hard configuration or static-contract
+    # failure. Keep that result visibly degraded with the child-evidence exit
+    # code while preserving exit 4 for hard failures.
+    if any(
+        item["status"] == "failed" and not _is_required_integration(item)
+        for item in checks
+    ):
         return "failed", EXIT_FAILED
-    if any(item["required"] and item["status"] in {"blocked", "unknown"} for item in checks):
+    # The offline collector may be run before child runners have emitted their
+    # receipts.  Keep that state visibly degraded (never healthy) while using
+    # the optional-evidence exit so an operator can collect the missing proof.
+    if any(
+        _is_required_integration(item) and item["status"] != "pass"
+        for item in checks
+    ):
+        return "degraded", EXIT_OPTIONAL_DEGRADED
+    if any(item["required"] and item["status"] == "blocked" for item in checks):
+        return "blocked", EXIT_REQUIRED_BLOCKED
+    if any(item["required"] and item["status"] == "unknown" for item in checks):
         return "blocked", EXIT_REQUIRED_BLOCKED
     if any(item["required"] and item["status"] == "degraded" for item in checks):
         return "degraded", EXIT_REQUIRED_BLOCKED
@@ -230,32 +546,92 @@ def _overall(checks: list[dict[str, Any]]) -> tuple[str, int]:
 
 
 def _workspace_root() -> Path:
-    configured = os.environ.get("WORKSPACE_DIR", "").strip() or os.environ.get("BACKEND_DATA_PATH_PROD", "").strip()
-    if not configured:
-        raise RuntimeError("canonical workspace is not configured")
-    root = Path(configured).expanduser()
-    if not root.is_absolute():
-        raise RuntimeError("canonical workspace must be absolute")
-    return root
+    if not os.environ.get("BACKEND_DATA_PATH_PROD", "").strip():
+        raise RuntimeError("canonical production workspace bind is not configured")
+    backend_root = ROOT / "backend"
+    if not backend_root.is_dir():
+        raise RuntimeError("canonical workspace contract is unavailable")
+    backend_text = str(backend_root)
+    if backend_text not in sys.path:
+        sys.path.insert(0, backend_text)
+    try:
+        from src.workspace.production import ProductionWorkspaceError, resolve_production_workspace
+    except ImportError as exc:
+        raise RuntimeError("canonical production workspace is invalid") from exc
+    try:
+        workspace = resolve_production_workspace(dict(os.environ), base_dir=ROOT)
+    except (OSError, ProductionWorkspaceError, ValueError) as exc:
+        raise RuntimeError("canonical production workspace is invalid") from exc
+    return workspace.host_root
+
+
+def _reject_symlink_components(path: Path) -> None:
+    current = Path(path.anchor)
+    for component in path.parts[1:]:
+        current /= component
+        try:
+            metadata = current.lstat()
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            raise RuntimeError("canonical receipt path is unreadable") from exc
+        if stat.S_ISLNK(metadata.st_mode):
+            raise RuntimeError("canonical receipt path must not contain symlinks")
+
+
+def _sync_directory(directory: Path) -> None:
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    descriptor = os.open(directory, flags)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
 
 
 def _write_receipt(receipt: dict[str, Any], generated_at: datetime) -> str:
     directory = _workspace_root() / "operator-receipts" / "epic-736-health"
+    _reject_symlink_components(directory)
     directory.mkdir(parents=True, exist_ok=True)
-    filename = generated_at.strftime("%Y%m%dT%H%M%SZ") + ".json"
-    target = directory / filename
-    payload = (json.dumps(receipt, indent=2, sort_keys=True) + "\n").encode("utf-8")
-    with tempfile.NamedTemporaryFile("wb", dir=directory, prefix=".health-", suffix=".tmp", delete=False) as handle:
-        temporary = Path(handle.name)
-        handle.write(payload)
-        handle.flush()
-        os.fsync(handle.fileno())
-    os.replace(temporary, target)
+    _reject_symlink_components(directory)
+    lock_path = directory / ".health-receipt.lock"
+    lock_fd = os.open(
+        lock_path,
+        os.O_CREAT | os.O_RDWR | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
+        0o600,
+    )
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        filename = generated_at.strftime("%Y%m%dT%H%M%SZ") + ".json"
+        target = directory / filename
+        while target.exists():
+            filename = generated_at.strftime("%Y%m%dT%H%M%SZ") + "-" + uuid.uuid4().hex[:12] + ".json"
+            target = directory / filename
+        payload = (json.dumps(receipt, indent=2, sort_keys=True) + "\n").encode("utf-8")
+        temporary: Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile("wb", dir=directory, prefix=".health-", suffix=".tmp", delete=False) as handle:
+                temporary = Path(handle.name)
+                handle.write(payload)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, target)
+            _sync_directory(directory)
+        finally:
+            if temporary is not None:
+                try:
+                    temporary.unlink()
+                except FileNotFoundError:
+                    pass
+    finally:
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        os.close(lock_fd)
     return f"operator-receipts/epic-736-health/{filename}"
 
 
-def build_receipt() -> tuple[dict[str, Any], int, str]:
+def build_receipt(evidence_path: Path | str | None = None) -> tuple[dict[str, Any], int, str]:
     generated = _utc_now()
+    expected_commit = _safe_commit()
+    child_evidence = _load_child_evidence(evidence_path, expected_commit=expected_commit)
     checks: list[dict[str, Any]] = []
     # The model-fabric entry is special because it is also the configuration
     # authority consumed by the rest of the checks.
@@ -264,7 +640,20 @@ def build_receipt() -> tuple[dict[str, Any], int, str]:
     for criterion in CRITERIA:
         if criterion.identifier in {"runtime.openrouter_model_fabric", "runtime.no_local_inference_dependency"}:
             continue
-        if not criterion.required and not criterion.paths:
+        if criterion.evidence_mode == "excluded":
+            checks.append(_excluded_check(criterion))
+        elif criterion.identifier in CHILD_CRITERION_IDS:
+            checks.append(
+                _contract_check(
+                    criterion,
+                    identifier=criterion.identifier + ".source",
+                    required=False,
+                )
+            )
+            checks.append(_child_evidence_check(criterion, child_evidence))
+        elif not criterion.required and criterion.evidence_mode in {"external_unverified", "integration"}:
+            checks.append(_optional_live_check(criterion))
+        elif not criterion.required and not criterion.paths:
             checks.append(_optional_live_check(criterion))
         else:
             checks.append(_contract_check(criterion))
@@ -277,16 +666,35 @@ def build_receipt() -> tuple[dict[str, Any], int, str]:
     ]
     residual_risks = [
         "Live provider, embedding, edge, voice, and Telegram evidence remains unprobed by the keyless command; no superiority or production-readiness claim follows.",
-        "Source-contract presence does not replace focused tests, runtime/UI receipts, or isolated mutating drills.",
+        "Evolution candidate, hidden-evaluation, canary-rollback, and comparator evidence remains explicitly excluded and separately owned.",
+        "Required child criteria have separate informational source checks and integration gates; source presence never satisfies behavioral evidence.",
+        "Missing, stale, malformed, mismatched, or ambiguous child receipts remain unknown and visibly degraded until a trusted runner emits a current passing receipt.",
     ]
     receipt: dict[str, Any] = {
-        "schema_version": 1,
+        "schema_version": 2,
         "epic": 736,
         "generated_at": _timestamp(generated),
         "environment": "prod",
-        "commit": _safe_commit(),
+        "commit": expected_commit,
         "overall_status": overall_status,
+        "claim_boundary": "static_and_local_contract_evidence_only; external_provider_quality_and_evolution_comparator_evidence_excluded",
+        "exclusions": [
+            {
+                "id": item["id"],
+                "owner_issue": item["owner_issue"],
+                "reason": item["summary"],
+            }
+            for item in checks
+            if item["evidence_mode"] == "excluded"
+        ],
         "checks": checks,
+        "child_evidence": {
+            "schema_version": CHILD_EVIDENCE_SCHEMA_VERSION,
+            "source": child_evidence.source,
+            "expected_commit": expected_commit,
+            "max_age_seconds": int(CHILD_EVIDENCE_MAX_AGE.total_seconds()),
+            "invalid_count": child_evidence.invalid_count,
+        },
         "redactions": {"count": 0, "classes": ["credentials", "message_content", "raw_media", "sensitive_paths"]},
         "skipped": skipped,
         "residual_risks": residual_risks,
@@ -298,6 +706,16 @@ def build_receipt() -> tuple[dict[str, Any], int, str]:
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--format", choices=("json", "text"), default="text")
+    parser.add_argument(
+        "--child-evidence",
+        "--evidence-dir",
+        "--evidence-path",
+        "--evidence",
+        dest="evidence_path",
+        type=Path,
+        default=None,
+        help="deprecated compatibility option; child receipts must be in the server-owned canonical directory",
+    )
     return parser
 
 
@@ -309,7 +727,7 @@ def main(argv: list[str] | None = None) -> int:
         # confused with a health failure.
         return EXIT_PASS if int(exc.code) == 0 else EXIT_USAGE
     try:
-        receipt, exit_code, logical_path = build_receipt()
+        receipt, exit_code, logical_path = build_receipt(args.evidence_path)
     except RuntimeError:
         print("health receipt generation failed: canonical workspace configuration error", file=sys.stderr)
         return EXIT_USAGE

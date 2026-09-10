@@ -586,6 +586,36 @@ def _consent_error(consent: TelegramConsent | None, *, boundary: str, current: d
     return None
 
 
+def _consent_error_for_update(
+    update: TelegramUpdate,
+    *,
+    current: datetime,
+    skew: int,
+) -> str | None:
+    """Revalidate both boundary grants at every ingress/receipt boundary."""
+
+    external_error = _consent_error(
+        update.external_transit_consent,
+        boundary="external",
+        current=current,
+        skew=skew,
+    )
+    if external_error:
+        return external_error
+    openrouter_error = _consent_error(
+        update.openrouter_consent,
+        boundary="openrouter",
+        current=current,
+        skew=skew,
+    )
+    if openrouter_error:
+        return openrouter_error
+    assert update.external_transit_consent is not None and update.openrouter_consent is not None
+    if update.external_transit_consent.reference == update.openrouter_consent.reference:
+        return "consent_references_not_separate"
+    return None
+
+
 def _valid_state(state: TelegramIngressState, policy: TelegramIngressPolicy) -> bool:
     if not isinstance(state, TelegramIngressState):
         return False
@@ -670,6 +700,13 @@ def validate_telegram_update(
         return _result(TelegramIngressStatus.BLOCKED, "update_too_old")
     if age < -effective_policy.max_clock_skew_seconds:
         return _result(TelegramIngressStatus.BLOCKED, "update_clock_ahead")
+    consent_error = _consent_error_for_update(
+        update,
+        current=current,
+        skew=effective_policy.max_clock_skew_seconds,
+    )
+    if consent_error:
+        return _result(TelegramIngressStatus.BLOCKED, consent_error)
     digest = canonical_telegram_request_digest(update)
     idempotency_key = canonical_telegram_idempotency_key(update)
     for entry in state.replay_entries:
@@ -690,15 +727,6 @@ def validate_telegram_update(
             return _result(TelegramIngressStatus.BLOCKED, "message_id_conflict")
     if update.sequence <= state.last_sequence:
         return _result(TelegramIngressStatus.BLOCKED, "update_not_monotonic")
-    external_error = _consent_error(update.external_transit_consent, boundary="external", current=current, skew=effective_policy.max_clock_skew_seconds)
-    if external_error:
-        return _result(TelegramIngressStatus.BLOCKED, external_error)
-    openrouter_error = _consent_error(update.openrouter_consent, boundary="openrouter", current=current, skew=effective_policy.max_clock_skew_seconds)
-    if openrouter_error:
-        return _result(TelegramIngressStatus.BLOCKED, openrouter_error)
-    assert update.external_transit_consent is not None and update.openrouter_consent is not None
-    if update.external_transit_consent.reference == update.openrouter_consent.reference:
-        return _result(TelegramIngressStatus.BLOCKED, "consent_references_not_separate")
     attachment_error = _attachment_error(update, effective_policy)
     if attachment_error:
         return _result(TelegramIngressStatus.BLOCKED, attachment_error, attachment_quarantined=update.attachment is not None)
@@ -832,6 +860,7 @@ def _trusted_result(result: TelegramIngressResult, update: TelegramUpdate | None
         expected_policy_fingerprint = _policy_fingerprint(policy)
         if update is None or expected_policy_fingerprint is None:
             return _result(TelegramIngressStatus.BLOCKED, "invalid_result_provenance")
+        assert policy is not None
         if result._policy_fingerprint != expected_policy_fingerprint:
             return _result(TelegramIngressStatus.BLOCKED, "invalid_result_provenance")
         try:
@@ -839,6 +868,13 @@ def _trusted_result(result: TelegramIngressResult, update: TelegramUpdate | None
                 return _result(TelegramIngressStatus.BLOCKED, "invalid_result_provenance")
         except (TypeError, ValueError, UnicodeError):
             return _result(TelegramIngressStatus.BLOCKED, "invalid_result_provenance")
+        consent_error = _consent_error_for_update(
+            update,
+            current=datetime.now(timezone.utc),
+            skew=policy.max_clock_skew_seconds,
+        )
+        if consent_error:
+            return _result(TelegramIngressStatus.BLOCKED, consent_error)
     elif result.request_digest is not None and update is not None:
         try:
             if result.request_digest != canonical_telegram_request_digest(update):

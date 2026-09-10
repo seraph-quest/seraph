@@ -35,8 +35,8 @@ def _consent(
     reference: str,
     *,
     state: TelegramConsentState = TelegramConsentState.ACTIVE,
-    granted_at: datetime = NOW - timedelta(minutes=1),
-    expires_at: datetime = NOW + timedelta(minutes=10),
+    granted_at: datetime = NOW - timedelta(days=1),
+    expires_at: datetime = NOW + timedelta(days=1),
     scope: str = TELEGRAM_TRANSIT_CONSENT_SCOPE,
 ) -> TelegramConsent:
     return TelegramConsent(reference, state, granted_at, expires_at, scope)
@@ -182,6 +182,76 @@ def test_ingest_advances_sequence_and_rejects_duplicate_conflict_and_replay():
     )
     assert conflict.reason_code == "replay_conflict"
     assert old_sequence.reason_code == "update_not_monotonic"
+
+
+def test_replay_rechecks_revoked_and_expired_consent_before_duplicate_return():
+    policy = _policy()
+    update = _update()
+    _, state = ingest_telegram_update(TelegramIngressState(), update, policy, now=NOW)
+
+    revoked = replace(
+        update,
+        external_transit_consent=replace(
+            update.external_transit_consent,
+            state=TelegramConsentState.REVOKED,
+        ),
+    )
+    expired = replace(
+        update,
+        openrouter_consent=replace(
+            update.openrouter_consent,
+            expires_at=NOW - timedelta(seconds=1),
+        ),
+    )
+
+    revoked_retry = validate_telegram_update(revoked, state, policy, now=NOW)
+    expired_retry = validate_telegram_update(expired, state, policy, now=NOW)
+
+    assert revoked_retry.status is TelegramIngressStatus.BLOCKED
+    assert revoked_retry.reason_code == "consent_revoked"
+    assert expired_retry.status is TelegramIngressStatus.BLOCKED
+    assert expired_retry.reason_code == "consent_expired"
+
+
+def test_receipt_rechecks_consent_after_acceptance_is_revoked():
+    policy = _policy()
+    update = _update()
+    accepted = validate_telegram_update(update, policy=policy, now=NOW)
+    revoked = replace(
+        update,
+        external_transit_consent=replace(
+            update.external_transit_consent,
+            state=TelegramConsentState.REVOKED,
+        ),
+    )
+
+    payload = serialize_telegram_receipt(revoked, accepted, policy=policy).as_payload()
+
+    assert payload["status"] == "blocked"
+    assert payload["reason_code"] == "consent_revoked"
+    assert payload["request_digest"] is None
+    assert payload["identity"]["operator_id"] is None
+    assert payload["consent"]["external_transit_reference"] is None
+
+
+def test_receipt_rechecks_consent_after_acceptance_expires():
+    policy = _policy()
+    update = _update()
+    accepted = validate_telegram_update(update, policy=policy, now=NOW)
+    expired = replace(
+        update,
+        openrouter_consent=replace(
+            update.openrouter_consent,
+            expires_at=datetime.now(timezone.utc) - timedelta(seconds=1),
+        ),
+    )
+
+    payload = serialize_telegram_receipt(expired, accepted, policy=policy).as_payload()
+
+    assert payload["status"] == "blocked"
+    assert payload["reason_code"] == "consent_expired"
+    assert payload["request_digest"] is None
+    assert payload["identity"]["operator_id"] is None
 
 
 def test_voice_is_quarantined_and_handoff_is_metadata_only():

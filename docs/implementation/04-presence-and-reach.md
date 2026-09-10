@@ -101,7 +101,17 @@ Retries that reuse the same identity in the same session receive a deterministic
 409/error receipt before model dispatch.  Reuse with changed content or bound
 metadata is rejected as an identity conflict, and an explicit unknown session
 is rejected rather than created.  Attachments, durable outbox delivery, voice,
-and Telegram or other external channel adapters remain future #750 slices.
+and Telegram or other external channel adapters remain future integration
+slices.
+
+## Telegram Ingress Contract (Branch-Local #752 Partial)
+
+The `feat/752-telegram-contract` branch adds a provider-free, typed Telegram
+ingress contract. Telegram transit is an external channel and both the
+`telegram_transit` and `openrouter_inference` consent grants are checked again
+on replay and receipt serialization, with content-free redacted receipts.
+No live Telegram adapter, bot token, durable outbox, transport delivery, or
+provider runtime is shipped by this branch; browser behavior is unchanged.
 
 ## Working On Now
 

@@ -344,6 +344,7 @@ async def _ensure_legacy_columns(conn) -> None:
         {
             "record_schema_version": "INTEGER DEFAULT 1",
             "parent_job_id": "VARCHAR",
+            "parent_fencing_token": "INTEGER",
             "job_kind": "VARCHAR DEFAULT 'workflow'",
             "owner_kind": "VARCHAR DEFAULT 'legacy'",
             "owner_principal_id": "VARCHAR",

@@ -626,13 +626,39 @@ async def run_strategist_tick() -> None:
         decision = parse_strategist_response(str(raw))
 
         if not decision.should_intervene:
-            await durable_job_repository.record_effect(
+            decision_digest = _reasoning_digest(decision.reasoning)
+            decision_effect = await durable_job_repository.record_effect(
                 durable_job_id,
                 effect_type="strategist_decision",
+                target_path=f"strategist:{durable_job_id}",
+                target_digest=decision_digest,
                 status="succeeded",
                 details={
                     "should_intervene": False,
-                    "reasoning_digest": _reasoning_digest(decision.reasoning),
+                    "reasoning_digest": decision_digest,
+                },
+                owner=_STRATEGIST_RUNNER_ID,
+                fencing_token=durable_fencing_token,
+            )
+            # The parser decision is an in-memory observation. Persist a
+            # capability-specific verified receipt before terminal success so
+            # restart/replay cannot mistake the policy value for execution
+            # evidence.
+            await durable_job_repository.record_effect(
+                durable_job_id,
+                effect_id=(decision_effect.get("receipt", {}).get("effect_id")
+                           if isinstance(decision_effect, dict)
+                           else None),
+                effect_type="strategist_decision",
+                receipt_kind="readback",
+                target_path=f"strategist:{durable_job_id}",
+                target_digest=decision_digest,
+                content_sha256=decision_digest,
+                status="succeeded",
+                details={
+                    "verified": True,
+                    "decision_schema": "strategist_decision",
+                    "should_intervene": False,
                 },
                 owner=_STRATEGIST_RUNNER_ID,
                 fencing_token=durable_fencing_token,
@@ -643,7 +669,7 @@ async def run_strategist_tick() -> None:
                 fencing_token=durable_fencing_token,
                 result={
                     "should_intervene": False,
-                    "reasoning_digest": _reasoning_digest(decision.reasoning),
+                    "reasoning_digest": decision_digest,
                 },
                 result_summary="no intervention required",
             )

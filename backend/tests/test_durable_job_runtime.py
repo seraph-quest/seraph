@@ -26,8 +26,10 @@ from src.workflows.job_runtime import (
     _admission_conflicts,
     _canonical_reconciliation_receipt,
     _canonical_remote_inference_receipt,
+    _bounded_effect_ledger,
     _digest,
     _effect_ledger_or_raise,
+    _verified_readback_exists,
     _safe_inputs_digest,
     _safe_structure,
     _validate_admission_authority,
@@ -38,10 +40,40 @@ from src.workflows.job_runtime import (
 
 def test_transition_table_is_the_single_normative_lifecycle_contract():
     assert DURABLE_JOB_STATUSES == tuple(DURABLE_JOB_TRANSITIONS)
-    assert DURABLE_JOB_TRANSITIONS["accepted"] == frozenset({"queued", "blocked", "failed", "cancelled"})
+    assert DURABLE_JOB_TRANSITIONS["accepted"] == frozenset({
+        "queued",
+        "blocked",
+        "unknown_external_effect",
+        "cost_liability",
+        "failed",
+        "cancelled",
+    })
     assert DURABLE_JOB_TRANSITIONS["failed"] == frozenset({"queued"})
     assert DURABLE_JOB_TRANSITIONS["succeeded"] == frozenset()
     assert DURABLE_JOB_TRANSITIONS["cancelled"] == frozenset()
+    assert "queued" not in DURABLE_JOB_TRANSITIONS["awaiting_approval"]
+
+
+def test_success_requires_verified_capability_readback_and_unresolved_history_is_retained():
+    assert not _verified_readback_exists([
+        {"receipt_kind": "effect", "status": "succeeded", "effect_type": "write"}
+    ])
+    assert _verified_readback_exists([
+        {
+            "receipt_kind": "readback",
+            "status": "succeeded",
+            "target_path": "workspace:result",
+            "content_sha256": "digest",
+            "details": {"verified": True},
+        }
+    ])
+    receipts = [
+        {"effect_id": "settled-0", "status": "succeeded"},
+        {"effect_id": "settled-1", "status": "succeeded"},
+        {"effect_id": "intent-1", "status": "intent"},
+    ]
+    retained = _bounded_effect_ledger(receipts, limit=2)
+    assert [item["effect_id"] for item in retained] == ["intent-1", "settled-1"]
 
 
 def test_corrupt_effect_history_is_not_coerced_to_empty():
@@ -223,6 +255,25 @@ def test_retry_requires_owner_identity_and_canonical_reconciliation_receipt():
     )
     assert digest
     assert "must-not-persist" not in canonical
+    with pytest.raises(ValueError, match="provider_operation_id or adapter_idempotency_key"):
+        _canonical_reconciliation_receipt(
+            {
+                "effect_id": "effect-cost",
+                "effect_type": "remote_inference",
+                "status": "settled",
+                "actual_cost_microusd": 3,
+            }
+        )
+    with pytest.raises(ValueError, match="nonnegative integer"):
+        _canonical_reconciliation_receipt(
+            {
+                "effect_id": "effect-cost",
+                "effect_type": "remote_inference",
+                "status": "settled",
+                "actual_cost_microusd": -1,
+                "adapter_idempotency_key": "operation-cost",
+            }
+        )
 
 
 def test_remote_admission_receipts_are_allowlisted_and_redacted():
@@ -473,13 +524,24 @@ async def test_terminal_replay_is_idempotent_with_stale_execution_receipt(async_
     )
     await durable_job_repository.queue_job(admitted["job_id"])
     claimed = await durable_job_repository.claim_job(admitted["job_id"], owner="runner-terminal-replay")
+    verified = await durable_job_repository.record_readback(
+        admitted["job_id"],
+        target_path="result:terminal-replay",
+        target_digest="result-digest",
+        content_sha256="result-digest",
+        status="succeeded",
+        details={"verified": True, "capability": "terminal-replay"},
+        owner="runner-terminal-replay",
+        fencing_token=claimed["lease"]["fencing_token"],
+        expected_revision=claimed["revision"],
+    )
     completed = await durable_job_repository.transition_job(
         admitted["job_id"],
         "succeeded",
         owner="runner-terminal-replay",
         fencing_token=claimed["lease"]["fencing_token"],
         expected_state="running",
-        expected_revision=claimed["revision"],
+        expected_revision=verified["revision"],
     )
 
     replay = await durable_job_repository.transition_job(
@@ -552,6 +614,77 @@ async def test_pending_dependency_does_not_admit_runner_or_consume_attempt(async
 
 
 @pytest.mark.asyncio
+async def test_approval_held_job_cannot_be_resumed_without_a_fresh_authority_route(async_db):
+    admitted = await durable_job_repository.admit_job(
+        _spec(job_id="job-743-approval-replay", dedupe_key="candidate-approval-replay")
+    )
+    await durable_job_repository.queue_job(admitted["job_id"])
+    claimed = await durable_job_repository.claim_job(admitted["job_id"], owner="runner-approval-replay")
+    held = await durable_job_repository.transition_job(
+        admitted["job_id"],
+        "awaiting_approval",
+        owner="runner-approval-replay",
+        fencing_token=claimed["lease"]["fencing_token"],
+    )
+    with pytest.raises(DurableJobTransitionError, match="illegal"):
+        await durable_job_repository.resume_job(
+            admitted["job_id"],
+            expected_revision=held["revision"],
+        )
+
+
+@pytest.mark.asyncio
+async def test_malformed_effect_history_is_blocked_before_claim(async_db):
+    admitted = await durable_job_repository.admit_job(
+        _spec(job_id="job-743-malformed-claim", dedupe_key="candidate-malformed-claim")
+    )
+    await durable_job_repository.queue_job(admitted["job_id"])
+    async with async_db() as db:
+        await db.execute(
+            update(WorkflowRunState)
+            .where(WorkflowRunState.run_identity == admitted["job_id"])
+            .values(effect_receipts_json="not-json")
+        )
+    blocked = await durable_job_repository.claim_job(admitted["job_id"], owner="runner-malformed-claim")
+    assert blocked["status"] == "blocked"
+    assert blocked["failure_reason"] == "malformed_effect_history_requires_reconciliation"
+    assert blocked["attempt_count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_unresolved_effect_blocks_requeue_and_claim(async_db):
+    admitted = await durable_job_repository.admit_job(
+        _spec(job_id="job-743-unresolved-claim", dedupe_key="candidate-unresolved-claim")
+    )
+    await durable_job_repository.record_effect(
+        admitted["job_id"],
+        effect_id="unresolved-claim-effect",
+        effect_type="destination_write",
+        target_path="controlled-ledger",
+        status="intent",
+        owner=None,
+        fencing_token=None,
+    )
+    with pytest.raises(DurableJobTransitionError, match="unresolved external effect"):
+        await durable_job_repository.queue_job(admitted["job_id"])
+
+    async with async_db() as db:
+        await db.execute(
+            update(WorkflowRunState)
+            .where(WorkflowRunState.run_identity == admitted["job_id"])
+            .values(status="queued")
+        )
+    recovered = await durable_job_repository.claim_job(
+        admitted["job_id"], owner="runner-unresolved-claim"
+    )
+    assert recovered["status"] == "unknown_external_effect"
+    assert recovered["attempt_count"] == 0
+    assert recovered["receipt"]["operator_action"] == (
+        "reconcile_external_effect_before_claim_or_retry"
+    )
+
+
+@pytest.mark.asyncio
 async def test_effect_receipt_updates_keep_one_stable_external_identity(async_db):
     admitted = await durable_job_repository.admit_job(
         _spec(job_id="job-743-effect-update", dedupe_key="candidate-effect-update")
@@ -571,7 +704,7 @@ async def test_effect_receipt_updates_keep_one_stable_external_identity(async_db
         owner="runner-effect-update",
         fencing_token=token,
     )
-    settled = await durable_job_repository.record_effect(
+    dispatched = await durable_job_repository.record_effect(
         admitted["job_id"],
         effect_id="effect-stable-1",
         effect_type="destination_write",
@@ -579,9 +712,23 @@ async def test_effect_receipt_updates_keep_one_stable_external_identity(async_db
         target_digest="target-1",
         approval_id="approval-1",
         adapter_idempotency_key="adapter-key-1",
-        status="succeeded",
+        status="dispatched",
         owner="runner-effect-update",
         fencing_token=token,
+        expected_revision=intent["revision"],
+    )
+    settled = await durable_job_repository.record_readback(
+        admitted["job_id"],
+        effect_id="effect-stable-1",
+        effect_type="destination_write",
+        target_path="controlled-ledger",
+        target_digest="target-1",
+        status="succeeded",
+        content_sha256="readback-1",
+        details={"verified": True, "readback": "controlled-ledger"},
+        owner="runner-effect-update",
+        fencing_token=token,
+        expected_revision=dispatched["revision"],
     )
     completed = await durable_job_repository.transition_job(
         admitted["job_id"],
@@ -698,6 +845,7 @@ async def test_failed_unresolved_effect_can_be_reconciled_before_retry(async_db)
         "effect_id": effect["receipt"]["effect_id"],
         "effect_type": "destination_write",
         "status": "read_back",
+        "target_path": "controlled-ledger",
         "outcome": "absent",
     }
     with pytest.raises(DurableJobTransitionError, match="unknown external effect"):
@@ -907,6 +1055,17 @@ async def test_claim_heartbeat_and_terminal_transition_share_revision_cas(async_
         fencing_token=token,
         expected_revision=claimed["revision"],
     )
+    verified = await durable_job_repository.record_readback(
+        admitted["job_id"],
+        target_path="result:cas",
+        target_digest="result-cas",
+        content_sha256="result-cas",
+        status="succeeded",
+        details={"verified": True, "capability": "cas"},
+        owner="runner-cas",
+        fencing_token=token,
+        expected_revision=heartbeated["revision"],
+    )
 
     with pytest.raises(DurableJobLeaseError, match="revision"):
         await durable_job_repository.transition_job(
@@ -923,10 +1082,10 @@ async def test_claim_heartbeat_and_terminal_transition_share_revision_cas(async_
         owner="runner-cas",
         fencing_token=token,
         expected_state="running",
-        expected_revision=heartbeated["revision"],
+        expected_revision=verified["revision"],
     )
     assert terminal["status"] == "succeeded"
-    assert terminal["revision"] == heartbeated["revision"] + 1
+    assert terminal["revision"] == verified["revision"] + 1
 
 
 @pytest.mark.asyncio
@@ -978,6 +1137,7 @@ async def test_restart_recovery_keeps_unknown_effect_and_cost_liability_out_of_r
     await durable_job_repository.record_effect(
         admitted["job_id"],
         effect_type="destination_write",
+        target_path="controlled-ledger",
         status="intent",
         details={"destination_ledger": "controlled", "payload": "redacted"},
         owner="runner-unknown",
@@ -1016,6 +1176,7 @@ async def test_restart_recovery_keeps_unknown_effect_and_cost_liability_out_of_r
             ),
             "effect_type": "destination_write",
             "status": "read_back",
+            "target_path": "controlled-ledger",
             "outcome": "absent",
         },
     )
@@ -1041,9 +1202,11 @@ async def test_restart_recovery_keeps_unknown_effect_and_cost_liability_out_of_r
     cost_claimed = await durable_job_repository.claim_job(
         cost_job["job_id"], owner="runner-cost", lease_seconds=1
     )
-    await durable_job_repository.record_effect(
+    cost_effect = await durable_job_repository.record_effect(
         cost_job["job_id"],
+        effect_id="cost-effect",
         effect_type="remote_inference_admission",
+        adapter_idempotency_key="operation-cost",
         status="unknown",
         details={"unknown_cost_outstanding": True},
         owner="runner-cost",
@@ -1061,9 +1224,37 @@ async def test_restart_recovery_keeps_unknown_effect_and_cost_liability_out_of_r
             owner_principal_id="service:strategist",
             service_id="service:strategist",
             reconciliation_receipt={
-                "effect_id": "cost-effect",
+                "effect_id": cost_effect["receipt"]["effect_id"],
                 "effect_type": "remote_inference_admission",
                 "status": "settled",
                 "actual_cost_microusd": 0,
+                "adapter_idempotency_key": "operation-cost",
             },
         )
+    with pytest.raises(DurableJobTransitionError, match="cost liability requires a settled receipt"):
+        await durable_job_repository.reconcile_external_effect(
+            cost_job["job_id"],
+            owner_kind="service",
+            owner_principal_id="service:strategist",
+            service_id="service:strategist",
+            reconciliation_receipt={
+                "effect_id": cost_effect["receipt"]["effect_id"],
+                "effect_type": "remote_inference_admission",
+                "status": "read_back",
+                "outcome": "absent",
+            },
+        )
+    settled = await durable_job_repository.reconcile_external_effect(
+        cost_job["job_id"],
+        owner_kind="service",
+        owner_principal_id="service:strategist",
+        service_id="service:strategist",
+        reconciliation_receipt={
+            "effect_id": cost_effect["receipt"]["effect_id"],
+            "effect_type": "remote_inference_admission",
+            "status": "settled",
+            "actual_cost_microusd": 0,
+            "adapter_idempotency_key": "operation-cost",
+        },
+    )
+    assert settled["status"] == "failed"

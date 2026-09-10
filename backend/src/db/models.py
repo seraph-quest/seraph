@@ -224,6 +224,7 @@ class WorkflowRunState(SQLModel, table=True):
     # Durable invocation contract (additive to the legacy workflow projection).
     record_schema_version: int = Field(default=2, index=True)
     parent_job_id: Optional[str] = Field(default=None, index=True)
+    parent_fencing_token: Optional[int] = Field(default=None, index=True)
     job_kind: str = Field(default="workflow", index=True)
     owner_kind: str = Field(default="legacy", index=True)
     owner_principal_id: Optional[str] = Field(default=None, index=True)

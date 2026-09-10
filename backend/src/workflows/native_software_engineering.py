@@ -879,8 +879,9 @@ def _cancellation_result(
         _write_json(job_workspace.artifact_dir / "cancellation.json", cancellation_payload)
     except OSError:
         cancellation_payload["artifact_write_failed"] = True
+    durable_status = str((durable_job or {}).get("status") or "cancelled")
     return {
-        "status": "cancelled",
+        "status": durable_status,
         "reason_code": reason_code,
         "evidence_mode": NATIVE_SOFTWARE_ENGINEERING_EVIDENCE_MODE,
         "provider": None,
@@ -995,6 +996,7 @@ async def _record_test_failure_evidence(
         request.job_id,
         target_path=_relative_workspace_path(patched_path),
         status="succeeded" if readback_ok else "failed",
+        target_digest=_digest_text(patched_body),
         content_sha256=_digest_text(patched_body),
         details={
             "diagnose_artifact": _relative_workspace_path(job_workspace.artifact_dir / "diagnose.json"),
@@ -1003,6 +1005,7 @@ async def _record_test_failure_evidence(
             "process_cleanup": _process_cleanup_receipt(test_result),
             "exact_workspace_scope": exact_scope,
             "original_fixture_immutable": source_immutable,
+            "verified": readback_ok,
         },
         owner=worker_owner,
         fencing_token=fencing_token,
@@ -1387,7 +1390,7 @@ async def run_native_software_engineering_fixture(
         # Establish the intended external write before applying it. If the
         # process dies after this point, restart recovery keeps the effect
         # uncertain until a readback/reconciliation receipt resolves it.
-        await durable_job_repository.record_effect(
+        intent = await durable_job_repository.record_effect(
             request.job_id,
             effect_id=patch_effect_id,
             effect_type="workspace_patch",
@@ -1403,6 +1406,42 @@ async def run_native_software_engineering_fixture(
             owner=worker_owner,
             fencing_token=fencing_token,
         )
+        dispatch_kwargs = {
+            "effect_id": patch_effect_id,
+            "effect_type": "workspace_patch",
+            "target_path": relative_bug_path,
+            "target_digest": patch_target_digest,
+            "approval_id": patch_approval_id,
+            "adapter_idempotency_key": patch_adapter_key,
+            "status": "dispatched",
+            "details": {
+                "preview_artifact": _relative_workspace_path(job_workspace.artifact_dir / "patch.preview.json"),
+                "approval_artifact": _relative_workspace_path(job_workspace.artifact_dir / "approval.json"),
+            },
+            "owner": worker_owner,
+            "fencing_token": fencing_token,
+        }
+        intent_revision = intent.get("revision") if isinstance(intent, dict) else None
+        if intent_revision is not None:
+            dispatch_kwargs["expected_revision"] = int(intent_revision)
+        await durable_job_repository.record_effect(
+            request.job_id,
+            **dispatch_kwargs,
+        )
+        if execution_control is not None and execution_control.cancel_event.is_set():
+            durable_job = await _cancel_claimed_job(
+                request.job_id,
+                owner=worker_owner,
+                fencing_token=fencing_token,
+                reason="operator_cancelled_before_apply",
+            )
+            return _cancellation_result(
+                request,
+                prepared,
+                job_workspace,
+                durable_job,
+                reason_code="operator_cancelled_before_apply",
+            )
         applied_raw = apply_workspace_patch(
             file_path=relative_bug_path,
             old_text=FIXTURE_BEFORE_TEXT,
@@ -1423,7 +1462,7 @@ async def run_native_software_engineering_fixture(
             "rollback": applied_payload.get("rollback"),
             "applied": True,
         }
-        await _record_artifact(
+        patch_artifact_receipt = await _record_artifact(
             request.job_id,
             job_workspace,
             filename="patch.json",
@@ -1432,19 +1471,26 @@ async def run_native_software_engineering_fixture(
             owner=worker_owner,
             fencing_token=fencing_token,
         )
-        await durable_job_repository.record_effect(
+        patch_readback_kwargs = {
+            "effect_id": patch_effect_id,
+            "effect_type": "workspace_patch",
+            "target_path": relative_bug_path,
+            "target_digest": patch_target_digest,
+            "status": "succeeded",
+            "content_sha256": str(applied_payload.get("after_sha256") or ""),
+            "details": {
+                "patch_artifact": _relative_workspace_path(job_workspace.artifact_dir / "patch.json"),
+                "verified": True,
+            },
+            "owner": worker_owner,
+            "fencing_token": fencing_token,
+        }
+        patch_revision = patch_artifact_receipt.get("revision") if isinstance(patch_artifact_receipt, dict) else None
+        if patch_revision is not None:
+            patch_readback_kwargs["expected_revision"] = int(patch_revision)
+        await durable_job_repository.record_readback(
             request.job_id,
-            effect_id=patch_effect_id,
-            effect_type="workspace_patch",
-            target_path=relative_bug_path,
-            target_digest=patch_target_digest,
-            approval_id=patch_approval_id,
-            adapter_idempotency_key=patch_adapter_key,
-            status="succeeded",
-            content_sha256=str(applied_payload.get("after_sha256") or ""),
-            details={"patch_artifact": _relative_workspace_path(job_workspace.artifact_dir / "patch.json")},
-            owner=worker_owner,
-            fencing_token=fencing_token,
+            **patch_readback_kwargs,
         )
         await _record_checkpoint(
             request.job_id,
@@ -1647,6 +1693,8 @@ async def run_native_software_engineering_fixture(
             request.job_id,
             target_path=relative_bug_path,
             status="succeeded" if readback_ok else "failed",
+            effect_type="native_swe_output",
+            target_digest=_digest_text(patched_body),
             content_sha256=_digest_text(patched_body),
             details={
                 "readback_artifact": _relative_workspace_path(job_workspace.artifact_dir / "readback.json"),
@@ -1657,6 +1705,7 @@ async def run_native_software_engineering_fixture(
                     "git_status": status_process["exit_code"],
                 },
                 "original_fixture_immutable": source_immutable,
+                "verified": readback_ok,
             },
             owner=worker_owner,
             fencing_token=fencing_token,
@@ -1830,7 +1879,7 @@ async def cancel_native_software_engineering_job(
         fencing_token=fencing_token,
         reason=reason,
     )
-    if result.get("status") == "cancelled":
+    if result.get("status") in {"cancelled", "unknown_external_effect", "cost_liability", "blocked"}:
         control = _native_execution_for_job(job_id)
         if control is not None and control.owner == owner and control.fencing_token == fencing_token:
             control.cancel_event.set()

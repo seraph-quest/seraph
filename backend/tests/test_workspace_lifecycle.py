@@ -220,7 +220,11 @@ def test_backup_restore_round_trip_and_rollback_preserve_secret_boundary(tmp_pat
     assert (root / ".vault-key").read_text(encoding="utf-8") == "SECRET-SENTINEL-DO-NOT-ARCHIVE\n"
     assert not (root / "derived" / "vectors.idx").exists()
 
-    rollback = rollback_workspace(root, "restore-roundtrip-01")
+    with pytest.raises(WorkspaceLifecycleError, match="registry identity"):
+        rollback_workspace(root, "restore-roundtrip-01")
+    assert (root / "soul.md").read_text(encoding="utf-8") == "original soul\n"
+
+    rollback = rollback_workspace(root, "restore-roundtrip-01", registry=registry)
     assert rollback["status"] == "rolled_back"
     assert (root / "soul.md").read_text(encoding="utf-8") == "changed soul\n"
 
@@ -750,6 +754,22 @@ def test_recovery_keeps_evidence_for_unjournaled_moved_root(tmp_path):
         recover_interrupted_restore(root, registry=registry)
     assert not root.exists()
     assert previous.is_dir()
+    assert record_root.is_dir()
+
+
+def test_cleanup_preserves_nonempty_unjournaled_restore_record(tmp_path):
+    root, _registry = _workspace(tmp_path)
+    restore_id = "restore-unjournaled-retention-01"
+    record_root = workspace_backup_dir(root) / restore_id
+    previous = record_root / "previous-workspace"
+    record_root.mkdir(parents=True)
+    previous.mkdir()
+    sentinel = previous / "soul.md"
+    sentinel.write_text("preserve this recovery evidence\n", encoding="utf-8")
+
+    cleanup_workspace_backups(root, keep=0)
+
+    assert sentinel.read_text(encoding="utf-8") == "preserve this recovery evidence\n"
     assert record_root.is_dir()
 
 

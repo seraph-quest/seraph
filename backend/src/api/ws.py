@@ -18,12 +18,23 @@ from src.agent.exceptions import ClarificationRequired
 from src.agent.direct_chat import run_direct_local_chat, should_use_direct_local_chat, stream_direct_local_chat
 from src.agent.factory import build_agent
 from src.agent.onboarding import create_onboarding_agent
-from src.agent.session import SessionOwnerMismatchError, session_manager
+from src.agent.session import (
+    MessageIngressConflictError,
+    SessionNotFoundError,
+    SessionOwnerMismatchError,
+    session_manager,
+)
 from src.audit.formatting import format_tool_call_summary
 from src.audit.runtime import log_agent_run_event
 from src.audit.repository import audit_repository
 from src.api.profile import get_or_create_profile, mark_onboarding_complete, reset_onboarding
-from src.api.chat import ChatAuthorityError, _bind_chat_principal
+from src.api.chat import (
+    ChatAuthorityError,
+    _bind_chat_principal,
+    build_chat_ingress_envelope,
+    chat_ingress_metadata,
+    log_chat_ingress_event,
+)
 from src.auth.middleware import authenticate_websocket
 from src.auth.service import AuthFailure, auth_enabled, authenticate_token, bind_operator_principal
 from src.guardian.state import build_guardian_state
@@ -315,10 +326,23 @@ async def websocket_chat(websocket: WebSocket):
                 continue
 
             try:
-                session = await session_manager.get_or_create(
+                session = await session_manager.get_for_ingress(
                     ws_msg.session_id,
                     owner_principal_id=operator.principal.principal_id,
                 )
+            except SessionNotFoundError as exc:
+                active_turn_session_id = exc.session_id
+                active_turn_completed = True
+                await websocket.send_text(
+                    WSResponse(
+                        type="error",
+                        content="This chat session was not found.",
+                        session_id=exc.session_id,
+                        reason="chat_session_not_found",
+                        seq=_next_seq(),
+                    ).model_dump_json()
+                )
+                continue
             except SessionOwnerMismatchError as exc:
                 active_turn_session_id = exc.session_id
                 active_turn_completed = True
@@ -348,8 +372,65 @@ async def websocket_chat(websocket: WebSocket):
                     ).model_dump_json()
                 )
                 continue
+            ingress = None
             if ws_msg.type != "resume_message":
-                await session_manager.add_message(session.id, "user", ws_msg.message)
+                ingress = build_chat_ingress_envelope(
+                    message=ws_msg.message,
+                    session_id=session.id,
+                    principal=chat_principal,
+                    operator_session_id=operator.session_id,
+                    transport="websocket",
+                    client_message_id=ws_msg.message_id,
+                    idempotency_key=ws_msg.idempotency_key,
+                )
+                try:
+                    _ingress_message, duplicate = await session_manager.reserve_ingress_message(
+                        session.id,
+                        ws_msg.message,
+                        message_id=ingress.message_id,
+                        metadata_json=chat_ingress_metadata(ingress),
+                    )
+                except MessageIngressConflictError as exc:
+                    await log_chat_ingress_event(
+                        session_id=session.id,
+                        envelope=ingress,
+                        status="identity_conflict",
+                    )
+                    active_turn_session_id = session.id
+                    active_turn_completed = True
+                    await websocket.send_text(
+                        WSResponse(
+                            type="error",
+                            content="This message identity is already bound to another request.",
+                            session_id=session.id,
+                            reason="chat_message_identity_conflict",
+                            seq=_next_seq(),
+                        ).model_dump_json()
+                    )
+                    continue
+                if duplicate:
+                    await log_chat_ingress_event(
+                        session_id=session.id,
+                        envelope=ingress,
+                        status="duplicate_rejected",
+                    )
+                    active_turn_session_id = session.id
+                    active_turn_completed = True
+                    await websocket.send_text(
+                        WSResponse(
+                            type="error",
+                            content="This message was already accepted for this session.",
+                            session_id=session.id,
+                            reason="chat_message_duplicate",
+                            seq=_next_seq(),
+                        ).model_dump_json()
+                    )
+                    continue
+                await log_chat_ingress_event(
+                    session_id=session.id,
+                    envelope=ingress,
+                    status="accepted",
+                )
             active_turn_session_id = session.id
             active_turn_completed = False
             await websocket.send_text(

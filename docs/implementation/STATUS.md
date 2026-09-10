@@ -39,6 +39,12 @@ GPU/VLM, speech, or connector calls, and records unprobed live evidence as
 of the checked revision, not claims of live execution or competitive
 superiority.
 
+Branch-local #753 adds authenticated local canonical-memory export, deterministic
+rebuild, tombstone-aware additive restore, and operator-visible recovery status;
+the owning guide records its bounded SQLite proof and remaining StrategyDelta,
+multi-process, production-restore, and semantic-quality limits. It is not
+Shipped `develop` truth until the reviewed milestone change lands.
+
 ## Legend
 
 - `[x]` shipped on `develop`

@@ -3,11 +3,17 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import math
+import os
 import re
+import stat
+import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
+from config.settings import settings
 from sqlalchemy import exists, func, or_, text, update
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlmodel import col, select
@@ -28,6 +34,12 @@ from src.db.models import (
     MemorySource,
     MemoryStatus,
     MemoryTombstone,
+)
+from src.workspace import (
+    WorkspaceStateClass,
+    WorkspaceStateError,
+    canonical_workspace_registry,
+    canonical_workspace_root,
 )
 
 
@@ -83,6 +95,9 @@ _CANONICAL_MEMORY_DELETE_ACTIONS = {
 }
 _CANONICAL_MEMORY_DELETE_CONTENT = "[delete/export propagated by operator]"
 _EMPTY_TOMBSTONE_REVISION = hashlib.sha256(b"[]").hexdigest()
+_MEMORY_EXPORT_SCHEMA_VERSION = "guardian.memory.export.v1"
+_MEMORY_INDEX_SCHEMA_VERSION = "guardian.memory.derived_index.v1"
+_MAX_RECOVERY_RECORDS = 10_000
 
 
 async def _begin_canonical_write(db) -> None:
@@ -120,6 +135,222 @@ async def _memory_tombstone_revision(db) -> str:
     return hashlib.sha256(
         json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()
+
+
+def _parse_recovery_timestamp(value: Any, *, field_name: str) -> datetime | None:
+    """Parse an archive timestamp without accepting local-time ambiguity."""
+
+    if value is None or value == "":
+        return None
+    if not isinstance(value, str):
+        raise ValueError(f"{field_name} must be an ISO-8601 timestamp")
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError(f"{field_name} must be an ISO-8601 timestamp") from exc
+    if parsed.tzinfo is None:
+        raise ValueError(f"{field_name} must include a timezone")
+    return parsed.astimezone(timezone.utc)
+
+
+def _recovery_timestamp(value: datetime | None) -> str | None:
+    if value is None:
+        return None
+    aware = value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
+    return aware.isoformat()
+
+
+def _recovery_json_hash(payload: dict[str, Any]) -> str:
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode(
+            "utf-8"
+        )
+    ).hexdigest()
+
+
+def _bounded_recovery_float(
+    value: Any,
+    *,
+    default: float,
+    field_name: str,
+    memory_id: str,
+    minimum: float = 0.0,
+    maximum: float | None = 1.0,
+) -> float:
+    """Validate numeric archive fields before any restore write occurs."""
+
+    try:
+        parsed = float(default if value is None else value)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError(
+            f"memory restore record {memory_id} has invalid {field_name}"
+        ) from exc
+    if not math.isfinite(parsed):
+        raise ValueError(f"memory restore record {memory_id} has invalid {field_name}")
+    parsed = max(minimum, parsed)
+    if maximum is not None:
+        parsed = min(maximum, parsed)
+    return parsed
+
+
+def _recovery_authority(
+    *,
+    actor: str,
+    owner_session_id: str | None,
+    authenticated_session_id: str | None,
+    source_role: str,
+) -> tuple[str, str]:
+    """Validate the explicit authority envelope used by recovery operations.
+
+    Authentication is established at the API boundary.  Requiring the same
+    bound session again at this store seam prevents a caller from accidentally
+    passing a body-owned session or an inference/source role into canonical
+    recovery code.
+    """
+
+    normalized_actor = str(actor or "").strip()
+    normalized_owner = str(owner_session_id or "").strip()
+    normalized_authenticated = str(authenticated_session_id or "").strip()
+    normalized_role = str(source_role or "").strip().lower()
+    if not normalized_actor:
+        raise PermissionError("memory recovery requires an authenticated actor")
+    if not normalized_owner or not normalized_authenticated:
+        raise PermissionError("memory recovery requires an authenticated owner session")
+    if normalized_owner != normalized_authenticated:
+        raise PermissionError("memory owner session does not match the authenticated session")
+    if normalized_role != "operator":
+        raise PermissionError("memory recovery source role must be operator")
+    return normalized_actor, normalized_owner
+
+
+def _recovery_artifact_path(*, kind: str, digest: str) -> tuple[Path, str]:
+    """Resolve a derived/canonical artifact through the workspace registry."""
+
+    try:
+        root = canonical_workspace_root(settings.workspace_dir)
+        registry = canonical_workspace_registry(root)
+        logical_root = "artifacts" if kind == "export" else "cache"
+        expected_class = (
+            WorkspaceStateClass.CANONICAL
+            if logical_root == "artifacts"
+            else WorkspaceStateClass.CACHE
+        )
+        if registry.classify_path(logical_root) is not expected_class:
+            raise RuntimeError(f"memory recovery {kind} path is not workspace-owned")
+        logical_directory = root / logical_root
+        try:
+            logical_stat = logical_directory.lstat()
+        except FileNotFoundError:
+            logical_stat = None
+        if logical_stat is not None and (
+            stat.S_ISLNK(logical_stat.st_mode) or not stat.S_ISDIR(logical_stat.st_mode)
+        ):
+            raise RuntimeError(f"memory recovery {kind} workspace root is not a regular directory")
+        logical_directory.mkdir(parents=False, exist_ok=True)
+        if stat.S_ISLNK(logical_directory.lstat().st_mode) or not stat.S_ISDIR(logical_directory.stat().st_mode):
+            raise RuntimeError(f"memory recovery {kind} workspace root is not a regular directory")
+        directory = root / logical_root / "memory-recovery"
+        # Check a replaced nested path before mkdir follows a possible link.
+        try:
+            directory_stat = directory.lstat()
+        except FileNotFoundError:
+            directory_stat = None
+        if directory_stat is not None and (
+            stat.S_ISLNK(directory_stat.st_mode) or not stat.S_ISDIR(directory_stat.st_mode)
+        ):
+            raise RuntimeError(f"memory recovery {kind} path is not a regular directory")
+        directory.mkdir(parents=True, exist_ok=True)
+        # The registry owns the top-level path.  Refuse a replaced nested
+        # directory before writing a recovery artifact into it.
+        if stat.S_ISLNK(directory.lstat().st_mode) or not stat.S_ISDIR(directory.stat().st_mode):
+            raise RuntimeError(f"memory recovery {kind} path is not a regular directory")
+        filename = f"{kind}-{digest[:24]}.json"
+        return directory / filename, f"{logical_root}/memory-recovery/{filename}"
+    except (WorkspaceStateError, OSError) as exc:
+        raise RuntimeError(f"memory recovery {kind} workspace path is unavailable") from exc
+
+
+def _write_recovery_artifact(path: Path, payload: dict[str, Any]) -> None:
+    """Atomically write one bounded JSON recovery artifact with private mode."""
+
+    encoded = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    ).encode("utf-8")
+    parent = path.parent
+    if path.exists() or path.is_symlink():
+        mode = path.lstat().st_mode
+        if stat.S_ISLNK(mode) or not stat.S_ISREG(mode):
+            raise RuntimeError("memory recovery artifact path is not a regular file")
+    try:
+        file_descriptor, temporary_name = tempfile.mkstemp(
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            dir=str(parent),
+        )
+    except OSError as exc:
+        raise RuntimeError("memory recovery artifact workspace is not writable") from exc
+    temporary_path = Path(temporary_name)
+    try:
+        os.fchmod(file_descriptor, 0o600)
+        with os.fdopen(file_descriptor, "wb") as handle:
+            handle.write(encoded)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary_path, path)
+    except OSError as exc:
+        try:
+            temporary_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise RuntimeError("memory recovery artifact could not be committed") from exc
+    except Exception:
+        try:
+            temporary_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
+
+
+def _archive_memory_payload(memory: Memory, sources: list[MemorySource]) -> dict[str, Any]:
+    try:
+        parsed_metadata = json.loads(memory.metadata_json or "{}")
+    except (TypeError, json.JSONDecodeError):
+        parsed_metadata = {}
+    metadata = parsed_metadata if isinstance(parsed_metadata, dict) else {}
+    return {
+        "id": memory.id,
+        "content": memory.content,
+        "category": _coerce_enum(memory.category, MemoryCategory).value,
+        "kind": _coerce_enum(memory.kind, MemoryKind).value,
+        "summary": memory.summary,
+        "confidence": float(memory.confidence or 0.0),
+        "importance": float(memory.importance or 0.0),
+        "reinforcement": float(memory.reinforcement or 0.0),
+        "status": _coerce_enum(memory.status, MemoryStatus).value,
+        "subject_entity_id": memory.subject_entity_id,
+        "project_entity_id": memory.project_entity_id,
+        "source_session_id": memory.source_session_id,
+        "embedding_id": memory.embedding_id,
+        "scope_key": memory.scope_key,
+        "metadata": metadata,
+        "created_at": _recovery_timestamp(memory.created_at),
+        "updated_at": _recovery_timestamp(memory.updated_at),
+        "last_confirmed_at": _recovery_timestamp(memory.last_confirmed_at),
+        "sources": [
+            {
+                "id": source.id,
+                "source_type": source.source_type,
+                "source_session_id": source.source_session_id,
+                "source_message_id": source.source_message_id,
+                "snippet": source.snippet,
+                "created_at": _recovery_timestamp(source.created_at),
+            }
+            for source in sources
+        ],
+    }
 
 
 def _canonical_memory_without_tombstone_clause():
@@ -1445,6 +1676,549 @@ class MemoryRepository:
 
         async with get_session() as db:
             return await _memory_tombstone_revision(db)
+
+    async def export_canonical_memory_state(
+        self,
+        *,
+        actor: str,
+        owner_session_id: str,
+        authenticated_session_id: str,
+        source_role: str = "operator",
+        limit: int = _MAX_RECOVERY_RECORDS,
+    ) -> dict[str, Any]:
+        """Export canonical memory rows and the content-free delete ledger.
+
+        The export is assembled while a SQLite ``BEGIN IMMEDIATE`` transaction
+        is held.  This gives the operator one tombstone revision and one row
+        set, so a concurrent merge cannot produce a self-inconsistent archive.
+        Deleted rows are intentionally absent; their IDs remain represented by
+        content-free tombstones so an older archive cannot revive them.
+        """
+
+        normalized_actor, normalized_owner = _recovery_authority(
+            actor=actor,
+            owner_session_id=owner_session_id,
+            authenticated_session_id=authenticated_session_id,
+            source_role=source_role,
+        )
+        bounded_limit = min(max(int(limit), 1), _MAX_RECOVERY_RECORDS)
+        reconciliation = await self.reconcile_memory_tombstones()
+        if reconciliation.get("status") != "ready":
+            return {
+                "schema_version": _MEMORY_EXPORT_SCHEMA_VERSION,
+                "status": "degraded_no_learning",
+                "operator_status": "canonical_memory_recovery_degraded",
+                "no_learning_reason": "canonical tombstone ledger requires repair",
+                "reconciliation": reconciliation,
+                "memories": [],
+                "tombstones": [],
+                "memory_ids": [],
+                "tombstone_ids": [],
+                "artifact_path": None,
+                "artifact_sha256": None,
+            }
+
+        async with self._canonical_memory_lock:
+            async with get_session() as db:
+                await _begin_canonical_write(db)
+                current_revision = await _memory_tombstone_revision(db)
+                tombstones = (
+                    await db.execute(
+                        select(MemoryTombstone).order_by(
+                            col(MemoryTombstone.created_at).asc(),
+                            col(MemoryTombstone.id).asc(),
+                        )
+                    )
+                ).scalars().all()
+                tombstone_ids = {tombstone.memory_id for tombstone in tombstones}
+                statement = (
+                    select(Memory)
+                    .where(~exists().where(MemoryTombstone.memory_id == Memory.id))
+                    .where(Memory.source_session_id == normalized_owner)
+                    .order_by(col(Memory.updated_at).asc(), col(Memory.id).asc())
+                    .limit(bounded_limit)
+                )
+                memories = (await db.execute(statement)).scalars().all()
+                memories = [
+                    memory
+                    for memory in memories
+                    if memory.id not in tombstone_ids
+                    and _canonical_memory_deletion_marker(memory) is None
+                ]
+                memory_ids = [memory.id for memory in memories]
+                source_rows: dict[str, list[MemorySource]] = {memory_id: [] for memory_id in memory_ids}
+                if memory_ids:
+                    source_result = await db.execute(
+                        select(MemorySource)
+                        .where(MemorySource.memory_id.in_(memory_ids))
+                        .order_by(col(MemorySource.created_at).asc(), col(MemorySource.id).asc())
+                    )
+                    for source in source_result.scalars().all():
+                        source_rows.setdefault(source.memory_id, []).append(source)
+                memory_payloads = [
+                    _archive_memory_payload(memory, source_rows.get(memory.id, []))
+                    for memory in memories
+                ]
+                tombstone_payloads = [
+                    {
+                        "id": tombstone.id,
+                        "memory_id": tombstone.memory_id,
+                        "actor": tombstone.actor,
+                        "reason": tombstone.reason,
+                        "created_at": _recovery_timestamp(tombstone.created_at),
+                    }
+                    for tombstone in tombstones
+                ]
+
+        body: dict[str, Any] = {
+            "schema_version": _MEMORY_EXPORT_SCHEMA_VERSION,
+            "owner_session_id": normalized_owner,
+            "canonical_tombstone_revision": current_revision,
+            "memories": memory_payloads,
+            "tombstones": tombstone_payloads,
+        }
+        export_hash = _recovery_json_hash(body)
+        payload = {
+            **body,
+            "export_hash": export_hash,
+            "generated_at": _now().isoformat(),
+            "status": "ready",
+            "operator_status": "canonical_memory_export_ready",
+            "provenance": {
+                "kind": "operator_memory_export",
+                "actor": normalized_actor,
+                "source_role": source_role,
+                "owner_session_id": normalized_owner,
+            },
+            "no_learning_reason": None,
+            "counts": {
+                "memories": len(memory_payloads),
+                "tombstones": len(tombstone_payloads),
+                "sources": sum(len(item.get("sources", [])) for item in memory_payloads),
+                "limit": bounded_limit,
+            },
+            "memory_ids": [item["id"] for item in memory_payloads],
+            "tombstone_ids": [item["id"] for item in tombstone_payloads],
+        }
+        artifact_path, logical_path = _recovery_artifact_path(kind="export", digest=export_hash)
+        payload["artifact_path"] = logical_path
+        payload["artifact_sha256"] = _recovery_json_hash(payload)
+        _write_recovery_artifact(artifact_path, payload)
+        return payload
+
+    async def rebuild_canonical_memory_index(
+        self,
+        *,
+        actor: str,
+        owner_session_id: str,
+        authenticated_session_id: str,
+        source_role: str = "operator",
+        limit: int = _MAX_RECOVERY_RECORDS,
+    ) -> dict[str, Any]:
+        """Rebuild a deterministic local derived index from canonical rows.
+
+        This path deliberately performs no embedding/provider call.  The
+        resulting index is a bounded lexical identity/content digest manifest;
+        semantic quality remains ``unavailable`` and is surfaced as degraded
+        rather than inferred from the presence of an index file.
+        """
+
+        normalized_actor, normalized_owner = _recovery_authority(
+            actor=actor,
+            owner_session_id=owner_session_id,
+            authenticated_session_id=authenticated_session_id,
+            source_role=source_role,
+        )
+        bounded_limit = min(max(int(limit), 1), _MAX_RECOVERY_RECORDS)
+        reconciliation = await self.reconcile_memory_tombstones()
+        if reconciliation.get("status") != "ready":
+            return {
+                "schema_version": _MEMORY_INDEX_SCHEMA_VERSION,
+                "status": "degraded_no_learning",
+                "operator_status": "canonical_memory_index_rebuild_degraded",
+                "no_learning_reason": "canonical tombstone ledger requires repair",
+                "reconciliation": reconciliation,
+                "records": [],
+                "memory_ids": [],
+                "artifact_path": None,
+                "artifact_sha256": None,
+                "semantic_index_status": "unavailable",
+            }
+        memories = [
+            memory
+            for memory in await self.list_memories_for_reindex(limit=bounded_limit)
+            if memory.source_session_id == normalized_owner
+        ]
+        tombstone_revision = await self.get_memory_tombstone_revision()
+        records: list[dict[str, Any]] = []
+        for memory in memories:
+            try:
+                memory_metadata = json.loads(memory.metadata_json or "{}")
+            except (TypeError, json.JSONDecodeError):
+                memory_metadata = {}
+            records.append(
+                {
+                    "id": memory.id,
+                    "kind": _coerce_enum(memory.kind, MemoryKind).value,
+                    "category": _coerce_enum(memory.category, MemoryCategory).value,
+                    "content_sha256": hashlib.sha256(memory.content.encode("utf-8")).hexdigest(),
+                    "source_session_id": memory.source_session_id,
+                    "updated_at": _recovery_timestamp(memory.updated_at),
+                    "provenance": (
+                        memory_metadata.get("provenance")
+                        if isinstance(memory_metadata, dict)
+                        else {}
+                    ),
+                }
+            )
+        body: dict[str, Any] = {
+            "schema_version": _MEMORY_INDEX_SCHEMA_VERSION,
+            "owner_session_id": normalized_owner,
+            "canonical_tombstone_revision": tombstone_revision,
+            "retrieval_mode": "deterministic_canonical_lexical",
+            "semantic_index_status": "unavailable",
+            "records": records,
+        }
+        index_hash = _recovery_json_hash(body)
+        payload = {
+            **body,
+            "index_hash": index_hash,
+            "generated_at": _now().isoformat(),
+            "status": "ready",
+            "operator_status": "canonical_memory_index_rebuilt",
+            "provenance": {
+                "kind": "operator_memory_rebuild",
+                "actor": normalized_actor,
+                "source_role": source_role,
+                "owner_session_id": normalized_owner,
+            },
+            "no_learning_reason": "semantic index unavailable; deterministic lexical index only",
+            "memory_ids": [record["id"] for record in records],
+            "counts": {"records": len(records), "limit": bounded_limit},
+        }
+        artifact_path, logical_path = _recovery_artifact_path(kind="index", digest=index_hash)
+        payload["artifact_path"] = logical_path
+        payload["artifact_sha256"] = _recovery_json_hash(payload)
+        _write_recovery_artifact(artifact_path, payload)
+        return payload
+
+    async def restore_canonical_memory_state(
+        self,
+        archive: dict[str, Any],
+        *,
+        actor: str,
+        owner_session_id: str,
+        authenticated_session_id: str,
+        source_role: str = "operator",
+    ) -> dict[str, Any]:
+        """Restore missing canonical rows while honoring current tombstones.
+
+        Restore is additive and tombstone-aware.  An older archive can repair a
+        missing row, but it cannot overwrite a newer row or reintroduce an ID
+        present in the current delete ledger.  Every archive record is checked
+        before the first database write so a forged owner/session/source role
+        cannot produce a partial restore.
+        """
+
+        normalized_actor, normalized_owner = _recovery_authority(
+            actor=actor,
+            owner_session_id=owner_session_id,
+            authenticated_session_id=authenticated_session_id,
+            source_role=source_role,
+        )
+        if not isinstance(archive, dict):
+            raise ValueError("memory restore archive must be an object")
+        if archive.get("schema_version") != _MEMORY_EXPORT_SCHEMA_VERSION:
+            raise ValueError("unknown memory restore archive version")
+        archive_owner = str(archive.get("owner_session_id") or "").strip()
+        if archive_owner and archive_owner != normalized_owner:
+            raise PermissionError("memory archive owner does not match the authenticated session")
+        records = archive.get("memories")
+        if not isinstance(records, list):
+            raise ValueError("memory restore archive memories must be a list")
+        if len(records) > _MAX_RECOVERY_RECORDS:
+            raise ValueError("memory restore archive is too large")
+        archive_tombstones = archive.get("tombstones", [])
+        if not isinstance(archive_tombstones, list):
+            raise ValueError("memory restore archive tombstones must be a list")
+        supplied_archive_hash = archive.get("export_hash")
+        if supplied_archive_hash is not None:
+            if not isinstance(supplied_archive_hash, str) or supplied_archive_hash != _recovery_json_hash(
+                {
+                    "schema_version": archive.get("schema_version"),
+                    "owner_session_id": archive.get("owner_session_id", ""),
+                    "canonical_tombstone_revision": archive.get("canonical_tombstone_revision"),
+                    "memories": records,
+                    "tombstones": archive_tombstones,
+                }
+            ):
+                raise ValueError("memory restore archive hash mismatch")
+        normalized_records: list[dict[str, Any]] = []
+        seen_ids: set[str] = set()
+        for record in records:
+            if not isinstance(record, dict):
+                raise ValueError("memory restore archive contains an invalid record")
+            memory_id = str(record.get("id") or "").strip()
+            if not memory_id or len(memory_id) > 255 or "\x00" in memory_id:
+                raise ValueError("memory restore archive contains an invalid memory id")
+            if memory_id in seen_ids:
+                raise ValueError("memory restore archive contains duplicate memory ids")
+            seen_ids.add(memory_id)
+            content = record.get("content")
+            if not isinstance(content, str) or not content.strip() or "\x00" in content:
+                raise ValueError(f"memory restore record {memory_id} has invalid content")
+            if len(content) > 1_000_000:
+                raise ValueError(f"memory restore record {memory_id} is too large")
+            source_session_id = str(record.get("source_session_id") or "").strip() or None
+            if source_session_id is not None and source_session_id != normalized_owner:
+                raise PermissionError(
+                    f"memory restore record {memory_id} belongs to another owner session"
+                )
+            try:
+                normalized_kind = _coerce_enum(record.get("kind"), MemoryKind)
+                normalized_category = _coerce_enum(record.get("category"), MemoryCategory)
+                normalized_status = _coerce_enum(record.get("status", MemoryStatus.active.value), MemoryStatus)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"memory restore record {memory_id} has an invalid enum") from exc
+            created_at = _parse_recovery_timestamp(record.get("created_at"), field_name="created_at")
+            updated_at = _parse_recovery_timestamp(record.get("updated_at"), field_name="updated_at")
+            if created_at is None or updated_at is None:
+                raise ValueError(f"memory restore record {memory_id} is missing timestamps")
+            metadata = record.get("metadata", {})
+            if not isinstance(metadata, dict):
+                raise ValueError(f"memory restore record {memory_id} metadata must be an object")
+            raw_marker = str(metadata.get("archived_reason") or "").strip().lower()
+            raw_operator_control = metadata.get("operator_control")
+            if raw_marker == _CANONICAL_MEMORY_DELETE_EXPORT_REASON or (
+                isinstance(raw_operator_control, dict)
+                and str(raw_operator_control.get("delete_export_state") or "").strip().lower()
+                == _CANONICAL_MEMORY_REDACTED_STATE
+            ):
+                raise ValueError(f"memory restore record {memory_id} is a deleted canonical record")
+            sources = record.get("sources", [])
+            if not isinstance(sources, list):
+                raise ValueError(f"memory restore record {memory_id} sources must be a list")
+            normalized_sources: list[dict[str, Any]] = []
+            for source in sources:
+                if not isinstance(source, dict):
+                    raise ValueError(f"memory restore record {memory_id} has an invalid source")
+                source_id = str(source.get("id") or "").strip() or None
+                if source_id is not None and (len(source_id) > 255 or "\x00" in source_id):
+                    raise ValueError(f"memory restore record {memory_id} has an invalid source id")
+                source_session = str(source.get("source_session_id") or "").strip() or None
+                if source_session is not None and source_session != normalized_owner:
+                    raise PermissionError(
+                        f"memory restore source for {memory_id} belongs to another owner session"
+                    )
+                source_created_at = _parse_recovery_timestamp(
+                    source.get("created_at"), field_name="source.created_at"
+                )
+                normalized_sources.append(
+                    {
+                        "id": source_id,
+                        "source_type": str(source.get("source_type") or "session").strip() or "session",
+                        "source_session_id": source_session,
+                        "source_message_id": str(source.get("source_message_id") or "").strip() or None,
+                        "snippet": self._normalize_source_snippet(source.get("snippet")),
+                        "created_at": source_created_at,
+                    }
+                )
+            clean_metadata = {
+                str(key): value
+                for key, value in metadata.items()
+                if str(key) not in {"operator_control", "provenance", "privacy_boundary"}
+            }
+            privacy_boundary = str(metadata.get("privacy_boundary") or "operator_visible").strip().lower()
+            if privacy_boundary in {"operator_visible", "private", "sensitive", "source_bound"}:
+                clean_metadata["privacy_boundary"] = privacy_boundary
+            clean_metadata["provenance"] = {
+                "kind": "operator_memory_restore",
+                "actor": normalized_actor,
+                "source": "authenticated_memory_recovery",
+                "owner_session_id": normalized_owner,
+                "restored_at": _now().isoformat(),
+            }
+            clean_metadata["operator_control"] = {
+                "last_action": "restore_memory",
+                "last_actor": normalized_actor,
+                "last_reason": "authenticated memory archive restore",
+                "last_action_at": _now().isoformat(),
+            }
+            normalized_records.append(
+                {
+                    "id": memory_id,
+                    "content": content.strip(),
+                    "category": normalized_category,
+                    "kind": normalized_kind,
+                    "summary": record.get("summary") if isinstance(record.get("summary"), str) else None,
+                    "confidence": _bounded_recovery_float(
+                        record.get("confidence"),
+                        default=0.5,
+                        field_name="confidence",
+                        memory_id=memory_id,
+                    ),
+                    "importance": _bounded_recovery_float(
+                        record.get("importance"),
+                        default=0.5,
+                        field_name="importance",
+                        memory_id=memory_id,
+                    ),
+                    "reinforcement": _bounded_recovery_float(
+                        record.get("reinforcement"),
+                        default=1.0,
+                        field_name="reinforcement",
+                        memory_id=memory_id,
+                        maximum=None,
+                    ),
+                    "status": normalized_status,
+                    "subject_entity_id": str(record.get("subject_entity_id") or "").strip() or None,
+                    "project_entity_id": str(record.get("project_entity_id") or "").strip() or None,
+                    "source_session_id": source_session_id,
+                    "embedding_id": str(record.get("embedding_id") or "").strip() or None,
+                    "scope_key": str(record.get("scope_key") or "").strip() or None,
+                    "metadata_json": json.dumps(clean_metadata, sort_keys=True),
+                    "created_at": created_at,
+                    "updated_at": updated_at,
+                    "last_confirmed_at": _parse_recovery_timestamp(
+                        record.get("last_confirmed_at"), field_name="last_confirmed_at"
+                    ),
+                    "sources": normalized_sources,
+                }
+            )
+
+        restored_ids: list[str] = []
+        suppressed_ids: list[str] = []
+        conflict_ids: list[str] = []
+        source_count = 0
+        async with self._canonical_memory_lock:
+            async with get_session() as db:
+                await _begin_canonical_write(db)
+                tombstone_result = await db.execute(select(MemoryTombstone))
+                tombstoned_ids = {tombstone.memory_id for tombstone in tombstone_result.scalars().all()}
+                for record in normalized_records:
+                    memory_id = record["id"]
+                    if memory_id in tombstoned_ids:
+                        suppressed_ids.append(memory_id)
+                        continue
+                    existing = (
+                        await db.execute(select(Memory).where(Memory.id == memory_id))
+                    ).scalars().first()
+                    if existing is not None and _canonical_memory_deletion_marker(existing) is not None:
+                        suppressed_ids.append(memory_id)
+                        continue
+                    if existing is not None:
+                        existing_updated_at = existing.updated_at
+                        if existing_updated_at is not None and existing_updated_at >= record["updated_at"]:
+                            conflict_ids.append(memory_id)
+                            continue
+                        existing.content = record["content"]
+                        existing.category = record["category"]
+                        existing.kind = record["kind"]
+                        existing.summary = record["summary"]
+                        existing.confidence = record["confidence"]
+                        existing.importance = record["importance"]
+                        existing.reinforcement = record["reinforcement"]
+                        existing.status = record["status"]
+                        existing.subject_entity_id = record["subject_entity_id"]
+                        existing.project_entity_id = record["project_entity_id"]
+                        existing.source_session_id = record["source_session_id"]
+                        existing.embedding_id = record["embedding_id"]
+                        existing.scope_key = record["scope_key"]
+                        existing.metadata_json = record["metadata_json"]
+                        existing.created_at = min(existing.created_at, record["created_at"])
+                        existing.updated_at = record["updated_at"]
+                        existing.last_confirmed_at = record["last_confirmed_at"]
+                        db.add(existing)
+                    else:
+                        db.add(
+                            Memory(
+                                id=memory_id,
+                                content=record["content"],
+                                category=record["category"],
+                                kind=record["kind"],
+                                summary=record["summary"],
+                                confidence=record["confidence"],
+                                importance=record["importance"],
+                                reinforcement=record["reinforcement"],
+                                status=record["status"],
+                                subject_entity_id=record["subject_entity_id"],
+                                project_entity_id=record["project_entity_id"],
+                                source_session_id=record["source_session_id"],
+                                embedding_id=record["embedding_id"],
+                                scope_key=record["scope_key"],
+                                metadata_json=record["metadata_json"],
+                                created_at=record["created_at"],
+                                updated_at=record["updated_at"],
+                                last_confirmed_at=record["last_confirmed_at"],
+                            )
+                        )
+                    await db.flush()
+                    restored_ids.append(memory_id)
+                    for source in record["sources"]:
+                        if source["id"]:
+                            existing_source_id = (
+                                await db.execute(
+                                    select(MemorySource).where(MemorySource.id == source["id"])
+                                )
+                            ).scalars().first()
+                            if existing_source_id is not None:
+                                if existing_source_id.memory_id != memory_id:
+                                    raise ValueError(
+                                        f"memory restore source id {source['id']} belongs to another memory"
+                                    )
+                                continue
+                        duplicate_statement = select(MemorySource).where(
+                            MemorySource.memory_id == memory_id,
+                            MemorySource.source_type == source["source_type"],
+                            MemorySource.source_session_id == source["source_session_id"],
+                            MemorySource.source_message_id == source["source_message_id"],
+                        )
+                        duplicate = (await db.execute(duplicate_statement)).scalars().first()
+                        if duplicate is not None:
+                            continue
+                        db.add(
+                            MemorySource(
+                                **({"id": source["id"]} if source["id"] else {}),
+                                memory_id=memory_id,
+                                source_type=source["source_type"],
+                                source_session_id=source["source_session_id"],
+                                source_message_id=source["source_message_id"],
+                                snippet=source["snippet"],
+                                **(
+                                    {"created_at": source["created_at"]}
+                                    if source["created_at"] is not None
+                                    else {}
+                                ),
+                            )
+                        )
+                        source_count += 1
+                    await db.flush()
+        reconciliation = await self.reconcile_memory_tombstones()
+        status = "ready" if reconciliation.get("status") == "ready" else "degraded_no_learning"
+        return {
+            "schema_version": _MEMORY_EXPORT_SCHEMA_VERSION,
+            "status": status,
+            "operator_status": "canonical_memory_restore_ready" if status == "ready" else "canonical_memory_restore_degraded",
+            "no_learning_reason": None
+            if status == "ready"
+            else "canonical tombstone ledger requires repair",
+            "provenance": {
+                "kind": "operator_memory_restore",
+                "actor": normalized_actor,
+                "source_role": source_role,
+                "owner_session_id": normalized_owner,
+            },
+            "archive_hash": archive.get("export_hash"),
+            "restored_memory_ids": restored_ids,
+            "tombstone_suppressed_memory_ids": suppressed_ids,
+            "newer_conflict_memory_ids": conflict_ids,
+            "restored_count": len(restored_ids),
+            "tombstone_suppressed_count": len(suppressed_ids),
+            "newer_conflict_count": len(conflict_ids),
+            "restored_source_count": source_count,
+            "current_tombstone_revision": await self.get_memory_tombstone_revision(),
+            "reconciliation": reconciliation,
+        }
 
     async def mark_memory_tombstoned(
         self,

@@ -19,6 +19,7 @@ from src.memory.repository import (
     _CANONICAL_MEMORY_DELETE_CONTENT,
     _CANONICAL_MEMORY_REDACTED_STATE,
     _canonical_memory_deletion_marker,
+    _recovery_authority,
     memory_repository,
 )
 from src.memory.snapshots import invalidate_bounded_guardian_snapshot_cache
@@ -349,7 +350,16 @@ def memory_operator_policy_payload() -> dict[str, Any]:
     return {
         "authoritative_memory": "guardian",
         "operator_authority": "operator_corrections_override_agent_extraction",
-        "control_primitives": ["correct", "pin", "forget", "audit", *sorted(_LIVE_CONTROL_ACTIONS)],
+        "control_primitives": [
+            "correct",
+            "pin",
+            "forget",
+            "audit",
+            "export",
+            "rebuild",
+            "restore",
+            *sorted(_LIVE_CONTROL_ACTIONS),
+        ],
         "provenance_values": [
             "operator_correction",
             "operator_pin",
@@ -362,6 +372,14 @@ def memory_operator_policy_payload() -> dict[str, Any]:
         "recency_policy": "operator_actions_refresh_last_confirmed_at",
         "receipt_policy": "every_operator_memory_action_emits_auditable_receipt",
         "acknowledgement_policy": "live_control_actions_require_explicit_operator_acknowledgement",
+        "recovery_authority": {
+            "owner_binding": "authenticated_operator_session",
+            "accepted_source_role": "operator",
+            "body_actor_is_ignored": True,
+            "tombstone_precedence": "current_ledger_beats_older_archive",
+            "derived_index_mode": "deterministic_canonical_lexical",
+        },
+        "recovery_states": ["ready", "degraded_no_learning", "blocked"],
         "claim_boundary": "live_controls_are_operator_receipts_not_solved_learning_superiority_or_full_provider_parity",
         "blocked_claims": list(_BLOCKED_LIVE_CONTROL_CLAIMS),
     }
@@ -408,7 +426,25 @@ async def correct_memory(
     importance: float = 0.9,
     privacy_boundary: str | None = None,
     metadata: dict[str, Any] | None = None,
+    authenticated_session_id: str | None = None,
+    source_role: str = "operator",
 ) -> dict[str, Any]:
+    normalized_source_role = str(source_role or "").strip().lower()
+    if normalized_source_role != "operator":
+        raise PermissionError("memory correction source role must be operator")
+    if authenticated_session_id is not None:
+        normalized_authenticated_session = str(authenticated_session_id).strip()
+        normalized_requested_session = str(source_session_id or "").strip()
+        if normalized_requested_session and normalized_requested_session != normalized_authenticated_session:
+            raise PermissionError("memory correction source session does not match the authenticated session")
+        source_session_id = normalized_authenticated_session
+        if corrects_memory_id:
+            existing_target = await memory_repository.get_memory(corrects_memory_id)
+            if existing_target is None:
+                raise ValueError(f"Unknown memory id: {corrects_memory_id}")
+            target_session_id = str(existing_target.source_session_id or "").strip()
+            if target_session_id and target_session_id != normalized_authenticated_session:
+                raise PermissionError("memory correction target belongs to another owner session")
     normalized_content = " ".join(str(content or "").strip().split())
     if not normalized_content:
         raise ValueError("content must be non-empty")
@@ -512,6 +548,173 @@ async def correct_memory(
         "receipt": receipt.as_payload(),
         "audit_event_id": audit_event.id,
         "policy": memory_operator_policy_payload(),
+    }
+
+
+async def export_memory_recovery(
+    *,
+    actor: str,
+    owner_session_id: str,
+    authenticated_session_id: str,
+    source_role: str = "operator",
+    limit: int = 10_000,
+) -> dict[str, Any]:
+    """Export canonical memory through the authenticated recovery boundary."""
+
+    result = await memory_repository.export_canonical_memory_state(
+        actor=actor,
+        owner_session_id=owner_session_id,
+        authenticated_session_id=authenticated_session_id,
+        source_role=source_role,
+        limit=limit,
+    )
+    if result.get("status") == "ready":
+        event = await audit_repository.log_event(
+            actor=actor,
+            event_type="memory_recovery_exported",
+            tool_name="memory_recovery",
+            risk_level="medium",
+            policy_mode="authenticated_operator",
+            session_id=owner_session_id,
+            summary="Authenticated operator exported canonical memory",
+            details={
+                "artifact_path": result.get("artifact_path"),
+                "artifact_sha256": result.get("artifact_sha256"),
+                "export_hash": result.get("export_hash"),
+                "counts": result.get("counts"),
+                "memory_ids": result.get("memory_ids"),
+                "tombstone_ids": result.get("tombstone_ids"),
+                "source_role": source_role,
+            },
+        )
+        result["audit_event_id"] = event.id
+    return result
+
+
+async def rebuild_memory_recovery(
+    *,
+    actor: str,
+    owner_session_id: str,
+    authenticated_session_id: str,
+    source_role: str = "operator",
+    limit: int = 10_000,
+) -> dict[str, Any]:
+    """Rebuild the local derived memory index without invoking a provider."""
+
+    result = await memory_repository.rebuild_canonical_memory_index(
+        actor=actor,
+        owner_session_id=owner_session_id,
+        authenticated_session_id=authenticated_session_id,
+        source_role=source_role,
+        limit=limit,
+    )
+    if result.get("status") == "ready":
+        event = await audit_repository.log_event(
+            actor=actor,
+            event_type="memory_recovery_rebuilt",
+            tool_name="memory_recovery",
+            risk_level="low",
+            policy_mode="authenticated_operator",
+            session_id=owner_session_id,
+            summary="Authenticated operator rebuilt local memory index",
+            details={
+                "artifact_path": result.get("artifact_path"),
+                "artifact_sha256": result.get("artifact_sha256"),
+                "index_hash": result.get("index_hash"),
+                "memory_ids": result.get("memory_ids"),
+                "semantic_index_status": result.get("semantic_index_status"),
+                "source_role": source_role,
+            },
+        )
+        result["audit_event_id"] = event.id
+    return result
+
+
+async def restore_memory_recovery(
+    *,
+    archive: dict[str, Any],
+    actor: str,
+    owner_session_id: str,
+    authenticated_session_id: str,
+    source_role: str = "operator",
+) -> dict[str, Any]:
+    """Restore an archive while preserving current canonical tombstones."""
+
+    result = await memory_repository.restore_canonical_memory_state(
+        archive,
+        actor=actor,
+        owner_session_id=owner_session_id,
+        authenticated_session_id=authenticated_session_id,
+        source_role=source_role,
+    )
+    event = await audit_repository.log_event(
+        actor=actor,
+        event_type="memory_recovery_restored",
+        tool_name="memory_recovery",
+        risk_level="medium",
+        policy_mode="authenticated_operator",
+        session_id=owner_session_id,
+        summary="Authenticated operator restored canonical memory archive",
+        details={
+            "archive_hash": result.get("archive_hash"),
+            "restored_memory_ids": result.get("restored_memory_ids"),
+            "tombstone_suppressed_memory_ids": result.get("tombstone_suppressed_memory_ids"),
+            "newer_conflict_memory_ids": result.get("newer_conflict_memory_ids"),
+            "reconciliation": result.get("reconciliation"),
+            "source_role": source_role,
+        },
+    )
+    result["audit_event_id"] = event.id
+    return result
+
+
+async def memory_recovery_status(
+    *,
+    owner_session_id: str,
+    authenticated_session_id: str,
+    actor: str,
+    source_role: str = "operator",
+) -> dict[str, Any]:
+    """Return operator-visible canonical recovery and no-learning state."""
+
+    normalized_actor, normalized_owner = _recovery_authority(
+        actor=actor,
+        owner_session_id=owner_session_id,
+        authenticated_session_id=authenticated_session_id,
+        source_role=source_role,
+    )
+    try:
+        reconciliation = await memory_repository.reconcile_memory_tombstones()
+        revision = await memory_repository.get_memory_tombstone_revision()
+    except SQLAlchemyError:
+        return {
+            "schema_version": "guardian.memory.recovery_status.v1",
+            "status": "degraded_no_learning",
+            "operator_status": "canonical_memory_recovery_unavailable",
+            "no_learning_reason": "canonical memory database unavailable",
+            "owner_session_id": normalized_owner,
+            "provenance": {"kind": "operator_memory_recovery_status", "actor": normalized_actor},
+            "reconciliation": {"status": "unavailable"},
+            "canonical_tombstone_revision": None,
+            "retrieval_mode": "disabled_until_canonical_recovery",
+        }
+    ready = reconciliation.get("status") == "ready"
+    return {
+        "schema_version": "guardian.memory.recovery_status.v1",
+        "status": "ready" if ready else "degraded_no_learning",
+        "operator_status": "canonical_memory_recovery_ready" if ready else "canonical_memory_recovery_degraded",
+        "no_learning_reason": None if ready else "canonical tombstone ledger requires repair",
+        "owner_session_id": normalized_owner,
+        "provenance": {
+            "kind": "operator_memory_recovery_status",
+            "actor": normalized_actor,
+            "source_role": source_role,
+        },
+        "reconciliation": reconciliation,
+        "canonical_tombstone_revision": revision,
+        "retrieval_mode": "deterministic_canonical_lexical" if ready else "disabled_until_canonical_recovery",
+        "semantic_index_status": "unavailable",
+        "provider_calls": 0,
     }
 
 

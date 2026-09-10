@@ -164,8 +164,12 @@ digest, and authority/egress delta.  Activation, pause, update, revoke,
 uninstall, rollback, bounded job cancellation, and the atomic active-version
 pointer retain canonical lifecycle receipts.  The state transaction uses an
 OS lock and atomic replacement; platforms without that lock fail closed.
-Local signature metadata provides integrity/provenance bookkeeping; it does
-not establish publisher trust.
+Initial activation binds the complete authority/egress delta from an empty
+baseline; update and rollback bind the exact current-to-target delta.  Pack jobs
+also require `authority.approval: always` at execution-contract admission.
+Local signature metadata is compared with the package digest when available;
+it provides integrity/provenance bookkeeping and does not establish publisher
+trust.
 
 The production primary/secondary canary entry points are explicitly blocked
 with `governed_runtime_adapter_unavailable` because this branch has no wired

@@ -28,7 +28,7 @@ authority:
     - workspace_read
   network: false
   secrets: []
-  approval: on_authority_expansion
+  approval: always
 resources:
   inference_priority: background
   max_inference_cost_microusd: 0

@@ -38,6 +38,7 @@ def _manifest(
     cost: int = 0,
     egress: list[str] | None = None,
     extra_authority: list[str] | None = None,
+    approval: str = "always",
 ) -> str:
     egress = egress if egress is not None else (["cloud_openrouter"] if network else [])
     tools = ["read_file", *(extra_authority or [])]
@@ -68,7 +69,7 @@ authority:
   filesystem: [workspace_read]
   network: {str(network).lower()}
   secrets: []
-  approval: on_authority_expansion
+  approval: {approval}
 resources:
   inference_priority: background
   max_inference_cost_microusd: {cost}
@@ -118,7 +119,7 @@ def _approve(
         digest=review["digest"],
         version=review["version"],
         current_digest=current_digest,
-        authority_delta_payload=delta or {},
+        authority_delta_payload=delta,
     )["approval"]["approval_id"]
 
 
@@ -274,20 +275,43 @@ def test_package_manifest_binding_is_checked_before_review(tmp_path: Path):
 
 def test_recomputed_fake_signature_never_becomes_publisher_trust(tmp_path: Path):
     root, pack = _package(tmp_path)
+    digest = capability_pack_digest(root)
     reviewed = parse_capability_pack_manifest(
         {
             **pack.model_dump(mode="json"),
             "signature": {
                 "state": "integrity-checked",
                 "algorithm": "seraph-sha256-v1",
-                "digest": capability_pack_digest(root),
+                "digest": digest,
             },
         }
     )
-    trust = publisher_trust_status(reviewed)
+    trust = publisher_trust_status(reviewed, package_root=root)
     assert trust["integrity_checked"] is True
+    assert trust["integrity_digest_match"] is True
     assert trust["publisher_verified"] is False
     assert "publisher label" in trust["reason"]
+    metadata_only = publisher_trust_status(reviewed)
+    assert metadata_only["integrity_checked"] is False
+    assert metadata_only["integrity_digest_match"] is None
+
+    mismatched = parse_capability_pack_manifest(
+        {
+            **pack.model_dump(mode="json"),
+            "signature": {
+                "state": "integrity-checked",
+                "algorithm": "seraph-sha256-v1",
+                "digest": "0" * 64,
+            },
+        }
+    )
+    mismatch_status = publisher_trust_status(mismatched, package_root=root)
+    assert mismatch_status["integrity_checked"] is False
+    assert mismatch_status["integrity_digest_match"] is False
+    assert "does not match" in mismatch_status["reason"]
+    with pytest.raises(CapabilityPackLifecycleError, match="does not match package content"):
+        CapabilityPackLifecycle(tmp_path / "state.json").review(mismatched, root_path=root, goal_id="goal-1")
+
     unavailable = parse_capability_pack_manifest({**pack.model_dump(mode="json"), "signature": {"state": "cryptographic-unavailable"}})
     assert publisher_trust_status(unavailable)["integrity_checked"] is False
 
@@ -317,6 +341,64 @@ def test_review_binds_digest_version_goal_and_authority_delta(tmp_path: Path):
     update_approval = _approve(store, expanded, expanded_review, action="update", goal_id="goal-1", current_digest=review["digest"], delta=delta)
     store.update(expanded, root_path=expanded_root, goal_id="goal-1", review_id=expanded_review["review_id"], approval_id=update_approval)
     assert store.status(first.id)["active"]["version"] == expanded.version
+
+
+def test_initial_activation_binds_full_authority_delta(tmp_path: Path):
+    root, pack = _package(tmp_path / "pack")
+    store = CapabilityPackLifecycle(tmp_path / "state.json")
+    review = store.review(pack, root_path=root, goal_id="goal-1")["review"]
+    with pytest.raises(CapabilityPackLifecycleError, match="authority delta"):
+        store.create_operator_approval(
+            pack.id,
+            action="activate",
+            goal_id="goal-1",
+            digest=review["digest"],
+            version=review["version"],
+            authority_delta_payload={},
+        )
+    approval = _approve(store, pack, review, action="activate", goal_id="goal-1")
+    activated = store.activate(pack, root_path=root, goal_id="goal-1", review_id=review["review_id"], approval_id=approval)
+    delta = activated["receipt"]["details"]["authority_delta"]
+    assert delta["authority_digest_before"] is None
+    assert delta["authority_digest_after"] == pack.authority_digest
+    assert delta["added"]["tools"] == ["read_file"]
+    assert delta["added"]["filesystem"] == ["workspace_read"]
+
+
+def test_paused_update_preserves_pause_and_execution_requires_always_approval(tmp_path: Path):
+    root, pack = _package(tmp_path / "first")
+    store = CapabilityPackLifecycle(tmp_path / "state.json")
+    review = store.review(pack, root_path=root, goal_id="goal-1")["review"]
+    activation = _approve(store, pack, review, action="activate", goal_id="goal-1")
+    store.activate(pack, root_path=root, goal_id="goal-1", review_id=review["review_id"], approval_id=activation)
+    pause = _approve(store, pack, review, action="pause", goal_id="goal-1")
+    store.pause(pack.id, approval_id=pause)
+
+    updated_root, updated = _package(tmp_path / "updated", manifest_text=_manifest(version="2.0.0"))
+    updated_review = store.review(updated, root_path=updated_root, goal_id="goal-1")["review"]
+    update = _approve(
+        store,
+        updated,
+        updated_review,
+        action="update",
+        goal_id="goal-1",
+        current_digest=review["digest"],
+        delta=authority_delta(pack, updated),
+    )
+    result = store.update(updated, root_path=updated_root, goal_id="goal-1", review_id=updated_review["review_id"], approval_id=update)
+    assert result["pointer"]["status"] == "paused"
+
+    restricted_root, restricted = _package(
+        tmp_path / "restricted",
+        manifest_text=_manifest(pack_id="seraph.restricted-pack", approval="on_authority_expansion"),
+    )
+    restricted_review = store.review(restricted, root_path=restricted_root, goal_id="goal-restricted")["review"]
+    restricted_approval = _approve(store, restricted, restricted_review, action="activate", goal_id="goal-restricted")
+    store.activate(restricted, root_path=restricted_root, goal_id="goal-restricted", review_id=restricted_review["review_id"], approval_id=restricted_approval)
+    with pytest.raises(CapabilityPackLifecycleError, match="authority.approval: always"):
+        store.build_execution_contract(restricted.id, goal_id="goal-restricted", job_id="restricted-job")
+    with pytest.raises(CapabilityPackLifecycleError, match="authority.approval: always"):
+        store.register_job(pack_id=restricted.id, goal_id="goal-restricted", job_id="restricted-job")
 
 
 def test_concurrent_activation_has_one_pointer_and_atomic_write_failure_keeps_old(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):

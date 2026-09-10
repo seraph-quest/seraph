@@ -1148,18 +1148,48 @@ def capability_pack_digest(package_root: str | Path) -> str:
     return hasher.hexdigest()
 
 
-def publisher_trust_status(manifest: CapabilityPackManifest) -> dict[str, Any]:
-    """Return explicit provenance status; local integrity is never publisher trust."""
+def publisher_trust_status(
+    manifest: CapabilityPackManifest,
+    *,
+    package_root: str | Path | None = None,
+) -> dict[str, Any]:
+    """Return explicit provenance status; local integrity is never publisher trust.
+
+    An ``integrity-checked`` declaration is meaningful only after the declared
+    signature digest has been compared with the package content.  Callers that
+    do not have the package root receive an unverified status instead of a
+    trust-like assertion based on metadata alone.
+    """
     signature = manifest.signature
     if not isinstance(signature, PackSignature):
         signature = PackSignature.model_validate(signature)
+    integrity_checked = False
+    integrity_digest_match: bool | None = None
+    computed_digest: str | None = None
+    reason = "signature and publisher label are provenance/integrity only; trusted publisher keys are unavailable"
+    if signature.state == "integrity-checked":
+        if package_root is None:
+            reason = "signature digest cannot be checked without the package root"
+        else:
+            try:
+                computed_digest = capability_pack_digest(package_root)
+            except (CapabilityPackError, OSError, ValueError):
+                reason = "signature digest could not be checked against package content"
+            else:
+                integrity_digest_match = signature.digest == computed_digest
+                integrity_checked = integrity_digest_match
+                if not integrity_digest_match:
+                    reason = "declared signature digest does not match package content"
     return {
         "publisher_verified": False,
         "trust": "local_review_required",
         "provenance": manifest.publisher.provenance,
         "signature_state": signature.state,
-        "integrity_checked": signature.state == "integrity-checked",
-        "reason": "signature and publisher label are provenance/integrity only; trusted publisher keys are unavailable",
+        "integrity_checked": integrity_checked,
+        "integrity_digest_match": integrity_digest_match,
+        "declared_digest": signature.digest,
+        "computed_digest": computed_digest,
+        "reason": reason,
     }
 
 
@@ -1717,9 +1747,31 @@ class CapabilityPackLifecycle:
                 raise CapabilityPackLifecycleError("approval requires a reviewed package version")
             if record.get("version") != version or record.get("goal_id") != goal_id:
                 raise CapabilityPackLifecycleError("approval must match the reviewed version and goal")
-            if current_digest is None and action in {"update", "rollback"} and isinstance(pointer, Mapping):
+            if current_digest is None and action in {"activate", "update", "rollback"} and isinstance(pointer, Mapping) and pointer.get("status") in {"active", "paused"}:
                 current_digest = str(pointer.get("digest") or "") or None
+            if authority_delta_payload is not None and not isinstance(authority_delta_payload, Mapping):
+                raise CapabilityPackLifecycleError("authority delta must be a mapping")
             delta = authority_delta_payload if authority_delta_payload is not None else {}
+            if action in {"activate", "update", "rollback"}:
+                current_record = None
+                if isinstance(pointer, Mapping) and pointer.get("status") in {"active", "paused"}:
+                    current_record = state["versions"].get(pack_id, {}).get(pointer.get("digest"))
+                    if not isinstance(current_record, Mapping):
+                        current_record = None
+                expected_delta = _authority_delta_from_payloads(
+                    current_record.get("authority") if isinstance(current_record, Mapping) else {},
+                    current_record.get("data_policy") if isinstance(current_record, Mapping) else {},
+                    record.get("authority") if isinstance(record.get("authority"), Mapping) else {},
+                    record.get("data_policy") if isinstance(record.get("data_policy"), Mapping) else {},
+                )
+                expected_delta["authority_digest_before"] = current_record.get("authority_digest") if isinstance(current_record, Mapping) else None
+                expected_delta["authority_digest_after"] = record.get("authority_digest")
+                if authority_delta_payload is None:
+                    delta = expected_delta
+                elif canonical_digest(delta) != canonical_digest(expected_delta):
+                    raise CapabilityPackLifecycleError(
+                        "approval authority delta does not match the reviewed transition"
+                    )
             approval = self._store_approval(
                 state,
                 action=action,
@@ -1759,6 +1811,11 @@ class CapabilityPackLifecycle:
         record = records.get(pointer.get("digest")) if isinstance(records, Mapping) else None
         if not isinstance(record, Mapping):
             raise CapabilityPackLifecycleError("execution contract version is unavailable")
+        authority = record.get("authority")
+        if not isinstance(authority, Mapping) or authority.get("approval") != "always":
+            raise CapabilityPackLifecycleError(
+                "execution contract requires authority.approval: always"
+            )
         resources = record.get("resources") if isinstance(record.get("resources"), Mapping) else {}
         runtime_seconds = int(resources.get("max_runtime_seconds", 0) or 0)
         artifact_bytes = int(resources.get("max_artifact_bytes", 0) or 0)
@@ -1861,6 +1918,11 @@ class CapabilityPackLifecycle:
         if not validation["ok"]:
             raise CapabilityPackLifecycleError("; ".join(validation["errors"]))
         digest = capability_pack_digest(root_path)
+        publisher_trust = publisher_trust_status(pack, package_root=root_path)
+        if pack.signature.state == "integrity-checked" and not publisher_trust["integrity_checked"]:
+            raise CapabilityPackLifecycleError(
+                "integrity-checked signature digest does not match package content"
+            )
         review_id = _review_digest(
             pack_id=pack.id,
             version=pack.version,
@@ -1881,7 +1943,7 @@ class CapabilityPackLifecycle:
             "reviewed_by": reviewed_by,
             "reviewed_at": _utc_now(),
             "authority_expansion_approved": bool(authority_expansion_approved),
-            "publisher_trust": publisher_trust_status(pack),
+            "publisher_trust": publisher_trust,
         }
         with self._state_lock():
             state = self._load()
@@ -1955,7 +2017,7 @@ class CapabilityPackLifecycle:
         existing = state["active"].get(pack.id)
         previous_manifest = None
         previous_digest = None
-        candidate_delta: dict[str, Any] = {}
+        candidate_delta: dict[str, Any] = self._record_delta(None, pack)
         idempotent_existing = False
         if isinstance(existing, Mapping) and existing.get("status") in {"active", "paused"}:
             previous_digest = str(existing.get("digest") or "") or None
@@ -1965,11 +2027,10 @@ class CapabilityPackLifecycle:
                 idempotent_existing = True
             elif not allow_replace:
                 raise CapabilityPackLifecycleError("a different version is active; use update or rollback")
-            if not idempotent_existing:
-                old_version = state["versions"].get(pack.id, {}).get(existing.get("digest"))
-                if isinstance(old_version, Mapping):
-                    previous_manifest = old_version
-                candidate_delta = self._record_delta(old_version, pack)
+            old_version = state["versions"].get(pack.id, {}).get(existing.get("digest"))
+            if isinstance(old_version, Mapping):
+                previous_manifest = old_version
+            candidate_delta = self._record_delta(old_version, pack)
         self._require_approval(
             state,
             approval_id=approval_id,
@@ -2008,7 +2069,7 @@ class CapabilityPackLifecycle:
             "review_id": review_id,
             "authority_digest": pack.authority_digest,
             "dependencies_digest": _dependencies_digest(pack),
-            "status": "active",
+            "status": "paused" if isinstance(existing, Mapping) and existing.get("status") == "paused" else "active",
             "previous_version": existing.get("version") if isinstance(existing, Mapping) else None,
             "previous_digest": existing.get("digest") if isinstance(existing, Mapping) else None,
             "root_path": record.get("root_path"),

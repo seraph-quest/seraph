@@ -82,6 +82,34 @@ running Seraph, then restart the daemon. Window-title presence also requires
 Accessibility permission. OCR or screenshot analysis requires Screen Recording
 or Screen & System Audio Recording permission.
 
+## Branch-local #749 pairing ingress contract
+
+The `feat/749-pairing-contract` branch adds a **Partial** server-side contract
+in `backend/src/extensions/node_pairing.py`. It is not shipped truth on
+`develop` and it does not claim a live Mac edge. The immutable request and
+state snapshots cover device, pairing, request, capture timestamp, monotonic
+sequence, content hash, media type, bounded size, policy version, capability
+scope, data purpose, and a scoped credential fingerprint. Pure validation
+returns the stable `accepted`, `duplicate`, `out_of_order`, `expired`,
+`revoked`, `oversized`, `blocked`, or `retryable` states. The bounded replay
+ledger advances only after an accepted request and never stores a raw token.
+
+Pairing lifecycle transitions are operator-owned `pair`, `rotate`, `revoke`,
+and `expire` snapshots. Rotation retires the previous fingerprint; revocation
+and expiry remove the active fingerprint. The ingress capability allow-list is
+read/observation-oriented and explicitly rejects action authority. Receipts
+contain metadata, digests, policy and state facts while redacting source paths,
+content, raw credentials, and full credential fingerprints. This contract does
+not authenticate a transport or read an artifact; callers still need to verify
+the payload hash before governed ingestion.
+
+The remaining #749 boundaries are an authenticated HTTPS/origin protocol,
+server-side artifact persistence and readback, real paired-Mac receipts,
+durable integration with the node state store, and operator UI/runtime wiring.
+Those boundaries must remain visibly blocked or partial until their own
+focused implementation and runtime evidence exists. No local GPU, VLM, or
+model/provider call is required by this contract.
+
 ## Still To Do On `develop`
 
 - [ ] richer interruption channels outside the browser/native desktop shell, imported capability reach, and typed source-adapter continuity layer

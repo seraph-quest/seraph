@@ -15,6 +15,7 @@ from src.guardian.audio_ingress import (
     AudioFormatRule,
     AudioIngressPolicy,
     AudioIngressRequest,
+    AudioIngressResult,
     AudioIngressStatus,
     AudioProviderStatus,
     AudioRequestIdentity,
@@ -34,18 +35,28 @@ def _consent(
     reference: str,
     *,
     state: AudioConsentState = AudioConsentState.ACTIVE,
+    granted_at: datetime = NOW - timedelta(minutes=1),
     expires_at: datetime = NOW + timedelta(minutes=10),
 ) -> AudioConsent:
     return AudioConsent(
         reference=reference,
         state=state,
-        granted_at=NOW - timedelta(minutes=1),
+        granted_at=granted_at,
         expires_at=expires_at,
     )
 
 
-def _policy(*, provider_status: AudioProviderStatus = AudioProviderStatus.READY) -> AudioIngressPolicy:
-    return AudioIngressPolicy(provider_status=provider_status)
+def _policy(
+    *,
+    provider_status: AudioProviderStatus = AudioProviderStatus.READY,
+    trusted_proof: bool = True,
+) -> AudioIngressPolicy:
+    return AudioIngressPolicy(
+        provider_status=provider_status,
+        trusted_adapter_id="audio-adapter-1" if trusted_proof else None,
+        provider_proof_reference="provider-proof:1" if trusted_proof else None,
+        consent_proof_reference="consent-proof:1" if trusted_proof else None,
+    )
 
 
 def _request(**changes) -> AudioIngressRequest:
@@ -98,6 +109,30 @@ def test_ready_openrouter_preflight_accepts_chat_and_receipt_never_contains_audi
     assert "raw transcript" not in encoded.lower()
     assert payload["privacy"] == {"raw_audio_in_receipt": False, "transcript_in_receipt": False}
     assert payload["provider"]["live_call_claimed"] is False
+
+
+def test_ready_provider_and_consents_require_explicit_trusted_adapter_proof():
+    result = validate_audio_ingress(
+        _request(), policy=_policy(trusted_proof=False), now=NOW
+    )
+    assert result.status is AudioIngressStatus.DEGRADED
+    assert result.reason_code == "trusted_adapter_proof_required"
+
+
+def test_receipt_omits_untrusted_result_digest_and_reason_content():
+    request = _request()
+    result = AudioIngressResult(
+        status=AudioIngressStatus.BLOCKED,
+        reason_code="YQ==",
+        accepted=False,
+        retryable=False,
+        request_digest="YQ==",
+    )
+    receipt = serialize_audio_ingress_receipt(request, result, policy=_policy()).as_payload()
+    encoded = json.dumps(receipt, sort_keys=True)
+    assert receipt["request_digest"] is None
+    assert receipt["reason_code"] == "invalid_receipt_reason_code"
+    assert "YQ==" not in encoded
 
 
 def test_unverified_or_unavailable_provider_is_degraded_without_local_fallback():
@@ -162,6 +197,38 @@ def test_raw_audio_retention_deadline_is_required_and_capped_at_fifteen_minutes(
     assert too_long.reason_code == "raw_audio_retention_exceeds_limit"
     missing = validate_audio_ingress(_request(raw_audio_retention_deadline=None), policy=_policy(), now=NOW)
     assert missing.reason_code == "raw_audio_retention_deadline_missing"
+
+
+@pytest.mark.parametrize(
+    ("changes", "reason"),
+    [
+        ({"captured_at": NOW + timedelta(seconds=31)}, "capture_timestamp_in_future"),
+        (
+            {
+                "captured_at": NOW - timedelta(minutes=2),
+                "capture_consent": _consent(
+                    CAPTURE_REF,
+                    granted_at=NOW + timedelta(seconds=1),
+                )
+            },
+            "capture_consent_after_capture",
+        ),
+        (
+            {
+                "captured_at": NOW + timedelta(seconds=20),
+                "capture_consent": _consent(
+                    CAPTURE_REF,
+                    expires_at=NOW + timedelta(seconds=10),
+                ),
+            },
+            "capture_consent_expired_before_capture",
+        ),
+    ],
+)
+def test_capture_and_consent_timestamps_cannot_move_the_retention_window_forward(changes, reason):
+    result = validate_audio_ingress(_request(**changes), policy=_policy(), now=NOW)
+    assert result.status is AudioIngressStatus.BLOCKED
+    assert result.reason_code == reason
 
 
 def test_non_chat_capability_requires_confirmed_transcript_but_chat_does_not():

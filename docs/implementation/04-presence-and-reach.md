@@ -36,6 +36,13 @@ transcripts are explicitly excluded. Duration and normalized-WAV limits remain
 metadata assertions until a governed decoder/attachment owner supplies the
 runtime proof.
 
+`trusted_adapter_id`, `provider_proof_reference`, and
+`consent_proof_reference` are handles supplied by that later trusted adapter;
+the pure validator checks their shape but cannot establish their authenticity
+or perform a live provider/consent check. A `ready` provider without all three
+handles returns `degraded` with `trusted_adapter_proof_required`, so callers
+cannot treat caller-asserted provider or consent metadata as execution proof.
+
 The remaining work is the #750/#751 integration with canonical session,
 attachment, and outbox persistence, governed OpenRouter admission and key/model
 capability checks, actual codec/duration verification, deletion/retention

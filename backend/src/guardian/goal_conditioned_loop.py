@@ -238,15 +238,17 @@ def _candidate_receipt_details(
     canonical_decision = build_gate_b_canonical_decision_record(
         goal_id=decision.goal_id,
         goal_revision=decision.goal_revision,
-        plan_revision=decision.goal_revision,
+        # This seam does not own a durable plan revision or canonical-memory
+        # reconciliation state.  Keep the Gate B record contract-only until a
+        # governed caller can supply those bindings.
+        plan_revision=None,
         decision_input_digest=_safe_digest(decision.inputs),
         memory_delta_id=strategy_delta_id,
         memory_delta_provenance=strategy_delta_provenance,
-        memory_control_owner=(
-            "operator:authenticated-strategy-delta-owner"
-            if strategy_delta_provenance == "verified"
-            else None
-        ),
+        memory_control_owner=None,
+        memory_state="unknown",
+        tombstone_ledger_revision=None,
+        recovery_state="restart_unverified",
         decision=decision.action.value,
     )
     return {
@@ -282,15 +284,16 @@ def _outcome_receipt_details(
     canonical_decision = build_gate_b_canonical_decision_record(
         goal_id=receipt.goal_id,
         goal_revision=receipt.goal_revision,
-        plan_revision=receipt.goal_revision,
+        # The goal-loop receipt has no authoritative plan revision or
+        # canonical-memory restart binding at this extension point.
+        plan_revision=None,
         decision_input_digest=receipt.decision_input_digest,
         memory_delta_id=receipt.strategy_delta_id,
         memory_delta_provenance=receipt.strategy_delta_provenance,
-        memory_control_owner=(
-            "operator:authenticated-strategy-delta-owner"
-            if receipt.strategy_delta_provenance == "verified"
-            else None
-        ),
+        memory_control_owner=None,
+        memory_state="unknown",
+        tombstone_ledger_revision=None,
+        recovery_state="restart_unverified",
         decision="act",
         verification=receipt.verification,
         requested_learning=receipt.learning,
@@ -403,6 +406,40 @@ def _sanitize_canonical_decision_record(value: object) -> dict[str, Any] | None:
     return record.as_payload()
 
 
+def _downgrade_canonical_decision_record(value: object) -> dict[str, Any] | None:
+    """Remove positive canonical-memory claims from an unresolved outer row.
+
+    Stored audit details are untrusted.  A nested Gate B record cannot retain a
+    verified/applied claim when the surrounding StrategyDelta provenance was
+    downgraded (for example, on the list/readback surface where the candidate
+    inputs are unavailable).  Rebuild the record through the same bounded
+    contract so no caller-supplied content is copied into the replacement.
+    """
+
+    safe_record = _sanitize_canonical_decision_record(value)
+    if safe_record is None:
+        return None
+    try:
+        record = build_gate_b_canonical_decision_record(
+            goal_id=safe_record.get("goal_id"),
+            goal_revision=safe_record.get("goal_revision"),
+            plan_revision=safe_record.get("plan_revision"),
+            decision_input_digest=safe_record.get("decision_input_digest"),
+            memory_delta_id=None,
+            memory_delta_provenance="unresolved",
+            memory_control_owner=None,
+            memory_state="unknown",
+            tombstone_ledger_revision=None,
+            recovery_state="restart_unverified",
+            decision=safe_record.get("decision"),
+            verification=safe_record.get("verification"),
+            requested_learning="no_learning",
+        )
+    except Exception:
+        return None
+    return record.as_payload()
+
+
 def _sanitize_strategy_delta_receipt(details: dict[str, Any]) -> dict[str, Any]:
     """Keep legacy audit rows from exposing an unverified correction ID."""
 
@@ -419,12 +456,20 @@ def _sanitize_strategy_delta_receipt(details: dict[str, Any]) -> dict[str, Any]:
             safe_details["evidence_refs"] = []
     delta_id = safe_details.get("strategy_delta_id")
     provenance = safe_details.get("strategy_delta_provenance")
-    if provenance == "verified" and isinstance(delta_id, str) and delta_id.strip():
-        return safe_details
-    safe_details["strategy_delta_id"] = None
-    safe_details["strategy_delta_provenance"] = (
-        "not_present" if provenance is None and delta_id is None else "unresolved"
+    outer_verified = (
+        provenance == "verified"
+        and isinstance(delta_id, str)
+        and _SAFE_OPAQUE_ID.fullmatch(delta_id.strip()) is not None
     )
+    if not outer_verified:
+        safe_details["strategy_delta_id"] = None
+        safe_details["strategy_delta_provenance"] = (
+            "not_present" if provenance is None and delta_id is None else "unresolved"
+        )
+    if "canonical_decision_record" in safe_details and not outer_verified:
+        safe_details["canonical_decision_record"] = _downgrade_canonical_decision_record(
+            safe_details.get("canonical_decision_record")
+        )
     return safe_details
 
 

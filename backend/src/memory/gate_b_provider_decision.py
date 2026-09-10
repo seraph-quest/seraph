@@ -165,9 +165,9 @@ def build_gate_b_canonical_decision_record(
     memory_delta_id: object = None,
     memory_delta_provenance: object = "not_present",
     memory_control_owner: object = None,
-    memory_state: object = "available",
+    memory_state: object = "unknown",
     tombstone_ledger_revision: object = None,
-    recovery_state: object = "steady",
+    recovery_state: object = "restart_unverified",
     decision: object = "act",
     verification: object = "unknown",
     requested_learning: object = "no_learning",
@@ -177,9 +177,9 @@ def build_gate_b_canonical_decision_record(
     The helper is deliberately pure.  A caller must supply the current goal
     and plan revisions, the digest used for the choice, the strategy-delta
     provenance and its authenticated control owner, plus the current
-    tombstone/restart state.  Missing or contradictory bindings become an
-    explicit no-learning or blocked record; they never become a positive
-    memory update.
+    tombstone/restart state.  The memory/recovery defaults are deliberately
+    unknown/unreconciled, so omitting those bindings becomes an explicit
+    no-learning or blocked record; it never becomes a positive memory update.
     """
 
     safe_goal_id = _safe_opaque_id(goal_id)

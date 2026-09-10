@@ -11,6 +11,7 @@ from src.goals.repository import deserialize_success_criterion, serialize_succes
 from src.guardian.goal_conditioned_loop import (
     _existing_receipt,
     _redact_receipt_details,
+    _sanitize_strategy_delta_receipt,
     _safe_digest,
     build_goal_candidate_decision,
     dispatch_goal_candidate,
@@ -248,9 +249,12 @@ async def test_unresolved_web_brief_correction_blocks_adapter_and_records_no_lea
     )
     assert no_learning["reason"] == "strategy_delta_unresolved"
     assert no_learning["strategy_delta_provenance"] == "unresolved"
-    assert no_learning["canonical_decision_record"]["status"] == "no_learning"
+    assert no_learning["canonical_decision_record"]["status"] == "blocked"
     assert no_learning["canonical_decision_record"]["learning"] == "no_learning"
     assert no_learning["canonical_decision_record"]["goal_revision"] == candidate.goal_revision
+    assert no_learning["canonical_decision_record"]["plan_revision"] is None
+    assert no_learning["canonical_decision_record"]["memory_state"] == "unknown"
+    assert no_learning["canonical_decision_record"]["recovery_state"] == "restart_unverified"
 
 
 async def test_stale_corrected_outcome_is_not_replayed_before_delta_validation():
@@ -442,13 +446,14 @@ async def test_correction_changes_later_choice_and_persists_provenance():
     assert later["strategy_delta_id"] == "delta-correction-1"
     assert later["strategy_delta_provenance"] == "verified"
     assert later["decision_input_digest"] == new_outcome.decision_input_digest
-    assert later["canonical_decision_record"]["status"] == "verified"
+    assert later["canonical_decision_record"]["status"] == "blocked"
+    assert later["canonical_decision_record"]["learning"] == "no_learning"
     assert later["canonical_decision_record"]["goal_revision"] == 2
-    assert later["canonical_decision_record"]["plan_revision"] == 2
+    assert later["canonical_decision_record"]["plan_revision"] is None
     assert later["canonical_decision_record"]["memory_delta_id"] == "delta-correction-1"
-    assert later["canonical_decision_record"]["memory_control_owner"] == (
-        "operator:authenticated-strategy-delta-owner"
-    )
+    assert later["canonical_decision_record"]["memory_control_owner"] is None
+    assert later["canonical_decision_record"]["memory_state"] == "unknown"
+    assert later["canonical_decision_record"]["recovery_state"] == "restart_unverified"
 
 
 async def test_strategy_delta_provenance_requires_applied_goal_target_linkage():
@@ -573,8 +578,6 @@ def test_result_contract_exposes_verified_correction_receipt_fields():
 
 
 def test_legacy_receipt_ids_are_sanitized_without_verified_provenance():
-    from src.guardian.goal_conditioned_loop import _sanitize_strategy_delta_receipt
-
     assert _sanitize_strategy_delta_receipt({"strategy_delta_id": "fabricated"}) == {
         "strategy_delta_id": None,
         "strategy_delta_provenance": "unresolved",
@@ -582,6 +585,97 @@ def test_legacy_receipt_ids_are_sanitized_without_verified_provenance():
     assert _sanitize_strategy_delta_receipt(
         {"strategy_delta_id": "delta-1", "strategy_delta_provenance": "verified"}
     )["strategy_delta_id"] == "delta-1"
+
+
+def test_unresolved_outer_receipt_downgrades_nested_canonical_record():
+    from src.memory.gate_b_provider_decision import build_gate_b_canonical_decision_record
+
+    nested = build_gate_b_canonical_decision_record(
+        goal_id="goal-readback",
+        goal_revision=2,
+        plan_revision=2,
+        decision_input_digest="a" * 64,
+        memory_delta_id="delta-readback",
+        memory_delta_provenance="verified",
+        memory_control_owner="operator:test",
+        memory_state="available",
+        recovery_state="steady",
+        decision="act",
+        verification="passed",
+        requested_learning="applied",
+    )
+
+    safe = _sanitize_strategy_delta_receipt(
+        {
+            "strategy_delta_id": "delta-readback",
+            "strategy_delta_provenance": "unresolved",
+            "canonical_decision_record": nested.as_payload(),
+        }
+    )
+
+    record = safe["canonical_decision_record"]
+    assert safe["strategy_delta_id"] is None
+    assert safe["strategy_delta_provenance"] == "unresolved"
+    assert record["status"] == "blocked"
+    assert record["learning"] == "no_learning"
+    assert record["memory_delta_id"] is None
+    assert record["memory_control_owner"] is None
+    assert record["memory_state"] == "unknown"
+    assert record["recovery_state"] == "restart_unverified"
+
+
+async def test_list_readback_downgrades_nested_canonical_record_with_outer_provenance():
+    from datetime import datetime, timezone
+    from unittest.mock import AsyncMock, patch
+
+    from src.memory.gate_b_provider_decision import build_gate_b_canonical_decision_record
+
+    nested = build_gate_b_canonical_decision_record(
+        goal_id="goal-list-readback",
+        goal_revision=1,
+        plan_revision=1,
+        decision_input_digest="b" * 64,
+        memory_delta_id="delta-list-readback",
+        memory_delta_provenance="verified",
+        memory_control_owner="operator:test",
+        memory_state="available",
+        recovery_state="steady",
+        decision="act",
+        verification="passed",
+        requested_learning="applied",
+    )
+    event = {
+        "id": "audit-list-readback",
+        "event_type": "goal_loop_outcome",
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "details": {
+            "goal_id": "goal-list-readback",
+            "strategy_delta_id": "delta-list-readback",
+            "strategy_delta_provenance": "verified",
+            "canonical_decision_record": nested.as_payload(),
+        },
+    }
+
+    with (
+        patch(
+            "src.guardian.goal_conditioned_loop.audit_repository.list_events",
+            new=AsyncMock(return_value=[event]),
+        ),
+        patch(
+            "src.guardian.goal_conditioned_loop.goal_repository.get",
+            new=AsyncMock(return_value=None),
+        ),
+    ):
+        listed = await list_goal_loop_receipts("goal-list-readback")
+
+    record = listed[0]["canonical_decision_record"]
+    assert listed[0]["strategy_delta_id"] is None
+    assert listed[0]["strategy_delta_provenance"] == "unresolved"
+    assert record["status"] == "blocked"
+    assert record["learning"] == "no_learning"
+    assert record["memory_delta_id"] is None
+    assert record["memory_state"] == "unknown"
+    assert record["recovery_state"] == "restart_unverified"
 
 
 def test_receipt_evidence_refs_are_typed_opaque_digests():

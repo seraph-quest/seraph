@@ -315,14 +315,18 @@ delete/tombstone/rebuild and provider-outage continuity. These are focused
 contract proofs, not a live end-to-end provider or human-outcome result.
 
 The shared `guardian-memory-canonical-decision-v1` record is emitted alongside
-#745 candidate and outcome receipts. It binds `goal_id`, goal and plan
-revisions, the decision-input digest, strategy-delta ID/provenance, an
+#745 candidate and outcome receipts. Its contract can bind `goal_id`, goal and
+plan revisions, the decision-input digest, strategy-delta ID/provenance, an
 authenticated control-owner attestation, and the current memory/recovery
-state. A verified strategy delta can therefore carry the later decision
-binding; unresolved evidence records `no_learning`, while tombstoned or
-revoked memory and an unreconciled restart are `blocked`. The owner field is a
-bounded attestation handle; the authoritative owner identity remains on the
-existing `StrategyDelta` record and is validated before the handle is emitted.
+state. The current goal-loop seam does not own an authoritative plan revision,
+control-owner handle, or reconciled memory/restart state, so it emits those
+records as blocked with `learning=no_learning` rather than manufacturing
+positive bindings. A governed caller that supplies the complete current state
+may produce the verified later-decision binding; unresolved evidence records
+`no_learning`, while tombstoned or revoked memory and an unreconciled restart
+are `blocked`. The owner field is a bounded attestation handle; the
+authoritative owner identity remains on the existing `StrategyDelta` record
+and is validated before a caller emits the handle.
 
 Remaining Gate B work requires a trusted OpenRouter adapter with explicit
 credential, capability, consent, egress, serial-admission, and budget proof;

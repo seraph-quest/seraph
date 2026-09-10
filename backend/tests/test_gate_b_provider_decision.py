@@ -102,6 +102,8 @@ def test_canonical_correction_binds_later_decision_to_revision_and_owner():
         goal_revision=1,
         plan_revision=1,
         decision_input_digest="a" * 64,
+        memory_state="available",
+        recovery_state="steady",
         decision="defer",
     )
     corrected = build_gate_b_canonical_decision_record(
@@ -112,6 +114,8 @@ def test_canonical_correction_binds_later_decision_to_revision_and_owner():
         memory_delta_id="delta-correction-1",
         memory_delta_provenance="verified",
         memory_control_owner="operator:test",
+        memory_state="available",
+        recovery_state="steady",
         decision="act",
         verification="passed",
     )
@@ -137,6 +141,8 @@ def test_unresolved_correction_records_no_learning_before_any_effect():
         decision_input_digest="c" * 64,
         memory_delta_id="delta-correction-1",
         memory_delta_provenance="unresolved",
+        memory_state="available",
+        recovery_state="steady",
         decision="act",
     )
 
@@ -144,6 +150,27 @@ def test_unresolved_correction_records_no_learning_before_any_effect():
     assert record.learning == "no_learning"
     assert record.reason_code == "canonical_memory_delta_unresolved"
     assert record.provider_override == "blocked"
+
+
+def test_canonical_verified_binding_defaults_missing_state_fail_closed():
+    record = build_gate_b_canonical_decision_record(
+        goal_id="goal-missing-state",
+        goal_revision=1,
+        plan_revision=1,
+        decision_input_digest="f" * 64,
+        memory_delta_id="delta-without-state-proof",
+        memory_delta_provenance="verified",
+        memory_control_owner="operator:test",
+        decision="act",
+        verification="passed",
+        requested_learning="applied",
+    )
+
+    assert record.status == "blocked"
+    assert record.learning == "no_learning"
+    assert record.memory_state == "unknown"
+    assert record.recovery_state == "restart_unverified"
+    assert record.reason_code == "canonical_restart_reconciliation_unverified"
 
 
 def test_tombstone_revocation_and_restart_state_fail_closed():
@@ -178,6 +205,7 @@ def test_tombstone_revocation_and_restart_state_fail_closed():
         memory_delta_id="delta-safe",
         memory_delta_provenance="verified",
         memory_control_owner="operator:test",
+        memory_state="available",
         recovery_state="restart_unverified",
         decision="act",
         verification="passed",
@@ -190,6 +218,7 @@ def test_tombstone_revocation_and_restart_state_fail_closed():
         memory_delta_id="delta-safe",
         memory_delta_provenance="verified",
         memory_control_owner="operator:test",
+        memory_state="available",
         recovery_state="restart_reconciled",
         decision="act",
         verification="passed",

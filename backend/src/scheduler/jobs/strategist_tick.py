@@ -46,6 +46,7 @@ logger = logging.getLogger(__name__)
 _STRATEGIST_SERVICE_ID = "service:strategist"
 _STRATEGIST_RUNNER_ID = "scheduler:strategist_tick"
 _STRATEGIST_CAPABILITY_VERSION = "strategist-tick-v1"
+_WEB_BRIEF_CORRECTION_FALLBACK_MAX_CANDIDATES = 2
 
 
 def _reasoning_digest(reasoning: object) -> str:
@@ -426,21 +427,23 @@ async def _run_opted_in_goal_web_brief(
         )
         return details
 
-    last_details: dict[str, object] | None = None
-    for selected in sorted(
+    ordered_candidates = sorted(
         eligible,
         key=lambda item: _proactive_goal_sort_key(item[0], item[4]),
-    ):
+    )
+    for candidate_index, selected in enumerate(ordered_candidates):
         details = await _run_candidate(selected)
-        last_details = details
         # A correction gate is a candidate-local no-op. Keep the scheduler's
-        # priority order but give the next valid goal a chance; all other
+        # priority order but give one next valid goal a chance; all other
         # blocked/failed outcomes stop the bounded tick after their receipt.
-        if details.get("status") == "blocked" and details.get("reason") == "strategy_delta_unresolved":
+        if (
+            details.get("status") == "blocked"
+            and details.get("reason") == "strategy_delta_unresolved"
+            and candidate_index + 1 < _WEB_BRIEF_CORRECTION_FALLBACK_MAX_CANDIDATES
+        ):
             continue
         return details
-    assert last_details is not None
-    return last_details
+    raise RuntimeError("web brief candidate fallback exhausted without a result")
 
 
 async def _run_opted_in_goal_snapshot(

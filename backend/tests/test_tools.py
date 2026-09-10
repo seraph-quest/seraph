@@ -154,6 +154,27 @@ class TestFilesystemTool:
         write_file.forward("sub/dir/file.txt", "nested content")
         assert (tmp_path / "sub" / "dir" / "file.txt").read_text() == "nested content"
 
+    def test_write_rejects_oversized_input_before_open(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("src.tools.filesystem_tool.settings.workspace_dir", str(tmp_path))
+
+        with pytest.raises(ValueError, match="file content exceeds"):
+            write_file.forward("too-large.txt", "x" * (1 * 1024 * 1024 + 1))
+
+        assert not (tmp_path / "too-large.txt").exists()
+
+    def test_write_fails_closed_when_final_target_is_replaced_by_symlink(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("src.tools.filesystem_tool.settings.workspace_dir", str(tmp_path))
+        outside = tmp_path / "outside.txt"
+        outside.write_text("must remain unchanged", encoding="utf-8")
+        swapped = tmp_path / "swapped.txt"
+        swapped.symlink_to(outside)
+
+        with patch("src.tools.filesystem_tool._safe_resolve", return_value=swapped):
+            result = write_file.forward("swapped.txt", "attacker content")
+
+        assert "Failed to write file" in result
+        assert outside.read_text(encoding="utf-8") == "must remain unchanged"
+
     def test_preview_workspace_patch_returns_diff_without_writing(self, tmp_path, monkeypatch):
         monkeypatch.setattr("src.tools.filesystem_tool.settings.workspace_dir", str(tmp_path))
         (tmp_path / "notes.md").write_text("alpha\nbeta\n", encoding="utf-8")
@@ -168,6 +189,19 @@ class TestFilesystemTool:
         assert receipt["artifact"]["content_sha256"] == receipt["after_sha256"]
         assert "+gamma" in receipt["diff"]
         assert (tmp_path / "notes.md").read_text(encoding="utf-8") == "alpha\nbeta\n"
+
+    def test_patch_rejects_oversized_input_before_read_or_write(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("src.tools.filesystem_tool.settings.workspace_dir", str(tmp_path))
+        (tmp_path / "notes.md").write_text("alpha\n", encoding="utf-8")
+
+        with pytest.raises(ValueError, match="new_text exceeds"):
+            preview_workspace_patch.forward(
+                "notes.md",
+                "alpha",
+                "x" * (1 * 1024 * 1024 + 1),
+            )
+
+        assert (tmp_path / "notes.md").read_text(encoding="utf-8") == "alpha\n"
 
     def test_apply_workspace_patch_writes_and_logs_receipt(self, tmp_path, monkeypatch, async_db):
         monkeypatch.setattr("src.tools.filesystem_tool.settings.workspace_dir", str(tmp_path))
@@ -276,7 +310,7 @@ class TestFilesystemTool:
 
     def test_write_file_failure_logs_runtime_audit(self, tmp_path, monkeypatch, async_db):
         monkeypatch.setattr("src.tools.filesystem_tool.settings.workspace_dir", str(tmp_path))
-        with patch("pathlib.Path.write_text", side_effect=PermissionError("denied")):
+        with patch("src.tools.filesystem_tool._open_workspace_text", side_effect=PermissionError("denied")):
             result = write_file.forward("blocked.txt", "secret")
 
         assert "Failed to write file" in result
@@ -294,7 +328,7 @@ class TestFilesystemTool:
         monkeypatch.setattr("src.tools.filesystem_tool.settings.workspace_dir", str(tmp_path))
         (tmp_path / "broken.txt").write_text("hello", encoding="utf-8")
 
-        with patch("pathlib.Path.read_text", side_effect=OSError("boom")):
+        with patch("src.tools.filesystem_tool._read_workspace_text_bounded", side_effect=OSError("boom")):
             result = read_file.forward("broken.txt")
 
         assert "Failed to read file" in result

@@ -31,11 +31,23 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from config.settings import settings
-from src.approval.runtime import get_current_session_id, get_current_trust_principal
+from src.approval.runtime import (
+    get_current_session_id,
+    get_current_trust_principal,
+    reset_runtime_fencing_token,
+    reset_runtime_trust_principal,
+    set_runtime_fencing_token,
+    set_runtime_trust_principal,
+)
 from src.artifacts.registry import build_artifact_record
+from src.extensions.capability_execution import (
+    CapabilityExecutionError,
+    _RAW_RESULT_TOKEN,
+    build_capability_request,
+    current_capability_execution_host,
+)
 from src.security.trust_contract import AuthorityGrant, PrincipalType
-from src.tools.filesystem_tool import apply_workspace_patch, preview_workspace_patch
-from src.tools.process_tools import process_runtime_manager
+from src.tools.filesystem_tool import _safe_resolve, _write_workspace_text_bounded
 from src.workflows.job_runtime import (
     DurableJobIdentity,
     DurableJobSpec,
@@ -63,6 +75,7 @@ _MAX_FIXTURE_TOTAL_BYTES = 8_000_000
 _MAX_FIXTURE_DEPTH = 16
 _MAX_FIXTURE_DIRECTORIES = 200
 _MAX_TEST_TIMEOUT_SECONDS = 120
+_MAX_ARTIFACT_BYTES = 1 * 1024 * 1024
 _GENERATED_FIXTURE_DIRS = frozenset({".git", "__pycache__", ".pytest_cache"})
 _SAFE_JOB_ID = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
 _SHELL_META_CHARS = set("|&;<>()`$\\\n\r\t")
@@ -120,6 +133,10 @@ _UNTRUSTED_INSTRUCTION_MARKERS = (
 _NATIVE_CANCEL_EVENT: contextvars.ContextVar[threading.Event | None] = contextvars.ContextVar(
     "native_software_engineering_cancel_event",
     default=None,
+)
+_NATIVE_JOB_ID: contextvars.ContextVar[str] = contextvars.ContextVar("native_software_engineering_job_id", default="")
+_NATIVE_FENCING_TOKEN: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "native_software_engineering_fencing_token", default=""
 )
 _NATIVE_EXECUTION_LOCK = threading.Lock()
 _NATIVE_EXECUTIONS: dict[str, "_NativeExecutionControl"] = {}
@@ -669,14 +686,73 @@ def _relative_workspace_path(path: Path) -> str:
 
 
 def _safe_json(payload: Any) -> str:
-    return json.dumps(payload, ensure_ascii=True, sort_keys=True, indent=2) + "\n"
+    # Stream encoder chunks into a bounded buffer.  In particular, do not
+    # create an unbounded ``json.dumps`` result before checking its size.
+    encoder = json.JSONEncoder(ensure_ascii=True, sort_keys=True, indent=2).iterencode(payload)
+    chunks: list[str] = []
+    total_bytes = 0
+    for chunk in encoder:
+        total_bytes += len(chunk.encode("utf-8"))
+        if total_bytes + 1 > _MAX_ARTIFACT_BYTES:
+            raise NativeSoftwareEngineeringError("artifact_size_exceeded")
+        chunks.append(chunk)
+    return "".join(chunks) + "\n"
 
 
 def _write_json(path: Path, payload: dict[str, Any]) -> str:
     content = _safe_json(payload)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(content, encoding="utf-8")
+    root = _workspace_root()
+    try:
+        relative = path.absolute().relative_to(root.absolute()).as_posix()
+    except ValueError as exc:
+        raise NativeSoftwareEngineeringError("artifact_path_outside_workspace") from exc
+    try:
+        resolved = _safe_resolve(relative)
+        _write_workspace_text_bounded(
+            resolved,
+            content,
+            max_bytes=_MAX_ARTIFACT_BYTES,
+            create_parents=True,
+        )
+    except (OSError, ValueError) as exc:
+        raise NativeSoftwareEngineeringError("artifact_write_blocked") from exc
     return content
+
+
+def _execute_native_capability(
+    capability_id: str,
+    arguments: dict[str, Any],
+    *,
+    destination: str,
+    _return_raw_result: bool = False,
+) -> Any:
+    """Route native SWE effects through the same fixed capability host."""
+    principal = get_current_trust_principal()
+    session_id = get_current_session_id()
+    if principal is None or session_id is None:
+        raise NativeSoftwareEngineeringError("runtime_principal_missing")
+    request = build_capability_request(
+        capability_id=capability_id,
+        arguments=arguments,
+        owner_principal_id=principal.principal_id,
+        session_id=session_id,
+        job_id=_NATIVE_JOB_ID.get() or principal.job_id,
+        destination=destination,
+    )
+    try:
+        host = current_capability_execution_host()
+        if _return_raw_result:
+            _, receipt = host._execute_adopted_internal_result(  # noqa: SLF001 - module-owned native seam
+                request,
+                _token=_RAW_RESULT_TOKEN,
+            )
+        else:
+            receipt = host.execute(request)
+    except CapabilityExecutionError as exc:
+        raise NativeSoftwareEngineeringError(f"capability_{exc.reason_code}") from exc
+    if receipt.state != "succeeded":
+        raise NativeSoftwareEngineeringError(f"capability_{receipt.state}")
+    return receipt.result
 
 
 def _process_result(
@@ -690,12 +766,17 @@ def _process_result(
     args_list = list(args)
     cancel_event = _NATIVE_CANCEL_EVENT.get()
     try:
-        result = process_runtime_manager.run_command(
-            command=command,
-            args_json=json.dumps(args_list),
-            cwd=cwd,
-            timeout_seconds=timeout_seconds,
-            cancel_event=cancel_event,
+        result = _execute_native_capability(
+            "run_command",
+            {
+                "command": command,
+                "args_json": json.dumps(args_list),
+                "cwd": cwd,
+                "timeout_seconds": timeout_seconds,
+                "cancel_event": cancel_event,
+            },
+            destination=f"workspace-process:{cwd or '.'}",
+            _return_raw_result=True,
         )
     except ValueError as exc:
         return {
@@ -771,6 +852,30 @@ def _process_cleanup_receipt(result: dict[str, Any] | None) -> dict[str, Any]:
         "remaining_descendants": result.get("remaining_descendants") if result else None,
         "worker_root": result.get("worker_root") if result else None,
     }
+
+
+def _changed_workspace_paths(status_output: str) -> set[str]:
+    """Return meaningful fixture changes while ignoring disposable test caches.
+
+    The bundled test command is allowed to create interpreter caches such as
+    ``__pycache__`` and ``.pytest_cache``.  They are excluded from fixture
+    inspection and are not part of the requested patch scope, so treating them
+    as a product change would turn a valid patch into a false readback failure.
+    Every other untracked or modified path remains part of the exact-scope
+    check.
+    """
+    changed: set[str] = set()
+    for line in status_output.splitlines():
+        if len(line) < 4 or "->" in line:
+            continue
+        relative = line[3:].strip()
+        if not relative:
+            continue
+        parts = Path(relative.rstrip("/")).parts
+        if any(part in _GENERATED_FIXTURE_DIRS for part in parts):
+            continue
+        changed.add(relative)
+    return changed
 
 
 async def _record_artifact(
@@ -926,11 +1031,7 @@ async def _record_test_failure_evidence(
         "git", ["status", "--short"], job_workspace.relative_root, include_output=True
     )
     status_output = str(status_process.pop("_stdout", ""))
-    changed_paths = {
-        line[3:].strip()
-        for line in status_output.splitlines()
-        if len(line) >= 4 and "->" not in line
-    }
+    changed_paths = _changed_workspace_paths(status_output)
     patched_path = job_workspace.root / FIXTURE_BUG_FILE
     patched_body = patched_path.read_text(encoding="utf-8") if patched_path.is_file() else ""
     source_immutable = _fixture_tree_digest(prepared.source) == prepared.source_digest
@@ -1043,6 +1144,15 @@ async def run_native_software_engineering_fixture(
     preflight = preflight_native_software_engineering_fixture(request)
     if preflight["status"] != "ready":
         return preflight
+    runtime_principal = get_current_trust_principal()
+    if runtime_principal is None:
+        return {
+            "status": "blocked",
+            "reason_code": "runtime_principal_missing",
+            "evidence_mode": NATIVE_SOFTWARE_ENGINEERING_EVIDENCE_MODE,
+            "provider": None,
+            "operator_visible": True,
+        }
     try:
         prepared = _prepare_fixture(request, executable=True)
     except NativeSoftwareEngineeringError as exc:
@@ -1131,6 +1241,10 @@ async def run_native_software_engineering_fixture(
     durable_job: dict[str, Any] | None = admitted
     execution_control: _NativeExecutionControl | None = None
     cancel_context_token: Any = None
+    job_context_token: Any = None
+    fencing_context_token: Any = None
+    runtime_principal_token: Any = None
+    runtime_fencing_token: Any = None
     try:
         try:
             await durable_job_repository.queue_job(request.job_id)
@@ -1158,6 +1272,12 @@ async def run_native_software_engineering_fixture(
             }
         durable_job = claimed
         fencing_token = int(claimed["lease"]["fencing_token"])
+        job_context_token = _NATIVE_JOB_ID.set(request.job_id)
+        fencing_context_token = _NATIVE_FENCING_TOKEN.set(str(fencing_token))
+        runtime_principal_token = set_runtime_trust_principal(
+            replace(runtime_principal, job_id=request.job_id)
+        )
+        runtime_fencing_token = set_runtime_fencing_token(str(fencing_token))
         execution_control = _NativeExecutionControl(
             owner=worker_owner,
             fencing_token=fencing_token,
@@ -1238,11 +1358,15 @@ async def run_native_software_engineering_fixture(
             fencing_token=fencing_token,
         )
 
-        preview_raw = preview_workspace_patch(
-            file_path=relative_bug_path,
-            old_text=FIXTURE_BEFORE_TEXT,
-            new_text=FIXTURE_AFTER_TEXT,
-            expected_occurrences=1,
+        preview_raw = _execute_native_capability(
+            "preview_workspace_patch",
+            {
+                "file_path": relative_bug_path,
+                "old_text": FIXTURE_BEFORE_TEXT,
+                "new_text": FIXTURE_AFTER_TEXT,
+                "expected_occurrences": 1,
+            },
+            destination=f"workspace:{relative_bug_path}",
         )
         preview_payload = json.loads(preview_raw)
         if not isinstance(preview_payload, dict) or preview_payload.get("applied"):
@@ -1495,12 +1619,16 @@ async def run_native_software_engineering_fixture(
             request.job_id,
             **boundary_kwargs,
         )
-        applied_raw = apply_workspace_patch(
-            file_path=relative_bug_path,
-            old_text=FIXTURE_BEFORE_TEXT,
-            new_text=FIXTURE_AFTER_TEXT,
-            expected_occurrences=1,
-            expected_before_sha256=preview_payload["before_sha256"],
+        applied_raw = _execute_native_capability(
+            "apply_workspace_patch",
+            {
+                "file_path": relative_bug_path,
+                "old_text": FIXTURE_BEFORE_TEXT,
+                "new_text": FIXTURE_AFTER_TEXT,
+                "expected_occurrences": 1,
+                "expected_before_sha256": preview_payload["before_sha256"],
+            },
+            destination=f"workspace:{relative_bug_path}",
         )
         applied_payload = json.loads(applied_raw)
         if not isinstance(applied_payload, dict) or applied_payload.get("applied") is not True:
@@ -1703,11 +1831,7 @@ async def run_native_software_engineering_fixture(
             "git", ["status", "--short"], job_workspace.relative_root, include_output=True
         )
         status_output = str(status_process.pop("_stdout", ""))
-        changed_paths = {
-            line[3:].strip()
-            for line in status_output.splitlines()
-            if len(line) >= 4 and "->" not in line
-        }
+        changed_paths = _changed_workspace_paths(status_output)
         patched_body = (job_workspace.root / FIXTURE_BUG_FILE).read_text(encoding="utf-8")
         source_immutable = _fixture_tree_digest(prepared.source) == prepared.source_digest
         exact_scope = changed_paths == {FIXTURE_BUG_FILE}
@@ -1874,6 +1998,14 @@ async def run_native_software_engineering_fixture(
     finally:
         if cancel_context_token is not None:
             _NATIVE_CANCEL_EVENT.reset(cancel_context_token)
+        if job_context_token is not None:
+            _NATIVE_JOB_ID.reset(job_context_token)
+        if fencing_context_token is not None:
+            _NATIVE_FENCING_TOKEN.reset(fencing_context_token)
+        if runtime_fencing_token is not None:
+            reset_runtime_fencing_token(runtime_fencing_token)
+        if runtime_principal_token is not None:
+            reset_runtime_trust_principal(runtime_principal_token)
         _unregister_native_execution(request.job_id, execution_control)
 
 

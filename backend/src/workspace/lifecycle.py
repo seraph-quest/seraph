@@ -1635,17 +1635,22 @@ def rollback_workspace(
     *,
     registry: WorkspaceStateRegistry | None = None,
 ) -> dict[str, Any]:
-    """Atomically swap the current root with a retained pre-restore root."""
+    """Atomically swap the current root with a retained pre-restore root.
+
+    A registry is mandatory so the journal workspace identity is checked
+    before any rollback transition can move a root.
+    """
+    if registry is None:
+        raise WorkspaceLifecycleError("rollback requires a workspace registry identity")
     resolved_root = canonical_workspace_root(root)
-    if registry is not None:
-        _registry_root(resolved_root, registry)
+    _registry_root(resolved_root, registry)
     restore_id = _safe_restore_id(restore_id)
     backup_root = workspace_backup_dir(resolved_root)
     journal_file = _journal_path(backup_root, restore_id)
     journal = _read_journal(
         journal_file,
         expected_restore_id=restore_id,
-        expected_workspace_id=registry.config.identity.workspace_id if registry is not None else None,
+        expected_workspace_id=registry.config.identity.workspace_id,
         expected_root_digest=_workspace_root_digest(resolved_root),
     )
     if journal.get("status") not in {"promoted", "recovered_promoted"}:
@@ -1706,14 +1711,27 @@ def cleanup_workspace_backups(
             raise WorkspaceLifecycleError("backup retention encountered a symlink")
         if candidate.is_dir():
             journal_file = candidate / "restore-journal.json"
-            if journal_file.exists():
-                journal = _read_journal(
-                    journal_file,
-                    expected_restore_id=candidate.name,
-                    expected_root_digest=_workspace_root_digest(resolved_root),
-                )
-                if journal.get("status") in {"active_moved", "rollback_active_moved"}:
+            if not _path_present(journal_file):
+                # A crash before the journal write may leave an empty record.
+                # Only that provably empty record and its empty staging sibling
+                # may be discarded by retention; any evidence is operator
+                # recovery material and must remain fail-closed.
+                stage = workspace_restore_staging_dir(resolved_root) / candidate.name
+                if not _is_empty_directory(candidate, label=f"unjournaled backup record {candidate.name}"):
                     continue
+                if not _is_empty_directory(stage, label=f"unjournaled staging root {candidate.name}"):
+                    continue
+                _remove_tree(stage, label=f"empty unjournaled staging root {candidate.name}")
+                _remove_tree(candidate, label=f"empty unjournaled backup record {candidate.name}")
+                removed.append(candidate.name)
+                continue
+            journal = _read_journal(
+                journal_file,
+                expected_restore_id=candidate.name,
+                expected_root_digest=_workspace_root_digest(resolved_root),
+            )
+            if journal.get("status") in {"active_moved", "rollback_active_moved"}:
+                continue
             _remove_tree(candidate, label=f"old backup record {candidate.name}")
         elif candidate.is_file():
             candidate.unlink()

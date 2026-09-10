@@ -301,6 +301,19 @@ async def lifespan(app: FastAPI):
         workspace_owner = runtime_workspace_owner(settings.workspace_dir)
         workspace_owner.__enter__()
     await init_db()
+    # Hydrate the trusted OpenRouter vault credential before any scheduler or
+    # canonical inference path resolves a provider profile.  Failure remains
+    # visible as configuration_required through the normal status surfaces;
+    # the exception is never allowed to trigger a provider call.
+    try:
+        from src.model_fabric.configuration import hydrate_openrouter_credential
+
+        await hydrate_openrouter_credential()
+    except Exception:
+        logging.getLogger(__name__).warning(
+            "OpenRouter credential hydration failed; inference remains fail-closed",
+            exc_info=True,
+        )
     # Recover expired durable invocation leases before scheduler jobs can
     # observe an old ``running`` occurrence and incorrectly skip it.  Recovery
     # is fail-closed and operator-visible; a failed recovery is not hidden as

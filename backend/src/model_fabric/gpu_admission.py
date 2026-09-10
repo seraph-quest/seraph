@@ -860,6 +860,8 @@ class GpuAdmissionBroker(Generic[T]):
                 "serial_gpu": self.serial_gpu,
                 "serial_remote_inference": self.serial_remote_inference,
                 "max_active": 1,
+                "max_inflight": int(getattr(self, "max_inflight", 1)),
+                "max_retries": int(getattr(self, "max_retries", 0)),
                 "active": self._receipt_locked(active).as_dict() if active is not None else None,
                 "queued": queued,
                 "capacity": {

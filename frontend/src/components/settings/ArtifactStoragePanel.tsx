@@ -12,6 +12,7 @@ import {
   type ModelFabricRuntimeStatus,
   type ModelFabricSettingsStatus,
 } from "../../lib/modelFabric";
+import { OpenRouterSetupPanel } from "./OpenRouterSetupPanel";
 
 interface VlmRuntimeStatus {
   mode: string;
@@ -708,6 +709,23 @@ export function ArtifactStoragePanel() {
       if (mountedRef.current) setCanaryRunning(false);
     }
   }
+
+  async function saveOpenRouterSetup(payload: Record<string, unknown>): Promise<ModelFabricSettingsStatus> {
+    const response = await fetchJsonWithTimeout("/api/settings/model-fabric", 20_000, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const nextSettings = normalizeModelFabricSettings(response);
+    if (!nextSettings) throw new Error("OpenRouter setup response is invalid.");
+    if (!mountedRef.current) return nextSettings;
+    retainModelFabricSettings(nextSettings);
+    setModelFabric(nextSettings);
+    setModelFabricStale(false);
+    setModelFabricError(null);
+    setCanaryProfile((current) => current || nextSettings.profiles.find((profile) => profile.enabled)?.id || "");
+    return nextSettings;
+  }
   useEffect(() => {
     let cancelled = false;
     mountedRef.current = true;
@@ -1258,6 +1276,11 @@ export function ArtifactStoragePanel() {
                       ? "good"
                       : "normal"
                 }
+              />
+              <OpenRouterSetupPanel
+                setup={modelFabric?.openrouter_setup}
+                stale={modelFabricStale}
+                onSave={saveOpenRouterSetup}
               />
               <div className="mt-2 border border-retro-text/10 px-2 py-2">
                 <div className="text-[9px] text-retro-text/50 mb-1">

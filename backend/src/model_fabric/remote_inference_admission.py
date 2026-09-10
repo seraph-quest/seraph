@@ -46,6 +46,9 @@ REMOTE_INFERENCE_ADMISSION_SCHEMA_VERSION = "seraph.remote-inference-admission.v
 REMOTE_INFERENCE_RESOURCE_CLASS = "remote_inference"
 REMOTE_INFERENCE_DEFAULT_QUEUE = 64
 REMOTE_INFERENCE_DEFAULT_OWNER_OUTSTANDING = 16
+REMOTE_INFERENCE_DEFAULT_MAX_INFLIGHT = 1
+REMOTE_INFERENCE_DEFAULT_RETRIES = 2
+REMOTE_INFERENCE_MAX_RETRIES = 2
 REMOTE_INFERENCE_OWNER_COST_UNKNOWN_REASON = "owner_cost_unknown"
 REMOTE_INFERENCE_OWNER_REVOCATION_REASON = GPU_OWNER_REVOCATION_REASON
 
@@ -136,6 +139,7 @@ class RemoteInferenceAdmissionBroker(GpuAdmissionBroker[Any]):
         max_outstanding_per_owner: int | None = REMOTE_INFERENCE_DEFAULT_OWNER_OUTSTANDING,
         max_owner_cost_microusd: int | None = None,
         owner_budget_resolver: Callable[[str], int | None] | None = None,
+        max_retries: int = REMOTE_INFERENCE_DEFAULT_RETRIES,
         **kwargs: Any,
     ) -> None:
         super().__init__(
@@ -145,6 +149,49 @@ class RemoteInferenceAdmissionBroker(GpuAdmissionBroker[Any]):
             **kwargs,
         )
         self._owner_budget_resolver = owner_budget_resolver
+        self.max_inflight = REMOTE_INFERENCE_DEFAULT_MAX_INFLIGHT
+        self.max_retries = self._validate_retry_limit(max_retries)
+
+    @staticmethod
+    def _validate_retry_limit(value: int) -> int:
+        normalized = int(value)
+        if not 0 <= normalized <= REMOTE_INFERENCE_MAX_RETRIES:
+            raise ValueError("max_retries must be between 0 and 2")
+        return normalized
+
+    def configure_policy(
+        self,
+        *,
+        max_queued: int = REMOTE_INFERENCE_DEFAULT_QUEUE,
+        max_inflight: int = REMOTE_INFERENCE_DEFAULT_MAX_INFLIGHT,
+        max_outstanding_per_owner: int | None = REMOTE_INFERENCE_DEFAULT_OWNER_OUTSTANDING,
+        max_owner_cost_microusd: int | None = None,
+        max_retries: int = REMOTE_INFERENCE_DEFAULT_RETRIES,
+    ) -> None:
+        """Apply persisted OpenRouter limits to the process-local lane."""
+        if int(max_inflight) != REMOTE_INFERENCE_DEFAULT_MAX_INFLIGHT:
+            raise ValueError("remote inference admission supports exactly one in-flight request")
+        normalized_queue = int(max_queued)
+        normalized_owner = (
+            None if max_outstanding_per_owner is None else int(max_outstanding_per_owner)
+        )
+        normalized_budget = (
+            None if max_owner_cost_microusd is None else int(max_owner_cost_microusd)
+        )
+        if normalized_queue < 1:
+            raise ValueError("max_queued must be positive")
+        if normalized_owner is not None and normalized_owner < 1:
+            raise ValueError("max_outstanding_per_owner must be positive")
+        if normalized_budget is not None and normalized_budget < 0:
+            raise ValueError("max_owner_cost_microusd must be non-negative")
+        normalized_retries = self._validate_retry_limit(max_retries)
+        with self._condition:
+            self.max_queued = normalized_queue
+            self.max_inflight = REMOTE_INFERENCE_DEFAULT_MAX_INFLIGHT
+            self.max_outstanding_per_owner = normalized_owner
+            self.max_owner_cost_microusd = normalized_budget
+            self.max_retries = normalized_retries
+            self._notify_all_locked()
 
     def _effective_owner_budget(self, request: GpuAdmissionRequest) -> int | None:
         """Use only a server-side broker/resolver budget as authority.
@@ -306,11 +353,32 @@ RemoteInferencePriority = GpuPriority
 remote_inference_admission_broker: RemoteInferenceAdmissionBroker = RemoteInferenceAdmissionBroker()
 
 
+def configure_remote_inference_admission(
+    *,
+    max_queued: int = REMOTE_INFERENCE_DEFAULT_QUEUE,
+    max_inflight: int = REMOTE_INFERENCE_DEFAULT_MAX_INFLIGHT,
+    max_outstanding_per_owner: int | None = REMOTE_INFERENCE_DEFAULT_OWNER_OUTSTANDING,
+    max_owner_cost_microusd: int | None = None,
+    max_retries: int = REMOTE_INFERENCE_DEFAULT_RETRIES,
+) -> None:
+    """Apply canonical setup limits to the process-local remote lane."""
+    remote_inference_admission_broker.configure_policy(
+        max_queued=max_queued,
+        max_inflight=max_inflight,
+        max_outstanding_per_owner=max_outstanding_per_owner,
+        max_owner_cost_microusd=max_owner_cost_microusd,
+        max_retries=max_retries,
+    )
+
+
 __all__ = [
     "REMOTE_INFERENCE_ADMISSION_SCHEMA_VERSION",
     "REMOTE_INFERENCE_RESOURCE_CLASS",
     "REMOTE_INFERENCE_DEFAULT_QUEUE",
     "REMOTE_INFERENCE_DEFAULT_OWNER_OUTSTANDING",
+    "REMOTE_INFERENCE_DEFAULT_MAX_INFLIGHT",
+    "REMOTE_INFERENCE_DEFAULT_RETRIES",
+    "REMOTE_INFERENCE_MAX_RETRIES",
     "REMOTE_INFERENCE_OWNER_COST_UNKNOWN_REASON",
     "REMOTE_INFERENCE_OWNER_REVOCATION_REASON",
     "GPU_OWNER_REVOCATION_REASON",
@@ -338,5 +406,6 @@ __all__ = [
     "RemoteInferenceAdmissionUncertainError",
     "RemoteInferencePriority",
     "remote_inference_admission_broker",
+    "configure_remote_inference_admission",
     "priority_for_inference_context",
 ]

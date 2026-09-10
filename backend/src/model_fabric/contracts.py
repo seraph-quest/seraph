@@ -333,7 +333,7 @@ def finalized_openai_compatible_body(
     body = {
         key: value
         for key, value in (options or {}).items()
-        if key not in _OPENAI_COMPATIBLE_RESERVED_FIELDS
+        if key not in _OPENAI_COMPATIBLE_RESERVED_FIELDS and not str(key).startswith("_seraph_")
     }
     body.update(
         {
@@ -365,7 +365,7 @@ def finalized_openai_compatible_embeddings_body(
     body = {
         key: value
         for key, value in (options or {}).items()
-        if key not in _OPENAI_COMPATIBLE_EMBEDDING_RESERVED_FIELDS
+        if key not in _OPENAI_COMPATIBLE_EMBEDDING_RESERVED_FIELDS and not str(key).startswith("_seraph_")
     }
     body.update(
         {

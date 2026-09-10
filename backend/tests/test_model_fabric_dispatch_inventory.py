@@ -304,7 +304,7 @@ def _review(
 _CANONICAL_ADAPTERS = (
     _review(
         "llm_runtime.py",
-        1542,
+        1600,
         "_governed_openai_chat_completion",
         "client.post",
         "canonical_adapter",
@@ -313,7 +313,7 @@ _CANONICAL_ADAPTERS = (
     ),
     _review(
         "llm_runtime.py",
-        4449,
+        4589,
         "stream_completion_with_fallback.default_transport",
         "client.stream",
         "canonical_adapter",
@@ -344,7 +344,7 @@ _CANONICAL_ADAPTERS = (
 _REVIEWED_EXCEPTIONS = (
     _review(
         "llm_runtime.py",
-        3562,
+        3683,
         "FallbackLiteLLMModel.generate.invoke_primary_transport",
         "BaseLiteLLMModel.generate",
         "transitional_provider_call",
@@ -353,7 +353,7 @@ _REVIEWED_EXCEPTIONS = (
     ),
     _review(
         "llm_runtime.py",
-        3641,
+        3762,
         "FallbackLiteLLMModel.generate.invoke_fallback_transport",
         "fallback_model.generate",
         "transitional_provider_call",
@@ -362,7 +362,7 @@ _REVIEWED_EXCEPTIONS = (
     ),
     _review(
         "llm_runtime.py",
-        4068,
+        4208,
         "completion_with_fallback_sync.invoke_primary_transport",
         "litellm.completion",
         "transitional_provider_call",
@@ -371,7 +371,7 @@ _REVIEWED_EXCEPTIONS = (
     ),
     _review(
         "llm_runtime.py",
-        4146,
+        4286,
         "completion_with_fallback_sync.invoke_fallback_transport",
         "litellm.completion",
         "transitional_provider_call",
@@ -380,7 +380,7 @@ _REVIEWED_EXCEPTIONS = (
     ),
     _review(
         "api/model_fabric_settings.py",
-        551,
+        852,
         "_execute_canary_transport",
         "client.post",
         "capability_probe",
@@ -389,7 +389,7 @@ _REVIEWED_EXCEPTIONS = (
     ),
     _review(
         "api/model_fabric_settings.py",
-        563,
+        864,
         "_execute_canary_transport",
         "client.stream",
         "capability_probe",
@@ -398,7 +398,7 @@ _REVIEWED_EXCEPTIONS = (
     ),
     _review(
         "api/model_fabric_settings.py",
-        573,
+        874,
         "_execute_canary_transport",
         "client.post",
         "capability_probe",
@@ -416,7 +416,7 @@ _REVIEWED_EXCEPTIONS = (
     ),
     _review(
         "local_runtime_profile_verifier.py",
-        269,
+        311,
         "_probe_backend",
         "client.get",
         "health_or_metadata_probe",

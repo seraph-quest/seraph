@@ -6,14 +6,16 @@ import base64
 from datetime import datetime, timezone
 import hashlib
 import json
+import os
 import re
 import threading
 import time
 from uuid import uuid4
 
 import httpx
+from config.settings import settings
 from fastapi import APIRouter, HTTPException, Request
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, model_validator
 
 from src.approval.runtime import get_current_trust_principal
 from src.llm_runtime import provider_profiles
@@ -26,14 +28,30 @@ from src.model_fabric import (
 from src.model_fabric.caller_context import CANONICAL_ROUTE_SPECS
 from src.model_fabric.configuration import (
     ModelFabricConfiguration,
+    OPENROUTER_ENV_CREDENTIAL_REF,
+    OPENROUTER_SETUP_SCHEMA_VERSION,
+    OPENROUTER_VAULT_CREDENTIAL_REF,
+    OpenRouterSetup,
     WorkloadPolicy,
     credential_ref_allowed,
     effective_workload_policy,
+    normalize_openrouter_model_id,
+    openrouter_profile_for_setup,
+    hydrate_openrouter_credential,
+    _openrouter_setup_payload,
     read_model_fabric_configuration,
     validate_active_model_fabric_configuration,
     write_model_fabric_configuration,
 )
-from src.model_fabric.contracts import MODEL_FABRIC_SCHEMA_VERSION, InferenceRequestContext, InferenceRequirements, InferenceWorkload, transport_endpoint
+from src.model_fabric.contracts import (
+    MODEL_FABRIC_SCHEMA_VERSION,
+    OPENROUTER_API_BASE,
+    OPENROUTER_PROVIDER_KIND,
+    InferenceRequestContext,
+    InferenceRequirements,
+    InferenceWorkload,
+    transport_endpoint,
+)
 from src.model_fabric.probe import CapabilityProbeObservation, run_capability_probe
 from src.model_fabric.proofs import proof_is_fresh
 from src.model_fabric.receipts import sanitized_endpoint
@@ -42,6 +60,7 @@ from src.model_fabric.runtime_status import latest_receipt_persistence, publish_
 from src.model_fabric.selector import (
     active_provider_exclusion_reason,
 )
+from src.vault.repository import vault_repository
 from src.model_fabric.remote_inference_admission import (
     remote_inference_admission_broker,
 )
@@ -119,11 +138,64 @@ class WorkloadPolicyInput(BaseModel):
     max_cost_microusd: int | None = Field(default=None, ge=0)
 
 
+class OpenRouterSetupInput(BaseModel):
+    """Write-only operator setup fields for the fixed OpenRouter route."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    profile_id: str = "openrouter"
+    provider_kind: str = OPENROUTER_PROVIDER_KIND
+    api_base: str = OPENROUTER_API_BASE
+    model_ids: tuple[str, ...] = ()
+    # ``models`` and ``model_id`` keep the API forgiving for clients that use
+    # singular or concise naming, while the persisted contract is always
+    # ``model_ids``.
+    models: tuple[str, ...] | None = None
+    model_id: str | None = None
+    capabilities: tuple[str, ...] = ()
+    modalities: tuple[str, ...] | None = None
+    temperature: float = Field(default=0.7, ge=0, le=2)
+    max_output_tokens: int = Field(default=4096, ge=1, le=131_072)
+    timeout_seconds: float = Field(default=120.0, ge=1, le=120)
+    timeout: float | None = Field(default=None, ge=1, le=120)
+    allowed_upstreams: tuple[str, ...] = ()
+    allow_fallbacks: bool = False
+    # Keep the policy name used by WorkloadPolicy available at the request
+    # edge; the canonical setup stores only allow_fallbacks.
+    fallback_allowed: bool | None = None
+    require_parameters: bool = True
+    data_collection: str = "deny"
+    data_retention_policy: str = "deny"
+    zero_data_retention: bool = False
+    egress_class: EgressClass = EgressClass.LOCAL_ONLY
+    cloud_egress: EgressClass | None = None
+    cloud_egress_acknowledged: bool = False
+    spend_ceiling_microusd: int | None = Field(default=None, ge=0, le=1_000_000_000)
+    max_cost_microusd: int | None = Field(default=None, ge=0, le=1_000_000_000)
+    max_queued: int = Field(default=64, ge=1, le=64)
+    max_queue_size: int | None = Field(default=None, ge=1, le=64)
+    max_inflight: int = Field(default=1, ge=1, le=1)
+    max_outstanding_per_owner: int = Field(default=16, ge=1, le=16)
+    max_retries: int = Field(default=2, ge=0, le=2)
+    credential_ref: str | None = None
+    # SecretStr prevents accidental repr/model dump exposure. The value is
+    # consumed only by the trusted PUT handler and never enters a response.
+    api_key: SecretStr | None = Field(default=None, repr=False)
+
+
 class ModelFabricConfigurationRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     profiles: tuple[ModelFabricProfileInput, ...] = ()
     workload_policies: tuple[WorkloadPolicyInput, ...] = ()
+    openrouter: OpenRouterSetupInput | None = None
+    openrouter_setup: OpenRouterSetupInput | None = None
+
+    @model_validator(mode="after")
+    def one_openrouter_setup_field(self):
+        if self.openrouter is not None and self.openrouter_setup is not None:
+            raise ValueError("send only one OpenRouter setup object")
+        return self
 
 
 class CapabilityCanaryRequest(BaseModel):
@@ -137,6 +209,163 @@ class CapabilityCanaryRequest(BaseModel):
     redaction_applied: bool = False
 
 
+def _openrouter_setup_from_input(
+    body: OpenRouterSetupInput,
+    *,
+    existing: OpenRouterSetup | None = None,
+) -> OpenRouterSetup:
+    """Convert request aliases into the canonical persisted setup shape."""
+    if body.provider_kind != OPENROUTER_PROVIDER_KIND:
+        raise ValueError("OpenRouter setup accepts only the openrouter provider")
+    if body.api_base.rstrip("/") != OPENROUTER_API_BASE:
+        raise ValueError("OpenRouter endpoint is fixed to https://openrouter.ai/api/v1")
+    raw_models = tuple(body.model_ids)
+    if body.models is not None:
+        if raw_models and tuple(body.models) != raw_models:
+            raise ValueError("OpenRouter model_ids and models disagree")
+        raw_models = tuple(body.models)
+    if body.model_id is not None:
+        if raw_models and raw_models != (body.model_id,):
+            raise ValueError("OpenRouter model_id and model_ids disagree")
+        raw_models = (body.model_id,)
+    model_ids = tuple(normalize_openrouter_model_id(value) for value in raw_models)
+    capabilities = tuple(body.modalities if body.modalities is not None else body.capabilities)
+    if body.fallback_allowed is True:
+        raise ValueError("OpenRouter fallbacks must be disabled")
+    if body.fallback_allowed is False and body.allow_fallbacks:
+        raise ValueError("OpenRouter fallback policy fields disagree")
+    egress_class = body.cloud_egress or body.egress_class
+    spend_ceiling = body.spend_ceiling_microusd
+    if body.max_cost_microusd is not None:
+        if spend_ceiling is not None and body.max_cost_microusd != spend_ceiling:
+            raise ValueError("OpenRouter spend ceiling fields disagree")
+        spend_ceiling = body.max_cost_microusd
+    credential_ref = body.credential_ref
+    if credential_ref == "OPENROUTER_API_KEY":
+        credential_ref = OPENROUTER_ENV_CREDENTIAL_REF
+    return OpenRouterSetup(
+        profile_id=body.profile_id,
+        model_ids=model_ids,
+        capabilities=capabilities,
+        temperature=body.temperature,
+        max_output_tokens=body.max_output_tokens,
+        timeout_seconds=body.timeout if body.timeout is not None else body.timeout_seconds,
+        allowed_upstreams=tuple(item.strip() for item in body.allowed_upstreams),
+        allow_fallbacks=body.allow_fallbacks,
+        require_parameters=body.require_parameters,
+        data_collection=body.data_collection.strip().lower(),
+        data_retention_policy=body.data_retention_policy.strip().lower(),
+        zero_data_retention=body.zero_data_retention,
+        egress_class=egress_class,
+        cloud_egress_acknowledged=body.cloud_egress_acknowledged,
+        spend_ceiling_microusd=spend_ceiling,
+        max_queued=body.max_queue_size if body.max_queue_size is not None else body.max_queued,
+        max_inflight=body.max_inflight,
+        max_outstanding_per_owner=body.max_outstanding_per_owner,
+        max_retries=body.max_retries,
+        credential_ref=credential_ref or (
+            existing.credential_ref if existing is not None else OPENROUTER_VAULT_CREDENTIAL_REF
+        ),
+        credential_fingerprint=existing.credential_fingerprint if existing is not None else None,
+        schema_version=OPENROUTER_SETUP_SCHEMA_VERSION,
+    )
+
+
+def _configured_openrouter_key() -> str:
+    """Read the trusted process configuration without including it in output."""
+    return str(settings.openrouter_api_key or os.getenv("OPENROUTER_API_KEY", "") or "").strip()
+
+
+def _fingerprint_secret(value: str | None) -> str | None:
+    if not value:
+        return None
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()[:12]
+
+
+async def _store_setup_credential(
+    setup: OpenRouterSetup,
+    api_key: SecretStr | None,
+) -> OpenRouterSetup:
+    """Store a newly supplied key in the existing encrypted vault."""
+    raw_key = api_key.get_secret_value() if api_key is not None else ""
+    if not raw_key.strip():
+        configured_key = _configured_openrouter_key()
+        if configured_key and setup.credential_ref == OPENROUTER_VAULT_CREDENTIAL_REF:
+            # The env reference remains a trusted, server-side fallback when
+            # an operator intentionally omitted a replacement key.
+            return OpenRouterSetup(
+                **{
+                    **setup.__dict__,
+                    "credential_ref": OPENROUTER_ENV_CREDENTIAL_REF,
+                    "credential_fingerprint": _fingerprint_secret(configured_key),
+                }
+            )
+        return setup
+    if len(raw_key) > 512 or any(ord(character) < 32 or ord(character) == 127 for character in raw_key):
+        raise ValueError("OpenRouter API key contains unsafe characters")
+    if setup.credential_ref not in {OPENROUTER_VAULT_CREDENTIAL_REF, OPENROUTER_ENV_CREDENTIAL_REF}:
+        raise ValueError("OpenRouter credential reference must use the trusted vault or env reference")
+    try:
+        await vault_repository.store(
+            "openrouter_api_key",
+            raw_key,
+            description="Seraph OpenRouter API key (write-only settings input)",
+        )
+    except Exception as exc:
+        raise RuntimeError("OpenRouter credential persistence failed") from exc
+    # Keep the current process usable after save. The persisted source remains
+    # the encrypted vault; this assignment is never returned or logged here.
+    settings.openrouter_api_key = raw_key
+    return OpenRouterSetup(
+        **{
+            **setup.__dict__,
+            "credential_ref": OPENROUTER_VAULT_CREDENTIAL_REF,
+            "credential_fingerprint": _fingerprint_secret(raw_key),
+        }
+    )
+
+
+def _openrouter_policy_for_setup(setup: OpenRouterSetup, runtime_path: str) -> WorkloadPolicy:
+    return WorkloadPolicy(
+        runtime_path=runtime_path,
+        egress_class=setup.egress_class,
+        cloud_egress_acknowledged=setup.cloud_egress_acknowledged,
+        allowed_profile_ids=(setup.profile_id,),
+        allowed_provider_kinds=(OPENROUTER_PROVIDER_KIND,),
+        fallback_allowed=False,
+        max_cost_microusd=setup.spend_ceiling_microusd,
+    )
+
+
+def _setup_configuration(
+    setup: OpenRouterSetup,
+    *,
+    profiles: tuple[ModelFabricProfileInput, ...],
+    policies: tuple[WorkloadPolicyInput, ...],
+) -> ModelFabricConfiguration:
+    generated_profile = openrouter_profile_for_setup(setup)
+    if profiles:
+        configured_profiles = tuple(ProviderProfile(**item.model_dump()) for item in profiles)
+        if any(profile.id == generated_profile.id for profile in configured_profiles):
+            raise ValueError("OpenRouter setup owns the canonical openrouter profile")
+        configured_profiles = (*configured_profiles, generated_profile)
+    else:
+        configured_profiles = (generated_profile,)
+    if policies:
+        configured_policies = tuple(WorkloadPolicy(**item.model_dump()) for item in policies)
+    else:
+        configured_policies = tuple(
+            _openrouter_policy_for_setup(setup, runtime_path)
+            for runtime_path in CANONICAL_ROUTE_SPECS
+        )
+    return ModelFabricConfiguration(
+        profiles=configured_profiles,
+        workload_policies=configured_policies,
+        status="ready",
+        openrouter_setup=setup,
+    )
+
+
 @router.get("/settings/model-fabric")
 async def get_model_fabric_settings():
     return await model_fabric_settings_payload()
@@ -146,16 +375,40 @@ async def get_model_fabric_settings():
 async def put_model_fabric_settings(body: ModelFabricConfigurationRequest, request: Request):
     if not _is_local_request(request):
         raise HTTPException(status_code=403, detail="Model-fabric settings require localhost access")
-    configuration = ModelFabricConfiguration(
-        profiles=tuple(ProviderProfile(**item.model_dump()) for item in body.profiles),
-        workload_policies=tuple(WorkloadPolicy(**item.model_dump()) for item in body.workload_policies),
-        status="ready",
-    )
     try:
+        setup_input = body.openrouter_setup or body.openrouter
+        existing = read_model_fabric_configuration().openrouter_setup
+        if setup_input is not None:
+            # Build and validate the complete profile before writing a new
+            # credential. An invalid policy must never leave a usable secret
+            # behind in the vault.
+            setup = _openrouter_setup_from_input(setup_input, existing=existing)
+            configuration = _setup_configuration(
+                setup,
+                profiles=body.profiles,
+                policies=body.workload_policies,
+            )
+            validate_active_model_fabric_configuration(configuration)
+            stored_setup = await _store_setup_credential(setup, setup_input.api_key)
+            if stored_setup != setup:
+                setup = stored_setup
+                configuration = _setup_configuration(
+                    setup,
+                    profiles=body.profiles,
+                    policies=body.workload_policies,
+                )
+        else:
+            configuration = ModelFabricConfiguration(
+                profiles=tuple(ProviderProfile(**item.model_dump()) for item in body.profiles),
+                workload_policies=tuple(WorkloadPolicy(**item.model_dump()) for item in body.workload_policies),
+                status="ready",
+            )
         validate_active_model_fabric_configuration(configuration)
         write_model_fabric_configuration(configuration)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail="Model-fabric credential persistence failed") from exc
     except OSError as exc:
         raise HTTPException(status_code=503, detail="Model-fabric settings persistence failed") from exc
     return await model_fabric_settings_payload()
@@ -394,6 +647,7 @@ def _static_profile_route_reasons(
 
 async def model_fabric_settings_payload() -> dict[str, object]:
     configured = read_model_fabric_configuration()
+    openrouter_setup_status = await _openrouter_setup_status(configured.openrouter_setup)
     proof_metadata_degraded = False
     try:
         proofs = await _profile_proof_statuses()
@@ -403,9 +657,15 @@ async def model_fabric_settings_payload() -> dict[str, object]:
         all_profiles = _operator_profile_statuses(())
     profiles = [item for item in all_profiles if item["model_fabric_eligible"]]
     excluded_profiles = [item for item in all_profiles if not item["model_fabric_eligible"]]
+    if proof_metadata_degraded:
+        status = "degraded"
+    elif openrouter_setup_status is not None and openrouter_setup_status["status"] == "configuration_required":
+        status = "configuration_required"
+    else:
+        status = configured.status
     return {
         "schema_version": "seraph.model-fabric.settings.v1",
-        "status": "degraded" if configured.status == "degraded" or proof_metadata_degraded else configured.status,
+        "status": "degraded" if configured.status == "degraded" else status,
         "error_code": configured.error_code or ("proof_metadata_unavailable" if proof_metadata_degraded else None),
         "configuration_status": configured.status,
         "updated_at": configured.updated_at,
@@ -415,11 +675,44 @@ async def model_fabric_settings_payload() -> dict[str, object]:
         "workload_policies": [_policy_payload(policy) for policy in configured.workload_policies],
         "defaults": {"egress_class": EgressClass.LOCAL_ONLY.value, "fallback_allowed": False},
         "canary_endpoint": "/api/settings/model-fabric/canary",
+        "openrouter_setup": openrouter_setup_status,
     }
+
+
+async def _openrouter_setup_status(setup: OpenRouterSetup | None) -> dict[str, object] | None:
+    """Return setup metadata while keeping credentials backend-only."""
+    if setup is None:
+        return None
+    credential = _configured_openrouter_key()
+    credential_store_error: str | None = None
+    if not credential and setup.credential_ref == OPENROUTER_VAULT_CREDENTIAL_REF:
+        try:
+            await hydrate_openrouter_credential()
+            credential = _configured_openrouter_key()
+        except Exception:
+            credential_store_error = "credential_store_unavailable"
+    payload = _openrouter_setup_payload(setup)
+    payload.update(
+        {
+            "api_base": OPENROUTER_API_BASE,
+            "provider_kind": OPENROUTER_PROVIDER_KIND,
+            "credential_configured": bool(credential),
+            "credential_fingerprint": _fingerprint_secret(credential) if credential else None,
+            "status": "configured_unverified" if credential else "configuration_required",
+            "error_code": credential_store_error or (None if credential else "credential_missing"),
+            "provider_calls": "manual_canary_only",
+        }
+    )
+    # Defensive deletion protects this boundary if the dataclass ever gains a
+    # credential-like field in a later schema revision.
+    for secret_field in ("api_key", "secret", "token", "authorization"):
+        payload.pop(secret_field, None)
+    return payload
 
 
 async def model_fabric_runtime_status(active_profile: str | None) -> dict[str, object]:
     configured = read_model_fabric_configuration()
+    openrouter_setup_status = await _openrouter_setup_status(configured.openrouter_setup)
     runtime_paths = {}
     degraded = configured.status == "degraded"
     status_paths = (*CANONICAL_ROUTE_SPECS, "capability_probe")
@@ -460,7 +753,14 @@ async def model_fabric_runtime_status(active_profile: str | None) -> dict[str, o
         active_profile=active_profile,
     )
     return {
-        "status": "degraded" if degraded else inference_readiness["status"],
+        "status": (
+            "degraded"
+            if degraded
+            else "configuration_required"
+            if openrouter_setup_status is not None
+            and openrouter_setup_status["status"] == "configuration_required"
+            else inference_readiness["status"]
+        ),
         "configuration_status": configured.status,
         "configuration_error": configured.error_code,
         "configured_chat_profile": active_profile,
@@ -468,6 +768,7 @@ async def model_fabric_runtime_status(active_profile: str | None) -> dict[str, o
         "profiles": [item for item in all_profiles if item["model_fabric_eligible"]],
         "excluded_profiles": [item for item in all_profiles if not item["model_fabric_eligible"]],
         "workload_policies": [_policy_payload(policy) for policy in configured.workload_policies],
+        "openrouter_setup": openrouter_setup_status,
         "proofs": proof_statuses,
         "topology": {
             "text": [

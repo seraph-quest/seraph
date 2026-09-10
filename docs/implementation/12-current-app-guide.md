@@ -61,6 +61,34 @@ container can read `/proc/self/mountinfo`. Compose sets the mount-check flag,
 and the container preflight fails closed before startup when the bind evidence
 is missing.
 
+### Configure the OpenRouter route (branch-local #741)
+
+Open the Settings panel's **OpenRouter setup** section to save the fixed
+`https://openrouter.ai/api/v1` route without editing an environment file. Enter
+one qualified `provider/model` ID (multiple model selection is rejected until a
+governed selector exists), select the capabilities, choose the explicit
+upstream allow-list, and set temperature, output-token, timeout, cloud-egress
+acknowledgement, data-retention policy, finite spend ceiling, and the bounded
+queue controls. These persisted controls are applied to the active profile and
+remote admission lane on every profile resolution. Fallbacks are always
+disabled; vision and embedding capabilities require zero-data-retention
+acknowledgement.
+
+The API-key field is write-only. A supplied key is stored through Seraph's
+encrypted vault and the response exposes only `credential_configured` and a
+short fingerprint plus the non-secret credential reference. Leaving the field
+blank preserves the existing server-side reference. The browser does not retain
+the field, and saved configuration and status payloads contain no key value.
+With no key, status is explicitly
+`configuration_required` and the route is not silently usable. On restart the
+backend hydrates a vault-backed credential before resolving the first route;
+if the vault is unavailable or empty, the route remains blocked.
+
+Saving and reading setup metadata never call OpenRouter. Capability proof is
+available only through the explicit manual canary control, which is intentionally
+omitted from keyless local tests. A real key and any canary remain operator-supplied
+follow-up configuration.
+
 The production backend's canonical workspace is the host path configured by
 `BACKEND_DATA_PATH_PROD`, mounted only as `WORKSPACE_DIR=/app/data`. The managed
 maintenance commands resolve that bind before doing any work and fail closed on

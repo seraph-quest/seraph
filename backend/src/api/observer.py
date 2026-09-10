@@ -10,7 +10,7 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse, PlainTextResponse
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 from sqlmodel import col, select
 
 from config.settings import settings
@@ -79,6 +79,9 @@ class NativeNotificationResponse(BaseModel):
     continuation_mode: str = "open_thread"
     resume_message: str | None = None
     created_at: str
+    delivery_status: str = "queued"
+    attempt_count: int = 0
+    fencing_token: int = 0
 
 
 class NativeNotificationPollResponse(BaseModel):
@@ -87,6 +90,23 @@ class NativeNotificationPollResponse(BaseModel):
 
 class NotificationAckResponse(BaseModel):
     acked: bool
+
+
+class NotificationAckRequest(BaseModel):
+    """Optional daemon fence; empty bodies remain backward compatible."""
+
+    fencing_token: int | None = Field(default=None, ge=1)
+
+
+class NotificationFailureRequest(BaseModel):
+    """Bounded daemon failure receipt for a claimed notification."""
+
+    reason: str = "display_failed"
+    fencing_token: int | None = Field(default=None, ge=1)
+
+
+class NotificationFailureResponse(BaseModel):
+    failed: bool
 
 
 class NativeNotificationListResponse(BaseModel):
@@ -2442,12 +2462,18 @@ async def get_next_native_notification():
 
 
 @router.post("/observer/notifications/{notification_id}/ack", response_model=NotificationAckResponse)
-async def ack_native_notification(notification_id: str):
-    """Acknowledge and remove a native notification after the daemon displays it."""
+async def ack_native_notification(
+    notification_id: str,
+    body: NotificationAckRequest | None = None,
+):
+    """Acknowledge a native notification after the daemon displays it."""
     from src.guardian.feedback import guardian_feedback_repository
 
     notification = await native_notification_queue.get(notification_id)
-    acked = await native_notification_queue.ack(notification_id)
+    acked = await native_notification_queue.ack(
+        notification_id,
+        fencing_token=body.fencing_token if body is not None else None,
+    )
     intervention_id = notification.intervention_id if notification is not None else None
     if acked and intervention_id:
         try:
@@ -2473,6 +2499,29 @@ async def ack_native_notification(notification_id: str):
         },
     )
     return {"acked": acked}
+
+
+@router.post(
+    "/observer/notifications/{notification_id}/fail",
+    response_model=NotificationFailureResponse,
+)
+async def fail_native_notification(
+    notification_id: str,
+    body: NotificationFailureRequest | None = None,
+):
+    """Record a bounded native-display failure and requeue when safe."""
+    failed = await native_notification_queue.fail(
+        notification_id,
+        reason=body.reason if body is not None else "display_failed",
+        fencing_token=body.fencing_token if body is not None else None,
+    )
+    await log_integration_event(
+        integration_type="observer_daemon",
+        name="notifications",
+        outcome="failed" if failed else "failure_missing",
+        details={"notification_id": notification_id},
+    )
+    return {"failed": failed}
 
 
 @router.post("/observer/notifications/{notification_id}/dismiss", response_model=NotificationDismissResponse)

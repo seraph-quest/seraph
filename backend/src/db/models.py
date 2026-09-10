@@ -609,6 +609,88 @@ class GuardianIntervention(SQLModel, table=True):
     feedback_at: Optional[datetime] = Field(default=None, index=True)
 
 
+# ─── Native notification outbox ────────────────────────
+
+class NativeNotificationOutbox(SQLModel, table=True):
+    """Durable, bounded state for the built-in native notification path.
+
+    This row is a delivery intent and receipt, not proof that an external
+    desktop notification was displayed. ``unknown`` is retained for an
+    expired lease after the retry budget is exhausted because the daemon may
+    have displayed the notification before Seraph lost the acknowledgement.
+    """
+
+    __tablename__ = "native_notification_outbox"
+    __table_args__ = (
+        Index(
+            "ix_native_notification_outbox_pending_order",
+            "status",
+            "created_at",
+            "urgency",
+        ),
+        Index(
+            "ix_native_notification_outbox_lease",
+            "status",
+            "lease_expires_at",
+        ),
+    )
+
+    id: str = Field(default_factory=_uuid, primary_key=True)
+    idempotency_key: str = Field(unique=True, index=True)
+    payload_digest: str = Field(index=True)
+    intervention_id: Optional[str] = Field(default=None, index=True)
+    owner_principal_id: Optional[str] = Field(default=None, index=True)
+    title: str
+    body: str
+    intervention_type: Optional[str] = Field(default=None, index=True)
+    urgency: Optional[int] = Field(default=None, index=True)
+    surface: str = Field(default="notification", index=True)
+    session_id: Optional[str] = Field(default=None, index=True)
+    thread_id: Optional[str] = Field(default=None, index=True)
+    thread_source: str = Field(default="ambient", index=True)
+    continuation_mode: str = Field(default="open_thread", index=True)
+    resume_message: Optional[str] = Field(default=None)
+    status: str = Field(default="queued", index=True)
+    attempt_count: int = Field(default=0, index=True)
+    max_attempts: int = Field(default=3, index=True)
+    deadline_at: datetime = Field(index=True)
+    lease_owner: Optional[str] = Field(default=None, index=True)
+    lease_expires_at: Optional[datetime] = Field(default=None, index=True)
+    fencing_token: int = Field(default=0, index=True)
+    last_error: Optional[str] = Field(default=None, index=True)
+    created_at: datetime = Field(default_factory=_now, index=True)
+    updated_at: datetime = Field(default_factory=_now, index=True)
+    delivered_at: Optional[datetime] = Field(default=None, index=True)
+    cancelled_at: Optional[datetime] = Field(default=None, index=True)
+
+
+class NativeNotificationDeliveryAttempt(SQLModel, table=True):
+    """One claimed native notification attempt with a fenced receipt."""
+
+    __tablename__ = "native_notification_delivery_attempts"
+    __table_args__ = (
+        Index(
+            "ux_native_notification_delivery_attempt_order",
+            "notification_id",
+            "attempt_index",
+            unique=True,
+        ),
+    )
+
+    id: str = Field(default_factory=_uuid, primary_key=True)
+    notification_id: str = Field(
+        foreign_key="native_notification_outbox.id",
+        index=True,
+    )
+    attempt_index: int = Field(index=True)
+    lease_owner: str = Field(index=True)
+    fencing_token: int = Field(index=True)
+    status: str = Field(default="claimed", index=True)
+    error_code: Optional[str] = Field(default=None, index=True)
+    started_at: datetime = Field(default_factory=_now, index=True)
+    finished_at: Optional[datetime] = Field(default=None, index=True)
+
+
 # ─── ScreenObservation ─────────────────────────────────
 
 class ScreenObservation(SQLModel, table=True):

@@ -1116,6 +1116,19 @@ def _command_env(*, worker_root: Path | None = None) -> dict[str, str]:
         for key, value in os.environ.items()
         if key in _ENV_ALLOWLIST
     }
+    # Resolve allowlisted helper commands (for example ``pytest``) from the
+    # same interpreter environment that owns this runtime.  A caller's PATH
+    # can put a user-level wrapper ahead of the active virtualenv; that wrapper
+    # may point at a different Python installation and make an otherwise valid
+    # deterministic workflow fail before it reaches its governed handler.
+    # Preserve the virtualenv wrapper directory. ``sys.executable`` commonly
+    # points through a symlink into a shared interpreter installation, while
+    # sibling entry points such as ``pytest`` live beside the wrapper itself.
+    interpreter_bin = str(Path(sys.executable).absolute().parent)
+    caller_path = env.get("PATH", "")
+    env["PATH"] = os.pathsep.join(
+        entry for entry in (interpreter_bin, caller_path) if entry
+    )
     env.setdefault("PYTHONUNBUFFERED", "1")
     env["SERAPH_SANDBOX_ENV"] = "allowlisted"
     if worker_root is None:

@@ -818,6 +818,30 @@ def _process_cleanup_receipt(result: dict[str, Any] | None) -> dict[str, Any]:
     }
 
 
+def _changed_workspace_paths(status_output: str) -> set[str]:
+    """Return meaningful fixture changes while ignoring disposable test caches.
+
+    The bundled test command is allowed to create interpreter caches such as
+    ``__pycache__`` and ``.pytest_cache``.  They are excluded from fixture
+    inspection and are not part of the requested patch scope, so treating them
+    as a product change would turn a valid patch into a false readback failure.
+    Every other untracked or modified path remains part of the exact-scope
+    check.
+    """
+    changed: set[str] = set()
+    for line in status_output.splitlines():
+        if len(line) < 4 or "->" in line:
+            continue
+        relative = line[3:].strip()
+        if not relative:
+            continue
+        parts = Path(relative.rstrip("/")).parts
+        if any(part in _GENERATED_FIXTURE_DIRS for part in parts):
+            continue
+        changed.add(relative)
+    return changed
+
+
 async def _record_artifact(
     job_id: str,
     job_workspace: _JobWorkspace,
@@ -971,11 +995,7 @@ async def _record_test_failure_evidence(
         "git", ["status", "--short"], job_workspace.relative_root, include_output=True
     )
     status_output = str(status_process.pop("_stdout", ""))
-    changed_paths = {
-        line[3:].strip()
-        for line in status_output.splitlines()
-        if len(line) >= 4 and "->" not in line
-    }
+    changed_paths = _changed_workspace_paths(status_output)
     patched_path = job_workspace.root / FIXTURE_BUG_FILE
     patched_body = patched_path.read_text(encoding="utf-8") if patched_path.is_file() else ""
     source_immutable = _fixture_tree_digest(prepared.source) == prepared.source_digest
@@ -1760,11 +1780,7 @@ async def run_native_software_engineering_fixture(
             "git", ["status", "--short"], job_workspace.relative_root, include_output=True
         )
         status_output = str(status_process.pop("_stdout", ""))
-        changed_paths = {
-            line[3:].strip()
-            for line in status_output.splitlines()
-            if len(line) >= 4 and "->" not in line
-        }
+        changed_paths = _changed_workspace_paths(status_output)
         patched_body = (job_workspace.root / FIXTURE_BUG_FILE).read_text(encoding="utf-8")
         source_immutable = _fixture_tree_digest(prepared.source) == prepared.source_digest
         exact_scope = changed_paths == {FIXTURE_BUG_FILE}

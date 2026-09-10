@@ -323,6 +323,31 @@ def test_run_command_uses_adopted_host_after_authority_gate(tmp_path, monkeypatc
     )
 
 
+def test_allowlisted_pytest_uses_active_interpreter_environment(tmp_path, monkeypatch):
+    """The adopted test command must use the runtime's own pytest install."""
+    monkeypatch.setattr(settings, "workspace_dir", str(tmp_path))
+    test_file = tmp_path / "test_active_runtime.py"
+    test_file.write_text("def test_active_runtime():\n    assert True\n", encoding="utf-8")
+    principal = TrustPrincipal(
+        principal_id="operator:test",
+        principal_type=PrincipalType.OPERATOR,
+        grants=(AuthorityGrant.CAPABILITY_EXECUTE,),
+        session_id="session:pytest-runtime",
+    )
+    tokens = set_runtime_context("session:pytest-runtime", "off", trust_principal=principal)
+    try:
+        wrapped = wrap_tools_for_approval([run_command])[0]
+        result = wrapped(
+            command="pytest",
+            args_json=json.dumps(["-q", test_file.name]),
+            timeout_seconds=30,
+        )
+    finally:
+        reset_runtime_context(tokens)
+
+    assert "1 passed" in result
+
+
 def test_filesystem_builtins_use_the_same_adopted_host(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "workspace_dir", str(tmp_path))
     principal = TrustPrincipal(

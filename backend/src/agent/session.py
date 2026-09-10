@@ -43,6 +43,22 @@ class SessionOwnerMismatchError(Exception):
         super().__init__(f"session {session_id!r} is owned by another principal")
 
 
+class SessionNotFoundError(Exception):
+    """Raised when an ingress references a session that does not exist."""
+
+    def __init__(self, session_id: str):
+        self.session_id = session_id
+        super().__init__(f"session {session_id!r} was not found")
+
+
+class MessageIngressConflictError(Exception):
+    """Raised when a canonical message identity is reused with new metadata."""
+
+    def __init__(self, message_id: str):
+        self.message_id = message_id
+        super().__init__(f"message {message_id!r} conflicts with an existing ingress")
+
+
 def _escape_like(value: str) -> str:
     return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
@@ -181,6 +197,29 @@ class SessionManager:
                     return session
             raise RuntimeError("session creation retry exhausted")
 
+    async def get_for_ingress(
+        self,
+        session_id: str | None = None,
+        *,
+        owner_principal_id: str | None = None,
+    ) -> Session:
+        """Resolve an ingress session without creating an unknown explicit ID."""
+        if session_id is None:
+            return await self.get_or_create(None, owner_principal_id=owner_principal_id)
+        normalized_session_id = str(session_id).strip()
+        if not normalized_session_id:
+            raise ValueError("session_id must not be blank")
+        async with get_session() as db:
+            result = await db.execute(
+                select(Session).where(Session.id == normalized_session_id)
+            )
+            session = result.scalars().first()
+            if session is None:
+                raise SessionNotFoundError(normalized_session_id)
+            await self._claim_session_owner(db, session, owner_principal_id)
+            db.expunge(session)
+            return session
+
     async def get(self, session_id: str) -> Session | None:
         async with get_session() as db:
             result = await db.execute(select(Session).where(Session.id == session_id))
@@ -188,6 +227,15 @@ class SessionManager:
             if session:
                 db.expunge(session)
             return session
+
+    async def get_message(self, message_id: str) -> Message | None:
+        """Read one persisted transcript message by its server-owned ID."""
+        async with get_session() as db:
+            result = await db.execute(select(Message).where(Message.id == message_id))
+            message = result.scalars().first()
+            if message:
+                db.expunge(message)
+            return message
 
     async def delete(self, session_id: str) -> bool:
         cleanup_fence_acquired = process_runtime_manager.begin_session_cleanup(session_id)
@@ -656,6 +704,79 @@ class SessionManager:
             db.add(session)
             return True
 
+    @staticmethod
+    def _ingress_metadata_matches(
+        existing_metadata_json: str | None,
+        metadata_json: str,
+    ) -> bool:
+        try:
+            existing = json.loads(existing_metadata_json or "{}")
+            requested = json.loads(metadata_json)
+        except (TypeError, json.JSONDecodeError):
+            return False
+        if not isinstance(existing, dict) or not isinstance(requested, dict):
+            return False
+        existing_ingress = existing.get("ingress")
+        requested_ingress = requested.get("ingress")
+        if not isinstance(existing_ingress, dict) or not isinstance(requested_ingress, dict):
+            return False
+        return all(
+            existing_ingress.get(field) == requested_ingress.get(field)
+            for field in (
+                "idempotency_key_digest",
+                "content_digest",
+                "principal_id",
+                "device_id",
+                "session_id",
+            )
+        )
+
+    async def reserve_ingress_message(
+        self,
+        session_id: str,
+        content: str,
+        *,
+        message_id: str,
+        metadata_json: str,
+    ) -> tuple[Message, bool]:
+        """Persist one user ingress before dispatch and detect safe retries.
+
+        The canonical server message ID is deterministic for a supplied retry
+        key.  SQLite's existing primary-key constraint closes the small race
+        between concurrent retries without adding a parallel receipt table.
+        """
+        existing = await self.get_message(message_id)
+        if existing is not None:
+            if (
+                existing.session_id != session_id
+                or existing.role != "user"
+                or not self._ingress_metadata_matches(existing.metadata_json, metadata_json)
+            ):
+                raise MessageIngressConflictError(message_id)
+            return existing, True
+        try:
+            message = await self.add_message(
+                session_id,
+                "user",
+                content,
+                metadata_json=metadata_json,
+                message_id=message_id,
+            )
+        except IntegrityError:
+            # A concurrent request won the primary-key reservation.  Read its
+            # durable row and apply the same identity check.
+            raced = await self.get_message(message_id)
+            if raced is None:
+                raise
+            if (
+                raced.session_id != session_id
+                or raced.role != "user"
+                or not self._ingress_metadata_matches(raced.metadata_json, metadata_json)
+            ):
+                raise MessageIngressConflictError(message_id)
+            return raced, True
+        return message, False
+
     async def add_message(
         self,
         session_id: str,
@@ -664,6 +785,7 @@ class SessionManager:
         step_number: int | None = None,
         tool_used: str | None = None,
         metadata_json: str | None = None,
+        message_id: str | None = None,
     ) -> Message:
         # Truncate oversized content (50 KB)
         if len(content) > 50_000:
@@ -678,6 +800,7 @@ class SessionManager:
                 episode_metadata = parsed_metadata
         async with get_session() as db:
             msg = Message(
+                id=message_id or uuid.uuid4().hex,
                 session_id=session_id,
                 role=role,
                 content=content,

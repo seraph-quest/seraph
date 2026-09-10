@@ -1,11 +1,14 @@
 import asyncio
 import contextvars
+import hashlib
 import json
 import logging
 from contextlib import suppress
+from datetime import datetime, timezone
 from dataclasses import replace
 from threading import Event
 from time import perf_counter
+from uuid import NAMESPACE_URL, uuid4, uuid5
 
 from fastapi import APIRouter, HTTPException, Request as HttpRequest
 
@@ -22,7 +25,12 @@ from config.settings import settings
 from src.agent.direct_chat import run_direct_local_chat, should_use_direct_local_chat
 from src.agent.factory import build_agent
 from src.agent.onboarding import create_onboarding_agent
-from src.agent.session import SessionOwnerMismatchError, session_manager
+from src.agent.session import (
+    MessageIngressConflictError,
+    SessionNotFoundError,
+    SessionOwnerMismatchError,
+    session_manager,
+)
 from src.audit.runtime import log_agent_run_event
 from src.audit.repository import audit_repository
 from src.api.profile import get_or_create_profile, mark_onboarding_complete
@@ -34,7 +42,7 @@ from src.auth.cancellation import (
 )
 from src.auth.service import AuthFailure, auth_enabled, authenticate_token, bind_operator_principal
 from src.guardian.state import build_guardian_state
-from src.models.schemas import ChatRequest, ChatResponse
+from src.models.schemas import ChatIngressEnvelope, ChatRequest, ChatResponse
 from src.operators.local_codex import ExternalAgentRuntimeRemovedError
 from src.tools.policy import get_current_tool_policy_mode
 from src.vault.redaction import redact_secrets_in_text
@@ -141,6 +149,16 @@ class ChatAuthorityError(Exception):
         self.code = code
 
 
+class ChatIngressValidationError(Exception):
+    """Raised when a web ingress payload cannot resolve safely."""
+
+    def __init__(self, message: str, *, code: str):
+        super().__init__(message)
+        self.message = message
+        self.status_code = 422
+        self.code = code
+
+
 def _bind_chat_principal(
     session_id: str,
     *,
@@ -217,6 +235,141 @@ def _bind_chat_principal(
     return replace(principal, session_id=normalized_session_id)
 
 
+def build_chat_ingress_envelope(
+    *,
+    message: str,
+    session_id: str,
+    principal: TrustPrincipal,
+    operator_session_id: str,
+    transport: str,
+    client_message_id: str | None = None,
+    idempotency_key: str | None = None,
+) -> ChatIngressEnvelope:
+    """Create server-owned metadata for one authenticated web ingress.
+
+    A caller may provide either identity field to make a retry deterministic.
+    If both aliases are supplied, they must carry the same normalized value so
+    one canonical retry identity can be reserved. The canonical persisted
+    message ID is derived by Seraph and is scoped to the bound principal and
+    session; caller identity never grants authority.
+    """
+    normalized_client_message_id, normalized_idempotency_key = validate_chat_ingress_identity(
+        client_message_id=client_message_id,
+        idempotency_key=idempotency_key,
+    )
+    identity_material = normalized_idempotency_key or normalized_client_message_id
+    if identity_material:
+        server_message_id = uuid5(
+            NAMESPACE_URL,
+            f"seraph-chat:{principal.principal_id}:{session_id}:{identity_material}",
+        ).hex
+    else:
+        server_message_id = uuid4().hex
+        identity_material = server_message_id
+    idempotency_key_digest = hashlib.sha256(identity_material.encode("utf-8")).hexdigest()
+    return ChatIngressEnvelope(
+        message_id=server_message_id,
+        client_message_id=normalized_client_message_id,
+        idempotency_key=f"sha256:{idempotency_key_digest}",
+        idempotency_key_digest=idempotency_key_digest,
+        principal_id=principal.principal_id,
+        operator_session_id=operator_session_id,
+        device_id=f"web-operator-session:{operator_session_id}",
+        transport=transport,
+        session_id=session_id,
+        correlation_id=f"chat:{server_message_id}",
+        content_digest=hashlib.sha256(message.encode("utf-8")).hexdigest(),
+        received_at=datetime.now(timezone.utc),
+    )
+
+
+def validate_chat_ingress_identity(
+    *,
+    client_message_id: str | None = None,
+    idempotency_key: str | None = None,
+) -> tuple[str | None, str | None]:
+    """Normalize caller identity and reject ambiguous dual identities.
+
+    The two request fields are aliases for this web ingress slice.  When both
+    are present they must resolve to the same opaque value; otherwise there is
+    no single retry identity to reserve.  This check is pure and can run before
+    session creation or audit/model dispatch.
+    """
+
+    normalized_client_message_id = str(client_message_id).strip() if client_message_id is not None else None
+    normalized_idempotency_key = str(idempotency_key).strip() if idempotency_key is not None else None
+    if client_message_id is not None and not normalized_client_message_id:
+        raise ChatIngressValidationError(
+            "client message_id must not be blank.",
+            code="chat_message_identity_invalid",
+        )
+    if idempotency_key is not None and not normalized_idempotency_key:
+        raise ChatIngressValidationError(
+            "idempotency_key must not be blank.",
+            code="chat_message_identity_invalid",
+        )
+    if (
+        normalized_client_message_id is not None
+        and normalized_idempotency_key is not None
+        and normalized_client_message_id != normalized_idempotency_key
+    ):
+        raise ChatIngressValidationError(
+            "client message_id and idempotency_key must resolve to one identity.",
+            code="chat_message_identity_conflict",
+        )
+    return normalized_client_message_id, normalized_idempotency_key
+
+
+def validate_chat_message(message: str) -> None:
+    """Reject empty or whitespace-only interactive messages before effects."""
+
+    if not isinstance(message, str) or not message.strip():
+        raise ChatIngressValidationError(
+            "Chat message must not be blank.",
+            code="chat_message_invalid",
+        )
+
+
+def chat_ingress_metadata(envelope: ChatIngressEnvelope) -> str:
+    """Serialize only typed, non-content ingress metadata for the transcript."""
+    return json.dumps(
+        {"ingress": envelope.model_dump(mode="json")},
+        sort_keys=True,
+    )
+
+
+async def log_chat_ingress_event(
+    *,
+    session_id: str,
+    envelope: ChatIngressEnvelope,
+    status: str,
+) -> None:
+    """Write an operator-readable receipt without exposing message content."""
+    await audit_repository.log_event(
+        session_id=session_id,
+        actor="operator",
+        event_type="chat_message_ingress",
+        tool_name="chat_ingress",
+        risk_level="low",
+        policy_mode=get_current_tool_policy_mode(),
+        summary=f"Chat message ingress {status}.",
+        details={
+            "status": status,
+            "schema_version": envelope.schema_version,
+            "message_id": envelope.message_id,
+            "idempotency_key_digest": envelope.idempotency_key_digest,
+            "content_digest": envelope.content_digest,
+            "principal_id": envelope.principal_id,
+            "operator_session_id": envelope.operator_session_id,
+            "device_id": envelope.device_id,
+            "channel": envelope.channel,
+            "transport": envelope.transport,
+            "session_id": envelope.session_id,
+            "correlation_id": envelope.correlation_id,
+        },
+    )
+
+
 @router.post("/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest, http_request: HttpRequest):
     """Send a message and receive an AI response."""
@@ -233,16 +386,35 @@ async def chat(request: ChatRequest, http_request: HttpRequest):
             status_code=exc.status_code,
             detail={"code": exc.code, "message": exc.message},
         ) from exc
+    try:
+        validate_chat_message(request.message)
+        validate_chat_ingress_identity(
+            client_message_id=request.message_id,
+            idempotency_key=request.idempotency_key,
+        )
+    except ChatIngressValidationError as exc:
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail={"code": exc.code, "message": exc.message},
+        ) from exc
     if request.session_id is not None and not request.session_id.strip():
         raise HTTPException(
             status_code=422,
             detail={"code": "chat_session_required"},
         )
     try:
-        session = await session_manager.get_or_create(
+        session = await session_manager.get_for_ingress(
             request.session_id,
             owner_principal_id=operator.principal.principal_id,
         )
+    except SessionNotFoundError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "code": "chat_session_not_found",
+                "session_id": exc.session_id,
+            },
+        ) from exc
     except SessionOwnerMismatchError as exc:
         raise HTTPException(
             status_code=403,
@@ -261,7 +433,55 @@ async def chat(request: ChatRequest, http_request: HttpRequest):
             status_code=exc.status_code,
             detail={"code": exc.code, "message": exc.message},
         ) from exc
-    await session_manager.add_message(session.id, "user", request.message)
+    ingress = build_chat_ingress_envelope(
+        message=request.message,
+        session_id=session.id,
+        principal=chat_principal,
+        operator_session_id=operator.session_id,
+        transport="rest",
+        client_message_id=request.message_id,
+        idempotency_key=request.idempotency_key,
+    )
+    try:
+        _ingress_message, duplicate = await session_manager.reserve_ingress_message(
+            session.id,
+            request.message,
+            message_id=ingress.message_id,
+            metadata_json=chat_ingress_metadata(ingress),
+        )
+    except MessageIngressConflictError as exc:
+        await log_chat_ingress_event(
+            session_id=session.id,
+            envelope=ingress,
+            status="identity_conflict",
+        )
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "chat_message_identity_conflict",
+                "message": "This message identity is already bound to another request.",
+                "message_id": exc.message_id,
+            },
+        ) from exc
+    if duplicate:
+        await log_chat_ingress_event(
+            session_id=session.id,
+            envelope=ingress,
+            status="duplicate_rejected",
+        )
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "chat_message_duplicate",
+                "message": "This message was already accepted for this session.",
+                "message_id": ingress.message_id,
+            },
+        )
+    await log_chat_ingress_event(
+        session_id=session.id,
+        envelope=ingress,
+        status="accepted",
+    )
 
     # Check onboarding status
     profile = await get_or_create_profile()

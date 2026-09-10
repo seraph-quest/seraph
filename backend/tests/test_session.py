@@ -1,5 +1,6 @@
 """Tests for the async DB-backed SessionManager (src/agent/session.py)."""
 
+import json
 from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -9,7 +10,12 @@ from sqlalchemy.exc import IntegrityError
 pytestmark = pytest.mark.usefixtures("mocked_canonical_inference_context")
 
 from config.settings import settings
-from src.agent.session import SessionManager, SessionOwnerMismatchError
+from src.agent.session import (
+    MessageIngressConflictError,
+    SessionManager,
+    SessionNotFoundError,
+    SessionOwnerMismatchError,
+)
 from src.audit.repository import audit_repository
 from src.scheduler.scheduled_jobs import scheduled_job_repository
 from src.security.trust_contract import canonical_digest
@@ -73,6 +79,90 @@ class TestGetOrCreate:
     async def test_rejects_blank_owner_principal_id(self, async_db, sm, owner_principal_id):
         with pytest.raises(ValueError, match="owner_principal_id must not be blank"):
             await sm.get_or_create("valid-session", owner_principal_id=owner_principal_id)
+
+    async def test_ingress_reservation_persists_metadata_and_rejects_retry(self, async_db, sm):
+        await sm.get_or_create("ingress-session", owner_principal_id="operator:single")
+        metadata = json.dumps(
+            {
+                "ingress": {
+                    "schema_version": "seraph.chat.message.v1",
+                    "message_id": "server-message-1",
+                    "idempotency_key": "sha256:" + "a" * 64,
+                    "idempotency_key_digest": "a" * 64,
+                    "content_digest": "b" * 64,
+                    "principal_id": "operator:single",
+                    "device_id": "web-operator-session:test",
+                    "session_id": "ingress-session",
+                }
+            }
+        )
+
+        first, duplicate = await sm.reserve_ingress_message(
+            "ingress-session",
+            "Persist this once",
+            message_id="server-message-1",
+            metadata_json=metadata,
+        )
+        replay, replayed = await sm.reserve_ingress_message(
+            "ingress-session",
+            "Persist this once",
+            message_id="server-message-1",
+            metadata_json=metadata,
+        )
+
+        assert first.id == replay.id == "server-message-1"
+        assert duplicate is False
+        assert replayed is True
+        persisted = await sm.get_message("server-message-1")
+        assert persisted is not None
+        assert json.loads(persisted.metadata_json or "{}") == json.loads(metadata)
+
+    async def test_ingress_reservation_rejects_identity_conflict_and_unknown_session(
+        self,
+        async_db,
+        sm,
+    ):
+        await sm.get_or_create("ingress-conflict", owner_principal_id="operator:single")
+        metadata = json.dumps(
+            {
+                "ingress": {
+                    "message_id": "server-message-2",
+                    "idempotency_key": "sha256:" + "c" * 64,
+                    "idempotency_key_digest": "c" * 64,
+                    "content_digest": "d" * 64,
+                    "principal_id": "operator:single",
+                    "device_id": "web-operator-session:test",
+                    "session_id": "ingress-conflict",
+                }
+            }
+        )
+        await sm.reserve_ingress_message(
+            "ingress-conflict",
+            "Original",
+            message_id="server-message-2",
+            metadata_json=metadata,
+        )
+        conflicting = json.dumps(
+            {
+                "ingress": {
+                    **json.loads(metadata)["ingress"],
+                    "content_digest": "e" * 64,
+                }
+            }
+        )
+        with pytest.raises(MessageIngressConflictError):
+            await sm.reserve_ingress_message(
+                "ingress-conflict",
+                "Changed",
+                message_id="server-message-2",
+                metadata_json=conflicting,
+            )
+
+        with pytest.raises(SessionNotFoundError):
+            await sm.get_for_ingress(
+                "missing-ingress-session",
+                owner_principal_id="operator:single",
+            )
 
     async def test_explicit_id_integrity_race_rereads_existing_owner(self, sm):
         from src.db.models import Session

@@ -39,6 +39,27 @@
 - [x] Batch CH browser-provider usability proof now adds `managed_browser_provider_attestation`, `live_multi_operator_usability_study`, `browser_computer_use_recovery_drill`, plus `/api/operator/browser-provider-usability-proof`, covering local/managed/remote browser provider identity, evidence mode, session partitioning, credential and download/upload boundaries, provider degradation, recorded-live multi-operator usability metrics, and fail-closed browser recovery drills without claiming safe autonomous browser/computer-use, full browser parity, best cockpit, solved operator control, production readiness, or full parity
 - [x] the one excellent reach-channel canary now selects native notifications as the only canary channel and exposes `one_excellent_reach_channel_canary`, `/api/operator/one-reach-channel-canary`, and the cockpit benchmark-proof card for pairing, revocation, health, retry/fallback, same-thread continuity, memory/context continuity, approval handoff, audit trail, degraded-state UI, and explicit rejection of Slack/Discord/Telegram/channel sprawl until one channel meets the bar
 
+## Web Ingress Contract (Partial On The Epic Branch)
+
+The #750 web slice adds a typed, server-owned `seraph.chat.message.v1`
+envelope to REST `/api/chat` and WebSocket `/ws/chat`.  Seraph binds the
+envelope to the authenticated principal, operator session, device label, and
+canonical conversation before model dispatch; a supplied `idempotency_key` or
+`message_id` produces a session-scoped UUID5 server message identity.  If both
+aliases are supplied, their normalized opaque values must match or the ingress
+is rejected before session reservation.  The
+redacted envelope and SHA-256 content/key digests are persisted in the user
+`Message.metadata_json`, and accepted, duplicate, and identity-conflict
+receipts are written to the canonical audit path without message content.
+REST and WebSocket turns reject empty or whitespace-only message content before
+reservation, audit, or model dispatch.
+
+Retries that reuse the same identity in the same session receive a deterministic
+409/error receipt before model dispatch.  Reuse with changed content or bound
+metadata is rejected as an identity conflict, and an explicit unknown session
+is rejected rather than created.  Attachments, durable outbox delivery, voice,
+and Telegram or other external channel adapters remain future #750 slices.
+
 ## Working On Now
 
 - [x] this workstream shipped `native-desktop-shell-v1`

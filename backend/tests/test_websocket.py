@@ -240,6 +240,115 @@ class TestWebSocket:
             for p in patches:
                 p.stop()
 
+    def test_websocket_ingress_rejects_duplicate_before_stream_dispatch(self):
+        client, patches, stack = _make_sync_client_with_db()
+        stream_calls = []
+
+        async def _fake_stream(*args, **kwargs):
+            stream_calls.append(args[0])
+            yield "Ready."
+
+        try:
+            with (
+                patch("src.api.ws.should_use_direct_local_chat", return_value=True),
+                patch("src.api.ws.direct_local_chat_route_error", new=AsyncMock(return_value=None)),
+                patch("src.api.ws.stream_direct_local_chat", _fake_stream),
+                patch("src.api.ws.run_direct_local_chat", new=AsyncMock(return_value="Unused.")),
+                client.websocket_connect("/ws/chat") as ws,
+            ):
+                _ = ws.receive_text()
+                first_payload = {
+                    "type": "message",
+                    "message": "Retry-safe websocket message",
+                    "idempotency_key": "ws-retry-1",
+                }
+                ws.send_text(json.dumps(first_payload))
+                first_responses = [json.loads(ws.receive_text()) for _ in range(4)]
+                session_id = first_responses[-1]["session_id"]
+
+                ws.send_text(
+                    json.dumps(
+                        {
+                            **first_payload,
+                            "session_id": session_id,
+                        }
+                    )
+                )
+                duplicate = json.loads(ws.receive_text())
+
+            assert first_responses[-1]["type"] == "final"
+            assert duplicate["type"] == "error"
+            assert duplicate["reason"] == "chat_message_duplicate"
+            assert stream_calls == ["Retry-safe websocket message"]
+        finally:
+            stack.close()
+            for p in patches:
+                p.stop()
+
+    def test_websocket_ingress_rejects_ambiguous_dual_identity_before_effects(self):
+        client, patches, stack = _make_sync_client_with_db()
+        stream_calls = []
+
+        async def _fake_stream(*args, **kwargs):
+            stream_calls.append(args[0])
+            yield "Unexpected."
+
+        try:
+            with (
+                patch("src.api.ws.log_chat_ingress_event", new=AsyncMock()) as mock_log,
+                patch("src.api.ws.stream_direct_local_chat", _fake_stream),
+                client.websocket_connect("/ws/chat") as ws,
+            ):
+                _ = ws.receive_text()
+                ws.send_text(
+                    json.dumps(
+                        {
+                            "type": "message",
+                            "message": "Do not reserve this",
+                            "message_id": "client-message-1",
+                            "idempotency_key": "ws-retry-1",
+                        }
+                    )
+                )
+                blocked = json.loads(ws.receive_text())
+
+            assert blocked["type"] == "error"
+            assert blocked["reason"] == "chat_message_identity_conflict"
+            assert stream_calls == []
+            mock_log.assert_not_awaited()
+        finally:
+            stack.close()
+            for p in patches:
+                p.stop()
+
+    @pytest.mark.parametrize("message", ["", " \t "])
+    def test_websocket_ingress_rejects_blank_message_before_effects(self, message):
+        client, patches, stack = _make_sync_client_with_db()
+        stream_calls = []
+
+        async def _fake_stream(*args, **kwargs):
+            stream_calls.append(args[0])
+            yield "Unexpected."
+
+        try:
+            with (
+                patch("src.api.ws.log_chat_ingress_event", new=AsyncMock()) as mock_log,
+                patch("src.api.ws.stream_direct_local_chat", _fake_stream),
+                client.websocket_connect("/ws/chat") as ws,
+            ):
+                _ = ws.receive_text()
+                ws.send_text(json.dumps({"type": "message", "message": message}))
+                blocked = json.loads(ws.receive_text())
+
+            assert blocked["type"] == "error"
+            assert blocked["reason"] == "chat_message_invalid"
+            assert stream_calls == []
+            mock_log.assert_not_awaited()
+        finally:
+            stack.close()
+            for p in patches:
+                p.stop()
+
     def test_websocket_comma_greeting_uses_real_direct_chat_classifier(self):
         client, patches, stack = _make_sync_client_with_db()
 

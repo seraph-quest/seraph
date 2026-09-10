@@ -37,6 +37,7 @@ class _FakeNativeJobRepository:
             "artifacts": [],
             "effects": [],
         }
+        self.cancel_calls = []
 
     def _copy(self):
         return copy.deepcopy(self.job)
@@ -77,6 +78,7 @@ class _FakeNativeJobRepository:
         return self._copy()
 
     async def cancel_job(self, job_id, **kwargs):
+        self.cancel_calls.append((job_id, kwargs))
         self.job["status"] = "cancelled"
         return self._copy()
 
@@ -92,6 +94,24 @@ def _copy_fixture(destination: Path) -> Path:
 def _approved_receipt(job_id: str):
     request = NativeSoftwareEngineeringRequest(job_id=job_id)
     return build_native_software_engineering_approval_receipt(request)
+
+
+@pytest.mark.asyncio
+async def test_native_cancel_forwards_dispatch_revision_fence():
+    repository = _FakeNativeJobRepository()
+    original = native_swe.durable_job_repository
+    native_swe.durable_job_repository = repository
+    try:
+        await native_swe._cancel_claimed_job(
+            "native-cancel-fenced",
+            owner="service:native-software-engineering",
+            fencing_token=1,
+            expected_revision=7,
+            reason="operator_cancelled_before_apply",
+        )
+    finally:
+        native_swe.durable_job_repository = original
+    assert repository.cancel_calls[-1][1]["expected_revision"] == 7
 
 
 @pytest.fixture(autouse=True)

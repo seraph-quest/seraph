@@ -695,28 +695,63 @@ async def run_strategist_tick() -> None:
             urgency=decision.urgency,
             reasoning=decision.reasoning,
         )
+        # Establish the intended delivery in the canonical job row before
+        # crossing the transport boundary.  If delivery or the process dies,
+        # recovery retains this exact unresolved effect for reconciliation.
+        delivery_target = f"strategist-delivery:{durable_job_id}"
+        delivery_effect_id = "proactive_delivery:" + _reasoning_digest(
+            {
+                "job_id": durable_job_id,
+                "intervention_type": decision.intervention_type,
+                "content_digest": _reasoning_digest(decision.content),
+            }
+        )[:24]
+        delivery_adapter_key = f"strategist-delivery:{durable_job_id}"
+        delivery_intent = await durable_job_repository.record_effect(
+            durable_job_id,
+            effect_id=delivery_effect_id,
+            effect_type="proactive_delivery",
+            target_path=delivery_target,
+            adapter_idempotency_key=delivery_adapter_key,
+            status="intent",
+            details={
+                "message_digest": _reasoning_digest(decision.content),
+                "intervention_type": decision.intervention_type,
+                "delivery_boundary": "transport_pending",
+            },
+            owner=_STRATEGIST_RUNNER_ID,
+            fencing_token=durable_fencing_token,
+        )
         result = await deliver_or_queue(
             message,
             guardian_confidence=guardian_state.confidence.overall,
         )
         delivery_value = _delivery_value(result)
         policy_action_value = _policy_action_value(result)
-        await durable_job_repository.record_effect(
-            durable_job_id,
-            effect_type="proactive_delivery",
-            # ``deliver_or_queue`` returns the policy decision, while the
-            # transport receipt is persisted by the delivery coordinator. Do
-            # not turn a policy value into a false claim that a user received
-            # the message.
-            status="unknown",
-            details={
+        delivery_update_kwargs = {
+            "effect_id": delivery_effect_id,
+            "effect_type": "proactive_delivery",
+            "target_path": delivery_target,
+            "adapter_idempotency_key": delivery_adapter_key,
+            # ``deliver_or_queue`` only returns a policy decision. The
+            # transport acknowledgement remains unknown until the delivery
+            # coordinator records a bound readback.
+            "status": "unknown",
+            "details": {
                 "delivery_policy": delivery_value,
                 "policy_action": policy_action_value,
                 "intervention_type": decision.intervention_type,
                 "verification": "delivery_coordinator_receipt",
             },
-            owner=_STRATEGIST_RUNNER_ID,
-            fencing_token=durable_fencing_token,
+            "owner": _STRATEGIST_RUNNER_ID,
+            "fencing_token": durable_fencing_token,
+        }
+        intent_revision = delivery_intent.get("revision") if isinstance(delivery_intent, dict) else None
+        if intent_revision is not None:
+            delivery_update_kwargs["expected_revision"] = int(intent_revision)
+        await durable_job_repository.record_effect(
+            durable_job_id,
+            **delivery_update_kwargs,
         )
         await _transition_tick(
             durable_job_id,

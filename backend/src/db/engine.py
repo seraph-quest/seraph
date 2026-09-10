@@ -391,6 +391,60 @@ async def _ensure_legacy_columns(conn) -> None:
     # columns, so this index is recreated on every startup even when a prior
     # migration already added the idempotency fields.
     if workflow_job_columns and "idempotency_binding" in workflow_job_columns:
+        # Never let the unique index hide or discard a legacy dedupe conflict.
+        # Ambiguous bindings need operator reconciliation while the table is
+        # still readable; creating the index first would abort startup with a
+        # backend-specific integrity error and obscure the affected rows.
+        duplicate_bindings = await conn.exec_driver_sql(
+            "SELECT idempotency_binding, COUNT(*) "
+            "FROM workflow_run_states "
+            "WHERE idempotency_binding IS NOT NULL "
+            "GROUP BY idempotency_binding "
+            "HAVING COUNT(*) > 1"
+        )
+        if duplicate_bindings.fetchall():
+            duplicate_rows = await conn.exec_driver_sql(
+                "SELECT id, status, run_fingerprint, metadata_json, idempotency_binding "
+                "FROM workflow_run_states "
+                "WHERE idempotency_binding IN ("
+                "SELECT idempotency_binding FROM workflow_run_states "
+                "WHERE idempotency_binding IS NOT NULL "
+                "GROUP BY idempotency_binding HAVING COUNT(*) > 1"
+                ")"
+            )
+            for row in duplicate_rows.fetchall():
+                metadata = {}
+                if row[3]:
+                    try:
+                        parsed = json.loads(row[3])
+                        if isinstance(parsed, dict):
+                            metadata = parsed
+                    except (TypeError, json.JSONDecodeError):
+                        metadata = {}
+                metadata["durable_job_migration"] = {
+                    "version": 1,
+                    "original_status": str(row[1] or "unknown"),
+                    "original_payload_digest": str(row[2] or ""),
+                    "original_idempotency_binding": str(row[4] or ""),
+                    "idempotency_conflict": True,
+                    "preserved": True,
+                    "operator_action": "reconcile_duplicate_idempotency_binding",
+                }
+                await conn.exec_driver_sql(
+                    "UPDATE workflow_run_states SET status = 'blocked', "
+                    "failure_reason = 'idempotency_binding_conflict', "
+                    "record_schema_version = 2, idempotency_binding = NULL, "
+                    "metadata_json = :metadata "
+                    "WHERE id = :id",
+                    {
+                        "metadata": json.dumps(metadata, ensure_ascii=True, sort_keys=True),
+                        "id": row[0],
+                    },
+                )
+            # Each conflict is now a visible blocked v2 row with its original
+            # binding retained in migration metadata. Clearing only the
+            # ambiguous index value lets the new unique index protect future
+            # admissions without dropping or silently merging either row.
         await conn.exec_driver_sql(
             "CREATE UNIQUE INDEX IF NOT EXISTS "
             "ux_workflow_run_states_idempotency_binding "
@@ -610,8 +664,13 @@ async def init_db() -> None:
 
     os.makedirs(os.path.dirname(_db_path), exist_ok=True)
     async with engine.begin() as conn:
-        await conn.run_sync(SQLModel.metadata.create_all)
+        # Migrate an existing workflow table before SQLModel creates its
+        # conditional unique idempotency index.  ``create_all`` attempts to
+        # create model indexes for existing tables too; running it first would
+        # make duplicate legacy bindings abort startup before the migration can
+        # preserve and block those rows for operator reconciliation.
         await _ensure_legacy_columns(conn)
+        await conn.run_sync(SQLModel.metadata.create_all)
         await _ensure_memory_indexes(conn)
         await _ensure_search_indexes(conn)
 

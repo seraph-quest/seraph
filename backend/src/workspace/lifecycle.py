@@ -46,7 +46,7 @@ from src.workspace.state_registry import (
 
 ARCHIVE_FORMAT = "seraph.workspace.backup"
 ARCHIVE_VERSION = 1
-JOURNAL_VERSION = 1
+JOURNAL_VERSION = 2
 MANIFEST_MEMBER = "manifest.json"
 PAYLOAD_PREFIX = "payload/"
 SYNTHETIC_MARKER_BYTES = b"seraph-synthetic-workspace-v1\n"
@@ -255,10 +255,128 @@ def _refresh_journal_digest(journal: dict[str, Any]) -> None:
     journal["journal_sha256"] = _digest_json(body)
 
 
+def _workspace_root_digest(root: Path) -> str:
+    """Return a non-reversible binding for the canonical lexical root."""
+    return hashlib.sha256(str(root).encode("utf-8")).hexdigest()
+
+
+def _bounded_identifier_list(value: object, *, label: str) -> None:
+    """Allow only short logical identifiers in durable operator receipts."""
+    if not isinstance(value, list) or len(value) > MAX_ARCHIVE_MEMBERS:
+        raise WorkspaceLifecycleError(f"{label} must be a bounded identifier list")
+    for identifier in value:
+        if not isinstance(identifier, str) or not identifier or len(identifier) > 256:
+            raise WorkspaceLifecycleError(f"{label} contains an invalid identifier")
+        normalized = identifier.replace("\\", "/")
+        parts = PurePosixPath(normalized).parts
+        if (
+            normalized.startswith("/")
+            or not parts
+            or any(part in {"", ".", ".."} for part in parts)
+            or normalized != "/".join(parts)
+        ):
+            raise WorkspaceLifecycleError(f"{label} contains an unsafe identifier")
+
+
+def _bounded_receipt_count(value: object, *, label: str) -> None:
+    if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= MAX_ARCHIVE_MEMBERS:
+        raise WorkspaceLifecycleError(f"{label} is outside the bounded receipt range")
+
+
+def _validate_stage_receipt(receipt: object) -> dict[str, Any]:
+    """Validate the metadata-only receipt shape persisted in a journal.
+
+    A strict allowlist prevents a reconciliation hook from accidentally
+    persisting arbitrary provider output, credential material, or free-form
+    model text in the recovery record.
+    """
+    if not isinstance(receipt, dict):
+        raise WorkspaceLifecycleError("restore journal stage receipt is missing")
+    required = {
+        "canonical_entry_count",
+        "secret_entry_count",
+        "derived_entries_rebuilt",
+        "database_verified",
+    }
+    allowed = required | {"restore_reconciliation"}
+    if set(receipt) - allowed or not required.issubset(receipt):
+        raise WorkspaceLifecycleError("restore journal stage receipt contains unsupported fields")
+    _bounded_receipt_count(receipt["canonical_entry_count"], label="canonical entry count")
+    _bounded_receipt_count(receipt["secret_entry_count"], label="secret entry count")
+    for field in ("derived_entries_rebuilt", "database_verified"):
+        if not isinstance(receipt[field], bool):
+            raise WorkspaceLifecycleError(f"restore journal {field} receipt is invalid")
+
+    reconciliation = receipt.get("restore_reconciliation")
+    if reconciliation is None:
+        return receipt
+    if not isinstance(reconciliation, dict):
+        raise WorkspaceLifecycleError("restore reconciliation receipt is invalid")
+    reconciliation_required = {
+        "status",
+        "derived_rebuild",
+        "authority_invalidation",
+        "token_invalidation",
+        "secret_values_included",
+    }
+    if set(reconciliation) != reconciliation_required:
+        raise WorkspaceLifecycleError("restore reconciliation receipt contains unsupported fields")
+    if reconciliation["status"] != "ready" or reconciliation["secret_values_included"] is not False:
+        raise WorkspaceLifecycleError("restore reconciliation receipt is not secret-safe")
+
+    derived = reconciliation["derived_rebuild"]
+    if not isinstance(derived, dict) or set(derived) != {
+        "status",
+        "rebuilt_directories",
+        "stored_derived_files",
+    }:
+        raise WorkspaceLifecycleError("derived rebuild receipt is invalid")
+    if derived["status"] != "clean_targets_recreated":
+        raise WorkspaceLifecycleError("derived rebuild receipt is not ready")
+    _bounded_identifier_list(derived["rebuilt_directories"], label="rebuilt directory list")
+    _bounded_receipt_count(derived["stored_derived_files"], label="stored derived file count")
+
+    authority = reconciliation["authority_invalidation"]
+    if not isinstance(authority, dict) or set(authority) != {
+        "status",
+        "tables_present",
+        "operator_sessions_invalidated",
+        "workflow_authority_rows_blocked",
+    }:
+        raise WorkspaceLifecycleError("authority invalidation receipt is invalid")
+    if authority["status"] != "applied":
+        raise WorkspaceLifecycleError("authority invalidation receipt is not applied")
+    _bounded_identifier_list(authority["tables_present"], label="authority table list")
+    _bounded_receipt_count(
+        authority["operator_sessions_invalidated"],
+        label="invalidated session count",
+    )
+    _bounded_receipt_count(
+        authority["workflow_authority_rows_blocked"],
+        label="blocked authority count",
+    )
+
+    tokens = reconciliation["token_invalidation"]
+    if not isinstance(tokens, dict) or set(tokens) != {
+        "status",
+        "optional_credentials_invalidated",
+    }:
+        raise WorkspaceLifecycleError("token invalidation receipt is invalid")
+    if tokens["status"] != "applied":
+        raise WorkspaceLifecycleError("token invalidation receipt is not applied")
+    _bounded_identifier_list(
+        tokens["optional_credentials_invalidated"],
+        label="invalidated credential list",
+    )
+    return receipt
+
+
 def _validate_journal(
     journal: object,
     *,
     expected_restore_id: str | None = None,
+    expected_workspace_id: str | None = None,
+    expected_root_digest: str | None = None,
 ) -> dict[str, Any]:
     """Validate journal identity and shape before recovery can move roots."""
     if not isinstance(journal, dict):
@@ -279,6 +397,13 @@ def _validate_journal(
     workspace_id = journal.get("workspace_id")
     if not isinstance(workspace_id, str) or not workspace_id or len(workspace_id) > 128:
         raise WorkspaceLifecycleError("restore journal has an invalid workspace identity")
+    if expected_workspace_id is not None and workspace_id != expected_workspace_id:
+        raise WorkspaceLifecycleError("restore journal workspace identity does not match target")
+    root_digest = journal.get("workspace_root_digest")
+    if not isinstance(root_digest, str) or not _DIGEST_PATTERN.fullmatch(root_digest):
+        raise WorkspaceLifecycleError("restore journal root identity is invalid")
+    if expected_root_digest is not None and root_digest != expected_root_digest:
+        raise WorkspaceLifecycleError("restore journal root identity does not match target")
     if journal.get("previous_name") != f"{restore_id}/previous-workspace":
         raise WorkspaceLifecycleError("restore journal previous-root binding is invalid")
     if journal.get("stage_name") != restore_id:
@@ -288,8 +413,7 @@ def _validate_journal(
     archive_digest = journal.get("archive_manifest_sha256")
     if not isinstance(archive_digest, str) or not _DIGEST_PATTERN.fullmatch(archive_digest):
         raise WorkspaceLifecycleError("restore journal archive identity is invalid")
-    if not isinstance(journal.get("stage_receipt"), dict):
-        raise WorkspaceLifecycleError("restore journal stage receipt is missing")
+    _validate_stage_receipt(journal.get("stage_receipt"))
 
     actual_digest = journal.get("journal_sha256")
     digest_body = dict(journal)
@@ -306,6 +430,9 @@ def _write_journal(path: Path, journal: dict[str, Any]) -> None:
     candidate = dict(journal)
     _refresh_journal_digest(candidate)
     _validate_journal(candidate, expected_restore_id=candidate.get("restore_id"))
+    encoded = _canonical_json(candidate).encode("utf-8")
+    if len(encoded) > MAX_JOURNAL_BYTES:
+        raise WorkspaceLifecycleError("restore journal exceeds bounded size")
     _atomic_json_write(path, candidate)
     journal.clear()
     journal.update(candidate)
@@ -959,6 +1086,8 @@ def _read_journal(
     path: Path,
     *,
     expected_restore_id: str | None = None,
+    expected_workspace_id: str | None = None,
+    expected_root_digest: str | None = None,
 ) -> dict[str, Any]:
     _assert_no_symlink_components(path, label="restore journal path")
     _assert_not_symlink(path, label="restore journal")
@@ -969,7 +1098,12 @@ def _read_journal(
         raise
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise WorkspaceLifecycleError("restore journal is unreadable") from exc
-    return _validate_journal(value, expected_restore_id=expected_restore_id)
+    return _validate_journal(
+        value,
+        expected_restore_id=expected_restore_id,
+        expected_workspace_id=expected_workspace_id,
+        expected_root_digest=expected_root_digest,
+    )
 
 
 def _journal_paths(root: Path, restore_id: str) -> tuple[Path, Path, Path, Path]:
@@ -979,6 +1113,71 @@ def _journal_paths(root: Path, restore_id: str) -> tuple[Path, Path, Path, Path]
     current = record_root / "current-workspace"
     stage = workspace_restore_staging_dir(root) / restore_id
     return record_root, previous, current, stage
+
+
+def _recovery_action(
+    status: str,
+    restore_id: str,
+    *,
+    active_present: bool,
+    previous_present: bool,
+    current_present: bool,
+    stage_present: bool,
+) -> str | None:
+    """Plan one recovery transition without changing filesystem state."""
+    if status == "staged":
+        if not active_present and previous_present and stage_present:
+            return "promoted_staging"
+        if not active_present and previous_present and not stage_present:
+            return "restored_previous"
+        if active_present and stage_present and not previous_present:
+            return "discarded_staging"
+        raise WorkspaceLifecycleError(f"staged restore {restore_id} has an ambiguous root state")
+
+    if status == "active_moved":
+        if active_present and previous_present and not stage_present:
+            return "confirmed_promotion"
+        if active_present:
+            raise WorkspaceLifecycleError(
+                f"interrupted restore {restore_id} has an ambiguous active root"
+            )
+        if stage_present:
+            return "promoted_staging"
+        if previous_present:
+            return "restored_previous"
+        raise WorkspaceLifecycleError(f"interrupted restore {restore_id} has no recoverable root")
+
+    if status == "rollback_active_moved":
+        if active_present and current_present and not previous_present:
+            return "confirmed_rollback"
+        if active_present:
+            raise WorkspaceLifecycleError(f"rollback {restore_id} has an ambiguous active root")
+        if previous_present:
+            return "restored_previous"
+        if current_present:
+            return "restored_current"
+        raise WorkspaceLifecycleError(f"rollback {restore_id} has no previous root")
+
+    if status == "promoted":
+        if active_present:
+            return None
+        if previous_present and current_present:
+            return "restored_previous"
+        raise WorkspaceLifecycleError(f"promoted restore {restore_id} has no active root")
+
+    if status in {
+        "recovered_promoted",
+        "recovered_rollback",
+        "staging_discarded",
+        "rolled_back",
+    }:
+        if not active_present:
+            raise WorkspaceLifecycleError(f"completed restore {restore_id} has no active root")
+        return None
+
+    # _validate_journal rejects this before the planner is reached.  Keep the
+    # explicit branch so a future status cannot accidentally become a no-op.
+    raise WorkspaceLifecycleError(f"restore {restore_id} has an unsupported recovery state")
 
 
 def restore_workspace(
@@ -1009,7 +1208,7 @@ def restore_workspace(
         raise WorkspaceLifecycleError(
             "production restore requires an authority and derived-state reconciliation hook"
         )
-    recover_interrupted_restore(resolved_root)
+    recover_interrupted_restore(resolved_root, registry=registry)
     # Keep the lexical path intact until lstat: resolving first would turn a
     # symlinked archive into its target and defeat the fail-closed check.
     loaded = _load_archive(Path(archive_path).expanduser(), registry)
@@ -1057,6 +1256,7 @@ def restore_workspace(
             "restore_id": restore_id,
             "status": "staged",
             "workspace_id": registry.config.identity.workspace_id,
+            "workspace_root_digest": _workspace_root_digest(resolved_root),
             "archive_manifest_sha256": loaded.manifest["manifest_sha256"],
             "previous_name": f"{restore_id}/previous-workspace",
             "stage_name": f"{restore_id}",
@@ -1103,24 +1303,90 @@ def restore_workspace(
 
 def recover_interrupted_restore(
     root: str | os.PathLike[str],
+    *,
+    registry: WorkspaceStateRegistry | None = None,
 ) -> dict[str, Any]:
-    """Recover journaled staged/half-promoted restores without guessing."""
+    """Recover journaled staged/half-promoted restores without guessing.
+
+    Every candidate journal and sidecar state is preflighted before the first
+    recovery transition.  ``registry`` is optional for direct callers; the
+    journal's root binding is always checked, and a supplied registry adds its
+    workspace identity to that binding.
+    """
     resolved_root = canonical_workspace_root(root)
+    if registry is not None:
+        _registry_root(resolved_root, registry)
+    expected_workspace_id = registry.config.identity.workspace_id if registry is not None else None
+    expected_root_digest = _workspace_root_digest(resolved_root)
     backup_root = workspace_backup_dir(resolved_root)
     staging_root = workspace_restore_staging_dir(resolved_root)
-    if not backup_root.exists():
+    if not _path_present(backup_root):
         return {"status": "clean", "recovered": []}
+    _assert_no_symlink_components(backup_root, label="workspace backup directory")
     _assert_not_symlink(backup_root, label="workspace backup directory")
+    _assert_no_symlink_components(staging_root, label="workspace restore staging directory")
     _assert_not_symlink(staging_root, label="workspace restore staging directory")
+
+    # Do not mutate a valid earlier record until every later candidate has
+    # passed journal, identity, symlink, and root-state validation.
+    actionable_records = 0
+    for record_root in sorted(backup_root.iterdir(), key=lambda item: item.name):
+        if not _RESTORE_ID_PATTERN.fullmatch(record_root.name):
+            continue
+        _assert_no_symlink_components(record_root, label="restore record path")
+        _assert_not_symlink(record_root, label="restore record root")
+        if not record_root.is_dir():
+            raise WorkspaceLifecycleError(f"restore record {record_root.name} is not a directory")
+        journal_file = record_root / "restore-journal.json"
+        _assert_no_symlink_components(journal_file, label="restore journal path")
+        if not _path_present(journal_file):
+            raise WorkspaceLifecycleError(f"restore record {record_root.name} journal is missing")
+        restore_id = record_root.name
+        journal = _read_journal(
+            journal_file,
+            expected_restore_id=restore_id,
+            expected_workspace_id=expected_workspace_id,
+            expected_root_digest=expected_root_digest,
+        )
+        _record_root, previous, current, stage = _journal_paths(resolved_root, restore_id)
+        for path, label in (
+            (resolved_root, "active workspace root"),
+            (previous, "previous workspace root"),
+            (current, "rollback workspace root"),
+            (stage, "restore staging root"),
+        ):
+            _assert_no_symlink_components(path, label=label)
+            _assert_not_symlink(path, label=label)
+        action = _recovery_action(
+            journal["status"],
+            restore_id,
+            active_present=_path_present(resolved_root),
+            previous_present=_path_present(previous),
+            current_present=_path_present(current),
+            stage_present=_path_present(stage),
+        )
+        if action is not None:
+            actionable_records += 1
+    if actionable_records > 1:
+        raise WorkspaceLifecycleError("multiple restore records require recovery")
+
     recovered: list[dict[str, Any]] = []
     for record_root in sorted(backup_root.iterdir(), key=lambda item: item.name):
-        if not record_root.is_dir() or record_root.is_symlink() or not _RESTORE_ID_PATTERN.fullmatch(record_root.name):
+        if not _RESTORE_ID_PATTERN.fullmatch(record_root.name):
             continue
+        _assert_not_symlink(record_root, label="restore record root")
+        if not record_root.is_dir():
+            raise WorkspaceLifecycleError(f"restore record {record_root.name} is not a directory")
         journal_file = record_root / "restore-journal.json"
-        if not journal_file.exists():
-            continue
+        if not _path_present(journal_file):
+            raise WorkspaceLifecycleError(f"restore record {record_root.name} journal is missing")
         restore_id = record_root.name
-        journal = _read_journal(journal_file, expected_restore_id=restore_id)
+        journal = _read_journal(
+            journal_file,
+            expected_restore_id=restore_id,
+            expected_workspace_id=expected_workspace_id,
+            expected_root_digest=expected_root_digest,
+        )
         status = journal.get("status")
         _record_root, previous, current, stage = _journal_paths(resolved_root, restore_id)
         for path, label in (
@@ -1239,7 +1505,11 @@ def rollback_workspace(
     restore_id = _safe_restore_id(restore_id)
     backup_root = workspace_backup_dir(resolved_root)
     journal_file = _journal_path(backup_root, restore_id)
-    journal = _read_journal(journal_file, expected_restore_id=restore_id)
+    journal = _read_journal(
+        journal_file,
+        expected_restore_id=restore_id,
+        expected_root_digest=_workspace_root_digest(resolved_root),
+    )
     if journal.get("status") not in {"promoted", "recovered_promoted"}:
         raise WorkspaceLifecycleError("restore is not in a rollback-capable state")
     _record_root, previous, current, stage = _journal_paths(resolved_root, restore_id)
@@ -1299,7 +1569,11 @@ def cleanup_workspace_backups(
         if candidate.is_dir():
             journal_file = candidate / "restore-journal.json"
             if journal_file.exists():
-                journal = _read_journal(journal_file, expected_restore_id=candidate.name)
+                journal = _read_journal(
+                    journal_file,
+                    expected_restore_id=candidate.name,
+                    expected_root_digest=_workspace_root_digest(resolved_root),
+                )
                 if journal.get("status") in {"active_moved", "rollback_active_moved"}:
                     continue
             _remove_tree(candidate, label=f"old backup record {candidate.name}")

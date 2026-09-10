@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useLayoutEffect, useRef } from "react";
 import { API_URL } from "../config/constants";
+import { apiFetch } from "../lib/api";
 import { useChatStore } from "../stores/chatStore";
 import { InterruptionModeToggle } from "./settings/InterruptionModeToggle";
 import { DaemonStatus } from "./settings/DaemonStatus";
@@ -9,6 +10,7 @@ import { ApprovalModeToggle } from "./settings/ApprovalModeToggle";
 import { AuditLogPanel } from "./settings/AuditLogPanel";
 import { WorkflowPanel } from "./settings/WorkflowPanel";
 import { ArtifactStoragePanel } from "./settings/ArtifactStoragePanel";
+import { useOptionalOperatorAuth } from "./auth/OperatorAuthGate";
 
 interface SkillInfo {
   name: string;
@@ -241,7 +243,7 @@ function TokenConfigForm({
     setSaving(true);
     setStatus("Saving...");
     try {
-      const saveRes = await fetch(`${API_URL}/api/mcp/servers/${server.name}/token`, {
+      const saveRes = await apiFetch(`${API_URL}/api/mcp/servers/${server.name}/token`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ token: token.trim() }),
@@ -253,7 +255,7 @@ function TokenConfigForm({
         return;
       }
       setStatus("Testing...");
-      const testRes = await fetch(`${API_URL}/api/mcp/servers/${server.name}/test`, { method: "POST" });
+      const testRes = await apiFetch(`${API_URL}/api/mcp/servers/${server.name}/test`, { method: "POST" });
       const testData = await testRes.json();
       if (testData.status === "ok") {
         setStatus(`Connected — ${testData.tool_count} tools`);
@@ -334,7 +336,7 @@ function AddServerForm({ onAdd }: { onAdd: () => void }) {
       if (authToken.trim()) {
         body.headers = { Authorization: `Bearer ${authToken.trim()}` };
       }
-      const res = await fetch(`${API_URL}/api/mcp/servers`, {
+      const res = await apiFetch(`${API_URL}/api/mcp/servers`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
@@ -426,6 +428,7 @@ export function SettingsPanel() {
   const onboardingCompleted = useChatStore((s) => s.onboardingCompleted);
   const restartOnboarding = useChatStore((s) => s.restartOnboarding);
   const loadSessions = useChatStore((s) => s.loadSessions);
+  const operatorAuth = useOptionalOperatorAuth();
 
   const [skills, setSkills] = useState<SkillInfo[]>([]);
   const [servers, setServers] = useState<McpServer[]>([]);
@@ -447,7 +450,7 @@ export function SettingsPanel() {
 
   const fetchSkills = useCallback(async () => {
     try {
-      const res = await fetch(`${API_URL}/api/skills`);
+      const res = await apiFetch(`${API_URL}/api/skills`);
       if (res.ok) {
         const data = await res.json();
         setSkills(data.skills ?? []);
@@ -459,7 +462,7 @@ export function SettingsPanel() {
 
   const fetchServers = useCallback(async () => {
     try {
-      const res = await fetch(`${API_URL}/api/mcp/servers`);
+      const res = await apiFetch(`${API_URL}/api/mcp/servers`);
       if (res.ok) {
         const data = await res.json();
         setServers(data.servers ?? []);
@@ -471,7 +474,7 @@ export function SettingsPanel() {
 
   const fetchCatalog = useCallback(async () => {
     try {
-      const res = await fetch(`${API_URL}/api/catalog`);
+      const res = await apiFetch(`${API_URL}/api/catalog`);
       if (res.ok) {
         const data = await res.json();
         setCatalogItems(data.items ?? []);
@@ -501,7 +504,7 @@ export function SettingsPanel() {
 
   const handleSkillToggle = async (name: string, enabled: boolean) => {
     try {
-      await fetch(`${API_URL}/api/skills/${name}`, {
+      await apiFetch(`${API_URL}/api/skills/${name}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ enabled }),
@@ -514,7 +517,7 @@ export function SettingsPanel() {
 
   const handleSkillReload = async () => {
     try {
-      await fetch(`${API_URL}/api/skills/reload`, { method: "POST" });
+      await apiFetch(`${API_URL}/api/skills/reload`, { method: "POST" });
       fetchSkills();
     } catch {
       // ignore
@@ -525,7 +528,7 @@ export function SettingsPanel() {
     const identifier = item.catalog_id ?? item.name;
     setInstalling(identifier);
     try {
-      const res = await fetch(`${API_URL}/api/catalog/install/${encodeURIComponent(identifier)}`, { method: "POST" });
+      const res = await apiFetch(`${API_URL}/api/catalog/install/${encodeURIComponent(identifier)}`, { method: "POST" });
       if (res.ok) {
         fetchCatalog();
         fetchSkills();
@@ -539,7 +542,7 @@ export function SettingsPanel() {
 
   const handleToggle = async (name: string, enabled: boolean) => {
     try {
-      await fetch(`${API_URL}/api/mcp/servers/${name}`, {
+      await apiFetch(`${API_URL}/api/mcp/servers/${name}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ enabled }),
@@ -553,7 +556,7 @@ export function SettingsPanel() {
 
   const handleRemove = async (name: string) => {
     try {
-      await fetch(`${API_URL}/api/mcp/servers/${name}`, { method: "DELETE" });
+      await apiFetch(`${API_URL}/api/mcp/servers/${name}`, { method: "DELETE" });
       fetchServers();
       useChatStore.getState().fetchToolRegistry();
     } catch {
@@ -564,7 +567,7 @@ export function SettingsPanel() {
   const handleTest = async (name: string) => {
     setTestResult(`Testing ${name}...`);
     try {
-      const res = await fetch(`${API_URL}/api/mcp/servers/${name}/test`, { method: "POST" });
+      const res = await apiFetch(`${API_URL}/api/mcp/servers/${name}/test`, { method: "POST" });
       const data = await res.json();
       if (res.ok) {
         setTestResult(`${name}: OK — ${data.tool_count} tools`);
@@ -675,6 +678,33 @@ export function SettingsPanel() {
                 {cockpitHintsEnabled ? "On" : "Off"}
               </button>
             </div>
+
+            {operatorAuth && (
+              <div className="cockpit-settings-inline-row">
+                <div className="cockpit-settings-copy">
+                  <div className="cockpit-settings-label">Operator session</div>
+                  <div className="cockpit-settings-note">
+                    {operatorAuth.session.principal_id} · expires {new Date(operatorAuth.session.idle_expires_at).toLocaleString()}
+                  </div>
+                </div>
+                <div className="flex gap-1">
+                  <button
+                    type="button"
+                    className="cockpit-settings-choice"
+                    onClick={() => void operatorAuth.refreshSession()}
+                  >
+                    Refresh
+                  </button>
+                  <button
+                    type="button"
+                    className="cockpit-settings-choice"
+                    onClick={() => void operatorAuth.logout()}
+                  >
+                    Sign out
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
           )}
 

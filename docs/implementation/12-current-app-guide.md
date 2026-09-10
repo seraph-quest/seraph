@@ -237,13 +237,26 @@ curl -b /tmp/seraph.cookies -H 'Origin: https://cockpit.example' \
   https://api.example/api/auth/session
 ```
 
+For a private LAN cockpit, replace the production host and origin allow-lists
+with the exact LAN hostname/IP and browser origin (for example,
+`seraph.lan,192.168.1.50` and `https://seraph.lan`). The same boundary is
+enforced for unsafe HTTP requests and WebSocket upgrades. An authenticated
+operator may use model-fabric setup and canaries from that configured LAN
+boundary; loopback is only the unauthenticated local-development shortcut.
+
 The login/session/refresh/logout endpoints are the canonical provisioning
 surface for the current single-operator deployment. Host headers with ports
 such as `127.0.0.1:8004` are normalized against the configured allow-list.
 Unauthenticated API requests fail closed; the explicit unauthenticated bypass
 is accepted only by test configuration. A WebSocket rechecks the session at a
-bounded interval and closes when the session is revoked or expires. A cockpit
-login form and multi-operator identity ownership remain #741 follow-up scope.
+bounded interval and closes when the session is revoked or expires. The cockpit
+now gates protected UI startup on `/api/auth/session`, provides a login form,
+and returns to login after a revoked or expired session. When no server-side
+credential is configured it shows the PBKDF2 provisioning command and keeps the
+core locked until the managed backend is restarted. Browser API requests use
+credentialed cookies across the local frontend/backend ports; raw passwords and
+session tokens never enter frontend state. Multi-operator identity ownership
+remains outside the current single-operator boundary.
 
 `/api/runtime/status` and `/api/settings/artifact-storage` are the active
 operator receipts. They expose the effective OpenRouter route, consent,

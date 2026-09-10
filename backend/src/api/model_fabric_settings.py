@@ -421,7 +421,10 @@ async def get_model_fabric_settings():
 @router.put("/settings/model-fabric")
 async def put_model_fabric_settings(body: ModelFabricConfigurationRequest, request: Request):
     if not _is_local_request(request):
-        raise HTTPException(status_code=403, detail="Model-fabric settings require localhost access")
+        raise HTTPException(
+            status_code=403,
+            detail="Model-fabric settings require a loopback request or an authenticated operator on the configured host/origin boundary",
+        )
     credential_mutated = False
     previous_vault_value: str | None = None
     previous_process_value = str(settings.openrouter_api_key or "")
@@ -492,7 +495,10 @@ async def put_model_fabric_settings(body: ModelFabricConfigurationRequest, reque
 @router.post("/settings/model-fabric/canary")
 async def run_model_fabric_canary(body: CapabilityCanaryRequest, request: Request):
     if not _is_local_request(request):
-        raise HTTPException(status_code=403, detail="Model-fabric canaries require localhost access")
+        raise HTTPException(
+            status_code=403,
+            detail="Model-fabric canaries require a loopback request or an authenticated operator on the configured host/origin boundary",
+        )
     if body.capability not in _PROBE_CAPABILITIES:
         raise HTTPException(status_code=422, detail="Unsupported model capability")
     principal = get_current_trust_principal()
@@ -1282,4 +1288,13 @@ def _attempt_summary(attempt) -> dict[str, object]:
 
 def _is_local_request(request: Request) -> bool:
     host = request.client.host if request.client is not None else ""
-    return host in {"127.0.0.1", "::1", "localhost", "testclient"}
+    if host in {"127.0.0.1", "::1", "localhost", "testclient"}:
+        return True
+    # The endpoint is already behind OperatorAuthMiddleware, which validates
+    # the configured host/origin allow-list and binds a server-minted
+    # principal. Permit an authenticated operator on the configured LAN
+    # profile without treating arbitrary remote callers as local. This keeps
+    # the keyless setup path usable across the frontend/backend ports while
+    # preserving the existing auth and origin boundary.
+    operator = getattr(getattr(request, "state", None), "operator", None)
+    return bool(getattr(operator, "principal", None) and getattr(operator.principal, "authenticated", False))

@@ -6,8 +6,9 @@ import { useKeyboardShortcuts } from "./hooks/useKeyboardShortcuts";
 import { CockpitView } from "./components/cockpit/CockpitView";
 import { applyThemePreference } from "./lib/theme";
 import { useChatStore } from "./stores/chatStore";
+import { OperatorAuthGate } from "./components/auth/OperatorAuthGate";
 
-export default function App() {
+function AuthenticatedApp() {
   const { sendMessage, skipOnboarding } = useWebSocket();
   const themePreference = useChatStore((s) => s.themePreference);
   useKeyboardShortcuts();
@@ -45,5 +46,13 @@ export default function App() {
       <QuestPanel />
       <SettingsPanel />
     </>
+  );
+}
+
+export default function App() {
+  return (
+    <OperatorAuthGate>
+      <AuthenticatedApp />
+    </OperatorAuthGate>
   );
 }

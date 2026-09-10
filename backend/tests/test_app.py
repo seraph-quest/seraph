@@ -127,13 +127,36 @@ async def test_cors_allows_loopback_dev_origin(client):
     response = await client.options(
         "/api/capabilities/overview",
         headers={
-            "Origin": "http://127.0.0.1:3000",
+            "Origin": "http://127.0.0.1:3001",
             "Access-Control-Request-Method": "GET",
         },
     )
 
     assert response.status_code == 200
-    assert response.headers["access-control-allow-origin"] == "http://127.0.0.1:3000"
+    assert response.headers["access-control-allow-origin"] == "http://127.0.0.1:3001"
+
+
+@pytest.mark.asyncio
+async def test_cors_uses_exact_origins_without_loopback_port_wildcard(client):
+    rejected = await client.options(
+        "/api/capabilities/overview",
+        headers={
+            "Origin": "http://localhost:9999",
+            "Access-Control-Request-Method": "GET",
+        },
+    )
+    assert rejected.status_code == 400
+    assert "access-control-allow-origin" not in rejected.headers
+
+    allowed = await client.options(
+        "/api/capabilities/overview",
+        headers={
+            "Origin": "http://localhost:3001",
+            "Access-Control-Request-Method": "GET",
+        },
+    )
+    assert allowed.status_code == 200
+    assert allowed.headers["access-control-allow-origin"] == "http://localhost:3001"
 
 
 @pytest.mark.asyncio

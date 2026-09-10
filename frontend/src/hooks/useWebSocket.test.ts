@@ -16,6 +16,7 @@ import {
   reduceAssistantDelta,
   resolveClarificationSessionId,
   shouldAcceptActiveResponseSession,
+  resolveWebSocketUrl,
 } from "./useWebSocket";
 import type { ChatMessage } from "../types";
 
@@ -28,6 +29,12 @@ describe("WS reconnection constants", () => {
   it("allows normal backend agent turns to finish before resetting the socket", () => {
     expect(WS_RESPONSE_TIMEOUT_MS).toBeGreaterThanOrEqual(120_000);
     expect(WS_RESPONSE_TIMEOUT_MS).toBeLessThanOrEqual(130_000);
+  });
+
+  it("resolves proxy-relative paths for HTTP and HTTPS cockpit origins", () => {
+    expect(resolveWebSocketUrl("/ws/chat", "http://127.0.0.1:3001/")).toBe("ws://127.0.0.1:3001/ws/chat");
+    expect(resolveWebSocketUrl("/ws/chat", "https://cockpit.example/console")).toBe("wss://cockpit.example/ws/chat");
+    expect(resolveWebSocketUrl("ws://backend/ws/chat", "http://127.0.0.1:3001/")).toBe("ws://backend/ws/chat");
   });
 });
 

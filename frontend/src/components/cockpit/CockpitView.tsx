@@ -7,6 +7,7 @@ import {
   type ModelFabricRuntimeStatus,
 } from "../../lib/modelFabric";
 import { API_URL } from "../../config/constants";
+import { apiFetch } from "../../lib/api";
 import { SERAPH_BUILD_ID } from "../../config/release";
 import { useChatStore } from "../../stores/chatStore";
 import { useQuestStore } from "../../stores/questStore";
@@ -7047,7 +7048,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     const controller = new AbortController();
     const timeout = window.setTimeout(() => controller.abort(), timeoutMs);
     try {
-      const response = await fetch(url, { signal: controller.signal });
+      const response = await apiFetch(url, { signal: controller.signal });
       if (isCancelled() || !response.ok) {
         return { ok: false, payload: null };
       }
@@ -7478,7 +7479,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     const fallbackProvider = browserProviders.find((providerInfo) => providerInfo.selected) ?? browserProviders[0] ?? null;
     const provider = browserWorkbenchProvider || fallbackProvider?.name || "";
     try {
-      const response = await fetch(`${API_URL}/api/browser/sessions`, {
+      const response = await apiFetch(`${API_URL}/api/browser/sessions`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -7515,7 +7516,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       return;
     }
     try {
-      const response = await fetch(`${API_URL}/api/browser/sessions/${encodeURIComponent(session.session_id)}/snapshot`, {
+      const response = await apiFetch(`${API_URL}/api/browser/sessions/${encodeURIComponent(session.session_id)}/snapshot`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -7559,7 +7560,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       }
     }
     try {
-      const response = await fetch(`${API_URL}/api/operator/browser-computer-use-control/actions`, {
+      const response = await apiFetch(`${API_URL}/api/operator/browser-computer-use-control/actions`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -7605,7 +7606,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       }
     }
     try {
-      const response = await fetch(`${API_URL}/api/operator/guardian-memory-live-control/actions`, {
+      const response = await apiFetch(`${API_URL}/api/operator/guardian-memory-live-control/actions`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -8280,7 +8281,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     try {
       const action = options.action ?? "resume";
       const actionHandle = options.actionHandle ?? resolved.actionHandle;
-      const response = await fetch(
+      const response = await apiFetch(
         `${API_URL}/api/workflows/runs/${encodeURIComponent(resolved.runIdentity)}/control`,
         {
           method: "POST",
@@ -9907,7 +9908,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     const loadStudioSource = async () => {
       try {
         if (selectedStudioEntry.extensionId && selectedStudioEntry.packageReference && selectedStudioEntry.entityType !== "mcp") {
-          const response = await fetch(
+          const response = await apiFetch(
             `${API_URL}/api/extensions/${encodeURIComponent(selectedStudioEntry.extensionId)}/source?reference=${encodeURIComponent(selectedStudioEntry.packageReference)}`,
           );
           const payload = await response.json().catch(() => null);
@@ -9938,7 +9939,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
           return;
         }
         if (selectedStudioEntry.entityType === "workflow_definition") {
-          const response = await fetch(`${API_URL}/api/workflows/${encodeURIComponent(selectedStudioEntry.name)}/source`);
+          const response = await apiFetch(`${API_URL}/api/workflows/${encodeURIComponent(selectedStudioEntry.name)}/source`);
           const payload = await response.json().catch(() => null);
           if (
             !cancelled
@@ -9953,7 +9954,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
           return;
         }
         if (selectedStudioEntry.entityType === "skill") {
-          const response = await fetch(`${API_URL}/api/skills/${encodeURIComponent(selectedStudioEntry.name)}/source`);
+          const response = await apiFetch(`${API_URL}/api/skills/${encodeURIComponent(selectedStudioEntry.name)}/source`);
           const payload = await response.json().catch(() => null);
           if (
             !cancelled
@@ -10340,7 +10341,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     setStudioStatus(`Validating ${entry.name}...`);
     try {
       if (entry.entityType === "extension_manifest" && entry.extensionId && entry.packageReference) {
-        const response = await fetch(
+        const response = await apiFetch(
           `${API_URL}/api/extensions/${encodeURIComponent(entry.extensionId)}/source?reference=${encodeURIComponent(entry.packageReference)}`,
         );
         const payload = await response.json().catch(() => null);
@@ -10360,15 +10361,15 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
 
       if (entry.entityType === "workflow_definition") {
         const [validationResponse, preflightResponse, diagnosticsResponse] = await Promise.all([
-          fetch(`${API_URL}/api/workflows/validate`, {
+          apiFetch(`${API_URL}/api/workflows/validate`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ content: studioDraft, file_name: fileName }),
           }),
-          fetch(
+          apiFetch(
             `${API_URL}/api/capabilities/preflight?target_type=workflow&name=${encodeURIComponent(entry.name)}`,
           ),
-          fetch(`${API_URL}/api/workflows/diagnostics`),
+          apiFetch(`${API_URL}/api/workflows/diagnostics`),
         ]);
 
         const validationPayload = await validationResponse.json().catch(() => null);
@@ -10393,7 +10394,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       }
 
       if (entry.entityType === "skill") {
-        const response = await fetch(`${API_URL}/api/skills/validate`, {
+        const response = await apiFetch(`${API_URL}/api/skills/validate`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ content: studioDraft, file_name: fileName }),
@@ -10414,7 +10415,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       }
 
       if (entry.entityType === "mcp") {
-        const response = await fetch(`${API_URL}/api/mcp/servers/validate`, {
+        const response = await apiFetch(`${API_URL}/api/mcp/servers/validate`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
@@ -10490,7 +10491,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     setStudioStatus(`Saving ${entry.name}...`);
     try {
       if (entry.extensionId && entry.packageReference) {
-        const response = await fetch(`${API_URL}/api/extensions/${encodeURIComponent(entry.extensionId)}/source`, {
+        const response = await apiFetch(`${API_URL}/api/extensions/${encodeURIComponent(entry.extensionId)}/source`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
@@ -10533,7 +10534,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       const endpoint = entry.entityType === "workflow_definition"
         ? `${API_URL}/api/workflows/save`
         : `${API_URL}/api/skills/save`;
-      const response = await fetch(endpoint, {
+      const response = await apiFetch(endpoint, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -10581,7 +10582,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     setStudioBusy("save");
     setStudioStatus(`Saving ${entry.name}...`);
     try {
-      const response = await fetch(`${API_URL}/api/mcp/servers/${entry.name}`, {
+      const response = await apiFetch(`${API_URL}/api/mcp/servers/${entry.name}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -10623,7 +10624,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     setStudioPackagePreview(null);
     setStudioPackageStatus(`Validating ${path}...`);
     try {
-      const response = await fetch(`${API_URL}/api/extensions/validate`, {
+      const response = await apiFetch(`${API_URL}/api/extensions/validate`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ path }),
@@ -10688,7 +10689,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     setStudioPackagePreview(null);
     setStudioPackageStatus(`Scaffolding ${displayName}...`);
     try {
-      const response = await fetch(`${API_URL}/api/extensions/scaffold`, {
+      const response = await apiFetch(`${API_URL}/api/extensions/scaffold`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -10745,7 +10746,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     setStudioBusy("extension-install");
     setStudioPackageStatus(`Installing ${path}...`);
     try {
-      const response = await fetch(`${API_URL}/api/extensions/install`, {
+      const response = await apiFetch(`${API_URL}/api/extensions/install`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ path }),
@@ -10784,7 +10785,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     setStudioBusy("extension-update");
     setStudioPackageStatus(`Updating ${path}...`);
     try {
-      const response = await fetch(`${API_URL}/api/extensions/update`, {
+      const response = await apiFetch(`${API_URL}/api/extensions/update`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ path }),
@@ -10820,7 +10821,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     setStudioBusy(enabled ? "extension-enable" : "extension-disable");
     setStudioStatus(`${enabled ? "Enabling" : "Disabling"} ${selectedExtensionPackage.display_name}...`);
     try {
-      const response = await fetch(
+      const response = await apiFetch(
         `${API_URL}/api/extensions/${encodeURIComponent(extensionId)}/${enabled ? "enable" : "disable"}`,
         { method: "POST" },
       );
@@ -10866,7 +10867,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     setStudioBusy("extension-configure");
     setStudioStatus(`Saving metadata for ${selectedExtensionPackage.display_name}...`);
     try {
-      const response = await fetch(`${API_URL}/api/extensions/${encodeURIComponent(extensionId)}/configure`, {
+      const response = await apiFetch(`${API_URL}/api/extensions/${encodeURIComponent(extensionId)}/configure`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ config: configPayload }),
@@ -10897,7 +10898,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     setStudioBusy("extension-remove");
     setStudioStatus(`Removing ${selectedExtensionPackage.display_name}...`);
     try {
-      const response = await fetch(`${API_URL}/api/extensions/${encodeURIComponent(extensionId)}`, {
+      const response = await apiFetch(`${API_URL}/api/extensions/${encodeURIComponent(extensionId)}`, {
         method: "DELETE",
       });
       const payload = await response.json().catch(() => null);
@@ -10942,7 +10943,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       ? `${API_URL}/api/extensions/${encodedId}`
       : `${API_URL}/api/extensions/${encodedId}/${action}`;
     try {
-      const response = await fetch(endpoint, {
+      const response = await apiFetch(endpoint, {
         method: action === "remove" ? "DELETE" : "POST",
         headers: body ? { "Content-Type": "application/json" } : undefined,
         body: body ? JSON.stringify(body) : undefined,
@@ -10974,7 +10975,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     const label = extensionPackage.display_name;
     setOperatorStatus(`Loading diagnostics for ${label}...`);
     try {
-      const response = await fetch(`${API_URL}/api/extensions/${encodeURIComponent(extensionPackage.id)}/diagnostics`);
+      const response = await apiFetch(`${API_URL}/api/extensions/${encodeURIComponent(extensionPackage.id)}/diagnostics`);
       const payload = await response.json().catch(() => null);
       if (!response.ok || !payload || typeof payload !== "object") {
         setOperatorStatus(`Failed to load diagnostics for ${label}`);
@@ -11051,7 +11052,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     setFeedbackState((current) => ({ ...current, [interventionId]: "saving" }));
 
     try {
-      const response = await fetch(`${API_URL}/api/observer/interventions/${interventionId}/feedback`, {
+      const response = await apiFetch(`${API_URL}/api/observer/interventions/${interventionId}/feedback`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ feedback_type: feedbackType }),
@@ -11071,7 +11072,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     setApprovalState((current) => ({ ...current, [approval.id]: "saving" }));
 
     try {
-      const response = await fetch(`${API_URL}/api/approvals/${approval.id}/${decision}`, {
+      const response = await apiFetch(`${API_URL}/api/approvals/${approval.id}/${decision}`, {
         method: "POST",
       });
       if (!response.ok) {
@@ -11115,7 +11116,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
 
   async function dismissDesktopNotification(notificationId: string) {
     try {
-      const response = await fetch(`${API_URL}/api/observer/notifications/${notificationId}/dismiss`, {
+      const response = await apiFetch(`${API_URL}/api/observer/notifications/${notificationId}/dismiss`, {
         method: "POST",
       });
       if (!response.ok) return;
@@ -11127,7 +11128,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
 
   async function dismissAllDesktopNotifications() {
     try {
-      const response = await fetch(`${API_URL}/api/observer/notifications/dismiss-all`, {
+      const response = await apiFetch(`${API_URL}/api/observer/notifications/dismiss-all`, {
         method: "POST",
       });
       if (!response.ok) return;
@@ -11148,7 +11149,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   async function reloadOperatorSurface(path: "skills" | "workflows") {
     setOperatorStatus(`Reloading ${path}...`);
     try {
-      const response = await fetch(`${API_URL}/api/${path}/reload`, { method: "POST" });
+      const response = await apiFetch(`${API_URL}/api/${path}/reload`, { method: "POST" });
       if (!response.ok) {
         setOperatorStatus(`Failed to reload ${path}`);
         appendOperatorFeed(`Failed to reload ${path}`, "failed");
@@ -11204,7 +11205,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   }
 
   async function preflightCapability(targetType: "runbook" | "workflow" | "starter_pack", name: string) {
-    const response = await fetch(
+    const response = await apiFetch(
       `${API_URL}/api/capabilities/preflight?target_type=${encodeURIComponent(targetType)}&name=${encodeURIComponent(name)}`,
     );
     const payload = await response.json().catch(() => null);
@@ -11220,7 +11221,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     label: string,
     preflight?: CapabilityPreflightResponse | null,
   ) {
-    const response = await fetch(`${API_URL}/api/capabilities/bootstrap`, {
+    const response = await apiFetch(`${API_URL}/api/capabilities/bootstrap`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ target_type: targetType, name }),
@@ -11719,7 +11720,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   async function toggleWorkflow(workflow: WorkflowInfo, enabled: boolean) {
     setOperatorStatus(`${enabled ? "Enabling" : "Disabling"} ${workflow.name}...`);
     try {
-      const response = await fetch(`${API_URL}/api/workflows/${workflow.name}`, {
+      const response = await apiFetch(`${API_URL}/api/workflows/${workflow.name}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ enabled }),
@@ -11755,7 +11756,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     });
     try {
       const identifier = item.catalog_id ?? item.name;
-      const response = await fetch(`${API_URL}/api/catalog/install/${encodeURIComponent(identifier)}`, {
+      const response = await apiFetch(`${API_URL}/api/catalog/install/${encodeURIComponent(identifier)}`, {
         method: "POST",
       });
       const payload = await response.json().catch(() => null);
@@ -11776,7 +11777,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   async function sendTestNativeNotification() {
     setOperatorStatus("Sending native notification test...");
     try {
-      const response = await fetch(`${API_URL}/api/observer/notifications/test`, {
+      const response = await apiFetch(`${API_URL}/api/observer/notifications/test`, {
         method: "POST",
       });
       const payload = await response.json().catch(() => null);
@@ -11896,7 +11897,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     if (toolPolicyMode === mode) return;
     setOperatorStatus(`Setting tool policy to ${formatOperatorMode(mode)}...`);
     try {
-      const response = await fetch(`${API_URL}/api/settings/tool-policy-mode`, {
+      const response = await apiFetch(`${API_URL}/api/settings/tool-policy-mode`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ mode }),
@@ -11919,7 +11920,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     if (mcpPolicyMode === mode) return;
     setOperatorStatus(`Setting MCP policy to ${formatOperatorMode(mode)}...`);
     try {
-      const response = await fetch(`${API_URL}/api/settings/mcp-policy-mode`, {
+      const response = await apiFetch(`${API_URL}/api/settings/mcp-policy-mode`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ mode }),
@@ -11942,7 +11943,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     if (approvalMode === mode) return;
     setOperatorStatus(`Setting approval mode to ${formatOperatorMode(mode)}...`);
     try {
-      const response = await fetch(`${API_URL}/api/settings/approval-mode`, {
+      const response = await apiFetch(`${API_URL}/api/settings/approval-mode`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ mode }),
@@ -11964,7 +11965,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   async function toggleSkill(skill: SkillInfo) {
     setOperatorStatus(`${skill.enabled ? "Disabling" : "Enabling"} ${skill.name}...`);
     try {
-      const response = await fetch(`${API_URL}/api/skills/${skill.name}`, {
+      const response = await apiFetch(`${API_URL}/api/skills/${skill.name}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ enabled: !skill.enabled }),
@@ -11988,7 +11989,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     const label = displayName ?? extensionPackage?.display_name ?? extensionId;
     setOperatorStatus(`Enabling ${label}...`);
     try {
-      const response = await fetch(`${API_URL}/api/extensions/${encodeURIComponent(extensionId)}/enable`, {
+      const response = await apiFetch(`${API_URL}/api/extensions/${encodeURIComponent(extensionId)}/enable`, {
         method: "POST",
       });
       const payload = await response.json().catch(() => null);
@@ -12018,7 +12019,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     setOperatorStatus(`${server.enabled ? "Disabling" : "Enabling"} ${server.name}...`);
     try {
       const packagedServer = server.source === "extension" && !!server.extension_id && !!server.extension_reference;
-      const response = await fetch(
+      const response = await apiFetch(
         packagedServer
           ? `${API_URL}/api/extensions/${encodeURIComponent(server.extension_id ?? "")}/connectors/enabled`
           : `${API_URL}/api/mcp/servers/${server.name}`,
@@ -12059,7 +12060,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     setOperatorStatus(`Testing ${server.name}...`);
     try {
       const packagedServer = server.source === "extension" && !!server.extension_id && !!server.extension_reference;
-      const response = await fetch(
+      const response = await apiFetch(
         packagedServer
           ? `${API_URL}/api/extensions/${encodeURIComponent(server.extension_id ?? "")}/connectors/test`
           : `${API_URL}/api/mcp/servers/${server.name}/test`,

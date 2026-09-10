@@ -1,5 +1,6 @@
 import { useState, useEffect } from "react";
 import { API_URL } from "../../config/constants";
+import { apiFetch } from "../../lib/api";
 
 interface DaemonStatusData {
   connected: boolean;
@@ -111,7 +112,7 @@ export function DaemonStatus() {
 
   async function fetchStatus() {
     try {
-      const continuityResponse = await fetch(`${API_URL}/api/observer/continuity`);
+      const continuityResponse = await apiFetch(`${API_URL}/api/observer/continuity`);
       if (continuityResponse.ok) {
         const data: ContinuitySnapshot = await continuityResponse.json();
         setStatus(data.daemon);
@@ -135,7 +136,7 @@ export function DaemonStatus() {
     if (testState === "sending") return;
     setTestState("sending");
     try {
-      const response = await fetch(`${API_URL}/api/observer/notifications/test`, {
+      const response = await apiFetch(`${API_URL}/api/observer/notifications/test`, {
         method: "POST",
       });
       if (!response.ok) {
@@ -153,7 +154,7 @@ export function DaemonStatus() {
     if (dismissState === "dismissing") return;
     setDismissState("dismissing");
     try {
-      const response = await fetch(`${API_URL}/api/observer/notifications/${notificationId}/dismiss`, {
+      const response = await apiFetch(`${API_URL}/api/observer/notifications/${notificationId}/dismiss`, {
         method: "POST",
       });
       if (!response.ok) {
@@ -171,7 +172,7 @@ export function DaemonStatus() {
     if (dismissState === "dismissing") return;
     setDismissState("dismissing");
     try {
-      const response = await fetch(`${API_URL}/api/observer/notifications/dismiss-all`, {
+      const response = await apiFetch(`${API_URL}/api/observer/notifications/dismiss-all`, {
         method: "POST",
       });
       if (!response.ok) {

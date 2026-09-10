@@ -35,7 +35,6 @@ from src.auth.middleware import OperatorAuthMiddleware
 from src.auth.service import validate_auth_configuration
 
 limiter = Limiter(key_func=get_remote_address, default_limits=["60/minute"])
-_LOCAL_DEV_ORIGIN_REGEX = r"https?://(localhost|127\.0\.0\.1)(:\d+)?$"
 
 
 def _safe_runtime_endpoint(value: object) -> str:
@@ -398,7 +397,6 @@ async def lifespan(app: FastAPI):
         if profile.approval_mode:
             context_manager.update_approval_mode(profile.approval_mode)
     except Exception:
-        import logging
         logging.getLogger(__name__).warning("Failed to load persisted settings", exc_info=True)
     defaults_dir = os.path.join(os.path.dirname(__file__), "defaults")
     mcp_config = os.path.join(settings.workspace_dir, "mcp-servers.json")
@@ -438,7 +436,6 @@ async def lifespan(app: FastAPI):
         from src.observer.manager import context_manager
         await context_manager.refresh()
     except Exception:
-        import logging
         logging.getLogger(__name__).warning("Initial context refresh failed", exc_info=True)
     yield
     shutdown_scheduler()
@@ -480,10 +477,11 @@ def create_app() -> FastAPI:
     ]
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=list(dict.fromkeys([
-            "http://localhost:3000", "http://localhost:5173", *configured_origins
-        ])),
-        allow_origin_regex=_LOCAL_DEV_ORIGIN_REGEX,
+        # Credentialed browser access is restricted to the operator-declared
+        # origins.  Do not add a wildcard-like localhost development set here:
+        # the frontend port and host are deployment configuration, and an
+        # unconfigured origin must not receive a session cookie.
+        allow_origins=list(dict.fromkeys(configured_origins)),
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],

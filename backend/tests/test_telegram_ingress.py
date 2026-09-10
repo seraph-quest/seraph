@@ -18,6 +18,8 @@ from src.extensions.telegram_ingress import (
     TelegramIngressResult,
     TelegramIngressState,
     TelegramIngressStatus,
+    TelegramPairingLifecycleState,
+    TelegramPairingSnapshot,
     TelegramUpdate,
     canonical_telegram_idempotency_key,
     canonical_telegram_request_digest,
@@ -43,6 +45,15 @@ def _consent(
 
 
 def _policy(**changes) -> TelegramIngressPolicy:
+    changes.setdefault(
+        "pairing_snapshot",
+        TelegramPairingSnapshot(
+            pairing_id="telegram-pairing-1",
+            operator_id=42,
+            chat_id=9001,
+            authority_reference="pairing-authority:1",
+        ),
+    )
     return TelegramIngressPolicy(operator_id=42, chat_id=9001, **changes)
 
 
@@ -118,6 +129,59 @@ def test_identity_fallback_and_blank_text_fail_closed():
         result = validate_telegram_update(update, policy=policy, now=NOW)
         assert result.status is TelegramIngressStatus.BLOCKED
         assert result.reason_code == reason
+
+
+def test_pairing_snapshot_is_required_and_lifecycle_bound():
+    update = _update()
+    missing = validate_telegram_update(
+        update,
+        policy=_policy(pairing_snapshot=None),
+        now=NOW,
+    )
+    mismatched = validate_telegram_update(
+        update,
+        policy=_policy(
+            pairing_snapshot=TelegramPairingSnapshot(
+                pairing_id="telegram-pairing-other",
+                operator_id=42,
+                chat_id=9001,
+                authority_reference="pairing-authority:1",
+            )
+        ),
+        now=NOW,
+    )
+    revoked = validate_telegram_update(
+        update,
+        policy=_policy(
+            pairing_snapshot=TelegramPairingSnapshot(
+                pairing_id="telegram-pairing-1",
+                operator_id=42,
+                chat_id=9001,
+                lifecycle=TelegramPairingLifecycleState.REVOKED,
+                authority_reference="pairing-authority:1",
+            )
+        ),
+        now=NOW,
+    )
+    expired = validate_telegram_update(
+        update,
+        policy=_policy(
+            pairing_snapshot=TelegramPairingSnapshot(
+                pairing_id="telegram-pairing-1",
+                operator_id=42,
+                chat_id=9001,
+                expires_at=NOW - timedelta(seconds=1),
+                authority_reference="pairing-authority:1",
+            )
+        ),
+        now=NOW,
+    )
+
+    assert missing.reason_code == "pairing_snapshot_required"
+    assert mismatched.reason_code == "pairing_identity_mismatch"
+    assert revoked.reason_code == "pairing_revoked"
+    assert expired.reason_code == "pairing_expired"
+    assert all(item.status is TelegramIngressStatus.BLOCKED for item in (missing, mismatched, revoked, expired))
 
 
 def test_consent_boundaries_are_required_current_and_separate():
@@ -266,7 +330,8 @@ def test_voice_is_quarantined_and_handoff_is_metadata_only():
     payload = serialize_telegram_receipt(update, result, policy=policy).as_payload()
     encoded = json.dumps(payload, sort_keys=True)
 
-    assert result.status is TelegramIngressStatus.ACCEPTED
+    assert result.status is TelegramIngressStatus.DEGRADED
+    assert result.reason_code == "voice_ingress_degraded_preflight_proof_required"
     assert result.attachment_quarantined is True
     assert result.voice_handoff is not None
     assert result.voice_handoff.decode_claimed is False
@@ -277,7 +342,7 @@ def test_voice_is_quarantined_and_handoff_is_metadata_only():
     assert "audio_payload" not in encoded
     assert payload["consent"]["external_transit_scope"] == TELEGRAM_TRANSIT_CONSENT_SCOPE
     assert payload["consent"]["openrouter_scope"] == OPENROUTER_INFERENCE_CONSENT_SCOPE
-    assert payload["provider"]["preflight_proof_present"] is True
+    assert payload["provider"]["preflight_proof_present"] is False
     assert payload["voice_handoff"]["decode_claimed"] is False
     assert payload["voice_handoff"]["send_claimed"] is False
 
@@ -393,6 +458,20 @@ def test_receipt_rejects_forged_result_and_redacts_blocked_metadata():
     ).as_payload()
     assert mismatched["status"] == "blocked"
     assert mismatched["reason_code"] == "invalid_result_provenance"
+
+
+def test_receipt_serialization_blocks_malformed_attachment_without_leaking_identity():
+    policy = _policy()
+    update = _update()
+    admitted = validate_telegram_update(update, policy=policy, now=NOW)
+    malformed = replace(update, attachment="not-metadata")
+
+    payload = serialize_telegram_receipt(malformed, admitted, policy=policy).as_payload()
+
+    assert payload["status"] == "blocked"
+    assert payload["reason_code"] == "invalid_attachment"
+    assert payload["request_digest"] is None
+    assert payload["identity"]["operator_id"] is None
 
 
 def test_malformed_clock_state_and_expired_voice_retention_fail_closed():

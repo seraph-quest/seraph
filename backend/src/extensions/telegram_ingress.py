@@ -51,6 +51,12 @@ _ALLOWED_REASON_CODES: Final = frozenset(
         "invalid_request_type",
         "invalid_policy",
         "invalid_pairing_state",
+        "pairing_snapshot_required",
+        "pairing_identity_mismatch",
+        "pairing_not_active",
+        "pairing_revoked",
+        "pairing_expired",
+        "pairing_expiry_invalid",
         "server_owned_identity_required",
         "invalid_operator_id",
         "invalid_chat_id",
@@ -117,6 +123,12 @@ class TelegramConsentState(str, Enum):
     REVOKED = "revoked"
 
 
+class TelegramPairingLifecycleState(str, Enum):
+    ACTIVE = "active"
+    EXPIRED = "expired"
+    REVOKED = "revoked"
+
+
 @dataclass(frozen=True, slots=True)
 class TelegramConsent:
     reference: str
@@ -124,6 +136,20 @@ class TelegramConsent:
     granted_at: datetime
     expires_at: datetime
     scope: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class TelegramPairingSnapshot:
+    """Authoritative pairing facts supplied by the canonical edge owner."""
+
+    pairing_id: str
+    operator_id: int
+    chat_id: int
+    lifecycle: TelegramPairingLifecycleState = TelegramPairingLifecycleState.ACTIVE
+    paired_at: datetime | None = None
+    expires_at: datetime | None = None
+    authority_reference: str | None = None
+    server_owned_identity: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -146,6 +172,7 @@ class TelegramIngressPolicy:
     operator_id: int
     chat_id: int
     pairing_id: str = "telegram-pairing-1"
+    pairing_snapshot: TelegramPairingSnapshot | None = None
     max_age_seconds: int = DEFAULT_MAX_AGE_SECONDS
     max_clock_skew_seconds: int = DEFAULT_MAX_CLOCK_SKEW_SECONDS
     max_text_bytes: int = DEFAULT_MAX_TEXT_BYTES
@@ -326,6 +353,10 @@ def _valid_policy(policy: TelegramIngressPolicy) -> bool:
         or not isinstance(policy.chat_id, int)
         or policy.chat_id <= 0
         or not _valid_id(policy.pairing_id)
+        or (
+            policy.pairing_snapshot is not None
+            and not _valid_pairing_snapshot(policy.pairing_snapshot)
+        )
         or not isinstance(policy.provider_status, AudioProviderStatus)
         or not all(
             value is None or isinstance(value, str)
@@ -382,6 +413,31 @@ def _valid_policy(policy: TelegramIngressPolicy) -> bool:
     ) and len(set(policy.allowed_media_types)) == len(policy.allowed_media_types)
 
 
+def _valid_pairing_snapshot(snapshot: TelegramPairingSnapshot) -> bool:
+    if not isinstance(snapshot, TelegramPairingSnapshot):
+        return False
+    if (
+        not _valid_id(snapshot.pairing_id)
+        or isinstance(snapshot.operator_id, bool)
+        or not isinstance(snapshot.operator_id, int)
+        or snapshot.operator_id <= 0
+        or isinstance(snapshot.chat_id, bool)
+        or not isinstance(snapshot.chat_id, int)
+        or snapshot.chat_id <= 0
+        or not isinstance(snapshot.lifecycle, TelegramPairingLifecycleState)
+        or not isinstance(snapshot.server_owned_identity, bool)
+        or not _valid_id(snapshot.authority_reference)
+    ):
+        return False
+    paired_at = _utc(snapshot.paired_at) if snapshot.paired_at is not None else None
+    expires_at = _utc(snapshot.expires_at) if snapshot.expires_at is not None else None
+    if snapshot.paired_at is not None and paired_at is None:
+        return False
+    if snapshot.expires_at is not None and expires_at is None:
+        return False
+    return not (paired_at is not None and expires_at is not None and expires_at <= paired_at)
+
+
 def _policy_fingerprint(policy: TelegramIngressPolicy | None) -> str | None:
     if not _valid_policy(policy):
         return None
@@ -391,6 +447,20 @@ def _policy_fingerprint(policy: TelegramIngressPolicy | None) -> str | None:
         "operator_id": policy.operator_id,
         "chat_id": policy.chat_id,
         "pairing_id": policy.pairing_id,
+        "pairing_snapshot": (
+            {
+                "pairing_id": policy.pairing_snapshot.pairing_id,
+                "operator_id": policy.pairing_snapshot.operator_id,
+                "chat_id": policy.pairing_snapshot.chat_id,
+                "lifecycle": policy.pairing_snapshot.lifecycle.value,
+                "paired_at": _iso(policy.pairing_snapshot.paired_at),
+                "expires_at": _iso(policy.pairing_snapshot.expires_at),
+                "authority_reference": policy.pairing_snapshot.authority_reference,
+                "server_owned_identity": policy.pairing_snapshot.server_owned_identity,
+            }
+            if policy.pairing_snapshot is not None
+            else None
+        ),
         "max_age_seconds": policy.max_age_seconds,
         "max_clock_skew_seconds": policy.max_clock_skew_seconds,
         "max_text_bytes": policy.max_text_bytes,
@@ -407,6 +477,41 @@ def _policy_fingerprint(policy: TelegramIngressPolicy | None) -> str | None:
         "consent_proof_reference": policy.consent_proof_reference,
     }
     return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+def _pairing_error(
+    update: TelegramUpdate,
+    policy: TelegramIngressPolicy,
+    *,
+    current: datetime,
+) -> str | None:
+    """Require a current, server-owned pairing snapshot before ingress."""
+
+    snapshot = policy.pairing_snapshot
+    if snapshot is None:
+        return "pairing_snapshot_required"
+    if (
+        snapshot.pairing_id != policy.pairing_id
+        or snapshot.operator_id != policy.operator_id
+        or snapshot.chat_id != policy.chat_id
+    ):
+        return "pairing_identity_mismatch"
+    if update.operator_id != snapshot.operator_id or update.chat_id != snapshot.chat_id:
+        return "pairing_identity_mismatch"
+    if snapshot.server_owned_identity is not True:
+        return "server_owned_identity_required"
+    if snapshot.lifecycle is TelegramPairingLifecycleState.REVOKED:
+        return "pairing_revoked"
+    if snapshot.lifecycle is TelegramPairingLifecycleState.EXPIRED:
+        return "pairing_expired"
+    if snapshot.lifecycle is not TelegramPairingLifecycleState.ACTIVE:
+        return "pairing_not_active"
+    expires_at = _utc(snapshot.expires_at) if snapshot.expires_at is not None else None
+    if snapshot.expires_at is not None and expires_at is None:
+        return "pairing_expiry_invalid"
+    if expires_at is not None and expires_at <= current:
+        return "pairing_expired"
+    return None
 
 
 def canonical_telegram_idempotency_key(update: TelegramUpdate) -> str:
@@ -693,6 +798,9 @@ def validate_telegram_update(
     current = _now(now)
     if current is None:
         return _result(TelegramIngressStatus.BLOCKED, "invalid_timestamp")
+    pairing_error = _pairing_error(update, effective_policy, current=current)
+    if pairing_error:
+        return _result(TelegramIngressStatus.BLOCKED, pairing_error)
     received_at = _utc(update.received_at)
     assert received_at is not None
     age = (current - received_at).total_seconds()
@@ -773,13 +881,10 @@ def validate_telegram_update(
         retention_deadline=_iso(deadline),
         request_digest=digest,
     )
-    proof_available = all(
-        (
-            effective_policy.trusted_adapter_id,
-            effective_policy.provider_proof_reference,
-            effective_policy.consent_proof_reference,
-        )
-    )
+    # This module has no trusted #751 adapter or proof verifier.  Syntactically
+    # present references remain caller metadata and cannot promote a voice
+    # handoff to an execution-ready result.
+    proof_available = False
     if effective_policy.provider_status is AudioProviderStatus.UNAVAILABLE:
         status = TelegramIngressStatus.DEGRADED
         reason = "voice_ingress_degraded_provider_unavailable"
@@ -861,12 +966,22 @@ def _trusted_result(result: TelegramIngressResult, update: TelegramUpdate | None
         if update is None or expected_policy_fingerprint is None:
             return _result(TelegramIngressStatus.BLOCKED, "invalid_result_provenance")
         assert policy is not None
+        structural_error = _structural_error(update, policy)
+        if structural_error:
+            return _result(TelegramIngressStatus.BLOCKED, structural_error)
+        pairing_error = _pairing_error(
+            update,
+            policy,
+            current=datetime.now(timezone.utc),
+        )
+        if pairing_error:
+            return _result(TelegramIngressStatus.BLOCKED, pairing_error)
         if result._policy_fingerprint != expected_policy_fingerprint:
             return _result(TelegramIngressStatus.BLOCKED, "invalid_result_provenance")
         try:
             if result.request_digest != canonical_telegram_request_digest(update) or result.idempotency_key != canonical_telegram_idempotency_key(update):
                 return _result(TelegramIngressStatus.BLOCKED, "invalid_result_provenance")
-        except (TypeError, ValueError, UnicodeError):
+        except (AttributeError, TypeError, ValueError, UnicodeError):
             return _result(TelegramIngressStatus.BLOCKED, "invalid_result_provenance")
         consent_error = _consent_error_for_update(
             update,
@@ -879,7 +994,7 @@ def _trusted_result(result: TelegramIngressResult, update: TelegramUpdate | None
         try:
             if result.request_digest != canonical_telegram_request_digest(update):
                 return _result(TelegramIngressStatus.BLOCKED, "invalid_result_provenance")
-        except (TypeError, ValueError, UnicodeError):
+        except (AttributeError, TypeError, ValueError, UnicodeError):
             return _result(TelegramIngressStatus.BLOCKED, "invalid_result_provenance")
     return result
 
@@ -930,12 +1045,7 @@ def serialize_telegram_receipt(
         provider = {
             "name": "openrouter",
             "status": safe_result.provider_status.value if safe_result.provider_status else None,
-            "preflight_proof_present": bool(
-                policy
-                and policy.trusted_adapter_id
-                and policy.provider_proof_reference
-                and policy.consent_proof_reference
-            ),
+            "preflight_proof_present": False,
             "model_dispatch_claimed": False,
             "local_fallback_claimed": False,
         }
@@ -1011,6 +1121,8 @@ __all__ = [
     "TelegramReplayEntry",
     "TelegramUpdate",
     "TelegramVoiceHandoff",
+    "TelegramPairingLifecycleState",
+    "TelegramPairingSnapshot",
     "TelegramPolicy",
     "TelegramReceipt",
     "TelegramRequest",

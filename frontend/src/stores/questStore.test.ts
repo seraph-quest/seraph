@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { GoalUpdateError, useQuestStore } from "./questStore";
+import type { GoalLoopPayload } from "../types";
 
 const mockFetch = vi.fn();
 globalThis.fetch = mockFetch;
@@ -172,7 +173,7 @@ describe("questStore", () => {
   });
 
   it.each([500, 422, 404])("retains last-known loop evidence while HTTP %s retrieval fails", async (status) => {
-    const previous = {
+    const previous: GoalLoopPayload = {
       goal: { id: "g1", title: "Ship", status: "active", revision: 4 },
       criterion: null,
       receipts: [{ receipt_type: "outcome", execution_status: "succeeded", verification: "passed", usefulness: "helpful", learning: "applied", content_redacted: true }],

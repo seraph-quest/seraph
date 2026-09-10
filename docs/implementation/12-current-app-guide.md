@@ -314,8 +314,13 @@ the database update predicate. Startup recovery runs before scheduler
 registration and marks work with an unresolved effect or provider cost as
 `unknown_external_effect` or `cost_liability`; an operator must record a typed
 effect-specific destination readback or cost settlement before the job can be
-requeued. This branch-local slice remains Partial until its tracked review and
-integration receipts land on `develop`.
+requeued. Failed jobs with an unresolved effect use the same exact-effect
+reconciliation path, while deadline-expired or attempt-exhausted retries are
+rejected. Corrupt or missing effect history on an effect-bound failure blocks
+retry. A concurrent duplicate admission returns the original durable row after
+the unique idempotency fence, and the legacy projection cannot reset or
+finalize a typed job. This branch-local slice remains Partial until its tracked
+review and integration receipts land on `develop`.
 
 ## Failure And Recovery
 

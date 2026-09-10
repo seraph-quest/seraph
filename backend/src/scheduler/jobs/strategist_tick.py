@@ -394,8 +394,16 @@ async def _run_opted_in_goal_web_brief(
         "artifact_ref": result.artifact_ref,
         "query_digest": hashlib.sha256(query.encode("utf-8")).hexdigest(),
         "priority": priority,
-        "strategy_delta_id": strategy_delta_id,
-        "strategy_delta_evidence_ref": f"strategy-delta:{strategy_delta_id}" if strategy_delta_id else None,
+        # The target is caller/configuration input. Only the service's
+        # revalidated result may establish correction provenance on the
+        # operator-visible scheduler receipt.
+        "strategy_delta_id": result.strategy_delta_id,
+        "strategy_delta_provenance": result.strategy_delta_provenance,
+        "strategy_delta_evidence_ref": (
+            f"strategy-delta:{result.strategy_delta_id}"
+            if result.strategy_delta_id and result.strategy_delta_provenance == "verified"
+            else None
+        ),
         "source_read": result.source_read,
         "reason": result.reason,
         "operator_visible": True,

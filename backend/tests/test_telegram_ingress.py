@@ -331,7 +331,7 @@ def test_voice_is_quarantined_and_handoff_is_metadata_only():
     encoded = json.dumps(payload, sort_keys=True)
 
     assert result.status is TelegramIngressStatus.DEGRADED
-    assert result.reason_code == "voice_ingress_degraded_preflight_proof_required"
+    assert result.reason_code == "voice_ingress_degraded_preflight_proof_unverified"
     assert result.attachment_quarantined is True
     assert result.voice_handoff is not None
     assert result.voice_handoff.decode_claimed is False
@@ -375,7 +375,7 @@ def test_ready_voice_requires_existing_audio_preflight_proof():
     ).as_payload()
 
     assert result.status is TelegramIngressStatus.DEGRADED
-    assert result.reason_code == "voice_ingress_degraded_preflight_proof_required"
+    assert result.reason_code == "voice_ingress_degraded_preflight_proof_unverified"
     assert result.voice_handoff is not None
     assert result.voice_handoff.decode_claimed is False
     assert payload["provider"]["preflight_proof_present"] is False

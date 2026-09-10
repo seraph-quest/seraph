@@ -102,7 +102,7 @@ _ALLOWED_REASON_CODES: Final = frozenset(
         "text_ingress_accepted",
         "voice_ingress_degraded_provider_unavailable",
         "voice_ingress_degraded_provider_unverified",
-        "voice_ingress_degraded_preflight_proof_required",
+        "voice_ingress_degraded_preflight_proof_unverified",
         "voice_handoff_ready",
         "invalid_result_provenance",
     }
@@ -884,19 +884,17 @@ def validate_telegram_update(
     # This module has no trusted #751 adapter or proof verifier.  Syntactically
     # present references remain caller metadata and cannot promote a voice
     # handoff to an execution-ready result.
-    proof_available = False
     if effective_policy.provider_status is AudioProviderStatus.UNAVAILABLE:
         status = TelegramIngressStatus.DEGRADED
         reason = "voice_ingress_degraded_provider_unavailable"
     elif effective_policy.provider_status is AudioProviderStatus.UNVERIFIED:
         status = TelegramIngressStatus.DEGRADED
         reason = "voice_ingress_degraded_provider_unverified"
-    elif not proof_available:
-        status = TelegramIngressStatus.DEGRADED
-        reason = "voice_ingress_degraded_preflight_proof_required"
     else:
-        status = TelegramIngressStatus.ACCEPTED
-        reason = "voice_handoff_ready"
+        # READY is only caller metadata here; a future trusted #751 adapter
+        # must verify its proof before any execution-ready handoff exists.
+        status = TelegramIngressStatus.DEGRADED
+        reason = "voice_ingress_degraded_preflight_proof_unverified"
     return _result(
         status,
         reason,

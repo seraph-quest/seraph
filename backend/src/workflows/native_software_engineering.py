@@ -1465,6 +1465,36 @@ async def run_native_software_engineering_fixture(
                 durable_job,
                 reason_code="operator_cancelled_before_apply",
             )
+        # Reacquire the effect boundary immediately before touching the
+        # workspace.  This conditional revision/fence write closes the
+        # cancellation race: cancellation wins the CAS and no patch runs; if
+        # this write wins, a later cancellation leaves the dispatched effect
+        # unresolved for restart reconciliation.
+        dispatched_revision = (
+            dispatched.get("revision") if isinstance(dispatched, dict) else None
+        )
+        boundary_kwargs = {
+            "effect_id": patch_effect_id,
+            "effect_type": "workspace_patch",
+            "target_path": relative_bug_path,
+            "target_digest": patch_target_digest,
+            "approval_id": patch_approval_id,
+            "adapter_idempotency_key": patch_adapter_key,
+            "status": "dispatched",
+            "details": {
+                "preview_artifact": _relative_workspace_path(job_workspace.artifact_dir / "patch.preview.json"),
+                "approval_artifact": _relative_workspace_path(job_workspace.artifact_dir / "approval.json"),
+                "effect_boundary": "apply_workspace_patch",
+            },
+            "owner": worker_owner,
+            "fencing_token": fencing_token,
+        }
+        if dispatched_revision is not None:
+            boundary_kwargs["expected_revision"] = int(dispatched_revision)
+        await durable_job_repository.record_effect(
+            request.job_id,
+            **boundary_kwargs,
+        )
         applied_raw = apply_workspace_patch(
             file_path=relative_bug_path,
             old_text=FIXTURE_BEFORE_TEXT,

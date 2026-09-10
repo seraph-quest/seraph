@@ -11,7 +11,7 @@ from types import SimpleNamespace
 import pytest
 from sqlalchemy import update
 from src.db.engine import _ensure_legacy_columns, _map_legacy_workflow_status
-from src.db.models import WorkflowRunState
+from src.db.models import ApprovalRequest, WorkflowRunState
 
 from src.workflows.job_runtime import (
     DURABLE_JOB_STATUSES,
@@ -296,6 +296,7 @@ def test_reconciliation_receipts_bind_to_the_exact_effect_and_no_effect_retry_jo
         "effect_type": "destination_write",
         "target_path": "controlled-ledger",
         "target_digest": "target-1",
+        "status": "intent",
     }
     with pytest.raises(DurableJobTransitionError, match="one durable effect"):
         _reconciliation_matches_effect(
@@ -318,6 +319,29 @@ def test_reconciliation_receipts_bind_to_the_exact_effect_and_no_effect_retry_jo
                 "target_path": "controlled-ledger",
                 "target_digest": "different-target",
                 "outcome": "absent",
+            },
+        )
+    with pytest.raises(DurableJobTransitionError, match="intended target digest"):
+        _reconciliation_matches_effect(
+            effect,
+            {
+                "effect_id": "effect-1",
+                "effect_type": "destination_write",
+                "status": "read_back",
+                "target_path": "controlled-ledger",
+                "outcome": "absent",
+            },
+        )
+    with pytest.raises(DurableJobTransitionError, match="unresolved"):
+        _reconciliation_matches_effect(
+            {**effect, "status": "succeeded"},
+            {
+                "effect_id": "effect-1",
+                "effect_type": "destination_write",
+                "status": "read_back",
+                "target_path": "controlled-ledger",
+                "target_digest": "target-1",
+                "outcome": "present",
             },
         )
     _validate_no_effect_retry_receipt(
@@ -794,6 +818,35 @@ async def test_approval_held_job_cannot_be_resumed_without_a_fresh_authority_rou
         owner="runner-approval-replay",
         fencing_token=claimed["lease"]["fencing_token"],
     )
+    approval_expires_at = (datetime.now(timezone.utc) + timedelta(minutes=5)).timestamp()
+    approval_details = {
+        "approval_owner_operator_session_id": "operator-session:test",
+        "approval_operator_principal_id": "operator:test",
+        "durable_job_id": admitted["job_id"],
+        "durable_owner_kind": admitted["owner"]["kind"],
+        "durable_owner_principal_id": admitted["owner"]["principal_id"],
+        "durable_service_id": admitted["owner"]["service_id"],
+        "durable_approval_id": admitted["declared_authority"]["approval_id"],
+        "durable_authority_digest": admitted["authority_digest"],
+        "durable_goal_id": admitted["goal_id"],
+        "durable_goal_revision": admitted["goal_revision"],
+        "durable_plan_revision": admitted["plan_revision"],
+        "durable_capability_version": admitted["capability_version"],
+        "durable_budget_digest": _digest({"budget_microusd": None}),
+        "approval_expires_at": approval_expires_at,
+    }
+    async with async_db() as db:
+        db.add(
+            ApprovalRequest(
+                id="approval-1",
+                session_id="job-session",
+                tool_name="strategist_tick",
+                status="approved",
+                fingerprint="approval-resume-fingerprint",
+                summary="resume durable job",
+                details_json=json.dumps(approval_details),
+            )
+        )
     with pytest.raises(DurableJobTransitionError, match="illegal"):
         await durable_job_repository.resume_job(
             admitted["job_id"],
@@ -863,7 +916,7 @@ async def test_approval_held_job_cannot_be_resumed_without_a_fresh_authority_rou
         budget_digest=_digest({"budget_microusd": None}),
         operator_principal_id="operator:test",
         operator_session_id="operator-session:test",
-        expires_at=(datetime.now(timezone.utc) + timedelta(minutes=5)).timestamp(),
+        expires_at=approval_expires_at,
         expected_revision=held["revision"],
     )
     assert resumed["status"] == "queued"
@@ -871,6 +924,30 @@ async def test_approval_held_job_cannot_be_resumed_without_a_fresh_authority_rou
         item.get("kind") == "approval_resume" and item.get("approval_id") == "approval-1"
         for item in resumed["effects"]
     )
+    with pytest.raises(DurableJobTransitionError, match="ApprovalRequest"):
+        await durable_job_repository.resume_approved_job(
+            admitted["job_id"],
+            approval_receipt={
+                "status": "approved",
+                "authenticated": True,
+                "operator_principal_id": "operator:test",
+                "operator_session_id": "operator-session:test",
+            },
+            approval_id="approval-1",
+            authority_digest=admitted["authority_digest"],
+            goal_id=admitted["goal_id"],
+            goal_revision=admitted["goal_revision"],
+            plan_revision=admitted["plan_revision"],
+            capability_version=admitted["capability_version"],
+            owner_kind=admitted["owner"]["kind"],
+            owner_principal_id=admitted["owner"]["principal_id"],
+            service_id=admitted["owner"]["service_id"],
+            budget_microusd=None,
+            budget_digest=_digest({"budget_microusd": None}),
+            operator_principal_id="operator:test",
+            operator_session_id="operator-session:test",
+            expires_at=approval_expires_at,
+        )
 
 
 @pytest.mark.asyncio
@@ -1122,6 +1199,7 @@ async def test_failed_unresolved_effect_can_be_reconciled_before_retry(async_db)
         admitted["job_id"],
         effect_type="destination_write",
         target_path="controlled-ledger",
+        target_digest="target-1",
         status="intent",
         details={"payload_digest": "payload-digest"},
         owner="runner-failed-effect",
@@ -1140,6 +1218,7 @@ async def test_failed_unresolved_effect_can_be_reconciled_before_retry(async_db)
         "effect_type": "destination_write",
         "status": "read_back",
         "target_path": "controlled-ledger",
+        "target_digest": "target-1",
         "outcome": "absent",
     }
     with pytest.raises(DurableJobTransitionError, match="unknown external effect"):
@@ -1432,6 +1511,7 @@ async def test_restart_recovery_keeps_unknown_effect_and_cost_liability_out_of_r
         admitted["job_id"],
         effect_type="destination_write",
         target_path="controlled-ledger",
+        target_digest="target-unknown",
         status="intent",
         details={"destination_ledger": "controlled", "payload": "redacted"},
         owner="runner-unknown",
@@ -1471,6 +1551,7 @@ async def test_restart_recovery_keeps_unknown_effect_and_cost_liability_out_of_r
             "effect_type": "destination_write",
             "status": "read_back",
             "target_path": "controlled-ledger",
+            "target_digest": "target-unknown",
             "outcome": "absent",
         },
     )
@@ -1488,6 +1569,7 @@ async def test_restart_recovery_keeps_unknown_effect_and_cost_liability_out_of_r
             "effect_type": "destination_write",
             "status": "read_back",
             "target_path": "controlled-ledger",
+            "target_digest": "target-unknown",
             "outcome": "absent",
         },
         expected_revision=reconciled["revision"],

@@ -14,6 +14,7 @@ import json
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from sqlalchemy import or_
 from sqlmodel import col, select
 
 from src.db.engine import get_session
@@ -759,6 +760,7 @@ class WorkflowStateRepository:
             ).scalars().first()
             if run is None:
                 return None
+            _assert_legacy_mutable(run)
             metadata = _workflow_v2_metadata(_loads(run.metadata_json, {}))
             v2 = metadata["orchestration_v2"]
             current_lease = _as_dict(v2.get("lease"))
@@ -831,6 +833,7 @@ class WorkflowStateRepository:
             ).scalars().first()
             if run is None:
                 return None
+            _assert_legacy_mutable(run)
             metadata = _workflow_v2_metadata(_loads(run.metadata_json, {}))
             v2 = metadata["orchestration_v2"]
             ledger = [
@@ -936,6 +939,7 @@ class WorkflowStateRepository:
             ).scalars().first()
             if run is None:
                 return None
+            _assert_legacy_mutable(run)
             metadata = _workflow_v2_metadata(_loads(run.metadata_json, {}))
             v2 = metadata["orchestration_v2"]
             ledger = [
@@ -1059,6 +1063,7 @@ class WorkflowStateRepository:
             ).scalars().first()
             if run is None:
                 return None
+            _assert_legacy_mutable(run)
             metadata = _workflow_v2_metadata(_loads(run.metadata_json, {}))
             v2 = metadata["orchestration_v2"]
             lease = _as_dict(v2.get("lease"))
@@ -1125,6 +1130,7 @@ class WorkflowStateRepository:
             ).scalars().first()
             if run is None:
                 return None
+            _assert_legacy_mutable(run)
             metadata = _workflow_v2_metadata(_loads(run.metadata_json, {}))
             v2 = metadata["orchestration_v2"]
             receipt = {
@@ -1174,6 +1180,7 @@ class WorkflowStateRepository:
             ).scalars().first()
             if run is None:
                 return None
+            _assert_legacy_mutable(run)
             metadata = _workflow_v2_metadata(_loads(run.metadata_json, {}))
             v2 = metadata["orchestration_v2"]
             receipt = {
@@ -1226,6 +1233,7 @@ class WorkflowStateRepository:
             ).scalars().first()
             if run is None:
                 return None
+            _assert_legacy_mutable(run)
             metadata = _workflow_v2_metadata(_loads(run.metadata_json, {}))
             v2 = metadata["orchestration_v2"]
             receipt = {
@@ -1274,6 +1282,7 @@ class WorkflowStateRepository:
             ).scalars().first()
             if run is None:
                 return None
+            _assert_legacy_mutable(run)
             metadata = _workflow_v2_metadata(_loads(run.metadata_json, {}))
             v2 = metadata["orchestration_v2"]
             receipt = {
@@ -1325,6 +1334,7 @@ class WorkflowStateRepository:
             ).scalars().first()
             if run is None:
                 return None
+            _assert_legacy_mutable(run)
             metadata = _workflow_v2_metadata(_loads(run.metadata_json, {}))
             v2 = metadata["orchestration_v2"]
             revision = int(v2.get("revision") or 0)
@@ -1410,6 +1420,7 @@ class WorkflowStateRepository:
             ).scalars().first()
             if run is None:
                 return None
+            _assert_legacy_mutable(run)
             metadata = _workflow_v2_metadata(_loads(run.metadata_json, {}))
             v2 = metadata["orchestration_v2"]
             receipt = {
@@ -1449,6 +1460,7 @@ class WorkflowStateRepository:
             ).scalars().first()
             if run is None:
                 return None
+            _assert_legacy_mutable(run)
             reviews = (
                 await db.execute(
                     select(WorkflowArtifactReview)
@@ -1502,6 +1514,19 @@ class WorkflowStateRepository:
                 select(WorkflowRunState)
                 .where(WorkflowRunState.status == "running")
                 .where(WorkflowRunState.heartbeat_at < cutoff)
+                # Schema-v2/idempotency-bound jobs are owned by
+                # DurableJobRepository.recover_stale_jobs, which applies the
+                # revision/fencing CAS and explicit external-effect
+                # classification.  Keep this compatibility helper limited to
+                # schema-v1 rows so it cannot manufacture the illegal
+                # ``interrupted`` state on a typed job.
+                .where(
+                    or_(
+                        WorkflowRunState.record_schema_version < 2,
+                        WorkflowRunState.record_schema_version.is_(None),
+                    )
+                )
+                .where(WorkflowRunState.idempotency_binding.is_(None))
             )
             runs = result.scalars().all()
             now = _utc_now()

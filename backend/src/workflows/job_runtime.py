@@ -70,6 +70,11 @@ DURABLE_JOB_TRANSITIONS: dict[str, frozenset[str]] = {
 }
 DURABLE_JOB_TERMINAL_STATUSES = frozenset({"succeeded", "cancelled"})
 UNCERTAIN_EXTERNAL_EFFECT_STATUSES = frozenset({"unknown_external_effect", "cost_liability"})
+DEPENDENCY_FAILURE_STATUSES = frozenset({"failed", "cancelled"})
+DEPENDENCY_UNRESOLVED_STATUSES = frozenset({
+    "unknown_external_effect",
+    "cost_liability",
+})
 UNSAFE_RETRY_REASONS = frozenset({
     "unknown_external_effect",
     "cost_liability",
@@ -403,6 +408,24 @@ def _normalized_json_list(raw: str | None) -> str:
     return _canonical(_string_list(parsed))
 
 
+def _dependency_ids(run: WorkflowRunState) -> list[str]:
+    """Read the persisted dependency set without hiding malformed metadata."""
+    raw = getattr(run, "dependencies_json", None)
+    if raw is None or not str(raw).strip():
+        return []
+    try:
+        parsed = json.loads(raw)
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise DurableJobTransitionError(
+            "durable dependency metadata is malformed; recovery is required"
+        ) from exc
+    if not isinstance(parsed, list) or any(not isinstance(item, str) for item in parsed):
+        raise DurableJobTransitionError(
+            "durable dependency metadata is malformed; recovery is required"
+        )
+    return _string_list(parsed)
+
+
 def _admission_conflicts(
     existing: WorkflowRunState,
     *,
@@ -587,6 +610,7 @@ def _serialize(run: WorkflowRunState, *, receipt: dict[str, Any] | None = None) 
         "resource_claims": _json_load(getattr(run, "resource_claims_json", None), []),
         "input_digest": getattr(run, "input_digest", None),
         "authority_digest": getattr(run, "authority_digest", None),
+        "declared_authority": _json_load(getattr(run, "declared_authority_json", None), {}),
         "idempotency": {
             "scope": getattr(run, "idempotency_scope", None),
             "key": getattr(run, "idempotency_key", None),
@@ -696,6 +720,8 @@ class DurableJobRepository:
             raise ValueError("priority must be between 0 and 100")
         if int(spec.max_attempts) < 1:
             raise ValueError("max_attempts must be at least 1")
+        if identity.job_id in _string_list(spec.dependencies):
+            raise DurableJobTransitionError("a durable job cannot depend on itself")
         deadline = _as_utc(spec.deadline_at)
         now = _utc_now()
         input_digest, safe_inputs = _safe_inputs_digest(spec.inputs)
@@ -851,6 +877,7 @@ class DurableJobRepository:
                 "status": status,
                 "job_id": identity.job_id,
                 "idempotency_binding": binding,
+                "reason": failure_reason,
                 "operator_visible": True,
             }
             return _serialize(run, receipt=receipt)
@@ -889,6 +916,24 @@ class DurableJobRepository:
         async with self._session() as db:
             run = await self._fetch(db, job_id)
             current = str(run.status)
+            if current in DURABLE_JOB_TERMINAL_STATUSES:
+                if current == to_status:
+                    # Terminal rows deliberately clear their lease.  Replaying
+                    # the same terminal command after a crash must therefore
+                    # be a side-effect-free no-op even when the caller still
+                    # has stale expected revision/owner/fence values.  A
+                    # different terminal command remains a typed conflict.
+                    db.expunge(run)
+                    return _serialize(
+                        run,
+                        receipt={
+                            "kind": "transition",
+                            "status": "deduped",
+                            "terminal_noop": True,
+                            "revision": _revision(run),
+                        },
+                    )
+                raise DurableJobTransitionError(f"terminal job cannot transition {current} -> {to_status}")
             expected_state = expected_state or expected_status
             if expected_state is not None and current != expected_state:
                 raise DurableJobTransitionError(
@@ -904,21 +949,18 @@ class DurableJobRepository:
             )
             if expected_fencing_token is not None and int(fencing_token or expected_fence) != expected_fence:
                 raise DurableJobLeaseError("durable job fencing token is stale")
-            if current in DURABLE_JOB_TERMINAL_STATUSES:
-                if current == to_status:
-                    if owner is not None or fencing_token is not None:
-                        self._assert_lease(run, owner=owner, fencing_token=fencing_token)
-                    db.expunge(run)
-                    return _serialize(
-                        run,
-                        receipt={
-                            "kind": "transition",
-                            "status": "deduped",
-                            "terminal_noop": True,
-                            "revision": current_revision,
-                        },
-                    )
-                raise DurableJobTransitionError(f"terminal job cannot transition {current} -> {to_status}")
+            if to_status == "queued" and _deadline_expired(run):
+                if current == "failed":
+                    raise DurableJobTransitionError("job deadline has expired")
+                if current in {"accepted", "awaiting_approval", "paused", "blocked"}:
+                    # A resume/queue request after the deadline is a durable
+                    # failure receipt, never a fresh runnable attempt.
+                    to_status = "failed"
+                    reason = "deadline_expired"
+            if current == "failed" and to_status == "queued":
+                raise DurableJobTransitionError(
+                    "failed jobs require explicit retry with reconciliation"
+                )
             if current == "running" and (owner is None or fencing_token is None):
                 raise DurableJobLeaseError(
                     "active jobs require owner and fencing token for every transition"
@@ -927,6 +969,8 @@ class DurableJobRepository:
                 raise DurableJobTransitionError(f"illegal durable job transition {current} -> {to_status}")
             self._assert_lease(run, owner=owner, fencing_token=fencing_token)
             if to_status == "succeeded":
+                if _deadline_expired(run):
+                    raise DurableJobTransitionError("job deadline has expired")
                 effect_ledger = _effect_ledger_or_raise(run.effect_receipts_json)
                 if _job_has_unsafe_effects(effect_ledger):
                     raise DurableJobTransitionError(
@@ -946,6 +990,9 @@ class DurableJobRepository:
                 "finished_at": now if to_status in DURABLE_JOB_TERMINAL_STATUSES or to_status == "failed" else None,
             }
             if to_status in {
+                "queued",
+                "awaiting_approval",
+                "paused",
                 "blocked",
                 "unknown_external_effect",
                 "cost_liability",
@@ -973,6 +1020,13 @@ class DurableJobRepository:
                 conditions.append(WorkflowRunState.fencing_token == fencing_token)
             elif expected_fencing_token is not None:
                 conditions.append(WorkflowRunState.fencing_token == expected_fence)
+            else:
+                conditions.extend(
+                    (
+                        WorkflowRunState.lease_owner.is_(None),
+                        WorkflowRunState.lease_expires_at.is_(None),
+                    )
+                )
             result_update = await db.execute(
                 update(WorkflowRunState)
                 .execution_options(synchronize_session=False)
@@ -998,8 +1052,80 @@ class DurableJobRepository:
     async def queue_job(self, job_id: str, **kwargs: Any) -> dict[str, Any]:
         return await self.transition_job(job_id, "queued", **kwargs)
 
-    async def cancel_job(self, job_id: str, *, owner: str | None = None, fencing_token: int | None = None, reason: str = "operator_cancelled") -> dict[str, Any]:
-        return await self.transition_job(job_id, "cancelled", owner=owner, fencing_token=fencing_token, reason=reason)
+    async def cancel_job(
+        self,
+        job_id: str,
+        *,
+        owner: str | None = None,
+        fencing_token: int | None = None,
+        expected_revision: int | None = None,
+        reason: str = "operator_cancelled",
+    ) -> dict[str, Any]:
+        return await self.transition_job(
+            job_id,
+            "cancelled",
+            owner=owner,
+            fencing_token=fencing_token,
+            expected_revision=expected_revision,
+            reason=reason,
+        )
+
+    async def pause_job(
+        self,
+        job_id: str,
+        *,
+        owner: str,
+        fencing_token: int,
+        reason: str = "operator_paused",
+        expected_revision: int | None = None,
+    ) -> dict[str, Any]:
+        """Pause a leased job through the canonical transition/CAS path."""
+        return await self.transition_job(
+            job_id,
+            "paused",
+            owner=owner,
+            fencing_token=fencing_token,
+            reason=reason,
+            expected_revision=expected_revision,
+        )
+
+    async def resume_job(
+        self,
+        job_id: str,
+        *,
+        owner: str | None = None,
+        fencing_token: int | None = None,
+        expected_revision: int | None = None,
+        reason: str = "operator_resumed",
+    ) -> dict[str, Any]:
+        """Resume a paused/approval-held job into the bounded queue."""
+        return await self.transition_job(
+            job_id,
+            "queued",
+            owner=owner,
+            fencing_token=fencing_token,
+            expected_revision=expected_revision,
+            reason=reason,
+        )
+
+    async def revoke_job(
+        self,
+        job_id: str,
+        *,
+        owner: str | None = None,
+        fencing_token: int | None = None,
+        expected_revision: int | None = None,
+        reason: str = "operator_revoked",
+    ) -> dict[str, Any]:
+        """Use the terminal cancellation transition for an authority revoke."""
+        return await self.transition_job(
+            job_id,
+            "cancelled",
+            owner=owner,
+            fencing_token=fencing_token,
+            expected_revision=expected_revision,
+            reason=reason,
+        )
 
     async def fail_unclaimed_job(
         self,
@@ -1071,6 +1197,40 @@ class DurableJobRepository:
             db.expunge(failed)
             return _serialize(failed, receipt=receipt)
 
+    async def _dependency_outcome(
+        self,
+        db: Any,
+        run: WorkflowRunState,
+    ) -> tuple[str, str | None, str | None, str | None]:
+        """Classify dependencies before a runner lease is admitted.
+
+        A successful dependency is satisfied.  A missing/failed/cancelled
+        dependency makes the child permanently ineligible for this attempt;
+        an uncertain dependency needs reconciliation first; all other live
+        states remain pending.  The caller performs the state change with its
+        own revision/fence CAS.
+        """
+        dependencies = _dependency_ids(run)
+        if not dependencies:
+            return "ready", None, None, None
+        result = await db.execute(
+            select(WorkflowRunState).where(WorkflowRunState.run_identity.in_(dependencies))
+        )
+        by_id = {item.run_identity: item for item in result.scalars().all()}
+        for dependency_id in dependencies:
+            dependency = by_id.get(dependency_id)
+            if dependency is None:
+                return "failed", "dependency_missing", dependency_id, None
+            dependency_status = _text(dependency.status)
+            if dependency_status in {"succeeded", "completed"}:
+                continue
+            if dependency_status in DEPENDENCY_FAILURE_STATUSES:
+                return "failed", "dependency_failed", dependency_id, dependency_status
+            if dependency_status in DEPENDENCY_UNRESOLVED_STATUSES:
+                return "blocked", "dependency_requires_reconciliation", dependency_id, dependency_status
+            return "pending", "dependency_pending", dependency_id, dependency_status
+        return "ready", None, None, None
+
     async def claim_job(
         self,
         job_id: str,
@@ -1088,6 +1248,8 @@ class DurableJobRepository:
             raise ValueError("lease_seconds must be positive")
         now = _utc_now()
         expires = now + timedelta(seconds=int(lease_seconds))
+        if expected_state != "queued":
+            raise DurableJobTransitionError("durable job claims require the queued state")
         async with self._session() as db:
             run = await self._fetch(db, job_id)
             if run.status in DURABLE_JOB_TERMINAL_STATUSES:
@@ -1121,6 +1283,8 @@ class DurableJobRepository:
                     .values(
                         status="failed",
                         failure_reason="deadline_expired",
+                        lease_owner=None,
+                        lease_expires_at=None,
                         updated_at=now,
                         heartbeat_at=now,
                         finished_at=now,
@@ -1138,6 +1302,102 @@ class DurableJobRepository:
                         "status": "failed",
                         "reason": "deadline_expired",
                         "revision": _revision(failed),
+                        "operator_visible": True,
+                    },
+                )
+            dependency_state, dependency_reason, dependency_id, dependency_status = await self._dependency_outcome(
+                db, run
+            )
+            if dependency_state == "failed":
+                failed = await db.execute(
+                    update(WorkflowRunState)
+                    .execution_options(synchronize_session=False)
+                    .where(
+                        WorkflowRunState.run_identity == job_id,
+                        WorkflowRunState.status == expected_state,
+                        WorkflowRunState.revision == current_revision,
+                        WorkflowRunState.fencing_token == expected_fence,
+                        or_(
+                            WorkflowRunState.lease_owner.is_(None),
+                            WorkflowRunState.lease_expires_at <= now,
+                        ),
+                    )
+                    .values(
+                        status="failed",
+                        failure_reason=dependency_reason,
+                        lease_owner=None,
+                        lease_expires_at=None,
+                        updated_at=now,
+                        heartbeat_at=now,
+                        finished_at=now,
+                        revision=WorkflowRunState.revision + 1,
+                    )
+                )
+                if not _rowcount_is_one(failed):
+                    raise DurableJobLeaseError("job changed before dependency failure transition")
+                failed_job = await self._fetch(db, job_id)
+                receipt = {
+                    "kind": "claim",
+                    "status": "failed",
+                    "reason": dependency_reason,
+                    "dependency_id": dependency_id,
+                    "dependency_status": dependency_status,
+                    "revision": _revision(failed_job),
+                    "operator_visible": True,
+                }
+                db.expunge(failed_job)
+                return _serialize(failed_job, receipt=receipt)
+            if dependency_state == "blocked":
+                blocked = await db.execute(
+                    update(WorkflowRunState)
+                    .execution_options(synchronize_session=False)
+                    .where(
+                        WorkflowRunState.run_identity == job_id,
+                        WorkflowRunState.status == expected_state,
+                        WorkflowRunState.revision == current_revision,
+                        WorkflowRunState.fencing_token == expected_fence,
+                        or_(
+                            WorkflowRunState.lease_owner.is_(None),
+                            WorkflowRunState.lease_expires_at <= now,
+                        ),
+                    )
+                    .values(
+                        status="blocked",
+                        failure_reason=dependency_reason,
+                        lease_owner=None,
+                        lease_expires_at=None,
+                        updated_at=now,
+                        heartbeat_at=now,
+                        finished_at=None,
+                        revision=WorkflowRunState.revision + 1,
+                    )
+                )
+                if not _rowcount_is_one(blocked):
+                    raise DurableJobLeaseError("job changed before dependency recovery block")
+                blocked_job = await self._fetch(db, job_id)
+                receipt = {
+                    "kind": "claim",
+                    "status": "blocked",
+                    "reason": dependency_reason,
+                    "dependency_id": dependency_id,
+                    "dependency_status": dependency_status,
+                    "revision": _revision(blocked_job),
+                    "operator_visible": True,
+                }
+                db.expunge(blocked_job)
+                return _serialize(blocked_job, receipt=receipt)
+            if dependency_state == "pending":
+                db.expunge(run)
+                return _serialize(
+                    run,
+                    receipt={
+                        "kind": "claim",
+                        "status": "blocked",
+                        "reason": dependency_reason,
+                        "dependency_id": dependency_id,
+                        "dependency_status": dependency_status,
+                        "state_unchanged": True,
+                        "operator_visible": True,
                     },
                 )
             if run.attempt_count >= run.max_attempts:
@@ -1224,6 +1484,43 @@ class DurableJobRepository:
             persisted_expiry = _as_utc(run.lease_expires_at)
             if persisted_expiry is None or persisted_expiry <= now:
                 raise DurableJobLeaseError("job lease has expired")
+            if _deadline_expired(run, now=now):
+                expired = await db.execute(
+                    update(WorkflowRunState)
+                    .execution_options(synchronize_session=False)
+                    .where(
+                        WorkflowRunState.run_identity == job_id,
+                        WorkflowRunState.status == expected_state,
+                        WorkflowRunState.revision == current_revision,
+                        WorkflowRunState.lease_owner == owner,
+                        WorkflowRunState.fencing_token == expected_fence,
+                        WorkflowRunState.lease_expires_at > now,
+                    )
+                    .values(
+                        status="failed",
+                        failure_reason="deadline_expired",
+                        lease_owner=None,
+                        lease_expires_at=None,
+                        finished_at=now,
+                        updated_at=now,
+                        heartbeat_at=now,
+                        revision=WorkflowRunState.revision + 1,
+                    )
+                )
+                if not _rowcount_is_one(expired):
+                    raise DurableJobLeaseError("job changed before deadline transition")
+                failed = await self._fetch(db, job_id)
+                receipt = {
+                    "kind": "heartbeat",
+                    "status": "failed",
+                    "reason": "deadline_expired",
+                    "owner": owner,
+                    "fencing_token": failed.fencing_token,
+                    "revision": _revision(failed),
+                    "operator_visible": True,
+                }
+                db.expunge(failed)
+                return _serialize(failed, receipt=receipt)
             expires = (
                 now + timedelta(seconds=int(lease_seconds))
                 if lease_seconds is not None
@@ -1358,17 +1655,22 @@ class DurableJobRepository:
         owner: str,
         fencing_token: int,
         safe: bool = True,
+        expected_revision: int | None = None,
     ) -> dict[str, Any]:
         if not _text(checkpoint_id):
             raise ValueError("checkpoint_id is required")
         async with self._session() as db:
             run = await self._fetch(db, job_id)
+            if _deadline_expired(run):
+                raise DurableJobTransitionError("job deadline has expired")
             if owner is None or fencing_token is None:
                 raise DurableJobLeaseError("owner and fencing token are required for checkpoint writes")
             self._assert_lease(run, owner=owner, fencing_token=fencing_token)
             if run.status not in {"running", "paused", "awaiting_approval"}:
                 raise DurableJobTransitionError(f"checkpoint not allowed from {run.status}")
             current_revision = _revision(run)
+            if expected_revision is not None and int(expected_revision) != current_revision:
+                raise DurableJobLeaseError("durable job revision is stale")
             state_digest = _digest(state)
             receipt = {
                 "checkpoint_id": checkpoint_id,
@@ -1415,6 +1717,7 @@ class DurableJobRepository:
         content: str | bytes | None = None,
         owner: str | None = None,
         fencing_token: int | None = None,
+        expected_revision: int | None = None,
     ) -> dict[str, Any]:
         """Persist an operator-safe artifact receipt.
 
@@ -1425,6 +1728,8 @@ class DurableJobRepository:
         """
         async with self._session() as db:
             run = await self._fetch(db, job_id)
+            if _deadline_expired(run):
+                raise DurableJobTransitionError("job deadline has expired")
             if run.status in DURABLE_JOB_TERMINAL_STATUSES:
                 raise DurableJobTransitionError(f"terminal job cannot record artifacts ({run.status})")
             lease_present = bool(run.lease_owner or run.lease_expires_at)
@@ -1465,6 +1770,8 @@ class DurableJobRepository:
             existing.append(receipt)
             now = _utc_now()
             current_revision = _revision(run)
+            if expected_revision is not None and int(expected_revision) != current_revision:
+                raise DurableJobLeaseError("durable job revision is stale")
             conditions = [
                 WorkflowRunState.run_identity == job_id,
                 WorkflowRunState.status == run.status,
@@ -1502,13 +1809,18 @@ class DurableJobRepository:
         job_id: str,
         *,
         effect_type: str,
+        effect_id: str | None = None,
         target_path: str | None = None,
+        target_digest: str | None = None,
+        approval_id: str | None = None,
+        adapter_idempotency_key: str | None = None,
         status: str = "succeeded",
         content_sha256: str | None = None,
         details: dict[str, Any] | None = None,
         receipt_kind: str = "effect",
         owner: str | None = None,
         fencing_token: int | None = None,
+        expected_revision: int | None = None,
     ) -> dict[str, Any]:
         """Persist a bounded effect or readback receipt on the job record.
 
@@ -1527,20 +1839,30 @@ class DurableJobRepository:
             raise ValueError("receipt_kind must be effect or readback")
         if status not in {"succeeded", "failed", "unknown", "blocked", "intent", "dispatched"}:
             raise ValueError("effect status is not supported")
+        effect_id = _text(effect_id) or None
+        target_path = _text(target_path) or None
+        target_digest = _text(target_digest) or None
+        approval_id = _text(approval_id) or None
+        adapter_idempotency_key = _text(adapter_idempotency_key) or None
         if content_sha256 is not None and not _text(content_sha256):
             content_sha256 = None
         safe_details = _safe_structure(details or {})
-        effect_id = "eff_" + _digest({
-            "job_id": job_id,
-            "receipt_kind": receipt_kind,
-            "effect_type": effect_type,
-            "target_path": target_path or "",
-            "status": status,
-            "content_sha256": content_sha256 or "",
-            "details": safe_details,
-        })[:24]
+        if effect_id is None:
+            # The lifecycle status and receipt payload are observations of one
+            # effect.  They must not create a new identity on every update or
+            # an old ``intent`` would remain unresolved after ``succeeded``.
+            effect_id = "eff_" + _digest({
+                "job_id": job_id,
+                "receipt_kind": receipt_kind,
+                "effect_type": effect_type,
+                "target_path": target_path or "",
+                "target_digest": target_digest or "",
+                "adapter_idempotency_key": adapter_idempotency_key or "",
+            })[:24]
         async with self._session() as db:
             run = await self._fetch(db, job_id)
+            if _deadline_expired(run):
+                raise DurableJobTransitionError("job deadline has expired")
             if run.status in DURABLE_JOB_TERMINAL_STATUSES:
                 raise DurableJobTransitionError(f"terminal job cannot record effects ({run.status})")
             lease_present = bool(run.lease_owner or run.lease_expires_at)
@@ -1559,14 +1881,42 @@ class DurableJobRepository:
                 "effect_id": effect_id,
                 "receipt_kind": receipt_kind,
                 "effect_type": effect_type,
-                "target_path": _text(target_path) or None,
+                "target_path": target_path,
+                "target_digest": target_digest,
+                "approval_id": approval_id,
+                "adapter_idempotency_key": adapter_idempotency_key,
                 "status": status,
                 "content_sha256": content_sha256,
                 "details": safe_details,
                 "recorded_at": _utc_now().isoformat(),
                 "fencing_token": fencing_token,
             }
-            existing = _json_load(run.effect_receipts_json, [])
+            existing = _effect_ledger_or_raise(run.effect_receipts_json)
+            previous = next(
+                (
+                    item
+                    for item in existing
+                    if isinstance(item, dict) and item.get("effect_id") == effect_id
+                ),
+                None,
+            )
+            if previous is not None and (
+                _text(previous.get("effect_type")) != effect_type
+                or _text(previous.get("target_path")) != _text(target_path)
+                or any(
+                    _text(previous.get(field_name))
+                    and _text(value)
+                    and _text(previous.get(field_name)) != _text(value)
+                    for field_name, value in (
+                        ("target_digest", target_digest),
+                        ("approval_id", approval_id),
+                        ("adapter_idempotency_key", adapter_idempotency_key),
+                    )
+                )
+            ):
+                raise DurableJobIdempotencyConflict(
+                    "effect_id already identifies a different effect target"
+                )
             existing = [
                 item
                 for item in existing
@@ -1575,6 +1925,8 @@ class DurableJobRepository:
             existing.append(receipt)
             now = _utc_now()
             current_revision = _revision(run)
+            if expected_revision is not None and int(expected_revision) != current_revision:
+                raise DurableJobLeaseError("durable job revision is stale")
             conditions = [
                 WorkflowRunState.run_identity == job_id,
                 WorkflowRunState.status == run.status,
@@ -1613,22 +1965,42 @@ class DurableJobRepository:
         *,
         target_path: str,
         status: str,
+        effect_id: str | None = None,
+        effect_type: str | None = None,
+        target_digest: str | None = None,
         content_sha256: str | None = None,
         details: dict[str, Any] | None = None,
         owner: str | None = None,
         fencing_token: int | None = None,
+        expected_revision: int | None = None,
     ) -> dict[str, Any]:
         """Record an explicit readback receipt in the canonical effect ledger."""
+        if effect_id and effect_type is None:
+            current = await self.get_job(job_id)
+            if current is not None:
+                prior = next(
+                    (
+                        item
+                        for item in current.get("effects", [])
+                        if isinstance(item, dict) and item.get("effect_id") == effect_id
+                    ),
+                    None,
+                )
+                if prior is not None:
+                    effect_type = _text(prior.get("effect_type"), "readback")
         return await self.record_effect(
             job_id,
-            effect_type="readback",
+            effect_type=effect_type or "readback",
+            effect_id=effect_id,
             receipt_kind="readback",
             target_path=target_path,
+            target_digest=target_digest,
             status=status,
             content_sha256=content_sha256,
             details=details,
             owner=owner,
             fencing_token=fencing_token,
+            expected_revision=expected_revision,
         )
 
     async def record_remote_inference_receipt(
@@ -1637,6 +2009,7 @@ class DurableJobRepository:
         *,
         owner: str | None = None,
         fencing_token: int | None = None,
+        expected_revision: int | None = None,
     ) -> dict[str, Any]:
         """Persist one redacted remote admission receipt on an existing job.
 
@@ -1663,7 +2036,10 @@ class DurableJobRepository:
         return await self.record_effect(
             job_id,
             effect_type="remote_inference_admission",
+            effect_id=f"remote_inference:{safe_receipt['operation_id']}",
             target_path=f"remote_inference:{safe_receipt['operation_id']}",
+            target_digest=_text(safe_receipt.get("operation_id")) or None,
+            adapter_idempotency_key=_text(safe_receipt.get("operation_id")) or None,
             status=REMOTE_INFERENCE_EFFECT_STATUSES[admission_status],
             details={
                 "admission_status": admission_status,
@@ -1672,6 +2048,7 @@ class DurableJobRepository:
             },
             owner=owner,
             fencing_token=fencing_token,
+            expected_revision=expected_revision,
         )
 
     async def retry_job(
@@ -1986,6 +2363,8 @@ __all__ = [
     "DURABLE_JOB_STATUSES",
     "DURABLE_JOB_TRANSITIONS",
     "DURABLE_JOB_TERMINAL_STATUSES",
+    "DEPENDENCY_FAILURE_STATUSES",
+    "DEPENDENCY_UNRESOLVED_STATUSES",
     "RECONCILIATION_RECEIPT_STATUSES",
     "UNCERTAIN_EXTERNAL_EFFECT_STATUSES",
     "REMOTE_INFERENCE_RECEIPT_STATUSES",

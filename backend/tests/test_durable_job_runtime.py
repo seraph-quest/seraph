@@ -444,6 +444,8 @@ async def test_admission_is_idempotent_and_lifecycle_records_safe_receipts(async
         fencing_token=token,
         reason="controlled_failure",
     )
+    with pytest.raises(DurableJobTransitionError, match="explicit retry"):
+        await durable_job_repository.queue_job(admitted["job_id"])
     retried = await durable_job_repository.retry_job(
         admitted["job_id"],
         owner_kind="service",
@@ -462,6 +464,139 @@ async def test_admission_is_idempotent_and_lifecycle_records_safe_receipts(async
     assert retried["status"] == "queued"
     assert retried["receipt"]["reconciliation_receipt_digest"]
     assert retried["effects"][0]["status"] == "reconciled"
+
+
+@pytest.mark.asyncio
+async def test_terminal_replay_is_idempotent_with_stale_execution_receipt(async_db):
+    admitted = await durable_job_repository.admit_job(
+        _spec(job_id="job-743-terminal-replay", dedupe_key="candidate-terminal-replay")
+    )
+    await durable_job_repository.queue_job(admitted["job_id"])
+    claimed = await durable_job_repository.claim_job(admitted["job_id"], owner="runner-terminal-replay")
+    completed = await durable_job_repository.transition_job(
+        admitted["job_id"],
+        "succeeded",
+        owner="runner-terminal-replay",
+        fencing_token=claimed["lease"]["fencing_token"],
+        expected_state="running",
+        expected_revision=claimed["revision"],
+    )
+
+    replay = await durable_job_repository.transition_job(
+        admitted["job_id"],
+        "succeeded",
+        owner="stale-runner",
+        fencing_token=claimed["lease"]["fencing_token"],
+        expected_state="running",
+        expected_revision=claimed["revision"],
+    )
+
+    assert completed["status"] == "succeeded"
+    assert replay["status"] == "succeeded"
+    assert replay["receipt"]["status"] == "deduped"
+    assert replay["revision"] == completed["revision"]
+
+
+@pytest.mark.asyncio
+async def test_dependency_failure_is_recorded_before_runner_claim(async_db):
+    dependency = await durable_job_repository.admit_job(
+        _spec(job_id="job-743-dependency", dedupe_key="candidate-dependency")
+    )
+    await durable_job_repository.queue_job(dependency["job_id"])
+    dependency_claim = await durable_job_repository.claim_job(
+        dependency["job_id"], owner="runner-dependency"
+    )
+    await durable_job_repository.transition_job(
+        dependency["job_id"],
+        "failed",
+        owner="runner-dependency",
+        fencing_token=dependency_claim["lease"]["fencing_token"],
+        reason="controlled_failure",
+    )
+
+    child = await durable_job_repository.admit_job(
+        replace(
+            _spec(job_id="job-743-dependent", dedupe_key="candidate-dependent"),
+            dependencies=(dependency["job_id"],),
+        )
+    )
+    await durable_job_repository.queue_job(child["job_id"])
+    failed = await durable_job_repository.claim_job(child["job_id"], owner="runner-dependent")
+
+    assert failed["status"] == "failed"
+    assert failed["failure_reason"] == "dependency_failed"
+    assert failed["receipt"]["dependency_id"] == dependency["job_id"]
+    assert failed["receipt"]["dependency_status"] == "failed"
+    assert failed["lease"]["owner"] is None
+
+
+@pytest.mark.asyncio
+async def test_pending_dependency_does_not_admit_runner_or_consume_attempt(async_db):
+    dependency = await durable_job_repository.admit_job(
+        _spec(job_id="job-743-pending-dependency", dedupe_key="candidate-pending-dependency")
+    )
+    child = await durable_job_repository.admit_job(
+        replace(
+            _spec(job_id="job-743-pending-child", dedupe_key="candidate-pending-child"),
+            dependencies=(dependency["job_id"],),
+        )
+    )
+    await durable_job_repository.queue_job(child["job_id"])
+    pending = await durable_job_repository.claim_job(child["job_id"], owner="runner-pending")
+
+    assert pending["status"] == "queued"
+    assert pending["receipt"]["status"] == "blocked"
+    assert pending["receipt"]["reason"] == "dependency_pending"
+    assert pending["receipt"]["state_unchanged"] is True
+    assert pending["attempt_count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_effect_receipt_updates_keep_one_stable_external_identity(async_db):
+    admitted = await durable_job_repository.admit_job(
+        _spec(job_id="job-743-effect-update", dedupe_key="candidate-effect-update")
+    )
+    await durable_job_repository.queue_job(admitted["job_id"])
+    claimed = await durable_job_repository.claim_job(admitted["job_id"], owner="runner-effect-update")
+    token = claimed["lease"]["fencing_token"]
+    intent = await durable_job_repository.record_effect(
+        admitted["job_id"],
+        effect_id="effect-stable-1",
+        effect_type="destination_write",
+        target_path="controlled-ledger",
+        target_digest="target-1",
+        approval_id="approval-1",
+        adapter_idempotency_key="adapter-key-1",
+        status="intent",
+        owner="runner-effect-update",
+        fencing_token=token,
+    )
+    settled = await durable_job_repository.record_effect(
+        admitted["job_id"],
+        effect_id="effect-stable-1",
+        effect_type="destination_write",
+        target_path="controlled-ledger",
+        target_digest="target-1",
+        approval_id="approval-1",
+        adapter_idempotency_key="adapter-key-1",
+        status="succeeded",
+        owner="runner-effect-update",
+        fencing_token=token,
+    )
+    completed = await durable_job_repository.transition_job(
+        admitted["job_id"],
+        "succeeded",
+        owner="runner-effect-update",
+        fencing_token=token,
+        expected_revision=settled["revision"],
+    )
+
+    assert intent["effects"][0]["effect_id"] == "effect-stable-1"
+    assert len(settled["effects"]) == 1
+    assert settled["effects"][0]["status"] == "succeeded"
+    assert settled["effects"][0]["approval_id"] == "approval-1"
+    assert settled["effects"][0]["adapter_idempotency_key"] == "adapter-key-1"
+    assert completed["status"] == "succeeded"
 
 
 @pytest.mark.asyncio
@@ -603,6 +738,8 @@ async def test_retry_rejects_expired_deadline_and_exhausted_attempt_budget(async
         )
     )
     assert expired["status"] == "failed"
+    with pytest.raises(DurableJobTransitionError, match="deadline"):
+        await durable_job_repository.queue_job(expired["job_id"])
     with pytest.raises(DurableJobTransitionError, match="deadline"):
         await durable_job_repository.retry_job(
             expired["job_id"],

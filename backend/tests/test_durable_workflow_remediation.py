@@ -31,12 +31,16 @@ from src.workflows.manager import (
     _workflow_canonical_lease_owner,
     _workflow_contract_fields,
     _workflow_durable_owner_fields,
+    durable_lease_id,
 )
 from src.api.workflows import (
     _canonical_workflow_projection_input,
     _control_typed_workflow_run,
     _list_workflow_runs,
     _safe_workflow_run_projection,
+    _workflow_parent_recovery_metadata,
+    _workflow_resume_plan,
+    _workflow_retry_from_step_draft,
     WorkflowRunControlRequest,
     control_workflow_run,
 )
@@ -276,6 +280,8 @@ def _typed_api_job(*, status: str = "running", lease_owner: str | None = None) -
             "owner": lease_owner,
             "expires_at": "2099-01-01T00:00:00+00:00",
             "fencing_token": 7,
+            "lease_id": durable_lease_id(run_identity, 7),
+            "revision": 4,
         },
         "started_at": "2026-09-10T10:00:00+00:00",
         "updated_at": "2026-09-10T10:01:00+00:00",
@@ -334,8 +340,38 @@ def test_typed_projection_exposes_bounded_receipts_and_status():
     assert projection["durable_receipts"]["checkpoints"][0]["state_digest"] == "a" * 64
     assert projection["durable_receipts"]["artifacts"][0]["artifact_id_digest"]
     assert projection["durable_receipts"]["effects"][0]["effect_type"] == "workflow_output"
+    assert projection_input["lease"]["lease_id"] == durable_lease_id(projection_input["run_identity"], 7)
+    assert projection_input["lease"]["revision"] == projection_input["revision"]
+    assert projection["lease"]["lease_id_digest"]
+    assert projection["lease"]["revision"] == projection["revision"]
     assert "secret result" not in str(projection)
     assert "must not be projected" not in str(projection)
+
+
+def test_typed_resume_plan_carries_derived_lease_identity_and_revision():
+    run = _canonical_workflow_projection_input(_typed_api_job())
+    assert run is not None
+    revision, lease_id, fencing_token = _workflow_parent_recovery_metadata(run)
+
+    assert revision == run["revision"]
+    assert fencing_token == run["lease"]["fencing_token"]
+    assert lease_id == durable_lease_id(run["run_identity"], fencing_token)
+
+    plan = _workflow_resume_plan(run, approvals=[])
+    assert plan["parent_revision"] == revision
+    assert plan["parent_lease_id"] == lease_id
+    assert plan["parent_fencing_token"] == fencing_token
+    draft = _workflow_retry_from_step_draft(
+        run["workflow_name"],
+        step_id="prepare",
+        arguments={},
+        parent_run_identity=run["run_identity"],
+        parent_revision=revision,
+        parent_lease_id=lease_id,
+        parent_fencing_token=fencing_token,
+    )
+    assert f'_seraph_parent_lease_id="{lease_id}"' in draft
+    assert "_seraph_parent_fencing_token=7" in draft
 
 
 @pytest.mark.asyncio
@@ -451,7 +487,7 @@ def test_typed_checkpoint_recovery_requires_current_runner_owner_and_fence():
         "revision": 9,
         "lease": {
             "owner": _workflow_canonical_lease_owner(parent_id),
-            "lease_id": "lease-parent",
+            "lease_id": durable_lease_id(parent_id, 11),
             "expires_at": "2099-01-01T00:00:00+00:00",
             "revision": 9,
             "fencing_token": 11,
@@ -464,17 +500,33 @@ def test_typed_checkpoint_recovery_requires_current_runner_owner_and_fence():
             details=details,
             control_inputs={
                 "_seraph_parent_revision": 9,
-                "_seraph_parent_lease_id": "lease-parent",
+                "_seraph_parent_lease_id": durable_lease_id(parent_id, 11),
                 "_seraph_parent_fencing_token": 11,
             },
         )
+        with pytest.raises(RuntimeError, match="lease identity"):
+            _assert_workflow_parent_recovery_authority(
+                parent_run_identity=parent_id,
+                details={
+                    **details,
+                    "lease": {
+                        **details["lease"],
+                        "lease_id": "lease-forged",
+                    },
+                },
+                control_inputs={
+                    "_seraph_parent_revision": 9,
+                    "_seraph_parent_lease_id": "lease-forged",
+                    "_seraph_parent_fencing_token": 11,
+                },
+            )
         with pytest.raises(RuntimeError, match="parent fence is stale"):
             _assert_workflow_parent_recovery_authority(
                 parent_run_identity=parent_id,
                 details=details,
                 control_inputs={
                     "_seraph_parent_revision": 9,
-                    "_seraph_parent_lease_id": "lease-parent",
+                    "_seraph_parent_lease_id": durable_lease_id(parent_id, 11),
                     "_seraph_parent_fencing_token": 10,
                 },
             )
@@ -503,6 +555,8 @@ def test_canonical_checkpoint_payload_contains_revision_lease_and_parent_fields(
     assert payload["record_schema_version"] == 2
     assert payload["revision"] == typed["revision"]
     assert payload["lease"] == typed["lease"]
+    assert payload["lease"]["lease_id"] == durable_lease_id(typed["run_identity"], 7)
+    assert payload["lease"]["revision"] == typed["revision"]
     assert payload["parent_job_id"] is None
     assert payload["parent_fencing_token"] is None
     assert payload["step_records"][0]["id"] == "prepare"

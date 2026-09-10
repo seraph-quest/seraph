@@ -51,6 +51,7 @@ from src.workflows.durable_state import _safe_operator_recovery_target, workflow
 from src.workflows.job_runtime import (
     DurableJobError,
     durable_job_repository,
+    durable_lease_id,
 )
 from src.workflows.run_identity import build_workflow_run_identity, parse_workflow_run_identity
 from src.workspace import WorkspaceStateClass, canonical_workspace_registry
@@ -600,6 +601,21 @@ def _canonical_workflow_projection_input(value: Any) -> dict[str, Any] | None:
         "service_id": raw.get("service_id"),
     }
     lease = _canonical_lease_projection(raw)
+    try:
+        current_fence = int(lease.get("fencing_token") or 0)
+        lease = {
+            **lease,
+            "lease_id": durable_lease_id(
+                raw.get("job_id") or raw.get("run_identity"),
+                current_fence,
+            ),
+            "revision": int(raw.get("revision") or 0),
+        }
+    except (TypeError, ValueError, OverflowError):
+        # The typed repository validates job identity/fence before exposing a
+        # row. Preserve malformed data so recovery rejects it explicitly
+        # rather than inventing an alternate lease identity.
+        lease = {**lease, "lease_id": None, "revision": None}
     checkpoints = raw.get("checkpoints")
     if not isinstance(checkpoints, list):
         checkpoints = raw.get("checkpoint_receipts")
@@ -927,10 +943,16 @@ def _safe_workflow_run_projection(value: Any) -> dict[str, Any] | None:
             "owner_digest": _workflow_identity_digest(str(value.get("lease", {}).get("owner")))
             if isinstance(value.get("lease"), dict) and value.get("lease", {}).get("owner")
             else None,
+            "lease_id_digest": _workflow_identity_digest(str(value.get("lease", {}).get("lease_id")))
+            if isinstance(value.get("lease"), dict) and value.get("lease", {}).get("lease_id")
+            else None,
             "expires_at": value.get("lease", {}).get("expires_at")
             if isinstance(value.get("lease"), dict) and isinstance(value.get("lease", {}).get("expires_at"), str)
             else None,
             "fencing_token": _safe_workflow_count(value.get("lease", {}).get("fencing_token"))
+            if isinstance(value.get("lease"), dict)
+            else 0,
+            "revision": _safe_workflow_count(value.get("lease", {}).get("revision"))
             if isinstance(value.get("lease"), dict)
             else 0,
         },
@@ -1826,6 +1848,21 @@ def _workflow_parent_recovery_metadata(
         fencing_token = int(lease.get("fencing_token")) if isinstance(lease, dict) and lease.get("fencing_token") is not None else None
     except (TypeError, ValueError):
         fencing_token = None
+    if _is_typed_workflow_run(run):
+        # Schema-v2 has no mutable lease-id column.  Always derive the
+        # recovery handle from the canonical identity and fence so an old or
+        # caller-supplied lease label cannot become recovery authority.
+        try:
+            typed_run_identity = str(run.get("run_identity") or run.get("job_id") or "").strip()
+            if typed_run_identity and fencing_token is not None:
+                lease_id = durable_lease_id(typed_run_identity, fencing_token)
+        except (TypeError, ValueError, OverflowError):
+            lease_id = None
+        if revision is None:
+            try:
+                revision = int(lease.get("revision")) if isinstance(lease, dict) and lease.get("revision") is not None else None
+            except (TypeError, ValueError, OverflowError):
+                revision = None
     return revision, str(lease_id).strip() if lease_id else None, fencing_token
 
 

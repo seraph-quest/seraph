@@ -256,6 +256,32 @@ def _digest(value: Any) -> str:
     return hashlib.sha256(_canonical(value).encode("utf-8")).hexdigest()
 
 
+def durable_lease_id(job_id: str, fencing_token: int) -> str:
+    """Derive the stable identity for one persisted lease epoch.
+
+    ``WorkflowRunState`` predates an explicit lease-id column.  The job
+    identity and fencing token are both durable and immutable for a lease
+    epoch, so their digest gives recovery a stable, non-secret lease handle
+    without introducing another mutable source of truth.
+    """
+    normalized_job_id = str(job_id or "").strip()
+    if not normalized_job_id:
+        raise ValueError("job_id is required to derive a lease id")
+    try:
+        normalized_fencing_token = int(fencing_token)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError("fencing_token is required to derive a lease id") from exc
+    if normalized_fencing_token < 0:
+        raise ValueError("fencing_token must be nonnegative")
+    digest = _digest(
+        {
+            "job_id": normalized_job_id,
+            "fencing_token": normalized_fencing_token,
+        }
+    )
+    return f"lease:{digest[:32]}"
+
+
 def _text(value: Any, default: str = "") -> str:
     result = str(value or "").strip()
     return result or default
@@ -1121,6 +1147,11 @@ def _serialize(run: WorkflowRunState, *, receipt: dict[str, Any] | None = None) 
             "owner": getattr(run, "lease_owner", None),
             "expires_at": run.lease_expires_at.isoformat() if getattr(run, "lease_expires_at", None) else None,
             "fencing_token": int(getattr(run, "fencing_token", 0) or 0),
+            "lease_id": durable_lease_id(
+                run.run_identity,
+                int(getattr(run, "fencing_token", 0) or 0),
+            ),
+            "revision": _revision(run),
         },
         "revision": _revision(run),
         "attempt_count": int(getattr(run, "attempt_count", 0) or 0),

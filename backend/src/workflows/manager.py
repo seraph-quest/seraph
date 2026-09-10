@@ -36,6 +36,7 @@ from src.workflows.job_runtime import (
     DurableJobRepository,
     DurableJobSpec,
     durable_job_repository,
+    durable_lease_id,
 )
 from src.workflows.run_identity import build_workflow_run_identity, parse_workflow_run_identity
 
@@ -300,6 +301,12 @@ def _assert_workflow_parent_recovery_authority(
             raise RuntimeError("Workflow checkpoint recovery parent fence is required") from exc
         if expected_fence != persisted_fence:
             raise RuntimeError("Workflow checkpoint recovery parent fence is stale")
+        try:
+            derived_lease_id = durable_lease_id(parent_run_identity, persisted_fence)
+        except ValueError as exc:
+            raise RuntimeError("Workflow checkpoint recovery parent lease identity is invalid") from exc
+        if lease_id != derived_lease_id or expected_lease_id != derived_lease_id:
+            raise RuntimeError("Workflow checkpoint recovery parent lease identity is invalid")
 
 
 def _run_durable_state_write(coro) -> Any | None:
@@ -1075,6 +1082,16 @@ class _CanonicalWorkflowStateWriter:
             return None
         owner = current.get("owner") if isinstance(current.get("owner"), dict) else {}
         authority = current.get("declared_authority")
+        lease = current.get("lease") if isinstance(current.get("lease"), dict) else {}
+        try:
+            current_fence = int(lease.get("fencing_token") or 0)
+            lease = {
+                **lease,
+                "lease_id": durable_lease_id(run_identity, current_fence),
+                "revision": int(current.get("revision") or 0),
+            }
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise RuntimeError("canonical workflow checkpoint lease metadata is malformed") from exc
         return {
             "record_schema_version": int(current.get("record_schema_version") or 0),
             "job_id": current.get("job_id") or run_identity,
@@ -1086,7 +1103,7 @@ class _CanonicalWorkflowStateWriter:
             "parent_job_id": current.get("parent_job_id"),
             "parent_fencing_token": current.get("parent_fencing_token"),
             "revision": current.get("revision"),
-            "lease": current.get("lease") if isinstance(current.get("lease"), dict) else {},
+            "lease": lease,
             "durable_run_identity": run_identity,
             "state_source": "durable_workflow_state",
             "approval_context": authority if isinstance(authority, dict) else {},

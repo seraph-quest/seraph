@@ -2,7 +2,7 @@
 
 import hashlib
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Mapping
 
 from sqlalchemy import or_, update
@@ -16,6 +16,9 @@ from src.conversation.identity import (
     build_conversation_identity,
     validate_attachment_refs,
 )
+
+
+_DEFAULT_PENDING_TTL_SECONDS = 5 * 60.0
 
 
 def _approval_expiry(value: object) -> datetime | None:
@@ -43,6 +46,20 @@ def _approval_is_expired(value: object, *, now: datetime | None = None) -> bool:
     if current.tzinfo is None:
         current = current.replace(tzinfo=timezone.utc)
     return expiry <= current
+
+
+def _bounded_pending_expiry(value: object, *, now: datetime) -> datetime:
+    """Return a finite, future expiry for a pending approval row."""
+    default_expiry = now + timedelta(seconds=_DEFAULT_PENDING_TTL_SECONDS)
+    expiry = _approval_expiry(value)
+    if expiry is None or expiry <= now:
+        return default_expiry
+    return min(expiry, default_expiry)
+
+
+def _pending_is_expired(value: object, *, now: datetime) -> bool:
+    """Pending approvals must always have a usable finite decision window."""
+    return value is None or _approval_is_expired(value, now=now)
 
 
 def _approval_attachment_refs(request: ApprovalRequest) -> list[dict[str, Any]]:
@@ -86,14 +103,14 @@ def _validated_approval_attachment_refs(request: ApprovalRequest) -> list[dict[s
     )
 
 
-async def _expire_approval_for_attachment_failure(
+async def _expire_approval_for_attachment_failure_in_session(
     db: Any,
     request: ApprovalRequest,
     *,
     now: datetime,
     error: ConversationIdentityError,
 ) -> None:
-    """Fence an approved row when its attachment handoff is no longer valid."""
+    """Fence an approved row using the caller's already-owned session."""
     try:
         details = json.loads(request.details_json) if request.details_json else {}
     except (TypeError, ValueError):
@@ -118,6 +135,35 @@ async def _expire_approval_for_attachment_failure(
             details_json=json.dumps(details, sort_keys=True),
         )
     )
+
+
+async def _expire_approval_for_attachment_failure(
+    request: ApprovalRequest,
+    *,
+    now: datetime,
+    error: ConversationIdentityError,
+) -> None:
+    """Fence an approved row in a transaction independent of resume state.
+
+    Durable resume callers may be inside a transaction that intentionally
+    rolls back after this method returns ``None``.  Re-read and commit the
+    quarantine in its own session so the fail-closed expiry and redaction
+    survive that caller error.
+    """
+    async with get_session() as quarantine_db:
+        persisted = (
+            await quarantine_db.execute(
+                select(ApprovalRequest).where(ApprovalRequest.id == request.id)
+            )
+        ).scalars().first()
+        if persisted is None or persisted.status != "approved":
+            return
+        await _expire_approval_for_attachment_failure_in_session(
+            quarantine_db,
+            persisted,
+            now=now,
+            error=error,
+        )
 
 
 def fingerprint_tool_call(
@@ -237,6 +283,14 @@ class ApprovalRepository:
         if "attachment_refs" in details or "attachments" in details:
             details["attachment_refs"] = safe_attachment_refs
             details.pop("attachments", None)
+        pending_now = datetime.now(timezone.utc)
+        pending_expires_at = _bounded_pending_expiry(
+            details.get("expires_at", details.get("approval_expires_at")),
+            now=pending_now,
+        )
+        details["expires_at"] = pending_expires_at.timestamp()
+        if "approval_expires_at" in details:
+            details["approval_expires_at"] = pending_expires_at.timestamp()
         channel = str(details.get("channel") or "web").strip()
         transport = str(details.get("transport") or "rest").strip()
         identity = build_conversation_identity(
@@ -268,8 +322,20 @@ class ApprovalRepository:
                         "conversation_owner_mismatch",
                         "Approval request belongs to another operator.",
                     )
-                db.expunge(request)
-                return request
+                if not _pending_is_expired(request.expires_at, now=pending_now):
+                    db.expunge(request)
+                    return request
+                # Expire the old row atomically before creating a new bounded
+                # request with the same fingerprint.
+                await db.execute(
+                    update(ApprovalRequest)
+                    .execution_options(synchronize_session=False)
+                    .where(
+                        ApprovalRequest.id == request.id,
+                        ApprovalRequest.status == "pending",
+                    )
+                    .values(status="expired", resolved_at=pending_now)
+                )
 
             request = ApprovalRequest(
                 session_id=canonical_session_id,
@@ -285,7 +351,7 @@ class ApprovalRepository:
                 attachment_refs_json=json.dumps(safe_attachment_refs, sort_keys=True),
                 challenge=(str(details.get("challenge") or "").strip() or None),
                 action=(str(details.get("action") or "").strip() or None),
-                expires_at=_approval_expiry(details.get("expires_at")),
+                expires_at=pending_expires_at,
                 tool_name=tool_name,
                 risk_level=risk_level,
                 status="pending",
@@ -430,7 +496,7 @@ class ApprovalRepository:
             try:
                 _validated_approval_attachment_refs(request)
             except ConversationIdentityError as exc:
-                await _expire_approval_for_attachment_failure(
+                await _expire_approval_for_attachment_failure_in_session(
                     db,
                     request,
                     now=now,
@@ -494,6 +560,7 @@ class ApprovalRepository:
             async with get_session() as session:
                 return await self._consume_approved_for_resume_in_session(
                     session,
+                    quarantine_in_separate_session=False,
                     approval_id=approval_id,
                     owner_operator_session_id=owner_operator_session_id,
                     operator_principal_id=operator_principal_id,
@@ -511,6 +578,7 @@ class ApprovalRepository:
                 )
         return await self._consume_approved_for_resume_in_session(
             db,
+            quarantine_in_separate_session=True,
             approval_id=approval_id,
             owner_operator_session_id=owner_operator_session_id,
             operator_principal_id=operator_principal_id,
@@ -531,6 +599,7 @@ class ApprovalRepository:
         self,
         db: Any,
         *,
+        quarantine_in_separate_session: bool,
         approval_id: str,
         owner_operator_session_id: str,
         operator_principal_id: str,
@@ -553,11 +622,11 @@ class ApprovalRepository:
         if not approval_id or not owner_operator_session_id or not operator_principal_id:
             return None
         result = await db.execute(
-                select(ApprovalRequest).where(
-                    ApprovalRequest.id == approval_id,
-                    ApprovalRequest.status == "approved",
-                )
+            select(ApprovalRequest).where(
+                ApprovalRequest.id == approval_id,
+                ApprovalRequest.status == "approved",
             )
+        )
         request = result.scalars().first()
         if request is None or not _approval_belongs_to_operator_session(
             request,
@@ -568,12 +637,19 @@ class ApprovalRepository:
         try:
             _validated_approval_attachment_refs(request)
         except ConversationIdentityError as exc:
-            await _expire_approval_for_attachment_failure(
-                db,
-                request,
-                now=now,
-                error=exc,
-            )
+            if quarantine_in_separate_session:
+                await _expire_approval_for_attachment_failure(
+                    request,
+                    now=now,
+                    error=exc,
+                )
+            else:
+                await _expire_approval_for_attachment_failure_in_session(
+                    db,
+                    request,
+                    now=now,
+                    error=exc,
+                )
             return None
         if _approval_is_expired(request.expires_at, now=now):
             await db.execute(

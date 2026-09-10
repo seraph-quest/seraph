@@ -606,6 +606,66 @@ async def test_approval_expiry_and_atomic_consume_replay(file_db, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_pending_approval_expiry_creates_fresh_bounded_request(file_db, monkeypatch):
+    get_session, _ = file_db
+    monkeypatch.setattr("src.approval.repository.get_session", get_session)
+    await _add_owner(
+        get_session,
+        session_id="conversation-pending-expiry",
+        owner_id="operator:pending-expiry",
+        operator_session_id="operator-session-pending-expiry",
+    )
+    details = {
+        "owner_principal_id": "operator:pending-expiry",
+        "approval_owner_operator_session_id": "operator-session-pending-expiry",
+        "expires_at": (datetime.now(timezone.utc) + timedelta(minutes=5)).timestamp(),
+    }
+    stale = await approval_repository.get_or_create_pending(
+        session_id="conversation-pending-expiry",
+        tool_name="pending-expiry-tool",
+        risk_level="high",
+        summary="Pending approval expiry",
+        fingerprint="pending-expiry-fingerprint",
+        details=details,
+    )
+    async with get_session() as db:
+        row = (
+            await db.execute(
+                select(ApprovalRequest).where(ApprovalRequest.id == stale.id)
+            )
+        ).scalar_one()
+        row.expires_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+
+    fresh = await approval_repository.get_or_create_pending(
+        session_id="conversation-pending-expiry",
+        tool_name="pending-expiry-tool",
+        risk_level="high",
+        summary="Pending approval expiry",
+        fingerprint="pending-expiry-fingerprint",
+        details={
+            **details,
+            "expires_at": (datetime.now(timezone.utc) - timedelta(seconds=1)).timestamp(),
+        },
+    )
+
+    assert fresh.id != stale.id
+    assert fresh.status == "pending"
+    assert fresh.expires_at is not None
+    now = datetime.now(timezone.utc)
+    assert fresh.expires_at > now
+    assert fresh.expires_at <= now + timedelta(minutes=5, seconds=1)
+    persisted_details = json.loads(fresh.details_json or "{}")
+    assert persisted_details["expires_at"] == fresh.expires_at.timestamp()
+    async with get_session() as db:
+        expired_row = (
+            await db.execute(
+                select(ApprovalRequest).where(ApprovalRequest.id == stale.id)
+            )
+        ).scalar_one()
+        assert expired_row.status == "expired"
+
+
+@pytest.mark.asyncio
 async def test_approved_consume_revalidates_attachment_receipt_at_execution(file_db, monkeypatch):
     get_session, _ = file_db
     monkeypatch.setattr("src.approval.repository.get_session", get_session)

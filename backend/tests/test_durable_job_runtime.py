@@ -10,6 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import update
+from sqlmodel import select
 from src.db.engine import _ensure_legacy_columns, _map_legacy_workflow_status
 from src.db.models import ApprovalRequest, WorkflowRunState
 
@@ -948,6 +949,93 @@ async def test_approval_held_job_cannot_be_resumed_without_a_fresh_authority_rou
             operator_session_id="operator-session:test",
             expires_at=approval_expires_at,
         )
+
+
+@pytest.mark.asyncio
+async def test_durable_resume_attachment_quarantine_survives_transition_rollback(async_db):
+    admitted = await durable_job_repository.admit_job(
+        _spec(job_id="job-743-resume-attachment-quarantine", dedupe_key="candidate-resume-attachment-quarantine")
+    )
+    await durable_job_repository.queue_job(admitted["job_id"])
+    claimed = await durable_job_repository.claim_job(
+        admitted["job_id"], owner="runner-resume-attachment-quarantine"
+    )
+    held = await durable_job_repository.transition_job(
+        admitted["job_id"],
+        "awaiting_approval",
+        owner="runner-resume-attachment-quarantine",
+        fencing_token=claimed["lease"]["fencing_token"],
+    )
+    approval_expires_at = (datetime.now(timezone.utc) + timedelta(minutes=5)).timestamp()
+    approval_details = {
+        "approval_owner_operator_session_id": "operator-session:resume-attachment-quarantine",
+        "approval_operator_principal_id": "operator:resume-attachment-quarantine",
+        "durable_job_id": admitted["job_id"],
+        "durable_owner_kind": admitted["owner"]["kind"],
+        "durable_owner_principal_id": admitted["owner"]["principal_id"],
+        "durable_service_id": admitted["owner"]["service_id"],
+        "durable_approval_id": admitted["declared_authority"]["approval_id"],
+        "durable_authority_digest": admitted["authority_digest"],
+        "durable_goal_id": admitted["goal_id"],
+        "durable_goal_revision": admitted["goal_revision"],
+        "durable_plan_revision": admitted["plan_revision"],
+        "durable_capability_version": admitted["capability_version"],
+        "durable_budget_digest": _digest({"budget_microusd": None}),
+        "approval_expires_at": approval_expires_at,
+    }
+    async with async_db() as db:
+        db.add(
+            ApprovalRequest(
+                id="approval-1",
+                session_id="job-session",
+                operator_session_id="operator-session:resume-attachment-quarantine",
+                attachment_refs_json="{malformed-attachment-refs",
+                status="approved",
+                tool_name="strategist_tick",
+                fingerprint="resume-attachment-quarantine-fingerprint",
+                summary="resume durable job with malformed attachment refs",
+                expires_at=datetime.now(timezone.utc) + timedelta(minutes=5),
+                details_json=json.dumps(approval_details),
+            )
+        )
+
+    with pytest.raises(DurableJobTransitionError, match="ApprovalRequest"):
+        await durable_job_repository.resume_approved_job(
+            admitted["job_id"],
+            approval_receipt={
+                "status": "approved",
+                "authenticated": True,
+                "operator_principal_id": "operator:resume-attachment-quarantine",
+                "operator_session_id": "operator-session:resume-attachment-quarantine",
+            },
+            approval_id=admitted["declared_authority"]["approval_id"],
+            authority_digest=admitted["authority_digest"],
+            goal_id=admitted["goal_id"],
+            goal_revision=admitted["goal_revision"],
+            plan_revision=admitted["plan_revision"],
+            capability_version=admitted["capability_version"],
+            owner_kind=admitted["owner"]["kind"],
+            owner_principal_id=admitted["owner"]["principal_id"],
+            service_id=admitted["owner"]["service_id"],
+            budget_microusd=None,
+            budget_digest=_digest({"budget_microusd": None}),
+            operator_principal_id="operator:resume-attachment-quarantine",
+            operator_session_id="operator-session:resume-attachment-quarantine",
+            expires_at=approval_expires_at,
+            expected_revision=held["revision"],
+        )
+
+    async with async_db() as db:
+        row = (
+            await db.execute(
+                select(ApprovalRequest).where(ApprovalRequest.id == "approval-1")
+            )
+        ).scalar_one()
+        details = json.loads(row.details_json or "{}")
+        assert row.status == "expired"
+        assert row.attachment_refs_json == "[]"
+        assert details["attachment_refs"] == []
+        assert details["attachment_refs_status"] == "unavailable"
 
 
 @pytest.mark.asyncio

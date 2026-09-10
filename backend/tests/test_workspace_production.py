@@ -15,7 +15,11 @@ from src.workspace import (
     ProductionWorkspaceConfigurationError,
     ProductionWorkspaceError,
     ProductionWorkspaceMountError,
+    WorkspaceLifecycleError,
+    backup_workspace,
+    canonical_workspace_registry,
     maintenance_fence,
+    reconcile_production_rollback,
     read_lifecycle_receipt,
     runtime_workspace_owner,
     resolve_production_workspace,
@@ -30,6 +34,25 @@ CLI = ROOT / "backend" / "workspace_cli.py"
 def _workspace(tmp_path: Path) -> Path:
     root = tmp_path / "production-data"
     (root / "artifacts").mkdir(parents=True)
+    for directory in (
+        "extensions",
+        "skills",
+        "workflows",
+        "runbooks",
+        "plans",
+        "reports",
+        "notes",
+    ):
+        (root / directory).mkdir()
+    for filename in (
+        "mcp-servers.json",
+        "stdio-proxies.json",
+        "extensions-state.json",
+        "starter-packs.json",
+        "model-fabric-settings.json",
+        "screen-analysis-settings.json",
+    ):
+        (root / filename).write_text("{}\n", encoding="utf-8")
     (root / ".vault-key").write_text("SECRET-SENTINEL\n", encoding="utf-8")
     (root / "soul.md").write_text("canonical\n", encoding="utf-8")
     (root / "artifacts" / "report.md").write_text("report\n", encoding="utf-8")
@@ -183,6 +206,13 @@ def test_maintenance_fence_rejects_duplicate_owner(tmp_path):
                 pass
 
 
+def test_production_lifecycle_requires_maintenance_fence(tmp_path):
+    root = _workspace(tmp_path)
+    registry = canonical_workspace_registry(root)
+    with pytest.raises(WorkspaceLifecycleError, match="maintenance fence"):
+        backup_workspace(root, registry=registry)
+
+
 def test_runtime_owner_blocks_maintenance_until_backend_releases_bind(tmp_path):
     root = _workspace(tmp_path)
     workspace = resolve_production_workspace(_env(root), base_dir=tmp_path)
@@ -192,6 +222,63 @@ def test_runtime_owner_blocks_maintenance_until_backend_releases_bind(tmp_path):
                 pass
     with maintenance_fence(workspace):
         pass
+
+
+def test_managed_lifecycle_is_fenced_across_processes(tmp_path):
+    """A second process cannot begin a lifecycle operation under the owner lease."""
+    root = _workspace(tmp_path)
+    environment = os.environ.copy()
+    environment.update(_env(root))
+    environment["PYTHONPATH"] = str(ROOT / "backend")
+    holder_code = """
+import sys
+from pathlib import Path
+from src.workspace import maintenance_fence, resolve_production_workspace
+
+root = Path(sys.argv[1])
+workspace = resolve_production_workspace(
+    {
+        "BACKEND_DATA_PATH_PROD": str(root),
+        "WORKSPACE_DIR": str(root),
+    },
+    base_dir=root.parent,
+)
+with maintenance_fence(workspace):
+    print("owner-ready", flush=True)
+    sys.stdin.read(1)
+"""
+    holder = subprocess.Popen(
+        [sys.executable, "-c", holder_code, str(root)],
+        env=environment,
+        cwd=ROOT,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        assert holder.stdout is not None
+        assert holder.stdout.readline().strip() == "owner-ready"
+        blocked = subprocess.run(
+            [sys.executable, str(CLI), "--base-dir", str(tmp_path), "backup"],
+            env=environment,
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert blocked.returncode == 78
+        receipt = json.loads(blocked.stdout)
+        assert receipt["reason_code"] == "production_workspace_owner_busy"
+        assert "SECRET-SENTINEL" not in blocked.stdout
+    finally:
+        if holder.stdin is not None:
+            holder.stdin.write("x")
+            holder.stdin.close()
+        holder.wait(timeout=10)
+        if holder.returncode != 0:
+            assert holder.stderr is not None
+            raise AssertionError(holder.stderr.read())
 
 
 def test_managed_cli_backup_restore_is_redacted_and_staged(tmp_path):
@@ -234,6 +321,134 @@ def test_managed_cli_backup_restore_is_redacted_and_staged(tmp_path):
         host_root=root
     ).bind_identity_digest
     assert (root / "soul.md").read_text(encoding="utf-8") == "canonical\n"
+
+
+def test_managed_restore_hands_off_owner_lock_inode(tmp_path):
+    root = _workspace(tmp_path)
+    environment = os.environ.copy()
+    environment.update(_env(root))
+    environment["PYTHONPATH"] = str(ROOT / "backend")
+
+    backup = subprocess.run(
+        [sys.executable, str(CLI), "--base-dir", str(tmp_path), "backup", "--archive", "lock.zip"],
+        env=environment,
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert backup.returncode == 0, backup.stderr
+    lock = root / ".seraph-workspace-maintenance.lock"
+    before = lock.stat()
+    restore = subprocess.run(
+        [
+            sys.executable,
+            str(CLI),
+            "--base-dir",
+            str(tmp_path),
+            "restore",
+            "--archive",
+            json.loads(backup.stdout)["archive_path"],
+            "--confirm",
+        ],
+        env=environment,
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert restore.returncode == 0, restore.stderr
+    after = lock.stat()
+    assert (after.st_dev, after.st_ino) == (before.st_dev, before.st_ino)
+    assert after.st_nlink >= 2
+
+
+def test_managed_backup_rejects_missing_required_canonical_path(tmp_path):
+    root = _workspace(tmp_path)
+    (root / "soul.md").unlink()
+    environment = os.environ.copy()
+    environment.update(_env(root))
+    environment["PYTHONPATH"] = str(ROOT / "backend")
+    blocked = subprocess.run(
+        [sys.executable, str(CLI), "--base-dir", str(tmp_path), "backup"],
+        env=environment,
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert blocked.returncode == 78
+    assert json.loads(blocked.stdout)["reason_code"] == "workspace_state_invalid"
+    assert not workspace_backup_dir_for(root).exists()
+
+
+def test_rollback_reconciliation_preserves_existing_safety_row(tmp_path):
+    root = _workspace(tmp_path)
+    target = tmp_path / "rollback-target"
+    target.mkdir()
+    with sqlite3.connect(root / "seraph.db") as database:
+        database.executescript(
+            """
+            CREATE TABLE tombstones (id TEXT PRIMARY KEY, reason TEXT NOT NULL);
+            INSERT INTO tombstones VALUES ('same', 'archive');
+            INSERT INTO tombstones VALUES ('source-only', 'source');
+            """
+        )
+    with sqlite3.connect(target / "seraph.db") as database:
+        database.executescript(
+            """
+            CREATE TABLE tombstones (id TEXT PRIMARY KEY, reason TEXT NOT NULL);
+            INSERT INTO tombstones VALUES ('same', 'newer');
+            """
+        )
+    registry = canonical_workspace_registry(root)
+    workspace = resolve_production_workspace(_env(root), base_dir=tmp_path)
+    with maintenance_fence(workspace):
+        receipt = reconcile_production_rollback(
+            active=root,
+            target=target,
+            registry=registry,
+        )
+    with sqlite3.connect(target / "seraph.db") as database:
+        assert database.execute(
+            "SELECT reason FROM tombstones WHERE id = 'same'"
+        ).fetchone()[0] == "newer"
+        assert database.execute(
+            "SELECT reason FROM tombstones WHERE id = 'source-only'"
+        ).fetchone()[0] == "source"
+    assert receipt["rows_merged"]["tombstones"] == 1
+    assert receipt["rows_preserved"]["tombstones"] == 1
+
+
+def test_managed_status_blocks_replaced_root_identity(tmp_path):
+    root = _workspace(tmp_path)
+    environment = os.environ.copy()
+    environment.update(_env(root))
+    environment["PYTHONPATH"] = str(ROOT / "backend")
+    backup = subprocess.run(
+        [sys.executable, str(CLI), "--base-dir", str(tmp_path), "backup"],
+        env=environment,
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert backup.returncode == 0, backup.stderr
+    root.rename(tmp_path / "replaced-production-data")
+    _workspace(tmp_path)
+    status = subprocess.run(
+        [sys.executable, str(CLI), "--base-dir", str(tmp_path), "status"],
+        env=environment,
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert status.returncode == 0
+    payload = json.loads(status.stdout)
+    assert payload["status"] == "blocked"
+    assert payload["reason_code"] == "production_workspace_root_changed"
+    assert payload["root_identity_match"] is False
 
 
 def test_managed_cli_identity_is_redacted_and_reproducible(tmp_path):
@@ -537,6 +752,153 @@ def test_managed_cli_blocks_unknown_entries_and_missing_secret(tmp_path):
     assert blocked.returncode == 78
     assert json.loads(blocked.stdout)["reason_code"] == "workspace_state_invalid"
     assert "SECRET-SENTINEL" not in blocked.stdout
+
+
+def test_isolated_backup_restore_restart_and_rollback_drill_preserves_state(tmp_path):
+    """Exercise the managed path with representative durable state and readback."""
+    root = _workspace(tmp_path)
+    (root / "google_calendar_token.json").write_text("OPTIONAL-TOKEN\n", encoding="utf-8")
+    with sqlite3.connect(root / "seraph.db") as database:
+        database.executescript(
+            """
+            CREATE TABLE goals (id TEXT PRIMARY KEY, title TEXT NOT NULL);
+            CREATE TABLE memory_items (id TEXT PRIMARY KEY, body TEXT NOT NULL);
+            CREATE TABLE artifact_registry (artifact_id TEXT PRIMARY KEY, logical_path TEXT NOT NULL);
+            CREATE TABLE tombstones (id TEXT PRIMARY KEY, reason TEXT NOT NULL);
+            CREATE TABLE revocations (id TEXT PRIMARY KEY, revoked_at TEXT NOT NULL);
+            CREATE TABLE config_versions (id TEXT PRIMARY KEY, value TEXT NOT NULL);
+            CREATE TABLE cost_liabilities (id TEXT PRIMARY KEY, amount INTEGER NOT NULL);
+            CREATE TABLE operator_sessions (id TEXT PRIMARY KEY, revoked_at TEXT);
+            CREATE TABLE production_workflow_authority_states (
+                id TEXT PRIMARY KEY,
+                workflow_phase TEXT,
+                safe_replay_decision TEXT,
+                blocked_replay_reason TEXT
+            );
+            INSERT INTO goals VALUES ('goal-1', 'recover the workspace');
+            INSERT INTO memory_items VALUES ('memory-1', 'durable memory');
+            INSERT INTO artifact_registry VALUES ('artifact-1', 'artifacts/report.md');
+            INSERT INTO tombstones VALUES ('tombstone-1', 'operator deleted item');
+            INSERT INTO revocations VALUES ('grant-1', '2026-09-01T00:00:00Z');
+            INSERT INTO config_versions VALUES ('config-1', 'v1');
+            INSERT INTO cost_liabilities VALUES ('liability-1', 17);
+            INSERT INTO operator_sessions VALUES ('session-1', NULL);
+            INSERT INTO production_workflow_authority_states VALUES
+                ('run-1', 'running', 'unsafe', NULL);
+            """
+        )
+    environment = os.environ.copy()
+    environment.update(_env(root))
+    environment["PYTHONPATH"] = str(ROOT / "backend")
+
+    def run(*arguments: str) -> dict[str, object]:
+        completed = subprocess.run(
+            [sys.executable, str(CLI), "--base-dir", str(tmp_path), *arguments],
+            env=environment,
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert completed.returncode == 0, completed.stderr or completed.stdout
+        assert "SECRET-SENTINEL" not in completed.stdout
+        assert "OPTIONAL-TOKEN" not in completed.stdout
+        return json.loads(completed.stdout)
+
+    def digest(path: Path) -> str:
+        import hashlib
+
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+
+    source_hashes = {
+        "soul": digest(root / "soul.md"),
+        "report": digest(root / "artifacts" / "report.md"),
+    }
+    with sqlite3.connect(root / "seraph.db") as database:
+        source_counts = {
+            table: int(database.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
+            for table in (
+                "goals",
+                "memory_items",
+                "artifact_registry",
+                "tombstones",
+                "revocations",
+                "config_versions",
+                "cost_liabilities",
+            )
+        }
+        artifact_ids = [
+            row[0]
+            for row in database.execute(
+                "SELECT artifact_id FROM artifact_registry ORDER BY artifact_id"
+            ).fetchall()
+        ]
+
+    backup = run("backup", "--archive", "isolated-drill.zip")
+    archive = Path(str(backup["archive_path"]))
+    assert backup["member_count"] > 0
+    assert archive.exists()
+    assert "OPTIONAL-TOKEN" not in archive.read_bytes().decode("latin1")
+
+    (root / "soul.md").write_text("mutated soul\n", encoding="utf-8")
+    (root / "artifacts" / "report.md").write_text("mutated report\n", encoding="utf-8")
+    with sqlite3.connect(root / "seraph.db") as database:
+        database.execute("UPDATE records SET value = 'mutated' WHERE id = 'r1'")
+        database.execute("DELETE FROM tombstones WHERE id = 'tombstone-1'")
+        database.execute("DELETE FROM revocations WHERE id = 'grant-1'")
+        database.execute("DELETE FROM config_versions WHERE id = 'config-1'")
+        database.execute("DELETE FROM cost_liabilities WHERE id = 'liability-1'")
+        database.execute(
+            "INSERT INTO artifact_registry VALUES ('artifact-mutated', 'artifacts/report.md')"
+        )
+
+    restored = run("restore", "--archive", str(archive), "--confirm")
+    restore_id = str(restored["restore_id"])
+    assert restored["stage_receipt"]["database_verified"] is True
+    assert restored["stage_receipt"]["restore_reconciliation"]["status"] == "ready"
+    assert digest(root / "soul.md") == source_hashes["soul"]
+    assert digest(root / "artifacts" / "report.md") == source_hashes["report"]
+    with sqlite3.connect(root / "seraph.db") as database:
+        assert {
+            table: int(database.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
+            for table in source_counts
+        } == source_counts
+        assert [
+            row[0]
+            for row in database.execute(
+                "SELECT artifact_id FROM artifact_registry ORDER BY artifact_id"
+            ).fetchall()
+        ] == artifact_ids
+        assert database.execute(
+            "SELECT revoked_at FROM operator_sessions WHERE id = 'session-1'"
+        ).fetchone()[0]
+        assert database.execute(
+            "SELECT workflow_phase FROM production_workflow_authority_states WHERE id = 'run-1'"
+        ).fetchone()[0] == "blocked"
+    assert not (root / "google_calendar_token.json").exists()
+
+    restarted_status = run("status")
+    assert restarted_status["status"] == "ready"
+    assert restarted_status["last_result"]["operation"] == "restore"
+
+    rolled_back = run("rollback", "--restore-id", restore_id, "--confirm")
+    assert rolled_back["status"] == "rolled_back"
+    assert rolled_back["rollback_reconciliation"]["status"] == "ready"
+    assert (root / "soul.md").read_text(encoding="utf-8") == "mutated soul\n"
+    assert (root / "artifacts" / "report.md").read_text(encoding="utf-8") == "mutated report\n"
+    with sqlite3.connect(root / "seraph.db") as database:
+        assert database.execute("SELECT value FROM records WHERE id = 'r1'").fetchone()[0] == "mutated"
+        assert database.execute("SELECT COUNT(*) FROM tombstones WHERE id = 'tombstone-1'").fetchone()[0] == 1
+        assert database.execute("SELECT COUNT(*) FROM revocations WHERE id = 'grant-1'").fetchone()[0] == 1
+        assert database.execute("SELECT COUNT(*) FROM config_versions WHERE id = 'config-1'").fetchone()[0] == 1
+        assert database.execute("SELECT COUNT(*) FROM cost_liabilities WHERE id = 'liability-1'").fetchone()[0] == 1
+        assert database.execute(
+            "SELECT revoked_at FROM operator_sessions WHERE id = 'session-1'"
+        ).fetchone()[0]
+        assert database.execute(
+            "SELECT workflow_phase FROM production_workflow_authority_states WHERE id = 'run-1'"
+        ).fetchone()[0] == "blocked"
+    assert not (root / "google_calendar_token.json").exists()
 
 
 def workspace_backup_dir_for(root: Path) -> Path:

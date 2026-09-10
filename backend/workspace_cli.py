@@ -24,6 +24,7 @@ from src.workspace import (
     maintenance_fence,
     read_lifecycle_receipt,
     reconcile_production_restore,
+    reconcile_production_rollback,
     resolve_production_workspace,
     rollback_workspace,
     restore_workspace,
@@ -152,7 +153,29 @@ def _status_receipt(workspace) -> dict[str, Any]:
     last = read_lifecycle_receipt(workspace)
     active_root_present = workspace.host_root.is_dir() and not workspace.host_root.is_symlink()
     last_status = str(last.get("status") or "").strip().lower() if isinstance(last, dict) else ""
-    if not active_root_present or last_status == "blocked":
+    current_bind_identity = None
+    if active_root_present:
+        try:
+            current_bind_identity = workspace.bind_identity_digest
+        except ProductionWorkspaceError:
+            current_bind_identity = None
+    recorded_bind_identity = (
+        last.get("workspace_ownership", {}).get("host_bind_identity_digest")
+        if isinstance(last, dict) and isinstance(last.get("workspace_ownership"), dict)
+        else None
+    )
+    root_identity_match = (
+        recorded_bind_identity == current_bind_identity
+        if recorded_bind_identity is not None and current_bind_identity is not None
+        else None
+    )
+    root_changed = (
+        active_root_present
+        and last is not None
+        and last_status in {"created", "restored", "rolled_back", "ready"}
+        and root_identity_match is False
+    )
+    if not active_root_present or last_status == "blocked" or root_changed:
         status = "blocked"
     elif last_status in {"created", "restored", "rolled_back", "ready"}:
         status = "ready"
@@ -166,6 +189,8 @@ def _status_receipt(workspace) -> dict[str, Any]:
         "operator_status": (
             "production_workspace_lifecycle_active_root_missing"
             if not active_root_present
+            else "production_workspace_root_changed"
+            if root_changed
             else "production_workspace_lifecycle_blocked"
             if status == "blocked"
             else "production_workspace_lifecycle_last_result"
@@ -174,6 +199,8 @@ def _status_receipt(workspace) -> dict[str, Any]:
         ),
         "workspace_ownership": workspace.receipt(),
         "active_root_present": active_root_present,
+        "root_identity_match": root_identity_match,
+        "reason_code": "production_workspace_root_changed" if root_changed else None,
         "last_result": last,
         "rollback_available": bool(last and last.get("rollback_available")),
         "secret_values_included": False,
@@ -230,6 +257,7 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
                     workspace.host_root,
                     args.restore_id,
                     registry=registry,
+                    reconcile_rollback=reconcile_production_rollback,
                 )
             else:  # pragma: no cover - argparse enforces the command set.
                 raise WorkspaceLifecycleError("unsupported workspace lifecycle command")

@@ -126,15 +126,29 @@ optional integration tokens. The production preflight requires dedicated
 identity match, and the configured path/device/inode identity match. The
 backend holds
 the same bind-local owner lock for its lifetime so backup and restore fail
-closed while writers or the scheduler are active. Restore resets only empty
+closed while writers or the scheduler are active; lifecycle code hard-links
+that lock inode into the staged generation before promotion, so the fence
+survives the directory rename. Backup and restore reject a source manifest
+that omits any declared required canonical path, and archives enforce both
+per-member and cumulative uncompressed payload bounds. Public lifecycle
+helpers require the production maintenance-fence context. Restore resets only empty
 declared derived directories; a stored derived index that has no bounded
 rebuild hook blocks promotion. Staged operator sessions and durable workflow
 authority rows are revoked or blocked before promotion. The current slice
 proves deterministic local inventory, archive validation, staged promotion,
 rollback journaling, durable status receipts, and provider-independent
-maintenance. Migration fencing beyond the backend owner lease,
-retention/disk-pressure drills, and live operator receipts remain partial #742
-acceptance work.
+maintenance. The owner fence is exercised by a competing subprocess, and
+restore journals bind the active, staged, previous, and promoted roots to
+device/inode identity; status also blocks when the current root no longer
+matches the last successful bind identity. Root replacement, symlink endpoints, archive traversal,
+special-file members, and promotion disk errors fail closed while retaining a
+recoverable journal. Rollback carries tombstones, revocations, configuration
+history, unresolved cost liabilities, and existing target safety rows without
+overwriting newer values, alongside session invalidation and workflow
+authority blocking into the retained generation. The checked-in drill is an
+isolated temporary workspace; it does not prove a live production-data restore,
+retention/disk-pressure capacity, or an interrupted CLI recovery when the
+active root is absent.
 
 ## Historical develop topology
 

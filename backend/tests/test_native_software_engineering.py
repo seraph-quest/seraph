@@ -455,7 +455,6 @@ async def test_runner_required_approval_stops_before_apply(async_db, tmp_path, m
     result = await run_native_software_engineering_fixture(
         fixture_root=native_software_engineering_fixture_root(),
         job_id="native-swe-awaiting-approval",
-        session_id="native-swe-awaiting-approval-session",
         patch_approval="required",
     )
 

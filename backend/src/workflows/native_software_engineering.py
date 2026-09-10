@@ -6,11 +6,12 @@ slice.  It intentionally has no model/provider dependency and does not expose
 an arbitrary shell or repository mutation surface.
 
 The fixture is copied into a job-owned workspace before any patch is applied.
-Caller supplied trees are inspected as untrusted input but are never executed;
-execution is restricted to this bundled deterministic fixture because this
-slice does not claim a general sandbox or network isolation boundary. Planner,
-worker, and critic labels are metadata only; the durable job owner remains the
-sole authority identity.
+Caller-supplied trees may be used when they are already inside the configured
+workspace, pass the untrusted-input scan, and match the documented fixture
+shape; sources outside that boundary remain inspection-only. This slice does
+not claim a general sandbox or network isolation boundary. Planner, worker,
+and critic labels are metadata only; the durable job owner remains the sole
+authority identity.
 """
 
 from __future__ import annotations
@@ -62,7 +63,8 @@ _MAX_FIXTURE_FILE_BYTES = 1_000_000
 _MAX_FIXTURE_TOTAL_BYTES = 8_000_000
 _MAX_FIXTURE_DEPTH = 16
 _MAX_FIXTURE_DIRECTORIES = 200
-_MAX_TEST_TIMEOUT_SECONDS = 120
+_MAX_TEST_TIMEOUT_SECONDS = 300
+_MAX_NATIVE_ATTEMPTS = 2
 _GENERATED_FIXTURE_DIRS = frozenset({".git", "__pycache__", ".pytest_cache"})
 _SAFE_JOB_ID = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
 _SHELL_META_CHARS = set("|&;<>()`$\\\n\r\t")
@@ -171,6 +173,11 @@ class NativeSoftwareEngineeringRequest:
     test_command: str = FIXTURE_TEST_COMMAND
     test_args: tuple[str, ...] = field(default_factory=lambda: FIXTURE_TEST_ARGS)
     test_timeout_seconds: int = 30
+    max_attempts: int = 2
+    # A caller that separates inspect/approval/apply can bind the later run to
+    # the exact source tree it inspected.  Omitting this remains valid for the
+    # one-shot local fixture path, which computes and checks its own digest.
+    expected_source_digest: str | None = None
     # Approval is required by default. A caller must provide an explicit
     # bounded approval decision before the patch can be applied.
     patch_approval: str = "required"
@@ -205,7 +212,7 @@ class _NativeExecutionControl:
 
 def native_software_engineering_fixture_root() -> Path:
     """Return the bundled source tree used by deterministic proof tests."""
-    return Path(__file__).resolve().parents[2] / "tests" / "fixtures" / "native_software_engineering" / "repository"
+    return Path(__file__).resolve().parents[2] / "tests" / "fixtures" / "native_swe_repo"
 
 
 def _workspace_root() -> Path:
@@ -234,6 +241,7 @@ def _preview_scope_digest(request: NativeSoftwareEngineeringRequest) -> str:
             "file_path": FIXTURE_BUG_FILE,
             "before_sha256": _digest_text(FIXTURE_BEFORE_TEXT),
             "after_sha256": _digest_text(FIXTURE_AFTER_TEXT),
+            "expected_source_digest": request.expected_source_digest or "",
         }
     )
 
@@ -430,6 +438,8 @@ def _validate_test_command(request: NativeSoftwareEngineeringRequest) -> None:
         raise NativeSoftwareEngineeringError("test_command_not_allowlisted")
     if not 1 <= int(request.test_timeout_seconds) <= _MAX_TEST_TIMEOUT_SECONDS:
         raise NativeSoftwareEngineeringError("test_timeout_out_of_bounds")
+    if not 1 <= int(request.max_attempts) <= _MAX_NATIVE_ATTEMPTS:
+        raise NativeSoftwareEngineeringError("attempt_limit_out_of_bounds")
     if not request.test_args:
         raise NativeSoftwareEngineeringError("test_arguments_missing")
     if tuple(request.test_args) != FIXTURE_TEST_ARGS:
@@ -486,10 +496,10 @@ def _prepare_fixture(request: NativeSoftwareEngineeringRequest, *, executable: b
             raise NativeSoftwareEngineeringError("fixture_outside_workspace")
     if not source.is_dir() or source.is_symlink():
         raise NativeSoftwareEngineeringError("fixture_root_invalid")
-    if executable and source != bundled:
-        raise NativeSoftwareEngineeringError("fixture_execution_source_not_allowlisted")
     _scan_untrusted_fixture(source, instruction_text=request.instruction_text)
     source_digest = _fixture_tree_digest(source)
+    if request.expected_source_digest and source_digest != request.expected_source_digest:
+        raise NativeSoftwareEngineeringError("fixture_source_digest_mismatch")
     bug_path = _validate_relative_fixture_file(source, FIXTURE_BUG_FILE, reason_code="fixture_bug_file_invalid")
     test_path = _validate_relative_fixture_file(source, FIXTURE_TEST_FILE, reason_code="fixture_test_file_invalid")
     body = bug_path.read_text(encoding="utf-8")
@@ -561,6 +571,7 @@ def build_native_software_engineering_plan(
             "command": request.test_command,
             "argument_count": len(request.test_args),
             "timeout_seconds": request.test_timeout_seconds,
+            "max_attempts": request.max_attempts,
         },
         "approval": {
             "required": True,
@@ -773,6 +784,22 @@ def _process_cleanup_receipt(result: dict[str, Any] | None) -> dict[str, Any]:
     }
 
 
+def _changed_workspace_paths(status_output: str) -> set[str]:
+    """Parse git status while excluding runtime-generated cache directories."""
+    changed_paths: set[str] = set()
+    for line in status_output.splitlines():
+        if len(line) < 4 or "->" in line:
+            continue
+        path = line[3:].strip()
+        if not path:
+            continue
+        path_parts = set(Path(path).parts)
+        if path_parts & _GENERATED_FIXTURE_DIRS:
+            continue
+        changed_paths.add(path)
+    return changed_paths
+
+
 async def _record_artifact(
     job_id: str,
     job_workspace: _JobWorkspace,
@@ -926,11 +953,7 @@ async def _record_test_failure_evidence(
         "git", ["status", "--short"], job_workspace.relative_root, include_output=True
     )
     status_output = str(status_process.pop("_stdout", ""))
-    changed_paths = {
-        line[3:].strip()
-        for line in status_output.splitlines()
-        if len(line) >= 4 and "->" not in line
-    }
+    changed_paths = _changed_workspace_paths(status_output)
     patched_path = job_workspace.root / FIXTURE_BUG_FILE
     patched_body = patched_path.read_text(encoding="utf-8") if patched_path.is_file() else ""
     source_immutable = _fixture_tree_digest(prepared.source) == prepared.source_digest
@@ -1033,7 +1056,7 @@ async def run_native_software_engineering_fixture(
     request: NativeSoftwareEngineeringRequest | None = None,
     **overrides: Any,
 ) -> dict[str, Any]:
-    """Run inspect -> plan -> patch -> test -> readback for the bundled fixture.
+    """Run inspect -> plan -> patch -> test -> readback for a bounded fixture.
 
     Expected policy rejections return an operator-safe ``blocked`` receipt.  A
     failed or timed-out test returns ``failed`` and keeps the job workspace for
@@ -1093,7 +1116,7 @@ async def run_native_software_engineering_fixture(
         resource_claims=("cpu", "workspace"),
         declared_authority=declared_authority,
         deadline_at=request.deadline_at,
-        max_attempts=1,
+        max_attempts=request.max_attempts,
         service_id=request.service_id,
     )
     try:
@@ -1703,11 +1726,7 @@ async def run_native_software_engineering_fixture(
             "git", ["status", "--short"], job_workspace.relative_root, include_output=True
         )
         status_output = str(status_process.pop("_stdout", ""))
-        changed_paths = {
-            line[3:].strip()
-            for line in status_output.splitlines()
-            if len(line) >= 4 and "->" not in line
-        }
+        changed_paths = _changed_workspace_paths(status_output)
         patched_body = (job_workspace.root / FIXTURE_BUG_FILE).read_text(encoding="utf-8")
         source_immutable = _fixture_tree_digest(prepared.source) == prepared.source_digest
         exact_scope = changed_paths == {FIXTURE_BUG_FILE}
@@ -1730,7 +1749,11 @@ async def run_native_software_engineering_fixture(
             "original_fixture_immutable": source_immutable,
             "changed_paths": sorted(changed_paths),
             "exact_workspace_scope": exact_scope,
-            "processes": {"git_diff_check": readback_process, "git_status": status_process},
+            "processes": {
+                "test": test_result,
+                "git_diff_check": readback_process,
+                "git_status": status_process,
+            },
             "verified": readback_ok,
         }
         await _record_artifact(

@@ -3,6 +3,7 @@
 ## Status On This Branch
 
 - [x] M2 execution completion is implemented in this batch and awaiting merge back to `develop`.
+- [x] Branch-local #748 proof now runs an authenticated, offline inspect→plan→preview→approval→apply→test→diagnose→readback journey through a durable job and an isolated fixture worktree. It records source/patch/path/command/resource digests, job-owned artifacts and checkpoints, 300-second and two-attempt bounds, exact approval/session/authority checks, actual child-process exit/output, and process-group timeout/cancel cleanup plus replay dedupe. This remains a deterministic local fixture: arbitrary repository execution, host isolation, external provider transport, autonomous commit/push/merge, and production crash-proof semantics are outside the demonstrated boundary.
 
 ## Paired Research
 

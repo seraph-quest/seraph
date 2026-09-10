@@ -7,7 +7,8 @@ No model, embedding, provider, or network seam is involved.
 from __future__ import annotations
 
 import asyncio
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
+from dataclasses import replace
 import json
 from pathlib import Path
 import sqlite3
@@ -23,6 +24,7 @@ from sqlmodel.orm.session import Session
 
 from config.settings import settings
 from src.api import memory as memory_api
+from src.approval.runtime import reset_runtime_context, set_runtime_context
 from src.db.models import (
     AuditEvent,
     Memory,
@@ -39,6 +41,22 @@ from src.memory.repository import memory_repository
 from src.memory.pipeline.merge import EmbeddingWriteResult, persist_extracted_memories
 from src.memory.types import ConsolidatedMemoryItem
 from src.auth.service import test_bypass_operator as make_test_bypass_operator
+
+
+@contextmanager
+def _runtime_operator(operator, *, revoked: bool | None = None):
+    principal = operator.principal
+    if revoked is not None:
+        principal = replace(principal, revoked=revoked)
+    tokens = set_runtime_context(
+        operator.session_id,
+        "off",
+        trust_principal=principal,
+    )
+    try:
+        yield
+    finally:
+        reset_runtime_context(tokens)
 
 
 class _SyncAsyncSession:
@@ -133,7 +151,8 @@ async def _memory_row(get_session, memory_id: str) -> Memory | None:
 @pytest.mark.asyncio
 async def test_export_rebuild_and_restore_keep_current_tombstone_authoritative(local_memory_db):
     get_session, database_path = local_memory_db
-    owner_session = "owner-recovery-session"
+    operator = make_test_bypass_operator()
+    owner_session = operator.session_id
     created = await memory_repository.create_memory(
         content="A private recovery fact that must survive a missing-row restore.",
         source_session_id=owner_session,
@@ -142,11 +161,12 @@ async def test_export_rebuild_and_restore_keep_current_tombstone_authoritative(l
         source_snippet="private recovery fact",
         metadata={"privacy_boundary": "private", "provenance": {"kind": "inferred"}},
     )
-    export = await memory_repository.export_canonical_memory_state(
-        actor="operator:test",
-        owner_session_id=owner_session,
-        authenticated_session_id=owner_session,
-    )
+    with _runtime_operator(operator):
+        export = await memory_repository.export_canonical_memory_state(
+            actor=operator.principal.principal_id,
+            owner_session_id=owner_session,
+            authenticated_session_id=owner_session,
+        )
     assert export["status"] == "ready"
     assert created.memory_id in export["memory_ids"]
     assert export["memories"][0]["content"].startswith("A private recovery fact")
@@ -161,11 +181,12 @@ async def test_export_rebuild_and_restore_keep_current_tombstone_authoritative(l
         reason="operator requested deletion",
     )
     assert deleted.created is True
-    rebuild_after_delete = await memory_repository.rebuild_canonical_memory_index(
-        actor="operator:test",
-        owner_session_id=owner_session,
-        authenticated_session_id=owner_session,
-    )
+    with _runtime_operator(operator):
+        rebuild_after_delete = await memory_repository.rebuild_canonical_memory_index(
+            actor=operator.principal.principal_id,
+            owner_session_id=owner_session,
+            authenticated_session_id=owner_session,
+        )
     assert rebuild_after_delete["status"] == "ready"
     assert created.memory_id not in rebuild_after_delete["memory_ids"]
     assert rebuild_after_delete["semantic_index_status"] == "unavailable"
@@ -174,12 +195,13 @@ async def test_export_rebuild_and_restore_keep_current_tombstone_authoritative(l
 
     # Simulate an older snapshot restore while the current deletion ledger and
     # redacted row remain in place.  Restore must not revive it.
-    restored_deleted = await memory_repository.restore_canonical_memory_state(
-        export,
-        actor="operator:test",
-        owner_session_id=owner_session,
-        authenticated_session_id=owner_session,
-    )
+    with _runtime_operator(operator):
+        restored_deleted = await memory_repository.restore_canonical_memory_state(
+            export,
+            actor=operator.principal.principal_id,
+            owner_session_id=owner_session,
+            authenticated_session_id=owner_session,
+        )
     assert restored_deleted["tombstone_suppressed_memory_ids"] == [created.memory_id]
     assert await memory_repository.get_memory(created.memory_id) is None
 
@@ -206,20 +228,22 @@ async def test_export_rebuild_and_restore_keep_current_tombstone_authoritative(l
         source_type="session",
         source_snippet="live recovery fact",
     )
-    live_export = await memory_repository.export_canonical_memory_state(
-        actor="operator:test",
-        owner_session_id=owner_session,
-        authenticated_session_id=owner_session,
-    )
-    corrupt_export = json.loads(json.dumps(live_export))
-    corrupt_export["memories"][0]["content"] = "tampered archive content"
-    with pytest.raises(ValueError, match="archive hash mismatch"):
-        await memory_repository.restore_canonical_memory_state(
-            corrupt_export,
-            actor="operator:test",
+    with _runtime_operator(operator):
+        live_export = await memory_repository.export_canonical_memory_state(
+            actor=operator.principal.principal_id,
             owner_session_id=owner_session,
             authenticated_session_id=owner_session,
         )
+    corrupt_export = json.loads(json.dumps(live_export))
+    corrupt_export["memories"][0]["content"] = "tampered archive content"
+    with pytest.raises(ValueError, match="archive hash mismatch"):
+        with _runtime_operator(operator):
+            await memory_repository.restore_canonical_memory_state(
+                corrupt_export,
+                actor=operator.principal.principal_id,
+                owner_session_id=owner_session,
+                authenticated_session_id=owner_session,
+            )
     stale_restore_connection = sqlite3.connect(database_path)
     try:
         stale_restore_connection.execute("PRAGMA foreign_keys=OFF")
@@ -230,64 +254,96 @@ async def test_export_rebuild_and_restore_keep_current_tombstone_authoritative(l
         stale_restore_connection.commit()
     finally:
         stale_restore_connection.close()
-    live_restored = await memory_repository.restore_canonical_memory_state(
-        live_export,
-        actor="operator:test",
-        owner_session_id=owner_session,
-        authenticated_session_id=owner_session,
-    )
+    with _runtime_operator(operator):
+        live_restored = await memory_repository.restore_canonical_memory_state(
+            live_export,
+            actor=operator.principal.principal_id,
+            owner_session_id=owner_session,
+            authenticated_session_id=owner_session,
+        )
     assert live.memory_id in live_restored["restored_memory_ids"]
     assert (await memory_repository.get_memory(live.memory_id)).content == "A live recovery fact for readback."
     restored_sources = await memory_repository.list_sources(memory_id=live.memory_id)
     assert {source.id for source in restored_sources} == {
         source["id"] for source in live_export["memories"][-1]["sources"]
     }
-    assert live.memory_id in (await memory_repository.rebuild_canonical_memory_index(
-        actor="operator:test",
-        owner_session_id=owner_session,
-        authenticated_session_id=owner_session,
-    ))["memory_ids"]
+    with _runtime_operator(operator):
+        assert live.memory_id in (await memory_repository.rebuild_canonical_memory_index(
+            actor=operator.principal.principal_id,
+            owner_session_id=owner_session,
+            authenticated_session_id=owner_session,
+        ))["memory_ids"]
+        restarted_repository = type(memory_repository)()
+        restarted_index = await restarted_repository.rebuild_canonical_memory_index(
+            actor=operator.principal.principal_id,
+            owner_session_id=owner_session,
+            authenticated_session_id=owner_session,
+        )
+    assert live.memory_id in restarted_index["memory_ids"]
 
 
 @pytest.mark.asyncio
 async def test_recovery_authority_and_archive_validation_fail_closed_before_writes(local_memory_db):
     _get_session, _database_path = local_memory_db
-    with pytest.raises(PermissionError, match="authenticated session"):
+    operator = make_test_bypass_operator()
+    owner_session = operator.session_id
+    with pytest.raises(PermissionError, match="current authenticated operator runtime"):
         await memory_repository.export_canonical_memory_state(
-            actor="operator:test",
-            owner_session_id="owner-a",
-            authenticated_session_id="owner-b",
-        )
-    with pytest.raises(PermissionError, match="source role"):
-        await memory_repository.export_canonical_memory_state(
-            actor="operator:test",
-            owner_session_id="owner-a",
-            authenticated_session_id="owner-a",
-            source_role="assistant",
+            actor=operator.principal.principal_id,
+            owner_session_id=owner_session,
+            authenticated_session_id=owner_session,
         )
 
     archive = {
         "schema_version": "guardian.memory.export.v1",
-        "owner_session_id": "owner-a",
+        "owner_session_id": owner_session,
         "memories": [],
         "tombstones": [],
     }
-    with pytest.raises(PermissionError, match="archive owner"):
-        await memory_repository.restore_canonical_memory_state(
-            archive,
-            actor="operator:test",
-            owner_session_id="owner-b",
-            authenticated_session_id="owner-b",
-        )
-    with pytest.raises(ValueError, match="unknown memory restore archive version"):
-        await memory_repository.restore_canonical_memory_state(
-            {**archive, "schema_version": "guardian.memory.export.v0"},
-            actor="operator:test",
-            owner_session_id="owner-a",
-            authenticated_session_id="owner-a",
-        )
+    with _runtime_operator(operator):
+        with pytest.raises(PermissionError, match="does not match the authenticated session"):
+            await memory_repository.export_canonical_memory_state(
+                actor=operator.principal.principal_id,
+                owner_session_id=owner_session,
+                authenticated_session_id="forged-session",
+            )
+        with pytest.raises(PermissionError, match="source role"):
+            await memory_repository.export_canonical_memory_state(
+                actor=operator.principal.principal_id,
+                owner_session_id=owner_session,
+                authenticated_session_id=owner_session,
+                source_role="assistant",
+            )
+        with pytest.raises(PermissionError, match="archive owner"):
+            await memory_repository.restore_canonical_memory_state(
+                {**archive, "owner_session_id": "forged-owner"},
+                actor=operator.principal.principal_id,
+                owner_session_id=owner_session,
+                authenticated_session_id=owner_session,
+            )
+        with pytest.raises(ValueError, match="unknown memory restore archive version"):
+            await memory_repository.restore_canonical_memory_state(
+                {**archive, "schema_version": "guardian.memory.export.v0"},
+                actor=operator.principal.principal_id,
+                owner_session_id=owner_session,
+                authenticated_session_id=owner_session,
+            )
+        with pytest.raises(ValueError, match="export hash is required"):
+            await memory_repository.restore_canonical_memory_state(
+                archive,
+                actor=operator.principal.principal_id,
+                owner_session_id=owner_session,
+                authenticated_session_id=owner_session,
+            )
 
-    operator = make_test_bypass_operator()
+    with _runtime_operator(operator, revoked=True):
+        with pytest.raises(PermissionError, match="current authenticated operator runtime"):
+            await memory_repository.export_canonical_memory_state(
+                actor=operator.principal.principal_id,
+                owner_session_id=owner_session,
+                authenticated_session_id=owner_session,
+            )
+
     request = SimpleNamespace(state=SimpleNamespace(operator=operator))
     with pytest.raises(HTTPException) as owner_error:
         memory_api.authenticated_memory_context(

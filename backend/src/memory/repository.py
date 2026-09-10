@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import hmac
 import json
 import math
 import os
@@ -35,6 +36,9 @@ from src.db.models import (
     MemoryStatus,
     MemoryTombstone,
 )
+from src.approval.runtime import get_current_session_id, get_current_trust_principal
+from src.auth.cancellation import assert_runtime_not_revoked
+from src.security.trust_contract import AuthorityGrant, PrincipalType
 from src.workspace import (
     WorkspaceStateClass,
     WorkspaceStateError,
@@ -200,27 +204,59 @@ def _recovery_authority(
     authenticated_session_id: str | None,
     source_role: str,
 ) -> tuple[str, str]:
-    """Validate the explicit authority envelope used by recovery operations.
+    """Resolve and validate the current runtime operator authority.
 
-    Authentication is established at the API boundary.  Requiring the same
-    bound session again at this store seam prevents a caller from accidentally
-    passing a body-owned session or an inference/source role into canonical
-    recovery code.
+    Recovery is a privileged store operation, so request arguments are only
+    an envelope to compare with the identity already bound to the current
+    execution.  A caller that supplies an actor/session without a runtime
+    principal is rejected before any database or artifact work occurs.
     """
 
     normalized_actor = str(actor or "").strip()
     normalized_owner = str(owner_session_id or "").strip()
     normalized_authenticated = str(authenticated_session_id or "").strip()
     normalized_role = str(source_role or "").strip().lower()
-    if not normalized_actor:
-        raise PermissionError("memory recovery requires an authenticated actor")
+
+    # The API middleware verifies the operator session before binding this
+    # principal.  Check the runtime cancellation guard as well so an in-flight
+    # request cannot continue recovery after that session is revoked.
+    try:
+        assert_runtime_not_revoked()
+    except PermissionError as exc:
+        raise PermissionError(str(exc)) from exc
+    principal = get_current_trust_principal()
+    runtime_session = str(get_current_session_id() or "").strip()
+    principal_id = str(getattr(principal, "principal_id", "") or "").strip()
+    principal_type = getattr(getattr(principal, "principal_type", None), "value", None) or str(
+        getattr(principal, "principal_type", "") or ""
+    ).strip().lower()
+    principal_session = str(getattr(principal, "session_id", "") or "").strip()
+    operator_session = str(getattr(principal, "operator_session_id", "") or "").strip()
+    grants = {
+        str(getattr(grant, "value", grant)).strip()
+        for grant in getattr(principal, "grants", ())
+    }
+    if (
+        principal is None
+        or principal_type != PrincipalType.OPERATOR.value
+        or not bool(getattr(principal, "authenticated", False))
+        or bool(getattr(principal, "revoked", False))
+        or not principal_id
+        or not runtime_session
+        or principal_session != runtime_session
+        or operator_session != runtime_session
+        or AuthorityGrant.CAPABILITY_EXECUTE.value not in grants
+    ):
+        raise PermissionError("memory recovery requires a current authenticated operator runtime")
+    if not normalized_actor or normalized_actor != principal_id:
+        raise PermissionError("memory recovery actor does not match the authenticated principal")
     if not normalized_owner or not normalized_authenticated:
         raise PermissionError("memory recovery requires an authenticated owner session")
-    if normalized_owner != normalized_authenticated:
+    if normalized_owner != runtime_session or normalized_authenticated != runtime_session:
         raise PermissionError("memory owner session does not match the authenticated session")
     if normalized_role != "operator":
         raise PermissionError("memory recovery source role must be operator")
-    return normalized_actor, normalized_owner
+    return principal_id, runtime_session
 
 
 def _recovery_artifact_path(*, kind: str, digest: str) -> tuple[Path, str]:
@@ -1942,17 +1978,21 @@ class MemoryRepository:
         if not isinstance(archive_tombstones, list):
             raise ValueError("memory restore archive tombstones must be a list")
         supplied_archive_hash = archive.get("export_hash")
-        if supplied_archive_hash is not None:
-            if not isinstance(supplied_archive_hash, str) or supplied_archive_hash != _recovery_json_hash(
-                {
-                    "schema_version": archive.get("schema_version"),
-                    "owner_session_id": archive.get("owner_session_id", ""),
-                    "canonical_tombstone_revision": archive.get("canonical_tombstone_revision"),
-                    "memories": records,
-                    "tombstones": archive_tombstones,
-                }
-            ):
-                raise ValueError("memory restore archive hash mismatch")
+        if not isinstance(supplied_archive_hash, str) or not re.fullmatch(
+            r"[0-9a-f]{64}", supplied_archive_hash
+        ):
+            raise ValueError("memory restore archive export hash is required")
+        expected_archive_hash = _recovery_json_hash(
+            {
+                "schema_version": archive.get("schema_version"),
+                "owner_session_id": archive.get("owner_session_id", ""),
+                "canonical_tombstone_revision": archive.get("canonical_tombstone_revision"),
+                "memories": records,
+                "tombstones": archive_tombstones,
+            }
+        )
+        if not hmac.compare_digest(supplied_archive_hash, expected_archive_hash):
+            raise ValueError("memory restore archive hash mismatch")
         normalized_records: list[dict[str, Any]] = []
         seen_ids: set[str] = set()
         for record in records:

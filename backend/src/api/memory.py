@@ -1,3 +1,4 @@
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Any
 
@@ -6,6 +7,7 @@ from fastapi import HTTPException
 from fastapi import Request
 from pydantic import BaseModel, Field
 
+from src.approval.runtime import reset_runtime_context, set_runtime_context
 from src.auth.service import AuthenticatedOperator
 from src.memory.benchmark import build_guardian_memory_benchmark_report
 from src.memory.control import (
@@ -327,7 +329,10 @@ async def get_memory_audit(memory_id: str | None = None, limit: int = 20):
     return await list_memory_audit_receipts(memory_id=memory_id, limit=limit)
 
 
-def _recovery_request_context(http_request: Request, request: MemoryRecoveryRequest) -> AuthenticatedMemoryContext:
+def _recovery_request_context(
+    http_request: Request,
+    request: MemoryRecoveryRequest | MemoryRestoreRequest,
+) -> AuthenticatedMemoryContext:
     return authenticated_memory_context(
         http_request,
         requested_owner_session_id=request.owner_session_id,
@@ -336,17 +341,37 @@ def _recovery_request_context(http_request: Request, request: MemoryRecoveryRequ
     )
 
 
+@asynccontextmanager
+async def _bound_recovery_runtime(
+    http_request: Request,
+    context: AuthenticatedMemoryContext,
+):
+    """Bind middleware-verified operator authority around the store call."""
+
+    principal = http_request.state.operator.principal
+    tokens = set_runtime_context(
+        context.session_id,
+        "off",
+        trust_principal=principal,
+    )
+    try:
+        yield
+    finally:
+        reset_runtime_context(tokens)
+
+
 @router.post("/memory/recovery/export")
 async def export_memory_recovery_route(http_request: Request, request: MemoryRecoveryRequest):
     try:
         context = _recovery_request_context(http_request, request)
-        return await export_memory_recovery_control(
-            actor=context.actor,
-            owner_session_id=context.session_id,
-            authenticated_session_id=context.session_id,
-            source_role=context.source_role,
-            limit=request.limit,
-        )
+        async with _bound_recovery_runtime(http_request, context):
+            return await export_memory_recovery_control(
+                actor=context.actor,
+                owner_session_id=context.session_id,
+                authenticated_session_id=context.session_id,
+                source_role=context.source_role,
+                limit=request.limit,
+            )
     except HTTPException:
         raise
     except PermissionError as exc:
@@ -361,13 +386,14 @@ async def export_memory_recovery_route(http_request: Request, request: MemoryRec
 async def rebuild_memory_recovery_route(http_request: Request, request: MemoryRecoveryRequest):
     try:
         context = _recovery_request_context(http_request, request)
-        return await rebuild_memory_recovery_control(
-            actor=context.actor,
-            owner_session_id=context.session_id,
-            authenticated_session_id=context.session_id,
-            source_role=context.source_role,
-            limit=request.limit,
-        )
+        async with _bound_recovery_runtime(http_request, context):
+            return await rebuild_memory_recovery_control(
+                actor=context.actor,
+                owner_session_id=context.session_id,
+                authenticated_session_id=context.session_id,
+                source_role=context.source_role,
+                limit=request.limit,
+            )
     except HTTPException:
         raise
     except PermissionError as exc:
@@ -381,19 +407,15 @@ async def rebuild_memory_recovery_route(http_request: Request, request: MemoryRe
 @router.post("/memory/recovery/restore")
 async def restore_memory_recovery_route(http_request: Request, request: MemoryRestoreRequest):
     try:
-        context = authenticated_memory_context(
-            http_request,
-            requested_owner_session_id=request.owner_session_id,
-            requested_source_session_id=request.source_session_id,
-            requested_source_role=request.source_role,
-        )
-        return await restore_memory_recovery_control(
-            archive=request.archive,
-            actor=context.actor,
-            owner_session_id=context.session_id,
-            authenticated_session_id=context.session_id,
-            source_role=context.source_role,
-        )
+        context = _recovery_request_context(http_request, request)
+        async with _bound_recovery_runtime(http_request, context):
+            return await restore_memory_recovery_control(
+                archive=request.archive,
+                actor=context.actor,
+                owner_session_id=context.session_id,
+                authenticated_session_id=context.session_id,
+                source_role=context.source_role,
+            )
     except HTTPException:
         raise
     except PermissionError as exc:
@@ -411,12 +433,13 @@ async def get_memory_recovery_status(http_request: Request, owner_session_id: st
             http_request,
             requested_owner_session_id=owner_session_id,
         )
-        return await memory_recovery_status(
-            owner_session_id=context.session_id,
-            authenticated_session_id=context.session_id,
-            actor=context.actor,
-            source_role=context.source_role,
-        )
+        async with _bound_recovery_runtime(http_request, context):
+            return await memory_recovery_status(
+                owner_session_id=context.session_id,
+                authenticated_session_id=context.session_id,
+                actor=context.actor,
+                source_role=context.source_role,
+            )
     except HTTPException:
         raise
     except PermissionError as exc:

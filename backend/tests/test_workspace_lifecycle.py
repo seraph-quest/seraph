@@ -379,6 +379,87 @@ def test_interrupted_restore_is_recovered_from_journal(tmp_path):
     assert (root / "soul.md").read_text(encoding="utf-8") == "original soul\n"
 
 
+def test_recovery_rejects_tampered_journal_before_moving_roots(tmp_path):
+    root, registry = _workspace(tmp_path)
+    archive = Path(backup_workspace(root, registry=registry)["archive_path"])
+    restore_id = "restore-journal-integrity-01"
+    with pytest.raises(InterruptedWorkspaceRestore):
+        restore_workspace(
+            root,
+            archive,
+            registry=registry,
+            confirm=True,
+            restore_id=restore_id,
+            interrupt_after_active_move=True,
+        )
+
+    journal_path = workspace_backup_dir(root) / restore_id / "restore-journal.json"
+    journal = json.loads(journal_path.read_text(encoding="utf-8"))
+    assert journal["journal_sha256"]
+    journal["status"] = "promoted"
+    journal_path.write_text(json.dumps(journal), encoding="utf-8")
+
+    with pytest.raises(WorkspaceLifecycleError, match="checksum"):
+        recover_interrupted_restore(root)
+    assert not root.exists()
+    assert (workspace_backup_dir(root) / restore_id / "previous-workspace").is_dir()
+    assert (workspace_restore_staging_dir(root) / restore_id).is_dir()
+
+
+def test_recovery_rejects_valid_but_unknown_journal_state(tmp_path):
+    root, registry = _workspace(tmp_path)
+    archive = Path(backup_workspace(root, registry=registry)["archive_path"])
+    restore_id = "restore-journal-binding-01"
+    with pytest.raises(InterruptedWorkspaceRestore):
+        restore_workspace(
+            root,
+            archive,
+            registry=registry,
+            confirm=True,
+            restore_id=restore_id,
+            interrupt_after_active_move=True,
+        )
+
+    journal_path = workspace_backup_dir(root) / restore_id / "restore-journal.json"
+    journal = json.loads(journal_path.read_text(encoding="utf-8"))
+    journal["status"] = "unknown-state"
+    workspace_lifecycle._refresh_journal_digest(journal)
+    journal_path.write_text(json.dumps(journal), encoding="utf-8")
+
+    with pytest.raises(WorkspaceLifecycleError, match="unknown state"):
+        recover_interrupted_restore(root)
+    assert not root.exists()
+    assert (workspace_backup_dir(root) / restore_id / "previous-workspace").is_dir()
+    assert (workspace_restore_staging_dir(root) / restore_id).is_dir()
+
+
+def test_recovery_rejects_journal_record_identity_mismatch(tmp_path):
+    root, registry = _workspace(tmp_path)
+    archive = Path(backup_workspace(root, registry=registry)["archive_path"])
+    restore_id = "restore-journal-binding-01"
+    with pytest.raises(InterruptedWorkspaceRestore):
+        restore_workspace(
+            root,
+            archive,
+            registry=registry,
+            confirm=True,
+            restore_id=restore_id,
+            interrupt_after_active_move=True,
+        )
+
+    journal_path = workspace_backup_dir(root) / restore_id / "restore-journal.json"
+    journal = json.loads(journal_path.read_text(encoding="utf-8"))
+    journal["restore_id"] = "restore-other-record-01"
+    workspace_lifecycle._refresh_journal_digest(journal)
+    journal_path.write_text(json.dumps(journal), encoding="utf-8")
+
+    with pytest.raises(WorkspaceLifecycleError, match="identity"):
+        recover_interrupted_restore(root)
+    assert not root.exists()
+    assert (workspace_backup_dir(root) / restore_id / "previous-workspace").is_dir()
+    assert (workspace_restore_staging_dir(root) / restore_id).is_dir()
+
+
 def test_restore_requires_existing_secret_material_and_rejects_secret_symlink(tmp_path):
     root, registry = _workspace(tmp_path)
     archive = Path(backup_workspace(root, registry=registry)["archive_path"])

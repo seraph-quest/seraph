@@ -571,6 +571,13 @@ def _apply_process_limits() -> None:
     ):
         try:
             current_soft, current_hard = resource.getrlimit(limit_name)
+            if limit_name == resource.RLIMIT_NPROC:
+                # Preserve an existing finite host limit. Linux may account
+                # the runner's threads toward RLIMIT_NPROC, so replacing a
+                # higher inherited limit with 64 can make a child unable to
+                # fork its own bounded helper. An unlimited host profile gets
+                # a finite fallback instead of losing the process ceiling.
+                requested = max(requested, current_soft) if current_soft != resource.RLIM_INFINITY else 1024
             hard = current_hard if current_hard != resource.RLIM_INFINITY else requested
             soft = min(requested, hard)
             resource.setrlimit(limit_name, (soft, hard))

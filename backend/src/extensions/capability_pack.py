@@ -111,7 +111,14 @@ _PRIVILEGED_TOOL_NAMES = {
     "execute_code",
     "run_command",
     "shell",
+    "shell_execute",
     "sudo",
+    "start_process",
+    "list_processes",
+    "read_process_output",
+    "stop_process",
+    "process",
+    "processes",
 }
 _SAFE_FILESYSTEM_SCOPES = {
     "workspace_read",
@@ -193,6 +200,23 @@ def _validate_secret_reference(value: str) -> str:
     if any(marker in lowered for marker in _SECRET_VALUE_MARKERS):
         raise ValueError("secrets must contain references, never inline secret values")
     return normalized
+
+
+def _is_privileged_tool_reference(value: str) -> bool:
+    """Reject process/shell aliases before they can become pack authority."""
+
+    normalized = value.lower().replace("-", "_")
+    leaf = normalized.rsplit(".", 1)[-1]
+    if leaf in _PRIVILEGED_TOOL_NAMES:
+        return True
+    # Namespaced aliases such as ``native.process.start`` and variants such as
+    # ``process_manager`` must remain behind the governed tool policy too.
+    parts = [part for part in re.split(r"[.:/]", normalized) if part]
+    return any(
+        part in {"exec", "shell", "sudo", "process", "processes"}
+        or "process" in part
+        for part in parts
+    )
 
 
 def _validate_contribution_reference(value: str, *, field_name: str) -> str:
@@ -403,10 +427,7 @@ class PackAuthority(BaseModel):
         if field_name == "secrets":
             return [_validate_secret_reference(item) for item in values]
         normalized = [_validate_reference(item, field_name=field_name) for item in values]
-        if field_name == "tools" and any(
-            item.rsplit(".", 1)[-1].lower() in _PRIVILEGED_TOOL_NAMES
-            for item in normalized
-        ):
+        if field_name == "tools" and any(_is_privileged_tool_reference(item) for item in normalized):
             raise ValueError("privileged process tools are not valid capability-pack authority")
         if field_name == "filesystem":
             for item in normalized:
@@ -805,12 +826,14 @@ class ArchiveValidationResult:
     members: tuple[str, ...] = ()
     errors: tuple[str, ...] = ()
     total_bytes: int = 0
+    regular_files: tuple[str, ...] = ()
 
     def as_dict(self) -> dict[str, Any]:
         return {
             "ok": self.ok,
             "archive": self.archive,
             "members": list(self.members),
+            "regular_files": list(self.regular_files),
             "errors": list(self.errors),
             "total_bytes": self.total_bytes,
         }
@@ -826,6 +849,7 @@ def validate_capability_pack_archive(
     """Inspect zip/tar metadata without extracting untrusted entries."""
     path = Path(archive_path)
     members: list[str] = []
+    regular_files: list[str] = []
     errors: list[str] = []
     total_bytes = 0
     seen: set[str] = set()
@@ -855,14 +879,22 @@ def validate_capability_pack_archive(
                     seen.add(name)
                     members.append(name)
                     mode = (info.external_attr >> 16) & 0xFFFF
-                    if stat.S_ISLNK(mode) or stat.S_ISCHR(mode) or stat.S_ISBLK(mode) or stat.S_ISFIFO(mode):
+                    is_directory = info.is_dir() or stat.S_ISDIR(mode)
+                    is_special = stat.S_ISLNK(mode) or stat.S_ISCHR(mode) or stat.S_ISBLK(mode) or stat.S_ISFIFO(mode)
+                    if is_special:
                         errors.append(f"archive member is a link or special file: {name}")
-                    if stat.S_IMODE(mode) & 0o111:
-                        errors.append(f"archive member is executable: {name}")
+                    elif not is_directory and stat.S_IFMT(mode) not in {0, stat.S_IFREG}:
+                        errors.append(f"archive member is not a regular file: {name}")
+                    elif not is_directory:
+                        regular_files.append(name)
+                        if stat.S_IMODE(mode) & 0o111:
+                            errors.append(f"archive member is executable: {name}")
                     unsafe_reason = _unsafe_package_member(name)
                     if unsafe_reason:
                         errors.append(f"{unsafe_reason}: {name}")
-                    if info.is_dir() and name in {"manifest.yaml", "manifest.yml"}:
+                    if name in {"manifest.yaml", "manifest.yml"} and not is_directory and name not in regular_files:
+                        errors.append("root manifest must be a regular file")
+                    if is_directory and name in {"manifest.yaml", "manifest.yml"}:
                         errors.append("root manifest must be a regular file")
                     if info.file_size > max_member_bytes:
                         errors.append(f"archive member exceeds size limit: {name}")
@@ -882,14 +914,21 @@ def validate_capability_pack_archive(
                         errors.append(f"duplicate archive member: {name}")
                     seen.add(name)
                     members.append(name)
-                    if info.issym() or info.islnk() or info.isdev() or info.isfifo():
+                    is_directory = info.isdir()
+                    is_regular = info.isfile()
+                    is_special = info.issym() or info.islnk() or info.isdev() or info.isfifo()
+                    if is_special:
                         errors.append(f"archive member is a link or special file: {name}")
-                    if int(info.mode) & 0o111:
-                        errors.append(f"archive member is executable: {name}")
+                    elif not is_directory and not is_regular:
+                        errors.append(f"archive member is not a regular file: {name}")
+                    elif is_regular:
+                        regular_files.append(name)
+                        if int(info.mode) & 0o111:
+                            errors.append(f"archive member is executable: {name}")
                     unsafe_reason = _unsafe_package_member(name)
                     if unsafe_reason:
                         errors.append(f"{unsafe_reason}: {name}")
-                    if info.isdir() and name in {"manifest.yaml", "manifest.yml"}:
+                    if name in {"manifest.yaml", "manifest.yml"} and not is_regular:
                         errors.append("root manifest must be a regular file")
                     size = max(0, int(info.size))
                     if size > max_member_bytes:
@@ -909,6 +948,7 @@ def validate_capability_pack_archive(
         ok=not errors,
         archive=str(path),
         members=tuple(sorted(set(members))),
+        regular_files=tuple(sorted(set(regular_files))),
         errors=tuple(dict.fromkeys(errors)),
         total_bytes=total_bytes,
     )
@@ -941,10 +981,11 @@ def _unsafe_package_member(name: str) -> str | None:
     return None
 
 
-def _scan_capability_pack_directory(root: Path) -> tuple[list[str], list[str], int]:
+def _scan_capability_pack_directory(root: Path) -> tuple[list[str], list[str], int, list[str]]:
     """Run the bounded directory scan shared by validation and digesting."""
 
     members: list[str] = []
+    regular_files: list[str] = []
     errors: list[str] = []
     total_bytes = 0
     try:
@@ -962,6 +1003,7 @@ def _scan_capability_pack_directory(root: Path) -> tuple[list[str], list[str], i
             if not stat.S_ISREG(entry_stat.st_mode):
                 errors.append(f"package member is not a regular file: {relative}")
                 continue
+            regular_files.append(relative)
             if stat.S_IMODE(entry_stat.st_mode) & 0o111:
                 errors.append(f"package member is executable: {relative}")
             unsafe_reason = _unsafe_package_member(relative)
@@ -981,15 +1023,22 @@ def _scan_capability_pack_directory(root: Path) -> tuple[list[str], list[str], i
         errors.append("package must contain a root manifest.yaml or manifest.yml")
     if "manifest.yaml" in members and "manifest.yml" in members:
         errors.append("package must contain only one root manifest")
-    return members, list(dict.fromkeys(errors)), total_bytes
+    return members, list(dict.fromkeys(errors)), total_bytes, regular_files
 
 
-def _validate_declared_archive_files(manifest: CapabilityPackManifest, members: Iterable[str]) -> list[str]:
+def _validate_declared_archive_files(
+    manifest: CapabilityPackManifest,
+    members: Iterable[str],
+    regular_files: Iterable[str],
+) -> list[str]:
     member_set = set(members)
+    regular_file_set = set(regular_files)
     errors: list[str] = []
     for reference in sorted(_declared_package_files(manifest)):
         if reference not in member_set:
             errors.append(f"declared contribution file is missing from package: {reference}")
+        elif reference not in regular_file_set:
+            errors.append(f"declared contribution file is not a regular file: {reference}")
     return errors
 
 
@@ -1000,7 +1049,7 @@ def validate_capability_pack_path(
     """Validate a checked-out package and every declared contribution path."""
     root = Path(package_root)
     errors: list[str] = []
-    members, scan_errors, _total_bytes = _scan_capability_pack_directory(root)
+    members, scan_errors, _total_bytes, regular_files = _scan_capability_pack_directory(root)
     errors.extend(scan_errors)
     if not root.exists() or not root.is_dir():
         return {"ok": False, "path": str(root), "errors": ["package root must be a directory"]}
@@ -1037,7 +1086,7 @@ def validate_capability_pack_path(
             errors.append("supplied manifest does not match the package manifest")
     references: list[str] = []
     if parsed is not None:
-        errors.extend(_validate_declared_archive_files(parsed, members))
+        errors.extend(_validate_declared_archive_files(parsed, members, regular_files))
         for field_name in _CONTRIBUTION_PATH_FIELDS:
             field_references = list(getattr(parsed.contributes, field_name))
             references.extend(field_references)
@@ -1100,7 +1149,7 @@ def validate_capability_pack_package(
             if len(content.encode("utf-8")) > MAX_PACK_MEMBER_BYTES:
                 raise CapabilityPackError("archive manifest exceeds size limit")
             parsed = parse_capability_pack_manifest(content, source=f"{path}:{manifest_name}")
-            errors.extend(_validate_declared_archive_files(parsed, archive.members))
+            errors.extend(_validate_declared_archive_files(parsed, archive.members, archive.regular_files))
             if manifest is not None:
                 supplied = manifest if isinstance(manifest, CapabilityPackManifest) else parse_capability_pack_manifest(manifest)
                 supplied_payload = supplied.model_dump(mode="json")
@@ -1122,7 +1171,7 @@ def capability_pack_digest(package_root: str | Path) -> str:
     root = Path(package_root)
     if not root.is_dir():
         raise CapabilityPackError("package root must be a directory")
-    _members, scan_errors, _total_bytes = _scan_capability_pack_directory(root)
+    _members, scan_errors, _total_bytes, _regular_files = _scan_capability_pack_directory(root)
     if scan_errors:
         raise CapabilityPackError("; ".join(scan_errors))
     hasher = hashlib.sha256()
@@ -1865,6 +1914,32 @@ class CapabilityPackLifecycle:
         return review
 
     @staticmethod
+    def _canonical_package_binding(
+        root_path: str | Path,
+    ) -> tuple[CapabilityPackManifest, str, dict[str, Any]] | None:
+        """Recompute the reviewed package identity from its current contents."""
+
+        root = Path(root_path)
+        try:
+            canonical_root = _safe_pack_path(root)
+            if canonical_root != str(root):
+                return None
+            validation = validate_capability_pack_path(root)
+            if not validation.get("ok"):
+                return None
+            payload = validation.get("manifest")
+            if not isinstance(payload, Mapping):
+                return None
+            manifest = parse_capability_pack_manifest(payload, source=str(root / "manifest.yaml"))
+            digest = capability_pack_digest(root)
+            publisher_trust = publisher_trust_status(manifest, package_root=root)
+            if manifest.signature.state == "integrity-checked" and not publisher_trust["integrity_checked"]:
+                return None
+            return manifest, digest, publisher_trust
+        except (CapabilityPackError, CapabilityPackManifestError, OSError, UnicodeDecodeError, ValueError, RuntimeError):
+            return None
+
+    @staticmethod
     def _pointer_binding_valid(
         state: Mapping[str, Any],
         pack_id: str,
@@ -1877,28 +1952,68 @@ class CapabilityPackLifecycle:
         review = reviews.get(pointer.get("review_id")) if isinstance(reviews, Mapping) else None
         if not isinstance(record, Mapping) or not isinstance(review, Mapping):
             return False
-        fields = (
-            "pack_id",
-            "version",
-            "digest",
-            "goal_id",
-            "authority_digest",
-            "review_id",
-            "dependencies_digest",
-        )
-        bound = all(
-            pointer.get(field_name) == record.get(field_name) == review.get(field_name)
-            for field_name in fields
-        ) and not bool(record.get("revoked"))
-        if not bound:
-            return False
         root_path = record.get("root_path")
         if not isinstance(root_path, str):
             return False
-        try:
-            return capability_pack_digest(root_path) == pointer.get("digest")
-        except (CapabilityPackError, OSError, ValueError):
+        canonical = CapabilityPackLifecycle._canonical_package_binding(root_path)
+        if canonical is None:
             return False
+        manifest, digest, publisher_trust = canonical
+        review_id = _review_digest(
+            pack_id=manifest.id,
+            version=manifest.version,
+            digest=digest,
+            goal_id=str(pointer.get("goal_id") or ""),
+            authority_digest=manifest.authority_digest,
+        )
+        canonical_record = {
+            "pack_id": manifest.id,
+            "version": manifest.version,
+            "digest": digest,
+            "goal_id": pointer.get("goal_id"),
+            "authority_digest": manifest.authority_digest,
+            "authority": manifest.authority.model_dump(mode="json"),
+            "resources": manifest.resources.model_dump(mode="json"),
+            "data_policy": manifest.data_policy.model_dump(mode="json"),
+            "compatibility": manifest.compatibility.model_dump(mode="json"),
+            "dependencies": _dependency_bindings(manifest),
+            "dependencies_digest": _dependencies_digest(manifest),
+            "root_path": _safe_pack_path(root_path),
+            "review_id": review_id,
+            "revoked": False,
+        }
+        record_fields = tuple(canonical_record)
+        if any(record.get(field_name) != canonical_record[field_name] for field_name in record_fields):
+            return False
+        canonical_review = {
+            "review_id": review_id,
+            "status": "approved",
+            "pack_id": manifest.id,
+            "version": manifest.version,
+            "digest": digest,
+            "goal_id": pointer.get("goal_id"),
+            "authority_digest": manifest.authority_digest,
+            "dependencies": _dependency_bindings(manifest),
+            "dependencies_digest": _dependencies_digest(manifest),
+            "publisher_trust": publisher_trust,
+        }
+        review_fields = tuple(canonical_review)
+        if any(review.get(field_name) != canonical_review[field_name] for field_name in review_fields):
+            return False
+        canonical_pointer = {
+            "pack_id": manifest.id,
+            "version": manifest.version,
+            "digest": digest,
+            "goal_id": pointer.get("goal_id"),
+            "review_id": review_id,
+            "authority_digest": manifest.authority_digest,
+            "dependencies_digest": _dependencies_digest(manifest),
+            "root_path": _safe_pack_path(root_path),
+        }
+        return (
+            all(pointer.get(field_name) == value for field_name, value in canonical_pointer.items())
+            and not bool(record.get("revoked"))
+        )
 
     def review(
         self,
@@ -2020,6 +2135,8 @@ class CapabilityPackLifecycle:
         candidate_delta: dict[str, Any] = self._record_delta(None, pack)
         idempotent_existing = False
         if isinstance(existing, Mapping) and existing.get("status") in {"active", "paused"}:
+            if not self._pointer_binding_valid(state, pack.id, existing):
+                raise CapabilityPackLifecycleError("active pointer binding is invalid")
             previous_digest = str(existing.get("digest") or "") or None
             if existing.get("goal_id") != goal_id:
                 raise CapabilityPackLifecycleError("active pack is bound to a different goal")
@@ -2203,37 +2320,91 @@ class CapabilityPackLifecycle:
                 raise CapabilityPackLifecycleError(f"pack '{pack_id}' has no active-version pointer")
             if pointer.get("status") not in {"active", "paused"}:
                 raise CapabilityPackLifecycleError("rollback requires an active or paused pack")
+            if not self._pointer_binding_valid(state, pack_id, pointer):
+                raise CapabilityPackLifecycleError("active pointer binding is invalid")
             previous_digest = pointer.get("previous_digest")
             previous_version = pointer.get("previous_version")
-            if not isinstance(previous_digest, str) or not isinstance(previous_version, str):
+            if (
+                not isinstance(previous_digest, str)
+                or not _DIGEST_RE.fullmatch(previous_digest)
+                or not isinstance(previous_version, str)
+            ):
                 raise CapabilityPackLifecycleError("pack has no rollback version")
             if previous_digest in state["revoked"].get(pack_id, []):
                 raise CapabilityPackLifecycleError("rollback target digest is revoked")
             record = state["versions"].get(pack_id, {}).get(previous_digest)
             if not isinstance(record, Mapping) or record.get("revoked"):
                 raise CapabilityPackLifecycleError("rollback target is quarantined or unavailable")
-            compatibility = record.get("compatibility") if isinstance(record.get("compatibility"), Mapping) else {}
+            root_path = record.get("root_path")
+            if not isinstance(root_path, str):
+                raise CapabilityPackLifecycleError("rollback target package root is unavailable")
+            canonical = self._canonical_package_binding(root_path)
+            if canonical is None:
+                raise CapabilityPackLifecycleError(
+                    "rollback target package root, manifest, signature, or contributions are invalid"
+                )
+            target_manifest, target_digest, target_publisher_trust = canonical
+            if target_manifest.id != pack_id or target_manifest.version != previous_version:
+                raise CapabilityPackLifecycleError("rollback target manifest identity does not match the reviewed version")
+            if target_digest != previous_digest:
+                raise CapabilityPackLifecycleError("rollback target content digest does not match the reviewed digest")
             try:
-                if not Version(self.seraph_version) in SpecifierSet(str(compatibility.get("seraph") or "")):
-                    raise CapabilityPackLifecycleError("rollback target is incompatible with this Seraph runtime")
-            except InvalidVersion as exc:
-                raise CapabilityPackLifecycleError("rollback target has invalid compatibility metadata") from exc
-            target_goal = str(goal_id or pointer.get("goal_id") or "")
+                self._assert_compatible(target_manifest)
+            except CapabilityPackLifecycleError as exc:
+                raise CapabilityPackLifecycleError(f"rollback target is incompatible with this Seraph runtime: {exc}") from exc
+            target_goal = _validate_goal_id(goal_id) if goal_id is not None else _validate_goal_id(str(pointer.get("goal_id") or ""))
             if record.get("goal_id") != target_goal:
                 raise CapabilityPackLifecycleError("rollback target is bound to a different goal")
             review_id = str(record.get("review_id") or "")
+            expected_review_id = _review_digest(
+                pack_id=target_manifest.id,
+                version=target_manifest.version,
+                digest=target_digest,
+                goal_id=target_goal,
+                authority_digest=target_manifest.authority_digest,
+            )
+            canonical_record = {
+                "pack_id": target_manifest.id,
+                "version": target_manifest.version,
+                "digest": target_digest,
+                "goal_id": target_goal,
+                "authority_digest": target_manifest.authority_digest,
+                "authority": target_manifest.authority.model_dump(mode="json"),
+                "resources": target_manifest.resources.model_dump(mode="json"),
+                "data_policy": target_manifest.data_policy.model_dump(mode="json"),
+                "compatibility": target_manifest.compatibility.model_dump(mode="json"),
+                "dependencies": _dependency_bindings(target_manifest),
+                "dependencies_digest": _dependencies_digest(target_manifest),
+                "root_path": _safe_pack_path(root_path),
+                "review_id": expected_review_id,
+                "revoked": False,
+            }
+            if any(record.get(field_name) != expected for field_name, expected in canonical_record.items()):
+                raise CapabilityPackLifecycleError("rollback target version binding is stale")
             review = self._review_from_state(state, review_id)
-            if review.get("digest") != previous_digest or review.get("version") != previous_version or review.get("goal_id") != target_goal or review.get("dependencies_digest") != record.get("dependencies_digest"):
+            canonical_review = {
+                "review_id": expected_review_id,
+                "status": "approved",
+                "pack_id": target_manifest.id,
+                "version": target_manifest.version,
+                "digest": target_digest,
+                "goal_id": target_goal,
+                "authority_digest": target_manifest.authority_digest,
+                "dependencies": _dependency_bindings(target_manifest),
+                "dependencies_digest": _dependencies_digest(target_manifest),
+                "publisher_trust": target_publisher_trust,
+            }
+            if any(review.get(field_name) != expected for field_name, expected in canonical_review.items()):
                 raise CapabilityPackLifecycleError("rollback review binding is stale")
             current_record = state["versions"].get(pack_id, {}).get(pointer.get("digest"))
             rollback_delta = _authority_delta_from_payloads(
                 current_record.get("authority") if isinstance(current_record, Mapping) else {},
                 current_record.get("data_policy") if isinstance(current_record, Mapping) else {},
-                record.get("authority") if isinstance(record.get("authority"), Mapping) else {},
-                record.get("data_policy") if isinstance(record.get("data_policy"), Mapping) else {},
+                target_manifest.authority.model_dump(mode="json"),
+                target_manifest.data_policy.model_dump(mode="json"),
             )
             rollback_delta["authority_digest_before"] = current_record.get("authority_digest") if isinstance(current_record, Mapping) else None
-            rollback_delta["authority_digest_after"] = record.get("authority_digest")
+            rollback_delta["authority_digest_after"] = target_manifest.authority_digest
             self._require_approval(
                 state,
                 approval_id=approval_id,
@@ -2247,9 +2418,9 @@ class CapabilityPackLifecycle:
             )
             cancelled_jobs = self._cancel_pack_jobs(state, pack_id, digest=str(pointer.get("digest") or ""), reason="rollback_requested")
             next_pointer = dict(pointer)
-            next_pointer.update({"version": previous_version, "digest": previous_digest, "goal_id": target_goal, "review_id": review_id, "authority_digest": record.get("authority_digest"), "dependencies_digest": record.get("dependencies_digest"), "status": "active", "previous_version": pointer.get("version"), "previous_digest": pointer.get("digest"), "root_path": record.get("root_path")})
+            next_pointer.update({"version": target_manifest.version, "digest": target_digest, "goal_id": target_goal, "review_id": expected_review_id, "authority_digest": target_manifest.authority_digest, "dependencies_digest": _dependencies_digest(target_manifest), "status": "active", "previous_version": pointer.get("version"), "previous_digest": pointer.get("digest"), "root_path": _safe_pack_path(root_path)})
             state["active"][pack_id] = next_pointer
-            receipt = self._record_receipt(state, action="rollback", status="active", pack_id=pack_id, details={"version": previous_version, "digest": previous_digest, "goal_id": target_goal, "authority_delta": rollback_delta, "approval_id": approval_id, "cancelled_jobs": cancelled_jobs})
+            receipt = self._record_receipt(state, action="rollback", status="active", pack_id=pack_id, details={"version": target_manifest.version, "digest": target_digest, "goal_id": target_goal, "authority_delta": rollback_delta, "approval_id": approval_id, "cancelled_jobs": cancelled_jobs})
             self._commit(state)
         return {"status": "active", "pointer": _public_pointer(next_pointer), "receipt": receipt}
 

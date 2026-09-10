@@ -168,6 +168,18 @@ def test_v2_schema_normalizes_priority_and_rejects_unsafe_limits():
     with pytest.raises(CapabilityPackManifestError, match="bounded workspace/artifact scope"):
         parse_capability_pack_manifest(_manifest().replace("filesystem: [workspace_read]", "filesystem: [host_root]"))
 
+    for tool in (
+        "shell_execute",
+        "start_process",
+        "list_processes",
+        "read_process_output",
+        "stop_process",
+        "process_manager",
+        "native.process.start",
+    ):
+        with pytest.raises(CapabilityPackManifestError, match="privileged process"):
+            parse_capability_pack_manifest(_manifest().replace("tools: ['read_file']", f"tools: ['{tool}']"))
+
 
 def test_v1_parser_and_migration_are_explicit_and_keyless():
     payload = {
@@ -249,6 +261,49 @@ def test_archive_validation_rejects_traversal_links_and_oversized_members(tmp_pa
     valid_report = validate_capability_pack_package(valid)
     assert valid_report["ok"] is True
     assert valid_report["manifest"]["schema_version"] == 2
+
+
+def test_archive_directory_execute_bits_are_allowed_but_declared_directories_are_not(tmp_path: Path):
+    directory_zip = tmp_path / "directory.zip"
+    with zipfile.ZipFile(directory_zip, "w") as archive:
+        archive.writestr("manifest.yaml", _manifest())
+        directory = zipfile.ZipInfo("skills/")
+        directory.external_attr = (stat.S_IFDIR | 0o755) << 16
+        archive.writestr(directory, b"")
+    directory_report = validate_capability_pack_archive(directory_zip)
+    assert directory_report.ok is True
+    assert "skills" in directory_report.members
+    assert "skills" not in directory_report.regular_files
+
+    directory_tar = tmp_path / "directory.tar"
+    with tarfile.open(directory_tar, "w") as archive:
+        manifest = tarfile.TarInfo("manifest.yaml")
+        manifest_content = _manifest().encode()
+        manifest.mode = 0o644
+        manifest.size = len(manifest_content)
+        archive.addfile(manifest, io.BytesIO(manifest_content))
+        directory = tarfile.TarInfo("skills")
+        directory.type = tarfile.DIRTYPE
+        directory.mode = 0o755
+        archive.addfile(directory)
+    tar_report = validate_capability_pack_archive(directory_tar)
+    assert tar_report.ok is True
+    assert "skills" in tar_report.members
+    assert "skills" not in tar_report.regular_files
+
+    declared_directory_zip = tmp_path / "declared-directory.zip"
+    declared_manifest = _manifest().replace("  skills: []", "  skills: [skills/brief.md]", 1)
+    with zipfile.ZipFile(declared_directory_zip, "w") as archive:
+        archive.writestr("manifest.yaml", declared_manifest)
+        directory = zipfile.ZipInfo("skills/")
+        directory.external_attr = (stat.S_IFDIR | 0o755) << 16
+        archive.writestr(directory, b"")
+        contribution_directory = zipfile.ZipInfo("skills/brief.md/")
+        contribution_directory.external_attr = (stat.S_IFDIR | 0o755) << 16
+        archive.writestr(contribution_directory, b"")
+    declared_report = validate_capability_pack_package(declared_directory_zip)
+    assert declared_report["ok"] is False
+    assert any("declared contribution file is not a regular file" in error for error in declared_report["errors"])
 
 
 def test_package_path_and_digest_reject_symlinked_contributions(tmp_path: Path):
@@ -597,6 +652,59 @@ def test_operator_approval_binds_rollback_delta_and_jobs_cancel(tmp_path: Path):
     assert store.status(first.id)["jobs"][0]["status"] == "cancelled"
     uninstall_approval = _approve(store, first, first_review, action="uninstall", goal_id="goal-1")
     assert store.uninstall(first.id, approval_id=uninstall_approval)["status"] == "uninstalled"
+
+
+def test_rollback_revalidates_target_package_inside_transaction(tmp_path: Path):
+    first_root, first = _package(tmp_path / "first", extra_file="first")
+    second_root, second = _package(tmp_path / "second", manifest_text=_manifest(version="2.0.0"), extra_file="second")
+    store = CapabilityPackLifecycle(tmp_path / "state.json")
+    first_review = store.review(first, root_path=first_root, goal_id="goal-1")["review"]
+    first_approval = _approve(store, first, first_review, action="activate", goal_id="goal-1")
+    store.activate(first, root_path=first_root, goal_id="goal-1", review_id=first_review["review_id"], approval_id=first_approval)
+    second_review = store.review(second, root_path=second_root, goal_id="goal-1")["review"]
+    update_approval = _approve(
+        store,
+        second,
+        second_review,
+        action="update",
+        goal_id="goal-1",
+        current_digest=first_review["digest"],
+        delta=authority_delta(first, second),
+    )
+    store.update(second, root_path=second_root, goal_id="goal-1", review_id=second_review["review_id"], approval_id=update_approval)
+
+    (first_root / "notes" / "brief.md").write_text("tampered", encoding="utf-8")
+    rollback_approval = _approve(
+        store,
+        first,
+        first_review,
+        action="rollback",
+        goal_id="goal-1",
+        current_digest=second_review["digest"],
+        delta=authority_delta(second, first),
+    )
+    with pytest.raises(CapabilityPackLifecycleError, match="content digest"):
+        store.rollback(first.id, approval_id=rollback_approval)
+    assert store.status(first.id)["active"]["digest"] == second_review["digest"]
+
+
+def test_pointer_binding_recomputes_canonical_authority_and_resources(tmp_path: Path):
+    root, pack = _package(tmp_path / "pack")
+    state_path = tmp_path / "state.json"
+    store = CapabilityPackLifecycle(state_path)
+    review = store.review(pack, root_path=root, goal_id="goal-1")["review"]
+    approval = _approve(store, pack, review, action="activate", goal_id="goal-1")
+    store.activate(pack, root_path=root, goal_id="goal-1", review_id=review["review_id"], approval_id=approval)
+
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    record = state["versions"][pack.id][review["digest"]]
+    record["authority"]["tools"] = ["read_file", "write_file"]
+    record["resources"]["max_artifact_bytes"] += 1
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+
+    assert store.status(pack.id)["active"]["status"] == "invalid"
+    with pytest.raises(CapabilityPackLifecycleError, match="binding is invalid"):
+        store.build_execution_contract(pack.id, goal_id="goal-1", job_id="job-1")
 
 
 def test_production_canary_is_blocked_and_retry_ids_are_unique(tmp_path: Path):

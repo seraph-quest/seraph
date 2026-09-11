@@ -291,6 +291,42 @@ class SessionManager:
                 and session.owner_principal_id != owner_principal_id
             ):
                 raise SessionOwnerMismatchError(session_id)
+            # Audio bytes live outside the database, so quarantine cleanup is a
+            # deletion precondition.  Keep the session and its durable job rows
+            # when cleanup cannot be proven; the worker's retention pass can
+            # then retry the server-owned paths instead of losing their receipt.
+            audio_jobs_result = await db.execute(
+                select(AudioIngressJob).where(AudioIngressJob.session_id == session_id)
+            )
+            audio_jobs = list(audio_jobs_result.scalars().all())
+            try:
+                from src.guardian.audio_worker import cleanup_audio_job_paths
+            except Exception:
+                logger.warning(
+                    "Audio quarantine cleanup is unavailable while deleting session %s",
+                    session_id,
+                    exc_info=True,
+                )
+                return False
+            for audio_job in audio_jobs:
+                try:
+                    cleaned = cleanup_audio_job_paths(
+                        audio_job.raw_path,
+                        audio_job.normalized_path,
+                    )
+                except Exception:
+                    logger.warning(
+                        "Audio quarantine cleanup failed while deleting session %s",
+                        session_id,
+                        exc_info=True,
+                    )
+                    return False
+                if not cleaned:
+                    logger.warning(
+                        "Audio quarantine cleanup is incomplete while deleting session %s",
+                        session_id,
+                    )
+                    return False
             try:
                 process_runtime_manager.stop_processes_for_session(
                     session_id,
@@ -355,30 +391,12 @@ class SessionManager:
             )
             for intervention in interventions.scalars().all():
                 await db.delete(intervention)
-            # Audio jobs hold a foreign key to the canonical conversation.  A
-            # session deletion must revoke their quarantine paths and delete
-            # the metadata rows before removing the parent session.
-            audio_jobs = await db.execute(
-                select(AudioIngressJob).where(AudioIngressJob.session_id == session_id)
-            )
-            for audio_job in audio_jobs.scalars().all():
-                try:
-                    from src.guardian.audio_worker import (
-                        cleanup_audio_job_paths,
-                        forget_audio_job_review,
-                    )
-
-                    cleanup_audio_job_paths(
-                        audio_job.raw_path,
-                        audio_job.normalized_path,
-                    )
-                    forget_audio_job_review(audio_job.request_id)
-                except Exception:
-                    logger.warning(
-                        "Audio quarantine cleanup failed while deleting session %s",
-                        session_id,
-                        exc_info=True,
-                    )
+            # Audio jobs hold a foreign key to the canonical conversation.  The
+            # quarantine preflight above succeeded, so delete the metadata rows
+            # only after their private paths are proven gone.
+            from src.guardian.audio_worker import forget_audio_job_review
+            for audio_job in audio_jobs:
+                forget_audio_job_review(audio_job.request_id)
                 await db.delete(audio_job)
             # A deleted conversation can never resume an old native delivery.
             # Preserve the outbox receipt while cancelling active handoffs so

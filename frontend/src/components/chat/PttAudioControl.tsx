@@ -24,6 +24,15 @@ type AudioSnapshot = {
   transcript?: { text?: string; digest?: string | null; confirmed_digest?: string | null };
 };
 
+function stateForRecovery(status: string): PttAudioState {
+  if (["queued", "processing", "transporting"].includes(status)) return "processing";
+  if (status === "degraded") return "degraded";
+  if (status === "blocked") return "blocked";
+  if (status === "failed") return "error";
+  if (status === "transcript_ready") return "review_unavailable";
+  return "error";
+}
+
 export function choosePttMimeType(): string | undefined {
   if (typeof MediaRecorder === "undefined") return undefined;
   const candidates = ["audio/webm;codecs=opus", "audio/webm", "audio/mp4"];
@@ -135,9 +144,11 @@ export function PttAudioControl({ sessionId, disabled = false, endpoint = "/api/
     streamRef.current = null;
   };
 
-  const stopCaptureResources = () => {
-    actionRef.current?.controller.abort();
-    actionRef.current = null;
+  const stopCaptureResources = (abortAction = true) => {
+    if (abortAction) {
+      actionRef.current?.controller.abort();
+      actionRef.current = null;
+    }
     captureActiveRef.current = false;
     captureGenerationRef.current += 1;
     const recorder = recorderRef.current;
@@ -155,20 +166,25 @@ export function PttAudioControl({ sessionId, disabled = false, endpoint = "/api/
     chunksRef.current = [];
   };
 
-  useEffect(() => stopCaptureResources, []);
+  useEffect(() => () => stopCaptureResources(), []);
 
   useEffect(() => {
     const sessionChanged = mountedSessionRef.current !== sessionId;
     mountedSessionRef.current = sessionId;
-    if (!controlDisabled && !sessionChanged) return;
-    // A disabled cockpit (or a switched conversation) must immediately revoke
-    // browser-side capture resources and invalidate pending upload responses.
-    // The server remains the authority for any already-admitted job.
-    stopCaptureResources();
-    setSnapshot(null);
-    setTranscript("");
-    setState("idle");
-    setError(null);
+    if (sessionChanged) {
+      // A switched conversation cannot retain another session's job handle.
+      stopCaptureResources();
+      setSnapshot(null);
+      setTranscript("");
+      setState("idle");
+      setError(null);
+      return;
+    }
+    if (controlDisabled) {
+      // Busy/disabled is a browser capture gate, not a server-job revocation.
+      // Keep the active request and durable snapshot available for recovery.
+      stopCaptureResources(false);
+    }
   }, [controlDisabled, sessionId]);
 
   const applySnapshot = (payload: AudioSnapshot) => {
@@ -277,6 +293,20 @@ export function PttAudioControl({ sessionId, disabled = false, endpoint = "/api/
     }
   };
 
+  const processRequest = async (
+    requestId: string,
+    action: { sequence: number; controller: AbortController },
+  ) => {
+    const response = await fetch(`${endpoint}/${requestId}/process`, {
+      method: "POST",
+      signal: action.controller.signal,
+    });
+    const payload = (await response.json()) as AudioSnapshot & { detail?: { code?: string } };
+    if (!response.ok) throw new Error(payload.detail?.code || "audio_processing_failed");
+    if (!isCurrentAction(action.sequence)) return;
+    applySnapshot(payload);
+  };
+
   const uploadCapture = async (blob: Blob) => {
     const action = beginAction();
     setState("uploading");
@@ -307,6 +337,9 @@ export function PttAudioControl({ sessionId, disabled = false, endpoint = "/api/
       if (!isCurrentAction(action.sequence)) return;
       if (!response.ok) throw new Error(payload.detail?.code || "audio_upload_failed");
       applySnapshot(payload);
+      if (["queued", "processing", "transporting"].includes(payload.status)) {
+        await processRequest(payload.request_id, action);
+      }
     } catch (cause) {
       if (!isCurrentAction(action.sequence)) return;
       setState("error");
@@ -360,8 +393,8 @@ export function PttAudioControl({ sessionId, disabled = false, endpoint = "/api/
       applySnapshot(payload);
     } catch (cause) {
       if (!isCurrentAction(action.sequence)) return;
-      setTranscript("");
-      setState("review_unavailable");
+      if (snapshot.status === "transcript_ready") setTranscript("");
+      setState(stateForRecovery(snapshot.status));
       setError(cause instanceof Error ? cause.message : "audio_reload_failed");
     } finally {
       finishAction(action.sequence);
@@ -374,17 +407,10 @@ export function PttAudioControl({ sessionId, disabled = false, endpoint = "/api/
     setState("processing");
     setError(null);
     try {
-      const response = await fetch(`${endpoint}/${snapshot.request_id}/process`, {
-        method: "POST",
-        signal: action.controller.signal,
-      });
-      const payload = (await response.json()) as AudioSnapshot & { detail?: { code?: string } };
-      if (!response.ok) throw new Error(payload.detail?.code || "audio_retry_failed");
-      if (!isCurrentAction(action.sequence)) return;
-      applySnapshot(payload);
+      await processRequest(snapshot.request_id, action);
     } catch (cause) {
       if (!isCurrentAction(action.sequence)) return;
-      setState("review_unavailable");
+      setState(stateForRecovery(snapshot.status));
       setError(cause instanceof Error ? cause.message : "audio_retry_failed");
     } finally {
       finishAction(action.sequence);
@@ -408,7 +434,7 @@ export function PttAudioControl({ sessionId, disabled = false, endpoint = "/api/
       applySnapshot(payload);
     } catch (cause) {
       if (!isCurrentAction(action.sequence)) return;
-      setState(previousState === "review" ? "review" : "review_unavailable");
+      setState(previousState === "review" ? "review" : stateForRecovery(previousState));
       setError(cause instanceof Error ? cause.message : "audio_cancel_failed");
     } finally {
       finishAction(action.sequence);
@@ -429,7 +455,7 @@ export function PttAudioControl({ sessionId, disabled = false, endpoint = "/api/
       </div>
       <button
         type="button"
-        disabled={controlDisabled || consentPending !== null || (!captureConsent && state === "idle") || ["uploading", "processing", "confirming", "reloading", "cancelling", "requesting_capture", "review", "review_unavailable", "confirmed", "cancelled"].includes(state)}
+        disabled={controlDisabled || consentPending !== null || (!captureConsent && state === "idle") || ["uploading", "processing", "confirming", "reloading", "cancelling", "requesting_capture", "review", "review_unavailable", "blocked", "degraded", "error", "confirmed", "cancelled"].includes(state)}
         onPointerDown={() => void beginCapture()}
         onPointerUp={endCapture}
         onPointerCancel={endCapture}
@@ -439,12 +465,19 @@ export function PttAudioControl({ sessionId, disabled = false, endpoint = "/api/
       >
         {state === "capturing" ? "Release to stop" : "Hold to talk"}
       </button>
-      {snapshot && ["review", "review_unavailable", "confirming", "reloading", "cancelling"].includes(state) && (
+      {snapshot && ["review", "review_unavailable", "confirming", "reloading", "cancelling", "processing", "degraded", "blocked", "error"].includes(state) && (
         <div className="flex gap-2 items-start">
-          <textarea aria-label="Editable transcript" value={transcript} onChange={(event) => setTranscript(event.target.value)} className="flex-1 bg-retro-bg pixel-border-thin p-2 text-xs" />
+          {state === "review" ? (
+            <textarea aria-label="Editable transcript" value={transcript} onChange={(event) => setTranscript(event.target.value)} className="flex-1 bg-retro-bg pixel-border-thin p-2 text-xs" />
+          ) : (
+            <span className="flex-1 text-xs">
+              {state === "processing" ? "Audio is processing. You can cancel or reload its durable status." : state === "review_unavailable" ? "Transcript text is unavailable in this worker." : error || "Audio processing needs recovery."}
+            </span>
+          )}
           <div className="flex flex-col gap-2">
             <button type="button" onClick={() => void confirmTranscript()} disabled={state !== "review"} className="pixel-border-thin px-2 py-1 font-pixel text-[10px]">Confirm</button>
             <button type="button" onClick={() => void reloadSnapshot()} disabled={state === "reloading"} className="pixel-border-thin px-2 py-1 font-pixel text-[10px]">Reload review</button>
+            {["processing", "degraded", "blocked", "error", "review_unavailable"].includes(state) && <button type="button" onClick={() => void retryProcessing()} disabled={state === "processing"} className="pixel-border-thin px-2 py-1 font-pixel text-[10px]">Retry processing</button>}
             <button type="button" onClick={() => void cancelAudio()} disabled={state === "cancelling"} className="pixel-border-thin px-2 py-1 font-pixel text-[10px]">Cancel</button>
           </div>
         </div>
@@ -452,16 +485,6 @@ export function PttAudioControl({ sessionId, disabled = false, endpoint = "/api/
       {snapshot && ["confirming", "reloading", "cancelling"].includes(state) && (
         <div className="pixel-border-thin p-2 text-xs" role="status">
           {state === "confirming" ? "Confirming transcript…" : state === "reloading" ? "Reloading transcript review…" : "Cancelling audio…"}
-        </div>
-      )}
-      {snapshot && state === "review_unavailable" && (
-        <div className="flex flex-col gap-2 pixel-border-thin p-2 text-xs">
-          <span>Transcript text is unavailable in this worker. Reload the review or retry processing.</span>
-          <div className="flex gap-2">
-            <button type="button" onClick={() => void reloadSnapshot()} className="pixel-border-thin px-2 py-1 font-pixel text-[10px]">Reload review</button>
-            <button type="button" onClick={() => void retryProcessing()} className="pixel-border-thin px-2 py-1 font-pixel text-[10px]">Retry processing</button>
-            <button type="button" onClick={() => void cancelAudio()} className="pixel-border-thin px-2 py-1 font-pixel text-[10px]">Cancel</button>
-          </div>
         </div>
       )}
       <span role="status" className="font-pixel text-[10px]" data-state={state}>{!sessionId ? "Select a conversation before recording." : error || state}</span>

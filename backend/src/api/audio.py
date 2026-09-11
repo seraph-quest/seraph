@@ -125,7 +125,7 @@ def _operator_payload(snapshot, *, owner_principal_id: str, operator_session_id:
 
 
 async def _submit(body: AudioIngressBody, request: Request) -> dict:
-    owner, operator_session_id, _ = _operator(request)
+    owner, operator_session_id, operator = _operator(request)
     captured_at = body.captured_at or datetime.now(timezone.utc)
     if captured_at.tzinfo is None:
         captured_at = captured_at.replace(tzinfo=timezone.utc)
@@ -152,7 +152,10 @@ async def _submit(body: AudioIngressBody, request: Request) -> dict:
                 requested_capability=body.requested_capability,
                 model_inference_granted=_has_model_inference_grant(operator),
             ),
-            process=True,
+            # Return the durable request identity before model processing so a
+            # browser can poll, cancel, or retry an admitted job while the
+            # bounded worker runs independently.
+            process=False,
             authority_principal=getattr(operator, "principal", None),
         )
     except AudioWorkerError as exc:

@@ -1231,6 +1231,22 @@ class AudioIngressWorker:
                         job_reference_filter,
                         AudioIngressJob.owner_principal_id == owner_principal_id,
                         AudioIngressJob.operator_session_id == operator_session_id,
+                        AudioIngressJob.status == "queued",
+                    )
+                    .values(
+                        status="blocked",
+                        error_code=f"{row.boundary}_consent_revoked",
+                        transport_status="revoked",
+                        transport_lease_id=None,
+                        updated_at=current,
+                    )
+                )
+                await db.execute(
+                    update(AudioIngressJob)
+                    .where(
+                        job_reference_filter,
+                        AudioIngressJob.owner_principal_id == owner_principal_id,
+                        AudioIngressJob.operator_session_id == operator_session_id,
                         AudioIngressJob.status == "processing",
                     )
                     .values(
@@ -2145,6 +2161,13 @@ class AudioIngressWorker:
         if row is None:
             raise AudioWorkerError("audio_job_not_found", "audio job is not available")
         self._assert_operator_session(row, owner_principal_id, operator_session_id)
+        # Expiry and cleanup mutate the durable row and may delete private
+        # bytes.  Re-authenticate the durable operator session before reaching
+        # that side-effecting path; the owner/session strings only bind the job.
+        await self._require_current_operator_authority(
+            owner_principal_id=owner_principal_id,
+            operator_session_id=operator_session_id,
+        )
         snapshot = await self._expire_if_needed(request_id)
         return replace(snapshot, duplicate=duplicate)
 
@@ -3049,9 +3072,11 @@ class AudioIngressWorker:
                 owner_principal_id=row.owner_principal_id,
                 operator_session_id=row.operator_session_id,
             )
-            self._cleanup_job_paths(row.raw_path, row.normalized_path)
             self._drop_review_transcript(row.request_id)
-            return self._snapshot(row)
+            # A terminal row may still carry paths after an earlier cleanup
+            # failure.  Route the idempotent cancel through the same durable
+            # cleanup receipt so a successful retry clears the path columns.
+            return await self._expire_if_needed(request_id)
         # Fence the durable status before asking an in-flight task or broker to
         # stop.  A transport that returns after cancellation can then only see
         # the terminal cancelled row and cannot write transcript_ready.

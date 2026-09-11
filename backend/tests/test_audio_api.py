@@ -9,7 +9,9 @@ from fastapi import HTTPException
 from starlette.requests import Request
 
 from src.api.audio import (
+    AudioIngressBody,
     TranscriptConfirmationBody,
+    _submit,
     _owned_job,
     cancel_audio,
     confirm_audio,
@@ -102,3 +104,31 @@ async def test_audio_job_owner_match_retains_expiring_snapshot_path():
         owner_principal_id=operator.principal.principal_id,
         operator_session_id=operator.session_id,
     )
+
+
+@pytest.mark.asyncio
+async def test_audio_submit_returns_durable_id_before_processing():
+    operator = _test_bypass_operator()
+    request = _audio_request(operator)
+    body = AudioIngressBody(
+        session_id="audio-session-api-submit",
+        audio_base64="YXVkaW8=",
+        capture_consent_reference="audio-consent:capture:11111111111111111111111111111111",
+    )
+    snapshot = SimpleNamespace(
+        request_id="server-owned-audio-job",
+        status="queued",
+        transcript_digest=None,
+        as_dict=lambda: {"request_id": "server-owned-audio-job", "status": "queued"},
+    )
+    with patch.object(
+        default_audio_worker,
+        "submit",
+        new_callable=AsyncMock,
+        return_value=snapshot,
+    ) as submit:
+        result = await _submit(body, request)
+
+    assert result["request_id"] == snapshot.request_id
+    assert result["status"] == "queued"
+    assert submit.await_args.kwargs["process"] is False

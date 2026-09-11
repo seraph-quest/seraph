@@ -145,6 +145,58 @@ class Message(SQLModel, table=True):
     session: Optional[Session] = Relationship(back_populates="messages")
 
 
+# ─── Audio ingress ───────────────────────────────────────
+
+class AudioIngressJob(SQLModel, table=True):
+    """Durable metadata for one bounded push-to-talk processing attempt.
+
+    Audio bytes live only in a short-lived quarantine directory.  This row is
+    deliberately metadata-only after cleanup and is the idempotency anchor for
+    retries, cancellation, restart recovery, and transcript confirmation.
+    """
+
+    __tablename__ = "audio_ingress_jobs"
+    __table_args__ = (
+        Index("ux_audio_ingress_jobs_request_id", "request_id", unique=True),
+    )
+
+    id: str = Field(default_factory=_uuid, primary_key=True)
+    request_id: str = Field(index=True)
+    request_digest: str = Field(index=True)
+    owner_principal_id: str = Field(index=True)
+    operator_session_id: Optional[str] = Field(default=None, index=True)
+    session_id: str = Field(foreign_key="sessions.id", index=True)
+    message_id: str = Field(index=True)
+    attachment_id: str = Field(index=True)
+    attachment_ref_json: str = Field(default="{}")
+    status: str = Field(default="queued", index=True)
+    raw_path: Optional[str] = Field(default=None)
+    normalized_path: Optional[str] = Field(default=None)
+    captured_at: datetime = Field(index=True)
+    audio_payload_digest: str = Field(index=True)
+    audio_size_bytes: int = Field(default=0)
+    duration_seconds: float = Field(default=0.0)
+    decoded_duration_seconds: Optional[float] = Field(default=None)
+    media_type: str = Field(default="audio/wav")
+    container: str = Field(default="wav")
+    codec: str = Field(default="pcm_s16le")
+    sample_rate_hz: int = Field(default=16_000)
+    channels: int = Field(default=1)
+    normalized_wav_size_bytes: Optional[int] = Field(default=None)
+    capture_consent_reference: str = Field(default="")
+    model_consent_reference: str = Field(default="")
+    raw_audio_retention_deadline: datetime = Field(index=True)
+    admission_operation_id: Optional[str] = Field(default=None, index=True)
+    transcript: Optional[str] = Field(default=None)
+    transcript_digest: Optional[str] = Field(default=None, index=True)
+    confirmed_transcript_digest: Optional[str] = Field(default=None, index=True)
+    result_digest: Optional[str] = Field(default=None, index=True)
+    error_code: Optional[str] = Field(default=None, index=True)
+    metadata_json: str = Field(default="{}")
+    created_at: datetime = Field(default_factory=_now, index=True)
+    updated_at: datetime = Field(default_factory=_now, index=True)
+
+
 # ─── Session Todo ───────────────────────────────────────
 
 class SessionTodo(SQLModel, table=True):

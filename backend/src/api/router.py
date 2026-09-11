@@ -4,6 +4,7 @@ from src.api.activity import router as activity_router
 from src.api.auth import router as auth_router
 from src.api.audit import router as audit_router
 from src.api.approvals import router as approvals_router
+from src.api.audio import router as audio_router
 from src.api.automation import router as automation_router
 from src.api.browser import router as browser_router
 from src.api.canvas import router as canvas_router
@@ -35,6 +36,7 @@ api_router.include_router(auth_router, prefix="/api/auth", tags=["auth"])
 api_router.include_router(activity_router, prefix="/api", tags=["activity"])
 api_router.include_router(audit_router, prefix="/api", tags=["audit"])
 api_router.include_router(approvals_router, prefix="/api", tags=["approvals"])
+api_router.include_router(audio_router, prefix="/api", tags=["audio"])
 api_router.include_router(automation_router, prefix="/api", tags=["automation"])
 api_router.include_router(browser_router, prefix="/api", tags=["browser"])
 api_router.include_router(canvas_router, prefix="/api", tags=["canvas"])

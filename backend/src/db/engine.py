@@ -51,6 +51,7 @@ OPERATOR_REQUIRED_TABLES = (
     "guardian_interventions",
     "strategy_deltas",
     "memory_tombstones",
+    "audio_ingress_jobs",
 )
 
 _LEGACY_WORKFLOW_STATUS_MAP = {

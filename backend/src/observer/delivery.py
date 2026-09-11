@@ -237,7 +237,11 @@ async def _bundle_owner_binding(items: list[object]) -> tuple[str | None, str | 
     goal_revision_values: list[object] = []
     for item in items:
         value = getattr(item, "budget_limit", None)
-        if value is not None and not any(value == existing for existing in budget_limits):
+        if (
+            isinstance(value, int)
+            and not isinstance(value, bool)
+            and not any(value == existing for existing in budget_limits)
+        ):
             budget_limits.append(value)
         goal_revision_values.append(getattr(item, "goal_revision", None))
     if goal_ids or budget_period_keys or budget_limits:

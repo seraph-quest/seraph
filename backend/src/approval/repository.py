@@ -368,6 +368,7 @@ def _approval_binding_matches(
     actual_conversation = str(
         getattr(request, "conversation_id", None)
         or _approval_detail_value(details, "conversation_id", "approval_conversation_id")
+        or getattr(request, "session_id", None)
         or ""
     ).strip()
     if actual_conversation != expected_session:
@@ -935,8 +936,6 @@ class ApprovalRepository:
         expected_owner_principal = str(owner_principal_id or "").strip()
         if (
             not approval_id
-            or not expected_session
-            or not expected_conversation
             or not expected_owner_operator_session
             or not expected_operator_principal
             or not expected_owner_principal
@@ -951,12 +950,30 @@ class ApprovalRepository:
         request = result.scalars().first()
         if request is None:
             return None
+        # Older resume callers did not repeat the conversation fields because
+        # the approval id already selected one durable row.  Bind omitted
+        # values to that row before any comparison; owner principal and
+        # operator-session identity remain mandatory caller assertions.
+        if not expected_session:
+            expected_session = str(getattr(request, "session_id", None) or "").strip()
+        if not expected_conversation:
+            expected_conversation = str(
+                getattr(request, "conversation_id", None)
+                or getattr(request, "session_id", None)
+                or ""
+            ).strip()
+        if not expected_session or not expected_conversation:
+            return None
         # Typed resume must consume the exact row bound to the durable run.
         # The row columns are canonical; details are only an additional
         # receipt and cannot repair missing or conflicting row identity.
         if (
             str(getattr(request, "session_id", None) or "").strip() != expected_session
-            or str(getattr(request, "conversation_id", None) or "").strip() != expected_conversation
+            or str(
+                getattr(request, "conversation_id", None)
+                or getattr(request, "session_id", None)
+                or ""
+            ).strip() != expected_conversation
             or str(getattr(request, "operator_session_id", None) or "").strip() != expected_owner_operator_session
             or str(getattr(request, "owner_principal_id", None) or "").strip() != expected_owner_principal
         ):

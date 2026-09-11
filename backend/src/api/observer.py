@@ -1843,6 +1843,7 @@ def _observer_presence_surface_payload() -> dict[str, Any]:
         if not (bool(getattr(item, "enabled", False)) or attention or follow_up_prompt):
             continue
         surface_id = f"node_adapters:{package_id}:{item.reference}"
+        pairing = _record_mapping(item, "pairing", "device_pairing")
         surfaces_by_id[surface_id] = {
             "id": surface_id,
             "kind": "node_adapter",
@@ -1870,16 +1871,16 @@ def _observer_presence_surface_payload() -> dict[str, Any]:
             "requires_network": bool(getattr(item, "requires_network", False)),
             "requires_daemon": bool(getattr(item, "requires_daemon", False)),
             **boundary_pairing,
-            "last_seen_at": item.pairing.get("last_seen_at"),
-            "last_ingest_at": item.pairing.get("last_ingest_at"),
-            "last_capture_at": item.pairing.get("last_capture_at"),
-            "last_transport_status": item.pairing.get("last_transport_status"),
-            "spool_count": item.pairing.get("spool_count", 0),
-            "spool_bytes": item.pairing.get("spool_bytes", 0),
-            "spool_oldest_at": item.pairing.get("spool_oldest_at"),
-            "recovery_state": item.pairing.get("recovery_state"),
-            "degraded_state": item.pairing.get("degraded_state"),
-            "revision": item.pairing.get("revision", 0),
+            "last_seen_at": pairing.get("last_seen_at"),
+            "last_ingest_at": pairing.get("last_ingest_at"),
+            "last_capture_at": pairing.get("last_capture_at"),
+            "last_transport_status": pairing.get("last_transport_status"),
+            "spool_count": pairing.get("spool_count", 0),
+            "spool_bytes": pairing.get("spool_bytes", 0),
+            "spool_oldest_at": pairing.get("spool_oldest_at"),
+            "recovery_state": pairing.get("recovery_state"),
+            "degraded_state": pairing.get("degraded_state"),
+            "revision": pairing.get("revision", 0),
         }
 
     surfaces = sorted(

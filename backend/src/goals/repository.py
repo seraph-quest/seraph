@@ -150,12 +150,20 @@ class GoalRepository:
         proactive_enabled: bool = False,
         owner_principal_id: str | None = None,
         owner_session_id: str | None = None,
+        operator_session_id: str | None = None,
         admission_budget: GoalAdmissionBudget | dict | None = None,
     ) -> Goal:
         if level not in _VALID_LEVELS:
             raise ValueError(f"Invalid level '{level}'. Must be one of: {_VALID_LEVELS}")
         if domain not in _VALID_DOMAINS:
             raise ValueError(f"Invalid domain '{domain}'. Must be one of: {_VALID_DOMAINS}")
+        if (
+            owner_session_id is not None
+            and operator_session_id is not None
+            and str(owner_session_id).strip() != str(operator_session_id).strip()
+        ):
+            raise ValueError("goal owner session aliases conflict")
+        owner_session_id = owner_session_id or operator_session_id
         owner_principal_id, owner_session_id = _validate_owner_pair(
             owner_principal_id,
             owner_session_id,

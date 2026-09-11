@@ -76,6 +76,12 @@ _PATCH_APPROVAL_STATES = frozenset({"approved", "required", "denied"})
 _NATIVE_PATCH_CAPABILITY_ID = "apply_workspace_patch"
 _NATIVE_APPROVAL_RISK = "high"
 _NATIVE_APPROVAL_TTL_SECONDS = 5 * 60.0
+# Native SWE runs are owned by a service principal rather than an interactive
+# operator. Keep a stable, service-owned approval-session identity for every
+# native service run. It is only accepted by the native caller below; the
+# generic approval repository still requires both owner bindings on every
+# effect path.
+_NATIVE_SERVICE_APPROVAL_OWNER_SESSION_ID = "service-session:native-software-engineering"
 
 _MAX_FIXTURE_FILES = 200
 _MAX_FIXTURE_FILE_BYTES = 1_000_000
@@ -377,13 +383,25 @@ def _native_approval_fingerprint(
 
 
 def _native_approval_owner_session(runtime_principal: Any, *, session_id: str) -> str:
+    # The native fixture is an explicitly service-owned run.  Service
+    # principals do not have an interactive operator authentication owner, so
+    # bind every native service approval to this fixed execution identity.
+    # This check deliberately precedes the generic helper: an incidental or
+    # caller-supplied service ``operator_session_id`` must not change the
+    # native service binding.
+    if (
+        getattr(runtime_principal, "principal_type", None) == PrincipalType.SERVICE
+        and str(getattr(runtime_principal, "principal_id", "") or "").strip()
+        == "service:native-software-engineering"
+    ):
+        return _NATIVE_SERVICE_APPROVAL_OWNER_SESSION_ID
     owner_session = approval_owner_operator_session_id(
         session_id=session_id,
         principal=runtime_principal,
     )
-    if not owner_session:
-        raise NativeSoftwareEngineeringError("approval_operator_session_missing")
-    return owner_session
+    if owner_session:
+        return owner_session
+    raise NativeSoftwareEngineeringError("approval_operator_session_missing")
 
 
 def build_native_software_engineering_approval_receipt(
@@ -1602,6 +1620,7 @@ async def run_native_software_engineering_fixture(
                     fingerprint=approval_fingerprint,
                     details={
                         "approval_conversation_id": request.session_id,
+                        "approval_owner_principal_id": request.owner_principal_id,
                         "approval_owner_operator_session_id": approval_operator_session,
                         "approval_context": approval_context,
                         "approval_expires_at": approval_expires_at,
@@ -1620,6 +1639,7 @@ async def run_native_software_engineering_fixture(
                     tool_name=_NATIVE_PATCH_CAPABILITY_ID,
                     fingerprint=approval_fingerprint,
                     owner_operator_session_id=approval_operator_session,
+                    owner_principal_id=request.owner_principal_id,
                     approval_id=request.approval_id,
                 )
             except Exception as exc:

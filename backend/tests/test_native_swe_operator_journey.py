@@ -36,7 +36,6 @@ def _principal(session_id: str, *, revoked: bool = False) -> TrustPrincipal:
         grants=(AuthorityGrant.CAPABILITY_EXECUTE,),
         session_id=session_id,
         revoked=revoked,
-        operator_session_id=session_id,
     )
 
 
@@ -96,6 +95,7 @@ async def _approved_request(
         fingerprint=native_swe._native_approval_fingerprint(approval_context),
         details={
             "approval_conversation_id": session_id,
+            "approval_owner_principal_id": request.owner_principal_id,
             "approval_owner_operator_session_id": approval_operator_session,
             "approval_context": approval_context,
             "approval_expires_at": expires_at,
@@ -104,6 +104,9 @@ async def _approved_request(
             "capability_id": native_swe._NATIVE_PATCH_CAPABILITY_ID,
         },
     )
+    assert pending.owner_principal_id == request.owner_principal_id
+    persisted_details = json.loads(pending.details_json or "{}")
+    assert persisted_details["approval_owner_principal_id"] == request.owner_principal_id
     resolved = await native_swe.approval_repository.resolve(pending.id, "approved")
     assert resolved is not None and resolved.status == "approved"
     return replace(request, patch_approval="approved", approval_id=pending.id)
@@ -264,6 +267,7 @@ async def test_operator_journey_records_failure_then_repair(
 
 @pytest.mark.asyncio
 async def test_operator_journey_fails_closed_for_identity_approval_digest_and_egress(
+    async_db,
     tmp_path,
     monkeypatch,
     native_context,

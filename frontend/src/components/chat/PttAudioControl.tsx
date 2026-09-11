@@ -5,8 +5,11 @@ export type PttAudioState =
   | "requesting_capture"
   | "capturing"
   | "uploading"
+  | "processing"
   | "review"
+  | "review_unavailable"
   | "confirmed"
+  | "cancelled"
   | "blocked"
   | "degraded"
   | "error";
@@ -85,6 +88,36 @@ export function PttAudioControl({ sessionId, disabled = false, endpoint = "/api/
     streamRef.current = null;
   };
 
+  const applySnapshot = (payload: AudioSnapshot) => {
+    setSnapshot(payload);
+    if (payload.status === "transcript_ready") {
+      const reviewText = payload.transcript?.text?.trim();
+      if (reviewText && payload.transcript?.digest) {
+        setTranscript(reviewText);
+        setError(null);
+        setState("review");
+      } else {
+        setState("review_unavailable");
+        setError("Transcript review is unavailable. Reload or retry processing.");
+      }
+    } else if (payload.status === "confirmed") {
+      setError(null);
+      setState("confirmed");
+    } else if (payload.status === "cancelled") {
+      setError(null);
+      setState("cancelled");
+    } else if (payload.status === "blocked") {
+      setState("blocked");
+      setError(payload.error_code || "audio_processing_blocked");
+    } else if (payload.status === "degraded") {
+      setState("degraded");
+      setError(payload.error_code || "audio_processing_degraded");
+    } else {
+      setState("error");
+      setError(payload.error_code || "audio_processing_failed");
+    }
+  };
+
   const beginCapture = async () => {
     if (disabled || !captureConsent || state !== "idle") return;
     const mimeType = choosePttMimeType();
@@ -148,20 +181,7 @@ export function PttAudioControl({ sessionId, disabled = false, endpoint = "/api/
       });
       const payload = (await response.json()) as AudioSnapshot & { detail?: { code?: string } };
       if (!response.ok) throw new Error(payload.detail?.code || "audio_upload_failed");
-      setSnapshot(payload);
-      if (payload.status === "transcript_ready") {
-        setTranscript(payload.transcript?.text || "");
-        setState("review");
-      } else if (payload.status === "blocked") {
-        setState("blocked");
-        setError(payload.error_code || "audio_processing_blocked");
-      } else if (payload.status === "degraded") {
-        setState("degraded");
-        setError(payload.error_code || "audio_processing_degraded");
-      } else {
-        setState("error");
-        setError(payload.error_code || "audio_processing_failed");
-      }
+      applySnapshot(payload);
     } catch (cause) {
       setState("error");
       setError(cause instanceof Error ? cause.message : "audio_upload_failed");
@@ -183,8 +203,50 @@ export function PttAudioControl({ sessionId, disabled = false, endpoint = "/api/
       setError("Transcript changed before confirmation.");
       return;
     }
-    setSnapshot((await response.json()) as AudioSnapshot);
-    setState("confirmed");
+    applySnapshot((await response.json()) as AudioSnapshot);
+  };
+
+  const reloadSnapshot = async () => {
+    if (!snapshot) return;
+    try {
+      const response = await fetch(`${endpoint}/${snapshot.request_id}`);
+      const payload = (await response.json()) as AudioSnapshot & { detail?: { code?: string } };
+      if (!response.ok) throw new Error(payload.detail?.code || "audio_reload_failed");
+      applySnapshot(payload);
+    } catch (cause) {
+      setState("review_unavailable");
+      setError(cause instanceof Error ? cause.message : "audio_reload_failed");
+    }
+  };
+
+  const retryProcessing = async () => {
+    if (!snapshot) return;
+    setState("processing");
+    setError(null);
+    try {
+      const response = await fetch(`${endpoint}/${snapshot.request_id}/process`, { method: "POST" });
+      const payload = (await response.json()) as AudioSnapshot & { detail?: { code?: string } };
+      if (!response.ok) throw new Error(payload.detail?.code || "audio_retry_failed");
+      applySnapshot(payload);
+    } catch (cause) {
+      setState("error");
+      setError(cause instanceof Error ? cause.message : "audio_retry_failed");
+    }
+  };
+
+  const cancelAudio = async () => {
+    if (!snapshot) return;
+    setState("processing");
+    setError(null);
+    try {
+      const response = await fetch(`${endpoint}/${snapshot.request_id}/cancel`, { method: "POST" });
+      const payload = (await response.json()) as AudioSnapshot & { detail?: { code?: string } };
+      if (!response.ok) throw new Error(payload.detail?.code || "audio_cancel_failed");
+      applySnapshot(payload);
+    } catch (cause) {
+      setState("error");
+      setError(cause instanceof Error ? cause.message : "audio_cancel_failed");
+    }
   };
 
   return (
@@ -201,7 +263,7 @@ export function PttAudioControl({ sessionId, disabled = false, endpoint = "/api/
       </div>
       <button
         type="button"
-        disabled={disabled || (!captureConsent && state === "idle") || ["uploading", "requesting_capture", "review", "confirmed"].includes(state)}
+        disabled={disabled || (!captureConsent && state === "idle") || ["uploading", "processing", "requesting_capture", "review", "review_unavailable", "confirmed", "cancelled"].includes(state)}
         onPointerDown={() => void beginCapture()}
         onPointerUp={endCapture}
         onPointerCancel={endCapture}
@@ -215,6 +277,16 @@ export function PttAudioControl({ sessionId, disabled = false, endpoint = "/api/
         <div className="flex gap-2 items-start">
           <textarea aria-label="Editable transcript" value={transcript} onChange={(event) => setTranscript(event.target.value)} className="flex-1 bg-retro-bg pixel-border-thin p-2 text-xs" />
           <button type="button" onClick={() => void confirmTranscript()} className="pixel-border-thin px-2 py-1 font-pixel text-[10px]">Confirm</button>
+        </div>
+      )}
+      {snapshot && state === "review_unavailable" && (
+        <div className="flex flex-col gap-2 pixel-border-thin p-2 text-xs">
+          <span>Transcript text is unavailable in this worker. Reload the review or retry processing.</span>
+          <div className="flex gap-2">
+            <button type="button" onClick={() => void reloadSnapshot()} className="pixel-border-thin px-2 py-1 font-pixel text-[10px]">Reload review</button>
+            <button type="button" onClick={() => void retryProcessing()} className="pixel-border-thin px-2 py-1 font-pixel text-[10px]">Retry processing</button>
+            <button type="button" onClick={() => void cancelAudio()} className="pixel-border-thin px-2 py-1 font-pixel text-[10px]">Cancel</button>
+          </div>
         </div>
       )}
       <span role="status" className="font-pixel text-[10px]" data-state={state}>{error || state}</span>

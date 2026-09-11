@@ -363,12 +363,16 @@ class SessionManager:
             )
             for audio_job in audio_jobs.scalars().all():
                 try:
-                    from src.guardian.audio_worker import cleanup_audio_job_paths
+                    from src.guardian.audio_worker import (
+                        cleanup_audio_job_paths,
+                        forget_audio_job_review,
+                    )
 
                     cleanup_audio_job_paths(
                         audio_job.raw_path,
                         audio_job.normalized_path,
                     )
+                    forget_audio_job_review(audio_job.request_id)
                 except Exception:
                     logger.warning(
                         "Audio quarantine cleanup failed while deleting session %s",

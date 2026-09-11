@@ -40,7 +40,6 @@ from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 
 from src.agent.session import MessageIngressConflictError, session_manager
-from src.approval.runtime import get_current_trust_principal
 from src.conversation.identity import (
     ConversationIdentityError,
     build_conversation_identity,
@@ -49,8 +48,8 @@ from src.conversation.identity import (
     validate_attachment_refs,
 )
 from src.db.engine import get_session
-from src.db.models import AudioConsentGrant, AudioIngressJob, OperatorSession
-from src.security.trust_contract import AuthorityGrant
+from src.db.models import AudioConsentGrant, AudioIngressJob
+from src.security.trust_contract import AuthorityGrant, TrustPrincipal
 from src.auth.service import AuthFailure, authenticate_session
 from src.model_fabric.remote_inference_admission import (
     RemoteInferenceAdmissionBroker,
@@ -66,7 +65,6 @@ from src.guardian.audio_ingress import (
     AudioIngressStatus,
     _build_server_owned_audio_consent,
     canonical_audio_request_digest,
-    is_server_owned_audio_consent,
     validate_audio_ingress,
 )
 from src.guardian.multimodal_voice import guardian_safe_multimodal_voice_policy_payload
@@ -120,6 +118,10 @@ class AudioTransportUnavailable(AudioWorkerError):
 class AudioTransportMalformed(AudioWorkerError):
     def __init__(self) -> None:
         super().__init__("audio_transport_malformed", "intercepted audio transport returned no bounded transcript")
+
+
+class _AudioTransportBoundaryBlocked(AudioWorkerError):
+    """A final durable authority/consent check denied the transport callback."""
 
 
 class AudioConfirmationConflict(AudioWorkerError):
@@ -927,21 +929,107 @@ class AudioIngressWorker:
             raise AudioWorkerError("invalid_consent_boundary", "audio consent boundary is invalid")
         return normalized
 
+    @staticmethod
+    def _principal_has_grant(
+        principal: object,
+        *,
+        owner_principal_id: str,
+        operator_session_id: str,
+        required_grant: AuthorityGrant,
+    ) -> bool:
+        """Check one server-authenticated operator identity binding."""
+        if not isinstance(principal, TrustPrincipal):
+            return False
+        grants = {
+            str(getattr(grant, "value", grant))
+            for grant in principal.grants
+        }
+        principal_type = str(getattr(principal.principal_type, "value", principal.principal_type))
+        return bool(
+            principal_type == "operator"
+            and principal.authenticated
+            and not principal.revoked
+            and principal.principal_id == owner_principal_id
+            and principal.operator_session_id == operator_session_id
+            and required_grant.value in grants
+        )
+
+    async def _require_issued_consent_authority(
+        self,
+        *,
+        owner_principal_id: str,
+        operator_session_id: str,
+        authority_principal: object | None,
+        required_grant: AuthorityGrant,
+    ) -> TrustPrincipal:
+        """Require both a server principal and its current durable session.
+
+        The worker intentionally does not treat owner/session strings, an
+        intercepted transport, or a caller-provided consent object as proof of
+        authority.  The API passes the authenticated principal as evidence;
+        this method then re-reads the durable operator session before issuing a
+        grant.
+        """
+        owner = str(owner_principal_id or "").strip()
+        operator_session = str(operator_session_id or "").strip()
+        if (
+            not owner
+            or not operator_session
+            or not isinstance(authority_principal, TrustPrincipal)
+            or not self._principal_has_grant(
+                authority_principal,
+                owner_principal_id=owner,
+                operator_session_id=operator_session,
+                required_grant=required_grant,
+            )
+        ):
+            raise AudioWorkerError(
+                "server_owned_identity_required",
+                "audio consent requires a server-authenticated operator session",
+            )
+        try:
+            current = await authenticate_session(operator_session, touch=False)
+        except AuthFailure as exc:
+            raise AudioWorkerError(
+                "audio_operator_session_invalid",
+                "audio consent requires a current operator session",
+            ) from exc
+        if current.session_id != operator_session or not self._principal_has_grant(
+            current.principal,
+            owner_principal_id=owner,
+            operator_session_id=operator_session,
+            required_grant=required_grant,
+        ):
+            raise AudioWorkerError(
+                "audio_operator_authority_required",
+                "audio consent authority is no longer current",
+            )
+        return current.principal
+
     async def issue_consent_grant(
         self,
         *,
         owner_principal_id: str,
         operator_session_id: str,
         boundary: str,
+        authority_principal: object | None = None,
         now: datetime | None = None,
         ttl: timedelta = RAW_RETENTION,
     ) -> AudioConsent:
-        """Issue a server-owned, session-bound consent grant."""
+        """Issue a grant only for a current server-authenticated operator."""
         boundary = self._normalize_consent_boundary(boundary)
         owner = str(owner_principal_id or "").strip()
         operator_session = str(operator_session_id or "").strip()
-        if not owner or not operator_session:
-            raise AudioWorkerError("server_owned_identity_required", "consent requires authenticated identity")
+        await self._require_issued_consent_authority(
+            owner_principal_id=owner,
+            operator_session_id=operator_session,
+            authority_principal=authority_principal,
+            required_grant=(
+                AuthorityGrant.INGRESS
+                if boundary == "capture"
+                else AuthorityGrant.MODEL_INFERENCE
+            ),
+        )
         current = _utc(now or self._now())
         if ttl.total_seconds() <= 0 or ttl > RAW_RETENTION:
             raise AudioWorkerError("invalid_consent_ttl", "audio consent lifetime is outside the bound")
@@ -1061,14 +1149,6 @@ class AudioIngressWorker:
                 now=now,
             )
         except AudioWorkerError as exc:
-            if exc.code == "audio_consent_untrusted" and is_server_owned_audio_consent(request.capture_consent):
-                capture = await self._register_internal_consent_hint(
-                    request.capture_consent,
-                    boundary="capture",
-                    owner_principal_id=request.owner_principal_id,
-                    operator_session_id=request.operator_session_id or "",
-                )
-                return capture, await self._resolve_model_consent_hint(request, now=now)
             if exc.code == "audio_consent_untrusted":
                 raise AudioWorkerError("capture_consent_untrusted", "capture consent is not server-owned") from exc
             if exc.code == "audio_consent_reference_invalid":
@@ -1085,14 +1165,6 @@ class AudioIngressWorker:
                     now=now,
                 )
             except AudioWorkerError as exc:
-                if exc.code == "audio_consent_untrusted" and is_server_owned_audio_consent(request.model_consent):
-                    model = await self._register_internal_consent_hint(
-                        request.model_consent,
-                        boundary="cloud_upload",
-                        owner_principal_id=request.owner_principal_id,
-                        operator_session_id=request.operator_session_id or "",
-                    )
-                    return capture, model
                 if exc.code == "audio_consent_untrusted":
                     raise AudioWorkerError("cloud_upload_consent_untrusted", "model consent is not server-owned") from exc
                 if exc.code == "audio_consent_reference_invalid":
@@ -1100,97 +1172,32 @@ class AudioIngressWorker:
                 raise
         return capture, model
 
-    async def _resolve_model_consent_hint(
-        self,
-        request: AudioUploadRequest,
-        *,
-        now: datetime,
-    ) -> AudioConsent | None:
-        if request.model_consent is None:
-            return None
-        return await self._register_internal_consent_hint(
-            request.model_consent,
-            boundary="cloud_upload",
-            owner_principal_id=request.owner_principal_id,
-            operator_session_id=request.operator_session_id or "",
-        )
-
-    async def _register_internal_consent_hint(
-        self,
-        consent: AudioConsent,
-        *,
-        boundary: str,
-        owner_principal_id: str,
-        operator_session_id: str,
-    ) -> AudioConsent:
-        """Persist an already server-issued test/runtime handle once.
-
-        Request JSON cannot reach this branch because the API constructs
-        untrusted reference hints.  It is retained only for the intercepted
-        test seam.  The durable row is issued with worker-owned current times;
-        caller-provided state and timestamps are never persisted.
-        """
-        if self.transport is None or not is_server_owned_audio_consent(consent):
-            raise AudioWorkerError(f"{boundary}_consent_untrusted", "audio consent is not server-owned")
-        expected_reference = f"audio-consent:{boundary}:"
-        if not isinstance(consent.reference, str) or not consent.reference.startswith(expected_reference):
-            raise AudioWorkerError(f"{boundary}_consent_reference_invalid", "audio consent reference is invalid")
-        current = self._now()
-        expires_at = current + RAW_RETENTION
-        async with get_session() as db:
-            result = await db.execute(
-                select(AudioConsentGrant).where(AudioConsentGrant.reference == consent.reference)
-            )
-            row = result.scalars().first()
-            if row is None:
-                row = AudioConsentGrant(
-                    reference=consent.reference,
-                    owner_principal_id=owner_principal_id,
-                    operator_session_id=operator_session_id,
-                    boundary=boundary,
-                    state=AudioConsentState.ACTIVE.value,
-                    granted_at=current,
-                    expires_at=expires_at,
-                    updated_at=current,
-                )
-                db.add(row)
-                await db.flush()
-            elif (
-                row.owner_principal_id != owner_principal_id
-                or row.operator_session_id != operator_session_id
-                or row.boundary != boundary
-            ):
-                raise AudioWorkerError(
-                    f"{boundary}_consent_untrusted",
-                    "audio consent is bound to another operator session",
-                )
-        return await self.read_consent_grant(
-            consent.reference,
-            owner_principal_id=owner_principal_id,
-            operator_session_id=operator_session_id,
-            now=self._now(),
-        )
-
     @staticmethod
-    def _assert_operator_session(row: AudioIngressJob, operator_session_id: str | None) -> None:
-        if operator_session_id is None:
-            return
-        expected = str(operator_session_id or "").strip()
-        if not expected or row.operator_session_id != expected:
-            raise AudioWorkerError("audio_operator_session_mismatch", "audio job belongs to another operator session")
+    def _assert_operator_session(
+        row: AudioIngressJob,
+        owner_principal_id: str | None,
+        operator_session_id: str | None,
+    ) -> None:
+        owner = str(owner_principal_id or "").strip()
+        operator_session = str(operator_session_id or "").strip()
+        if (
+            not owner
+            or not operator_session
+            or row.owner_principal_id != owner
+            or row.operator_session_id != operator_session
+        ):
+            raise AudioWorkerError(
+                "audio_operator_session_mismatch",
+                "audio job requires its owning operator principal and session",
+            )
 
     @staticmethod
     def _principal_has_model_authority(principal: object, row: AudioIngressJob) -> bool:
-        grants = {
-            str(getattr(grant, "value", grant))
-            for grant in getattr(principal, "grants", ())
-        }
-        return bool(
-            getattr(principal, "authenticated", False)
-            and not getattr(principal, "revoked", False)
-            and str(getattr(principal, "principal_id", "") or "") == row.owner_principal_id
-            and str(getattr(principal, "operator_session_id", "") or "") == (row.operator_session_id or "")
-            and AuthorityGrant.MODEL_INFERENCE.value in grants
+        return AudioIngressWorker._principal_has_grant(
+            principal,
+            owner_principal_id=row.owner_principal_id,
+            operator_session_id=str(row.operator_session_id or ""),
+            required_grant=AuthorityGrant.MODEL_INFERENCE,
         )
 
     async def _recheck_model_authority(
@@ -1199,23 +1206,22 @@ class AudioIngressWorker:
         *,
         authority_principal: object | None = None,
     ) -> bool:
-        """Read current operator authority immediately before model transport."""
-        principal = authority_principal or get_current_trust_principal()
-        if principal is not None:
-            return self._principal_has_model_authority(principal, row)
+        """Read current durable operator authority before model transport.
+
+        ``authority_principal`` remains an API compatibility parameter for
+        callers that carry request context, but it is deliberately ignored:
+        request-time principal objects can be stale after revocation.
+        """
+        del authority_principal
         operator_session_id = str(row.operator_session_id or "").strip()
         if not operator_session_id:
             return False
         try:
             current = await authenticate_session(operator_session_id, touch=False)
         except AuthFailure:
-            # Intercepted workers in focused tests may have no auth-session row;
-            # a real/revoked durable session is always fail-closed.
-            async with get_session() as db:
-                durable_session = await db.get(OperatorSession, operator_session_id)
-            if durable_session is not None:
-                return False
-            return self.transport is not None
+            return False
+        if current.session_id != operator_session_id:
+            return False
         return self._principal_has_model_authority(current.principal, row)
 
     async def _expire_if_needed(self, request_id: str, *, now: datetime | None = None) -> AudioJobSnapshot:
@@ -1622,6 +1628,7 @@ class AudioIngressWorker:
                     return replace(
                         await self.process(
                             request_id,
+                            owner_principal_id=request.owner_principal_id,
                             operator_session_id=request.operator_session_id,
                             authority_principal=authority_principal,
                         ),
@@ -1640,6 +1647,7 @@ class AudioIngressWorker:
             if process:
                 return await self.process(
                     request_id,
+                    owner_principal_id=request.owner_principal_id,
                     operator_session_id=request.operator_session_id,
                     authority_principal=authority_principal,
                 )
@@ -1662,6 +1670,7 @@ class AudioIngressWorker:
         self,
         request_id: str,
         *,
+        owner_principal_id: str | None = None,
         operator_session_id: str | None = None,
         authority_principal: object | None = None,
     ) -> AudioJobSnapshot:
@@ -1671,7 +1680,7 @@ class AudioIngressWorker:
         row_for_identity = await self._job(request_id)
         if row_for_identity is None:
             raise AudioWorkerError("audio_job_not_found", "audio job is not available")
-        self._assert_operator_session(row_for_identity, operator_session_id)
+        self._assert_operator_session(row_for_identity, owner_principal_id, operator_session_id)
         current_task = asyncio.current_task()
         wait_for: asyncio.Task[AudioJobSnapshot] | None = None
         async with self._task_lock:
@@ -1685,6 +1694,7 @@ class AudioIngressWorker:
         try:
             return await self._process_impl(
                 request_id,
+                owner_principal_id=owner_principal_id,
                 operator_session_id=operator_session_id,
                 authority_principal=authority_principal,
             )
@@ -1698,6 +1708,7 @@ class AudioIngressWorker:
         self,
         request_id: str,
         *,
+        owner_principal_id: str | None = None,
         operator_session_id: str | None = None,
         authority_principal: object | None = None,
     ) -> AudioJobSnapshot:
@@ -1705,7 +1716,7 @@ class AudioIngressWorker:
         row = await self._job(request_id)
         if row is None:
             raise AudioWorkerError("audio_job_not_found", "audio job is not available")
-        self._assert_operator_session(row, operator_session_id)
+        self._assert_operator_session(row, owner_principal_id, operator_session_id)
         if row.status in {"confirmed", "failed", "blocked", "cancelled", "degraded"}:
             return self._snapshot(row)
         if row.status == "transcript_ready":
@@ -2015,11 +2026,56 @@ class AudioIngressWorker:
                 )
 
             async def invoke() -> object:
+                # ``execute`` may wait behind another remote operation.  This
+                # callback runs only after the broker grants the lease, so the
+                # durable job, operator session, current model grant, and both
+                # consent rows are checked again at the actual transport edge.
+                latest = await self._job(row.request_id)
+                if latest is None:
+                    raise _AudioTransportBoundaryBlocked(
+                        "audio_job_not_found",
+                        "audio job is no longer available",
+                    )
+                if latest.status != "processing":
+                    raise _AudioTransportBoundaryBlocked(
+                        "audio_job_cancelled" if latest.status == "cancelled" else "audio_job_not_ready",
+                        "audio job is no longer admitted for transport",
+                    )
+                try:
+                    self._assert_operator_session(
+                        latest,
+                        latest.owner_principal_id,
+                        latest.operator_session_id,
+                    )
+                except AudioWorkerError as exc:
+                    raise _AudioTransportBoundaryBlocked(exc.code, str(exc)) from exc
+                if not await self._recheck_model_authority(latest):
+                    raise _AudioTransportBoundaryBlocked(
+                        "model_inference_grant_revoked",
+                        "model inference authority is no longer current",
+                    )
+                try:
+                    await self._resolve_upload_consents(
+                        AudioUploadRequest(
+                            session_id=latest.session_id,
+                            owner_principal_id=latest.owner_principal_id,
+                            operator_session_id=latest.operator_session_id,
+                            audio_bytes=b"placeholder",
+                            captured_at=latest.captured_at,
+                            capture_consent=persisted_capture,
+                            model_consent=persisted_model,
+                            requested_capability=latest.requested_capability,
+                            model_inference_granted=True,
+                        ),
+                        now=self._now(),
+                    )
+                except AudioWorkerError as exc:
+                    raise _AudioTransportBoundaryBlocked(exc.code, str(exc)) from exc
                 return await self.transport.transcribe(
                     normalized_bytes,
-                    request_id=row.request_id,
-                    session_id=row.session_id,
-                    audio_digest=row.audio_payload_digest,
+                    request_id=latest.request_id,
+                    session_id=latest.session_id,
+                    audio_digest=latest.audio_payload_digest,
                 )
 
             try:
@@ -2065,6 +2121,18 @@ class AudioIngressWorker:
                 transcript_digest=None,
             )
             raise
+        except _AudioTransportBoundaryBlocked as exc:
+            self._cleanup_job_paths(row.raw_path, row.normalized_path)
+            return await self._update_if_status(
+                row.id,
+                {"processing"},
+                status="blocked",
+                error_code=exc.code,
+                raw_path=None,
+                normalized_path=None,
+                transcript=None,
+                transcript_digest=None,
+            )
         except AudioTransportUnavailable as exc:
             self._cleanup_job_paths(row.raw_path, row.normalized_path)
             return await self._update_if_status(
@@ -2125,6 +2193,7 @@ class AudioIngressWorker:
         *,
         expected_transcript_digest: str | None = None,
         transcript_digest: str | None = None,
+        owner_principal_id: str | None = None,
         operator_session_id: str | None = None,
     ) -> AudioJobSnapshot:
         """Persist only the operator-confirmed transcript through SessionManager."""
@@ -2133,7 +2202,7 @@ class AudioIngressWorker:
         if row is None:
             raise AudioConfirmationConflict("audio_job_not_found")
         try:
-            self._assert_operator_session(row, operator_session_id)
+            self._assert_operator_session(row, owner_principal_id, operator_session_id)
         except AudioWorkerError as exc:
             raise AudioConfirmationConflict(exc.code) from exc
         if not isinstance(transcript, str):
@@ -2357,13 +2426,14 @@ class AudioIngressWorker:
         self,
         request_id: str,
         *,
+        owner_principal_id: str | None = None,
         operator_session_id: str | None = None,
     ) -> AudioJobSnapshot:
         request_id = _validate_request_id(request_id) or ""
         row = await self._job(request_id)
         if row is None:
             raise AudioWorkerError("audio_job_not_found", "audio job is not available")
-        self._assert_operator_session(row, operator_session_id)
+        self._assert_operator_session(row, owner_principal_id, operator_session_id)
         if row.status == "confirming_reserved":
             raise AudioWorkerError("confirmation_in_progress", "transcript confirmation has already fenced cancellation")
         if row.status in {"confirmed", "failed", "blocked", "cancelled", "degraded"}:
@@ -2448,7 +2518,12 @@ class AudioIngressWorker:
                     changed = True
                     if row.status != "confirmed":
                         row.transcript_digest = None
-                if recover_process_local and row.status in {"queued", "processing", "confirming_reserved"}:
+                if recover_process_local and row.status in {
+                    "queued",
+                    "processing",
+                    "confirming",
+                    "confirming_reserved",
+                }:
                     should_expire = True
                 # An unconfirmed transcript is process-local by contract.  It
                 # is never resumed after restart; clear its digest and text.
@@ -2462,6 +2537,7 @@ class AudioIngressWorker:
                     row.normalized_path = None
                     row.transcript = None
                     row.transcript_digest = None
+                    row.confirmed_transcript_digest = None
                     self._drop_review_transcript(row.request_id)
                     row.updated_at = current
                     changed = True
@@ -2536,6 +2612,12 @@ def cleanup_audio_job_paths(raw_path: str | Path | None, normalized_path: str | 
     return cleaned
 
 
+def forget_audio_job_review(request_id: str) -> None:
+    """Drop process-local transcript text when a canonical session is deleted."""
+    for worker in tuple(_AUDIO_WORKERS):
+        worker._drop_review_transcript(request_id)
+
+
 default_audio_worker = AudioIngressWorker()
 
 
@@ -2556,6 +2638,7 @@ __all__ = [
     "cleanup_audio_ingress_jobs",
     "cleanup_expired_audio_ingress_jobs",
     "cleanup_audio_job_paths",
+    "forget_audio_job_review",
     "default_audio_worker",
     "parse_intercepted_transcript",
 ]

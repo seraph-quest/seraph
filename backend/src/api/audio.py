@@ -180,6 +180,7 @@ async def issue_audio_consent(body: AudioConsentGrantBody, request: Request) -> 
             owner_principal_id=owner,
             operator_session_id=operator_session_id,
             boundary=body.boundary,
+            authority_principal=getattr(operator, "principal", None),
         )
     except AudioWorkerError as exc:
         raise _error(exc) from exc
@@ -236,14 +237,13 @@ async def _owned_job(request_id: str, request: Request, *, require_model: bool =
         raise HTTPException(status_code=404, detail={"code": exc.code}) from exc
     if snapshot.owner_principal_id != owner or snapshot.operator_session_id != operator_session_id:
         raise HTTPException(status_code=404, detail={"code": "audio_job_not_found"})
-    return snapshot, operator_session_id, operator
+    return snapshot, owner, operator_session_id, operator
 
 
 @router.get("/audio/ptt/{request_id}")
 @router.get("/audio/ingress/{request_id}")
 async def get_audio(request_id: str, request: Request) -> dict:
-    snapshot, operator_session_id, operator = await _owned_job(request_id, request)
-    owner = str(operator.principal.principal_id)
+    snapshot, owner, operator_session_id, _ = await _owned_job(request_id, request)
     return _operator_payload(
         snapshot,
         owner_principal_id=owner,
@@ -253,10 +253,11 @@ async def get_audio(request_id: str, request: Request) -> dict:
 
 @router.post("/audio/ptt/{request_id}/process")
 async def process_audio(request_id: str, request: Request) -> dict:
-    snapshot, operator_session_id, operator = await _owned_job(request_id, request, require_model=True)
+    snapshot, owner, operator_session_id, operator = await _owned_job(request_id, request, require_model=True)
     try:
         result = await default_audio_worker.process(
             snapshot.request_id,
+            owner_principal_id=owner,
             operator_session_id=operator_session_id,
             authority_principal=getattr(operator, "principal", None),
         )
@@ -264,40 +265,45 @@ async def process_audio(request_id: str, request: Request) -> dict:
         raise _error(exc) from exc
     return _operator_payload(
         result,
-        owner_principal_id=str(operator.principal.principal_id),
+        owner_principal_id=owner,
         operator_session_id=operator_session_id,
     )
 
 
 @router.post("/audio/ptt/{request_id}/confirm")
 async def confirm_audio(request_id: str, body: TranscriptConfirmationBody, request: Request) -> dict:
-    _, operator_session_id, operator = await _owned_job(request_id, request)
+    _, owner, operator_session_id, operator = await _owned_job(request_id, request)
     try:
         snapshot = await default_audio_worker.confirm_transcript(
             request_id,
             body.transcript,
             expected_transcript_digest=body.expected_transcript_digest,
             transcript_digest=body.transcript_digest,
+            owner_principal_id=owner,
             operator_session_id=operator_session_id,
         )
     except AudioConfirmationConflict as exc:
         raise _error(exc) from exc
     return _operator_payload(
         snapshot,
-        owner_principal_id=str(operator.principal.principal_id),
+        owner_principal_id=owner,
         operator_session_id=operator_session_id,
     )
 
 
 @router.post("/audio/ptt/{request_id}/cancel")
 async def cancel_audio(request_id: str, request: Request) -> dict:
-    _, operator_session_id, operator = await _owned_job(request_id, request)
+    _, owner, operator_session_id, operator = await _owned_job(request_id, request)
     try:
-        snapshot = await default_audio_worker.cancel(request_id, operator_session_id=operator_session_id)
+        snapshot = await default_audio_worker.cancel(
+            request_id,
+            owner_principal_id=owner,
+            operator_session_id=operator_session_id,
+        )
     except AudioWorkerError as exc:
         raise _error(exc) from exc
     return _operator_payload(
         snapshot,
-        owner_principal_id=str(operator.principal.principal_id),
+        owner_principal_id=owner,
         operator_session_id=operator_session_id,
     )

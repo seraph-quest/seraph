@@ -16,6 +16,7 @@ from sqlmodel import col, select
 from config.settings import settings
 from src.audit.runtime import log_integration_event
 from src.agent.session import session_manager
+from src.auth.service import AuthenticatedOperator
 from src.db.engine import get_session
 from src.db.models import PairedEdgeArtifact, ScreenObservation
 from src.observer.image_metadata import local_image_metadata
@@ -215,11 +216,21 @@ def _require_authenticated_daemon(request: Request, worker_id: str) -> None:
 def _require_authenticated_operator_binding(request: Request) -> tuple[str, str]:
     """Resolve the authenticated browser principal and operator session."""
     operator = getattr(request.state, "operator", None)
-    principal_id = getattr(getattr(operator, "principal", None), "principal_id", None)
-    operator_session_id = getattr(operator, "session_id", None)
-    if not operator or not principal_id or not operator_session_id:
-        raise HTTPException(status_code=401, detail="authenticated operator request is required")
-    return str(principal_id), str(operator_session_id)
+    principal = getattr(operator, "principal", None)
+    principal_id = getattr(principal, "principal_id", None)
+    operator_session_id = str(getattr(operator, "session_id", "") or "")
+    principal_type = getattr(getattr(principal, "principal_type", None), "value", getattr(principal, "principal_type", None))
+    if (
+        not isinstance(operator, AuthenticatedOperator)
+        or not principal_id
+        or not operator_session_id
+        or principal_type != "operator"
+        or not bool(getattr(principal, "authenticated", False))
+        or bool(getattr(principal, "revoked", False))
+        or str(getattr(principal, "operator_session_id", "") or "") != operator_session_id
+    ):
+        raise HTTPException(status_code=401, detail={"code": "authenticated_operator_required"})
+    return str(principal_id), operator_session_id
 
 
 class QueuedInsightResponse(BaseModel):
@@ -555,10 +566,12 @@ def _screen_artifact_root() -> Path:
     return Path("~/Library/Application Support/Seraph/artifacts/screen-captures").expanduser().resolve()
 
 
-def _require_local_artifact_request(request: Request) -> None:
+def _require_local_artifact_request(request: Request) -> tuple[str, str]:
+    owner_principal_id, operator_session_id = _require_authenticated_operator_binding(request)
     client_host = request.client.host if request.client is not None else ""
     if client_host not in {"127.0.0.1", "::1", "localhost", "testclient"}:
         raise HTTPException(status_code=403, detail="Screen artifacts are only available from localhost")
+    return owner_principal_id, operator_session_id
 
 
 def _screen_artifact_path(raw_path: str | None) -> Path:
@@ -684,14 +697,16 @@ async def list_screen_artifacts(request: Request, limit: int = 20) -> dict[str, 
 @router.get("/observer/screen-artifacts/{observation_id}/image")
 async def get_screen_artifact_image(observation_id: str, request: Request) -> Response:
     """Return a preserved screenshot image for local operator inspection."""
-    _require_local_artifact_request(request)
+    owner_principal_id, _ = _require_local_artifact_request(request)
     observation = await _screen_artifact_observation(observation_id)
     artifacts = _screen_capture_artifacts(observation) or {}
     if artifacts.get("provider") == "paired_edge":
         artifact_id = str(artifacts.get("artifact_id") or artifacts.get("readback_id") or "")
         async with get_session() as db:
             result = await db.execute(
-                select(PairedEdgeArtifact).where(col(PairedEdgeArtifact.artifact_id) == artifact_id)
+                select(PairedEdgeArtifact)
+                .where(col(PairedEdgeArtifact.artifact_id) == artifact_id)
+                .where(col(PairedEdgeArtifact.owner_principal_id) == owner_principal_id)
             )
             artifact = result.scalar_one_or_none()
         if artifact is None:

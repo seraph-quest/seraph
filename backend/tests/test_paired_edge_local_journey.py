@@ -108,7 +108,7 @@ async def test_local_http_capture_artifact_readback_spool_restart_and_revoke(tmp
     monkeypatch.setattr(settings, "deployment_environment", "test")
     monkeypatch.setattr(settings, "operator_auth_allow_unauthenticated_tests", True)
     monkeypatch.setattr(settings, "operator_auth_allowed_hosts", "test")
-    monkeypatch.setattr(settings, "operator_auth_allowed_origins", "http://test")
+    monkeypatch.setattr(settings, "operator_auth_allowed_origins", "https://test")
 
     engine = create_async_engine(
         "sqlite+aiosqlite://",
@@ -151,10 +151,10 @@ async def test_local_http_capture_artifact_readback_spool_restart_and_revoke(tmp
     app.add_middleware(OperatorAuthMiddleware)
     app.include_router(nodes.router, prefix="/api")
     asgi_transport = httpx.ASGITransport(app=app)
-    async with httpx.AsyncClient(transport=asgi_transport, base_url="http://test") as client:
+    async with httpx.AsyncClient(transport=asgi_transport, base_url="https://test") as client:
         pair_response = await client.post(
             "/api/nodes/pairings/pair",
-            headers={"Origin": "http://test"},
+            headers={"Origin": "https://test"},
             json={
                 "extension_id": "seraph.openclaw-device-bridge",
                 "reference": "connectors/nodes/device.yaml",
@@ -173,12 +173,12 @@ async def test_local_http_capture_artifact_readback_spool_restart_and_revoke(tmp
 
         spool_path = tmp_path / "edge-spool.json"
         transport = PairedEdgeTransport(
-            origin="http://test",
+            origin="https://test",
             credential=credential,
             device_id="mac-local-1",
             pairing_id="pair-local-1",
             spool_path=spool_path,
-            http_client=httpx.AsyncClient(transport=asgi_transport, base_url="http://test"),
+            http_client=httpx.AsyncClient(transport=asgi_transport, base_url="https://test"),
         )
         accepted = await transport.capture(
             b"synthetic-png-bytes",
@@ -205,7 +205,7 @@ async def test_local_http_capture_artifact_readback_spool_restart_and_revoke(tmp
         wrong_size_payload = dict(valid_payload, content_size=999)
         wrong_size = await client.post(
             "/api/nodes/edge/upload",
-            headers={"Authorization": f"Bearer {credential}", "Origin": "http://test"},
+            headers={"Authorization": f"Bearer {credential}", "Origin": "https://test"},
             json=wrong_size_payload,
         )
         assert wrong_size.status_code == 403
@@ -213,7 +213,7 @@ async def test_local_http_capture_artifact_readback_spool_restart_and_revoke(tmp
         wrong_hash_payload = dict(valid_payload, request_id="negative-hash", content_hash="sha256:" + "0" * 64)
         wrong_hash = await client.post(
             "/api/nodes/edge/upload",
-            headers={"Authorization": f"Bearer {credential}", "Origin": "http://test"},
+            headers={"Authorization": f"Bearer {credential}", "Origin": "https://test"},
             json=wrong_hash_payload,
         )
         assert wrong_hash.status_code == 403
@@ -221,7 +221,7 @@ async def test_local_http_capture_artifact_readback_spool_restart_and_revoke(tmp
         out_of_order_payload = dict(valid_payload, request_id="negative-sequence", sequence=1)
         out_of_order = await client.post(
             "/api/nodes/edge/upload",
-            headers={"Authorization": f"Bearer {credential}", "Origin": "http://test"},
+            headers={"Authorization": f"Bearer {credential}", "Origin": "https://test"},
             json=out_of_order_payload,
         )
         assert out_of_order.status_code == 409
@@ -238,7 +238,7 @@ async def test_local_http_capture_artifact_readback_spool_restart_and_revoke(tmp
 
         wrong_auth = await client.post(
             "/api/nodes/edge/upload",
-            headers={"Authorization": "Bearer wrong", "Origin": "http://test"},
+            headers={"Authorization": "Bearer wrong", "Origin": "https://test"},
             json=transport._payload(  # type: ignore[attr-defined]
                 b"bad-auth",
                 sequence=99,
@@ -249,7 +249,7 @@ async def test_local_http_capture_artifact_readback_spool_restart_and_revoke(tmp
         assert wrong_auth.status_code == 401
 
         offline = PairedEdgeTransport(
-            origin="http://test",
+            origin="https://test",
             credential=credential,
             device_id="mac-local-1",
             pairing_id="pair-local-1",
@@ -265,12 +265,12 @@ async def test_local_http_capture_artifact_readback_spool_restart_and_revoke(tmp
         await offline.close()
 
         restarted = PairedEdgeTransport(
-            origin="http://test",
+            origin="https://test",
             credential=credential,
             device_id="mac-local-1",
             pairing_id="pair-local-1",
             spool_path=spool_path,
-            http_client=httpx.AsyncClient(transport=asgi_transport, base_url="http://test"),
+            http_client=httpx.AsyncClient(transport=asgi_transport, base_url="https://test"),
         )
         drained = await restarted.drain()
         assert len(drained) == 1
@@ -284,7 +284,7 @@ async def test_local_http_capture_artifact_readback_spool_restart_and_revoke(tmp
 
         revoke_response = await client.post(
             "/api/nodes/pairings/revoke",
-            headers={"Origin": "http://test"},
+            headers={"Origin": "https://test"},
             json={
                 "extension_id": "seraph.openclaw-device-bridge",
                 "reference": "connectors/nodes/device.yaml",

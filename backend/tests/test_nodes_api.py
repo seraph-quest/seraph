@@ -1,11 +1,16 @@
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 from unittest.mock import patch
+from dataclasses import replace
 
+from fastapi import HTTPException
 import pytest
 
 from config.settings import settings
+from src.api.nodes import _operator_principal_id, _require_pairing_owner
+from src.auth.service import test_bypass_operator
 
 
 def _write_node_pack(workspace):
@@ -103,6 +108,38 @@ async def test_node_adapter_inventory_lists_staged_and_canvas_states(client, tmp
     assert adapters["canvas-node"]["requires_network"] is False
 
 
+def test_pairing_and_operator_scope_reject_cross_owner_or_stale_session(monkeypatch):
+    monkeypatch.setattr(settings, "deployment_environment", "test")
+    monkeypatch.setattr(settings, "operator_auth_allow_unauthenticated_tests", True)
+    operator = test_bypass_operator()
+    stale = replace(
+        operator,
+        principal=replace(operator.principal, operator_session_id="other-session"),
+    )
+    request = SimpleNamespace(state=SimpleNamespace(operator=stale))
+    with pytest.raises(HTTPException) as auth_error:
+        _operator_principal_id(request)
+    assert auth_error.value.status_code == 401
+
+    adapter = SimpleNamespace(extension_id="edge", reference="device.yaml", name="device")
+    state_payload = {
+        "extensions": {
+            "edge": {
+                "node_pairings": {
+                    "device.yaml": {
+                        "owner_principal_id": "operator:owner",
+                        "device_id": "device-1",
+                        "pairing_id": "pair-1",
+                    }
+                }
+            }
+        }
+    }
+    with pytest.raises(HTTPException) as owner_error:
+        _require_pairing_owner(state_payload, adapter, "operator:attacker")
+    assert owner_error.value.status_code == 404
+
+
 @pytest.mark.asyncio
 async def test_packaged_device_adapter_defaults_unpaired_staged_and_fail_closed(client, tmp_path):
     workspace = tmp_path / "workspace"
@@ -149,6 +186,7 @@ async def test_device_pairing_metadata_is_visible_and_revocation_fails_closed(cl
                                 "label": "Bench device",
                                 "paired_at": "2026-05-05T10:00:00+00:00",
                                 "trusted": True,
+                                "owner_principal_id": "operator:test-bypass",
                                 "scopes": ["notify", "capture"],
                             }
                         }

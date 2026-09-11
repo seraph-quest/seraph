@@ -18,9 +18,9 @@ from uuid import uuid4
 import httpx
 
 try:
-    from blocklist import is_blocked
+    from blocklist import DEFAULT_BLOCKLIST, is_blocked
 except ImportError:  # pragma: no cover - package import fallback
-    from .blocklist import is_blocked
+    from .blocklist import DEFAULT_BLOCKLIST, is_blocked
 
 
 _SPOOL_SCHEMA = "seraph.paired_edge.spool.v1"
@@ -29,6 +29,16 @@ _DEFAULT_MAX_BYTES = 50 * 1024 * 1024
 _DEFAULT_MAX_AGE_SECONDS = 24 * 60 * 60
 _DEFAULT_MAX_RETRIES = 8
 _DEFAULT_BACKOFF_SECONDS = 2.0
+_EDGE_UPLOAD_PATH = "/api/nodes/edge/upload"
+_EDGE_HEARTBEAT_PATH = "/api/nodes/edge/heartbeat"
+_EDGE_ENDPOINTS = frozenset({_EDGE_UPLOAD_PATH, _EDGE_HEARTBEAT_PATH})
+_EDGE_KINDS = frozenset({"capture", "heartbeat"})
+_KNOWN_RESULT_STATUSES = frozenset(
+    {"accepted", "duplicate", "expired", "revoked", "oversized", "blocked", "out_of_order", "retryable"}
+)
+_TERMINAL_RESULT_STATUSES = frozenset(
+    {"accepted", "duplicate", "expired", "revoked", "oversized", "blocked", "out_of_order"}
+)
 
 
 def _utc_now() -> datetime:
@@ -51,7 +61,7 @@ def _parse_timestamp(value: object) -> datetime | None:
     return parsed.astimezone(timezone.utc)
 
 
-def validate_edge_origin(value: str) -> str:
+def validate_edge_origin(value: str, *, allow_insecure_test_transport: bool = False) -> str:
     """Return a safe configured origin suitable for authenticated requests."""
 
     raw = str(value or "").strip().rstrip("/")
@@ -67,10 +77,41 @@ def validate_edge_origin(value: str) -> str:
     ):
         raise ValueError("edge_origin_must_be_http_or_https_without_credentials")
     host = parsed.hostname
+    if parsed.scheme.lower() == "http":
+        normalized_host = host.strip().rstrip(".").lower()
+        if not (allow_insecure_test_transport and normalized_host in {"127.0.0.1", "::1", "localhost"}):
+            raise ValueError("edge_origin_requires_https")
     if ":" in host and not host.startswith("["):
         host = f"[{host}]"
     netloc = f"{host}:{parsed.port}" if parsed.port is not None else host
     return urlunsplit((parsed.scheme.lower(), netloc, parsed.path.rstrip("/"), "", ""))
+
+
+def _response_outcome(http_status: int, response: dict[str, object]) -> tuple[str, str]:
+    """Map both HTTP status and the typed receipt into a durable outcome."""
+
+    status_value = response.get("status")
+    status = status_value if isinstance(status_value, str) else ""
+    reason_value = response.get("reason_code")
+    reason = reason_value if isinstance(reason_value, str) and reason_value else ""
+    detail = response.get("detail")
+    if isinstance(detail, dict):
+        detail_code = detail.get("code")
+        if not reason and isinstance(detail_code, str) and detail_code:
+            reason = detail_code
+    if http_status == 401:
+        return "blocked", reason or "http_401_unauthorized"
+    if http_status == 403:
+        if status == "revoked" or reason in {"pairing_revoked", "credential_revoked", "credential_rotated_or_revoked"}:
+            return "revoked", reason or "http_403_revoked"
+        return "blocked", reason or "http_403_forbidden"
+    if status in _KNOWN_RESULT_STATUSES:
+        return status, reason or "server_response"
+    if http_status >= 500:
+        return "retryable", reason or f"http_{http_status}_server_error"
+    if http_status >= 400:
+        return "blocked", reason or f"http_{http_status}_client_error"
+    return "retryable", reason or "server_response"
 
 
 @dataclass(frozen=True)
@@ -80,6 +121,8 @@ class SpoolItem:
     payload: dict[str, object]
     content_size: int
     created_at: str
+    endpoint: str = _EDGE_UPLOAD_PATH
+    kind: str = "capture"
     retries: int = 0
     next_attempt_at: str | None = None
     last_error: str | None = None
@@ -91,6 +134,8 @@ class SpoolItem:
             "payload": self.payload,
             "content_size": self.content_size,
             "created_at": self.created_at,
+            "endpoint": self.endpoint,
+            "kind": self.kind,
             "retries": self.retries,
             "next_attempt_at": self.next_attempt_at,
             "last_error": self.last_error,
@@ -164,6 +209,16 @@ class DurableEdgeSpool:
             ):
                 continue
             seen.add(request_id)
+            endpoint = raw_item.get("endpoint")
+            kind = raw_item.get("kind")
+            if not isinstance(endpoint, str) or endpoint not in _EDGE_ENDPOINTS:
+                endpoint = _EDGE_HEARTBEAT_PATH if kind == "heartbeat" else _EDGE_UPLOAD_PATH
+            if not isinstance(kind, str) or kind not in _EDGE_KINDS:
+                kind = "heartbeat" if endpoint == _EDGE_HEARTBEAT_PATH else "capture"
+            if kind == "heartbeat":
+                endpoint = _EDGE_HEARTBEAT_PATH
+            else:
+                endpoint = _EDGE_UPLOAD_PATH
             self._items.append(
                 SpoolItem(
                     request_id=request_id,
@@ -171,6 +226,8 @@ class DurableEdgeSpool:
                     payload=payload,
                     content_size=size,
                     created_at=created_at,
+                    endpoint=endpoint,
+                    kind=kind,
                     retries=int(raw_item.get("retries") or 0) if isinstance(raw_item.get("retries"), int) else 0,
                     next_attempt_at=raw_item.get("next_attempt_at") if isinstance(raw_item.get("next_attempt_at"), str) else None,
                     last_error=raw_item.get("last_error") if isinstance(raw_item.get("last_error"), str) else None,
@@ -224,6 +281,8 @@ class DurableEdgeSpool:
         request_id: str,
         sequence: int,
         content_size: int,
+        endpoint: str = _EDGE_UPLOAD_PATH,
+        kind: str = "capture",
         now: datetime | None = None,
     ) -> bool:
         """Queue one capture, returning false for duplicate/full/oversized data."""
@@ -236,6 +295,14 @@ class DurableEdgeSpool:
             return False
         if len(self._items) >= self.max_count:
             return False
+        if not isinstance(endpoint, str) or endpoint not in _EDGE_ENDPOINTS:
+            endpoint = _EDGE_HEARTBEAT_PATH if kind == "heartbeat" else _EDGE_UPLOAD_PATH
+        if not isinstance(kind, str) or kind not in _EDGE_KINDS:
+            kind = "heartbeat" if endpoint == _EDGE_HEARTBEAT_PATH else "capture"
+        if kind == "heartbeat":
+            endpoint = _EDGE_HEARTBEAT_PATH
+        else:
+            endpoint = _EDGE_UPLOAD_PATH
         self._items.append(
             SpoolItem(
                 request_id=request_id,
@@ -243,6 +310,8 @@ class DurableEdgeSpool:
                 payload=dict(payload),
                 content_size=content_size,
                 created_at=_iso(current),
+                endpoint=endpoint,
+                kind=kind,
             )
         )
         self._items.sort(key=lambda item: (item.sequence, item.created_at, item.request_id))
@@ -285,6 +354,8 @@ class DurableEdgeSpool:
                 payload=item.payload,
                 content_size=item.content_size,
                 created_at=item.created_at,
+                endpoint=item.endpoint,
+                kind=item.kind,
                 retries=retries,
                 next_attempt_at=_iso(current if delay <= 0 else current + timedelta(seconds=delay)),
                 last_error=str(error)[:160],
@@ -321,6 +392,7 @@ class EdgeTransportResult:
     response: dict[str, object] | None = None
     queued: bool = False
     artifact_id: str | None = None
+    http_status: int | None = None
 
 
 class PairedEdgeTransport:
@@ -330,7 +402,7 @@ class PairedEdgeTransport:
         self,
         *,
         origin: str,
-        credential: str,
+        credential: str | None,
         device_id: str,
         pairing_id: str,
         spool_path: str | os.PathLike[str],
@@ -343,11 +415,15 @@ class PairedEdgeTransport:
         cloud_upload_enabled: bool = False,
         http_client: httpx.AsyncClient | None = None,
         timeout_seconds: float = 10.0,
+        allow_insecure_test_transport: bool = False,
     ) -> None:
-        self.origin = validate_edge_origin(origin)
-        if not credential:
+        raw_credential = str(credential or "").strip()
+        allow_insecure = bool(allow_insecure_test_transport and not raw_credential)
+        self.origin = validate_edge_origin(origin, allow_insecure_test_transport=allow_insecure)
+        parsed_origin = urlsplit(self.origin)
+        if not raw_credential and not (allow_insecure and parsed_origin.scheme == "http"):
             raise ValueError("paired edge credential is required")
-        self.credential = credential
+        self.credential = raw_credential or None
         self.device_id = device_id
         self.pairing_id = pairing_id
         self.extension_id = extension_id
@@ -355,7 +431,7 @@ class PairedEdgeTransport:
         self.policy_version = policy_version
         self.capability_scope = capability_scope
         self.data_purpose = data_purpose
-        self.blocklist = set(blocklist or set())
+        self.blocklist = set(DEFAULT_BLOCKLIST if blocklist is None else blocklist)
         self.cloud_upload_enabled = bool(cloud_upload_enabled)
         self.timeout_seconds = timeout_seconds
         self.spool = DurableEdgeSpool(spool_path)
@@ -445,14 +521,16 @@ class PairedEdgeTransport:
         if self._client is None:
             await self.__aenter__()
         assert self._client is not None
+        headers = {
+            "Origin": self.origin,
+            "X-Seraph-Node-Device": self.device_id,
+        }
+        if self.credential:
+            headers["Authorization"] = f"Bearer {self.credential}"
         response = await self._client.post(
             f"{self.origin}{path}",
             json=payload,
-            headers={
-                "Authorization": f"Bearer {self.credential}",
-                "Origin": self.origin,
-                "X-Seraph-Node-Device": self.device_id,
-            },
+            headers=headers,
         )
         try:
             data = response.json()
@@ -466,13 +544,13 @@ class PairedEdgeTransport:
         *,
         path: str,
         content_size: int,
+        kind: str,
     ) -> EdgeTransportResult:
         request_id = str(payload["request_id"])
         sequence = int(payload["sequence"])
         try:
-            _http_status, response = await self._post(path, payload)
-            status = str(response.get("status") or "retryable")
-            reason = str(response.get("reason_code") or "server_response")
+            http_status, response = await self._post(path, payload)
+            status, reason = _response_outcome(http_status, response)
             artifact = response.get("artifact")
             artifact_id = str(artifact.get("artifact_id")) if isinstance(artifact, dict) and artifact.get("artifact_id") else None
             queued = False
@@ -482,6 +560,8 @@ class PairedEdgeTransport:
                     request_id=request_id,
                     sequence=sequence,
                     content_size=content_size,
+                    endpoint=path,
+                    kind=kind,
                 )
             result = EdgeTransportResult(
                 status=status,
@@ -491,6 +571,7 @@ class PairedEdgeTransport:
                 response=response,
                 queued=queued,
                 artifact_id=artifact_id,
+                http_status=http_status,
             )
             self.last_result = result
             return result
@@ -500,6 +581,8 @@ class PairedEdgeTransport:
                 request_id=request_id,
                 sequence=sequence,
                 content_size=content_size,
+                endpoint=path,
+                kind=kind,
             )
             result = EdgeTransportResult(
                 status="retryable" if queued else "blocked",
@@ -507,6 +590,7 @@ class PairedEdgeTransport:
                 request_id=request_id,
                 sequence=sequence,
                 queued=queued,
+                http_status=None,
             )
             self.last_result = result
             return result
@@ -520,10 +604,29 @@ class PairedEdgeTransport:
                 request_id=f"heartbeat-{uuid4().hex}",
                 captured_at=captured_at or _utc_now(),
             )
+            if self.spool.count:
+                queued = self.spool.enqueue(
+                    payload,
+                    request_id=str(payload["request_id"]),
+                    sequence=sequence,
+                    content_size=0,
+                    endpoint=_EDGE_HEARTBEAT_PATH,
+                    kind="heartbeat",
+                )
+                result = EdgeTransportResult(
+                    status="retryable" if queued else "blocked",
+                    reason_code="queued_behind_pending_items" if queued else "spool_full",
+                    request_id=str(payload["request_id"]),
+                    sequence=sequence,
+                    queued=queued,
+                )
+                self.last_result = result
+                return result
             return await self._send_or_queue(
                 payload,
-                path="/api/nodes/edge/heartbeat",
+                path=_EDGE_HEARTBEAT_PATH,
                 content_size=0,
+                kind="heartbeat",
             )
 
     async def capture(
@@ -569,8 +672,9 @@ class PairedEdgeTransport:
             )
             return await self._send_or_queue(
                 payload,
-                path="/api/nodes/edge/upload",
+                path=_EDGE_UPLOAD_PATH,
                 content_size=len(content),
+                kind="capture",
             )
 
     async def drain(self) -> list[EdgeTransportResult]:
@@ -580,9 +684,8 @@ class PairedEdgeTransport:
         async with self._lock:
             for item in list(self.spool.ready()):
                 try:
-                    _http_status, response = await self._post("/api/nodes/edge/upload", item.payload)
-                    status = str(response.get("status") or "retryable")
-                    reason = str(response.get("reason_code") or "server_response")
+                    http_status, response = await self._post(item.endpoint, item.payload)
+                    status, reason = _response_outcome(http_status, response)
                     artifact = response.get("artifact")
                     artifact_id = str(artifact.get("artifact_id")) if isinstance(artifact, dict) and artifact.get("artifact_id") else None
                     result = EdgeTransportResult(
@@ -592,8 +695,9 @@ class PairedEdgeTransport:
                         sequence=item.sequence,
                         response=response,
                         artifact_id=artifact_id,
+                        http_status=http_status,
                     )
-                    if status in {"accepted", "duplicate", "expired", "revoked", "oversized", "blocked", "out_of_order"}:
+                    if status in _TERMINAL_RESULT_STATUSES:
                         self.spool.acknowledge(item.request_id)
                     else:
                         self.spool.retry(item.request_id, error=reason)

@@ -33,7 +33,7 @@ def test_disconnect_restart_drain_is_ordered_and_exactly_once(tmp_path):
 
 async def _disconnect_restart_drain(spool_path):
     first = PairedEdgeTransport(
-        origin="http://127.0.0.1:8004",
+        origin="https://127.0.0.1:8004",
         credential="one-time-test-credential",
         device_id="mac-test-1",
         pairing_id="pair-test-1",
@@ -53,7 +53,7 @@ async def _disconnect_restart_drain(spool_path):
         requests.append(request)
         body = request.read()
         assert request.headers["authorization"] == "Bearer one-time-test-credential"
-        assert request.headers["origin"] == "http://127.0.0.1:8004"
+        assert request.headers["origin"] == "https://127.0.0.1:8004"
         assert b'"content_base64"' in body
         return httpx.Response(
             201,
@@ -66,7 +66,7 @@ async def _disconnect_restart_drain(spool_path):
         )
 
     restarted = PairedEdgeTransport(
-        origin="http://127.0.0.1:8004",
+        origin="https://127.0.0.1:8004",
         credential="one-time-test-credential",
         device_id="mac-test-1",
         pairing_id="pair-test-1",
@@ -95,15 +95,14 @@ async def _retryable_response_and_blocklist(tmp_path):
         return httpx.Response(503, json={"status": "retryable", "reason_code": "server_busy"}, request=request)
 
     transport = PairedEdgeTransport(
-        origin="http://localhost:8004",
+        origin="https://localhost:8004",
         credential="credential",
         device_id="device",
         pairing_id="pairing",
         spool_path=tmp_path / "spool.json",
-        blocklist={"bank"},
         http_client=httpx.AsyncClient(transport=httpx.MockTransport(retryable_handler)),
     )
-    blocked = await transport.capture(b"secret", app="My Bank")
+    blocked = await transport.capture(b"secret", app="1Password 7")
     assert blocked.status == "blocked"
     assert blocked.reason_code == "sensitive_app_blocked_before_upload"
     assert calls == 0
@@ -131,8 +130,124 @@ def test_spool_bounds_dedupe_and_retry_backoff_are_durable(tmp_path):
 
 
 def test_edge_origin_rejects_credentials_and_non_origin_paths():
-    assert validate_edge_origin("HTTP://127.0.0.1:8004/") == "http://127.0.0.1:8004"
+    assert validate_edge_origin("HTTPS://127.0.0.1:8004/") == "https://127.0.0.1:8004"
+    with pytest.raises(ValueError, match="https"):
+        validate_edge_origin("HTTP://127.0.0.1:8004/")
     with pytest.raises(ValueError):
         validate_edge_origin("http://user:pass@127.0.0.1:8004")
     with pytest.raises(ValueError):
         validate_edge_origin("http://127.0.0.1:8004/core")
+
+
+def test_credentialed_plaintext_is_rejected_but_explicit_local_synthetic_is_allowed(tmp_path):
+    with pytest.raises(ValueError, match="https"):
+        PairedEdgeTransport(
+            origin="http://127.0.0.1:8004",
+            credential="bearer-secret",
+            device_id="device",
+            pairing_id="pairing",
+            spool_path=tmp_path / "secure.json",
+            http_client=_offline_client(),
+        )
+    synthetic = PairedEdgeTransport(
+        origin="http://127.0.0.1:8004",
+        credential=None,
+        device_id="device",
+        pairing_id="pairing",
+        spool_path=tmp_path / "synthetic.json",
+        allow_insecure_test_transport=True,
+        http_client=_offline_client(),
+    )
+    asyncio.run(synthetic.close())
+
+
+def test_unauthorized_http_receipts_are_terminal_and_not_queued(tmp_path):
+    async def run() -> None:
+        for status_code in (401, 403):
+            def denied_handler(request: httpx.Request, *, status_code=status_code) -> httpx.Response:
+                return httpx.Response(status_code, json={"detail": {"code": "access_denied"}}, request=request)
+
+            transport = PairedEdgeTransport(
+                origin="https://localhost:8004",
+                credential="credential",
+                device_id="device",
+                pairing_id="pairing",
+                spool_path=tmp_path / f"denied-{status_code}.json",
+                http_client=httpx.AsyncClient(transport=httpx.MockTransport(denied_handler)),
+            )
+            result = await transport.capture(b"safe", app="Safari")
+            assert result.status == "blocked"
+            assert result.queued is False
+            assert result.http_status == status_code
+            assert transport.spool.count == 0
+            await transport.close()
+
+            spool_path = tmp_path / f"drain-denied-{status_code}.json"
+            queued_transport = PairedEdgeTransport(
+                origin="https://localhost:8004",
+                credential="credential",
+                device_id="device",
+                pairing_id="pairing",
+                spool_path=spool_path,
+                http_client=_offline_client(),
+            )
+            queued = await queued_transport.capture(b"safe", app="Safari")
+            assert queued.queued is True
+            await queued_transport.close()
+            drainer = PairedEdgeTransport(
+                origin="https://localhost:8004",
+                credential="credential",
+                device_id="device",
+                pairing_id="pairing",
+                spool_path=spool_path,
+                http_client=httpx.AsyncClient(transport=httpx.MockTransport(denied_handler)),
+            )
+            drained = await drainer.drain()
+            assert drained[0].status == "blocked"
+            assert drained[0].http_status == status_code
+            assert drainer.spool.count == 0
+            await drainer.close()
+
+    asyncio.run(run())
+
+
+def test_spooled_heartbeat_keeps_endpoint_and_sequence_order(tmp_path):
+    async def run() -> None:
+        offline = PairedEdgeTransport(
+            origin="https://localhost:8004",
+            credential="credential",
+            device_id="device",
+            pairing_id="pairing",
+            spool_path=tmp_path / "ordered.json",
+            http_client=_offline_client(),
+        )
+        capture = await offline.capture(b"safe", app="Safari")
+        heartbeat = await offline.heartbeat()
+        assert capture.queued and heartbeat.queued
+        assert [(item.sequence, item.kind, item.endpoint) for item in offline.spool.items] == [
+            (1, "capture", "/api/nodes/edge/upload"),
+            (2, "heartbeat", "/api/nodes/edge/heartbeat"),
+        ]
+        await offline.close()
+
+        paths: list[str] = []
+
+        def online_handler(request: httpx.Request) -> httpx.Response:
+            paths.append(request.url.path)
+            return httpx.Response(201, json={"status": "accepted", "reason_code": "ok"}, request=request)
+
+        online = PairedEdgeTransport(
+            origin="https://localhost:8004",
+            credential="credential",
+            device_id="device",
+            pairing_id="pairing",
+            spool_path=tmp_path / "ordered.json",
+            http_client=httpx.AsyncClient(transport=httpx.MockTransport(online_handler)),
+        )
+        results = await online.drain()
+        assert [item.status for item in results] == ["accepted", "accepted"]
+        assert paths == ["/api/nodes/edge/upload", "/api/nodes/edge/heartbeat"]
+        assert online.spool.count == 0
+        await online.close()
+
+    asyncio.run(run())

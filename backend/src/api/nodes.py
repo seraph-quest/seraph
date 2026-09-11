@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field
 from sqlmodel import col, select
 
 from config.settings import settings
+from src.auth.service import AuthenticatedOperator
 from src.db.engine import get_session
 from src.db.models import PairedEdgeArtifact
 from src.extensions.node_pairing import (
@@ -101,10 +102,39 @@ class EdgeHeartbeatRequest(EdgeIngressRequest):
 
 def _operator_principal_id(request: Request) -> str:
     operator = getattr(request.state, "operator", None)
-    principal_id = getattr(getattr(operator, "principal", None), "principal_id", None)
-    if not principal_id:
-        raise HTTPException(status_code=401, detail="authenticated operator request is required")
+    principal = getattr(operator, "principal", None)
+    principal_id = getattr(principal, "principal_id", None)
+    principal_type = getattr(getattr(principal, "principal_type", None), "value", getattr(principal, "principal_type", None))
+    session_id = str(getattr(operator, "session_id", "") or "")
+    principal_session_id = str(getattr(principal, "operator_session_id", "") or "")
+    if (
+        not isinstance(operator, AuthenticatedOperator)
+        or not principal_id
+        or principal_type != "operator"
+        or not bool(getattr(principal, "authenticated", False))
+        or bool(getattr(principal, "revoked", False))
+        or not session_id
+        or principal_session_id != session_id
+    ):
+        raise HTTPException(status_code=401, detail={"code": "authenticated_operator_required"})
     return str(principal_id)
+
+
+def _require_pairing_owner(
+    state_payload: dict[str, Any],
+    adapter: NodeAdapterInventoryEntry,
+    owner_principal_id: str,
+) -> None:
+    entry, _ = current_pairing(
+        state_payload,
+        extension_id=adapter.extension_id,
+        reference=adapter.reference,
+        name=adapter.name,
+    )
+    stored_owner = str(entry.get("owner_principal_id") or "").strip()
+    if not stored_owner or stored_owner != owner_principal_id:
+        # Do not disclose whether another operator owns this pairing.
+        raise HTTPException(status_code=404, detail={"code": "node_pairing_not_found"})
 
 
 def _node_inventory(state_payload: dict[str, Any] | None = None) -> list[NodeAdapterInventoryEntry]:
@@ -172,7 +202,8 @@ async def list_node_adapters():
 
 
 @router.get("/nodes/pairings")
-async def list_node_pairings():
+async def list_node_pairings(request: Request):
+    _operator_principal_id(request)
     inventory = _node_inventory()
     return {
         "pairings": [
@@ -253,7 +284,7 @@ async def pair_node(request: NodePairingMutationRequest, http_request: Request):
 async def rotate_node_pairing(request: NodePairingMutationRequest, http_request: Request):
     """Rotate a credential under the persisted state revision fence."""
 
-    _operator_principal_id(http_request)
+    owner_principal_id = _operator_principal_id(http_request)
     if not request.credential:
         raise HTTPException(status_code=400, detail={"code": "credential_required"})
     state_payload = load_extension_state_payload()
@@ -262,6 +293,7 @@ async def rotate_node_pairing(request: NodePairingMutationRequest, http_request:
         extension_id=request.extension_id,
         reference=request.reference,
     )
+    _require_pairing_owner(state_payload, adapter, owner_principal_id)
     expected_revision = (
         request.expected_revision
         if request.expected_revision is not None
@@ -302,7 +334,7 @@ async def rotate_node_pairing(request: NodePairingMutationRequest, http_request:
 async def reconnect_node_pairing(request: NodePairingMutationRequest, http_request: Request):
     """Verify a pairing credential and return its current operator-visible state."""
 
-    _operator_principal_id(http_request)
+    owner_principal_id = _operator_principal_id(http_request)
     if not request.credential:
         raise HTTPException(status_code=400, detail={"code": "credential_required"})
     state_payload = load_extension_state_payload()
@@ -311,6 +343,7 @@ async def reconnect_node_pairing(request: NodePairingMutationRequest, http_reque
         extension_id=request.extension_id,
         reference=request.reference,
     )
+    _require_pairing_owner(state_payload, adapter, owner_principal_id)
     try:
         entry, state = await verify_pairing_credential(
             state_payload,
@@ -339,13 +372,14 @@ async def reconnect_node_pairing(request: NodePairingMutationRequest, http_reque
 async def expire_node_pairing(request: NodePairingMutationRequest, http_request: Request):
     """Expire a pairing through the same deterministic lifecycle contract."""
 
-    _operator_principal_id(http_request)
+    owner_principal_id = _operator_principal_id(http_request)
     state_payload = load_extension_state_payload()
     adapter = _find_adapter(
         _node_inventory(state_payload),
         extension_id=request.extension_id,
         reference=request.reference,
     )
+    _require_pairing_owner(state_payload, adapter, owner_principal_id)
     entry, state = current_pairing(
         state_payload,
         extension_id=adapter.extension_id,
@@ -384,13 +418,14 @@ async def expire_node_pairing(request: NodePairingMutationRequest, http_request:
 
 @router.post("/nodes/pairings/revoke")
 async def revoke_node_pairing(request: NodePairingMutationRequest, http_request: Request):
-    _operator_principal_id(http_request)
+    owner_principal_id = _operator_principal_id(http_request)
     state_payload = load_extension_state_payload()
     adapter = _find_adapter(
         _node_inventory(state_payload),
         extension_id=request.extension_id,
         reference=request.reference,
     )
+    _require_pairing_owner(state_payload, adapter, owner_principal_id)
     revoke_node_adapter_pairing_entry(
         state_payload,
         extension_id=adapter.extension_id,
@@ -418,13 +453,14 @@ async def revoke_node_pairing(request: NodePairingMutationRequest, http_request:
 
 @router.post("/nodes/pairings/clear")
 async def clear_node_pairing(request: NodePairingMutationRequest, http_request: Request):
-    _operator_principal_id(http_request)
+    owner_principal_id = _operator_principal_id(http_request)
     state_payload = load_extension_state_payload()
     adapter = _find_adapter(
         _node_inventory(state_payload),
         extension_id=request.extension_id,
         reference=request.reference,
     )
+    _require_pairing_owner(state_payload, adapter, owner_principal_id)
     removed = clear_node_adapter_pairing_entry(
         state_payload,
         extension_id=adapter.extension_id,
@@ -776,10 +812,12 @@ async def edge_ingest(body: EdgeIngressRequest, request: Request):
     return await _edge_ingest(body, request, heartbeat=False)
 
 
-async def _edge_artifact(artifact_id: str) -> PairedEdgeArtifact:
+async def _edge_artifact(artifact_id: str, *, owner_principal_id: str) -> PairedEdgeArtifact:
     async with get_session() as db:
         result = await db.execute(
-            select(PairedEdgeArtifact).where(col(PairedEdgeArtifact.artifact_id) == artifact_id)
+            select(PairedEdgeArtifact)
+            .where(col(PairedEdgeArtifact.artifact_id) == artifact_id)
+            .where(col(PairedEdgeArtifact.owner_principal_id) == owner_principal_id)
         )
         artifact = result.scalar_one_or_none()
     if artifact is None:
@@ -789,15 +827,15 @@ async def _edge_artifact(artifact_id: str) -> PairedEdgeArtifact:
 
 @router.get("/nodes/edge/artifacts/{artifact_id}")
 async def get_edge_artifact(artifact_id: str, request: Request):
-    _operator_principal_id(request)
-    artifact = await _edge_artifact(artifact_id)
+    owner_principal_id = _operator_principal_id(request)
+    artifact = await _edge_artifact(artifact_id, owner_principal_id=owner_principal_id)
     return artifact_metadata(artifact)
 
 
 @router.get("/nodes/edge/artifacts/{artifact_id}/content")
 async def get_edge_artifact_content(artifact_id: str, request: Request):
-    _operator_principal_id(request)
-    artifact = await _edge_artifact(artifact_id)
+    owner_principal_id = _operator_principal_id(request)
+    artifact = await _edge_artifact(artifact_id, owner_principal_id=owner_principal_id)
     return Response(
         content=artifact.content,
         media_type=artifact.media_type,

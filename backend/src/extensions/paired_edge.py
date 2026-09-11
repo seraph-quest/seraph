@@ -338,6 +338,9 @@ async def verify_pairing_credential(
         raise ValueError("credential_unavailable")
     if not hmac.compare_digest(stored, presented_credential):
         raise ValueError("authentication_failed")
+    owner_principal_id = str(entry.get("owner_principal_id") or "").strip()
+    if not owner_principal_id:
+        raise ValueError("pairing_owner_missing")
     return entry, state
 
 
@@ -543,7 +546,7 @@ async def authenticate_edge_request(
         request=request,
         state=state,
         entry=entry,
-        owner_principal_id=str(entry.get("owner_principal_id") or "operator:single"),
+        owner_principal_id=owner_principal_id,
         policy=_policy_from_entry(entry),
         payload_revision=int(payload.get("revision") or 0),
     )

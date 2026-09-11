@@ -81,12 +81,14 @@ async def test_login_cookie_session_refresh_rotation_and_logout(client):
     session = await client.get("/api/auth/session")
     assert session.status_code == 200
     assert session.json()["principal_id"] == "operator:single"
+    assert session.json()["session_id"]
 
     refreshed = await client.post("/api/auth/refresh", headers={"origin": ORIGIN})
     assert refreshed.status_code == 200
     new_token = refreshed.cookies.get(settings.operator_auth_cookie_name)
     assert new_token and new_token != old_token
     assert refreshed.json()["principal_id"] == "operator:single"
+    assert refreshed.json()["session_id"]
     assert refreshed.json()["absolute_expires_at"] == original_absolute_expiry
 
     with pytest.raises(AuthFailure, match="session_revoked"):

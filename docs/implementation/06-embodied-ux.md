@@ -505,6 +505,37 @@
   - `git diff --check`
     - result: `passed`
 
+## Outcome-first cockpit behavior (local branch evidence)
+
+The current milestone binds the existing guardian workspace to the server-owned
+goal loop, workflow runs, approval, runtime, audit, and artifact endpoints. The
+embedded Outcome cockpit shows the selected goal and revision, criterion,
+active work and next action, the next approval decision, effective route and
+budget/queue metadata, artifact evidence, and the latest backend outcome
+receipt. Receipt fields keep candidate, attempt/outcome, criterion, execution,
+verification, usefulness, learning, artifact, and learning-record values
+separate so an attempted action or operator-attested completion is not rendered
+as verified success.
+
+Approval controls require a fresh authenticated browser binding whose principal
+and operator session match the backend row, plus a non-empty approval scope and
+finite future expiry. The bound goal or plan revision remains visible, and
+missing or stale authority leaves inspect, deny, and approve surfaces locked.
+Workflow retry, continuation, branch, pause, correction, and rollback controls
+continue to use their existing backend action handles and revision checks; the
+cockpit does not grant authority by rendering a button. Existing reach-target
+revocation and extension rollback controls remain the recovery surfaces for
+already-applied effects.
+
+Endpoint failures retain inspectable last-known runtime labels with a stale
+state, while loading, empty, awaiting, degraded, blocked, failed,
+unauthorized, partial-metadata, and recovered states remain explicit. A blocked
+OpenRouter readiness result blocks the inference route only; unrelated goal,
+workflow, artifact, and settings controls stay visible. No GPU, VLM, audio, or
+provider call is made by this local UI proof, and no claim about live provider
+success or model quality is established. Browser and managed-backend behavior
+remain unverified when those services are unavailable.
+
 ## Non-Goals
 
 - cosmetic polish detached from guardian value

@@ -502,6 +502,10 @@ async def _ensure_legacy_columns(conn) -> None:
             "owner_kind": "VARCHAR DEFAULT 'legacy'",
             "owner_principal_id": "VARCHAR",
             "service_id": "VARCHAR",
+            # Keep execution conversation and browser operator authentication
+            # as separate durable bindings for recovery authorization.
+            "conversation_id": "VARCHAR",
+            "operator_session_id": "VARCHAR",
             "goal_id": "VARCHAR",
             "goal_revision": "INTEGER",
             "plan_revision": "INTEGER",
@@ -532,6 +536,12 @@ async def _ensure_legacy_columns(conn) -> None:
             "result_summary": "VARCHAR",
         },
     )
+    for column in ("conversation_id", "operator_session_id"):
+        if column in workflow_job_columns:
+            await conn.exec_driver_sql(
+                f"CREATE INDEX IF NOT EXISTS ix_workflow_run_states_{column} "
+                f"ON workflow_run_states ({column})"
+            )
     if workflow_job_columns and "revision" in await _table_columns("workflow_run_states"):
         await conn.exec_driver_sql(
             "UPDATE workflow_run_states SET revision = 0 "

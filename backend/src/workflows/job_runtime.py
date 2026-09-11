@@ -570,6 +570,13 @@ def _safe_inputs_digest(inputs: Any) -> tuple[str, dict[str, Any]]:
     return _digest(inputs), {"redacted": True, "keys": keys, "shape": type(inputs).__name__}
 
 
+def _positive_revision(value: Any) -> int | None:
+    """Accept only positive JSON integer revisions at durable boundaries."""
+    if type(value) is not int or value <= 0:
+        return None
+    return value
+
+
 def _binding(
     *,
     owner_principal_id: str,
@@ -627,6 +634,10 @@ def _validate_admission_authority(spec: "DurableJobSpec") -> None:
         raise ValueError("service authority must declare the matching service_id")
     if identity.owner_kind == "user" and _text(authority_service_id):
         raise ValueError("user authority cannot declare service_id")
+    for field_name in ("goal_revision", "plan_revision"):
+        value = getattr(spec, field_name, None)
+        if value is not None and _positive_revision(value) is None:
+            raise ValueError(f"{field_name} must be a positive JSON integer")
 
 
 def _goal_revision(value: Any, *, field_name: str = "goal_revision") -> int:
@@ -1404,12 +1415,14 @@ def _validate_approval_resume_receipt(
         expected = getattr(run, field_name, None)
         actual = raw.get(field_name)
         if field_name in {"goal_revision", "plan_revision"}:
-            try:
-                actual = int(actual) if actual is not None else None
-            except (TypeError, ValueError) as exc:
+            expected_revision = _positive_revision(expected)
+            actual_revision = _positive_revision(actual)
+            if expected_revision is None or actual_revision is None:
                 raise DurableJobTransitionError(
                     f"approval resume {field_name} is malformed"
-                ) from exc
+                )
+            actual = actual_revision
+            expected = expected_revision
         if actual != expected:
             raise DurableJobTransitionError(f"approval resume {field_name} is stale")
     expected_budget = _authority_budget_microusd(authority)
@@ -1473,6 +1486,8 @@ def _serialize(run: WorkflowRunState, *, receipt: dict[str, Any] | None = None) 
         "workflow_name": run.workflow_name,
         "tool_name": run.tool_name,
         "session_id": run.session_id,
+        "conversation_id": getattr(run, "conversation_id", None) or run.session_id,
+        "operator_session_id": getattr(run, "operator_session_id", None),
         "run_fingerprint": getattr(run, "run_fingerprint", None),
         "goal_id": getattr(run, "goal_id", None),
         "goal_revision": getattr(run, "goal_revision", None),
@@ -1576,6 +1591,8 @@ class DurableJobSpec:
     identity: DurableJobIdentity
     inputs: Any = field(default_factory=dict)
     session_id: str | None = None
+    conversation_id: str | None = None
+    operator_session_id: str | None = None
     parent_job_id: str | None = None
     parent_fencing_token: int | None = None
     goal_id: str | None = None
@@ -1774,6 +1791,8 @@ class DurableJobRepository:
                 workflow_name=identity.job_kind,
                 tool_name=identity.job_kind,
                 session_id=spec.session_id,
+                conversation_id=spec.conversation_id or spec.session_id,
+                operator_session_id=spec.operator_session_id,
                 status=status,
                 run_fingerprint=run_fingerprint,
                 arguments_json=_canonical(safe_inputs),
@@ -1998,6 +2017,12 @@ class DurableJobRepository:
                     )
                 from src.approval.repository import approval_repository
 
+                durable_authority = _json_load(getattr(run, "declared_authority_json", None), {})
+                durable_criterion_id = (
+                    _text(durable_authority.get("criterion_id"))
+                    if isinstance(durable_authority, Mapping)
+                    else ""
+                ) or None
                 approval_request_record = await approval_repository.consume_approved_for_resume(
                     db=db,
                     approval_id=approval_resume_record["approval_id"],
@@ -2014,6 +2039,10 @@ class DurableJobRepository:
                     capability_version=approval_resume_record["capability_version"],
                     budget_digest=approval_resume_record["budget_digest"],
                     expires_at=approval_resume_record["expires_at"],
+                    session_id=run.session_id,
+                    conversation_id=getattr(run, "conversation_id", None) or run.session_id,
+                    criterion_id=durable_criterion_id,
+                    candidate_id=getattr(run, "candidate_id", None),
                 )
                 if approval_request_record is None:
                     raise DurableJobTransitionError(

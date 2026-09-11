@@ -212,6 +212,43 @@ Those boundaries must remain visibly blocked or partial until their own
 focused implementation and runtime evidence exists. No local GPU, VLM, or
 model/provider call is required by this contract.
 
+## Branch-local #749 paired edge completion
+
+The `feat/749-paired-mac-edge-final` slice adds a **Partial** provider-free
+local vertical behind the same contract. It is not shipped `develop` truth and
+does not claim macOS permission, hardware, Telegram, OpenRouter, GPU, VLM, or
+cloud-provider readiness. Pairing returns a raw credential once, stores only
+an opaque vault reference and scoped fingerprint, and protects state writes
+with a file lock plus revision/CAS. Pair, reconnect, rotate, expire, and
+revoke remain operator-owned; revocation changes the lifecycle field used by
+ingress validation so the next request is rejected immediately.
+
+The daemon adapter in `daemon/paired_edge.py` posts heartbeat and capture
+envelopes over the configured local HTTP origin with bearer authentication,
+origin and device headers, request/device/pairing ids, monotonic sequence,
+capture time, hash, MIME, size, policy, and scope. The server independently
+checks the credential, owner, hash, and size before applying the pure pairing
+replay contract. Accepted bytes receive a server-owned `edge_art_*` artifact
+and readback id; a reported Mac path is never used as an artifact id or
+persisted as a source path. `accepted`, `duplicate`, `out_of_order`,
+`expired`, `revoked`, `oversized`, `blocked`, and `retryable` responses have
+stable HTTP/status mappings.
+
+Disconnects use a private bounded durable JSON spool (count, bytes, age,
+retries, exponential backoff, retention, sequence ordering, and request-id
+dedupe). The capture blocklist runs before bytes are posted, and cloud/model
+egress is disabled by default. Node adapter and observer continuity payloads
+expose paired/revoked state, last seen/ingest times, spool and recovery
+telemetry, degraded state, revision, and disabled action authority. The
+demonstrated local receipt is `backend/tests/test_paired_edge_local_journey.py`
+plus `daemon/tests/test_paired_edge_transport.py`; it uses synthetic bytes and
+an in-process loopback/ASGI origin only.
+
+Platform limits remain explicit: a real Mac capture producer, macOS permission
+prompts, device discovery, hosted provider transport, and production rollout
+still require separate implementation and review. The local proof does not
+turn those limits into readiness claims.
+
 ## Still To Do On `develop`
 
 - [ ] richer interruption channels outside the browser/native desktop shell, imported capability reach, and typed source-adapter continuity layer

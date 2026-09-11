@@ -105,6 +105,8 @@ export interface WorkflowRunRecord {
     goalRevision?: number | null;
     criterionId?: string | null;
     planRevision?: number | null;
+    candidateId?: string | null;
+    approvalReceipt?: Record<string, unknown> | null;
   }>;
   threadId?: string | null;
   threadLabel?: string | null;

@@ -26,6 +26,7 @@ export type ApprovalAuthorityRecord = {
   approval_context?: unknown;
   goal_revision?: unknown;
   plan_revision?: unknown;
+  candidate_id?: unknown;
 };
 
 export type OperatorAuthBinding = {
@@ -239,6 +240,7 @@ export type WorkflowApprovalBinding = {
   goalRevision?: unknown;
   criterionId?: unknown;
   planRevision?: unknown;
+  candidateId?: unknown;
   toolName?: unknown;
   sessionId?: unknown;
   pendingApprovalIds?: readonly string[] | null;
@@ -252,6 +254,15 @@ function approvalMatchesWorkflow(
   const workflowId = text(workflow.workflowId);
   if (!workflowId || text(approval.workflow_id) !== workflowId) return false;
 
+  const workflowToolName = text(workflow.toolName);
+  if (workflowToolName && text(approval.tool_name) !== workflowToolName) return false;
+  const workflowSessionId = text(workflow.sessionId);
+  if (!workflowSessionId) return false;
+  if (
+    text(approval.session_id) !== workflowSessionId
+    || text(approval.approval_conversation_id) !== workflowSessionId
+  ) return false;
+
   const workflowGoalId = text(workflow.goalId);
   const workflowCriterionId = text(workflow.criterionId);
   const workflowGoalRevision = workflow.goalRevision;
@@ -261,6 +272,10 @@ function approvalMatchesWorkflow(
   if (!Number.isInteger(approval.goal_revision) || approval.goal_revision !== workflowGoalRevision) return false;
   if (!Number.isInteger(workflow.planRevision) || !Number.isInteger(approval.plan_revision)) return false;
   if (approval.plan_revision !== workflow.planRevision) return false;
+  if (workflow.candidateId !== undefined && workflow.candidateId !== null) {
+    const workflowCandidateId = text(workflow.candidateId);
+    if (!workflowCandidateId || text(approval.candidate_id) !== workflowCandidateId) return false;
+  }
   return true;
 }
 

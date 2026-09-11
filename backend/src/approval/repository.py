@@ -226,6 +226,155 @@ def _approval_belongs_to_operator_session(
     )
 
 
+_APPROVAL_BINDING_FIELDS: dict[str, tuple[str, ...]] = {
+    "workflow_id": (
+        "workflow_id",
+        "workflow_run_identity",
+        "run_identity",
+        "workflow_run_id",
+        "durable_job_id",
+        "job_id",
+    ),
+    "goal_id": ("goal_id", "durable_goal_id"),
+    "criterion_id": ("criterion_id", "durable_criterion_id"),
+    "goal_revision": ("goal_revision", "durable_goal_revision"),
+    "plan_revision": ("plan_revision", "durable_plan_revision"),
+    "candidate_id": (
+        "candidate_id",
+        "workflow_candidate_id",
+        "durable_candidate_id",
+    ),
+}
+
+
+def _approval_details(request: ApprovalRequest) -> dict[str, Any]:
+    try:
+        parsed = json.loads(request.details_json) if request.details_json else {}
+    except (TypeError, ValueError):
+        return {}
+    return dict(parsed) if isinstance(parsed, Mapping) else {}
+
+
+def _approval_detail_value(details: Mapping[str, Any], *names: str) -> Any:
+    for name in names:
+        if name in details:
+            return details[name]
+    nested_context = details.get("approval_context")
+    if isinstance(nested_context, Mapping):
+        for name in names:
+            if name in nested_context:
+                return nested_context[name]
+    return None
+
+
+def _approval_binding_matches(
+    request: ApprovalRequest,
+    *,
+    session_id: str | None,
+    owner_operator_session_id: str | None,
+    owner_principal_id: str | None,
+    approval_binding: Mapping[str, Any] | None,
+) -> bool:
+    """Return whether an approved row is the exact caller-owned capability.
+
+    The generic approval APIs are used by tools and extension lifecycle calls,
+    so the database query deliberately starts broad enough to find all rows
+    with the same fingerprint.  Identity is then checked on every row before
+    choosing one.  This prevents a newer row owned by another operator (or a
+    duplicate row with a different run binding) from blocking or authorizing
+    the current caller.
+    """
+    expected_session = str(session_id or "").strip()
+    expected_operator_session = str(owner_operator_session_id or "").strip()
+    expected_principal = str(owner_principal_id or "").strip()
+    # Callers that consume an approval must provide the complete owner binding.
+    # Keep the legacy repository-only shape usable for old, already-persisted
+    # rows; all production consumers pass these values explicitly.
+    strict_owner = bool(owner_operator_session_id or owner_principal_id or approval_binding)
+    if not expected_session:
+        return False
+    if strict_owner and (not expected_operator_session or not expected_principal):
+        return False
+
+    details = _approval_details(request)
+    actual_conversation = str(
+        request.conversation_id
+        or _approval_detail_value(details, "conversation_id", "approval_conversation_id")
+        or ""
+    ).strip()
+    if strict_owner:
+        if actual_conversation != expected_session:
+            return False
+        actual_principal = str(
+            request.owner_principal_id
+            or _approval_detail_value(
+                details,
+                "owner_principal_id",
+                "approval_owner_principal_id",
+            )
+            or ""
+        ).strip()
+        if actual_principal != expected_principal:
+            return False
+        if not _approval_belongs_to_operator_session(request, expected_operator_session):
+            return False
+    elif owner_operator_session_id is not None and not _approval_belongs_to_operator_session(
+        request,
+        expected_operator_session,
+    ):
+        return False
+
+    if not isinstance(approval_binding, Mapping):
+        return True
+    for expected_name, aliases in _APPROVAL_BINDING_FIELDS.items():
+        if expected_name not in approval_binding or approval_binding[expected_name] is None:
+            continue
+        expected = approval_binding[expected_name]
+        if isinstance(expected, str):
+            expected = expected.strip()
+            if not expected:
+                continue
+        observed = _approval_detail_value(details, *aliases)
+        if observed is None:
+            return False
+        if expected_name in {"goal_revision", "plan_revision"}:
+            if type(expected) is not int or type(observed) is not int:
+                return False
+        elif isinstance(expected, str):
+            observed = str(observed).strip()
+        if observed != expected:
+            return False
+    return True
+
+
+def _approval_rows(result: Any) -> list[ApprovalRequest]:
+    """Materialize every candidate before applying the exact identity filter."""
+    scalar_rows = result.scalars()
+    all_rows = getattr(scalar_rows, "all", None)
+    return list(all_rows()) if callable(all_rows) else []
+
+
+def _select_exact_approval_rows(
+    requests: list[ApprovalRequest],
+    *,
+    session_id: str | None,
+    owner_operator_session_id: str | None,
+    owner_principal_id: str | None,
+    approval_binding: Mapping[str, Any] | None,
+) -> list[ApprovalRequest]:
+    return [
+        request
+        for request in requests
+        if _approval_binding_matches(
+            request,
+            session_id=session_id,
+            owner_operator_session_id=owner_operator_session_id,
+            owner_principal_id=owner_principal_id,
+            approval_binding=approval_binding,
+        )
+    ]
+
+
 class ApprovalRepository:
     async def get(self, approval_id: str) -> ApprovalRequest | None:
         """Fetch an approval without resolving it."""
@@ -480,6 +629,8 @@ class ApprovalRepository:
         tool_name: str,
         fingerprint: str,
         owner_operator_session_id: str | None = None,
+        owner_principal_id: str | None = None,
+        approval_binding: Mapping[str, Any] | None = None,
     ) -> dict[str, Any] | bool | None:
         async with get_session() as db:
             result = await db.execute(
@@ -488,17 +639,34 @@ class ApprovalRepository:
                 .where(ApprovalRequest.tool_name == tool_name)
                 .where(ApprovalRequest.fingerprint == fingerprint)
                 .where(ApprovalRequest.status == "approved")
-                .order_by(col(ApprovalRequest.created_at).desc())
             )
-            request = result.scalars().first()
-            if request is None:
-                return False
-            if owner_operator_session_id is not None and not _approval_belongs_to_operator_session(
-                request,
-                owner_operator_session_id,
-            ):
-                return False
+            requests = _select_exact_approval_rows(
+                _approval_rows(result),
+                session_id=session_id,
+                owner_operator_session_id=owner_operator_session_id,
+                owner_principal_id=owner_principal_id,
+                approval_binding=approval_binding,
+            )
             now = datetime.now(timezone.utc)
+            current_requests: list[ApprovalRequest] = []
+            for candidate in requests:
+                if _approval_is_expired(candidate.expires_at, now=now):
+                    await db.execute(
+                        update(ApprovalRequest)
+                        .execution_options(synchronize_session=False)
+                        .where(
+                            ApprovalRequest.id == candidate.id,
+                            ApprovalRequest.status == "approved",
+                        )
+                        .values(status="expired", resolved_at=now)
+                    )
+                    continue
+                current_requests.append(candidate)
+            # Ambiguous approvals are never resolved by recency.  A caller can
+            # retry after an operator explicitly fences the duplicate rows.
+            if len(current_requests) != 1:
+                return False
+            request = current_requests[0]
             try:
                 _validated_approval_attachment_refs(request)
             except ConversationIdentityError as exc:
@@ -779,6 +947,8 @@ class ApprovalRepository:
         tool_name: str,
         fingerprint: str,
         owner_operator_session_id: str | None = None,
+        owner_principal_id: str | None = None,
+        approval_binding: Mapping[str, Any] | None = None,
     ) -> bool:
         async with get_session() as db:
             result = await db.execute(
@@ -787,24 +957,30 @@ class ApprovalRepository:
                 .where(ApprovalRequest.tool_name == tool_name)
                 .where(ApprovalRequest.fingerprint == fingerprint)
                 .where(ApprovalRequest.status == "approved")
-                .order_by(col(ApprovalRequest.created_at).desc())
             )
-            request = result.scalars().first()
-            if request is None:
-                return False
-            if owner_operator_session_id is not None and not _approval_belongs_to_operator_session(
-                request, owner_operator_session_id
-            ):
-                return False
-            if _approval_is_expired(request.expires_at):
-                await db.execute(
-                    update(ApprovalRequest)
-                    .where(
-                        ApprovalRequest.id == request.id,
-                        ApprovalRequest.status == "approved",
+            requests = _select_exact_approval_rows(
+                _approval_rows(result),
+                session_id=session_id,
+                owner_operator_session_id=owner_operator_session_id,
+                owner_principal_id=owner_principal_id,
+                approval_binding=approval_binding,
+            )
+            now = datetime.now(timezone.utc)
+            current_requests: list[ApprovalRequest] = []
+            for request in requests:
+                if _approval_is_expired(request.expires_at, now=now):
+                    await db.execute(
+                        update(ApprovalRequest)
+                        .execution_options(synchronize_session=False)
+                        .where(
+                            ApprovalRequest.id == request.id,
+                            ApprovalRequest.status == "approved",
+                        )
+                        .values(status="expired", resolved_at=now)
                     )
-                    .values(status="expired", resolved_at=datetime.now(timezone.utc))
-                )
+                    continue
+                current_requests.append(request)
+            if len(current_requests) != 1:
                 return False
             return True
 

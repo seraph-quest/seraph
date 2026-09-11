@@ -1315,6 +1315,8 @@ interface PendingApproval {
   workflow_id?: string | null;
   goal_id?: string | null;
   criterion_id?: string | null;
+  candidate_id?: string | null;
+  approval_receipt?: Record<string, unknown> | null;
   session_id?: string | null;
   thread_id?: string | null;
   approval_conversation_id?: string | null;
@@ -1376,6 +1378,10 @@ function normalizePendingApprovals(value: unknown): PendingApproval[] {
       workflow_id: optionalString(record.workflow_id ?? record.run_identity),
       goal_id: optionalString(record.goal_id),
       criterion_id: optionalString(record.criterion_id),
+      candidate_id: optionalString(record.candidate_id),
+      approval_receipt: record.approval_receipt && typeof record.approval_receipt === "object" && !Array.isArray(record.approval_receipt)
+        ? record.approval_receipt as Record<string, unknown>
+        : null,
       session_id: optionalString(record.session_id),
       thread_id: optionalString(record.thread_id),
       approval_conversation_id: optionalString(record.approval_conversation_id ?? record.conversation_id),
@@ -6076,6 +6082,10 @@ function normalizeWorkflowRun(value: Record<string, unknown>): WorkflowRunRecord
             goalRevision: typeof record.goal_revision === "number" && Number.isInteger(record.goal_revision) ? record.goal_revision : null,
             criterionId: typeof record.criterion_id === "string" ? record.criterion_id : null,
             planRevision: typeof record.plan_revision === "number" && Number.isInteger(record.plan_revision) ? record.plan_revision : null,
+            candidateId: typeof record.candidate_id === "string" ? record.candidate_id : null,
+            approvalReceipt: record.approval_receipt && typeof record.approval_receipt === "object" && !Array.isArray(record.approval_receipt)
+              ? record.approval_receipt as Record<string, unknown>
+              : null,
           });
           return entries;
         }, [])
@@ -8630,7 +8640,11 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
               source: "cockpit",
               workflow_name: resolved.workflowName,
               status: resolved.status,
+              session_id: resolved.sessionId,
+              conversation_id: resolved.sessionId,
               thread_id: resolved.threadId,
+              approval_id: authority.approval?.id,
+              approval_receipt: authority.approval?.approval_receipt,
               workflow_run_identity: resolved.runIdentity,
               goal_id: resolved.goalId,
               goal_revision: resolved.goalRevision,
@@ -10937,6 +10951,8 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       approval_context: attached.approvalContext,
       goal_revision: attached.goalRevision,
       plan_revision: attached.planRevision,
+      candidate_id: attached.candidateId,
+      approval_receipt: attached.approvalReceipt,
     }));
     const selected = selectApprovalForWorkflow(pendingApprovals, {
       workflowId: workflow.runIdentity,
@@ -10944,6 +10960,8 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       goalRevision: workflow.goalRevision,
       criterionId: workflow.criterionId,
       planRevision: workflow.planRevision,
+      candidateId: workflow.candidateId,
+      sessionId: workflow.sessionId,
       pendingApprovalIds: workflow.pendingApprovalIds,
       pendingApprovals: attachedApprovals,
     });
@@ -11000,10 +11018,30 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
         approval,
       };
     }
+    if (!resolved.sessionId || resolved.sessionId !== operatorAuth.sessionId) {
+      return {
+        allowed: false,
+        reason: "workflow conversation or operator session does not match",
+        workflow: resolved,
+        approval,
+      };
+    }
     if (bindingState !== "matched") {
       return {
         allowed: false,
         reason: "workflow goal, criterion, or revision binding is unavailable or stale",
+        workflow: resolved,
+        approval,
+      };
+    }
+    if (
+      resolved.availability === "durable"
+      && resolved.status === "awaiting_approval"
+      && (!approval || !approval.approval_receipt)
+    ) {
+      return {
+        allowed: false,
+        reason: "typed approval receipt is unavailable",
         workflow: resolved,
         approval,
       };

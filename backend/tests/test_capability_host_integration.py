@@ -498,8 +498,8 @@ async def test_repository_consumed_approval_issues_one_use_host_binding(monkeypa
         def scalars(self):
             return self
 
-        def first(self):
-            return request if request.status == "approved" else None
+        def all(self):
+            return [request] if request.status == "approved" else []
 
     class _Db:
         async def execute(self, statement):
@@ -564,6 +564,97 @@ async def test_repository_consumed_approval_issues_one_use_host_binding(monkeypa
             )
         )
     assert calls == [{"message": "hello", "count": 1}]
+
+
+@pytest.mark.asyncio
+async def test_repository_selector_ignores_other_owner_and_rejects_duplicate_exact_rows(monkeypatch):
+    common = {
+        "session_id": "conversation-selector",
+        "conversation_id": "conversation-selector",
+        "tool_name": "selector-tool",
+        "fingerprint": "selector-fingerprint",
+        "status": "approved",
+        "summary": "selector approval",
+    }
+    requests = [
+        ApprovalRequest(
+            id="selector-wrong-owner",
+            **common,
+            owner_principal_id="operator:other",
+            operator_session_id="operator-session-other",
+            details_json=json.dumps({
+                "owner_principal_id": "operator:other",
+                "approval_owner_operator_session_id": "operator-session-other",
+                "conversation_id": "conversation-selector",
+            }),
+        ),
+        ApprovalRequest(
+            id="selector-right-owner",
+            **common,
+            owner_principal_id="operator:selector",
+            operator_session_id="operator-session-selector",
+            details_json=json.dumps({
+                "owner_principal_id": "operator:selector",
+                "approval_owner_operator_session_id": "operator-session-selector",
+                "conversation_id": "conversation-selector",
+            }),
+        ),
+    ]
+
+    class _Result:
+        def scalars(self):
+            return self
+
+        def all(self):
+            return list(requests)
+
+    class _Db:
+        async def execute(self, statement):
+            return _Result()
+
+    db = _Db()
+
+    @asynccontextmanager
+    async def _get_session():
+        yield db
+
+    monkeypatch.setattr("src.approval.repository.get_session", _get_session)
+
+    assert await approval_repository.has_approved(
+        session_id="conversation-selector",
+        tool_name="selector-tool",
+        fingerprint="selector-fingerprint",
+        owner_operator_session_id="operator-session-selector",
+        owner_principal_id="operator:selector",
+    )
+
+    requests.append(
+        ApprovalRequest(
+            id="selector-right-duplicate",
+            **common,
+            owner_principal_id="operator:selector",
+            operator_session_id="operator-session-selector",
+            details_json=json.dumps({
+                "owner_principal_id": "operator:selector",
+                "approval_owner_operator_session_id": "operator-session-selector",
+                "conversation_id": "conversation-selector",
+            }),
+        )
+    )
+    assert not await approval_repository.has_approved(
+        session_id="conversation-selector",
+        tool_name="selector-tool",
+        fingerprint="selector-fingerprint",
+        owner_operator_session_id="operator-session-selector",
+        owner_principal_id="operator:selector",
+    )
+    assert await approval_repository.consume_approved(
+        session_id="conversation-selector",
+        tool_name="selector-tool",
+        fingerprint="selector-fingerprint",
+        owner_operator_session_id="operator-session-selector",
+        owner_principal_id="operator:selector",
+    ) is False
 
 
 def test_corrupt_journal_is_operator_visible_and_blocks_restart_execution(tmp_path):

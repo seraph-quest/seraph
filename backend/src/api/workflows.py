@@ -123,6 +123,8 @@ _WORKFLOW_REPLAY_BLOCK_REASONS = frozenset(
         "high_risk_requires_manual_reentry",
         "durable_projection_missing",
         "workflow_approval_ambiguous",
+        "workflow_candidate_stale",
+        "workflow_candidate_unavailable",
     }
 )
 _WORKFLOW_SAFE_REFUSAL_CODES = _WORKFLOW_REPLAY_BLOCK_REASONS | {
@@ -160,6 +162,8 @@ _WORKFLOW_SAFE_REFUSAL_CODES = _WORKFLOW_REPLAY_BLOCK_REASONS | {
     "workflow_criterion_stale",
     "workflow_plan_revision_stale",
     "workflow_approval_ambiguous",
+    "workflow_candidate_stale",
+    "workflow_candidate_unavailable",
 }
 _WORKFLOW_SAFE_TOKEN_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
 _WORKFLOW_SAFE_ARTIFACT_ID_RE = re.compile(r"^art_[0-9a-f]{24}$")
@@ -388,6 +392,37 @@ def _positive_json_integer(value: Any) -> int | None:
     return value
 
 
+def _workflow_authority_budget_microusd(run: dict[str, Any]) -> int | None:
+    authority = run.get("declared_authority")
+    if not isinstance(authority, dict):
+        authority = run.get("approval_context")
+    if not isinstance(authority, dict):
+        return None
+    value: Any = None
+    found = False
+    for field_name in ("budget_microusd", "max_budget_microusd", "owner_cost_budget_microusd"):
+        if field_name in authority:
+            value = authority[field_name]
+            found = True
+            break
+    if not found and isinstance(authority.get("budget"), dict):
+        budget = authority["budget"]
+        for field_name in ("microusd", "max_microusd", "amount_microusd"):
+            if field_name in budget:
+                value = budget[field_name]
+                found = True
+                break
+    if not found or value is None:
+        return None
+    if isinstance(value, bool):
+        return None
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return parsed if parsed >= 0 else None
+
+
 def _workflow_canonical_plan_revision(goal: Any, *, current_goal_revision: int) -> int | None:
     """Resolve the plan revision from canonical goal/plan state.
 
@@ -443,6 +478,38 @@ async def _workflow_current_goal_binding_detail(run: dict[str, Any]) -> str | No
     )
     if current_plan_revision is None or current_plan_revision != expected_plan_revision:
         return "workflow_plan_revision_stale"
+
+    # A run carrying a candidate identity must still point at the durable
+    # goal-loop candidate receipt for this exact canonical goal revision and
+    # criterion.  Candidate ids are part of the mutation authority boundary;
+    # accepting a stale id would let a run mutate the current goal after its
+    # decision inputs have changed.
+    if "candidate_id" in run and run.get("candidate_id") is not None:
+        candidate_id = str(run.get("candidate_id") or "").strip()
+        if not candidate_id:
+            return "workflow_candidate_stale"
+        try:
+            candidate_events = await audit_repository.list_events(limit=500)
+        except Exception:
+            logger.exception("Canonical goal-loop candidate lookup failed before workflow recovery")
+            return "workflow_candidate_unavailable"
+        matching_candidates: list[dict[str, Any]] = []
+        for event in candidate_events:
+            if event.get("event_type") != "goal_loop_candidate":
+                continue
+            details = event.get("details")
+            if not isinstance(details, dict):
+                continue
+            if (
+                str(details.get("candidate_id") or "").strip() == candidate_id
+                and str(details.get("goal_id") or "").strip() == goal_id
+                and type(details.get("goal_revision")) is int
+                and details.get("goal_revision") == expected_revision
+                and str(details.get("criterion_id") or "").strip() == criterion_id
+            ):
+                matching_candidates.append(details)
+        if len(matching_candidates) != 1:
+            return "workflow_candidate_stale"
     return None
 
 
@@ -2505,10 +2572,47 @@ async def _control_typed_workflow_run(
                     expected_revision=revision,
                 )
             elif action == "resume":
-                transition = await durable_job_repository.resume_job(
-                    run_identity,
-                    expected_revision=revision,
-                )
+                if str(run.get("status") or "") == "awaiting_approval":
+                    context = operator_context if isinstance(operator_context, dict) else {}
+                    supplied_receipt = context.get("approval_receipt")
+                    if not isinstance(supplied_receipt, dict):
+                        raise DurableJobError(
+                            "approval resume requires a typed approval receipt"
+                        )
+                    approval_id = str(
+                        context.get("approval_id")
+                        or supplied_receipt.get("approval_id")
+                        or ""
+                    ).strip()
+                    expires_at = supplied_receipt.get("expires_at")
+                    if not approval_id or expires_at is None:
+                        raise DurableJobError(
+                            "approval resume requires a current authenticated approval"
+                        )
+                    transition = await durable_job_repository.resume_approved_job(
+                        run_identity,
+                        approval_receipt=supplied_receipt,
+                        approval_id=approval_id,
+                        authority_digest=str(run.get("authority_digest") or ""),
+                        goal_id=run.get("goal_id"),
+                        goal_revision=run.get("goal_revision"),
+                        plan_revision=run.get("plan_revision"),
+                        capability_version=str(run.get("capability_version") or ""),
+                        owner_kind=str(run.get("owner_kind") or ""),
+                        owner_principal_id=str(run.get("owner_principal_id") or ""),
+                        service_id=run.get("service_id"),
+                        budget_microusd=_workflow_authority_budget_microusd(run),
+                        budget_digest=str(run.get("budget_digest") or ""),
+                        operator_principal_id=principal_id,
+                        operator_session_id=session_id,
+                        expires_at=expires_at,
+                        expected_revision=revision,
+                    )
+                else:
+                    transition = await durable_job_repository.resume_job(
+                        run_identity,
+                        expected_revision=revision,
+                    )
             elif action == "revoke":
                 transition = await durable_job_repository.revoke_job(
                     run_identity,

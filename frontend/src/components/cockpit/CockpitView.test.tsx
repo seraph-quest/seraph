@@ -1181,7 +1181,7 @@ describe("CockpitView", () => {
     expect(screen.queryByText("MODEL UNAVAILABLE")).not.toBeInTheDocument();
   });
 
-  it("does not queue stale workflow fallback drafts when live recovery control is refused", async () => {
+  it("keeps recovery controls disabled when the workflow session is not the operator session", async () => {
     fetchMock.mockImplementation((input: RequestInfo | URL) => {
       const url = String(input);
       if (url.includes("/api/workflows/runs/") && url.includes("/control")) {
@@ -1306,11 +1306,10 @@ describe("CockpitView", () => {
     const row = workflowRow.closest(".cockpit-row");
     expect(row).not.toBeNull();
 
-    fireEvent.click(within(row as HTMLElement).getByRole("button", { name: "Retry step" }));
+    const retryButton = within(row as HTMLElement).getByRole("button", { name: "Retry step" });
+    expect(retryButton).toBeDisabled();
+    fireEvent.click(retryButton);
 
-    await waitFor(() =>
-      expect(screen.getByText("Live recovery control blocked web-brief-to-file: run identity is unavailable.")).toBeInTheDocument(),
-    );
     expect(fetchMock.mock.calls.some(([input]) => String(input).includes("/api/workflows/runs/") && String(input).includes("/control"))).toBe(false);
     expect(screen.queryByDisplayValue('Retry step "write_file" for workflow "web-brief-to-file".')).not.toBeInTheDocument();
   });
@@ -6704,8 +6703,13 @@ describe("CockpitView", () => {
         return Promise.resolve(mockResponse({
           runs: [{
             id: "workflow-run-1",
+            run_identity: "workflow-run-1",
             tool_name: "workflow_web_brief_to_file",
             workflow_name: "web-brief-to-file",
+            goal_id: "goal-1",
+            goal_revision: 1,
+            criterion_id: "criterion-1",
+            plan_revision: 1,
             session_id: "session-2",
             status: "awaiting_approval",
             started_at: "2026-03-18T12:01:00Z",
@@ -6722,6 +6726,11 @@ describe("CockpitView", () => {
             pending_approval_ids: ["approval-run-1"],
             pending_approvals: [{
               id: "approval-run-1",
+              workflow_id: "workflow-run-1",
+              goal_id: "goal-1",
+              goal_revision: 1,
+              criterion_id: "criterion-1",
+              plan_revision: 1,
               summary: "Approve write_file for web brief",
               risk_level: "medium",
               created_at: "2026-03-18T12:01:30Z",

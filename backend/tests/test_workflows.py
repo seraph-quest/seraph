@@ -5380,6 +5380,44 @@ class TestWorkflowApi:
         assert audit.await_count == 1
 
     @pytest.mark.asyncio
+    async def test_current_goal_binding_refuses_stale_candidate_receipt(self):
+        from src.api.workflows import _workflow_current_goal_binding_detail
+
+        run = {
+            "goal_id": "goal-candidate",
+            "criterion_id": "criterion-candidate",
+            "goal_revision": 3,
+            "plan_revision": 3,
+            "candidate_id": "candidate-current",
+        }
+        goal = SimpleNamespace(
+            id="goal-candidate",
+            revision=3,
+            success_criterion_json=json.dumps({
+                "criterion_id": "criterion-candidate",
+                "description": "Current criterion",
+                "target": "done",
+            }),
+        )
+        with (
+            patch("src.api.workflows.goal_repository.get", new_callable=AsyncMock, return_value=goal),
+            patch(
+                "src.api.workflows.audit_repository.list_events",
+                new_callable=AsyncMock,
+                return_value=[{
+                    "event_type": "goal_loop_candidate",
+                    "details": {
+                        "candidate_id": "candidate-stale",
+                        "goal_id": "goal-candidate",
+                        "goal_revision": 3,
+                        "criterion_id": "criterion-candidate",
+                    },
+                }],
+            ),
+        ):
+            assert await _workflow_current_goal_binding_detail(run) == "workflow_candidate_stale"
+
+    @pytest.mark.asyncio
     async def test_workflow_control_refuses_durable_owner_mismatch_before_lease(self):
         from src.api.workflows import WorkflowRunControlRequest, control_workflow_run
 
@@ -7342,6 +7380,19 @@ async def test_branch_child_control_consumes_child_action_handle_identity():
                     "target": "done",
                 }),
             ),
+        ),
+        patch(
+            "src.api.workflows.audit_repository.list_events",
+            new_callable=AsyncMock,
+            return_value=[{
+                "event_type": "goal_loop_candidate",
+                "details": {
+                    "candidate_id": "candidate-child",
+                    "goal_id": "goal-child",
+                    "goal_revision": 1,
+                    "criterion_id": "criterion-child",
+                },
+            }],
         ),
         patch(
             "src.api.workflows.workflow_state_repository.acquire_or_renew_v2_lease",

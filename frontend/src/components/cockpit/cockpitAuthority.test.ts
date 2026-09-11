@@ -195,6 +195,33 @@ describe("cockpit approval authority", () => {
     )).toBe(null);
   });
 
+  it("requires a declared candidate identity to match the approval", () => {
+    expect(selectApprovalForWorkflow(
+      [{ ...approval, candidate_id: "candidate-stale" }],
+      {
+        workflowId: "run-1",
+        goalId: "goal-1",
+        goalRevision: 1,
+        criterionId: "criterion-1",
+        planRevision: 1,
+        candidateId: "candidate-current",
+        sessionId: "conversation-1",
+      },
+    )).toBe(null);
+    expect(selectApprovalForWorkflow(
+      [{ ...approval, candidate_id: "candidate-current" }],
+      {
+        workflowId: "run-1",
+        goalId: "goal-1",
+        goalRevision: 1,
+        criterionId: "criterion-1",
+        planRevision: 1,
+        candidateId: "candidate-current",
+        sessionId: "conversation-1",
+      },
+    )?.id).toBe("approval-1");
+  });
+
   it("keeps approval target references out of rendered scope labels", () => {
     const labels = displayApprovalScopeTarget({
       target: { type: "workspace", reference: "workspace/private/report.md" },

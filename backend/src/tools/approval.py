@@ -366,6 +366,12 @@ class ApprovalTool(Tool):
                     session_id=session_id,
                     principal=principal,
                 ),
+                owner_principal_id=(
+                    str(principal.principal_id).strip()
+                    if principal is not None and principal.principal_id
+                    else None
+                ),
+                approval_binding=approval_context,
             )
         )
         if consumed_approval:

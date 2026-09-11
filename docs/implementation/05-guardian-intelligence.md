@@ -129,6 +129,14 @@ budget carries the outstanding-job, attempt, runtime, notification, period,
 and quiet-hour limits used by the strategist admission gate. This remains a
 bounded canary; it does not claim broad autonomous planning.
 
+The direct authenticated `POST /api/goals/{goal_id}/snapshot` route is a
+deliberate manual boundary outside that standing scheduler admission budget.
+Its fixed service request remains bounded by the adapter's one-job, one-attempt
+and runtime limits, while the operator and audit receipts explicitly record
+`authenticated_manual_operator_request_outside_standing_goal_admission_budget`.
+Persisted reviewed goal budgets therefore govern autonomous strategist runs;
+they are not silently reused as a quota for an explicit operator canary.
+
 Notification reservations are durable and scoped to the goal and budget
 period. The native outbox reserves a notification under an immediate SQLite
 transaction before inserting a distinct idempotency key; retries return the

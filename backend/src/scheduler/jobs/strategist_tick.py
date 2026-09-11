@@ -71,6 +71,19 @@ def _notification_budget_binding(goal: Goal, budget: object) -> dict[str, object
     }
 
 
+def _notification_delivery_binding(goal: Goal) -> dict[str, str | None]:
+    """Carry the goal's canonical operator fence into scheduled delivery."""
+
+    return {
+        "notification_owner_principal_id": (
+            str(getattr(goal, "owner_principal_id", "") or "").strip() or None
+        ),
+        "notification_operator_session_id": (
+            str(getattr(goal, "owner_session_id", "") or "").strip() or None
+        ),
+    }
+
+
 async def _goal_notifications_used(goal: Goal, *, period_started_at: datetime | None) -> int | None:
     """Count persisted notification intents for the goal owner in this budget period."""
 
@@ -612,6 +625,7 @@ async def _run_opted_in_goal_web_brief(
             "goal_id_read_back": result.goal_id_read_back,
             "evidence_refs": list(result.evidence_refs),
             "notification_budget": _notification_budget_binding(goal, budget),
+            **_notification_delivery_binding(goal),
         }
         await durable_job_repository.record_effect(
             parent_job_id,
@@ -759,6 +773,7 @@ async def _run_opted_in_goal_snapshot(
         "goal_id_read_back": result.goal_id_read_back,
         "evidence_refs": list(result.evidence_refs),
         "notification_budget": _notification_budget_binding(goal, budget),
+        **_notification_delivery_binding(goal),
     }
     await durable_job_repository.record_effect(
         parent_job_id,
@@ -956,7 +971,18 @@ async def run_strategist_tick() -> None:
         )
         result = await deliver_or_queue(
             message,
+            is_scheduled=True,
             guardian_confidence=guardian_state.confidence.overall,
+            owner_principal_id=(
+                proactive_work.get("notification_owner_principal_id")
+                if isinstance(proactive_work.get("notification_owner_principal_id"), str)
+                else None
+            ),
+            operator_session_id=(
+                proactive_work.get("notification_operator_session_id")
+                if isinstance(proactive_work.get("notification_operator_session_id"), str)
+                else None
+            ),
             notification_budget=(
                 proactive_work.get("notification_budget")
                 if isinstance(proactive_work.get("notification_budget"), dict)

@@ -7,7 +7,10 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from fastapi import HTTPException
 
-from src.api.goals import GOAL_SNAPSHOT_SERVICE_ID
+from src.api.goals import (
+    GOAL_SNAPSHOT_MANUAL_BUDGET_BOUNDARY,
+    GOAL_SNAPSHOT_SERVICE_ID,
+)
 from src.api.goals import inspect_goal_loop, propose_goal_loop_candidate
 from src.audit.repository import audit_repository
 from src.guardian.goal_snapshot_to_file import GoalSnapshotToFileResult
@@ -238,6 +241,7 @@ class TestGoalSnapshot:
         assert payload["learning"] == "no_learning"
         assert payload["artifact_ref"] == "artifact-1"
         assert payload["operator_receipt"]["delegated_service_id"] == GOAL_SNAPSHOT_SERVICE_ID
+        assert payload["operator_receipt"]["budget_boundary"] == GOAL_SNAPSHOT_MANUAL_BUDGET_BOUNDARY
         assert payload["operator_receipt"]["principal_id"] == "operator:test-bypass"
         service_cls.assert_called_once()
         request = service.run.await_args.args[0]

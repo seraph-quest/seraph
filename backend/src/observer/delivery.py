@@ -2,6 +2,7 @@
 
 import hashlib
 import logging
+from contextlib import contextmanager
 from dataclasses import replace
 
 from src.audit.runtime import log_observer_delivery_event
@@ -27,6 +28,60 @@ def _current_trust_principal():
     from src.approval.runtime import get_current_trust_principal
 
     return get_current_trust_principal()
+
+
+@contextmanager
+def _native_delivery_runtime(principal):
+    """Bind delegated scheduler ownership while the native queue validates it."""
+
+    if principal is None:
+        yield
+        return
+    from src.approval.runtime import (
+        get_current_approval_mode,
+        get_current_session_id,
+        get_current_trust_principal,
+        reset_runtime_context,
+        set_runtime_context,
+    )
+
+    current = get_current_trust_principal()
+    if current == principal:
+        yield
+        return
+    tokens = set_runtime_context(
+        get_current_session_id(),
+        get_current_approval_mode(),
+        trust_principal=principal,
+    )
+    try:
+        yield
+    finally:
+        reset_runtime_context(tokens)
+
+
+def _delegated_native_principal(
+    principal,
+    *,
+    owner_principal_id: str | None,
+    session_id: str | None,
+    operator_session_id: str | None,
+):
+    """Let an authenticated service job carry a canonical goal owner fence."""
+
+    if principal is None or not owner_principal_id:
+        return principal
+    principal_type = str(
+        getattr(getattr(principal, "principal_type", None), "value", getattr(principal, "principal_type", ""))
+    ).lower()
+    if principal_type != "service":
+        return principal
+    return replace(
+        principal,
+        principal_id=owner_principal_id,
+        session_id=session_id or getattr(principal, "session_id", None),
+        operator_session_id=operator_session_id or getattr(principal, "operator_session_id", None),
+    )
 
 
 def _transport_failure_reason(
@@ -196,15 +251,25 @@ def _bundle_content(items: list[object]) -> str:
 
 
 def _group_native_bundle_items(items: list[object]) -> list[list[object]]:
-    session_groups: dict[tuple[str, str, str, int | None], list[object]] = {}
+    session_groups: dict[tuple[str, str, str, int | None, str, str], list[object]] = {}
     ambient_items: list[object] = []
     for item in items:
-        raw_session_id = getattr(item, "session_id", None)
-        session_id = str(raw_session_id).strip() if isinstance(raw_session_id, str) else ""
-        budget_goal_id = str(getattr(item, "goal_id", "") or "").strip()
-        budget_period_key = str(getattr(item, "budget_period_key", "") or "").strip()
+        session_id = _queued_item_text(item, "session_id")
+        budget_goal_id = _queued_item_text(item, "goal_id")
+        budget_period_key = _queued_item_text(item, "budget_period_key")
         budget_limit = getattr(item, "budget_limit", None)
-        group_key = (session_id, budget_goal_id, budget_period_key, budget_limit)
+        if not isinstance(budget_limit, int) or isinstance(budget_limit, bool):
+            budget_limit = None
+        owner_principal_id = _queued_item_text(item, "owner_principal_id")
+        operator_session_id = _queued_item_text(item, "operator_session_id")
+        group_key = (
+            session_id,
+            budget_goal_id,
+            budget_period_key,
+            budget_limit,
+            owner_principal_id,
+            operator_session_id,
+        )
         if session_id:
             session_groups.setdefault(group_key, []).append(item)
             continue
@@ -241,6 +306,8 @@ def _resolve_delivery_identity(
     message: WSResponse,
     *,
     session_id: str | None,
+    owner_principal_id: str | None = None,
+    operator_session_id: str | None = None,
     trusted_principal=None,
 ) -> tuple[object | None, str | None, str | None, str | None]:
     """Resolve proactive identity from trusted runtime state.
@@ -261,8 +328,14 @@ def _resolve_delivery_identity(
         )
     requested_conversation_id = candidates[0] if candidates else None
 
-    supplied_owner = str(message.owner_principal_id or "").strip() or None
-    supplied_operator_session = str(message.operator_session_id or "").strip() or None
+    supplied_owner = str(
+        owner_principal_id if owner_principal_id is not None else message.owner_principal_id or ""
+    ).strip() or None
+    supplied_operator_session = str(
+        operator_session_id
+        if operator_session_id is not None
+        else message.operator_session_id or ""
+    ).strip() or None
     trusted_owner = str(getattr(trusted_principal, "principal_id", "") or "").strip() or None
     trusted_operator_session = str(
         getattr(trusted_principal, "operator_session_id", "") or ""
@@ -380,6 +453,39 @@ def _apply_native_channel_preference(
     if transport_order[0] == "native_notification":
         return transport_order
     return ["native_notification", *[transport for transport in transport_order if transport != "native_notification"]]
+
+
+def _has_notification_budget(notification_budget: dict[str, object] | None) -> bool:
+    """Return whether delivery carries a goal-bound budget assertion.
+
+    Treat a malformed partial binding as bounded work too.  It must fail at the
+    native reservation boundary rather than being allowed to escape over the
+    unscoped WebSocket broadcast path.
+    """
+
+    if not isinstance(notification_budget, dict):
+        return False
+    return any(
+        notification_budget.get(key) is not None
+        for key in ("goal_id", "budget_period_key", "budget_limit")
+    )
+
+
+def _queued_item_text(item: object, field: str) -> str:
+    value = getattr(item, field, None)
+    return value.strip() if isinstance(value, str) else ""
+
+
+def _is_owner_bound_bundle_item(item: object) -> bool:
+    """Return whether a queued item must never enter global WebSocket fanout."""
+
+    if any(
+        _queued_item_text(item, field)
+        for field in ("session_id", "owner_principal_id", "operator_session_id", "goal_id", "budget_period_key")
+    ):
+        return True
+    budget_limit = getattr(item, "budget_limit", None)
+    return isinstance(budget_limit, int) and not isinstance(budget_limit, bool)
 
 
 def _canonical_delivery_message(
@@ -515,6 +621,8 @@ async def deliver_or_queue(
     *,
     guardian_confidence: str | None = None,
     session_id: str | None = None,
+    owner_principal_id: str | None = None,
+    operator_session_id: str | None = None,
     notification_budget: dict[str, object] | None = None,
 ) -> InterventionDecision:
     """Route a proactive message through the delivery gate.
@@ -547,29 +655,47 @@ async def deliver_or_queue(
         trusted_principal is not None
         and trusted_type == "service"
         and str(getattr(trusted_principal, "job_id", "") or "").strip()
-        and (session_id or message.conversation_id or message.session_id)
+        and (
+            session_id
+            or message.conversation_id
+            or message.session_id
+            or owner_principal_id
+            or operator_session_id
+            or notification_budget
+        )
     ):
-        from src.agent.session import session_manager
-
-        service_session_id = str(
-            session_id or message.conversation_id or message.session_id or ""
+        service_session_id = str(session_id or message.conversation_id or message.session_id or "").strip()
+        canonical_owner = str(owner_principal_id or message.owner_principal_id or "").strip()
+        canonical_operator_session = str(
+            operator_session_id or message.operator_session_id or ""
         ).strip()
-        canonical_session = await session_manager.get(service_session_id)
-        canonical_owner = str(getattr(canonical_session, "owner_principal_id", "") or "").strip()
-        if canonical_session is None or not canonical_owner:
+        if service_session_id:
+            from src.agent.session import session_manager
+
+            canonical_session = await session_manager.get(service_session_id)
+            canonical_owner = str(getattr(canonical_session, "owner_principal_id", "") or "").strip()
+            if canonical_session is None or not canonical_owner:
+                raise ConversationIdentityError(
+                    "conversation_owner_missing",
+                    "Scheduled delivery requires an owner on the canonical conversation session.",
+                )
+        if not canonical_owner and (notification_budget or canonical_operator_session):
             raise ConversationIdentityError(
                 "conversation_owner_missing",
-                "Scheduled delivery requires an owner on the canonical conversation session.",
+                "Scheduled delivery requires a canonical goal owner.",
             )
         principal_for_delivery = replace(
             trusted_principal,
-            principal_id=canonical_owner,
+            principal_id=canonical_owner or trusted_principal.principal_id,
             session_id=service_session_id,
+            operator_session_id=canonical_operator_session,
         )
     identity, requested_conversation_id, owner_principal_id, operator_session_id = (
         _resolve_delivery_identity(
             message,
             session_id=session_id,
+            owner_principal_id=owner_principal_id,
+            operator_session_id=operator_session_id,
             trusted_principal=principal_for_delivery,
         )
     )
@@ -698,6 +824,12 @@ async def deliver_or_queue(
             "learning_arbitration_weights": learning_arbitration_weights,
             "policy_action": policy_decision.action.value,
             "policy_reason": policy_decision.reason,
+            "notification_budget_bound": _has_notification_budget(notification_budget),
+            "notification_budget_goal_id": (
+                notification_budget.get("goal_id")
+                if isinstance(notification_budget, dict)
+                else None
+            ),
         }
         intervention_id = await _create_intervention_record(
             session_id=session_id,
@@ -751,7 +883,16 @@ async def deliver_or_queue(
             )
             if adjusted_transport_order != transport_order:
                 event_details["transport_order_adjustment"] = "learned_native_channel_preference"
-            transport_order = adjusted_transport_order
+            goal_bound_notification = _has_notification_budget(notification_budget)
+            if goal_bound_notification:
+                # A budgeted goal notification must reserve its native outbox
+                # row before delivery. WebSocket has no reservation boundary,
+                # so it can never be a primary or fallback transport here.
+                transport_order = ["native_notification"]
+                event_details["notification_budget_transport_fence"] = "native_notification_only"
+                event_details["transport_order"] = transport_order
+            else:
+                transport_order = adjusted_transport_order
 
             last_error = (
                 str(route_binding.get("failure_reason"))
@@ -811,35 +952,42 @@ async def deliver_or_queue(
                         last_error = _prefer_delivery_error(last_error, "daemon_unavailable")
                         continue
                     try:
-                        notification = await native_notification_queue.enqueue(
-                            intervention_id=intervention_id,
-                            title=_native_notification_title(message, is_scheduled=is_scheduled),
-                            body=message.content,
-                            intervention_type=intervention_type,
-                            urgency=urgency,
-                            surface=(
-                                "action_card"
-                                if effective_learning_signal.escalation_bias == "prefer_async_native"
-                                else "notification"
-                            ),
-                            session_id=session_id,
-                            thread_id=session_id,
-                            thread_source="session" if session_id else "ambient",
-                            continuation_mode="resume_thread" if session_id else "open_thread",
-                            resume_message=f"Continue from this guardian intervention: {message.content}",
+                        native_principal = _delegated_native_principal(
+                            principal_for_delivery,
                             owner_principal_id=owner_principal_id,
+                            session_id=session_id,
                             operator_session_id=operator_session_id,
-                            device_id=message.device_id,
-                            channel="native_notification",
-                            transport="native_notification",
-                            conversation_id=identity.conversation_id if identity is not None else None,
-                            correlation_id=message.correlation_id,
-                            causation_id=message.causation_id,
-                            attachment_refs=delivery_message.attachment_refs,
-                            goal_id=(notification_budget or {}).get("goal_id"),
-                            budget_period_key=(notification_budget or {}).get("budget_period_key"),
-                            budget_limit=(notification_budget or {}).get("budget_limit"),
                         )
+                        with _native_delivery_runtime(native_principal):
+                            notification = await native_notification_queue.enqueue(
+                                intervention_id=intervention_id,
+                                title=_native_notification_title(message, is_scheduled=is_scheduled),
+                                body=message.content,
+                                intervention_type=intervention_type,
+                                urgency=urgency,
+                                surface=(
+                                    "action_card"
+                                    if effective_learning_signal.escalation_bias == "prefer_async_native"
+                                    else "notification"
+                                ),
+                                session_id=session_id,
+                                thread_id=session_id,
+                                thread_source="session" if session_id else "ambient",
+                                continuation_mode="resume_thread" if session_id else "open_thread",
+                                resume_message=f"Continue from this guardian intervention: {message.content}",
+                                owner_principal_id=owner_principal_id,
+                                operator_session_id=operator_session_id,
+                                device_id=message.device_id,
+                                channel="native_notification",
+                                transport="native_notification",
+                                conversation_id=identity.conversation_id if identity is not None else None,
+                                correlation_id=message.correlation_id,
+                                causation_id=message.causation_id,
+                                attachment_refs=delivery_message.attachment_refs,
+                                goal_id=(notification_budget or {}).get("goal_id"),
+                                budget_period_key=(notification_budget or {}).get("budget_period_key"),
+                                budget_limit=(notification_budget or {}).get("budget_limit"),
+                            )
                     except NativeNotificationBudgetDenied as exc:
                         last_error = _prefer_delivery_error(last_error, str(exc))
                         event_details.update(
@@ -848,8 +996,13 @@ async def deliver_or_queue(
                                 "notification_budget_goal_id": exc.goal_id,
                                 "notification_budget_period_key": exc.budget_period_key,
                                 "notification_budget_limit": exc.budget_limit,
+                                "notification_budget_partial_reservation": False,
                             }
                         )
+                        # A denied reservation is a bounded failure. Never
+                        # turn it into an unreserved WebSocket delivery.
+                        if goal_bound_notification:
+                            break
                         continue
                     context_manager.record_native_notification(
                         title=notification.title,
@@ -928,7 +1081,7 @@ async def deliver_or_queue(
                 "intervention_id": intervention_id,
                 "session_id": session_id,
             }
-            if session_id is not None:
+            if session_id is not None or owner_principal_id is not None or operator_session_id is not None:
                 insight_kwargs["owner_principal_id"] = owner_principal_id
                 insight_kwargs["operator_session_id"] = operator_session_id
             if notification_budget:
@@ -1052,18 +1205,18 @@ async def deliver_queued_bundle() -> int:
         if isinstance(route_binding.get("failure_reason"), str) and route_binding.get("failure_reason")
         else _route_disabled_error(primary_transport=route_binding["primary_transport"])
     )
+    owner_bound_items = any(_is_owner_bound_bundle_item(item) for item in items)
     for transport in transport_order:
         if transport == "native_notification":
             if not context_manager.is_daemon_connected():
                 last_error = _prefer_delivery_error(last_error, "daemon_unavailable")
                 continue
             notifications = []
+            denied_groups: list[dict[str, object]] = []
+            owner_binding_failures: list[dict[str, object]] = []
             for group_items in native_bundle_groups:
                 group_content = _bundle_content(group_items)
                 group_continuation = _bundle_continuation_payload(group_items, bundle_content=group_content)
-                group_owner_principal_id, group_operator_session_id = await _bundle_owner_binding(
-                    group_items
-                )
                 source_insight_ids = [
                     str(item.id)
                     for item in group_items
@@ -1071,28 +1224,63 @@ async def deliver_queued_bundle() -> int:
                 ]
                 first_item = group_items[0] if group_items else None
                 try:
-                    notification = await native_notification_queue.enqueue(
-                        intervention_id=None,
-                        title="Seraph update",
-                        body=group_content,
-                        intervention_type="proactive_bundle",
-                        urgency=3,
-                        surface="action_card",
-                        session_id=group_continuation["session_id"],
-                        thread_id=group_continuation["thread_id"],
-                        thread_source=str(group_continuation["thread_source"] or "ambient"),
-                        continuation_mode=str(group_continuation["continuation_mode"] or "open_thread"),
-                        resume_message=group_continuation["resume_message"],
-                        idempotency_key=_bundle_idempotency_key(group_items),
-                        owner_principal_id=group_owner_principal_id,
-                        operator_session_id=group_operator_session_id,
-                        source_insight_ids=source_insight_ids,
-                        goal_id=getattr(first_item, "goal_id", None),
-                        budget_period_key=getattr(first_item, "budget_period_key", None),
-                        budget_limit=getattr(first_item, "budget_limit", None),
+                    group_owner_principal_id, group_operator_session_id = await _bundle_owner_binding(
+                        group_items
                     )
+                except ConversationIdentityError as exc:
+                    last_error = _prefer_delivery_error(last_error, exc.code)
+                    owner_binding_failures.append(
+                        {
+                            "source_insight_ids": source_insight_ids,
+                            "reason": exc.code,
+                        }
+                    )
+                    continue
+                group_goal_id = _queued_item_text(first_item, "goal_id") if first_item is not None else ""
+                group_budget_period_key = (
+                    _queued_item_text(first_item, "budget_period_key") if first_item is not None else ""
+                )
+                group_budget_limit = getattr(first_item, "budget_limit", None) if first_item is not None else None
+                if not isinstance(group_budget_limit, int) or isinstance(group_budget_limit, bool):
+                    group_budget_limit = None
+                try:
+                    native_principal = _delegated_native_principal(
+                        _current_trust_principal(),
+                        owner_principal_id=group_owner_principal_id,
+                        session_id=group_continuation["session_id"],
+                        operator_session_id=group_operator_session_id,
+                    )
+                    with _native_delivery_runtime(native_principal):
+                        notification = await native_notification_queue.enqueue(
+                            intervention_id=None,
+                            title="Seraph update",
+                            body=group_content,
+                            intervention_type="proactive_bundle",
+                            urgency=3,
+                            surface="action_card",
+                            session_id=group_continuation["session_id"],
+                            thread_id=group_continuation["thread_id"],
+                            thread_source=str(group_continuation["thread_source"] or "ambient"),
+                            continuation_mode=str(group_continuation["continuation_mode"] or "open_thread"),
+                            resume_message=group_continuation["resume_message"],
+                            idempotency_key=_bundle_idempotency_key(group_items),
+                            owner_principal_id=group_owner_principal_id,
+                            operator_session_id=group_operator_session_id,
+                            source_insight_ids=source_insight_ids,
+                            goal_id=group_goal_id or None,
+                            budget_period_key=group_budget_period_key or None,
+                            budget_limit=group_budget_limit,
+                        )
                 except NativeNotificationBudgetDenied as exc:
                     last_error = _prefer_delivery_error(last_error, str(exc))
+                    denied_groups.append(
+                        {
+                            "goal_id": exc.goal_id,
+                            "budget_period_key": exc.budget_period_key,
+                            "budget_limit": exc.budget_limit,
+                            "source_insight_ids": source_insight_ids,
+                        }
+                    )
                     continue
                 context_manager.record_native_notification(
                     title=notification.title,
@@ -1107,16 +1295,50 @@ async def deliver_queued_bundle() -> int:
                         transport="native_notification_bundle",
                         notification_id=notification.id,
                     )
+            queued_item_count = sum(len(group_items) for _, group_items in notifications)
+            denied_item_count = sum(
+                len(group.get("source_insight_ids") or []) for group in denied_groups
+            )
             details.update(
                 {
                     "attempted_connections": len(notifications),
                     "delivered_connections": 0,
-                    "failed_connections": 0,
+                    "failed_connections": len(owner_binding_failures),
                     "queued_connections": len(notifications),
+                    "queued_item_count": queued_item_count,
+                    "notification_budget_denied_item_count": denied_item_count,
+                    "notification_budget_denied": bool(denied_groups),
+                    "notification_budget_partial_reservation": bool(
+                        denied_groups and notifications
+                    ),
+                    "notification_budget_denied_groups": denied_groups,
+                    "recoverable_source_insight_ids": [
+                        source_id
+                        for group in denied_groups
+                        for source_id in group.get("source_insight_ids") or []
+                    ],
+                    "owner_binding_failures": owner_binding_failures,
                 }
             )
+            if notifications:
+                await log_observer_delivery_event(
+                    decision="queued",
+                    message_type="proactive",
+                    intervention_type="proactive_bundle",
+                    urgency=3,
+                    is_scheduled=False,
+                    details={
+                        **details,
+                        "transport": "native_notification",
+                        "notification_id": notifications[0][0].id,
+                        "notification_ids": [notification.id for notification, _ in notifications],
+                        "queue_retained": bool(denied_groups or owner_binding_failures),
+                    },
+                )
+                return queued_item_count
+
             await log_observer_delivery_event(
-                decision="queued",
+                decision="failed",
                 message_type="proactive",
                 intervention_type="proactive_bundle",
                 urgency=3,
@@ -1124,17 +1346,15 @@ async def deliver_queued_bundle() -> int:
                 details={
                     **details,
                     "transport": "native_notification",
-                    "notification_id": notifications[0][0].id if notifications else None,
-                    "notification_ids": [notification.id for notification, _ in notifications],
+                    "notification_id": None,
+                    "notification_ids": [],
+                    "queue_retained": True,
                 },
             )
-            return len(items)
+            return 0
 
         if transport == "websocket":
-            if any(
-                getattr(item, "session_id", None) or getattr(item, "owner_principal_id", None)
-                for item in items
-            ):
+            if owner_bound_items:
                 # ConnectionManager broadcasts globally and has no per-session
                 # recipient fence. A bound bundle must stay on the owner-aware
                 # native outbox until a scoped WebSocket transport exists.

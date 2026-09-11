@@ -135,6 +135,9 @@ class GoalSnapshotRunRequest(BaseModel):
 
 
 GOAL_SNAPSHOT_SERVICE_ID = "service:goal-snapshot"
+GOAL_SNAPSHOT_MANUAL_BUDGET_BOUNDARY = (
+    "authenticated_manual_operator_request_outside_standing_goal_admission_budget"
+)
 
 
 def _require_authenticated_operator(request: Request) -> AuthenticatedOperator:
@@ -1063,6 +1066,9 @@ async def run_goal_snapshot(goal_id: str, body: GoalSnapshotRunRequest, request:
     or a second execution path.  The service identity is fixed in code and is
     bound to the operator session for the child durable job; all goal, authority,
     workflow, artifact, and readback checks remain in ``GoalSnapshotToFileService``.
+    Reviewed standing-goal admission budgets apply to scheduler admissions;
+    this explicit operator canary is a separate manual boundary and records
+    that fact in its operator and audit receipts.
     """
 
     operator = _require_authenticated_operator(request)
@@ -1112,6 +1118,7 @@ async def run_goal_snapshot(goal_id: str, body: GoalSnapshotRunRequest, request:
         "session_id_digest": _session_digest(operator.session_id),
         "delegated_service_id": GOAL_SNAPSHOT_SERVICE_ID,
         "authority_boundary": "authenticated_operator_to_fixed_service",
+        "budget_boundary": GOAL_SNAPSHOT_MANUAL_BUDGET_BOUNDARY,
     }
     try:
         await audit_repository.log_event(
@@ -1126,6 +1133,7 @@ async def run_goal_snapshot(goal_id: str, body: GoalSnapshotRunRequest, request:
                 "goal_revision": current_revision,
                 "session_id_digest": _session_digest(operator.session_id),
                 "delegated_service_id": GOAL_SNAPSHOT_SERVICE_ID,
+                "budget_boundary": GOAL_SNAPSHOT_MANUAL_BUDGET_BOUNDARY,
                 "execution_status": payload.get("execution_status"),
                 "verification": payload.get("verification"),
                 "learning": payload.get("learning"),

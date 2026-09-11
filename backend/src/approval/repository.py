@@ -203,7 +203,8 @@ def _approval_belongs_to_operator_session(
     if not owner_operator_session_id:
         return False
     try:
-        details = json.loads(request.details_json) if request.details_json else {}
+        details_json = getattr(request, "details_json", None)
+        details = json.loads(details_json) if details_json else {}
     except (TypeError, ValueError):
         details = {}
     if not isinstance(details, dict):
@@ -211,7 +212,7 @@ def _approval_belongs_to_operator_session(
     explicit_owner = str(
         details.get("approval_owner_operator_session_id")
         or details.get("approval_owner_auth_session_id")
-        or request.operator_session_id
+        or getattr(request, "operator_session_id", None)
         or ""
     ).strip()
     if explicit_owner:
@@ -222,7 +223,7 @@ def _approval_belongs_to_operator_session(
     # repository session id (the old auth-session-only route).
     legacy_owner = str(details.get("approval_owner_session_id") or "").strip()
     return bool(legacy_owner) and legacy_owner == owner_operator_session_id and (
-        request.session_id == owner_operator_session_id
+        getattr(request, "session_id", None) == owner_operator_session_id
     )
 
 
@@ -249,7 +250,8 @@ _APPROVAL_BINDING_FIELDS: dict[str, tuple[str, ...]] = {
 
 def _approval_details(request: ApprovalRequest) -> dict[str, Any]:
     try:
-        parsed = json.loads(request.details_json) if request.details_json else {}
+        details_json = getattr(request, "details_json", None)
+        parsed = json.loads(details_json) if details_json else {}
     except (TypeError, ValueError):
         return {}
     return dict(parsed) if isinstance(parsed, Mapping) else {}
@@ -287,41 +289,32 @@ def _approval_binding_matches(
     expected_session = str(session_id or "").strip()
     expected_operator_session = str(owner_operator_session_id or "").strip()
     expected_principal = str(owner_principal_id or "").strip()
-    # Callers that consume an approval must provide the complete owner binding.
-    # Keep the legacy repository-only shape usable for old, already-persisted
-    # rows; all production consumers pass these values explicitly.
-    strict_owner = bool(owner_operator_session_id or owner_principal_id or approval_binding)
-    if not expected_session:
-        return False
-    if strict_owner and (not expected_operator_session or not expected_principal):
+    # Every selection/consumption path is an effect-authority lookup.  A
+    # fingerprint and conversation id are not enough to prove who may spend
+    # the approval, so ownerless legacy callers fail closed as well.
+    if not expected_session or not expected_operator_session or not expected_principal:
         return False
 
     details = _approval_details(request)
     actual_conversation = str(
-        request.conversation_id
+        getattr(request, "conversation_id", None)
         or _approval_detail_value(details, "conversation_id", "approval_conversation_id")
         or ""
     ).strip()
-    if strict_owner:
-        if actual_conversation != expected_session:
-            return False
-        actual_principal = str(
-            request.owner_principal_id
-            or _approval_detail_value(
-                details,
-                "owner_principal_id",
-                "approval_owner_principal_id",
-            )
-            or ""
-        ).strip()
-        if actual_principal != expected_principal:
-            return False
-        if not _approval_belongs_to_operator_session(request, expected_operator_session):
-            return False
-    elif owner_operator_session_id is not None and not _approval_belongs_to_operator_session(
-        request,
-        expected_operator_session,
-    ):
+    if actual_conversation != expected_session:
+        return False
+    actual_principal = str(
+        getattr(request, "owner_principal_id", None)
+        or _approval_detail_value(
+            details,
+            "owner_principal_id",
+            "approval_owner_principal_id",
+        )
+        or ""
+    ).strip()
+    if actual_principal != expected_principal:
+        return False
+    if not _approval_belongs_to_operator_session(request, expected_operator_session):
         return False
 
     if not isinstance(approval_binding, Mapping):
@@ -751,6 +744,10 @@ class ApprovalRepository:
         capability_version: str,
         budget_digest: str,
         expires_at: float,
+        session_id: str | None = None,
+        conversation_id: str | None = None,
+        criterion_id: str | None = None,
+        candidate_id: str | None = None,
         db: Any | None = None,
     ) -> dict[str, Any] | None:
         """Consume one current, authenticated approval for durable resume.
@@ -781,6 +778,10 @@ class ApprovalRepository:
                     capability_version=capability_version,
                     budget_digest=budget_digest,
                     expires_at=expires_at,
+                    session_id=session_id,
+                    conversation_id=conversation_id,
+                    criterion_id=criterion_id,
+                    candidate_id=candidate_id,
                 )
         return await self._consume_approved_for_resume_in_session(
             db,
@@ -799,6 +800,10 @@ class ApprovalRepository:
             capability_version=capability_version,
             budget_digest=budget_digest,
             expires_at=expires_at,
+            session_id=session_id,
+            conversation_id=conversation_id,
+            criterion_id=criterion_id,
+            candidate_id=candidate_id,
         )
 
     async def _consume_approved_for_resume_in_session(
@@ -820,12 +825,28 @@ class ApprovalRepository:
         capability_version: str,
         budget_digest: str,
         expires_at: float,
+        session_id: str | None,
+        conversation_id: str | None,
+        criterion_id: str | None,
+        candidate_id: str | None,
     ) -> dict[str, Any] | None:
         try:
             expires_at = float(expires_at)
         except (TypeError, ValueError, OverflowError):
             return None
-        if not approval_id or not owner_operator_session_id or not operator_principal_id:
+        expected_session = str(session_id or "").strip()
+        expected_conversation = str(conversation_id or "").strip()
+        expected_owner_operator_session = str(owner_operator_session_id or "").strip()
+        expected_operator_principal = str(operator_principal_id or "").strip()
+        expected_owner_principal = str(owner_principal_id or "").strip()
+        if (
+            not approval_id
+            or not expected_session
+            or not expected_conversation
+            or not expected_owner_operator_session
+            or not expected_operator_principal
+            or not expected_owner_principal
+        ):
             return None
         result = await db.execute(
             select(ApprovalRequest).where(
@@ -834,9 +855,16 @@ class ApprovalRepository:
             )
         )
         request = result.scalars().first()
-        if request is None or not _approval_belongs_to_operator_session(
-            request,
-            owner_operator_session_id,
+        if request is None:
+            return None
+        # Typed resume must consume the exact row bound to the durable run.
+        # The row columns are canonical; details are only an additional
+        # receipt and cannot repair missing or conflicting row identity.
+        if (
+            str(getattr(request, "session_id", None) or "").strip() != expected_session
+            or str(getattr(request, "conversation_id", None) or "").strip() != expected_conversation
+            or str(getattr(request, "operator_session_id", None) or "").strip() != expected_owner_operator_session
+            or str(getattr(request, "owner_principal_id", None) or "").strip() != expected_owner_principal
         ):
             return None
         now = datetime.now(timezone.utc)
@@ -876,9 +904,73 @@ class ApprovalRepository:
             return None
 
         def detail(*names: str) -> Any:
-            for name in names:
-                if name in details:
-                    return details[name]
+            return _approval_detail_value(details, *names)
+
+        # These identities are part of the durable run contract even when
+        # their values are absent.  Comparing the normalized pair makes a
+        # candidate-present approval unable to authorize a candidate-absent
+        # run, and rejects missing criterion/candidate receipts for a run that
+        # declared them.
+        def exact_optional_identity(
+            expected: Any,
+            *names: str,
+            allow_missing: bool = False,
+        ) -> bool:
+            expected_value = str(expected).strip() if expected is not None else ""
+            observed = detail(*names)
+            if observed is None:
+                return allow_missing or not expected_value
+            observed_value = str(observed).strip() if observed is not None else ""
+            return observed_value == expected_value
+
+        if not exact_optional_identity(
+            expected_conversation,
+            "conversation_id",
+            "approval_conversation_id",
+            allow_missing=True,
+        ):
+            return None
+        if not exact_optional_identity(
+            expected_session,
+            "session_id",
+            "approval_session_id",
+            allow_missing=True,
+        ):
+            return None
+        if not exact_optional_identity(
+            criterion_id,
+            "criterion_id",
+            "durable_criterion_id",
+        ):
+            return None
+        if not exact_optional_identity(
+            candidate_id,
+            "candidate_id",
+            "workflow_candidate_id",
+            "durable_candidate_id",
+        ):
+            return None
+        if not exact_optional_identity(
+            expected_owner_operator_session,
+            "operator_session_id",
+            "approval_owner_operator_session_id",
+            "approval_owner_auth_session_id",
+            allow_missing=True,
+        ):
+            return None
+        if not exact_optional_identity(
+            expected_owner_principal,
+            "owner_principal_id",
+            "approval_owner_principal_id",
+            "durable_owner_principal_id",
+            allow_missing=True,
+        ):
+            return None
+        if not exact_optional_identity(
+            expected_operator_principal,
+            "approval_operator_principal_id",
+            "operator_principal_id",
+        ):
             return None
 
         required_bindings = (

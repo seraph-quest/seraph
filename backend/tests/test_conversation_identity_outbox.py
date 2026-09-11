@@ -556,6 +556,7 @@ async def test_approval_expiry_and_atomic_consume_replay(file_db, monkeypatch):
         tool_name=request.tool_name,
         fingerprint=request.fingerprint,
         owner_operator_session_id="operator-session-approval",
+        owner_principal_id="operator:approval",
     )
     results = await asyncio.gather(
         approval_repository.consume_approved(
@@ -563,12 +564,14 @@ async def test_approval_expiry_and_atomic_consume_replay(file_db, monkeypatch):
             tool_name=request.tool_name,
             fingerprint=request.fingerprint,
             owner_operator_session_id="operator-session-approval",
+            owner_principal_id="operator:approval",
         ),
         approval_repository.consume_approved(
             session_id=request.session_id,
             tool_name=request.tool_name,
             fingerprint=request.fingerprint,
             owner_operator_session_id="operator-session-approval",
+            owner_principal_id="operator:approval",
         ),
     )
     assert sum(bool(result) for result in results) == 1
@@ -577,6 +580,7 @@ async def test_approval_expiry_and_atomic_consume_replay(file_db, monkeypatch):
         tool_name=request.tool_name,
         fingerprint=request.fingerprint,
         owner_operator_session_id="operator-session-approval",
+        owner_principal_id="operator:approval",
     )
 
     expired_request = await approval_repository.get_or_create_pending(
@@ -602,6 +606,7 @@ async def test_approval_expiry_and_atomic_consume_replay(file_db, monkeypatch):
         tool_name=expired_request.tool_name,
         fingerprint=expired_request.fingerprint,
         owner_operator_session_id="operator-session-approval",
+        owner_principal_id="operator:approval",
     )
 
 
@@ -723,6 +728,7 @@ async def test_approved_consume_revalidates_attachment_receipt_at_execution(file
         tool_name="attachment-tool",
         fingerprint="approval-attachment-expiry-fingerprint",
         owner_operator_session_id="operator-session-approval-attachment",
+        owner_principal_id="operator:approval-attachment",
     )
     async with get_session() as db:
         row = (

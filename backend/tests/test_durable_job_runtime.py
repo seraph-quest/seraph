@@ -10,7 +10,9 @@ from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import update
+from sqlalchemy.sql.dml import Update
 from sqlmodel import select
+from src.approval.repository import approval_repository
 from src.db.engine import _ensure_legacy_columns, _map_legacy_workflow_status
 from src.db.models import ApprovalRequest, WorkflowRunState
 
@@ -448,6 +450,86 @@ def test_approval_resume_receipt_rechecks_current_authority_and_execution_contra
         )
 
 
+@pytest.mark.asyncio
+async def test_typed_resume_consumes_only_the_exact_approval_run_identity():
+    expires_at = (datetime.now(timezone.utc) + timedelta(minutes=5)).timestamp()
+    details = {
+        "durable_job_id": "job-exact-identity",
+        "durable_owner_kind": "service",
+        "durable_owner_principal_id": "service:exact-identity",
+        "durable_service_id": "service:exact-identity",
+        "durable_authority_digest": "authority-exact-identity",
+        "durable_goal_id": "goal-exact-identity",
+        "durable_criterion_id": "criterion-exact-identity",
+        "durable_goal_revision": 4,
+        "durable_plan_revision": 2,
+        "durable_candidate_id": "candidate-exact-identity",
+        "durable_capability_version": "capability-exact-identity",
+        "durable_budget_digest": _digest({"budget_microusd": None}),
+        "durable_approval_id": "approval-exact-identity",
+        "approval_operator_principal_id": "operator:exact-identity",
+        "approval_expires_at": expires_at,
+    }
+    request = ApprovalRequest(
+        id="approval-exact-identity",
+        session_id="conversation-exact-identity",
+        conversation_id="conversation-exact-identity",
+        owner_principal_id="service:exact-identity",
+        operator_session_id="operator-session-exact-identity",
+        status="approved",
+        tool_name="exact-identity-tool",
+        fingerprint="exact-identity-fingerprint",
+        expires_at=datetime.fromtimestamp(expires_at, tz=timezone.utc),
+        details_json=json.dumps(details),
+    )
+
+    class _Result:
+        def scalars(self):
+            return self
+
+        def first(self):
+            return request if request.status == "approved" else None
+
+    class _Db:
+        async def execute(self, statement):
+            if isinstance(statement, Update):
+                request.status = "consumed"
+                return SimpleNamespace(rowcount=1)
+            return _Result()
+
+    db = _Db()
+    common = {
+        "db": db,
+        "approval_id": request.id,
+        "owner_operator_session_id": "operator-session-exact-identity",
+        "operator_principal_id": "operator:exact-identity",
+        "job_id": "job-exact-identity",
+        "owner_kind": "service",
+        "owner_principal_id": "service:exact-identity",
+        "service_id": "service:exact-identity",
+        "authority_digest": "authority-exact-identity",
+        "goal_id": "goal-exact-identity",
+        "goal_revision": 4,
+        "plan_revision": 2,
+        "capability_version": "capability-exact-identity",
+        "budget_digest": _digest({"budget_microusd": None}),
+        "expires_at": expires_at,
+        "session_id": "conversation-exact-identity",
+        "conversation_id": "conversation-exact-identity",
+        "criterion_id": "criterion-exact-identity",
+    }
+    assert await approval_repository.consume_approved_for_resume(
+        **common,
+        candidate_id=None,
+    ) is None
+    assert request.status == "approved"
+    assert await approval_repository.consume_approved_for_resume(
+        **common,
+        candidate_id="candidate-exact-identity",
+    )
+    assert request.status == "consumed"
+
+
 def test_remote_admission_receipts_are_allowlisted_and_redacted():
     safe, digest = _canonical_remote_inference_receipt(
         {
@@ -853,6 +935,7 @@ async def test_approval_held_job_cannot_be_resumed_without_a_fresh_authority_rou
         "durable_goal_id": admitted["goal_id"],
         "durable_goal_revision": admitted["goal_revision"],
         "durable_plan_revision": admitted["plan_revision"],
+        "durable_candidate_id": admitted["candidate_id"],
         "durable_capability_version": admitted["capability_version"],
         "durable_budget_digest": _digest({"budget_microusd": None}),
         "approval_expires_at": approval_expires_at,
@@ -862,6 +945,9 @@ async def test_approval_held_job_cannot_be_resumed_without_a_fresh_authority_rou
             ApprovalRequest(
                 id="approval-1",
                 session_id="job-session",
+                conversation_id="job-session",
+                owner_principal_id=admitted["owner"]["principal_id"],
+                operator_session_id="operator-session:test",
                 tool_name="strategist_tick",
                 status="approved",
                 fingerprint="approval-resume-fingerprint",
@@ -1000,6 +1086,7 @@ async def test_durable_resume_attachment_quarantine_survives_transition_rollback
         "durable_goal_id": admitted["goal_id"],
         "durable_goal_revision": admitted["goal_revision"],
         "durable_plan_revision": admitted["plan_revision"],
+        "durable_candidate_id": admitted["candidate_id"],
         "durable_capability_version": admitted["capability_version"],
         "durable_budget_digest": _digest({"budget_microusd": None}),
         "approval_expires_at": approval_expires_at,
@@ -1009,6 +1096,8 @@ async def test_durable_resume_attachment_quarantine_survives_transition_rollback
             ApprovalRequest(
                 id="approval-1",
                 session_id="job-session",
+                conversation_id="job-session",
+                owner_principal_id=admitted["owner"]["principal_id"],
                 operator_session_id="operator-session:resume-attachment-quarantine",
                 attachment_refs_json="{malformed-attachment-refs",
                 status="approved",

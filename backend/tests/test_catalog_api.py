@@ -224,14 +224,32 @@ class _LifecycleApprovalStore:
         self.records: dict[tuple[str | None, str, str], SimpleNamespace] = {}
         self.next_id = 1
 
-    async def consume_approved(self, *, session_id, tool_name, fingerprint):
+    async def consume_approved(
+        self,
+        *,
+        session_id,
+        tool_name,
+        fingerprint,
+        owner_operator_session_id=None,
+        owner_principal_id=None,
+        approval_binding=None,
+    ):
         record = self.records.get((session_id, tool_name, fingerprint))
         if record is None or record.status != "approved":
             return False
         record.status = "consumed"
         return True
 
-    async def has_approved(self, *, session_id, tool_name, fingerprint):
+    async def has_approved(
+        self,
+        *,
+        session_id,
+        tool_name,
+        fingerprint,
+        owner_operator_session_id=None,
+        owner_principal_id=None,
+        approval_binding=None,
+    ):
         record = self.records.get((session_id, tool_name, fingerprint))
         return record is not None and record.status == "approved"
 

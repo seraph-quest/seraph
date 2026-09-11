@@ -489,9 +489,16 @@ async def test_repository_consumed_approval_issues_one_use_host_binding(monkeypa
         id="approval:repository",
         status="approved",
         session_id="session:test",
+        conversation_id="session:test",
+        owner_principal_id="operator:test",
+        operator_session_id="session:test",
         tool_name="test.echo",
         fingerprint=fingerprint,
-        details_json=None,
+        details_json=json.dumps({
+            "conversation_id": "session:test",
+            "owner_principal_id": "operator:test",
+            "approval_owner_operator_session_id": "session:test",
+        }),
     )
 
     class _Result:
@@ -522,6 +529,8 @@ async def test_repository_consumed_approval_issues_one_use_host_binding(monkeypa
         session_id="session:test",
         tool_name="test.echo",
         fingerprint=fingerprint,
+        owner_operator_session_id="session:test",
+        owner_principal_id="operator:test",
     )
     assert isinstance(binding, dict)
     assert binding["approval_id"] == request.id
@@ -531,6 +540,8 @@ async def test_repository_consumed_approval_issues_one_use_host_binding(monkeypa
         session_id="session:test",
         tool_name="test.echo",
         fingerprint=fingerprint,
+        owner_operator_session_id="session:test",
+        owner_principal_id="operator:test",
     ) is False
 
     result = host.execute(
@@ -626,6 +637,11 @@ async def test_repository_selector_ignores_other_owner_and_rejects_duplicate_exa
         fingerprint="selector-fingerprint",
         owner_operator_session_id="operator-session-selector",
         owner_principal_id="operator:selector",
+    )
+    assert not await approval_repository.has_approved(
+        session_id="conversation-selector",
+        tool_name="selector-tool",
+        fingerprint="selector-fingerprint",
     )
 
     requests.append(

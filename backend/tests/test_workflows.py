@@ -5417,6 +5417,41 @@ class TestWorkflowApi:
         ):
             assert await _workflow_current_goal_binding_detail(run) == "workflow_candidate_stale"
 
+    def test_workflow_approval_candidate_binding_is_symmetric(self):
+        from src.api.workflows import _workflow_approval_matches_identity
+
+        run = {
+            "run_identity": "run-candidate-symmetric",
+            "workflow_name": "example",
+            "tool_name": "workflow_example",
+            "session_id": "session-candidate-symmetric",
+            "owner_kind": "service",
+            "owner_principal_id": "service:example",
+            "goal_id": "goal-candidate-symmetric",
+            "criterion_id": "criterion-candidate-symmetric",
+            "goal_revision": 2,
+            "plan_revision": 3,
+            "candidate_id": None,
+            "pending_approval_ids": ["approval-candidate-symmetric"],
+        }
+        approval = {
+            "id": "approval-candidate-symmetric",
+            "workflow_run_identity": run["run_identity"],
+            "workflow_name": run["workflow_name"],
+            "session_id": run["session_id"],
+            "owner_kind": run["owner_kind"],
+            "owner_principal_id": run["owner_principal_id"],
+            "goal_id": run["goal_id"],
+            "criterion_id": run["criterion_id"],
+            "goal_revision": run["goal_revision"],
+            "plan_revision": run["plan_revision"],
+            "candidate_id": "candidate-present",
+        }
+
+        assert not _workflow_approval_matches_identity(run, approval)
+        run["candidate_id"] = "candidate-present"
+        assert _workflow_approval_matches_identity(run, approval)
+
     @pytest.mark.asyncio
     async def test_workflow_control_refuses_durable_owner_mismatch_before_lease(self):
         from src.api.workflows import WorkflowRunControlRequest, control_workflow_run

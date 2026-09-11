@@ -116,7 +116,9 @@ export function goalWorkflowBindingState({
   if (goalRevision !== workflowGoalRevision) return "stale";
   if (criterionId !== workflowCriterionId) return "stale";
   if (planRevision !== workflowPlanRevision) return "stale";
-  if (workflowCandidateId != null && (!candidateId || candidateId !== workflowCandidateId)) return "stale";
+  const expectedCandidateId = text(workflowCandidateId);
+  const suppliedCandidateId = text(candidateId);
+  if (expectedCandidateId !== suppliedCandidateId) return "stale";
   return "matched";
 }
 
@@ -272,10 +274,8 @@ function approvalMatchesWorkflow(
   if (!Number.isInteger(approval.goal_revision) || approval.goal_revision !== workflowGoalRevision) return false;
   if (!Number.isInteger(workflow.planRevision) || !Number.isInteger(approval.plan_revision)) return false;
   if (approval.plan_revision !== workflow.planRevision) return false;
-  if (workflow.candidateId !== undefined && workflow.candidateId !== null) {
-    const workflowCandidateId = text(workflow.candidateId);
-    if (!workflowCandidateId || text(approval.candidate_id) !== workflowCandidateId) return false;
-  }
+  const workflowCandidateId = text(workflow.candidateId);
+  if (text(approval.candidate_id) !== workflowCandidateId) return false;
   return true;
 }
 

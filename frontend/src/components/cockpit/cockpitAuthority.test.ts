@@ -222,6 +222,20 @@ describe("cockpit approval authority", () => {
     )?.id).toBe("approval-1");
   });
 
+  it("rejects a candidate-bound approval when the workflow has no candidate", () => {
+    expect(selectApprovalForWorkflow(
+      [{ ...approval, candidate_id: "candidate-current" }],
+      {
+        workflowId: "run-1",
+        goalId: "goal-1",
+        goalRevision: 1,
+        criterionId: "criterion-1",
+        planRevision: 1,
+        sessionId: "conversation-1",
+      },
+    )).toBe(null);
+  });
+
   it("keeps approval target references out of rendered scope labels", () => {
     const labels = displayApprovalScopeTarget({
       target: { type: "workspace", reference: "workspace/private/report.md" },

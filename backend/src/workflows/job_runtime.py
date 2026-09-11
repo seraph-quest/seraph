@@ -1684,6 +1684,12 @@ class DurableJobRepository:
                     )
                 from src.approval.repository import approval_repository
 
+                durable_authority = _json_load(getattr(run, "declared_authority_json", None), {})
+                durable_criterion_id = (
+                    _text(durable_authority.get("criterion_id"))
+                    if isinstance(durable_authority, Mapping)
+                    else ""
+                ) or None
                 approval_request_record = await approval_repository.consume_approved_for_resume(
                     db=db,
                     approval_id=approval_resume_record["approval_id"],
@@ -1700,6 +1706,10 @@ class DurableJobRepository:
                     capability_version=approval_resume_record["capability_version"],
                     budget_digest=approval_resume_record["budget_digest"],
                     expires_at=approval_resume_record["expires_at"],
+                    session_id=run.session_id,
+                    conversation_id=run.session_id,
+                    criterion_id=durable_criterion_id,
+                    candidate_id=getattr(run, "candidate_id", None),
                 )
                 if approval_request_record is None:
                     raise DurableJobTransitionError(

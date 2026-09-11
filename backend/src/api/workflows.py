@@ -362,12 +362,12 @@ def _workflow_identity_binding_detail(
             return "workflow_identity_binding_mismatch"
 
     expected_candidate_id = run.get("candidate_id")
-    if expected_candidate_id is not None:
-        supplied_candidate_id = context.get("candidate_id")
-        if not str(expected_candidate_id).strip() or not str(supplied_candidate_id or "").strip():
-            return "workflow_identity_binding_missing"
-        if str(expected_candidate_id).strip() != str(supplied_candidate_id).strip():
+    expected_candidate = str(expected_candidate_id or "").strip()
+    supplied_candidate = str(context.get("candidate_id") or "").strip()
+    if expected_candidate != supplied_candidate:
+        if expected_candidate and supplied_candidate:
             return "workflow_identity_binding_mismatch"
+        return "workflow_identity_binding_missing"
 
     expected_plan_revision = run.get("plan_revision")
     if require_plan_revision and expected_plan_revision is None:
@@ -2052,10 +2052,8 @@ def _workflow_approval_matches_identity(
 
     for field_name in ("goal_id", "criterion_id", "candidate_id"):
         expected = str(run.get(field_name) or "").strip()
-        if field_name == "candidate_id" and not expected:
-            continue
         actual = str(_workflow_approval_value(approval, field_name) or "").strip()
-        if not expected or actual != expected:
+        if actual != expected:
             return False
     for field_name in ("goal_revision", "plan_revision"):
         expected = _positive_json_integer(run.get(field_name))

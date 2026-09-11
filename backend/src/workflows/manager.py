@@ -145,12 +145,20 @@ def _workflow_durable_owner_fields() -> dict[str, str]:
         return {
             "owner_kind": "user",
             "owner_principal_id": principal_id,
+            "conversation_id": current_session_id,
+            "operator_session_id": str(
+                getattr(principal, "operator_session_id", "") or ""
+            ).strip(),
         }
     if str(principal_type or "").strip().lower() == "service":
         return {
             "owner_kind": "service",
             "owner_principal_id": principal_id,
             "service_id": principal_id,
+            "conversation_id": current_session_id,
+            "operator_session_id": str(
+                getattr(principal, "operator_session_id", "") or ""
+            ).strip(),
         }
     raise DurableWorkflowStateUnavailable(
         "canonical workflow admission principal type is unsupported"
@@ -1508,6 +1516,8 @@ def _admit_canonical_workflow_job(
         "owner_kind": owner_kind,
         "capability": tool_name,
         "session_id": session_id,
+        "conversation_id": owner_fields.get("conversation_id") or session_id,
+        "operator_session_id": owner_fields.get("operator_session_id") or None,
     }
     for field_name in (
         "goal_id",
@@ -1538,6 +1548,8 @@ def _admit_canonical_workflow_job(
         identity=identity,
         inputs=_durable_arguments(audit_arguments, checkpoint_context_allowed=checkpoint_context_allowed),
         session_id=session_id,
+        conversation_id=owner_fields.get("conversation_id") or session_id,
+        operator_session_id=owner_fields.get("operator_session_id") or None,
         parent_job_id=parent_job_id,
         parent_fencing_token=parent_fencing_token,
         run_fingerprint=run_fingerprint,

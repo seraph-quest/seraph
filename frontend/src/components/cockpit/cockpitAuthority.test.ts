@@ -51,10 +51,15 @@ describe("cockpit approval authority", () => {
       "ready",
     )).toBe(false);
     expect(isApprovalAuthorityReady(
-      { ...approval, approval_conversation_id: "other-conversation" },
+      { ...approval, approval_conversation_id: undefined },
       auth,
       "ready",
     )).toBe(false);
+    expect(isApprovalAuthorityReady(
+      { ...approval, approval_conversation_id: "durable-conversation", session_id: "execution-conversation" },
+      auth,
+      "ready",
+    )).toBe(true);
   });
 
   it("treats a missing approval status as non-actionable", () => {

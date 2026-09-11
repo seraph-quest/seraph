@@ -1222,6 +1222,8 @@ def _serialize(run: WorkflowRunState, *, receipt: dict[str, Any] | None = None) 
         "workflow_name": run.workflow_name,
         "tool_name": run.tool_name,
         "session_id": run.session_id,
+        "conversation_id": getattr(run, "conversation_id", None) or run.session_id,
+        "operator_session_id": getattr(run, "operator_session_id", None),
         "run_fingerprint": getattr(run, "run_fingerprint", None),
         "goal_id": getattr(run, "goal_id", None),
         "goal_revision": getattr(run, "goal_revision", None),
@@ -1325,6 +1327,8 @@ class DurableJobSpec:
     identity: DurableJobIdentity
     inputs: Any = field(default_factory=dict)
     session_id: str | None = None
+    conversation_id: str | None = None
+    operator_session_id: str | None = None
     parent_job_id: str | None = None
     parent_fencing_token: int | None = None
     goal_id: str | None = None
@@ -1470,6 +1474,8 @@ class DurableJobRepository:
                 workflow_name=identity.job_kind,
                 tool_name=identity.job_kind,
                 session_id=spec.session_id,
+                conversation_id=spec.conversation_id or spec.session_id,
+                operator_session_id=spec.operator_session_id,
                 status=status,
                 run_fingerprint=run_fingerprint,
                 arguments_json=_canonical(safe_inputs),
@@ -1707,7 +1713,7 @@ class DurableJobRepository:
                     budget_digest=approval_resume_record["budget_digest"],
                     expires_at=approval_resume_record["expires_at"],
                     session_id=run.session_id,
-                    conversation_id=run.session_id,
+                    conversation_id=getattr(run, "conversation_id", None) or run.session_id,
                     criterion_id=durable_criterion_id,
                     candidate_id=getattr(run, "candidate_id", None),
                 )

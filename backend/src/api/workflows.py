@@ -329,6 +329,61 @@ def _workflow_owner_is_bound(run: dict[str, Any], principal_id: str) -> bool:
     )
 
 
+def _workflow_conversation_id(run: dict[str, Any]) -> str:
+    """Return the durable conversation scope for a workflow run."""
+    return str(
+        _workflow_run_identity_value(
+            run,
+            "conversation_id",
+            "approval_conversation_id",
+            "session_id",
+            "thread_id",
+        )
+        or ""
+    ).strip()
+
+
+def _workflow_operator_session_id(run: dict[str, Any]) -> str:
+    """Return the durable browser authentication owner for a run."""
+    return str(
+        _workflow_run_identity_value(
+            run,
+            "operator_session_id",
+            "approval_owner_operator_session_id",
+            "approval_owner_auth_session_id",
+        )
+        or ""
+    ).strip()
+
+
+def _workflow_recovery_identity_detail(
+    *,
+    run: dict[str, Any],
+    run_identity: str,
+    operator_session_id: str,
+) -> str | None:
+    """Require both conversation and auth-session bindings to be exact.
+
+    ``run_identity`` encodes the execution conversation.  The authenticated
+    browser session is persisted separately on the run and must match the
+    current operator session; equating the two would reject valid recovery
+    after a browser refresh or session rotation.
+    """
+    try:
+        identity_conversation, _tool_name, _fingerprint, _discriminator = parse_workflow_run_identity(
+            run_identity
+        )
+    except (TypeError, ValueError):
+        return "workflow_identity_binding_missing"
+    conversation_id = _workflow_conversation_id(run)
+    if not conversation_id or not identity_conversation or conversation_id != identity_conversation:
+        return "workflow_identity_binding_mismatch"
+    bound_operator_session = _workflow_operator_session_id(run)
+    if not bound_operator_session or not operator_session_id or bound_operator_session != operator_session_id:
+        return "workflow_owner_mismatch"
+    return None
+
+
 def _workflow_identity_binding_detail(
     *,
     run: dict[str, Any],
@@ -877,11 +932,71 @@ def _canonical_workflow_projection_input(value: Any) -> dict[str, Any] | None:
     authority = raw.get("declared_authority")
     if not isinstance(authority, dict):
         authority = raw.get("approval_context") if isinstance(raw.get("approval_context"), dict) else {}
+    conversation_id = (
+        raw.get("conversation_id")
+        if raw.get("conversation_id") is not None
+        else authority.get("conversation_id")
+        or authority.get("approval_conversation_id")
+        or raw.get("session_id")
+    )
+    operator_session_id = (
+        raw.get("operator_session_id")
+        if raw.get("operator_session_id") is not None
+        else authority.get("operator_session_id")
+        or authority.get("approval_owner_operator_session_id")
+        or authority.get("approval_owner_auth_session_id")
+    )
     typed_receipts = {
         "checkpoints": _safe_canonical_receipt_projection(checkpoints, kind="checkpoint"),
         "artifacts": _safe_canonical_receipt_projection(artifacts, kind="artifact"),
         "effects": _safe_canonical_receipt_projection(effects, kind="effect"),
     }
+    raw_pending_approvals = raw.get("pending_approvals")
+    pending_approvals = (
+        [
+            {
+                key: item.get(key)
+                for key in (
+                    "id",
+                    "workflow_run_identity",
+                    "run_identity",
+                    "job_id",
+                    "tool_name",
+                    "workflow_name",
+                    "session_id",
+                    "conversation_id",
+                    "approval_conversation_id",
+                    "operator_session_id",
+                    "approval_owner_operator_session_id",
+                    "owner_kind",
+                    "approval_owner_kind",
+                    "owner_principal_id",
+                    "approval_owner_principal_id",
+                    "goal_id",
+                    "criterion_id",
+                    "goal_revision",
+                    "plan_revision",
+                    "candidate_id",
+                    "status",
+                    "risk_level",
+                    "summary",
+                    "action",
+                    "expires_at",
+                    "approval_expires_at",
+                )
+                if item.get(key) is not None
+            }
+            for item in raw_pending_approvals
+            if isinstance(item, dict)
+        ]
+        if isinstance(raw_pending_approvals, list)
+        else []
+    )
+    pending_ids = [
+        str(item.get("id") or item.get("approval_id") or "").strip()
+        for item in pending_approvals
+        if str(item.get("id") or item.get("approval_id") or "").strip()
+    ]
     raw_arguments = raw.get("arguments") if isinstance(raw.get("arguments"), dict) else {}
     return {
         **raw,
@@ -894,6 +1009,8 @@ def _canonical_workflow_projection_input(value: Any) -> dict[str, Any] | None:
         "owner_kind": owner.get("kind"),
         "owner_principal_id": owner.get("principal_id"),
         "service_id": owner.get("service_id"),
+        "conversation_id": conversation_id,
+        "operator_session_id": operator_session_id,
         "goal_id": raw.get("goal_id") if raw.get("goal_id") is not None else authority.get("goal_id"),
         "criterion_id": raw.get("criterion_id") if raw.get("criterion_id") is not None else authority.get("criterion_id"),
         "goal_revision": raw.get("goal_revision") if raw.get("goal_revision") is not None else authority.get("goal_revision"),
@@ -917,9 +1034,9 @@ def _canonical_workflow_projection_input(value: Any) -> dict[str, Any] | None:
         "continued_error_steps": continued_error_steps,
         "arguments": raw_arguments,
         "approval_context": authority,
-        "pending_approvals": [],
-        "pending_approval_count": 1 if status == "awaiting_approval" else 0,
-        "pending_approval_ids": [],
+        "pending_approvals": pending_approvals,
+        "pending_approval_count": len(pending_approvals) if pending_approvals else (1 if status == "awaiting_approval" else 0),
+        "pending_approval_ids": pending_ids,
         "availability": "durable",
         "state_source": "durable_workflow_state",
         "typed_receipts": typed_receipts,
@@ -939,6 +1056,8 @@ def _canonical_workflow_projection_input(value: Any) -> dict[str, Any] | None:
                 "lease": lease,
                 "parent_job_id": raw.get("parent_job_id"),
                 "parent_fencing_token": raw.get("parent_fencing_token"),
+                "conversation_id": conversation_id,
+                "operator_session_id": operator_session_id,
             }
         },
     }
@@ -2599,8 +2718,13 @@ async def _load_typed_workflow_run_for_control(
         return None
     if not _workflow_owner_is_bound(run, principal_id):
         raise HTTPException(status_code=403, detail="workflow_owner_mismatch")
-    if str(run.get("session_id") or "") != str(session_id or ""):
-        raise HTTPException(status_code=403, detail="workflow_owner_mismatch")
+    identity_detail = _workflow_recovery_identity_detail(
+        run=run,
+        run_identity=run_identity,
+        operator_session_id=session_id,
+    )
+    if identity_detail is not None:
+        raise HTTPException(status_code=403, detail=identity_detail)
     return run
 
 
@@ -3778,6 +3902,19 @@ async def _list_workflow_runs(
         is_typed = _is_typed_workflow_run(durable_run)
         if is_typed:
             durable_run = _canonical_workflow_projection_input(durable_run) or durable_run
+            # Typed rows do not own approval rows, but their operator-facing
+            # projection must carry the exact pending approval receipts that
+            # can authorize recovery. Join by the durable session/tool/
+            # fingerprint key; identity matching below remains authoritative.
+            typed_approval_key = _workflow_run_approval_key(durable_run)
+            typed_approvals = pending_by_signature.get(typed_approval_key, [])
+            durable_run["pending_approvals"] = typed_approvals
+            durable_run["pending_approval_ids"] = [
+                str(approval.get("id") or "").strip()
+                for approval in typed_approvals
+                if str(approval.get("id") or "").strip()
+            ]
+            durable_run["pending_approval_count"] = len(typed_approvals)
         run_identity = str(durable_run.get("run_identity") or durable_run.get("id"))
         if not run_identity:
             continue
@@ -4126,8 +4263,13 @@ async def build_workflow_resume_plan(
             )
             await _workflow_session_fence(request, revocation_scope)
             raise HTTPException(status_code=403, detail=detail)
-        if str(run.get("session_id") or "") != str(active_session_id or ""):
-            detail = "workflow_owner_mismatch"
+        identity_detail = _workflow_recovery_identity_detail(
+            run=run,
+            run_identity=run_identity,
+            operator_session_id=active_session_id,
+        )
+        if identity_detail is not None:
+            detail = identity_detail
             await _record_workflow_route_receipt(
                 event_type="workflow_resume_plan_refused",
                 session_id=active_session_id,
@@ -4486,9 +4628,14 @@ async def control_workflow_run(
             raise HTTPException(status_code=403, detail="workflow_owner_mismatch")
 
         if action in _WORKFLOW_IDENTITY_BOUND_ACTIONS:
-            if str(run.get("session_id") or "") != str(active_session_id or ""):
-                await log_refusal(status_code=403, detail="workflow_owner_mismatch")
-                raise HTTPException(status_code=403, detail="workflow_owner_mismatch")
+            identity_detail = _workflow_recovery_identity_detail(
+                run=run,
+                run_identity=run_identity,
+                operator_session_id=active_session_id,
+            )
+            if identity_detail is not None:
+                await log_refusal(status_code=403, detail=identity_detail)
+                raise HTTPException(status_code=403, detail=identity_detail)
             identity_detail = _workflow_identity_binding_detail(
                 run=run,
                 run_identity=run_identity,

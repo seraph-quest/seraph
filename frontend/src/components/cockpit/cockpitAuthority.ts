@@ -203,7 +203,7 @@ export function isApprovalAuthorityReady(
 
   const conversation = text(approval.approval_conversation_id ?? approval.conversation_id);
   const executionSession = text(approval.session_id) || text(approval.thread_id);
-  if (!conversation || !executionSession || conversation !== executionSession) return false;
+  if (!conversation || !executionSession) return false;
 
   if (!approvalScope(approval) || Object.keys(approvalScope(approval) ?? {}).length === 0) return false;
   const suppliedExpiry = approvalExpiry(approval);

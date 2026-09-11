@@ -218,6 +218,11 @@ class WorkflowRunState(SQLModel, table=True):
     workflow_name: str = Field(index=True)
     tool_name: str = Field(default="", index=True)
     session_id: Optional[str] = Field(default=None, foreign_key="sessions.id", index=True)
+    # ``session_id`` is the execution/conversation scope.  The browser
+    # authentication session is a separate durable binding so recovery can be
+    # resumed from a different operator session without confusing the two.
+    conversation_id: Optional[str] = Field(default=None, index=True)
+    operator_session_id: Optional[str] = Field(default=None, index=True)
     status: str = Field(default="running", index=True)
     branch_kind: Optional[str] = Field(default=None, index=True)
     branch_depth: int = Field(default=0)

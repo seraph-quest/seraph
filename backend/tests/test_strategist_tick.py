@@ -1,7 +1,7 @@
 """Tests for strategist tick runtime audit coverage."""
 
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -11,7 +11,8 @@ from src.audit.repository import audit_repository
 from src.guardian.state import GuardianState, GuardianStateConfidence
 from src.guardian.goal_snapshot_to_file import GoalSnapshotToFileResult
 from src.guardian.web_brief_to_file import WebBriefToFileResult
-from src.goals.contracts import CriterionVerifierKind, GoalSuccessCriterion
+from src.goals.contracts import CriterionVerifierKind, GoalAdmissionBudget, GoalSuccessCriterion
+from src.db.models import Goal
 from src.guardian.world_model import GuardianWorldModel
 from src.observer.context import CurrentContext
 from src.observer.user_state import DeliveryDecision
@@ -19,6 +20,9 @@ from src.scheduler.jobs.strategist_tick import (
     _occurrence_identity,
     _run_opted_in_goal_web_brief,
     _run_opted_in_goal_snapshot,
+    _goal_budget_admission,
+    _adapter_result_matches_goal,
+    _goal_work_must_not_continue,
     run_strategist_tick,
 )
 from src.workflows.job_runtime import durable_job_repository
@@ -31,6 +35,108 @@ class _RecordingDurableJobs:
     async def record_effect(self, job_id, **kwargs):
         self.effects.append((job_id, kwargs))
         return {"status": kwargs["status"]}
+
+
+def test_adapter_result_identity_requires_exact_goal_and_revision():
+    goal = SimpleNamespace(id="goal-identity", revision=7)
+
+    assert _adapter_result_matches_goal(
+        SimpleNamespace(goal_id="goal-identity", goal_revision=7),
+        goal,
+        7,
+    ) is True
+    assert _adapter_result_matches_goal(
+        SimpleNamespace(goal_id="other-goal", goal_revision=7),
+        goal,
+        7,
+    ) is False
+    assert _adapter_result_matches_goal(
+        SimpleNamespace(goal_id="goal-identity", goal_revision=6),
+        goal,
+        7,
+    ) is False
+    assert _adapter_result_matches_goal(SimpleNamespace(), goal, 7) is False
+
+
+@pytest.mark.asyncio
+async def test_goal_budget_missing_expired_and_valid_admission_are_visible():
+    missing = Goal(
+        id="budget-missing",
+        title="Missing budget",
+        proactive_enabled=True,
+        owner_principal_id="operator:a",
+        owner_session_id="operator-session:a",
+    )
+    missing_receipt = await _goal_budget_admission(
+        missing,
+        capability_id="workflow.goal-snapshot-to-file",
+    )
+    assert missing_receipt["status"] == "deferred"
+    assert missing_receipt["reason"] == "goal_budget_missing_reviewed_grant"
+    assert missing_receipt["proposal_only"] is True
+
+    now = datetime.now(timezone.utc)
+    expired = Goal(
+        id="budget-expired",
+        title="Expired budget",
+        proactive_enabled=True,
+        owner_principal_id="operator:a",
+        owner_session_id="operator-session:a",
+        admission_budget_json=GoalAdmissionBudget(
+            reviewed_grant=True,
+            grant_id="expired-grant",
+            period_started_at=now - timedelta(hours=2),
+            period_expires_at=now - timedelta(hours=1),
+        ).model_dump_json(),
+    )
+    expired_receipt = await _goal_budget_admission(
+        expired,
+        capability_id="workflow.goal-snapshot-to-file",
+    )
+    assert expired_receipt["status"] == "deferred"
+    assert expired_receipt["reason"] == "goal_budget_period_expired"
+
+    valid = Goal(
+        id="budget-valid",
+        title="Valid budget",
+        proactive_enabled=True,
+        owner_principal_id="operator:a",
+        owner_session_id="operator-session:a",
+        admission_budget_json=GoalAdmissionBudget(
+            reviewed_grant=True,
+            grant_id="valid-grant",
+            period_started_at=now - timedelta(minutes=1),
+            period_expires_at=now + timedelta(hours=1),
+            max_attempts=2,
+            max_runtime_seconds=45,
+            notifications_per_day=1,
+        ).model_dump_json(),
+    )
+    with patch.object(
+        durable_job_repository,
+        "list_jobs",
+        new=AsyncMock(return_value=[]),
+    ):
+        valid_receipt = await _goal_budget_admission(
+            valid,
+            capability_id="workflow.goal-snapshot-to-file",
+        )
+    assert valid_receipt["status"] == "admitted"
+    assert valid_receipt["budget"].max_attempts == 2
+
+
+@pytest.mark.asyncio
+async def test_goal_budget_without_owner_is_blocked_before_delivery_fallback():
+    receipt = await _goal_budget_admission(
+        Goal(id="unbound-goal", title="Unbound goal", proactive_enabled=True),
+        capability_id="workflow.goal-snapshot-to-file",
+    )
+
+    assert receipt["status"] == "blocked"
+    assert receipt["reason"] == "goal_owner_binding_missing"
+    assert receipt["notification_owner_principal_id"] is None
+    assert receipt["notification_operator_session_id"] is None
+    assert _goal_work_must_not_continue(receipt) is True
 
 
 def _make_context(**overrides) -> CurrentContext:
@@ -148,6 +254,53 @@ async def test_proactive_goal_snapshot_runs_one_enabled_goal_through_existing_se
 
 
 @pytest.mark.asyncio
+async def test_snapshot_unverified_execution_is_failed_and_delivery_fenced():
+    criterion = GoalSuccessCriterion(
+        description="Create a verified snapshot",
+        verifier_kind=CriterionVerifierKind.artifact_readback,
+        evidence_refs=["goal:operator-consent"],
+    )
+    goal = SimpleNamespace(
+        id="goal-unverified-snapshot",
+        revision=3,
+        proactive_enabled=True,
+        success_criterion_json=criterion.model_dump_json(),
+        due_date=datetime.now(timezone.utc),
+        sort_order=0,
+    )
+    jobs = _RecordingDurableJobs()
+    service = MagicMock()
+    service.run = AsyncMock(
+        return_value=GoalSnapshotToFileResult(
+            goal_id=goal.id,
+            goal_revision=goal.revision,
+            file_path="goal-snapshots/goal-unverified-snapshot.md",
+            execution_status="succeeded",
+            verification="failed",
+            learning="no_learning",
+            job_id="child-unverified-snapshot",
+            artifact_ref="artifact-unverified-snapshot",
+            reason="artifact_readback_failed",
+        )
+    )
+    with (
+        patch("src.scheduler.jobs.strategist_tick.goal_repository.list_goals", new=AsyncMock(return_value=[goal])),
+        patch("src.scheduler.jobs.strategist_tick.durable_job_repository", jobs),
+        patch("src.scheduler.jobs.strategist_tick.GoalSnapshotToFileService", return_value=service),
+    ):
+        receipt = await _run_opted_in_goal_snapshot(
+            parent_job_id="parent-unverified-snapshot",
+            parent_fencing_token=2,
+        )
+
+    assert receipt["execution_status"] == "succeeded"
+    assert receipt["verification"] == "failed"
+    assert receipt["status"] == "failed"
+    assert _goal_work_must_not_continue(receipt) is True
+    assert jobs.effects[0][1]["status"] == "failed"
+
+
+@pytest.mark.asyncio
 async def test_proactive_web_brief_requires_explicit_target_and_reuses_existing_service():
     criterion = GoalSuccessCriterion(
         description="Create a source-backed brief",
@@ -202,6 +355,57 @@ async def test_proactive_web_brief_requires_explicit_target_and_reuses_existing_
     assert request.parent_job_id == "parent-brief-1"
     assert request.parent_fencing_token == 5
     assert request.session_id == "web-brief:scheduler:goal-1:4"
+
+
+@pytest.mark.asyncio
+async def test_web_brief_unverified_execution_is_failed_and_delivery_fenced():
+    criterion = GoalSuccessCriterion(
+        description="Create a source-backed brief",
+        verifier_kind=CriterionVerifierKind.artifact_readback,
+        evidence_refs=["operator:source-consent"],
+        target={"query": "Seraph project", "file_path": "briefs/goal-unverified-brief.md"},
+    )
+    goal = SimpleNamespace(
+        id="goal-unverified-brief",
+        revision=4,
+        proactive_enabled=True,
+        success_criterion_json=criterion.model_dump_json(),
+        due_date=datetime.now(timezone.utc),
+        sort_order=0,
+    )
+    jobs = _RecordingDurableJobs()
+    service = MagicMock()
+    service.run = AsyncMock(
+        return_value=WebBriefToFileResult(
+            goal_id=goal.id,
+            goal_revision=goal.revision,
+            query="Seraph project",
+            file_path="briefs/goal-unverified-brief.md",
+            execution_status="succeeded",
+            verification="failed",
+            learning="no_learning",
+            source_read=True,
+            query_read_back=True,
+            job_id="child-unverified-brief",
+            artifact_ref="artifact-unverified-brief",
+            reason="source_readback_failed",
+        )
+    )
+    with (
+        patch("src.scheduler.jobs.strategist_tick.goal_repository.list_goals", new=AsyncMock(return_value=[goal])),
+        patch("src.scheduler.jobs.strategist_tick.durable_job_repository", jobs),
+        patch("src.scheduler.jobs.strategist_tick.WebBriefToFileService", return_value=service),
+    ):
+        receipt = await _run_opted_in_goal_web_brief(
+            parent_job_id="parent-unverified-brief",
+            parent_fencing_token=5,
+        )
+
+    assert receipt["execution_status"] == "succeeded"
+    assert receipt["verification"] == "failed"
+    assert receipt["status"] == "failed"
+    assert _goal_work_must_not_continue(receipt) is True
+    assert jobs.effects[0][1]["status"] == "failed"
 
 
 @pytest.mark.asyncio
@@ -412,3 +616,83 @@ async def test_strategist_tick_timeout_is_terminally_recorded(async_db):
     assert durable_job is not None
     assert durable_job["status"] == "failed"
     assert durable_job["failure_reason"] == "strategist_timeout"
+
+
+@pytest.mark.asyncio
+async def test_goal_candidate_failure_blocks_before_unbound_delivery(async_db):
+    criterion = GoalSuccessCriterion(
+        description="Create a verified snapshot",
+        verifier_kind=CriterionVerifierKind.artifact_readback,
+        evidence_refs=["goal:operator-consent"],
+    )
+    goal = Goal(
+        id="goal-candidate-failure",
+        title="Candidate failure goal",
+        proactive_enabled=True,
+        success_criterion_json=criterion.model_dump_json(),
+        owner_principal_id="operator:goal-owner",
+        owner_session_id="session:goal-owner",
+    )
+    budget = GoalAdmissionBudget(
+        reviewed_grant=True,
+        grant_id="goal-grant",
+        period_started_at=datetime.now(timezone.utc) - timedelta(minutes=1),
+        period_expires_at=datetime.now(timezone.utc) + timedelta(hours=1),
+    )
+    decision_completion = AsyncMock(
+        return_value=(
+            '{"should_intervene": true, "content": "Should not deliver", '
+            '"intervention_type": "advisory", "urgency": 3, "reasoning": "candidate failed"}'
+        )
+    )
+    deliver = AsyncMock()
+
+    with (
+        patch(
+            "src.scheduler.jobs.strategist_tick.goal_repository.list_goals",
+            new=AsyncMock(return_value=[goal]),
+        ),
+        patch(
+            "src.scheduler.jobs.strategist_tick._goal_budget_admission",
+            new=AsyncMock(
+                return_value={
+                    "status": "admitted",
+                    "goal_id": goal.id,
+                    "budget": budget,
+                    "notification_owner_principal_id": goal.owner_principal_id,
+                    "notification_operator_session_id": goal.owner_session_id,
+                }
+            ),
+        ),
+        patch(
+            "src.scheduler.jobs.strategist_tick._persist_scheduled_candidate",
+            new=AsyncMock(side_effect=RuntimeError("candidate persistence unavailable")),
+        ),
+        patch(
+            "src.scheduler.jobs.strategist_tick.run_strategist_decision_completion",
+            decision_completion,
+        ),
+        patch("src.observer.delivery.deliver_or_queue", deliver),
+    ):
+        await run_strategist_tick()
+
+    decision_completion.assert_not_awaited()
+    deliver.assert_not_awaited()
+    durable_job = await durable_job_repository.get_job(_occurrence_identity())
+    assert durable_job is not None
+    assert durable_job["status"] == "blocked"
+    failure_effect = next(
+        effect
+        for effect in durable_job["effects"]
+        if effect["effect_type"] == "goal_snapshot_admission"
+    )
+    assert failure_effect["status"] == "failed"
+    assert failure_effect["details"]["goal_id"] == goal.id
+    fence_effect = next(
+        effect
+        for effect in durable_job["effects"]
+        if effect["effect_type"] == "goal_work_delivery_fence"
+    )
+    assert fence_effect["details"]["owner_principal_id"] == goal.owner_principal_id
+    assert fence_effect["details"]["operator_session_id"] == goal.owner_session_id
+    assert not any(effect["effect_type"] == "proactive_delivery" for effect in durable_job["effects"])

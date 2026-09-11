@@ -352,6 +352,16 @@ class ApprovalTool(Tool):
             )
 
         approval_context = _tool_approval_context(self.wrapped_tool, arguments)
+        # A workflow approval must be tied to the durable run that will
+        # consume it.  The runtime principal carries that identity while a
+        # workflow step is executing; persist it in the same binding that is
+        # fingerprinted and returned by the approval repository.
+        workflow_run_identity = str(
+            getattr(principal, "job_id", "") or ""
+        ).strip()
+        if workflow_run_identity:
+            approval_context = dict(approval_context or {})
+            approval_context.setdefault("workflow_run_identity", workflow_run_identity)
         fingerprint = fingerprint_tool_call(
             self.name,
             arguments,
@@ -366,6 +376,12 @@ class ApprovalTool(Tool):
                     session_id=session_id,
                     principal=principal,
                 ),
+                owner_principal_id=(
+                    str(principal.principal_id).strip()
+                    if principal is not None and principal.principal_id
+                    else None
+                ),
+                approval_binding=approval_context,
             )
         )
         if consumed_approval:
@@ -398,6 +414,18 @@ class ApprovalTool(Tool):
         # Pending approvals are durable capabilities, so they need a bounded
         # decision window even when the wrapped tool did not provide one.
         approval_expires_at = time.time() + 5 * 60.0
+        approval_owner_details = build_approval_owner_details(
+            session_id=session_id,
+            principal=principal,
+        )
+        principal_type = getattr(getattr(principal, "principal_type", None), "value", getattr(principal, "principal_type", ""))
+        owner_kind = "user" if str(principal_type or "").strip().lower() == "operator" else (
+            "service" if str(principal_type or "").strip().lower() == "service" else ""
+        )
+        if owner_kind:
+            approval_owner_details["owner_kind"] = owner_kind
+        if workflow_run_identity:
+            approval_owner_details["workflow_run_identity"] = workflow_run_identity
         request = _run_async(
             approval_repository.get_or_create_pending(
                 session_id=session_id,
@@ -407,7 +435,7 @@ class ApprovalTool(Tool):
                 fingerprint=fingerprint,
                 details={
                     "arguments": redact_for_audit(arguments),
-                    **build_approval_owner_details(session_id=session_id, principal=principal),
+                    **approval_owner_details,
                     **({"approval_context": approval_context} if approval_context else {}),
                     "approval_expires_at": approval_expires_at,
                     "expires_at": approval_expires_at,

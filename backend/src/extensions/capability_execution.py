@@ -1063,10 +1063,15 @@ class CapabilityExecutionHost:
                     else None
                 ),
             )
+            binding_execution_session = str(
+                binding.get("execution_session_id")
+                or binding.get("session_id")
+                or ""
+            )
             if (
                 str(binding.get("approval_id") or "") != request.approval_id
                 or str(binding.get("status") or "") != "consumed"
-                or str(binding.get("session_id") or "") != request.session_id
+                or binding_execution_session != request.session_id
                 or str(binding.get("tool_name") or "") != request.capability_id
                 or str(binding.get("fingerprint") or "") != expected_approval_digest
                 or request.approval_digest != expected_approval_digest
@@ -1074,14 +1079,29 @@ class CapabilityExecutionHost:
                 raise CapabilityExecutionError("approval_binding_mismatch")
             owner_session = str(binding.get("owner_operator_session_id") or "")
             principal_operator_session = str(getattr(principal, "operator_session_id", "") or "")
+            principal_type = getattr(principal, "principal_type", "")
+            principal_type = str(getattr(principal_type, "value", principal_type))
+            if principal_type == "service":
+                # Native SWE effects execute as the service principal, but
+                # approval authority belongs to a separate interactive
+                # operator. The service identity must be bound to the job
+                # owner in the signed row and can never satisfy the approval
+                # identity itself.
+                if str(binding.get("execution_owner_principal_id") or "") != str(
+                    principal.principal_id
+                ):
+                    raise CapabilityExecutionError("approval_execution_owner_mismatch")
+                approval_operator = str(binding.get("approval_operator_principal_id") or "")
+                if not approval_operator.startswith("operator:") or approval_operator == str(
+                    principal.principal_id
+                ):
+                    raise CapabilityExecutionError("approval_operator_mismatch")
             if not principal_operator_session:
-                principal_type = getattr(principal, "principal_type", "")
-                principal_type = str(getattr(principal_type, "value", principal_type))
                 if principal_type == "operator" and principal.session_id == request.session_id:
                     # Compatibility for pre-auth-session rows whose operator
                     # principal was explicitly bound to the same session.
                     principal_operator_session = request.session_id
-            if owner_session and owner_session != principal_operator_session:
+            if principal_type != "service" and owner_session and owner_session != principal_operator_session:
                 raise CapabilityExecutionError("approval_owner_mismatch")
             approval_expires_at = binding.get("approval_expires_at")
             if approval_expires_at is not None:

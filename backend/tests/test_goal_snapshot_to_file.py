@@ -164,12 +164,20 @@ class _GovernedWorkflow:
         return "snapshot executed", {"durable_run_identity": "workflow-run-test"}
 
 
-def _goal(*, revision: int = 1, status: str = "active") -> Goal:
+def _goal(
+    *,
+    revision: int = 1,
+    status: str = "active",
+    owner_principal_id: str | None = None,
+    owner_session_id: str | None = None,
+) -> Goal:
     return Goal(
         id="goal-1",
         title="Keep the operator plan current",
         status=status,
         revision=revision,
+        owner_principal_id=owner_principal_id,
+        owner_session_id=owner_session_id,
         success_criterion_json=serialize_success_criterion(
             GoalSuccessCriterion(
                 criterion_id="snapshot-present",
@@ -244,6 +252,43 @@ def test_request_contract_binds_capability_owner_and_bounded_path():
         normalize_workspace_relative_path("/tmp/outside.md")
     with pytest.raises(ValueError):
         _request(owner_principal_id="operator:user")
+    with pytest.raises(ValueError, match="goal owner delegation requires both principal and session"):
+        _request(goal_owner_principal_id="operator:goal-owner")
+
+
+async def test_service_authority_carries_canonical_goal_owner_delegation(monkeypatch, tmp_path):
+    monkeypatch.setattr(settings, "workspace_dir", str(tmp_path))
+    goal = _goal(
+        owner_principal_id="operator:goal-owner",
+        owner_session_id="operator-session:goal-owner",
+    )
+    request = _request(
+        goal_owner_principal_id=goal.owner_principal_id,
+        goal_owner_session_id=goal.owner_session_id,
+    )
+    jobs = _Jobs()
+    candidate = build_goal_candidate_decision(
+        goal,
+        GoalCandidateRequest(
+            capability_id=CAPABILITY_ID,
+            capability_version=request.capability_version,
+            inputs={"file_path": request.file_path},
+            evidence_refs=request.evidence_refs,
+            expires_at=request.deadline_at,
+        ),
+    )
+    result = await GoalSnapshotToFileAdapter(
+        request,
+        goals=_Goals(goal),
+        jobs=jobs,
+        workflow_tool_provider=lambda _name: _GovernedWorkflow(tmp_path),
+        authority_principal=_authority_principal(),
+    ).execute(goal=goal, candidate=candidate)
+
+    assert result.execution_status == "succeeded"
+    authority = jobs.specs[next(iter(jobs.specs))].declared_authority
+    assert authority["goal_owner_principal_id"] == "operator:goal-owner"
+    assert authority["goal_owner_session_id"] == "operator-session:goal-owner"
 
 
 def test_candidate_identity_includes_inputs():

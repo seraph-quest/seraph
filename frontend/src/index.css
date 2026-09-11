@@ -2050,6 +2050,190 @@ body {
   padding: 0 var(--cockpit-pane-gutter) 10px;
 }
 
+.cockpit-outcome {
+  border: 1px solid var(--cockpit-border);
+  background: var(--cockpit-panel-bg);
+  padding: 10px var(--cockpit-pane-gutter) 12px;
+}
+
+.cockpit-outcome-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.cockpit-outcome-title {
+  color: var(--cockpit-text);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.11em;
+  text-transform: uppercase;
+}
+
+.cockpit-outcome-subtitle,
+.cockpit-outcome-status,
+.cockpit-outcome-note,
+.cockpit-outcome-meta {
+  color: var(--cockpit-muted);
+  font-size: 10px;
+  line-height: 1.45;
+}
+
+.cockpit-outcome-subtitle {
+  margin-top: 3px;
+}
+
+.cockpit-outcome-status {
+  margin: 8px 0 10px;
+}
+
+.cockpit-outcome-keyhint {
+  color: var(--cockpit-muted);
+  font-size: 9px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.cockpit-outcome-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.cockpit-outcome-card {
+  min-width: 0;
+  border: 1px solid var(--cockpit-border);
+  background: var(--cockpit-soft-button-bg);
+  padding: 8px;
+}
+
+.cockpit-outcome-card[data-state="stale"],
+.cockpit-outcome-card[data-state="degraded"],
+.cockpit-outcome-card[data-state="blocked"],
+.cockpit-outcome-card[data-state="failed"],
+.cockpit-outcome-card[data-state="unauthorized"],
+.cockpit-outcome-card[data-state="partial_metadata"] {
+  border-color: var(--cockpit-warning);
+}
+
+.cockpit-outcome-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 7px;
+}
+
+.cockpit-outcome-card-label,
+.cockpit-outcome-value-label {
+  color: var(--cockpit-muted);
+  font-size: 9px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.cockpit-outcome-state {
+  border: 1px solid var(--cockpit-border);
+  color: var(--cockpit-muted);
+  font-size: 8px;
+  letter-spacing: 0.08em;
+  padding: 2px 4px;
+  white-space: nowrap;
+}
+
+.cockpit-outcome-state[data-state="active"],
+.cockpit-outcome-state[data-state="recovered"] {
+  color: var(--cockpit-accent-strong);
+  border-color: var(--cockpit-accent-strong);
+}
+
+.cockpit-outcome-state[data-state="awaiting_approval"],
+.cockpit-outcome-state[data-state="stale"],
+.cockpit-outcome-state[data-state="degraded"],
+.cockpit-outcome-state[data-state="blocked"],
+.cockpit-outcome-state[data-state="failed"],
+.cockpit-outcome-state[data-state="unauthorized"],
+.cockpit-outcome-state[data-state="partial_metadata"] {
+  color: var(--cockpit-warning);
+  border-color: var(--cockpit-warning);
+}
+
+.cockpit-outcome-primary {
+  color: var(--cockpit-text);
+  font-size: 11px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.cockpit-outcome-copy,
+.cockpit-outcome-empty {
+  color: var(--cockpit-text);
+  font-size: 10px;
+  line-height: 1.5;
+  margin: 6px 0;
+  overflow-wrap: anywhere;
+}
+
+.cockpit-outcome-empty {
+  color: var(--cockpit-muted);
+}
+
+.cockpit-outcome-value-row {
+  display: grid;
+  grid-template-columns: minmax(58px, auto) minmax(0, 1fr);
+  gap: 8px;
+  margin-top: 5px;
+}
+
+.cockpit-outcome-value-label {
+  padding-top: 1px;
+}
+
+.cockpit-outcome-value {
+  color: var(--cockpit-text);
+  font-size: 10px;
+  overflow-wrap: anywhere;
+}
+
+.cockpit-outcome-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-top: 8px;
+}
+
+.cockpit-outcome-action {
+  border: 1px solid var(--cockpit-border);
+  border-radius: 0;
+  background: var(--cockpit-soft-button-bg);
+  color: var(--cockpit-soft-button-text);
+  cursor: pointer;
+  font: inherit;
+  font-size: 9px;
+  letter-spacing: 0.06em;
+  padding: 5px 7px;
+  text-transform: uppercase;
+}
+
+.cockpit-outcome-action:hover,
+.cockpit-outcome-action:focus-visible {
+  border-color: var(--cockpit-state-selected-border);
+  background: var(--cockpit-soft-button-hover-bg);
+  color: var(--cockpit-text);
+}
+
+.cockpit-outcome-action:disabled {
+  cursor: not-allowed;
+  opacity: 0.4;
+}
+
+@media (max-width: 760px) {
+  .cockpit-outcome-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
 .cockpit-presence-panel {
   display: flex;
   min-height: 0;

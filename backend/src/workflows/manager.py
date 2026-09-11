@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
+from dataclasses import replace
 from datetime import datetime, timezone
 import hashlib
 import json
@@ -18,7 +19,12 @@ from smolagents import Tool
 from sqlmodel import col, select
 
 from src.audit.formatting import format_tool_call_summary, redact_for_audit
-from src.approval.runtime import get_current_session_id, get_current_trust_principal
+from src.approval.runtime import (
+    get_current_session_id,
+    get_current_trust_principal,
+    reset_runtime_trust_principal,
+    set_runtime_trust_principal,
+)
 from src.db.engine import get_session
 from src.db.models import AuditEvent
 from src.extensions.governance import build_governance_status
@@ -145,15 +151,49 @@ def _workflow_durable_owner_fields() -> dict[str, str]:
         return {
             "owner_kind": "user",
             "owner_principal_id": principal_id,
+            "conversation_id": current_session_id,
+            "operator_session_id": str(
+                getattr(principal, "operator_session_id", "") or ""
+            ).strip(),
         }
     if str(principal_type or "").strip().lower() == "service":
         return {
             "owner_kind": "service",
             "owner_principal_id": principal_id,
             "service_id": principal_id,
+            "conversation_id": current_session_id,
+            "operator_session_id": str(
+                getattr(principal, "operator_session_id", "") or ""
+            ).strip(),
         }
     raise DurableWorkflowStateUnavailable(
         "canonical workflow admission principal type is unsupported"
+    )
+
+
+def _bind_workflow_step_trust_principal(run_identity: str):
+    """Bind the current durable run only while a workflow step executes.
+
+    Approval-bearing step tools read the runtime principal, so their approval
+    request must carry the exact run identity that will consume the decision.
+    A pre-existing different job identity indicates a nested or stale runtime
+    scope and must fail closed rather than being overwritten.
+    """
+    canonical_run_identity = str(run_identity or "").strip()
+    if not canonical_run_identity:
+        raise DurableWorkflowStateUnavailable(
+            "workflow step authority requires a non-empty durable run identity"
+        )
+    principal = get_current_trust_principal()
+    if principal is None:
+        return None
+    existing_job_id = str(getattr(principal, "job_id", "") or "").strip()
+    if existing_job_id and existing_job_id != canonical_run_identity:
+        raise DurableWorkflowStateUnavailable(
+            "workflow step authority job identity conflicts with the durable run"
+        )
+    return set_runtime_trust_principal(
+        replace(principal, job_id=canonical_run_identity)
     )
 
 
@@ -958,6 +998,14 @@ def _workflow_contract_fields(
             raise DurableWorkflowStateUnavailable(f"durable workflow {name} is malformed")
         return normalized
 
+    def identity_revision(name: str) -> int | None:
+        value = pick(name)
+        if value is None or value == "":
+            return None
+        if type(value) is not int or value <= 0:
+            raise DurableWorkflowStateUnavailable(f"durable workflow {name} is malformed")
+        return value
+
     raw_dependencies = pick("dependencies")
     if raw_dependencies is None:
         dependencies: tuple[str, ...] = ()
@@ -975,10 +1023,29 @@ def _workflow_contract_fields(
         )
     else:
         raise DurableWorkflowStateUnavailable("durable workflow dependencies are malformed")
+    goal_id = optional_text("goal_id")
+    criterion_id = optional_text("criterion_id")
+    goal_revision = identity_revision("goal_revision")
+    plan_revision = identity_revision("plan_revision")
+    if goal_id is not None and (
+        criterion_id is None
+        or goal_revision is None
+        or plan_revision is None
+    ):
+        raise DurableWorkflowStateUnavailable(
+            "durable workflow canonical goal identity is incomplete"
+        )
+    if goal_id is None and any(
+        value is not None for value in (criterion_id, goal_revision, plan_revision)
+    ):
+        raise DurableWorkflowStateUnavailable(
+            "durable workflow canonical goal identity is incomplete"
+        )
     return {
-        "goal_id": optional_text("goal_id"),
-        "goal_revision": optional_int("goal_revision"),
-        "plan_revision": optional_int("plan_revision"),
+        "goal_id": goal_id,
+        "criterion_id": criterion_id,
+        "goal_revision": goal_revision,
+        "plan_revision": plan_revision,
         "candidate_id": optional_text("candidate_id"),
         "dependencies": dependencies,
         "deadline_at": pick("deadline_at"),
@@ -1481,9 +1548,12 @@ def _admit_canonical_workflow_job(
         "owner_kind": owner_kind,
         "capability": tool_name,
         "session_id": session_id,
+        "conversation_id": owner_fields.get("conversation_id") or session_id,
+        "operator_session_id": owner_fields.get("operator_session_id") or None,
     }
     for field_name in (
         "goal_id",
+        "criterion_id",
         "goal_revision",
         "plan_revision",
         "candidate_id",
@@ -1510,6 +1580,8 @@ def _admit_canonical_workflow_job(
         identity=identity,
         inputs=_durable_arguments(audit_arguments, checkpoint_context_allowed=checkpoint_context_allowed),
         session_id=session_id,
+        conversation_id=owner_fields.get("conversation_id") or session_id,
+        operator_session_id=owner_fields.get("operator_session_id") or None,
         parent_job_id=parent_job_id,
         parent_fencing_token=parent_fencing_token,
         run_fingerprint=run_fingerprint,
@@ -1907,10 +1979,17 @@ class WorkflowTool(Tool):
             step_started_at = _utc_now_iso()
             started = time.perf_counter()
             try:
-                result = tool(
-                    **rendered_arguments,
-                    sanitize_inputs_outputs=sanitize_inputs_outputs,
+                step_principal_token = _bind_workflow_step_trust_principal(
+                    durable_run_identity
                 )
+                try:
+                    result = tool(
+                        **rendered_arguments,
+                        sanitize_inputs_outputs=sanitize_inputs_outputs,
+                    )
+                finally:
+                    if step_principal_token is not None:
+                        reset_runtime_trust_principal(step_principal_token)
             except Exception as exc:
                 safe_error_summary = _safe_workflow_error_summary(exc)
                 step_completed_at = _utc_now_iso()

@@ -527,6 +527,51 @@ async def _add_owner(get_session, *, session_id: str, owner_id: str, operator_se
 
 
 @pytest.mark.asyncio
+async def test_pending_selection_does_not_reuse_ownerless_legacy_row(
+    file_db,
+    monkeypatch,
+):
+    get_session, _ = file_db
+    monkeypatch.setattr("src.approval.repository.get_session", get_session)
+    await _add_owner(
+        get_session,
+        session_id="conversation-pending-owner-binding",
+        owner_id="operator:pending-owner",
+        operator_session_id="operator-session-pending-owner",
+    )
+    common = dict(
+        session_id="conversation-pending-owner-binding",
+        tool_name="owner-bound-tool",
+        risk_level="high",
+        summary="Owner-bound approval",
+        fingerprint="owner-bound-fingerprint",
+    )
+    legacy = await approval_repository.get_or_create_pending(
+        **common,
+        details={"expires_at": (datetime.now(timezone.utc) + timedelta(minutes=5)).timestamp()},
+    )
+    bound = await approval_repository.get_or_create_pending(
+        **common,
+        details={
+            "owner_principal_id": "operator:pending-owner",
+            "approval_owner_operator_session_id": "operator-session-pending-owner",
+        },
+    )
+
+    assert bound.id != legacy.id
+    assert bound.owner_principal_id == "operator:pending-owner"
+    assert bound.operator_session_id == "operator-session-pending-owner"
+    reused = await approval_repository.get_or_create_pending(
+        **common,
+        details={
+            "owner_principal_id": "operator:pending-owner",
+            "approval_owner_operator_session_id": "operator-session-pending-owner",
+        },
+    )
+    assert reused.id == bound.id
+
+
+@pytest.mark.asyncio
 async def test_approval_expiry_and_atomic_consume_replay(file_db, monkeypatch):
     get_session, _ = file_db
     monkeypatch.setattr("src.approval.repository.get_session", get_session)
@@ -556,6 +601,7 @@ async def test_approval_expiry_and_atomic_consume_replay(file_db, monkeypatch):
         tool_name=request.tool_name,
         fingerprint=request.fingerprint,
         owner_operator_session_id="operator-session-approval",
+        owner_principal_id="operator:approval",
     )
     results = await asyncio.gather(
         approval_repository.consume_approved(
@@ -563,12 +609,14 @@ async def test_approval_expiry_and_atomic_consume_replay(file_db, monkeypatch):
             tool_name=request.tool_name,
             fingerprint=request.fingerprint,
             owner_operator_session_id="operator-session-approval",
+            owner_principal_id="operator:approval",
         ),
         approval_repository.consume_approved(
             session_id=request.session_id,
             tool_name=request.tool_name,
             fingerprint=request.fingerprint,
             owner_operator_session_id="operator-session-approval",
+            owner_principal_id="operator:approval",
         ),
     )
     assert sum(bool(result) for result in results) == 1
@@ -577,6 +625,7 @@ async def test_approval_expiry_and_atomic_consume_replay(file_db, monkeypatch):
         tool_name=request.tool_name,
         fingerprint=request.fingerprint,
         owner_operator_session_id="operator-session-approval",
+        owner_principal_id="operator:approval",
     )
 
     expired_request = await approval_repository.get_or_create_pending(
@@ -602,6 +651,7 @@ async def test_approval_expiry_and_atomic_consume_replay(file_db, monkeypatch):
         tool_name=expired_request.tool_name,
         fingerprint=expired_request.fingerprint,
         owner_operator_session_id="operator-session-approval",
+        owner_principal_id="operator:approval",
     )
 
 
@@ -723,6 +773,7 @@ async def test_approved_consume_revalidates_attachment_receipt_at_execution(file
         tool_name="attachment-tool",
         fingerprint="approval-attachment-expiry-fingerprint",
         owner_operator_session_id="operator-session-approval-attachment",
+        owner_principal_id="operator:approval-attachment",
     )
     async with get_session() as db:
         row = (

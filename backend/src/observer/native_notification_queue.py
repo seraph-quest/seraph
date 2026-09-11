@@ -33,12 +33,13 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 from uuid import uuid4
 
-from sqlalchemy import and_, delete, or_, select, update
+from sqlalchemy import and_, delete, func, or_, select, text, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import OperationalError
 
 from src.db import engine as db_engine
 from src.db.models import (
+    Goal,
     NativeNotificationDeliveryAttempt,
     NativeNotificationOutbox,
     OperatorSession,
@@ -64,6 +65,7 @@ MAX_TITLE_CHARS = 240
 MAX_BODY_CHARS = 8_000
 MAX_RESUME_MESSAGE_CHARS = 4_000
 MAX_REASON_CHARS = 200
+_TEST_BYPASS_OPERATOR_SESSION = "test-auth-bypass"
 _CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 _SECRET_VALUE = re.compile(
     r"(?i)(api[_-]?key|authorization|bearer|password|passphrase|secret|token)"
@@ -73,6 +75,16 @@ _SECRET_VALUE = re.compile(
 
 class NativeNotificationConflictError(ValueError):
     """Raised when one idempotency key is reused with another payload."""
+
+
+class NativeNotificationBudgetDenied(ValueError):
+    """Raised when a durable standing-goal notification reservation is full."""
+
+    def __init__(self, *, goal_id: str, budget_period_key: str, budget_limit: int) -> None:
+        self.goal_id = goal_id
+        self.budget_period_key = budget_period_key
+        self.budget_limit = budget_limit
+        super().__init__("goal_budget_notification_limit")
 
 
 class NativeNotificationLeaseError(ValueError):
@@ -109,6 +121,10 @@ class NativeNotification:
     causation_id: str | None = None
     attachment_refs: list[dict[str, Any]] | None = None
     degraded_state: str | None = None
+    goal_id: str | None = None
+    goal_revision: int | None = None
+    budget_period_key: str | None = None
+    budget_limit: int | None = None
 
     def to_dict(self) -> dict[str, str | int | None]:
         return asdict(self)
@@ -152,6 +168,34 @@ def _safe_reason(value: object) -> str:
     return raw[:MAX_REASON_CHARS] or "display_failed"
 
 
+def _goal_binding_reason(
+    row: NativeNotificationOutbox,
+    goal: Goal | None,
+) -> str | None:
+    """Return a fail-closed reason when a goal receipt is no longer valid."""
+    if goal is None:
+        return "goal_deleted"
+    if not row.owner_principal_id or not row.operator_session_id:
+        return "goal_owner_binding_missing"
+    if (
+        goal.owner_principal_id != row.owner_principal_id
+        or goal.owner_session_id != row.operator_session_id
+    ):
+        return "goal_owner_revoked"
+    if row.goal_revision is None:
+        return "goal_revision_missing"
+    try:
+        goal_revision = int(goal.revision)
+        row_revision = int(row.goal_revision)
+    except (TypeError, ValueError, OverflowError):
+        return "goal_revision_invalid"
+    if goal_revision < 1 or row_revision < 1:
+        return "goal_revision_invalid"
+    if goal_revision != row_revision:
+        return "goal_revision_changed"
+    return None
+
+
 def _payload_digest(values: dict[str, Any]) -> str:
     canonical = json.dumps(values, sort_keys=True, ensure_ascii=True, separators=(",", ":"))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
@@ -189,6 +233,10 @@ def _row_to_notification(row: NativeNotificationOutbox) -> NativeNotification:
             owner_principal_id=row.owner_principal_id,
         ),
         degraded_state=row.degraded_state,
+        goal_id=row.goal_id,
+        goal_revision=row.goal_revision,
+        budget_period_key=row.budget_period_key,
+        budget_limit=row.budget_limit,
     )
 
 
@@ -341,6 +389,10 @@ async def _ensure_outbox_tables(db) -> None:
         )
         columns = {row[1] for row in result.fetchall()}
         definitions = {
+            "goal_id": "VARCHAR",
+            "goal_revision": "INTEGER",
+            "budget_period_key": "VARCHAR",
+            "budget_limit": "INTEGER",
             "operator_session_id": "VARCHAR",
             "device_id": "VARCHAR",
             "channel": "VARCHAR DEFAULT 'native_notification'",
@@ -412,6 +464,10 @@ class NativeNotificationQueue:
         causation_id: str | None = None,
         attachment_refs: object = None,
         source_insight_ids: list[str] | None = None,
+        goal_id: str | None = None,
+        goal_revision: int | None = None,
+        budget_period_key: str | None = None,
+        budget_limit: int | None = None,
     ) -> NativeNotification:
         """Persist one notification or return the matching idempotent row.
 
@@ -422,6 +478,21 @@ class NativeNotificationQueue:
         silently replacing an already-authorized delivery intent.
         """
         intervention_id = _validate_identifier(intervention_id, field="intervention_id")
+        goal_id = _validate_identifier(goal_id, field="goal_id")
+        if goal_revision is not None and (
+            isinstance(goal_revision, bool)
+            or not isinstance(goal_revision, int)
+            or goal_revision < 1
+        ):
+            raise ValueError("native notification goal_revision must be a positive integer")
+        budget_period_key = _validate_identifier(budget_period_key, field="budget_period_key")
+        if budget_limit is not None:
+            if isinstance(budget_limit, bool) or not isinstance(budget_limit, int) or budget_limit < 0:
+                raise ValueError("native notification budget_limit must be a nonnegative integer")
+        if (goal_id is None) != (budget_period_key is None) or (goal_id is None) != (budget_limit is None):
+            raise ValueError("native notification budget binding requires goal_id, budget_period_key, and budget_limit")
+        if goal_id is None and goal_revision is not None:
+            raise ValueError("native notification goal_revision requires goal_id")
         owner_principal_id = _validate_identifier(owner_principal_id, field="owner_principal_id")
         operator_session_id = _validate_identifier(operator_session_id, field="operator_session_id")
         device_id = _validate_identifier(device_id, field="device_id")
@@ -493,6 +564,12 @@ class NativeNotificationQueue:
                 "conversation_owner_missing",
                 "An operator session cannot be persisted without its owner principal.",
             )
+        if goal_id is not None:
+            if not owner_principal_id or not operator_session_id:
+                raise ConversationIdentityError(
+                    "goal_owner_binding_missing",
+                    "A goal-bound notification requires a canonical owner and operator session.",
+                )
         try:
             safe_attachment_refs = validate_attachment_refs(
                 attachment_refs,
@@ -553,6 +630,10 @@ class NativeNotificationQueue:
             "correlation_id": identity.correlation_id,
             "causation_id": identity.causation_id,
             "attachment_refs": safe_attachment_refs,
+            "goal_id": goal_id,
+            "goal_revision": goal_revision,
+            "budget_period_key": budget_period_key,
+            "budget_limit": budget_limit,
         }
         digest = _payload_digest(payload)
         now = _utc_now()
@@ -579,6 +660,17 @@ class NativeNotificationQueue:
 
         async with self._lock:
             async with self._session() as db:
+                # A goal notification budget is a durable reservation, not an
+                # advisory count. SQLite's immediate transaction serializes
+                # distinct idempotency keys across queue instances/processes;
+                # the normal outer session commit persists the reservation.
+                if budget_limit is not None:
+                    if db.in_transaction():
+                        await db.commit()
+                    bind = db.get_bind()
+                    dialect_name = getattr(getattr(bind, "dialect", None), "name", "")
+                    if dialect_name == "sqlite":
+                        await db.execute(text("BEGIN IMMEDIATE"))
                 if session_id is not None:
                     session_result = await db.execute(
                         select(Session).where(Session.id == session_id)
@@ -598,6 +690,34 @@ class NativeNotificationQueue:
                         session_row.owner_principal_id = owner_principal_id
                         db.add(session_row)
                         await db.flush()
+                if goal_id is not None:
+                    goal_result = await db.execute(
+                        select(Goal).where(Goal.id == goal_id)
+                    )
+                    goal = goal_result.scalar_one_or_none()
+                    if goal is None:
+                        raise ConversationIdentityError(
+                            "goal_not_found",
+                            "A goal-bound notification requires an existing goal.",
+                        )
+                    if (
+                        goal.owner_principal_id != owner_principal_id
+                        or goal.owner_session_id != operator_session_id
+                    ):
+                        raise ConversationIdentityError(
+                            "goal_owner_mismatch",
+                            "The notification owner does not match the canonical goal owner.",
+                        )
+                    canonical_goal_revision = max(int(goal.revision or 1), 1)
+                    if goal_revision is None:
+                        goal_revision = canonical_goal_revision
+                        payload["goal_revision"] = goal_revision
+                        digest = _payload_digest(payload)
+                    elif goal_revision != canonical_goal_revision:
+                        raise ConversationIdentityError(
+                            "goal_revision_mismatch",
+                            "The notification revision does not match the canonical goal.",
+                        )
                 existing_result = await db.execute(
                     select(NativeNotificationOutbox).where(
                         NativeNotificationOutbox.idempotency_key == key
@@ -615,6 +735,20 @@ class NativeNotificationQueue:
                     await delete_source_rows(db)
                     return _row_to_notification(existing)
 
+                if budget_limit is not None:
+                    used_result = await db.execute(
+                        select(func.count(NativeNotificationOutbox.id)).where(
+                            NativeNotificationOutbox.goal_id == goal_id,
+                            NativeNotificationOutbox.budget_period_key == budget_period_key,
+                        )
+                    )
+                    if int(used_result.scalar_one() or 0) >= budget_limit:
+                        raise NativeNotificationBudgetDenied(
+                            goal_id=str(goal_id),
+                            budget_period_key=str(budget_period_key),
+                            budget_limit=budget_limit,
+                        )
+
                 # SQLite's conflict-aware insert is the cross-process CAS.
                 # It avoids a SELECT-then-INSERT uniqueness exception and
                 # lets a losing writer read the committed canonical row.
@@ -625,6 +759,10 @@ class NativeNotificationQueue:
                         idempotency_key=key,
                         payload_digest=digest,
                         intervention_id=intervention_id,
+                        goal_id=goal_id,
+                        goal_revision=goal_revision,
+                        budget_period_key=budget_period_key,
+                        budget_limit=budget_limit,
                         owner_principal_id=owner_principal_id,
                         operator_session_id=operator_session_id,
                         device_id=identity.device_id,
@@ -771,6 +909,53 @@ class NativeNotificationQueue:
                 await db.refresh(row)
                 await self._finish_attempt(db, row, status="cancelled", now=now, error_code=reason)
 
+        # Goal-bound notifications are durable effects of a specific goal.
+        # Reconcile the binding before exposing them to a daemon so a deleted
+        # goal or malformed legacy row can never fall back to ambient delivery.
+        goal_result = await db.execute(
+            select(NativeNotificationOutbox).where(
+                NativeNotificationOutbox.status.in_(ACTIVE_STATUSES),
+                NativeNotificationOutbox.goal_id.is_not(None),
+            )
+        )
+        goal_rows = goal_result.scalars().all()
+        goal_ids = {row.goal_id for row in goal_rows if row.goal_id}
+        goals_by_id: dict[str, Goal] = {}
+        if goal_ids:
+            existing_goals_result = await db.execute(
+                select(Goal).where(Goal.id.in_(goal_ids))
+            )
+            goals_by_id = {
+                goal.id: goal for goal in existing_goals_result.scalars().all()
+            }
+        for row in goal_rows:
+            goal = goals_by_id.get(str(row.goal_id))
+            reason = _goal_binding_reason(row, goal)
+            if reason is None:
+                continue
+            transition = await db.execute(
+                update(NativeNotificationOutbox)
+                .execution_options(synchronize_session=False)
+                .where(
+                    NativeNotificationOutbox.id == row.id,
+                    NativeNotificationOutbox.status.in_(ACTIVE_STATUSES),
+                    NativeNotificationOutbox.fencing_token == row.fencing_token,
+                )
+                .values(
+                    status="cancelled",
+                    cancelled_at=now,
+                    last_error=reason,
+                    degraded_state=reason,
+                    lease_owner=None,
+                    lease_expires_at=None,
+                    updated_at=now,
+                )
+            )
+            if transition.rowcount != 1:
+                continue
+            await db.refresh(row)
+            await self._finish_attempt(db, row, status="cancelled", now=now, error_code=reason)
+
         # A notification bound to an operator/session is an authorized intent,
         # not an ambient broadcast. Re-check both bindings on every queue
         # interaction so a restart or a worker that was already polling cannot
@@ -805,6 +990,18 @@ class NativeNotificationQueue:
                 )
                 operator_session = operator_result.scalar_one_or_none()
                 if operator_session is None:
+                    # The test-only auth bypass has no durable OperatorSession
+                    # row. It remains a valid synthetic scope only in the
+                    # configured test environment; production sessions must
+                    # always be revalidated against the canonical auth store.
+                    from config.settings import settings
+
+                    if (
+                        row.operator_session_id == _TEST_BYPASS_OPERATOR_SESSION
+                        and settings.deployment_environment == "test"
+                        and settings.operator_auth_allow_unauthenticated_tests
+                    ):
+                        continue
                     reason = "operator_session_missing"
                 elif operator_session.revoked_at is not None:
                     reason = "operator_session_revoked"
@@ -1240,6 +1437,44 @@ class NativeNotificationQueue:
                     or (_aware(row.deadline_at) or now) <= now
                 ):
                     return False
+                if row.goal_id is not None:
+                    goal_result = await db.execute(
+                        select(Goal).where(Goal.id == row.goal_id)
+                    )
+                    reason = _goal_binding_reason(
+                        row,
+                        goal_result.scalar_one_or_none(),
+                    )
+                    if reason is not None:
+                        cancelled = await db.execute(
+                            update(NativeNotificationOutbox)
+                            .execution_options(synchronize_session=False)
+                            .where(
+                                NativeNotificationOutbox.id == notification_id,
+                                NativeNotificationOutbox.status == "failed",
+                            )
+                            .values(
+                                status="cancelled",
+                                cancelled_at=now,
+                                last_error=reason,
+                                degraded_state=reason,
+                                lease_owner=None,
+                                lease_expires_at=None,
+                                updated_at=now,
+                            )
+                        )
+                        if cancelled.rowcount != 1:
+                            return False
+                        await db.refresh(row)
+                        await self._finish_attempt(
+                            db,
+                            row,
+                            status="cancelled",
+                            now=now,
+                            error_code=reason,
+                        )
+                        await db.flush()
+                        return False
                 row.status = "queued"
                 row.last_error = None
                 row.degraded_state = None
@@ -1268,6 +1503,88 @@ class NativeNotificationQueue:
             async with self._session() as db:
                 now = _utc_now()
                 await self._reconcile_expired(db, now)
+                row_result = await db.execute(
+                    select(NativeNotificationOutbox).where(
+                        NativeNotificationOutbox.id == notification_id,
+                    )
+                )
+                row = row_result.scalar_one_or_none()
+                if row is None or row.status != "unknown":
+                    return False
+                if row.goal_id is not None and (
+                    not owner_principal_id
+                    or not operator_session_id
+                    or owner_principal_id != row.owner_principal_id
+                    or operator_session_id != row.operator_session_id
+                ):
+                    # Goal-bound recovery must carry the exact authenticated
+                    # owner/session fence; ambient or partial scopes cannot
+                    # replay an old delivery intent.
+                    return False
+                if owner_principal_id is not None:
+                    owner_result = await db.execute(
+                        select(NativeNotificationOutbox.id).where(
+                            NativeNotificationOutbox.id == notification_id,
+                            _owner_scope_predicate(
+                                owner_principal_id=owner_principal_id,
+                                operator_session_id=operator_session_id,
+                            ),
+                        )
+                    )
+                    if owner_result.scalar_one_or_none() is None:
+                        return False
+
+                if (
+                    row.attempt_count >= row.max_attempts
+                    or (_aware(row.deadline_at) or now) <= now
+                ):
+                    return False
+
+                if row.goal_id:
+                    goal_result = await db.execute(
+                        select(Goal).where(Goal.id == row.goal_id)
+                    )
+                    goal = goal_result.scalar_one_or_none()
+                    reason = _goal_binding_reason(row, goal)
+                    if reason is not None:
+                        cancel_predicates = [
+                            NativeNotificationOutbox.id == notification_id,
+                            NativeNotificationOutbox.status == "unknown",
+                        ]
+                        if owner_principal_id is not None:
+                            cancel_predicates.append(
+                                _owner_scope_predicate(
+                                    owner_principal_id=owner_principal_id,
+                                    operator_session_id=operator_session_id,
+                                )
+                            )
+                        cancelled = await db.execute(
+                            update(NativeNotificationOutbox)
+                            .execution_options(synchronize_session=False)
+                            .where(*cancel_predicates)
+                            .values(
+                                status="cancelled",
+                                cancelled_at=now,
+                                last_error=reason,
+                                degraded_state=reason,
+                                lease_owner=None,
+                                lease_expires_at=None,
+                                updated_at=now,
+                            )
+                        )
+                        if cancelled.rowcount != 1:
+                            return False
+                        await db.refresh(row)
+                        await self._finish_attempt(
+                            db,
+                            row,
+                            status="cancelled",
+                            now=now,
+                            error_code=reason,
+                        )
+                        await db.flush()
+                        return False
+
                 predicates = [
                     NativeNotificationOutbox.id == notification_id,
                     NativeNotificationOutbox.status == "unknown",

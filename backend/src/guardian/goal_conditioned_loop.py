@@ -630,11 +630,26 @@ async def _existing_receipt(
             continue
         details = event.get("details")
         if isinstance(details, dict) and details.get("dedupe_key") == dedupe_key:
-            return await _validate_stored_receipt_provenance(
+            validated = await _validate_stored_receipt_provenance(
                 details,
                 candidate=candidate,
                 goal=goal,
             )
+            if validated is None:
+                return None
+            # Audit details intentionally carry operator-facing fields such as
+            # ``canonical_decision_record`` and ``content_redacted``.  They
+            # are receipt metadata, not GoalOutcomeReceipt fields.  Project a
+            # replay payload back to the typed outcome contract before the
+            # dispatcher rehydrates it; otherwise a real persisted replay
+            # fails with Pydantic extra-field errors after a restart.
+            if event_type == _OUTCOME_EVENT:
+                return {
+                    field_name: validated[field_name]
+                    for field_name in GoalOutcomeReceipt.model_fields
+                    if field_name in validated
+                }
+            return validated
     return None
 
 
@@ -665,6 +680,27 @@ async def _persist_receipt(
         details=safe_details,
     )
     return safe_details
+
+
+async def _persist_receipt_compat(**kwargs: Any) -> dict[str, Any]:
+    """Persist a receipt while retaining compatibility with narrow test seams.
+
+    The production writer receives the candidate and live goal so it can
+    validate correction provenance.  Older adapter tests replace this writer
+    with a small ``(event_type, summary, details)`` function; dropping only
+    those optional context arguments keeps that seam usable without weakening
+    the real persistence path.
+    """
+
+    try:
+        return await _persist_receipt(**kwargs)
+    except TypeError as exc:
+        if "unexpected keyword argument 'candidate'" not in str(exc):
+            raise
+        fallback = dict(kwargs)
+        fallback.pop("candidate", None)
+        fallback.pop("goal", None)
+        return await _persist_receipt(**fallback)
 
 
 def build_goal_candidate_decision(
@@ -753,7 +789,7 @@ async def propose_goal_candidate(
         candidate=decision,
         goal=goal,
     )
-    await _persist_receipt(
+    await _persist_receipt_compat(
         event_type=_CANDIDATE_EVENT,
         summary=f"Goal candidate {decision.action.value} for {goal.id}",
         details=_candidate_receipt_details(
@@ -841,7 +877,7 @@ async def _persist_no_learning(
         evidence_refs=list(evidence_refs),
         reason=reason,
     )
-    await _persist_receipt(
+    await _persist_receipt_compat(
         event_type=_NO_LEARNING_EVENT,
         summary=f"Goal candidate {candidate.candidate_id} recorded no learning",
         details=_outcome_receipt_details(receipt, capability_id=candidate.capability_id),
@@ -1029,7 +1065,7 @@ async def dispatch_goal_candidate(
         canonical_decision.status == "verified" and canonical_decision.learning == "applied"
     ):
         outcome = outcome.model_copy(update={"learning": "no_learning", "learning_record_id": None})
-    await _persist_receipt(
+    await _persist_receipt_compat(
         event_type=_OUTCOME_EVENT,
         summary=f"Goal candidate {candidate.candidate_id} outcome recorded",
         details=_outcome_receipt_details(outcome, capability_id=candidate.capability_id),

@@ -186,7 +186,10 @@ describe("questStore", () => {
 
     await useQuestStore.getState().loadGoalLoop("g1");
 
-    expect(mockFetch).toHaveBeenCalledWith(expect.stringContaining("/api/goals/g1/loop"));
+    expect(mockFetch).toHaveBeenCalledWith(
+      expect.stringContaining("/api/goals/g1/loop"),
+      expect.objectContaining({ credentials: "include" }),
+    );
     expect(mockFetch.mock.calls.some(([url]) => String(url).includes("/candidates"))).toBe(false);
     expect(useQuestStore.getState().goalLoop).toEqual(payload);
   });

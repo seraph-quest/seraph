@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import copy
-from dataclasses import replace
+import json
 import shutil
 import threading
 import time
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -18,7 +19,6 @@ from src.security.trust_contract import AuthorityGrant, PrincipalType, TrustPrin
 import src.workflows.native_software_engineering as native_swe
 from src.workflows.native_software_engineering import (
     NativeSoftwareEngineeringRequest,
-    build_native_software_engineering_approval_receipt,
     native_software_engineering_fixture_root,
     preflight_native_software_engineering_fixture,
     resume_native_software_engineering_fixture,
@@ -108,9 +108,71 @@ def _copy_fixture(destination: Path) -> Path:
     return destination
 
 
-def _approved_receipt(job_id: str):
-    request = NativeSoftwareEngineeringRequest(job_id=job_id)
-    return build_native_software_engineering_approval_receipt(request)
+async def _issue_repository_approval(request: NativeSoftwareEngineeringRequest):
+    inspection_request = replace(
+        request,
+        patch_approval="required",
+        approval_id=None,
+        approval_operator_principal_id="operator:test-bypass",
+        approval_operator_session_id="test-auth-bypass",
+    )
+    prepared = native_swe._prepare_fixture(inspection_request)
+    job_workspace = native_swe._job_workspace(request)
+    relative_bug_path = native_swe._relative_workspace_path(job_workspace.root / native_swe.FIXTURE_BUG_FILE)
+    preview_payload = {
+        # The governed preview hashes the complete file, not only the matched
+        # replacement text.  Bind the approval to that same source receipt so
+        # apply cannot silently accept a changed fixture.
+        "before_sha256": native_swe._digest_text(
+            prepared.bug_path.read_text(encoding="utf-8")
+        ),
+        "after_sha256": native_swe._digest_text(
+            prepared.bug_path.read_text(encoding="utf-8").replace(
+                native_swe.FIXTURE_BEFORE_TEXT,
+                native_swe.FIXTURE_AFTER_TEXT,
+                1,
+            )
+        ),
+    }
+    context = native_swe._native_approval_context(
+        inspection_request,
+        prepared,
+        relative_bug_path=relative_bug_path,
+        preview_payload=preview_payload,
+    )
+    operator_session = inspection_request.approval_operator_session_id
+    expires_at = time.time() + 300
+    pending = await native_swe.approval_repository.get_or_create_pending(
+        session_id=operator_session,
+        tool_name=native_swe._NATIVE_PATCH_CAPABILITY_ID,
+        risk_level=native_swe._NATIVE_APPROVAL_RISK,
+        summary="test native SWE approval",
+        fingerprint=native_swe._native_approval_fingerprint(context),
+        details={
+            "approval_conversation_id": operator_session,
+            "approval_owner_principal_id": inspection_request.approval_operator_principal_id,
+            "approval_owner_operator_session_id": operator_session,
+            "approval_operator_principal_id": inspection_request.approval_operator_principal_id,
+            "approval_execution_owner_principal_id": request.owner_principal_id,
+            "approval_execution_session_id": request.session_id,
+            "approval_context": context,
+            "approval_expires_at": expires_at,
+            "expires_at": expires_at,
+            "action": "apply",
+            "capability_id": native_swe._NATIVE_PATCH_CAPABILITY_ID,
+        },
+    )
+    assert pending.owner_principal_id == inspection_request.approval_operator_principal_id
+    persisted_details = json.loads(pending.details_json or "{}")
+    assert persisted_details["approval_owner_principal_id"] == inspection_request.approval_operator_principal_id
+    resolved = await native_swe.approval_repository.resolve(pending.id, "approved")
+    assert resolved is not None and resolved.status == "approved"
+    return replace(
+        inspection_request,
+        patch_approval="approved",
+        approval_receipt=None,
+        approval_id=pending.id,
+    )
 
 
 @pytest.mark.asyncio
@@ -149,6 +211,31 @@ def _native_service_principal(monkeypatch):
         yield
     finally:
         reset_runtime_context(tokens)
+
+
+def test_native_service_cannot_supply_its_own_approval_identity():
+    principal = TrustPrincipal(
+        principal_id="service:native-software-engineering",
+        principal_type=PrincipalType.SERVICE,
+        grants=(AuthorityGrant.CAPABILITY_EXECUTE,),
+        session_id="native-swe-service-run",
+    )
+
+    with pytest.raises(native_swe.NativeSoftwareEngineeringError, match="approval_operator_session_missing"):
+        native_swe._native_approval_owner_session(principal, session_id=principal.session_id)
+    with pytest.raises(native_swe.NativeSoftwareEngineeringError, match="approval_operator_session_missing"):
+        native_swe._native_approval_owner_session(
+            replace(principal, operator_session_id="caller-supplied-session"),
+            session_id=principal.session_id,
+        )
+    with pytest.raises(native_swe.NativeSoftwareEngineeringError, match="service_cannot_self_approve"):
+        native_swe._native_approval_operator_identity(
+            NativeSoftwareEngineeringRequest(
+                job_id="service-self-approval",
+                approval_operator_principal_id=principal.principal_id,
+                approval_operator_session_id="operator-session",
+            )
+        )
 
 
 def test_preflight_inspects_documented_bug_without_provider_or_mutation(tmp_path, monkeypatch):
@@ -213,7 +300,7 @@ def test_preflight_blocks_scope_command_timeout_and_role_authority_violations(tm
         assert receipt["reason_code"] == reason_code
 
 
-def test_preflight_rejects_unbound_replayed_and_stale_approval_receipts(tmp_path, monkeypatch):
+def test_preflight_requires_repository_approval_binding(tmp_path, monkeypatch):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     monkeypatch.setattr(settings, "workspace_dir", str(workspace))
@@ -224,53 +311,105 @@ def test_preflight_rejects_unbound_replayed_and_stale_approval_receipts(tmp_path
         patch_approval="approved",
     )
 
-    cases = (
-        (base, "approval_receipt_required"),
-        (
-            replace(
-                base,
-                fixture_root=None,
-                approval_receipt=build_native_software_engineering_approval_receipt(
-                    replace(base, fixture_root=None), expires_at=time.time() - 1
-                ),
-            ),
-            "approval_receipt_expired",
-        ),
-        (
-            replace(
-                base,
-                fixture_root=None,
-                approval_receipt=replace(
-                    _approved_receipt(base.job_id), preview_digest="stale"
-                ),
-            ),
-            "approval_receipt_preview_mismatch",
-        ),
-        (
-            replace(
-                base,
-                fixture_root=None,
-                approval_receipt=replace(_approved_receipt(base.job_id), consumed=True),
-            ),
-            "approval_receipt_replayed",
-        ),
+    missing = preflight_native_software_engineering_fixture(base)
+    assert missing["status"] == "blocked"
+    assert missing["reason_code"] == "approval_id_required"
+
+    malformed = preflight_native_software_engineering_fixture(
+        replace(base, approval_id="../forged")
     )
-    for request, reason_code in cases:
-        receipt = preflight_native_software_engineering_fixture(request)
-        assert receipt["status"] == "blocked"
-        assert receipt["reason_code"] == reason_code
+    assert malformed["status"] == "blocked"
+    assert malformed["reason_code"] == "approval_id_invalid"
+
+
+def test_preflight_rejects_caller_fabricated_native_approval_receipt(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.setattr(settings, "workspace_dir", str(workspace))
+    legacy_receipt = native_swe.NativeSoftwareEngineeringApprovalReceipt(
+        receipt_id="caller-forged",
+        owner_principal_id="service:native-software-engineering",
+        session_id="native-swe-fixture-session",
+        job_id="forged-approval",
+        preview_digest="anything",
+        expires_at=time.time() + 300,
+    )
+
+    result = preflight_native_software_engineering_fixture(
+        NativeSoftwareEngineeringRequest(
+            job_id="forged-approval",
+            patch_approval="approved",
+            approval_receipt=legacy_receipt,
+        )
+    )
+
+    assert result["status"] == "blocked"
+    assert result["reason_code"] == "approval_receipt_unsupported"
+
+
+def test_cancellation_receipt_reports_unknown_cleanup_when_process_evidence_is_absent(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setattr(settings, "workspace_dir", str(tmp_path))
+    workspace = tmp_path / "job" / "workspace"
+    artifacts = tmp_path / "job" / "artifacts"
+    workspace.mkdir(parents=True)
+    artifacts.mkdir(parents=True)
+    source = native_software_engineering_fixture_root()
+    prepared = native_swe._PreparedFixture(
+        source=source,
+        source_digest=native_swe._fixture_tree_digest(source),
+        bug_path=source / "calculator.py",
+        test_path=source / "tests" / "test_calculator.py",
+    )
+    job_workspace = native_swe._JobWorkspace(
+        root=workspace,
+        relative_root="job/workspace",
+        branch="seraph-job-cancel-fallback",
+        artifact_dir=artifacts,
+        relative_artifact_dir="job/artifacts",
+    )
+    control = native_swe._NativeExecutionControl(
+        owner="native-swe-worker:cancel-fallback",
+        fencing_token=1,
+        cancel_event=threading.Event(),
+    )
+    native_swe._register_native_execution("cancel-fallback", control)
+    try:
+        native_swe._mark_native_cleanup_requested("cancel-fallback", control)
+        result = native_swe._cancellation_result(
+            NativeSoftwareEngineeringRequest(job_id="cancel-fallback"),
+            prepared,
+            job_workspace,
+            {"status": "cancelled"},
+            reason_code="operator_cancelled",
+        )
+    finally:
+        native_swe._unregister_native_execution("cancel-fallback", control)
+
+    assert result["process_cleanup"]["cleanup_status"] == "unknown"
+    assert result["process_cleanup"]["cleanup_requested"] is True
+    cancellation_artifact = json.loads((artifacts / "cancellation.json").read_text(encoding="utf-8"))
+    assert cancellation_artifact["process_cleanup"]["cleanup_status"] == "unknown"
 
 
 @pytest.mark.asyncio
-async def test_resume_requires_bound_receipt_and_stays_blocked_without_operator_route():
+async def test_resume_rejects_legacy_caller_receipt():
     request = NativeSoftwareEngineeringRequest(job_id="approval-resume")
-    receipt = _approved_receipt(request.job_id)
+    receipt = native_swe.NativeSoftwareEngineeringApprovalReceipt(
+        receipt_id="caller-forged",
+        owner_principal_id=request.owner_principal_id,
+        session_id=request.session_id,
+        job_id=request.job_id,
+        preview_digest="anything",
+        expires_at=time.time() + 300,
+    )
 
     result = await resume_native_software_engineering_fixture(request, receipt)
 
     assert result["status"] == "blocked"
-    assert result["reason_code"] == "approval_resume_requires_operator_route"
-    assert result["approval_resume_supported"] is False
+    assert result["reason_code"] == "approval_receipt_unsupported"
 
 
 @pytest.mark.asyncio
@@ -286,10 +425,12 @@ async def test_runner_keeps_fixture_immutable_and_records_job_owned_vertical_sli
     source_before = (source / "calculator.py").read_bytes()
 
     result = await run_native_software_engineering_fixture(
-        fixture_root=source,
-        job_id="native-swe-success",
-        patch_approval="approved",
-        approval_receipt=_approved_receipt("native-swe-success"),
+        await _issue_repository_approval(
+            NativeSoftwareEngineeringRequest(
+                fixture_root=source,
+                job_id="native-swe-success",
+            )
+        )
     )
 
     assert result["status"] == "succeeded"
@@ -347,11 +488,13 @@ async def test_runner_timeout_fails_closed_and_keeps_recoverable_workspace(async
     monkeypatch.setattr(native_swe, "_process_result", timed_out_process)
 
     result = await run_native_software_engineering_fixture(
-        fixture_root=source,
-        job_id="native-swe-timeout",
-        patch_approval="approved",
-        approval_receipt=_approved_receipt("native-swe-timeout"),
-        test_timeout_seconds=1,
+        await _issue_repository_approval(
+            NativeSoftwareEngineeringRequest(
+                fixture_root=source,
+                job_id="native-swe-timeout",
+                test_timeout_seconds=1,
+            )
+        )
     )
 
     assert result["status"] == "failed"
@@ -381,11 +524,13 @@ async def test_runner_cancellation_keeps_patch_and_receipts_recoverable(async_db
     monkeypatch.setattr(settings, "workspace_dir", str(workspace))
 
     result = await run_native_software_engineering_fixture(
-        fixture_root=native_software_engineering_fixture_root(),
-        job_id="native-swe-cancel",
-        patch_approval="approved",
-        approval_receipt=_approved_receipt("native-swe-cancel"),
-        cancel_before_test=True,
+        await _issue_repository_approval(
+            NativeSoftwareEngineeringRequest(
+                fixture_root=native_software_engineering_fixture_root(),
+                job_id="native-swe-cancel",
+                cancel_before_test=True,
+            )
+        )
     )
 
     assert result["status"] == "cancelled"
@@ -397,7 +542,7 @@ async def test_runner_cancellation_keeps_patch_and_receipts_recoverable(async_db
 
 
 @pytest.mark.asyncio
-async def test_cancellation_during_test_cannot_report_success(tmp_path, monkeypatch):
+async def test_cancellation_during_test_cannot_report_success(async_db, tmp_path, monkeypatch):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     monkeypatch.setattr(settings, "workspace_dir", str(workspace))
@@ -429,11 +574,11 @@ async def test_cancellation_during_test_cannot_report_success(tmp_path, monkeypa
         return original_process_result(command, args, cwd, timeout_seconds=timeout_seconds, include_output=include_output)
 
     monkeypatch.setattr(native_swe, "_process_result", cancellable_process)
-    request = NativeSoftwareEngineeringRequest(
-        fixture_root=native_software_engineering_fixture_root(),
-        job_id="native-swe-cancel-during-test",
-        patch_approval="approved",
-        approval_receipt=_approved_receipt("native-swe-cancel-during-test"),
+    request = await _issue_repository_approval(
+        NativeSoftwareEngineeringRequest(
+            fixture_root=native_software_engineering_fixture_root(),
+            job_id="native-swe-cancel-during-test",
+        )
     )
     runner = asyncio.create_task(run_native_software_engineering_fixture(request))
     await asyncio.wait_for(asyncio.to_thread(test_started.wait, 3), timeout=4)
@@ -474,10 +619,13 @@ async def test_runner_required_approval_stops_before_apply(async_db, tmp_path, m
     result = await run_native_software_engineering_fixture(
         fixture_root=native_software_engineering_fixture_root(),
         job_id="native-swe-awaiting-approval",
-        # The service principal fixture is explicitly bound to this session;
-        # an unbound request must remain fail-closed before admission.
+        # The service principal is authenticated for this execution session;
+        # a request without an approval id must remain fail-closed before
+        # admission.
         session_id="native-swe-fixture-session",
         patch_approval="required",
+        approval_operator_principal_id="operator:test-bypass",
+        approval_operator_session_id="test-auth-bypass",
     )
 
     assert result["status"] == "awaiting_approval"

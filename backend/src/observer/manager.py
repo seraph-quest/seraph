@@ -3,6 +3,7 @@
 import asyncio
 import logging
 import time
+from dataclasses import replace
 from datetime import datetime, timezone
 from typing import Awaitable, Callable
 
@@ -37,10 +38,19 @@ async def _gather_git_source() -> dict:
     return result or {}
 
 
-async def _gather_goal_source() -> dict:
+async def _gather_goal_source(
+    *,
+    owner_principal_id: str | None = None,
+    owner_session_id: str | None = None,
+    service_id: str | None = None,
+) -> dict:
     from src.observer.sources.goal_source import gather_goals
 
-    return await gather_goals()
+    return await gather_goals(
+        owner_principal_id=owner_principal_id,
+        owner_session_id=owner_session_id,
+        service_id=service_id,
+    )
 
 
 _OBSERVER_SOURCE_RUNNERS: dict[str, Callable[[], Awaitable[dict]]] = {
@@ -85,21 +95,75 @@ def _active_observer_definitions() -> list[tuple[str, str]]:
 class ContextManager:
     def __init__(self) -> None:
         self._context = CurrentContext()
+        self._scoped_contexts: dict[tuple[str, ...], CurrentContext] = {}
         self._lock = asyncio.Lock()
         self._transition_epoch = 0  # guards against duplicate bundle deliveries
 
-    def get_context(self) -> CurrentContext:
-        """Return current snapshot (sync, non-blocking)."""
-        return self._context
+    @staticmethod
+    def _scope_key(
+        *,
+        owner_principal_id: str | None = None,
+        owner_session_id: str | None = None,
+        service_id: str | None = None,
+    ) -> tuple[str, ...] | None:
+        owner = str(owner_principal_id or "").strip() or None
+        session = str(owner_session_id or "").strip() or None
+        service = str(service_id or "").strip() or None
+        if owner is not None and session is not None:
+            return ("owner", owner, session)
+        if owner is not None or session is not None:
+            return ("invalid",)
+        if service is not None:
+            return ("service", service)
+        return None
 
-    def is_daemon_connected(self, max_age_seconds: float = 30) -> bool:
+    def get_context(
+        self,
+        *,
+        owner_principal_id: str | None = None,
+        owner_session_id: str | None = None,
+        service_id: str | None = None,
+    ) -> CurrentContext:
+        """Return a snapshot without allowing an unscoped caller to see goals."""
+        key = self._scope_key(
+            owner_principal_id=owner_principal_id,
+            owner_session_id=owner_session_id,
+            service_id=service_id,
+        )
+        if key is None:
+            return self._context
+        scoped = self._scoped_contexts.get(key)
+        if scoped is not None:
+            return scoped
+        # A scoped refresh may not have completed yet. Preserve harmless
+        # operator state, but never carry an unrelated goal summary forward.
+        return replace(self._context, active_goals_summary="", data_quality="degraded")
+
+    def is_daemon_connected(
+        self,
+        max_age_seconds: float = 30,
+        *,
+        owner_principal_id: str | None = None,
+        owner_session_id: str | None = None,
+        service_id: str | None = None,
+    ) -> bool:
         """Return whether the native daemon has posted recently."""
-        last_post = self._context.last_daemon_post
+        last_post = self.get_context(
+            owner_principal_id=owner_principal_id,
+            owner_session_id=owner_session_id,
+            service_id=service_id,
+        ).last_daemon_post
         if last_post is None:
             return False
         return (time.time() - last_post) < max_age_seconds
 
-    async def refresh(self) -> CurrentContext:
+    async def refresh(
+        self,
+        *,
+        owner_principal_id: str | None = None,
+        owner_session_id: str | None = None,
+        service_id: str | None = None,
+    ) -> CurrentContext:
         """Gather all sources and merge into a new context snapshot.
 
         Preserves externally-managed fields (screen_context, last_interaction).
@@ -108,11 +172,17 @@ class ContextManager:
         """
         try:
             async with self._lock:
-                old = self._context
+                scope_key = self._scope_key(
+                    owner_principal_id=owner_principal_id,
+                    owner_session_id=owner_session_id,
+                    service_id=service_id,
+                )
+                old = self._scoped_contexts.get(scope_key, self._context) if scope_key else self._context
 
                 active_sources = _active_observer_definitions()
                 source_results: dict[str, dict] = {}
                 sources_ok = 0
+                source_degraded = False
                 sources_total = len(active_sources)
 
                 for source_type, source_name in active_sources:
@@ -121,8 +191,18 @@ class ContextManager:
                         logger.warning("Observer source '%s' has no runtime runner", source_type)
                         continue
                     try:
-                        source_results[source_type] = await runner()
+                        if source_type == "goals":
+                            source_results[source_type] = await runner(
+                                owner_principal_id=owner_principal_id,
+                                owner_session_id=owner_session_id,
+                                service_id=service_id,
+                            )
+                        else:
+                            source_results[source_type] = await runner()
                         sources_ok += 1
+                        source_degraded = source_degraded or (
+                            source_results[source_type].get("observer_source_status") == "degraded"
+                        )
                     except Exception:
                         logger.exception("Observer source '%s' (%s) failed during refresh", source_type, source_name)
                         source_results[source_type] = {}
@@ -135,7 +215,7 @@ class ContextManager:
                 # Derive data quality
                 if sources_total == 0:
                     data_quality = "stale"
-                elif sources_ok == sources_total:
+                elif sources_ok == sources_total and not source_degraded:
                     data_quality = "good"
                 elif sources_ok == 0:
                     data_quality = "stale"
@@ -180,7 +260,7 @@ class ContextManager:
                     logger.debug("Failed to load active project during observer refresh", exc_info=True)
                     active_project = old.active_project
 
-                self._context = CurrentContext(
+                new_context = CurrentContext(
                     time_of_day=time_data.get("time_of_day", "unknown"),
                     day_of_week=time_data.get("day_of_week", "unknown"),
                     is_working_hours=time_data.get("is_working_hours", False),
@@ -219,7 +299,7 @@ class ContextManager:
 
                     observer_transition_count = await record_observer_transition_episodes(
                         old_context=old,
-                        new_context=self._context,
+                        new_context=new_context,
                         active_project=active_project,
                     )
                 except Exception:
@@ -228,7 +308,11 @@ class ContextManager:
                 triggered_bundle_delivery = False
 
                 # Detect blocked → unblocked transition and deliver queued bundle
-                if old.user_state in _BLOCKED_STATES and new_user_state in _UNBLOCKED_STATES:
+                if (
+                    (scope_key is None or scope_key[0] == "service")
+                    and old.user_state in _BLOCKED_STATES
+                    and new_user_state in _UNBLOCKED_STATES
+                ):
                     self._transition_epoch += 1
                     epoch = self._transition_epoch
                     triggered_bundle_delivery = True
@@ -258,7 +342,11 @@ class ContextManager:
                     },
                 )
 
-                return self._context
+                if scope_key:
+                    self._scoped_contexts[scope_key] = new_context
+                else:
+                    self._context = new_context
+                return new_context
         except Exception as exc:
             await log_background_task_event(
                 task_name="observer_context_refresh",

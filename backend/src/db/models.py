@@ -145,6 +145,93 @@ class Message(SQLModel, table=True):
     session: Optional[Session] = Relationship(back_populates="messages")
 
 
+# ─── Audio ingress ───────────────────────────────────────
+
+class AudioIngressJob(SQLModel, table=True):
+    """Durable metadata for one bounded push-to-talk processing attempt.
+
+    Audio bytes live only in a short-lived quarantine directory.  This row is
+    deliberately metadata-only after cleanup and is the idempotency anchor for
+    retries, cancellation, restart recovery, and transcript confirmation.
+    """
+
+    __tablename__ = "audio_ingress_jobs"
+    __table_args__ = (
+        Index("ux_audio_ingress_jobs_request_id", "request_id", unique=True),
+    )
+
+    id: str = Field(default_factory=_uuid, primary_key=True)
+    request_id: str = Field(index=True)
+    request_digest: str = Field(index=True)
+    owner_principal_id: str = Field(index=True)
+    operator_session_id: Optional[str] = Field(default=None, index=True)
+    session_id: str = Field(foreign_key="sessions.id", index=True)
+    message_id: str = Field(index=True)
+    attachment_id: str = Field(index=True)
+    attachment_ref_json: str = Field(default="{}")
+    status: str = Field(default="queued", index=True)
+    requested_capability: str = Field(default="chat", index=True)
+    raw_path: Optional[str] = Field(default=None)
+    normalized_path: Optional[str] = Field(default=None)
+    captured_at: datetime = Field(index=True)
+    audio_payload_digest: str = Field(index=True)
+    audio_size_bytes: int = Field(default=0)
+    duration_seconds: float = Field(default=0.0)
+    decoded_duration_seconds: Optional[float] = Field(default=None)
+    media_type: str = Field(default="audio/wav")
+    container: str = Field(default="wav")
+    codec: str = Field(default="pcm_s16le")
+    sample_rate_hz: int = Field(default=16_000)
+    channels: int = Field(default=1)
+    normalized_wav_size_bytes: Optional[int] = Field(default=None)
+    capture_consent_reference: str = Field(default="")
+    model_consent_reference: str = Field(default="")
+    raw_audio_retention_deadline: datetime = Field(index=True)
+    admission_operation_id: Optional[str] = Field(default=None, index=True)
+    # A server-owned lease fences the final intercepted transport boundary.
+    # It is intentionally never exposed to browser callers; revocation and
+    # cancellation can invalidate the durable row while a worker is waiting.
+    transport_lease_id: Optional[str] = Field(default=None, index=True)
+    transcript: Optional[str] = Field(default=None)
+    transcript_digest: Optional[str] = Field(default=None, index=True)
+    confirmed_transcript_digest: Optional[str] = Field(default=None, index=True)
+    result_digest: Optional[str] = Field(default=None, index=True)
+    error_code: Optional[str] = Field(default=None, index=True)
+    provider_status: str = Field(default="unverified", index=True)
+    transport_status: str = Field(default="unknown", index=True)
+    cleanup_status: str = Field(default="complete", index=True)
+    metadata_json: str = Field(default="{}")
+    created_at: datetime = Field(default_factory=_now, index=True)
+    updated_at: datetime = Field(default_factory=_now, index=True)
+
+
+class AudioConsentGrant(SQLModel, table=True):
+    """Server-issued consent for one audio boundary.
+
+    The browser may carry the opaque reference, but it cannot choose the
+    state, owner, operator session, or validity window that authorizes a
+    capture or model transfer.  Audio workers re-read this row before each
+    boundary crossing so revocation is effective for queued jobs too.
+    """
+
+    __tablename__ = "audio_consent_grants"
+    __table_args__ = (
+        Index("ux_audio_consent_grants_reference", "reference", unique=True),
+    )
+
+    id: str = Field(default_factory=_uuid, primary_key=True)
+    reference: str = Field(index=True)
+    owner_principal_id: str = Field(index=True)
+    operator_session_id: str = Field(index=True)
+    boundary: str = Field(index=True)  # capture | cloud_upload
+    state: str = Field(default="active", index=True)  # active | revoked
+    granted_at: datetime = Field(default_factory=_now, index=True)
+    expires_at: datetime = Field(index=True)
+    revoked_at: Optional[datetime] = Field(default=None, index=True)
+    created_at: datetime = Field(default_factory=_now, index=True)
+    updated_at: datetime = Field(default_factory=_now, index=True)
+
+
 # ─── Session Todo ───────────────────────────────────────
 
 class SessionTodo(SQLModel, table=True):
@@ -218,6 +305,11 @@ class WorkflowRunState(SQLModel, table=True):
     workflow_name: str = Field(index=True)
     tool_name: str = Field(default="", index=True)
     session_id: Optional[str] = Field(default=None, foreign_key="sessions.id", index=True)
+    # ``session_id`` is the execution/conversation scope.  The browser
+    # authentication session is a separate durable binding so recovery can be
+    # resumed from a different operator session without confusing the two.
+    conversation_id: Optional[str] = Field(default=None, index=True)
+    operator_session_id: Optional[str] = Field(default=None, index=True)
     status: str = Field(default="running", index=True)
     branch_kind: Optional[str] = Field(default=None, index=True)
     branch_depth: int = Field(default=0)
@@ -527,6 +619,12 @@ class Goal(SQLModel, table=True):
     # The authenticated goals API records the operator grant; the scheduler
     # must never infer permission from an active status or criterion alone.
     proactive_enabled: bool = Field(default=False, index=True)
+    # Nullable so existing local databases and manually-created legacy goals
+    # remain readable. Public loop routes require both bindings; scheduler
+    # service runs use their own explicit service authority.
+    owner_principal_id: Optional[str] = Field(default=None, index=True)
+    owner_session_id: Optional[str] = Field(default=None, index=True)
+    admission_budget_json: Optional[str] = Field(default=None)
     created_at: datetime = Field(default_factory=_now)
     updated_at: datetime = Field(default_factory=_now)
 
@@ -590,6 +688,12 @@ class QueuedInsight(SQLModel, table=True):
     session_id: Optional[str] = Field(default=None, foreign_key="sessions.id", index=True)
     owner_principal_id: Optional[str] = Field(default=None, index=True)
     operator_session_id: Optional[str] = Field(default=None, index=True)
+    goal_id: Optional[str] = Field(default=None, index=True)
+    # Revision fence for goal-bound deferred delivery.  A queued insight is
+    # only valid for the canonical goal revision that produced it.
+    goal_revision: Optional[int] = Field(default=None, index=True)
+    budget_period_key: Optional[str] = Field(default=None, index=True)
+    budget_limit: Optional[int] = Field(default=None, index=True)
     content: str
     intervention_type: str = Field(default="advisory")
     urgency: int = Field(default=3)
@@ -659,6 +763,15 @@ class NativeNotificationOutbox(SQLModel, table=True):
     payload_digest: str = Field(index=True)
     intervention_id: Optional[str] = Field(default=None, index=True)
     owner_principal_id: Optional[str] = Field(default=None, index=True)
+    # Optional standing-goal budget reservation binding. Legacy/manual
+    # notifications leave these fields null and retain their existing queue
+    # semantics.
+    goal_id: Optional[str] = Field(default=None, index=True)
+    # Revision fence for goal-bound effects.  A notification may only be
+    # recovered while its canonical goal still has this revision.
+    goal_revision: Optional[int] = Field(default=None, index=True)
+    budget_period_key: Optional[str] = Field(default=None, index=True)
+    budget_limit: Optional[int] = Field(default=None, index=True)
     operator_session_id: Optional[str] = Field(default=None, index=True)
     device_id: Optional[str] = Field(default=None, index=True)
     channel: str = Field(default="native_notification", index=True)
@@ -719,6 +832,137 @@ class NativeNotificationDeliveryAttempt(SQLModel, table=True):
     finished_at: Optional[datetime] = Field(default=None, index=True)
 
 
+# ─── Telegram transport ─────────────────────────────────
+
+class TelegramTransportState(SQLModel, table=True):
+    """Durable, server-owned state for the provider-free Telegram adapter.
+
+    The token itself lives in the encrypted vault.  This projection only
+    stores its fingerprint and the pairing/consent/cursor facts needed to
+    reject stale or cross-operator updates after a restart.
+    """
+
+    __tablename__ = "telegram_transport_states"
+
+    id: str = Field(default="telegram", primary_key=True)
+    owner_principal_id: Optional[str] = Field(default=None, index=True)
+    operator_session_id: Optional[str] = Field(default=None, index=True)
+    operator_id: Optional[int] = Field(default=None, index=True)
+    chat_id: Optional[int] = Field(default=None, index=True)
+    pairing_id: Optional[str] = Field(default=None, index=True)
+    pairing_state: str = Field(default="unpaired", index=True)
+    pairing_expires_at: Optional[datetime] = Field(default=None, index=True)
+    token_secret_ref: Optional[str] = Field(default=None, index=True)
+    token_fingerprint: Optional[str] = Field(default=None, index=True)
+    transit_consent_reference: Optional[str] = Field(default=None, index=True)
+    transit_consent_expires_at: Optional[datetime] = Field(default=None, index=True)
+    model_consent_reference: Optional[str] = Field(default=None, index=True)
+    model_consent_expires_at: Optional[datetime] = Field(default=None, index=True)
+    cursor: int = Field(default=0, index=True)
+    sequence: int = Field(default=0, index=True)
+    rate_events_json: str = Field(default="[]")
+    revoked_at: Optional[datetime] = Field(default=None, index=True)
+    last_update_at: Optional[datetime] = Field(default=None, index=True)
+    last_error: Optional[str] = Field(default=None, index=True)
+    updated_at: datetime = Field(default_factory=_now, index=True)
+
+
+class TelegramInboundUpdate(SQLModel, table=True):
+    """Replay ledger and bounded ingress receipt for one Telegram update."""
+
+    __tablename__ = "telegram_inbound_updates"
+
+    id: str = Field(default_factory=_uuid, primary_key=True)
+    idempotency_key: str = Field(unique=True, index=True)
+    request_digest: str = Field(index=True)
+    owner_principal_id: str = Field(index=True)
+    operator_session_id: str = Field(index=True)
+    operator_id: int = Field(index=True)
+    chat_id: int = Field(index=True)
+    update_id: int = Field(index=True)
+    message_id: int = Field(index=True)
+    sequence: int = Field(index=True)
+    session_id: Optional[str] = Field(default=None, index=True)
+    canonical_message_id: Optional[str] = Field(default=None, index=True)
+    content_digest: Optional[str] = Field(default=None, index=True)
+    attachment_id: Optional[str] = Field(default=None, index=True)
+    attachment_hash: Optional[str] = Field(default=None, index=True)
+    attachment_media_type: Optional[str] = Field(default=None)
+    attachment_size_bytes: Optional[int] = Field(default=None)
+    attachment_duration_seconds: Optional[float] = Field(default=None)
+    attachment_quarantine_receipt_digest: Optional[str] = Field(default=None, index=True)
+    status: str = Field(default="accepted", index=True)
+    reason_code: str = Field(default="", index=True)
+    receipt_json: str = Field(default="{}")
+    created_at: datetime = Field(default_factory=_now, index=True)
+
+
+class TelegramTransportOutbox(SQLModel, table=True):
+    """Canonical Telegram delivery intent with bounded retry state."""
+
+    __tablename__ = "telegram_transport_outbox"
+
+    id: str = Field(default_factory=_uuid, primary_key=True)
+    idempotency_key: str = Field(unique=True, index=True)
+    payload_digest: str = Field(index=True)
+    owner_principal_id: str = Field(index=True)
+    operator_session_id: str = Field(index=True)
+    chat_id: int = Field(index=True)
+    session_id: Optional[str] = Field(default=None, index=True)
+    conversation_id: Optional[str] = Field(default=None, index=True)
+    thread_id: Optional[str] = Field(default=None, index=True)
+    message_id: Optional[str] = Field(default=None, index=True)
+    correlation_id: Optional[str] = Field(default=None, index=True)
+    content: str = Field(default="")
+    content_digest: str = Field(index=True)
+    kind: str = Field(default="text", index=True)
+    attachment_refs_json: str = Field(default="[]")
+    status: str = Field(default="queued", index=True)
+    attempt_count: int = Field(default=0, index=True)
+    max_attempts: int = Field(default=3, index=True)
+    next_attempt_at: datetime = Field(default_factory=_now, index=True)
+    # Delivery claims are durable so two adapter processes cannot both treat
+    # the same row as theirs after a restart.  A lease expiry makes an
+    # interrupted call recoverable, while the monotonically increasing fence
+    # prevents a late callback from overwriting a newer attempt.
+    lease_owner: Optional[str] = Field(default=None, index=True)
+    lease_expires_at: Optional[datetime] = Field(default=None, index=True)
+    fencing_token: int = Field(default=0, index=True)
+    deadline_at: Optional[datetime] = Field(default=None, index=True)
+    last_error: Optional[str] = Field(default=None, index=True)
+    response_code: Optional[int] = Field(default=None, index=True)
+    external_message_id: Optional[str] = Field(default=None, index=True)
+    created_at: datetime = Field(default_factory=_now, index=True)
+    updated_at: datetime = Field(default_factory=_now, index=True)
+    delivered_at: Optional[datetime] = Field(default=None, index=True)
+    cancelled_at: Optional[datetime] = Field(default=None, index=True)
+
+
+class TelegramDeliveryAttempt(SQLModel, table=True):
+    """Durable bounded delivery attempt receipt for injected transport calls."""
+
+    __tablename__ = "telegram_delivery_attempts"
+    __table_args__ = (
+        Index(
+            "ux_telegram_delivery_attempt_order",
+            "outbox_id",
+            "attempt_index",
+            unique=True,
+        ),
+    )
+
+    id: str = Field(default_factory=_uuid, primary_key=True)
+    outbox_id: str = Field(index=True)
+    attempt_index: int = Field(index=True)
+    lease_owner: Optional[str] = Field(default=None, index=True)
+    fencing_token: int = Field(default=0, index=True)
+    status: str = Field(default="started", index=True)
+    response_code: Optional[int] = Field(default=None, index=True)
+    error_code: Optional[str] = Field(default=None, index=True)
+    started_at: datetime = Field(default_factory=_now, index=True)
+    finished_at: Optional[datetime] = Field(default=None, index=True)
+
+
 # ─── ScreenObservation ─────────────────────────────────
 
 class ScreenObservation(SQLModel, table=True):
@@ -735,6 +979,49 @@ class ScreenObservation(SQLModel, table=True):
     duration_s: Optional[int] = Field(default=None)
     blocked: bool = Field(default=False)
     created_at: datetime = Field(default_factory=_now)
+
+
+# ─── Paired edge artifacts ───────────────────────────────
+
+class PairedEdgeArtifact(SQLModel, table=True):
+    """Server-owned bytes accepted from a paired observation edge.
+
+    The edge may report a source path for diagnostics, but that path is never
+    persisted here and cannot participate in the canonical artifact ID.  A
+    request ID is the idempotency key for the authenticated pairing transport.
+    """
+
+    __tablename__ = "paired_edge_artifacts"
+    __table_args__ = (
+        Index(
+            "ux_paired_edge_artifacts_pairing_request",
+            "extension_id",
+            "reference",
+            "pairing_id",
+            "request_id",
+            unique=True,
+        ),
+        Index("ix_paired_edge_artifacts_owner_created", "owner_principal_id", "created_at"),
+    )
+
+    id: str = Field(default_factory=_uuid, primary_key=True)
+    artifact_id: str = Field(unique=True, index=True)
+    extension_id: str = Field(index=True)
+    reference: str = Field(index=True)
+    device_id: str = Field(index=True)
+    pairing_id: str = Field(index=True)
+    request_id: str = Field(index=True)
+    owner_principal_id: str = Field(index=True)
+    sequence: int = Field(index=True)
+    captured_at: datetime = Field(index=True)
+    content_hash: str = Field(index=True)
+    media_type: str
+    content_size: int
+    content: bytes
+    app_name: str = Field(default="")
+    window_title: str = Field(default="")
+    observation_json: Optional[str] = Field(default=None)
+    created_at: datetime = Field(default_factory=_now, index=True)
 
 
 # ─── Secret (Vault) ─────────────────────────────────────

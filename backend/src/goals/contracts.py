@@ -68,6 +68,51 @@ class GoalSuccessCriterion(BaseModel):
         return self.verifier_kind is not None
 
 
+class GoalAdmissionBudget(BaseModel):
+    """Persisted limits required before a standing goal can admit work.
+
+    A missing budget is intentionally different from a zero budget: legacy
+    goals remain visible, but the strategist may only defer them until an
+    operator supplies a reviewed grant and bounded limits.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    reviewed_grant: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("reviewed_grant", "reviewed"),
+    )
+    grant_id: str | None = Field(default=None, min_length=1, max_length=160)
+    max_outstanding_jobs: int = Field(default=1, ge=1, le=16)
+    max_attempts: int = Field(
+        default=1,
+        ge=1,
+        le=3,
+        validation_alias=AliasChoices("max_attempts", "max_attempts_per_job"),
+    )
+    max_runtime_seconds: int = Field(default=300, ge=1, le=900)
+    notifications_per_day: int = Field(default=0, ge=0, le=100)
+    period_started_at: datetime | None = None
+    period_expires_at: datetime | None = None
+    quiet_hours_start: int | None = Field(default=None, ge=0, le=23)
+    quiet_hours_end: int | None = Field(default=None, ge=0, le=23)
+    timezone: str = Field(default="UTC", min_length=1, max_length=64)
+
+    @model_validator(mode="after")
+    def _validate_grant_and_window(self) -> "GoalAdmissionBudget":
+        if self.reviewed_grant and not self.grant_id:
+            raise ValueError("reviewed_grant requires grant_id")
+        if (self.quiet_hours_start is None) != (self.quiet_hours_end is None):
+            raise ValueError("quiet hours require both a start and end")
+        if (
+            self.period_started_at is not None
+            and self.period_expires_at is not None
+            and self.period_expires_at <= self.period_started_at
+        ):
+            raise ValueError("period_expires_at must be after period_started_at")
+        return self
+
+
 class GoalCandidateAction(str, Enum):
     """The bounded choices available to goal-conditioned planning."""
 

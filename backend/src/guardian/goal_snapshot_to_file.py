@@ -21,6 +21,7 @@ from typing import Any, Callable, Literal, Protocol
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from config.settings import settings
+from src.artifacts.registry import artifact_id_for
 from src.approval.runtime import (
     get_current_approval_mode,
     get_current_trust_principal,
@@ -64,6 +65,7 @@ from src.security.trust_contract import (
     TrustPrincipal,
 )
 from src.workflows.job_runtime import (
+    DurableJobAdmissionDenied,
     DurableJobIdempotencyConflict,
     DurableJobIdentity,
     DurableJobSpec,
@@ -170,6 +172,12 @@ class GoalSnapshotToFileRequest(BaseModel):
     owner_principal_id: str = Field(min_length=1, max_length=160)
     service_id: str = Field(min_length=1, max_length=160)
     session_id: str = Field(min_length=1, max_length=160)
+    # Service work runs in its own session, so the canonical goal owner is
+    # carried as an explicit delegation target for durable admission. These
+    # values are hints from the caller; execute() verifies them against the
+    # freshly read goal before putting them in the authority declaration.
+    goal_owner_principal_id: str | None = Field(default=None, min_length=1, max_length=160)
+    goal_owner_session_id: str | None = Field(default=None, min_length=1, max_length=160)
     parent_job_id: str | None = Field(default=None, min_length=1, max_length=160)
     parent_fencing_token: int | None = Field(default=None, ge=1)
     capability_version: Literal[CAPABILITY_VERSION] = CAPABILITY_VERSION
@@ -177,6 +185,8 @@ class GoalSnapshotToFileRequest(BaseModel):
     reason: str = Field(default="goal_snapshot_requested", max_length=1_000)
     expected_outcome: str = Field(default="", max_length=1_000)
     priority: int = Field(default=DEFAULT_PRIORITY, ge=0, le=MAX_PRIORITY)
+    max_attempts: int = Field(default=1, ge=1, le=3)
+    max_outstanding_jobs: int | None = Field(default=None, ge=1, le=16)
     deadline_at: datetime = Field(
         default_factory=lambda: _now() + timedelta(seconds=DEFAULT_DEADLINE_SECONDS)
     )
@@ -186,6 +196,13 @@ class GoalSnapshotToFileRequest(BaseModel):
     @classmethod
     def _strip_text(cls, value: Any) -> str:
         return _text(value)
+
+    @field_validator("goal_owner_principal_id", "goal_owner_session_id", mode="before")
+    @classmethod
+    def _strip_optional_text(cls, value: Any) -> str | None:
+        if value is None:
+            return None
+        return _text(value) or None
 
     @field_validator("file_path", mode="before")
     @classmethod
@@ -214,6 +231,8 @@ class GoalSnapshotToFileRequest(BaseModel):
             raise ValueError("owner_principal_id must identify a service principal")
         if not self.service_id.startswith("service:") or not self.service_id[8:]:
             raise ValueError("service_id must identify a service")
+        if (self.goal_owner_principal_id is None) != (self.goal_owner_session_id is None):
+            raise ValueError("goal owner delegation requires both principal and session")
         if self.deadline_at > _now() + timedelta(seconds=MAX_DEADLINE_SECONDS):
             raise ValueError("deadline_at exceeds the bounded execution horizon")
         return self
@@ -1114,6 +1133,8 @@ class GoalSnapshotToFileAdapter:
         approval_context: dict[str, Any] | None,
         path: str,
         workflow_binding: dict[str, Any] | None = None,
+        goal_owner_principal_id: str | None = None,
+        goal_owner_session_id: str | None = None,
     ) -> dict[str, Any]:
         effect = _text(getattr(decision, "effect", None)) or _text(receipt.get("effect")) or "deny"
         stable_receipt = self._stable_authority_receipt(receipt)
@@ -1139,6 +1160,8 @@ class GoalSnapshotToFileAdapter:
             "service_id": self.request.service_id,
             "session_id": self.request.session_id,
             "goal_id": material.envelope.goal_id if material else self.request.goal_id,
+            "goal_owner_principal_id": goal_owner_principal_id,
+            "goal_owner_session_id": goal_owner_session_id,
             "authority_envelope": {
                 "schema_version": _text(receipt.get("schema_version")) or CAPABILITY_POLICY_SCHEMA_VERSION,
                 "allowed": bool(decision and decision.allowed),
@@ -1202,6 +1225,18 @@ class GoalSnapshotToFileAdapter:
             return self._blocked("goal_not_active")
         if current_revision != candidate.goal_revision:
             return self._blocked("stale_goal_revision")
+        canonical_goal_owner_principal_id = _text(getattr(current_goal, "owner_principal_id", None)) or None
+        canonical_goal_owner_session_id = _text(getattr(current_goal, "owner_session_id", None)) or None
+        requested_goal_owner = (
+            self.request.goal_owner_principal_id,
+            self.request.goal_owner_session_id,
+        )
+        canonical_goal_owner = (
+            canonical_goal_owner_principal_id,
+            canonical_goal_owner_session_id,
+        )
+        if any(value is not None for value in requested_goal_owner) and requested_goal_owner != canonical_goal_owner:
+            return self._blocked("request_goal_owner_binding_mismatch")
 
         self._resolved_workflow_binding = None
         workflow_tool, approval_context, workflow_reason = self._resolve_workflow_tool(path)
@@ -1250,6 +1285,8 @@ class GoalSnapshotToFileAdapter:
             approval_context=approval_context,
             path=path,
             workflow_binding=workflow_binding,
+            goal_owner_principal_id=canonical_goal_owner_principal_id,
+            goal_owner_session_id=canonical_goal_owner_session_id,
         )
         declared_authority.update(
             {
@@ -1292,7 +1329,8 @@ class GoalSnapshotToFileAdapter:
             resource_claims=self._resource_claims(),
             declared_authority=declared_authority,
             deadline_at=self.request.deadline_at,
-            max_attempts=1,
+            max_attempts=self.request.max_attempts,
+            max_outstanding_jobs=self.request.max_outstanding_jobs,
             service_id=self.request.service_id,
         )
         try:
@@ -1309,6 +1347,15 @@ class GoalSnapshotToFileAdapter:
                     fallback_reason=f"authority_denied:{authority_reason}",
                 )
             return self._blocked("idempotency_conflict", job_id=job_id)
+        except DurableJobAdmissionDenied as exc:
+            self.last_receipt = {
+                **(self.last_receipt or {}),
+                "job_id": job_id,
+                "durable_status": "blocked",
+                "budget_reason": exc.reason,
+                "operator_visible": True,
+            }
+            return self._blocked(exc.reason, job_id=job_id, durable_status="blocked")
         except Exception as exc:
             if authority_decision is None or not authority_decision.allowed:
                 self._mark_durable_failure(
@@ -2178,12 +2225,71 @@ class GoalSnapshotToFileAdapter:
     async def _replay_admission(self, projection: dict[str, Any], candidate: GoalCandidateDecision, path: str) -> GoalExecutionResult:
         job_id = _text(projection.get("job_id")) or self._job_identifier(candidate)
         status = _status(projection)
+        # A positive replay is only valid for the exact durable invocation that
+        # produced this candidate.  Checking the goal id alone would allow a
+        # stale or cross-job projection to be paired with a matching file.
+        expected_job_id = self._job_identifier(candidate)
+        idempotency = projection.get("idempotency") if isinstance(projection.get("idempotency"), dict) else {}
+        try:
+            observed_goal_revision = int(projection.get("goal_revision"))
+        except (TypeError, ValueError, OverflowError):
+            observed_goal_revision = None
+        binding_mismatch = (
+            job_id != expected_job_id
+            or _text(projection.get("goal_id")) != candidate.goal_id
+            or observed_goal_revision != int(candidate.goal_revision)
+            or _text(projection.get("candidate_id")) != candidate.candidate_id
+            or _text(projection.get("job_kind")) != self._capability_identifier()
+            or _text(projection.get("capability_version")) != self.request.capability_version
+            or _text(idempotency.get("scope")) != self._idempotency_scope()
+            or _text(idempotency.get("key")) != candidate.dedupe_key
+        )
+        if binding_mismatch:
+            self.last_receipt = {
+                **(self.last_receipt or {}),
+                "job_id": job_id,
+                "durable_status": status,
+                "idempotent_replay": True,
+                "replay_binding_verified": False,
+            }
+            return self._blocked(
+                "idempotent_replay_binding_mismatch",
+                job_id=job_id,
+                durable_status=status or "accepted",
+            )
         if status == "succeeded":
             artifact = _artifact_from_projection(projection)
             readback = self._readback(path, candidate.goal_id)
-            if artifact and readback.output_exists and readback.workspace_contained and readback.goal_id_read_back:
+            artifact_digest = _text(artifact.get("content_sha256")) if artifact else ""
+            artifact_path = _text(artifact.get("file_path")) if artifact else ""
+            expected_artifact_id = (
+                artifact_id_for(
+                    file_path=path,
+                    artifact_type=self._artifact_type(),
+                    producer=self._capability_identifier(),
+                    run_id=job_id,
+                    content_sha256=readback.content_sha256,
+                )
+                if readback.content_sha256
+                else ""
+            )
+            artifact_binding_ok = bool(
+                artifact
+                and artifact_path == path
+                and _text(artifact.get("artifact_type")) == self._artifact_type()
+                and _text(artifact.get("producer")) == self._capability_identifier()
+                and artifact_digest
+                and artifact_digest == readback.content_sha256
+                and _text(artifact.get("artifact_id")) == expected_artifact_id
+            )
+            if (
+                artifact_binding_ok
+                and readback.output_exists
+                and readback.workspace_contained
+                and readback.goal_id_read_back
+            ):
                 artifact_id = _text(artifact.get("artifact_id")) or None
-                digest = readback.content_sha256 or _text(artifact.get("content_sha256")) or None
+                digest = readback.content_sha256
                 self.last_receipt = {
                     "job_id": job_id,
                     "durable_status": "succeeded",
@@ -2192,7 +2298,13 @@ class GoalSnapshotToFileAdapter:
                     "output_exists": True,
                     "workspace_contained": True,
                     "goal_id_read_back": True,
+                    "evidence_refs": [
+                        f"job:{job_id}",
+                        f"readback:{digest}",
+                        *self._extra_evidence_refs(readback),
+                    ],
                     "idempotent_replay": True,
+                    "replay_binding_verified": True,
                 }
                 return GoalExecutionResult(
                     execution_status="succeeded",
@@ -2206,7 +2318,22 @@ class GoalSnapshotToFileAdapter:
                     ],
                     reason="idempotent_replay_verified",
                 )
-            return self._blocked("idempotent_terminal_artifact_readback_failed", job_id=job_id, durable_status=status)
+            self.last_receipt = {
+                **(self.last_receipt or {}),
+                "job_id": job_id,
+                "durable_status": status,
+                "output_exists": readback.output_exists,
+                "workspace_contained": readback.workspace_contained,
+                "goal_id_read_back": readback.goal_id_read_back,
+                "content_sha256": readback.content_sha256,
+                "idempotent_replay": True,
+                "replay_binding_verified": bool(binding_mismatch is False and artifact_binding_ok),
+            }
+            return self._blocked(
+                "idempotent_terminal_artifact_readback_failed",
+                job_id=job_id,
+                durable_status=status,
+            )
         if status == "failed":
             return self._failed("idempotent_existing_failed_job", job_id=job_id, durable_status=status)
         if status == "cancelled":
@@ -2380,6 +2507,85 @@ class GoalSnapshotToFileService:
         if not isinstance(outcome, GoalOutcomeReceipt):
             outcome = GoalOutcomeReceipt.model_validate(outcome)
         receipt = adapter.last_receipt or {}
+        # A persisted goal-loop outcome is intentionally redacted and may not
+        # retain the raw durable job id in its evidence references.  Rehydrate
+        # the stable capability job identity from the actual durable repository
+        # on audit replay so scheduler receipts keep their job/artifact
+        # lineage across a process restart without executing the workflow
+        # again.
+        replay_projection = None
+        replay_job_id = _text(receipt.get("job_id")) or None
+        if not replay_job_id and hasattr(adapter, "_job_identifier"):
+            replay_job_id = adapter._job_identifier(candidate)
+        needs_replay_projection = (
+            outcome.execution_status == "succeeded"
+            and outcome.verification == "passed"
+            and not (
+                _text(receipt.get("content_sha256"))
+                and receipt.get("output_exists") is True
+                and receipt.get("workspace_contained") is True
+                and receipt.get("goal_id_read_back") is True
+                and (receipt.get("artifact_id") or outcome.artifact_ref)
+            )
+        )
+        if replay_job_id and (needs_replay_projection or not receipt.get("job_id")):
+            try:
+                get_job = getattr(adapter.jobs, "get_job", None)
+                replay_projection = await get_job(replay_job_id) if get_job is not None else None
+            except Exception:
+                replay_projection = None
+            if isinstance(replay_projection, dict):
+                receipt = {
+                    **receipt,
+                    "job_id": replay_job_id,
+                    "durable_status": replay_projection.get("status"),
+                }
+                if needs_replay_projection and hasattr(adapter, "_replay_admission"):
+                    replay_result = await adapter._replay_admission(
+                        replay_projection,
+                        candidate,
+                        request.file_path,
+                    )
+                    replay_receipt = adapter.last_receipt or {}
+                    receipt = {**receipt, **replay_receipt}
+                    if (
+                        replay_result.execution_status != "succeeded"
+                        or replay_result.verification != "passed"
+                    ):
+                        outcome = outcome.model_copy(
+                            update={
+                                "execution_status": replay_result.execution_status,
+                                "verification": replay_result.verification,
+                                "usefulness": replay_result.usefulness,
+                                "learning": "no_learning",
+                                "artifact_ref": replay_result.artifact_ref,
+                                "evidence_refs": list(replay_result.evidence_refs),
+                                "reason": replay_result.reason,
+                            }
+                        )
+                    else:
+                        outcome = outcome.model_copy(
+                            update={
+                                "execution_status": "succeeded",
+                                "verification": "passed",
+                                "artifact_ref": replay_result.artifact_ref or outcome.artifact_ref,
+                                "evidence_refs": list(replay_result.evidence_refs),
+                                "reason": replay_result.reason,
+                            }
+                        )
+            elif needs_replay_projection:
+                # A cached positive audit row without its canonical durable
+                # projection cannot establish artifact/readback evidence.
+                outcome = outcome.model_copy(
+                    update={
+                        "execution_status": "blocked",
+                        "verification": "unknown",
+                        "learning": "no_learning",
+                        "artifact_ref": None,
+                        "evidence_refs": [],
+                        "reason": "idempotent_replay_projection_missing",
+                    }
+                )
         return self._result_for_outcome(
             request=request,
             candidate=candidate,

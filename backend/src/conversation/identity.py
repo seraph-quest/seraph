@@ -187,6 +187,13 @@ def _object_mapping(value: object) -> Mapping[str, Any] | None:
                 "size_bytes",
                 "content_hash",
                 "voice_note",
+                "purpose",
+                "session_id",
+                "message_id",
+                "codec",
+                "capture_consent_reference",
+                "model_consent_reference",
+                "raw_audio_retention_deadline",
                 "duration_seconds",
                 "quarantine_status",
                 "status",
@@ -207,6 +214,13 @@ def _object_mapping(value: object) -> Mapping[str, Any] | None:
                 "size_bytes",
                 "content_hash",
                 "voice_note",
+                "purpose",
+                "session_id",
+                "message_id",
+                "codec",
+                "capture_consent_reference",
+                "model_consent_reference",
+                "raw_audio_retention_deadline",
                 "duration_seconds",
                 "quarantine_status",
                 "status",
@@ -288,6 +302,13 @@ def _attachment_receipt_metadata(
     size_bytes: object = None,
     duration_seconds: object = None,
     voice_note: object = None,
+    purpose: object = None,
+    session_id: object = None,
+    message_id: object = None,
+    codec: object = None,
+    capture_consent_reference: object = None,
+    model_consent_reference: object = None,
+    raw_audio_retention_deadline: object = None,
 ) -> dict[str, Any]:
     normalized_id = _safe_attachment_text(attachment_id, field="id")
     normalized_owner = _safe_attachment_text(owner_principal_id, field="owner_principal_id")
@@ -342,6 +363,18 @@ def _attachment_receipt_metadata(
                 "Attachment receipt voice_note is invalid.",
             )
         payload["voice_note"] = voice_note
+    for field_name, value, max_chars in (
+        ("purpose", purpose, 64),
+        ("session_id", session_id, MAX_IDENTITY_CHARS),
+        ("message_id", message_id, MAX_IDENTITY_CHARS),
+        ("codec", codec, 64),
+        ("capture_consent_reference", capture_consent_reference, 128),
+        ("model_consent_reference", model_consent_reference, 128),
+        ("raw_audio_retention_deadline", raw_audio_retention_deadline, 64),
+    ):
+        normalized = _safe_attachment_text(value, field=field_name, max_chars=max_chars)
+        if normalized is not None:
+            payload[field_name] = normalized
     return payload
 
 
@@ -354,6 +387,13 @@ def issue_attachment_quarantine_receipt(
     size_bytes: object = None,
     duration_seconds: object = None,
     voice_note: object = None,
+    purpose: object = None,
+    session_id: object = None,
+    message_id: object = None,
+    codec: object = None,
+    capture_consent_reference: object = None,
+    model_consent_reference: object = None,
+    raw_audio_retention_deadline: object = None,
     issued_at: datetime | None = None,
     expires_at: datetime | None = None,
 ) -> str:
@@ -388,6 +428,13 @@ def issue_attachment_quarantine_receipt(
         size_bytes=size_bytes,
         duration_seconds=duration_seconds,
         voice_note=voice_note,
+        purpose=purpose,
+        session_id=session_id,
+        message_id=message_id,
+        codec=codec,
+        capture_consent_reference=capture_consent_reference,
+        model_consent_reference=model_consent_reference,
+        raw_audio_retention_deadline=raw_audio_retention_deadline,
     )
     payload.update({"issued_at": _receipt_iso(issued), "expires_at": _receipt_iso(expires)})
     encoded = base64.urlsafe_b64encode(
@@ -457,6 +504,13 @@ def _decode_attachment_quarantine_receipt(
         size_bytes=payload.get("size_bytes"),
         duration_seconds=payload.get("duration_seconds"),
         voice_note=payload.get("voice_note"),
+        purpose=payload.get("purpose"),
+        session_id=payload.get("session_id"),
+        message_id=payload.get("message_id"),
+        codec=payload.get("codec"),
+        capture_consent_reference=payload.get("capture_consent_reference"),
+        model_consent_reference=payload.get("model_consent_reference"),
+        raw_audio_retention_deadline=payload.get("raw_audio_retention_deadline"),
     )
     if payload.get("quarantine_status") != "quarantined":
         raise ConversationIdentityError(
@@ -503,7 +557,19 @@ def _decode_attachment_quarantine_receipt(
 def _compare_attachment_field(item: Mapping[str, Any], field: str, expected: object) -> None:
     if field not in item or item.get(field) is None:
         return
-    if field in {"attachment_id", "owner_principal_id", "content_hash", "media_type"}:
+    if field in {
+        "attachment_id",
+        "owner_principal_id",
+        "content_hash",
+        "media_type",
+        "purpose",
+        "session_id",
+        "message_id",
+        "codec",
+        "capture_consent_reference",
+        "model_consent_reference",
+        "raw_audio_retention_deadline",
+    }:
         actual = _safe_attachment_text(item.get(field), field=field, max_chars=MAX_HASH_CHARS)
     elif field == "size_bytes":
         try:
@@ -583,6 +649,13 @@ def _canonical_attachment_ref(
             size_bytes=item.get("size_bytes"),
             duration_seconds=item.get("duration_seconds"),
             voice_note=item.get("voice_note"),
+            purpose=item.get("purpose"),
+            session_id=item.get("session_id"),
+            message_id=item.get("message_id"),
+            codec=item.get("codec"),
+            capture_consent_reference=item.get("capture_consent_reference"),
+            model_consent_reference=item.get("model_consent_reference"),
+            raw_audio_retention_deadline=item.get("raw_audio_retention_deadline"),
         )
         payload.update({"issued_at": _receipt_iso(issued_at), "expires_at": _receipt_iso(expires_at)})
         encoded = base64.urlsafe_b64encode(
@@ -627,7 +700,19 @@ def _canonical_attachment_ref(
         "quarantine_receipt_issued_at": metadata["issued_at"],
         "quarantine_receipt_expires_at": metadata["expires_at"],
     }
-    for field in ("media_type", "size_bytes", "duration_seconds", "voice_note"):
+    for field in (
+        "media_type",
+        "size_bytes",
+        "duration_seconds",
+        "voice_note",
+        "purpose",
+        "session_id",
+        "message_id",
+        "codec",
+        "capture_consent_reference",
+        "model_consent_reference",
+        "raw_audio_retention_deadline",
+    ):
         if field in metadata:
             safe[field] = metadata[field]
     return safe

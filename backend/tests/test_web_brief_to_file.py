@@ -16,6 +16,7 @@ from src.goals.repository import serialize_success_criterion
 from src.guardian import goal_conditioned_loop
 from src.guardian.web_brief_to_file import (
     CAPABILITY_ID,
+    WebBriefToFileAdapter,
     WebBriefToFileRequest,
     WebBriefToFileService,
 )
@@ -108,12 +109,20 @@ class _BriefWorkflow:
             "step_tools": ["web_search", "write_file"],
         }
 
-    def __call__(self, *, query: str, file_path: str, sanitize_inputs_outputs: bool = False) -> str:
+    def __call__(
+        self,
+        *,
+        query: str,
+        file_path: str,
+        goal_id: str = "",
+        sanitize_inputs_outputs: bool = False,
+    ) -> str:
         self.calls.append({"query": query, "file_path": file_path})
         target = self.root / file_path
         target.parent.mkdir(parents=True, exist_ok=True)
         if self.source_available:
             content = (
+                f"Goal ID: {goal_id}\n\n"
                 f'Web brief for "{query}"\n\n'
                 "1. Public source\n"
                 "   URL: https://example.com/source\n"
@@ -414,6 +423,25 @@ async def test_web_brief_executes_public_source_workflow_and_reads_back_artifact
     assert workflow.calls == [{"query": "Seraph project", "file_path": "briefs/goal-brief.md"}]
     assert jobs.specs[result.job_id].identity.job_kind == CAPABILITY_ID
     assert jobs.specs[result.job_id].identity.idempotency_scope == "web-brief-to-file"
+
+
+def test_web_brief_readback_rejects_same_query_artifact_for_another_goal(monkeypatch, tmp_path):
+    monkeypatch.setattr(settings, "workspace_dir", str(tmp_path))
+    target = tmp_path / "briefs" / "goal-brief.md"
+    target.parent.mkdir(parents=True)
+    target.write_text(
+        'Goal ID: goal-other\n\nWeb brief for "Seraph project"\n\n'
+        "URL: https://example.com/source\n",
+        encoding="utf-8",
+    )
+
+    adapter = WebBriefToFileAdapter(_request(), jobs=_Jobs(), goals=_Goals(_goal()))
+    readback = adapter._readback("briefs/goal-brief.md", "goal-brief")
+
+    assert readback.output_exists is True
+    assert readback.workspace_contained is True
+    assert readback.goal_id_read_back is False
+    assert readback.reason == "goal_id_missing_from_output"
 
 
 @pytest.mark.asyncio

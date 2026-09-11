@@ -5,13 +5,16 @@ import hashlib
 import logging
 from datetime import datetime, timedelta, timezone
 from time import perf_counter
+from zoneinfo import ZoneInfo
 
 from config.settings import settings
 from src.approval.runtime import get_current_trust_principal
 from src.agent.strategist import parse_strategist_response, run_strategist_decision_completion
 from src.audit.runtime import log_scheduler_job_event
-from src.db.models import Goal
-from src.goals.repository import deserialize_success_criterion, goal_repository
+from src.db.models import Goal, NativeNotificationOutbox
+from src.goals.contracts import GoalCandidateRequest
+from src.goals.repository import deserialize_admission_budget, deserialize_success_criterion, goal_repository
+from src.guardian.goal_conditioned_loop import propose_goal_candidate
 from src.guardian.goal_snapshot_to_file import (
     GoalSnapshotToFileRequest,
     GoalSnapshotToFileResult,
@@ -40,6 +43,8 @@ from src.workflows.job_runtime import (
     durable_job_repository,
 )
 from src.security.trust_contract import AuthorityGrant, PrincipalType, TrustPrincipal
+from sqlalchemy import func
+from sqlmodel import select
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +52,280 @@ _STRATEGIST_SERVICE_ID = "service:strategist"
 _STRATEGIST_RUNNER_ID = "scheduler:strategist_tick"
 _STRATEGIST_CAPABILITY_VERSION = "strategist-tick-v1"
 _WEB_BRIEF_CORRECTION_FALLBACK_MAX_CANDIDATES = 2
+
+
+def _notification_budget_binding(goal: Goal, budget: object) -> dict[str, object] | None:
+    """Build the stable reservation identity used by the native outbox."""
+    limit = getattr(budget, "notifications_per_day", None)
+    if not isinstance(limit, int):
+        return None
+    period_started_at = getattr(budget, "period_started_at", None)
+    if isinstance(period_started_at, datetime):
+        period_key = period_started_at.astimezone(timezone.utc).isoformat()
+    else:
+        period_key = datetime.now(timezone.utc).date().isoformat()
+    return {
+        "goal_id": str(goal.id),
+        "goal_revision": max(int(getattr(goal, "revision", 1) or 1), 1),
+        "budget_period_key": period_key,
+        "budget_limit": limit,
+    }
+
+
+def _notification_delivery_binding(goal: Goal) -> dict[str, str | None]:
+    """Carry the goal's canonical operator fence into scheduled delivery."""
+
+    return {
+        "notification_owner_principal_id": (
+            str(getattr(goal, "owner_principal_id", "") or "").strip() or None
+        ),
+        "notification_operator_session_id": (
+            str(getattr(goal, "owner_session_id", "") or "").strip() or None
+        ),
+    }
+
+
+async def _goal_notifications_used(goal: Goal, *, period_started_at: datetime | None) -> int | None:
+    """Count persisted notification intents for the goal owner in this budget period."""
+
+    owner_principal_id = str(getattr(goal, "owner_principal_id", "") or "").strip()
+    if not owner_principal_id:
+        # Legacy scheduler-only rows have no operator owner and therefore no
+        # notification scope. Report a real zero; owner binding remains the
+        # public route's fail-closed requirement.
+        return 0
+    from src.workflows.job_runtime import get_session
+
+    started = period_started_at or (datetime.now(timezone.utc) - timedelta(days=1))
+    try:
+        async with get_session() as db:
+            result = await db.execute(
+                select(func.count(NativeNotificationOutbox.id)).where(
+                    NativeNotificationOutbox.goal_id == str(goal.id),
+                    NativeNotificationOutbox.owner_principal_id == owner_principal_id,
+                    NativeNotificationOutbox.created_at >= started,
+                )
+            )
+            return int(result.scalar_one() or 0)
+    except Exception:
+        logger.exception("strategist_tick: notification budget state unavailable for %s", goal.id)
+        return None
+
+
+async def _goal_budget_admission(goal: Goal, *, capability_id: str) -> dict[str, object] | None:
+    """Return a visible defer receipt when a persisted standing-goal budget is absent/exhausted."""
+
+    if not isinstance(goal, Goal):
+        return None
+    owner_binding = _notification_delivery_binding(goal)
+    if not owner_binding["notification_owner_principal_id"] or not owner_binding["notification_operator_session_id"]:
+        return {
+            "status": "blocked",
+            "reason": "goal_owner_binding_missing",
+            "goal_id": goal.id,
+            "capability_id": capability_id,
+            "proposal_only": True,
+            "operator_visible": True,
+            **owner_binding,
+        }
+    budget = deserialize_admission_budget(goal)
+    if budget is None:
+        reason = (
+            "goal_budget_invalid"
+            if getattr(goal, "admission_budget_json", None)
+            else "goal_budget_missing_reviewed_grant"
+        )
+        return {
+            "status": "deferred",
+            "reason": reason,
+            "goal_id": goal.id,
+            "capability_id": capability_id,
+            "proposal_only": True,
+            "operator_visible": True,
+            **owner_binding,
+        }
+    if not budget.reviewed_grant or not budget.grant_id:
+        return {
+            "status": "deferred",
+            "reason": "goal_budget_missing_reviewed_grant",
+            "goal_id": goal.id,
+            "capability_id": capability_id,
+            "proposal_only": True,
+            "operator_visible": True,
+            **owner_binding,
+        }
+    now = datetime.now(timezone.utc)
+    if budget.period_expires_at is not None and budget.period_expires_at <= now:
+        reason = "goal_budget_period_expired"
+    elif budget.period_started_at is not None and budget.period_started_at > now:
+        reason = "goal_budget_period_not_started"
+    else:
+        reason = ""
+    if not reason and budget.quiet_hours_start is not None:
+        try:
+            local_hour = now.astimezone(ZoneInfo(budget.timezone)).hour
+        except Exception:
+            reason = "goal_budget_timezone_invalid"
+        else:
+            start, end = budget.quiet_hours_start, budget.quiet_hours_end
+            quiet = local_hour >= start or local_hour < end if start > end else start <= local_hour < end
+            if quiet:
+                reason = "goal_quiet_hours"
+    notifications_used = None
+    if not reason:
+        notifications_used = await _goal_notifications_used(
+            goal,
+            period_started_at=budget.period_started_at,
+        )
+        if notifications_used is None:
+            reason = "goal_budget_state_unavailable"
+        elif notifications_used >= budget.notifications_per_day:
+            reason = "goal_budget_notification_limit"
+    if reason:
+        return {
+            "status": "deferred",
+            "reason": reason,
+            "goal_id": goal.id,
+            "capability_id": capability_id,
+            "proposal_only": True,
+            "operator_visible": True,
+            **owner_binding,
+            "budget": {
+                "max_outstanding_jobs": budget.max_outstanding_jobs,
+                "max_attempts": budget.max_attempts,
+                "max_runtime_seconds": budget.max_runtime_seconds,
+                "notifications_per_day": budget.notifications_per_day,
+                "notifications_used": notifications_used,
+            },
+        }
+    return {
+        "status": "admitted",
+        "goal_id": goal.id,
+        "capability_id": capability_id,
+        "operator_visible": True,
+        **owner_binding,
+        "budget": budget,
+        "notifications_used": notifications_used if notifications_used is not None else 0,
+    }
+
+
+async def _record_budget_defer(parent_job_id: str, parent_fencing_token: int, details: dict[str, object], *, effect_type: str) -> dict[str, object]:
+    await durable_job_repository.record_effect(
+        parent_job_id,
+        effect_type=effect_type,
+        status="succeeded",
+        details=details,
+        owner=_STRATEGIST_RUNNER_ID,
+        fencing_token=parent_fencing_token,
+    )
+    return details
+
+
+def _goal_work_failure_details(
+    goal: Goal,
+    *,
+    capability_id: str,
+    error: Exception,
+    budget: object | None = None,
+    reason: str | None = None,
+) -> dict[str, object]:
+    """Keep the selected goal identity on candidate persistence/service failure."""
+
+    if budget is None:
+        try:
+            budget = deserialize_admission_budget(goal)
+        except Exception:
+            budget = None
+    return {
+        "status": "failed",
+        "reason": reason or f"goal_work_error:{type(error).__name__}",
+        "goal_id": str(getattr(goal, "id", "") or "").strip() or None,
+        "goal_revision": max(int(getattr(goal, "revision", 1) or 1), 1),
+        "capability_id": capability_id,
+        "operator_visible": True,
+        "goal_work_failure": True,
+        "error_type": type(error).__name__,
+        "notification_budget": _notification_budget_binding(goal, budget),
+        **_notification_delivery_binding(goal),
+    }
+
+
+async def _record_goal_work_failure(
+    parent_job_id: str,
+    parent_fencing_token: int,
+    *,
+    goal: Goal,
+    capability_id: str,
+    effect_type: str,
+    error: Exception,
+    budget: object | None = None,
+    reason: str | None = None,
+) -> dict[str, object]:
+    """Persist a candidate failure before the parent delivery fence runs."""
+
+    details = _goal_work_failure_details(
+        goal,
+        capability_id=capability_id,
+        error=error,
+        budget=budget,
+        reason=reason,
+    )
+    try:
+        await durable_job_repository.record_effect(
+            parent_job_id,
+            effect_type=effect_type,
+            status="failed",
+            details=details,
+            owner=_STRATEGIST_RUNNER_ID,
+            fencing_token=parent_fencing_token,
+        )
+    except Exception:
+        # The parent transition still fails closed even if this secondary
+        # receipt cannot be written.  Keep the error visible in the log.
+        logger.exception("strategist_tick: failed to persist goal work failure")
+    return details
+
+
+def _goal_work_must_not_continue(details: dict[str, object]) -> bool:
+    """Keep deferred/failed goal work from falling through to ambient delivery."""
+
+    goal_id = str(details.get("goal_id") or "").strip()
+    status = str(details.get("status") or "").strip()
+    verification = str(details.get("verification") or "").strip()
+    if status in {
+        "blocked",
+        "deferred",
+        "failed",
+        "exhausted",
+    }:
+        return True
+    # A service result that reports execution success without a passed
+    # readback is not a successful goal outcome. Keep this guard here as a
+    # second fence even when the adapter has normalized its receipt below.
+    if status == "succeeded" and verification != "passed":
+        return True
+    return bool(goal_id) and status == "skipped"
+
+
+def _goal_result_status(*, execution_status: object, verification: object) -> str:
+    """Normalize adapter results before they reach the parent delivery fence."""
+
+    normalized_execution = str(execution_status or "").strip()
+    normalized_verification = str(verification or "").strip()
+    if normalized_execution == "blocked":
+        return "blocked"
+    if normalized_execution == "succeeded" and normalized_verification == "passed":
+        return "succeeded"
+    return "failed"
+
+
+def _adapter_result_matches_goal(result: object, goal: Goal, revision: int) -> bool:
+    """Require an adapter receipt to echo the selected canonical goal fence."""
+    return (
+        str(getattr(result, "goal_id", "") or "").strip()
+        == str(getattr(goal, "id", "") or "").strip()
+        and getattr(result, "goal_revision", None) == revision
+    )
 
 
 def _reasoning_digest(reasoning: object) -> str:
@@ -299,6 +578,22 @@ def _has_explicit_web_brief_target(criterion: object) -> bool:
     return isinstance(target, dict) and any(key in target for key in ("query", "file_path"))
 
 
+async def _persist_scheduled_candidate(
+    goal: Goal,
+    request: GoalCandidateRequest,
+) -> None:
+    """Persist the strategist's candidate before admitting its child job.
+
+    Scheduler tests may use lightweight goal-shaped objects to exercise
+    ordering without a database.  The real repository always returns the
+    canonical ``Goal`` model, where candidate persistence is a required part
+    of admission and failures remain visible to the surrounding tick.
+    """
+
+    if isinstance(goal, Goal):
+        await propose_goal_candidate(goal.id, request)
+
+
 async def _run_opted_in_goal_web_brief(
     *,
     parent_job_id: str,
@@ -348,6 +643,18 @@ async def _run_opted_in_goal_web_brief(
         selected: tuple[Goal, object, str, str, int, str | None],
     ) -> dict[str, object]:
         goal, criterion, query, file_path, priority, strategy_delta_id = selected
+        budget_admission = await _goal_budget_admission(
+            goal,
+            capability_id="workflow.web-brief-to-file",
+        )
+        if budget_admission is not None and budget_admission.get("status") != "admitted":
+            return await _record_budget_defer(
+                parent_job_id,
+                parent_fencing_token,
+                budget_admission,
+                effect_type="web_brief_admission",
+            )
+        budget = budget_admission.get("budget") if budget_admission else None
         revision = max(int(goal.revision or 1), 1)
         session_id = f"web-brief:scheduler:{goal.id}:{revision}"
         principal = TrustPrincipal(
@@ -368,22 +675,84 @@ async def _run_opted_in_goal_web_brief(
             owner_principal_id="service:web-brief",
             service_id="service:web-brief",
             session_id=session_id,
+            goal_owner_principal_id=getattr(goal, "owner_principal_id", None),
+            goal_owner_session_id=getattr(goal, "owner_session_id", None),
             parent_job_id=parent_job_id,
             parent_fencing_token=parent_fencing_token,
             evidence_refs=evidence_refs,
             reason="scheduled_proactive_web_brief",
             expected_outcome=criterion.description,
             priority=priority,
+            max_attempts=budget.max_attempts if budget is not None else 1,
+            max_outstanding_jobs=budget.max_outstanding_jobs if budget is not None else None,
+            deadline_at=(
+                datetime.now(timezone.utc) + timedelta(seconds=budget.max_runtime_seconds)
+                if budget is not None else datetime.now(timezone.utc) + timedelta(seconds=300)
+            ),
         )
-        result = await WebBriefToFileService(authority_principal=principal).run(request)
+        try:
+            await _persist_scheduled_candidate(
+                goal,
+                GoalCandidateRequest(
+                    capability_id="workflow.web-brief-to-file",
+                    capability_version=request.capability_version,
+                    inputs={
+                        "query": request.query,
+                        "file_path": request.file_path,
+                        "priority": request.priority,
+                    },
+                    evidence_refs=request.evidence_refs,
+                    reason=request.reason,
+                    expected_outcome=request.expected_outcome,
+                    expires_at=request.deadline_at,
+                ),
+            )
+        except Exception as exc:
+            return await _record_goal_work_failure(
+                parent_job_id,
+                parent_fencing_token,
+                goal=goal,
+                capability_id="workflow.web-brief-to-file",
+                effect_type="web_brief_admission",
+                error=exc,
+                budget=budget,
+            )
+        try:
+            result = await WebBriefToFileService(authority_principal=principal).run(request)
+        except Exception as exc:
+            return await _record_goal_work_failure(
+                parent_job_id,
+                parent_fencing_token,
+                goal=goal,
+                capability_id="workflow.web-brief-to-file",
+                effect_type="web_brief_admission",
+                error=exc,
+                budget=budget,
+            )
         if not isinstance(result, WebBriefToFileResult):
-            raise TypeError("web brief service returned an invalid result")
-        effect_status = (
-            "succeeded"
-            if result.execution_status == "succeeded" and result.verification == "passed"
-            else "blocked"
-            if result.execution_status == "blocked"
-            else "failed"
+            return await _record_goal_work_failure(
+                parent_job_id,
+                parent_fencing_token,
+                goal=goal,
+                capability_id="workflow.web-brief-to-file",
+                effect_type="web_brief_admission",
+                error=TypeError("web brief service returned an invalid result"),
+                budget=budget,
+            )
+        if not _adapter_result_matches_goal(result, goal, revision):
+            return await _record_goal_work_failure(
+                parent_job_id,
+                parent_fencing_token,
+                goal=goal,
+                capability_id="workflow.web-brief-to-file",
+                effect_type="web_brief_admission",
+                error=ValueError("web brief adapter returned a mismatched goal identity"),
+                budget=budget,
+                reason="goal_identity_mismatch",
+            )
+        effect_status = _goal_result_status(
+            execution_status=result.execution_status,
+            verification=result.verification,
         )
         result_strategy_delta_id = (
             result.strategy_delta_id
@@ -394,7 +763,10 @@ async def _run_opted_in_goal_web_brief(
         if result_strategy_delta_provenance == "verified" and not result_strategy_delta_id:
             result_strategy_delta_provenance = "unresolved"
         details = {
-            "status": result.execution_status,
+            # Persist the normalized status. The raw adapter status is kept
+            # separately for diagnostics, but cannot authorize delivery.
+            "status": effect_status,
+            "execution_status": result.execution_status,
             "verification": result.verification,
             "learning": result.learning,
             "goal_id": result.goal_id,
@@ -416,6 +788,13 @@ async def _run_opted_in_goal_web_brief(
             "source_read": result.source_read,
             "reason": result.reason,
             "operator_visible": True,
+            "content_sha256": result.content_sha256,
+            "output_exists": result.output_exists,
+            "workspace_contained": result.workspace_contained,
+            "goal_id_read_back": result.goal_id_read_back,
+            "evidence_refs": list(result.evidence_refs),
+            "notification_budget": _notification_budget_binding(goal, budget),
+            **_notification_delivery_binding(goal),
         }
         await durable_job_repository.record_effect(
             parent_job_id,
@@ -432,7 +811,18 @@ async def _run_opted_in_goal_web_brief(
         key=lambda item: _proactive_goal_sort_key(item[0], item[4]),
     )
     for candidate_index, selected in enumerate(ordered_candidates):
-        details = await _run_candidate(selected)
+        try:
+            details = await _run_candidate(selected)
+        except Exception as exc:
+            goal = selected[0]
+            details = await _record_goal_work_failure(
+                parent_job_id,
+                parent_fencing_token,
+                goal=goal,
+                capability_id="workflow.web-brief-to-file",
+                effect_type="web_brief_admission",
+                error=exc,
+            )
         # A correction gate is a candidate-local no-op. Keep the scheduler's
         # priority order but give one next valid goal a chance; all other
         # blocked/failed outcomes stop the bounded tick after their receipt.
@@ -482,6 +872,18 @@ async def _run_opted_in_goal_snapshot(
         return details
 
     goal, criterion = sorted(eligible, key=lambda item: _proactive_goal_sort_key(item[0]))[0]
+    budget_admission = await _goal_budget_admission(
+        goal,
+        capability_id="workflow.goal-snapshot-to-file",
+    )
+    if budget_admission is not None and budget_admission.get("status") != "admitted":
+        return await _record_budget_defer(
+            parent_job_id,
+            parent_fencing_token,
+            budget_admission,
+            effect_type="goal_snapshot_admission",
+        )
+    budget = budget_admission.get("budget") if budget_admission else None
     revision = max(int(goal.revision or 1), 1)
     # Keep the child authority/session stable across strategist occurrences;
     # parent_job_id remains the lineage/fence, while the candidate identity
@@ -501,24 +903,85 @@ async def _run_opted_in_goal_snapshot(
         owner_principal_id="service:goal-snapshot",
         service_id="service:goal-snapshot",
         session_id=session_id,
+        goal_owner_principal_id=getattr(goal, "owner_principal_id", None),
+        goal_owner_session_id=getattr(goal, "owner_session_id", None),
         parent_job_id=parent_job_id,
         parent_fencing_token=parent_fencing_token,
         evidence_refs=list(criterion.evidence_refs),
         reason="scheduled_proactive_goal_snapshot",
         expected_outcome=criterion.description,
+        max_attempts=budget.max_attempts if budget is not None else 1,
+        max_outstanding_jobs=budget.max_outstanding_jobs if budget is not None else None,
+        deadline_at=(
+            datetime.now(timezone.utc) + timedelta(seconds=budget.max_runtime_seconds)
+            if budget is not None else datetime.now(timezone.utc) + timedelta(seconds=300)
+        ),
     )
-    result = await GoalSnapshotToFileService(authority_principal=principal).run(request)
+    try:
+        await _persist_scheduled_candidate(
+            goal,
+            GoalCandidateRequest(
+                capability_id="workflow.goal-snapshot-to-file",
+                capability_version=request.capability_version,
+                inputs={"file_path": request.file_path},
+                evidence_refs=request.evidence_refs,
+                reason=request.reason,
+                expected_outcome=request.expected_outcome,
+                expires_at=request.deadline_at,
+            ),
+        )
+    except Exception as exc:
+        return await _record_goal_work_failure(
+            parent_job_id,
+            parent_fencing_token,
+            goal=goal,
+            capability_id="workflow.goal-snapshot-to-file",
+            effect_type="goal_snapshot_admission",
+            error=exc,
+            budget=budget,
+        )
+    try:
+        result = await GoalSnapshotToFileService(authority_principal=principal).run(request)
+    except Exception as exc:
+        return await _record_goal_work_failure(
+            parent_job_id,
+            parent_fencing_token,
+            goal=goal,
+            capability_id="workflow.goal-snapshot-to-file",
+            effect_type="goal_snapshot_admission",
+            error=exc,
+            budget=budget,
+        )
     if not isinstance(result, GoalSnapshotToFileResult):
-        raise TypeError("goal snapshot service returned an invalid result")
-    effect_status = (
-        "succeeded"
-        if result.execution_status == "succeeded" and result.verification == "passed"
-        else "blocked"
-        if result.execution_status == "blocked"
-        else "failed"
+        return await _record_goal_work_failure(
+            parent_job_id,
+            parent_fencing_token,
+            goal=goal,
+            capability_id="workflow.goal-snapshot-to-file",
+            effect_type="goal_snapshot_admission",
+            error=TypeError("goal snapshot service returned an invalid result"),
+            budget=budget,
+        )
+    if not _adapter_result_matches_goal(result, goal, revision):
+        return await _record_goal_work_failure(
+            parent_job_id,
+            parent_fencing_token,
+            goal=goal,
+            capability_id="workflow.goal-snapshot-to-file",
+            effect_type="goal_snapshot_admission",
+            error=ValueError("goal snapshot adapter returned a mismatched goal identity"),
+            budget=budget,
+            reason="goal_identity_mismatch",
+        )
+    effect_status = _goal_result_status(
+        execution_status=result.execution_status,
+        verification=result.verification,
     )
     details = {
-        "status": result.execution_status,
+        # Persist the normalized status. The raw adapter status is kept
+        # separately for diagnostics, but cannot authorize delivery.
+        "status": effect_status,
+        "execution_status": result.execution_status,
         "verification": result.verification,
         "learning": result.learning,
         "goal_id": result.goal_id,
@@ -527,6 +990,13 @@ async def _run_opted_in_goal_snapshot(
         "artifact_ref": result.artifact_ref,
         "reason": result.reason,
         "operator_visible": True,
+        "content_sha256": result.content_sha256,
+        "output_exists": result.output_exists,
+        "workspace_contained": result.workspace_contained,
+        "goal_id_read_back": result.goal_id_read_back,
+        "evidence_refs": list(result.evidence_refs),
+        "notification_budget": _notification_budget_binding(goal, budget),
+        **_notification_delivery_binding(goal),
     }
     await durable_job_repository.record_effect(
         parent_job_id,
@@ -556,6 +1026,7 @@ async def run_strategist_tick() -> None:
         guardian_state = await build_guardian_state(
             refresh_observer=True,
             memory_query="current priorities, commitments, and recent intervention patterns",
+            service_id=_STRATEGIST_SERVICE_ID,
         )
         await durable_job_repository.record_checkpoint(
             durable_job_id,
@@ -582,6 +1053,9 @@ async def run_strategist_tick() -> None:
             proactive_work = {
                 "status": "blocked",
                 "reason": f"goal_work_scheduler_error:{type(exc).__name__}",
+                "goal_id": None,
+                "capability_id": "goal_work",
+                "goal_work_failure": True,
                 "operator_visible": True,
             }
             try:
@@ -602,6 +1076,44 @@ async def run_strategist_tick() -> None:
             owner=_STRATEGIST_RUNNER_ID,
             fencing_token=durable_fencing_token,
         )
+        if _goal_work_must_not_continue(proactive_work):
+            fence_details = {
+                "status": "blocked",
+                "reason": str(proactive_work.get("reason") or "goal_work_not_admitted"),
+                "goal_id": proactive_work.get("goal_id"),
+                "capability_id": proactive_work.get("capability_id"),
+                "delivery": "blocked",
+                "transport": "none",
+                "operator_visible": True,
+                "owner_principal_id": proactive_work.get("notification_owner_principal_id"),
+                "operator_session_id": proactive_work.get("notification_operator_session_id"),
+            }
+            await durable_job_repository.record_effect(
+                durable_job_id,
+                effect_type="goal_work_delivery_fence",
+                status="blocked",
+                details=fence_details,
+                owner=_STRATEGIST_RUNNER_ID,
+                fencing_token=durable_fencing_token,
+            )
+            await _transition_tick(
+                durable_job_id,
+                status="blocked",
+                fencing_token=durable_fencing_token,
+                reason=str(fence_details["reason"]),
+                result=fence_details,
+                result_summary="goal-bound work was not admitted; delivery was blocked",
+            )
+            await log_scheduler_job_event(
+                job_name="strategist_tick",
+                outcome="blocked",
+                details={
+                    "duration_ms": int((perf_counter() - started_at) * 1000),
+                    **fence_details,
+                    "durable_job_id": durable_job_id,
+                },
+            )
+            return
         # Keep the shared durable child contract live across the bounded
         # proactive work and model call. The repository performs the row-level
         # state/revision/fence CAS; a lost lease fails closed below.
@@ -724,7 +1236,23 @@ async def run_strategist_tick() -> None:
         )
         result = await deliver_or_queue(
             message,
+            is_scheduled=True,
             guardian_confidence=guardian_state.confidence.overall,
+            owner_principal_id=(
+                proactive_work.get("notification_owner_principal_id")
+                if isinstance(proactive_work.get("notification_owner_principal_id"), str)
+                else None
+            ),
+            operator_session_id=(
+                proactive_work.get("notification_operator_session_id")
+                if isinstance(proactive_work.get("notification_operator_session_id"), str)
+                else None
+            ),
+            notification_budget=(
+                proactive_work.get("notification_budget")
+                if isinstance(proactive_work.get("notification_budget"), dict)
+                else None
+            ),
         )
         delivery_value = _delivery_value(result)
         policy_action_value = _policy_action_value(result)

@@ -1,29 +1,37 @@
 """Tests for delivery coordinator — deliver_or_queue routing."""
 
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch, MagicMock
 
 import pytest
+import pytest_asyncio
 
 from config.settings import settings
 from src.extensions.state import save_extension_state_payload
 from src.audit.repository import audit_repository
-from src.guardian.feedback import GuardianLearningSignal, guardian_feedback_repository
+from src.guardian.feedback import (
+    GuardianLearningSignal,
+    ScopedGuardianLearningResolution,
+    guardian_feedback_repository,
+)
 from src.guardian.learning_evidence import (
     GuardianLearningAxisEvidence,
     learning_field_for_axis,
     neutral_axis_evidence,
     ordered_learning_axes,
 )
-from src.db.models import MemoryKind
+from src.db.models import MemoryKind, Session
 from src.memory.procedural import sync_learning_signal_memories
 from src.memory.procedural_guidance import ProceduralMemoryGuidance
 from src.memory.repository import memory_repository
 from src.models.schemas import WSResponse
 from src.observer.context import CurrentContext
 from src.observer.delivery import _active_channel_adapters, deliver_or_queue, deliver_queued_bundle
+from src.conversation.identity import ConversationIdentityError
 from src.observer.intervention_policy import InterventionAction
 from src.observer.native_notification_queue import native_notification_queue
 from src.scheduler.connection_manager import BroadcastResult
+from src.security.trust_contract import AuthorityGrant, PrincipalType, TrustPrincipal
 
 
 def _make_context(**overrides) -> CurrentContext:
@@ -36,8 +44,47 @@ def _make_context(**overrides) -> CurrentContext:
     return CurrentContext(**defaults)
 
 
-def _patch_deps(ctx, *, use_actual_learning_signal: bool = False):
+@pytest_asyncio.fixture(autouse=True)
+async def _delivery_database(async_db):
+    """Give every delivery-path test the same bounded in-memory outbox."""
+    yield async_db
+
+
+@pytest.mark.asyncio
+async def test_goal_bound_delivery_without_owner_is_rejected_before_transport():
+    message = WSResponse(
+        type="proactive",
+        content="goal update",
+        intervention_type="goal_update",
+        urgency=3,
+    )
+    with pytest.raises(ConversationIdentityError) as exc:
+        await deliver_or_queue(
+            message,
+            notification_budget={
+                "goal_id": "goal-a",
+                "budget_period_key": "2026-09-11",
+                "budget_limit": 1,
+            },
+        )
+
+    assert exc.value.code == "goal_owner_binding_missing"
+
+
+def _patch_deps(
+    ctx,
+    *,
+    use_actual_learning_signal: bool = False,
+    persist_intervention: bool = False,
+):
     """Patch the lazy-imported singletons at their source modules."""
+    # ``async_db`` replaces the feedback repository's session factory with the
+    # in-memory fixture.  Keep persistence for those tests while making the
+    # small routing-only tests independent of the operator's local database.
+    from src.guardian import feedback as feedback_module
+
+    if not persist_intervention and getattr(feedback_module.get_session, "__module__", "") != "src.db.engine":
+        persist_intervention = True
     mock_cm = MagicMock()
     mock_cm.get_context.return_value = ctx
     mock_cm.is_daemon_connected.return_value = False
@@ -53,19 +100,69 @@ def _patch_deps(ctx, *, use_actual_learning_signal: bool = False):
     mock_iq.drain = AsyncMock(return_value=[])
     mock_iq.peek_all = AsyncMock(return_value=[])
     mock_iq.delete_many = AsyncMock(return_value=0)
+    # Bound delivery now requires a server-owned runtime envelope.  Unit tests
+    # that exercise policy/routing provide the same narrow service envelope as
+    # the scheduler and a canonical session owner readback; production code
+    # still fails closed when either is absent.
+    test_principal = TrustPrincipal(
+        principal_id="service:test-delivery",
+        principal_type=PrincipalType.SERVICE,
+        authenticated=True,
+        grants=(AuthorityGrant.CAPABILITY_EXECUTE,),
+        job_id="test-delivery",
+    )
 
     patches = [
         patch("src.observer.manager.context_manager", mock_cm),
         patch("src.scheduler.connection_manager.ws_manager", mock_ws),
         patch("src.observer.insight_queue.insight_queue", mock_iq),
+        patch("src.observer.delivery._current_trust_principal", return_value=test_principal),
+        patch(
+            "src.agent.session.session_manager.get",
+            new=AsyncMock(return_value=SimpleNamespace(owner_principal_id="operator:test-delivery")),
+        ),
     ]
-    if not use_actual_learning_signal:
+    if not persist_intervention:
+        patches.extend(
+            [
+                patch("src.observer.delivery._create_intervention_record", AsyncMock(return_value=None)),
+                patch("src.observer.delivery._update_intervention_outcome", AsyncMock()),
+                patch(
+                    "src.observer.delivery._active_channel_adapters",
+                    return_value={"websocket", "native_notification"},
+                ),
+                patch("src.observer.delivery.log_observer_delivery_event", AsyncMock()),
+            ]
+        )
+    if not use_actual_learning_signal and not persist_intervention:
         patches.append(
             patch(
                 "src.guardian.feedback.guardian_feedback_repository.get_learning_signal",
                 AsyncMock(
                     side_effect=lambda intervention_type, limit=12, **kwargs: GuardianLearningSignal.neutral(
                         intervention_type
+                    )
+                ),
+            )
+        )
+        patches.append(
+            patch(
+                "src.guardian.feedback.guardian_feedback_repository.resolve_learning_signal",
+                AsyncMock(
+                    side_effect=lambda intervention_type, **kwargs: ScopedGuardianLearningResolution(
+                        effective_signal=GuardianLearningSignal.neutral(intervention_type),
+                        dominant_scope="global",
+                        decisions=(),
+                    )
+                ),
+            )
+        )
+        patches.append(
+            patch(
+                "src.memory.procedural_guidance.load_procedural_memory_guidance",
+                AsyncMock(
+                    side_effect=lambda intervention_type, **kwargs: ProceduralMemoryGuidance(
+                        intervention_type=intervention_type
                     )
                 ),
             )
@@ -106,7 +203,7 @@ def _axis_evidence_tuple(
 @pytest.mark.asyncio
 async def test_deliver_broadcasts():
     ctx = _make_context()
-    patches, mock_cm, mock_ws, mock_iq = _patch_deps(ctx)
+    patches, mock_cm, mock_ws, mock_iq = _patch_deps(ctx, persist_intervention=False)
     for p in patches:
         p.start()
     try:
@@ -126,7 +223,7 @@ async def test_deliver_broadcasts():
 @pytest.mark.asyncio
 async def test_native_channel_adapter_can_deliver_without_websocket():
     ctx = _make_context()
-    patches, mock_cm, mock_ws, mock_iq = _patch_deps(ctx)
+    patches, mock_cm, mock_ws, mock_iq = _patch_deps(ctx, persist_intervention=False)
     mock_cm.is_daemon_connected.return_value = True
     for p in patches:
         p.start()
@@ -150,7 +247,7 @@ async def test_native_channel_adapter_can_deliver_without_websocket():
 @pytest.mark.asyncio
 async def test_live_delivery_falls_back_to_native_when_browser_runtime_is_unavailable():
     ctx = _make_context()
-    patches, mock_cm, mock_ws, mock_iq = _patch_deps(ctx)
+    patches, mock_cm, mock_ws, mock_iq = _patch_deps(ctx, persist_intervention=False)
     mock_cm.is_daemon_connected.return_value = True
     mock_ws.broadcast = AsyncMock(return_value=BroadcastResult(
         attempted_connections=0,
@@ -198,7 +295,7 @@ async def test_channel_routing_can_prefer_native_notification_for_live_delivery(
         }
     )
     ctx = _make_context()
-    patches, mock_cm, mock_ws, mock_iq = _patch_deps(ctx)
+    patches, mock_cm, mock_ws, mock_iq = _patch_deps(ctx, persist_intervention=False)
     mock_cm.is_daemon_connected.return_value = True
     for p in patches:
         p.start()
@@ -223,7 +320,7 @@ async def test_channel_routing_can_prefer_native_notification_for_live_delivery(
 @pytest.mark.asyncio
 async def test_native_channel_adapter_can_deliver_queued_bundle_without_websocket():
     ctx = _make_context()
-    patches, mock_cm, mock_ws, mock_iq = _patch_deps(ctx)
+    patches, mock_cm, mock_ws, mock_iq = _patch_deps(ctx, persist_intervention=False)
     mock_cm.is_daemon_connected.return_value = True
     mock_iq.peek_all = AsyncMock(
         return_value=[
@@ -253,9 +350,9 @@ async def test_native_channel_adapter_can_deliver_queued_bundle_without_websocke
 
 
 @pytest.mark.asyncio
-async def test_native_bundle_delivery_preserves_shared_thread_continuity():
+async def test_native_bundle_delivery_preserves_shared_thread_continuity(async_db):
     ctx = _make_context()
-    patches, mock_cm, mock_ws, mock_iq = _patch_deps(ctx)
+    patches, mock_cm, mock_ws, mock_iq = _patch_deps(ctx, persist_intervention=False)
     mock_cm.is_daemon_connected.return_value = True
     mock_iq.peek_all = AsyncMock(
         return_value=[
@@ -276,6 +373,8 @@ async def test_native_bundle_delivery_preserves_shared_thread_continuity():
     for p in patches:
         p.start()
     try:
+        async with async_db() as db:
+            db.add(Session(id="session-123", owner_principal_id="operator:test-delivery"))
         await native_notification_queue.clear()
         with patch("src.observer.delivery._active_channel_adapters", return_value={"native_notification"}):
             delivered = await deliver_queued_bundle()
@@ -295,9 +394,9 @@ async def test_native_bundle_delivery_preserves_shared_thread_continuity():
 
 
 @pytest.mark.asyncio
-async def test_native_bundle_delivery_partitions_mixed_sessions_into_separate_notifications():
+async def test_native_bundle_delivery_partitions_mixed_sessions_into_separate_notifications(async_db):
     ctx = _make_context()
-    patches, mock_cm, mock_ws, mock_iq = _patch_deps(ctx)
+    patches, mock_cm, mock_ws, mock_iq = _patch_deps(ctx, persist_intervention=False)
     mock_cm.is_daemon_connected.return_value = True
     mock_iq.peek_all = AsyncMock(
         return_value=[
@@ -318,6 +417,9 @@ async def test_native_bundle_delivery_partitions_mixed_sessions_into_separate_no
     for p in patches:
         p.start()
     try:
+        async with async_db() as db:
+            db.add(Session(id="session-123", owner_principal_id="operator:test-delivery"))
+            db.add(Session(id="session-456", owner_principal_id="operator:test-delivery"))
         await native_notification_queue.clear()
         with patch("src.observer.delivery._active_channel_adapters", return_value={"native_notification"}):
             delivered = await deliver_queued_bundle()
@@ -354,7 +456,7 @@ async def test_channel_routing_can_prefer_native_notification_for_bundle_deliver
         }
     )
     ctx = _make_context()
-    patches, mock_cm, mock_ws, mock_iq = _patch_deps(ctx)
+    patches, mock_cm, mock_ws, mock_iq = _patch_deps(ctx, persist_intervention=False)
     mock_cm.is_daemon_connected.return_value = True
     mock_iq.peek_all = AsyncMock(
         return_value=[
@@ -400,7 +502,7 @@ async def test_channel_routing_can_prefer_websocket_for_scheduled_delivery(tmp_p
         }
     )
     ctx = _make_context()
-    patches, mock_cm, mock_ws, mock_iq = _patch_deps(ctx)
+    patches, mock_cm, mock_ws, mock_iq = _patch_deps(ctx, persist_intervention=False)
     mock_cm.is_daemon_connected.return_value = True
     for p in patches:
         p.start()
@@ -440,7 +542,7 @@ async def test_channel_routing_can_prefer_native_notification_for_alert_delivery
         }
     )
     ctx = _make_context()
-    patches, mock_cm, mock_ws, mock_iq = _patch_deps(ctx)
+    patches, mock_cm, mock_ws, mock_iq = _patch_deps(ctx, persist_intervention=False)
     mock_cm.is_daemon_connected.return_value = True
     for p in patches:
         p.start()
@@ -522,7 +624,7 @@ def test_active_channel_adapters_keep_builtin_transport_for_unclaimed_route(tmp_
 @pytest.mark.asyncio
 async def test_deliver_logs_runtime_audit(async_db):
     ctx = _make_context()
-    patches, mock_cm, mock_ws, mock_iq = _patch_deps(ctx)
+    patches, mock_cm, mock_ws, mock_iq = _patch_deps(ctx, persist_intervention=False)
     for p in patches:
         p.start()
     try:
@@ -553,7 +655,7 @@ async def test_deliver_logs_runtime_audit(async_db):
 @pytest.mark.asyncio
 async def test_deliver_decrements_budget():
     ctx = _make_context(attention_budget_remaining=3)
-    patches, mock_cm, mock_ws, mock_iq = _patch_deps(ctx)
+    patches, mock_cm, mock_ws, mock_iq = _patch_deps(ctx, persist_intervention=False)
     for p in patches:
         p.start()
     try:
@@ -569,7 +671,7 @@ async def test_deliver_decrements_budget():
 @pytest.mark.asyncio
 async def test_deliver_ambient_no_budget_decrement():
     ctx = _make_context(attention_budget_remaining=3)
-    patches, mock_cm, mock_ws, mock_iq = _patch_deps(ctx)
+    patches, mock_cm, mock_ws, mock_iq = _patch_deps(ctx, persist_intervention=False)
     for p in patches:
         p.start()
     try:
@@ -586,7 +688,7 @@ async def test_deliver_ambient_no_budget_decrement():
 @pytest.mark.asyncio
 async def test_queue_when_blocked():
     ctx = _make_context(user_state="deep_work")
-    patches, mock_cm, mock_ws, mock_iq = _patch_deps(ctx)
+    patches, mock_cm, mock_ws, mock_iq = _patch_deps(ctx, persist_intervention=False)
     for p in patches:
         p.start()
     try:
@@ -604,6 +706,8 @@ async def test_queue_when_blocked():
             reasoning="",
             intervention_id=msg.intervention_id,
             session_id=None,
+            owner_principal_id="service:test-delivery",
+            operator_session_id=None,
         )
     finally:
         for p in patches:
@@ -636,7 +740,7 @@ async def test_deliver_uses_procedural_memory_guidance_when_heuristic_signal_is_
     )
 
     ctx = _make_context(user_state="deep_work")
-    patches, mock_cm, mock_ws, mock_iq = _patch_deps(ctx)
+    patches, mock_cm, mock_ws, mock_iq = _patch_deps(ctx, persist_intervention=False)
     mock_cm.is_daemon_connected.return_value = True
     for p in patches:
         p.start()
@@ -714,7 +818,7 @@ async def test_deliver_prefers_native_transport_when_procedural_memory_promotes_
     )
 
     ctx = _make_context(user_state="deep_work")
-    patches, mock_cm, mock_ws, mock_iq = _patch_deps(ctx)
+    patches, mock_cm, mock_ws, mock_iq = _patch_deps(ctx, persist_intervention=False)
     mock_cm.is_daemon_connected.return_value = True
     mock_ws.broadcast = AsyncMock(
         return_value=BroadcastResult(
@@ -891,7 +995,7 @@ async def test_deliver_prefers_scoped_project_and_thread_guidance_over_global_me
     )
 
     ctx = _make_context(user_state="available", active_project="Atlas")
-    patches, mock_cm, mock_ws, mock_iq = _patch_deps(ctx)
+    patches, mock_cm, mock_ws, mock_iq = _patch_deps(ctx, persist_intervention=False)
     for p in patches:
         p.start()
     try:

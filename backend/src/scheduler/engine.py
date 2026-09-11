@@ -121,6 +121,7 @@ def init_scheduler() -> AsyncIOScheduler | None:
     from src.scheduler.jobs.screenshot_observation_digest import run_screenshot_observation_digest
     from src.scheduler.jobs.weekly_activity_review import run_weekly_activity_review
     from src.scheduler.jobs.screen_cleanup import run_screen_cleanup
+    from src.scheduler.jobs.audio_ingress_cleanup import run_audio_ingress_cleanup
 
     jobs = [
         {
@@ -228,6 +229,14 @@ def init_scheduler() -> AsyncIOScheduler | None:
             "trigger": CronTrigger(hour=3, timezone=validated_tz),
             "id": "screen_cleanup",
             "name": "Screen observation cleanup",
+        },
+        {
+            "func": _async_job_wrapper(run_audio_ingress_cleanup, loop, job_id="audio_ingress_cleanup"),
+            "trigger": IntervalTrigger(seconds=60),
+            "id": "audio_ingress_cleanup",
+            "name": "Audio ingress retention cleanup",
+            "next_run_time": _startup_next_run(True, delay_seconds=60),
+            "misfire_grace_time": 120,
         },
     ]
 

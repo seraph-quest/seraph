@@ -103,7 +103,7 @@ _EXECUTABLE_META_CHARS = set("|&;<>()`$\n\r\t ")
 _OUTPUT_CHAR_LIMIT = 12_000
 _PROCESS_OUTPUT_DEFAULT = 4_000
 _PROCESS_OUTPUT_MAX = 24_000
-_COMMAND_TIMEOUT_MAX = 120
+_COMMAND_TIMEOUT_MAX = 300
 # The process manager already applies tighter display/timeout limits. These
 # resource ceilings are the hard local profile carried by every child. The
 # lower display limit remains an intentional operator/UI bound.
@@ -115,6 +115,8 @@ _PROCESS_PIPE_CHUNK_BYTES = 64 * 1024
 _PROCESS_STOP_WAIT_SECONDS = 1.0
 _PROCESS_IDENTITY_RETRY_ATTEMPTS = 5
 _PROCESS_IDENTITY_RETRY_DELAY_SECONDS = 0.01
+_GIT_PATHSPEC_FILE_MAX_BYTES = 1 * 1024 * 1024
+_GIT_PATHSPEC_FILE_MAX_ENTRIES = 4096
 _SECRET_FILE_NAMES = {
     ".env",
     ".envrc",
@@ -260,6 +262,51 @@ _NETWORK_CAPABLE_FLAGS = {
 _NETWORK_CAPABLE_FLAG_PREFIXES = tuple(f"{flag}=" for flag in _NETWORK_CAPABLE_FLAGS)
 _NETWORK_ARGUMENT_PREFIXES = ("http://", "https://", "ssh://", "git@")
 _GIT_SAFE_INLINE_CONFIG_KEYS = frozenset({"user.name", "user.email"})
+_GIT_PATH_VALUE_OPTIONS = frozenset(
+    {
+        "-C",
+        "--git-dir",
+        "--work-tree",
+        "--exec-path",
+        "--output",
+        "--output-directory",
+        "--file",
+        "--template",
+        "--notes-file",
+        "--order-file",
+        "--pathspec-from-file",
+        "--exclude",
+        "--include",
+        "--export-marks",
+        "--import-marks",
+    }
+)
+_GIT_NON_PATH_VALUE_OPTIONS = frozenset(
+    {
+        "-c",
+        "--config-env",
+        "--upload-pack",
+        "--receive-pack",
+        "--namespace",
+    }
+)
+_GIT_ATTACHED_PATH_OPTION_PREFIXES = (
+    "--git-dir=",
+    "--work-tree=",
+    "--exec-path=",
+    "--output=",
+    "--output-directory=",
+    "--file=",
+    "--template=",
+    "--notes-file=",
+    "--order-file=",
+    "--pathspec-from-file=",
+    "--exclude=",
+    "--include=",
+    "--export-marks=",
+    "--import-marks=",
+)
+_GIT_SHORT_ATTACHED_PATH_OPTION_PREFIXES = ("-C", "-F", "-O", "-o", "-f")
 _ENV_ALLOWLIST = {
     "PATH",
     "LANG",
@@ -468,7 +515,15 @@ def _reject_network_capable_package_args(command_name: str, args: list[str]) -> 
     # Options that take a value must be skipped while locating the subcommand;
     # otherwise ``git -C workspace status`` would mistake the path for it.
     value_options = {
-        "git": {"-C", "-c", "--config-env", "--upload-pack", "--receive-pack", "--exec-path"},
+        "git": {
+            "-C",
+            "-c",
+            "--config-env",
+            "--upload-pack",
+            "--receive-pack",
+            "--exec-path",
+            "--pathspec-from-file",
+        },
         "npm": {"--registry", "--proxy", "--https-proxy", "--userconfig", "--globalconfig"},
         "uv": {"--index-url", "--extra-index-url", "--default-index", "--find-links", "--proxy"},
     }[command_name]
@@ -508,26 +563,227 @@ def _reject_network_script_markers(script_path: Path) -> None:
         raise ValueError("script network clients are blocked in the process runtime.")
 
 
+def _validate_git_line_range_path(raw_range: str, cwd: Path) -> None:
+    """Validate the file component of Git's ``-L <range>:<path>`` option."""
+    value = str(raw_range)
+    parts = value.split(":")
+    if value.startswith(":") and len(parts) >= 3:
+        path = ":".join(parts[2:])
+    elif len(parts) >= 2:
+        path = ":".join(parts[1:])
+    else:
+        path = ""
+    if path:
+        _ensure_process_accessible_path(path, cwd, label="git path argument")
+
+
+def _git_pathspec_parts(raw_entry: str) -> tuple[str, bool]:
+    """Return a pathspec's path portion and whether it is root-relative.
+
+    Git pathspec files contain pathspec syntax rather than shell arguments. We
+    accept the bounded subset needed by workspace operations, while still
+    validating the actual path portion for traversal and secret-like names.
+    Magic prefixes and the short exclusion prefixes are stripped only for
+    validation; Git receives the original entry unchanged.
+    """
+    entry = str(raw_entry)
+    root_relative = False
+    if entry.startswith(":/"):
+        root_relative = True
+        entry = entry[2:]
+    elif entry.startswith(":("):
+        close = entry.find(")", 2)
+        if close < 0:
+            raise ValueError("git pathspec magic must be closed.")
+        magic = {part.strip().lower() for part in entry[2:close].split(",") if part.strip()}
+        root_relative = "top" in magic
+        entry = entry[close + 1 :]
+    elif entry.startswith(("!", "^")):
+        entry = entry[1:]
+    if not entry:
+        raise ValueError("git pathspec entries cannot be empty.")
+    return entry, root_relative
+
+
+def _validate_git_pathspec_entry(raw_entry: str, cwd: Path) -> None:
+    """Validate one decoded pathspec from ``--pathspec-from-file``.
+
+    Pathspec files are read by Git after this validator returns, so every
+    entry is checked before the child starts. Existing glob matches are also
+    inspected so a broad pattern cannot select a secret-like workspace file.
+    """
+    entry = str(raw_entry)
+    if "\x00" in entry:
+        raise ValueError("git pathspec entries cannot contain NUL bytes.")
+    path_value, root_relative = _git_pathspec_parts(entry)
+    base = _workspace_root() if root_relative else cwd
+    resolved = (Path(path_value) if Path(path_value).is_absolute() else (base / path_value)).resolve()
+    try:
+        resolved.relative_to(_workspace_root())
+    except ValueError as exc:
+        raise ValueError("git pathspec must stay within the workspace.") from exc
+
+    # Validate the syntactic path even when a glob has no current match. This
+    # catches traversal and direct secret names without requiring the target
+    # file to exist yet.
+    if _is_secret_like_workspace_path(resolved):
+        raise ValueError("git pathspec cannot target secret-like workspace files.")
+
+    # Glob pathspecs are legitimate Git input. Enumerate a bounded set of
+    # current matches to ensure a broad pattern cannot select a secret-like
+    # file that already exists. A pattern with too many matches fails closed.
+    if any(char in path_value for char in "*?["):
+        try:
+            matches = list(base.glob(path_value))
+        except (OSError, ValueError, NotImplementedError) as exc:
+            raise ValueError("git pathspec pattern cannot be inspected safely.") from exc
+        if len(matches) > _GIT_PATHSPEC_FILE_MAX_ENTRIES:
+            raise ValueError("git pathspec pattern matches too many workspace paths.")
+        for match in matches:
+            try:
+                match_resolved = match.resolve()
+                match_resolved.relative_to(_workspace_root())
+            except (OSError, ValueError) as exc:
+                raise ValueError("git pathspec must stay within the workspace.") from exc
+            if _is_secret_like_workspace_path(match_resolved):
+                raise ValueError("git pathspec cannot select secret-like workspace files.")
+
+
+def _validate_git_pathspec_file(raw_path: str, cwd: Path, *, nul_mode: bool) -> None:
+    """Read and validate every entry in a Git pathspec file before spawning."""
+    if str(raw_path).strip() == "-":
+        raise ValueError("--pathspec-from-file=- is not supported by the workspace runtime.")
+    _ensure_process_accessible_path(raw_path, cwd, label="--pathspec-from-file path")
+    candidate = Path(raw_path)
+    file_path = candidate if candidate.is_absolute() else (cwd / candidate)
+    if file_path.is_symlink():
+        raise ValueError("--pathspec-from-file cannot be a symbolic link.")
+    resolved = file_path.resolve()
+    if not resolved.is_file():
+        raise ValueError("--pathspec-from-file must point to a regular workspace file.")
+    try:
+        with resolved.open("rb") as pathspec_file:
+            data = pathspec_file.read(_GIT_PATHSPEC_FILE_MAX_BYTES + 1)
+    except OSError as exc:
+        raise ValueError("--pathspec-from-file must be readable by the process runtime.") from exc
+    if len(data) > _GIT_PATHSPEC_FILE_MAX_BYTES:
+        raise ValueError("Git pathspec file exceeds the bounded workspace limit.")
+    delimiter = b"\x00" if nul_mode else b"\n"
+    raw_entries = data.split(delimiter)
+    if raw_entries and raw_entries[-1] == b"":
+        raw_entries.pop()
+    if len(raw_entries) > _GIT_PATHSPEC_FILE_MAX_ENTRIES:
+        raise ValueError("Git pathspec file contains too many entries.")
+    if not raw_entries:
+        raise ValueError("Git pathspec file cannot be empty.")
+    for raw_entry in raw_entries:
+        try:
+            entry = raw_entry.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise ValueError("Git pathspec file must contain UTF-8 entries.") from exc
+        if not entry:
+            raise ValueError("Git pathspec entries cannot be empty.")
+        _validate_git_pathspec_entry(entry, cwd)
+
+
+def _validate_git_workspace_args(args: list[str], cwd: Path) -> None:
+    """Validate Git path operands before spawning the child process.
+
+    Git accepts path operands for many subcommands and its ``--`` separator
+    turns every following token into a pathspec.  Treating those values as
+    opaque command arguments lets ``git diff --no-index`` read arbitrary
+    files, even though the process runtime advertises workspace-only paths.
+    Relative operands are resolved against the already-bound workspace cwd;
+    absolute paths and traversal are rejected by the same resolver used by
+    the other process commands.
+    """
+    pathspec_mode = False
+    index = 0
+    while index < len(args):
+        arg = args[index]
+        if pathspec_mode:
+            _ensure_process_accessible_path(arg, cwd, label="git path argument")
+            index += 1
+            continue
+        if arg == "--":
+            pathspec_mode = True
+            index += 1
+            continue
+        if arg in _GIT_PATH_VALUE_OPTIONS:
+            if index + 1 >= len(args):
+                raise ValueError(f"{arg} requires a path argument.")
+            if arg == "--pathspec-from-file":
+                _validate_git_pathspec_file(
+                    args[index + 1],
+                    cwd,
+                    nul_mode="--pathspec-file-nul" in args,
+                )
+            else:
+                _ensure_process_accessible_path(args[index + 1], cwd, label=f"{arg} path")
+            index += 2
+            continue
+        if arg in _GIT_NON_PATH_VALUE_OPTIONS:
+            if index + 1 >= len(args):
+                raise ValueError(f"{arg} requires a value.")
+            index += 2
+            continue
+        attached_path = next(
+            (
+                arg[len(prefix) :]
+                for prefix in _GIT_ATTACHED_PATH_OPTION_PREFIXES
+                if arg.startswith(prefix)
+            ),
+            None,
+        )
+        if attached_path is not None:
+            if not attached_path:
+                raise ValueError("Git path option requires a path argument.")
+            if arg.startswith("--pathspec-from-file="):
+                _validate_git_pathspec_file(
+                    attached_path,
+                    cwd,
+                    nul_mode="--pathspec-file-nul" in args,
+                )
+            else:
+                _ensure_process_accessible_path(attached_path, cwd, label="git path argument")
+            index += 1
+            continue
+        attached_short_path = next(
+            (
+                arg[len(prefix) :]
+                for prefix in _GIT_SHORT_ATTACHED_PATH_OPTION_PREFIXES
+                if len(arg) > len(prefix) and arg.startswith(prefix)
+            ),
+            None,
+        )
+        if attached_short_path is not None:
+            _ensure_process_accessible_path(attached_short_path, cwd, label="git path argument")
+            index += 1
+            continue
+        if arg in {"-L", "--line-range"}:
+            if index + 1 >= len(args):
+                raise ValueError(f"{arg} requires a range and path argument.")
+            _validate_git_line_range_path(args[index + 1], cwd)
+            index += 2
+            continue
+        if arg.startswith("-L") and len(arg) > 2:
+            _validate_git_line_range_path(arg[2:], cwd)
+            index += 1
+            continue
+        if arg.startswith("-"):
+            index += 1
+            continue
+        _ensure_process_accessible_path(arg, cwd, label="git path argument")
+        index += 1
+
+
 def _validate_workspace_scoped_args(executable: str, args: list[str], cwd: Path) -> None:
     command_name = Path(executable).name
 
     _reject_network_capable_package_args(command_name, args)
 
     if command_name == "git":
-        index = 0
-        while index < len(args):
-            arg = args[index]
-            if arg in {"-C", "--git-dir", "--work-tree"}:
-                if index + 1 >= len(args):
-                    raise ValueError(f"{arg} requires a path argument.")
-                _ensure_process_accessible_path(args[index + 1], cwd, label=f"{arg} path")
-                index += 2
-                continue
-            if arg.startswith("--git-dir="):
-                _ensure_process_accessible_path(arg.split("=", 1)[1], cwd, label="--git-dir path")
-            elif arg.startswith("--work-tree="):
-                _ensure_process_accessible_path(arg.split("=", 1)[1], cwd, label="--work-tree path")
-            index += 1
+        _validate_git_workspace_args(args, cwd)
         return
 
     if command_name in {"python", "python3", "node"}:

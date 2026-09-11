@@ -1218,19 +1218,29 @@ async def _require_extension_lifecycle_approval(
         if owner_operator_session_id
         else {}
     )
+    owner_principal_id = (
+        str(owner_principal.principal_id).strip()
+        if owner_principal is not None and owner_principal.principal_id
+        else None
+    )
+    selector_kwargs = {
+        **owner_kwargs,
+        "owner_principal_id": owner_principal_id,
+        "approval_binding": safe_fingerprint_context,
+    }
     approval_satisfied = (
         await approval_repository.consume_approved(
             session_id=session_id,
             tool_name=tool_name,
             fingerprint=fingerprint,
-            **owner_kwargs,
+            **selector_kwargs,
         )
         if consume
         else await approval_repository.has_approved(
             session_id=session_id,
             tool_name=tool_name,
             fingerprint=fingerprint,
-            **owner_kwargs,
+            **selector_kwargs,
         )
     )
     if approval_satisfied:

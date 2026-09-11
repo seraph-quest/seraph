@@ -19,11 +19,14 @@ from src.db.engine import get_session
 from src.db.models import (
     ApprovalRequest,
     AuditEvent,
+    AudioIngressJob,
     GuardianIntervention,
     MemoryEpisode,
     MemoryEpisodeType,
     Message,
     NativeNotificationOutbox,
+    OperatorSession,
+    TelegramTransportOutbox,
     QueuedInsight,
     ScheduledJob,
     Session,
@@ -290,6 +293,42 @@ class SessionManager:
                 and session.owner_principal_id != owner_principal_id
             ):
                 raise SessionOwnerMismatchError(session_id)
+            # Audio bytes live outside the database, so quarantine cleanup is a
+            # deletion precondition.  Keep the session and its durable job rows
+            # when cleanup cannot be proven; the worker's retention pass can
+            # then retry the server-owned paths instead of losing their receipt.
+            audio_jobs_result = await db.execute(
+                select(AudioIngressJob).where(AudioIngressJob.session_id == session_id)
+            )
+            audio_jobs = list(audio_jobs_result.scalars().all())
+            try:
+                from src.guardian.audio_worker import cleanup_audio_job_paths
+            except Exception:
+                logger.warning(
+                    "Audio quarantine cleanup is unavailable while deleting session %s",
+                    session_id,
+                    exc_info=True,
+                )
+                return False
+            for audio_job in audio_jobs:
+                try:
+                    cleaned = cleanup_audio_job_paths(
+                        audio_job.raw_path,
+                        audio_job.normalized_path,
+                    )
+                except Exception:
+                    logger.warning(
+                        "Audio quarantine cleanup failed while deleting session %s",
+                        session_id,
+                        exc_info=True,
+                    )
+                    return False
+                if not cleaned:
+                    logger.warning(
+                        "Audio quarantine cleanup is incomplete while deleting session %s",
+                        session_id,
+                    )
+                    return False
             try:
                 process_runtime_manager.stop_processes_for_session(
                     session_id,
@@ -354,6 +393,13 @@ class SessionManager:
             )
             for intervention in interventions.scalars().all():
                 await db.delete(intervention)
+            # Audio jobs hold a foreign key to the canonical conversation.  The
+            # quarantine preflight above succeeded, so delete the metadata rows
+            # only after their private paths are proven gone.
+            from src.guardian.audio_worker import forget_audio_job_review
+            for audio_job in audio_jobs:
+                forget_audio_job_review(audio_job.request_id)
+                await db.delete(audio_job)
             # A deleted conversation can never resume an old native delivery.
             # Preserve the outbox receipt while cancelling active handoffs so
             # a restarted daemon cannot dispatch stale content.
@@ -372,6 +418,21 @@ class SessionManager:
                     lease_owner=None,
                     lease_expires_at=None,
                     cancelled_at=datetime.now(timezone.utc),
+                    updated_at=datetime.now(timezone.utc),
+                )
+            )
+            # A deleted canonical conversation cannot resume a Telegram
+            # delivery after restart. Preserve the receipt but cancel any
+            # queued/claimed handoff under the same owner fence.
+            await db.execute(
+                update(TelegramTransportOutbox)
+                .where(
+                    TelegramTransportOutbox.session_id == session_id,
+                    TelegramTransportOutbox.status.in_({"queued", "sending", "unknown"}),
+                )
+                .values(
+                    status="cancelled",
+                    last_error="conversation_deleted",
                     updated_at=datetime.now(timezone.utc),
                 )
             )
@@ -821,6 +882,10 @@ class SessionManager:
         message_id: str,
         metadata_json: str,
         attachment_refs: object = None,
+        confirmation_job_id: str | None = None,
+        confirmation_digest: str | None = None,
+        confirmation_owner_principal_id: str | None = None,
+        confirmation_operator_session_id: str | None = None,
     ) -> tuple[Message, bool]:
         """Persist one user ingress before dispatch and detect safe retries.
 
@@ -828,6 +893,96 @@ class SessionManager:
         key.  SQLite's existing primary-key constraint closes the small race
         between concurrent retries without adding a parallel receipt table.
         """
+        confirmation_mode = any(
+            value is not None
+            for value in (
+                confirmation_job_id,
+                confirmation_digest,
+                confirmation_owner_principal_id,
+                confirmation_operator_session_id,
+            )
+        )
+        if confirmation_mode and not all(
+            isinstance(value, str) and value
+            for value in (
+                confirmation_job_id,
+                confirmation_digest,
+                confirmation_owner_principal_id,
+                confirmation_operator_session_id,
+            )
+        ):
+            raise ValueError("confirmation reservation fence is incomplete")
+        if confirmation_mode:
+            assert confirmation_job_id is not None
+            assert confirmation_digest is not None
+            assert confirmation_owner_principal_id is not None
+            assert confirmation_operator_session_id is not None
+            # Claim the durable job fence and insert the canonical message in
+            # the same transaction.  Cancellation can win before this update;
+            # once it does, no message reservation is possible.
+            async with get_session() as db:
+                # The worker's request-time re-authentication closes the
+                # normal path, but session revocation can race that check.  A
+                # A row lock makes this transaction the linearization point on
+                # databases that support ``FOR UPDATE``.  SQLite's serialized
+                # write transaction provides the same fail-closed ordering for
+                # the local-first runtime: a revoked or expired operator
+                # session cannot reserve a canonical message after this check.
+                authority_result = await db.execute(
+                    select(OperatorSession)
+                    .where(OperatorSession.id == confirmation_operator_session_id)
+                    .with_for_update()
+                )
+                authority = authority_result.scalars().first()
+                now = datetime.now(timezone.utc)
+                if authority is None or authority.revoked_at is not None:
+                    raise MessageIngressConflictError(message_id)
+                idle_expires_at = authority.idle_expires_at
+                absolute_expires_at = authority.absolute_expires_at
+                if idle_expires_at.tzinfo is None:
+                    idle_expires_at = idle_expires_at.replace(tzinfo=timezone.utc)
+                if absolute_expires_at.tzinfo is None:
+                    absolute_expires_at = absolute_expires_at.replace(tzinfo=timezone.utc)
+                if now >= idle_expires_at or now >= absolute_expires_at:
+                    raise MessageIngressConflictError(message_id)
+                claimed = await db.execute(
+                    update(AudioIngressJob)
+                    .where(
+                        AudioIngressJob.id == confirmation_job_id,
+                        AudioIngressJob.status == "confirming",
+                        AudioIngressJob.confirmed_transcript_digest == confirmation_digest,
+                        AudioIngressJob.owner_principal_id == confirmation_owner_principal_id,
+                        AudioIngressJob.operator_session_id == confirmation_operator_session_id,
+                    )
+                    .values(status="confirming_reserved", updated_at=datetime.now(timezone.utc))
+                )
+                if claimed.rowcount != 1:
+                    raise MessageIngressConflictError(message_id)
+                existing = await db.get(Message, message_id)
+                if existing is not None:
+                    if (
+                        existing.session_id != session_id
+                        or existing.role != "user"
+                        or not self._ingress_metadata_matches(existing.metadata_json, metadata_json)
+                        or existing.content != content
+                    ):
+                        raise MessageIngressConflictError(message_id)
+                    db.expunge(existing)
+                    return existing, True
+                try:
+                    message = await self._add_message_in_db(
+                        db,
+                        session_id,
+                        "user",
+                        content,
+                        metadata_json=metadata_json,
+                        message_id=message_id,
+                        attachment_refs=attachment_refs,
+                    )
+                except IntegrityError as exc:
+                    raise MessageIngressConflictError(message_id) from exc
+                return message, False
+
         existing = await self.get_message(message_id)
         if existing is not None:
             if (
@@ -860,6 +1015,107 @@ class SessionManager:
                 raise MessageIngressConflictError(message_id)
             return raced, True
         return message, False
+
+    async def _add_message_in_db(
+        self,
+        db,
+        session_id: str,
+        role: str,
+        content: str,
+        step_number: int | None = None,
+        tool_used: str | None = None,
+        metadata_json: str | None = None,
+        message_id: str | None = None,
+        attachment_refs: object = None,
+    ) -> Message:
+        """Insert a message while retaining the caller's transaction."""
+        if len(content) > 50_000:
+            content = content[:50_000] + "\n\n[truncated]"
+        episode_metadata: dict | None = None
+        if metadata_json:
+            try:
+                parsed_metadata = json.loads(metadata_json)
+            except json.JSONDecodeError:
+                parsed_metadata = None
+            if isinstance(parsed_metadata, dict):
+                episode_metadata = parsed_metadata
+        lineage = episode_metadata.get("lineage") if isinstance(episode_metadata, dict) else None
+        if not isinstance(lineage, dict) and isinstance(episode_metadata, dict):
+            candidate = episode_metadata.get("ingress")
+            lineage = candidate if isinstance(candidate, dict) else None
+        if not isinstance(lineage, dict):
+            lineage = {}
+        lineage_owner_principal_id = str(
+            lineage.get("owner_principal_id") or lineage.get("principal_id") or ""
+        ).strip() or None
+        lineage_attachment_refs = lineage.get("attachment_refs")
+        attachment_input = attachment_refs if attachment_refs is not None else lineage_attachment_refs
+        safe_attachment_refs = validate_attachment_refs(
+            attachment_input,
+            owner_principal_id=lineage_owner_principal_id,
+        )
+        lineage_conversation_id = str(
+            lineage.get("conversation_id") or lineage.get("session_id") or session_id
+        ).strip() or session_id
+        lineage_thread_id = str(
+            lineage.get("thread_id") or lineage_conversation_id
+        ).strip() or lineage_conversation_id
+        msg = Message(
+            id=message_id or uuid.uuid4().hex,
+            session_id=session_id,
+            conversation_id=lineage_conversation_id,
+            thread_id=lineage_thread_id,
+            owner_principal_id=lineage_owner_principal_id,
+            operator_session_id=str(lineage.get("operator_session_id") or "").strip() or None,
+            device_id=str(lineage.get("device_id") or "").strip() or None,
+            channel=str(lineage.get("channel") or "").strip() or None,
+            transport=str(lineage.get("transport") or "").strip() or None,
+            correlation_id=str(lineage.get("correlation_id") or "").strip() or None,
+            causation_id=str(lineage.get("causation_id") or "").strip() or None,
+            attachment_refs_json=json.dumps(safe_attachment_refs, sort_keys=True),
+            role=role,
+            content=content,
+            step_number=step_number,
+            tool_used=tool_used,
+            metadata_json=metadata_json,
+        )
+        db.add(msg)
+        result = await db.execute(select(Session).where(Session.id == session_id))
+        session = result.scalars().first()
+        if session:
+            session.updated_at = datetime.now(timezone.utc)
+            db.add(session)
+        await db.flush()
+        episode_draft = build_message_episode(
+            role=role,
+            content=content,
+            tool_used=tool_used,
+            metadata=episode_metadata,
+        )
+        if episode_draft is not None:
+            try:
+                async with db.begin_nested():
+                    db.add(
+                        MemoryEpisode(
+                            session_id=session_id,
+                            episode_type=episode_draft.episode_type,
+                            summary=episode_draft.summary,
+                            content=episode_draft.content,
+                            source_message_id=msg.id,
+                            source_tool_name=episode_draft.source_tool_name,
+                            source_role=episode_draft.source_role,
+                            salience=episode_draft.salience,
+                            confidence=episode_draft.confidence,
+                            metadata_json=json.dumps(episode_draft.metadata or {}, sort_keys=True),
+                            observed_at=msg.created_at,
+                            created_at=msg.created_at,
+                        )
+                    )
+                    await db.flush()
+            except Exception:
+                logger.debug("Failed to persist episodic event for message %s", msg.id, exc_info=True)
+        db.expunge(msg)
+        return msg
 
     async def add_message(
         self,

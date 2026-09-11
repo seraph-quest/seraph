@@ -29,9 +29,10 @@ The pure validator still checks standard base64 shape and metadata-reported byte
 count, the 10 MiB audio cap, one stream, the MIME/container/codec allowlist,
 metadata-reported duration up to 60 seconds, normalized-WAV metadata up to 2
 MiB, consent freshness, and request/attachment identity conflicts. Transcript
-text from the intercepted transport is untrusted and editable; only the
-operator's final text and digest are persisted through the canonical session
-message path after digest-bound confirmation.
+text from the intercepted transport is untrusted and process-local; only its
+digest crosses the job/API boundary. The operator supplies the final text and
+digest, which are persisted through the canonical session message path after
+digest-bound confirmation.
 
 The payload builder emits only the documented OpenRouter `input_audio` content
 shape. It performs no network call, decoding, codec inspection, shell command,
@@ -56,10 +57,11 @@ admitted through the shared bounded remote-inference broker; the default worker
 has no transport and cannot make a provider call. The focused browser seam in
 `frontend/src/components/chat/PttAudioControl.tsx` requires a deliberate
 microphone grant, keeps model consent separate, prefers WebM/Opus then MP4,
-shows an editable transcript, and confirms it by digest. This slice makes no
-speech-quality, live-provider, GPU, VLM, or live-microphone claim. The input
-shape remains compatible with the existing audio ingress contract and the
-documented OpenRouter audio shape for a future separately governed adapter.
+and confirms operator-supplied text by the returned digest without receiving
+unconfirmed transcript text from the API. This slice makes no speech-quality,
+live-provider, GPU, VLM, or live-microphone claim. The input shape remains
+compatible with the existing audio ingress contract and the documented
+OpenRouter audio shape for a future separately governed adapter.
 
 ## Shipped On `develop`
 

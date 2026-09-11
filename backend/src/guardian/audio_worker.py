@@ -21,6 +21,8 @@ import hashlib
 import json
 import math
 import os
+import re
+from contextlib import suppress
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -32,12 +34,14 @@ from typing import Any, Awaitable, Callable, Protocol
 import uuid
 import wave
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 
 from src.agent.session import MessageIngressConflictError, session_manager
 from src.conversation.identity import (
     ConversationIdentityError,
+    build_conversation_identity,
+    build_lineage,
     issue_attachment_quarantine_receipt,
     validate_attachment_refs,
 )
@@ -73,6 +77,7 @@ DECODER_STDERR_MAX_BYTES = 64 * 1024
 AUDIO_WORKER_SCHEMA_VERSION = "seraph.guardian.audio-worker.v1"
 AUDIO_CAPABILITY_VERSION = "guardian.audio.transcription.v1"
 _AUDIO_ID_MAX = 256
+_REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$")
 _AUDIO_STATUS = frozenset(
     {"queued", "processing", "transcript_ready", "confirmed", "failed", "blocked", "cancelled"}
 )
@@ -169,6 +174,9 @@ class AudioUploadRequest:
     requested_capability: str = "chat"
     channel: str = "web"
     transport: str = "rest"
+    # API callers must set this from the authenticated operator principal.  A
+    # missing value is persisted as denied and can never authorize processing.
+    model_inference_granted: bool | None = None
 
     def __post_init__(self) -> None:
         for field_name in ("session_id", "owner_principal_id"):
@@ -192,8 +200,16 @@ class AudioUploadRequest:
                 object.__setattr__(self, field_name, normalized)
         if not isinstance(self.captured_at, datetime) or self.captured_at.tzinfo is None:
             raise ValueError("captured_at must be timezone-aware")
+        if (
+            not isinstance(self.requested_capability, str)
+            or not 1 <= len(self.requested_capability) <= 32
+            or any(char.isspace() for char in self.requested_capability)
+        ):
+            raise ValueError("requested_capability is invalid")
         if self.channel != "web" or self.transport not in {"rest", "websocket"}:
             raise ValueError("audio upload must use the web ingress transport")
+        if self.model_inference_granted is not None and not isinstance(self.model_inference_granted, bool):
+            raise ValueError("model_inference_granted must be a boolean")
 
 
 @dataclass(frozen=True, slots=True)
@@ -205,6 +221,7 @@ class AudioJobSnapshot:
     session_id: str
     message_id: str
     attachment_id: str
+    requested_capability: str
     status: str
     audio_payload_digest: str
     audio_size_bytes: int
@@ -237,6 +254,7 @@ class AudioJobSnapshot:
             "session_id": self.session_id,
             "message_id": self.message_id,
             "attachment_id": self.attachment_id,
+            "requested_capability": self.requested_capability,
             "status": self.status,
             "capture": {
                 "audio_payload_digest": self.audio_payload_digest,
@@ -256,7 +274,9 @@ class AudioJobSnapshot:
                 "model_reference": self.model_consent_reference,
             },
             "transcript": {
-                "available": self.transcript is not None,
+                # The digest is the confirmation handle; the unconfirmed text
+                # itself is intentionally process-local and redacted.
+                "available": self.transcript_digest is not None,
                 "digest": self.transcript_digest,
                 "confirmed_digest": self.confirmed_transcript_digest,
             },
@@ -299,11 +319,91 @@ def _digest_text(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
-def _bounded_id(value: str | None, prefix: str) -> str:
-    normalized = str(value or "").strip()
-    if normalized:
-        return normalized
-    return f"{prefix}-{uuid.uuid4().hex}"
+def _validate_request_id(value: str | None) -> str | None:
+    """Validate a caller retry key before any path operation is attempted."""
+    if value is None:
+        return None
+    normalized = str(value).strip()
+    # The retry key is opaque metadata, never a filesystem component.  Keep
+    # the allow-list intentionally narrower than the conversation identity
+    # contract so both POSIX and Windows path tricks fail closed.
+    if (
+        not _REQUEST_ID_RE.fullmatch(normalized)
+        or "/" in normalized
+        or "\\" in normalized
+        or ".." in normalized
+        or Path(normalized).is_absolute()
+    ):
+        raise AudioWorkerError("invalid_request_id", "audio request identity is invalid")
+    return normalized
+
+
+def _validate_supplied_identity(value: str | None, *, field: str) -> str | None:
+    if value is None:
+        return None
+    normalized = str(value).strip()
+    if (
+        not normalized
+        or len(normalized) > _AUDIO_ID_MAX
+        or "\x00" in normalized
+        or "/" in normalized
+        or "\\" in normalized
+    ):
+        raise AudioWorkerError("invalid_server_owned_id", f"{field} must be a server-owned identity")
+    return normalized
+
+
+def _derive_audio_identity(kind: str, *, owner: str, session_id: str, material: str) -> str:
+    return uuid.uuid5(
+        uuid.NAMESPACE_URL,
+        f"seraph-audio:{kind}:{owner}:{session_id}:{material}",
+    ).hex
+
+
+def _serialize_consent(consent: AudioConsent | None) -> dict[str, str] | None:
+    if consent is None:
+        return None
+    try:
+        state = consent.state.value
+    except AttributeError:
+        state = str(consent.state)
+    return {
+        "reference": str(consent.reference),
+        "state": state,
+        "granted_at": _utc(consent.granted_at).isoformat(),
+        "expires_at": _utc(consent.expires_at).isoformat(),
+    }
+
+
+def _deserialize_consent(value: object) -> AudioConsent | None:
+    if not isinstance(value, dict):
+        return None
+    try:
+        reference = str(value["reference"])
+        state = AudioConsentState(str(value["state"]))
+        granted_at = datetime.fromisoformat(str(value["granted_at"]))
+        expires_at = datetime.fromisoformat(str(value["expires_at"]))
+        return AudioConsent(
+            reference=reference,
+            state=state,
+            granted_at=_utc(granted_at),
+            expires_at=_utc(expires_at),
+        )
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def _bound_request_digest(request: AudioUploadRequest, ingress: AudioIngressRequest) -> str:
+    """Bind the immutable ingress digest to authenticated owner metadata."""
+    payload = {
+        "canonical_ingress_digest": canonical_audio_request_digest(ingress),
+        "owner_principal_id": request.owner_principal_id,
+        "operator_session_id": request.operator_session_id,
+        "model_inference_granted": request.model_inference_granted,
+        "capture_consent": _serialize_consent(request.capture_consent),
+        "model_consent": _serialize_consent(request.model_consent),
+    }
+    return _digest_text(_bounded_json(payload))
 
 
 def _bounded_json(value: object) -> str:
@@ -565,8 +665,17 @@ class AudioIngressWorker:
     def _now(self) -> datetime:
         return _utc(self.clock())
 
-    def _work_dir(self, request_id: str) -> Path:
-        path = self.quarantine_root / request_id
+    def _work_dir(self, quarantine_identity: str) -> Path:
+        """Create a directory from a worker-owned bounded identity only."""
+        if (
+            not _REQUEST_ID_RE.fullmatch(quarantine_identity)
+            or "/" in quarantine_identity
+            or "\\" in quarantine_identity
+            or ".." in quarantine_identity
+            or Path(quarantine_identity).is_absolute()
+        ):
+            raise AudioWorkerError("invalid_quarantine_identity", "audio quarantine identity is invalid")
+        path = self.quarantine_root / quarantine_identity
         path.mkdir(mode=0o700, parents=False, exist_ok=False)
         return path
 
@@ -614,6 +723,7 @@ class AudioIngressWorker:
             session_id=row.session_id,
             message_id=row.message_id,
             attachment_id=row.attachment_id,
+            requested_capability=row.requested_capability,
             status=row.status,
             audio_payload_digest=row.audio_payload_digest,
             audio_size_bytes=row.audio_size_bytes,
@@ -628,7 +738,9 @@ class AudioIngressWorker:
             capture_consent_reference=row.capture_consent_reference,
             model_consent_reference=row.model_consent_reference,
             raw_audio_retention_deadline=row.raw_audio_retention_deadline,
-            transcript=row.transcript,
+            # Raw/unconfirmed text is never exposed, including for legacy rows
+            # created before the process-local transcript rule was tightened.
+            transcript=None,
             transcript_digest=row.transcript_digest,
             confirmed_transcript_digest=row.confirmed_transcript_digest,
             result_digest=row.result_digest,
@@ -651,6 +763,35 @@ class AudioIngressWorker:
             db.expunge(row)
             return self._snapshot(row)
 
+    async def _update_if_status(
+        self,
+        job_id: str,
+        expected_statuses: set[str] | frozenset[str],
+        **changes: object,
+    ) -> AudioJobSnapshot:
+        """Apply a fenced state transition and return the durable winner.
+
+        Cancellation and restart cleanup can race an in-flight intercepted
+        transport.  Every terminal/process result uses this conditional write
+        so a stale task can never resurrect a cancelled job.
+        """
+        async with get_session() as db:
+            values = dict(changes)
+            values["updated_at"] = self._now()
+            await db.execute(
+                update(AudioIngressJob)
+                .where(
+                    AudioIngressJob.id == job_id,
+                    AudioIngressJob.status.in_(tuple(expected_statuses)),
+                )
+                .values(**values)
+            )
+            row = await db.get(AudioIngressJob, job_id)
+            if row is None:
+                raise AudioWorkerError("audio_job_not_found", "audio job is not available")
+            db.expunge(row)
+            return self._snapshot(row)
+
     async def _insert_job(
         self,
         request: AudioUploadRequest,
@@ -661,6 +802,7 @@ class AudioIngressWorker:
         normalized_path: Path,
         request_digest: str,
         retention_deadline: datetime,
+        identity_material_digest: str,
     ) -> tuple[AudioIngressJob, bool]:
         async with get_session() as db:
             existing_result = await db.execute(
@@ -672,6 +814,10 @@ class AudioIngressWorker:
                     raise AudioWorkerError("request_identity_conflict", "audio request identity is already bound")
                 db.expunge(existing)
                 return existing, True
+            # Missing authority is always persisted as denied.  The
+            # intercepted transport is a provider-free execution seam, not an
+            # authority bypass.
+            model_inference_granted = request.model_inference_granted is True
             row = AudioIngressJob(
                 request_id=ingress.request_id,
                 request_digest=request_digest,
@@ -688,6 +834,7 @@ class AudioIngressWorker:
                 audio_payload_digest=str(attachment_ref.get("content_hash") or ingress.payload_digest),
                 audio_size_bytes=ingress.audio_size_bytes,
                 duration_seconds=ingress.duration_seconds,
+                requested_capability=ingress.requested_capability,
                 media_type=ingress.media_type,
                 container=ingress.container,
                 codec=ingress.codec,
@@ -701,6 +848,16 @@ class AudioIngressWorker:
                     "capture": "quarantined",
                     "transport": "intercepted_test_boundary_only",
                     "canonical_memory": "no_learning_until_confirmed",
+                    "consent": {
+                        "capture": _serialize_consent(request.capture_consent),
+                        "model": _serialize_consent(request.model_consent),
+                    },
+                    "authority": {
+                        "model_inference_granted": model_inference_granted is True,
+                    },
+                    "identity": {
+                        "idempotency_key_digest": identity_material_digest,
+                    },
                     "multimodal_voice_claim_boundary": guardian_safe_multimodal_voice_policy_payload()["claim_boundary"],
                 }),
             )
@@ -713,7 +870,11 @@ class AudioIngressWorker:
                     select(AudioIngressJob).where(AudioIngressJob.request_id == ingress.request_id)
                 )
                 existing = retry.scalars().first()
-                if existing is None or existing.request_digest != request_digest:
+                if (
+                    existing is None
+                    or existing.request_digest != request_digest
+                    or existing.owner_principal_id != request.owner_principal_id
+                ):
                     raise AudioWorkerError("request_identity_conflict", "audio request identity raced")
                 db.expunge(existing)
                 return existing, True
@@ -725,28 +886,56 @@ class AudioIngressWorker:
         now = self._now()
         if len(request.audio_bytes) > RAW_AUDIO_MAX_BYTES:
             raise AudioWorkerError("audio_size_exceeds_limit", "audio upload exceeds the bound")
-        if request.request_id:
-            existing = await self._job(request.request_id)
-            if existing is not None:
-                payload_digest = hashlib.sha256(request.audio_bytes).hexdigest()
-                if (
-                    existing.owner_principal_id != request.owner_principal_id
-                    or existing.audio_payload_digest != payload_digest
-                ):
-                    raise AudioWorkerError("request_identity_conflict", "audio request identity is already bound")
-                return replace(self._snapshot(existing), duplicate=True)
-        await session_manager.get_for_ingress(
+        # Validate the caller retry key before it can influence a path.  The
+        # key remains an idempotency input; the durable request/message/
+        # attachment IDs are derived below from the authenticated owner and
+        # canonical session, matching the #750 web ingress contract.
+        supplied_request_id = _validate_request_id(request.request_id)
+        session = await session_manager.get_for_ingress(
             request.session_id,
             owner_principal_id=request.owner_principal_id,
         )
-        request_id = _bounded_id(request.request_id, "audio-request")
-        message_id = _bounded_id(request.message_id, "audio-message")
-        attachment_id = _bounded_id(request.attachment_id, "audio-attachment")
+        canonical_session_id = str(session.id)
+        request_material = supplied_request_id or uuid.uuid4().hex
+        request_id = _derive_audio_identity(
+            "request",
+            owner=request.owner_principal_id,
+            session_id=canonical_session_id,
+            material=request_material,
+        )
+        # Match the #750 web-ingress message identity namespace: the caller's
+        # opaque retry key is only material for a server-derived UUID5 scoped
+        # to the authenticated principal and canonical session.
+        message_id = uuid.uuid5(
+            uuid.NAMESPACE_URL,
+            f"seraph-chat:{request.owner_principal_id}:{canonical_session_id}:{request_material}",
+        ).hex
+        attachment_id = _derive_audio_identity(
+            "attachment",
+            owner=request.owner_principal_id,
+            session_id=canonical_session_id,
+            material=request_id,
+        )
+        supplied_message_id = _validate_supplied_identity(request.message_id, field="message_id")
+        supplied_attachment_id = _validate_supplied_identity(request.attachment_id, field="attachment_id")
+        if supplied_message_id is not None and supplied_message_id != message_id:
+            raise AudioWorkerError(
+                "canonical_message_identity_conflict",
+                "message identity must be derived from the authenticated session",
+            )
+        if supplied_attachment_id is not None and supplied_attachment_id != attachment_id:
+            raise AudioWorkerError(
+                "canonical_attachment_identity_conflict",
+                "attachment identity must be derived from the authenticated session",
+            )
         work_dir: Path | None = None
         try:
             if request.capture_consent is None:
                 raise AudioWorkerError("capture_consent_missing", "capture consent is required")
-            work_dir = self._work_dir(request_id)
+            # Never use a request or caller identity as a directory name.  A
+            # fresh bounded worker-owned token also prevents retries from
+            # observing or colliding with a previous quarantine directory.
+            work_dir = self._work_dir(f"job-{uuid.uuid4().hex}")
             raw_path = work_dir / "quarantine.bin"
             normalized_path = work_dir / "normalized.wav"
             with raw_path.open("xb") as handle:
@@ -772,7 +961,7 @@ class AudioIngressWorker:
                 duration_seconds=decoded.source_duration_seconds,
                 voice_note=True,
                 purpose="push_to_talk_audio",
-                session_id=request.session_id,
+                session_id=canonical_session_id,
                 message_id=message_id,
                 codec=decoded.codec,
                 capture_consent_reference=capture_ref,
@@ -790,7 +979,7 @@ class AudioIngressWorker:
                 "duration_seconds": decoded.source_duration_seconds,
                 "voice_note": True,
                 "purpose": "push_to_talk_audio",
-                "session_id": request.session_id,
+                "session_id": canonical_session_id,
                 "message_id": message_id,
                 "codec": decoded.codec,
                 "capture_consent_reference": capture_ref,
@@ -802,7 +991,7 @@ class AudioIngressWorker:
                 [raw_attachment], owner_principal_id=request.owner_principal_id
             )[0]
             ingress = AudioIngressRequest(
-                session_id=request.session_id,
+                session_id=canonical_session_id,
                 message_id=message_id,
                 attachment_id=attachment_id,
                 request_id=request_id,
@@ -823,7 +1012,7 @@ class AudioIngressWorker:
                 sample_rate_hz=decoded.source_sample_rate_hz,
                 channels=decoded.source_channels,
             )
-            request_digest = canonical_audio_request_digest(ingress)
+            request_digest = _bound_request_digest(request, ingress)
             row, duplicate = await self._insert_job(
                 request,
                 ingress=ingress,
@@ -832,10 +1021,17 @@ class AudioIngressWorker:
                 normalized_path=normalized_path,
                 request_digest=request_digest,
                 retention_deadline=retention_deadline,
+                identity_material_digest=_digest_text(request_material),
             )
             if duplicate:
                 self._unlink_tree(work_dir)
-                return replace(self._snapshot(row), duplicate=True)
+                existing_snapshot = self._snapshot(row, duplicate=True)
+                # A retry of an admitted but unfinished job must still pass
+                # through the durable consent/authority checks.  Terminal and
+                # transcript-ready jobs remain idempotent snapshots.
+                if process and existing_snapshot.status in {"queued", "processing"}:
+                    return replace(await self.process(request_id), duplicate=True)
+                return existing_snapshot
             # The quarantined source is no longer needed once conversion has
             # succeeded.  Keep only normalized bytes until confirmation/expiry.
             self._unlink_tree(raw_path)
@@ -858,37 +1054,85 @@ class AudioIngressWorker:
             raise AudioWorkerError("audio_ingress_failed", "audio upload could not be admitted") from exc
 
     async def _snapshot_by_request(self, request_id: str, *, duplicate: bool = False) -> AudioJobSnapshot:
+        _validate_request_id(request_id)
         row = await self._job(request_id)
         if row is None:
             raise AudioWorkerError("audio_job_not_found", "audio job is not available")
         return self._snapshot(row, duplicate=duplicate)
 
     async def process(self, request_id: str) -> AudioJobSnapshot:
+        """Run one process task and register it for cancellation fencing."""
+        request_id = _validate_request_id(request_id) or ""
+        current_task = asyncio.current_task()
+        wait_for: asyncio.Task[AudioJobSnapshot] | None = None
+        async with self._task_lock:
+            existing = self._tasks.get(request_id)
+            if existing is not None and existing is not current_task and not existing.done():
+                wait_for = existing
+            elif current_task is not None:
+                self._tasks[request_id] = current_task  # type: ignore[assignment]
+        if wait_for is not None:
+            return await asyncio.shield(wait_for)
+        try:
+            return await self._process_impl(request_id)
+        finally:
+            if current_task is not None:
+                async with self._task_lock:
+                    if self._tasks.get(request_id) is current_task:
+                        self._tasks.pop(request_id, None)
+
+    async def _process_impl(self, request_id: str) -> AudioJobSnapshot:
         """Decode/admit/parse a queued job, using only an intercepted transport."""
         row = await self._job(request_id)
         if row is None:
             raise AudioWorkerError("audio_job_not_found", "audio job is not available")
         if row.status in {"confirmed", "failed", "blocked", "cancelled"}:
             return self._snapshot(row)
-        if row.transcript is not None and row.status == "transcript_ready":
+        if row.status == "transcript_ready":
             return self._snapshot(row)
         try:
-            capture = AudioConsent(
-                reference=row.capture_consent_reference,
-                state=AudioConsentState.ACTIVE,
-                granted_at=row.captured_at - timedelta(seconds=1),
-                expires_at=row.raw_audio_retention_deadline,
-            )
-            model = (
-                AudioConsent(
-                    reference=row.model_consent_reference,
-                    state=AudioConsentState.ACTIVE,
-                    granted_at=row.captured_at - timedelta(seconds=1),
-                    expires_at=row.raw_audio_retention_deadline,
-                )
-                if row.model_consent_reference
+            if row.status == "queued":
+                transitioned = await self._update_if_status(row.id, {"queued"}, status="processing")
+                if transitioned.status != "processing":
+                    return transitioned
+                refreshed = await self._job(request_id)
+                if refreshed is None:
+                    raise AudioWorkerError("audio_job_not_found", "audio job is not available")
+                row = refreshed
+            if row.status != "processing":
+                return self._snapshot(row)
+            try:
+                persisted_metadata = json.loads(row.metadata_json or "{}")
+            except (TypeError, json.JSONDecodeError):
+                persisted_metadata = {}
+            consent_metadata = (
+                persisted_metadata.get("consent")
+                if isinstance(persisted_metadata, dict)
                 else None
             )
+            authority_metadata = (
+                persisted_metadata.get("authority")
+                if isinstance(persisted_metadata, dict)
+                else None
+            )
+            capture = _deserialize_consent(
+                consent_metadata.get("capture") if isinstance(consent_metadata, dict) else None
+            )
+            model = _deserialize_consent(
+                consent_metadata.get("model") if isinstance(consent_metadata, dict) else None
+            )
+            if not isinstance(authority_metadata, dict) or authority_metadata.get("model_inference_granted") is not True:
+                self._cleanup_job_paths(row.raw_path, row.normalized_path)
+                return await self._update_if_status(
+                    row.id,
+                    {"processing"},
+                    status="blocked",
+                    error_code="model_inference_grant_missing",
+                    raw_path=None,
+                    normalized_path=None,
+                    transcript=None,
+                    transcript_digest=None,
+                )
             request = AudioIngressRequest(
                 session_id=row.session_id,
                 message_id=row.message_id,
@@ -906,7 +1150,7 @@ class AudioIngressWorker:
                 capture_consent=capture,
                 cloud_upload_consent=model,
                 raw_audio_retention_deadline=row.raw_audio_retention_deadline,
-                requested_capability="chat",
+                requested_capability=row.requested_capability,
                 sample_rate_hz=row.sample_rate_hz,
                 channels=row.channels,
             )
@@ -921,18 +1165,44 @@ class AudioIngressWorker:
             result = validate_audio_ingress(request, policy=policy, now=self._now())
             if result.status is not AudioIngressStatus.ACCEPTED:
                 self._cleanup_job_paths(row.raw_path, row.normalized_path)
-                return await self._update(row.id, status="blocked", error_code=result.reason_code, raw_path=None, normalized_path=None)
+                return await self._update_if_status(
+                    row.id,
+                    {"processing"},
+                    status="blocked",
+                    error_code=result.reason_code,
+                    raw_path=None,
+                    normalized_path=None,
+                    transcript=None,
+                    transcript_digest=None,
+                )
             if self.transport is None:
                 self._cleanup_job_paths(row.raw_path, row.normalized_path)
-                return await self._update(row.id, status="blocked", error_code="audio_transport_unavailable", raw_path=None, normalized_path=None)
+                return await self._update_if_status(
+                    row.id,
+                    {"processing"},
+                    status="blocked",
+                    error_code="audio_transport_unavailable",
+                    raw_path=None,
+                    normalized_path=None,
+                    transcript=None,
+                    transcript_digest=None,
+                )
             normalized_path = Path(row.normalized_path or "")
             if not normalized_path.is_file():
-                return await self._update(row.id, status="failed", error_code="normalized_audio_missing", raw_path=None, normalized_path=None)
+                return await self._update_if_status(
+                    row.id,
+                    {"processing"},
+                    status="failed",
+                    error_code="normalized_audio_missing",
+                    raw_path=None,
+                    normalized_path=None,
+                    transcript=None,
+                    transcript_digest=None,
+                )
             normalized_bytes = await asyncio.to_thread(normalized_path.read_bytes)
             if len(normalized_bytes) > NORMALIZED_WAV_MAX_BYTES:
                 raise AudioWorkerError("normalized_wav_size_exceeds_limit", "normalized WAV exceeds the bound")
             operation_id = f"audio:{row.request_id}"
-            await self._update(row.id, status="processing", admission_operation_id=operation_id)
             admission_request = GpuAdmissionRequest(
                 operation_id=operation_id,
                 job_id=row.id,
@@ -946,6 +1216,14 @@ class AudioIngressWorker:
                 owner_budget_microusd=0,
                 uncertain_on_error=False,
             )
+
+            transitioned = await self._update_if_status(
+                row.id,
+                {"processing"},
+                admission_operation_id=operation_id,
+            )
+            if transitioned.status != "processing":
+                return transitioned
 
             async def invoke() -> object:
                 return await self.transport.transcribe(
@@ -966,24 +1244,57 @@ class AudioIngressWorker:
             transcript = parse_intercepted_transcript(response)
             transcript_digest = _digest_text(transcript)
             result_digest = _digest_text(_bounded_json({"request": row.request_digest, "transcript": transcript_digest}))
-            return await self._update(
+            # The unconfirmed text is deliberately discarded after deriving a
+            # digest.  Confirmation receives the operator's edited text and
+            # persists it through the canonical message ingress only then.
+            del transcript
+            return await self._update_if_status(
                 row.id,
+                {"processing"},
                 status="transcript_ready",
-                transcript=transcript,
+                transcript=None,
                 transcript_digest=transcript_digest,
                 result_digest=result_digest,
                 error_code=None,
                 raw_path=None,
             )
         except asyncio.CancelledError:
-            await self._update(row.id, status="cancelled", error_code="caller_cancelled", raw_path=None, normalized_path=None)
+            self._cleanup_job_paths(row.raw_path, row.normalized_path)
+            await self._update_if_status(
+                row.id,
+                {"processing", "queued"},
+                status="cancelled",
+                error_code="caller_cancelled",
+                raw_path=None,
+                normalized_path=None,
+                transcript=None,
+                transcript_digest=None,
+            )
             raise
         except AudioWorkerError as exc:
             self._cleanup_job_paths(row.raw_path, row.normalized_path)
-            return await self._update(row.id, status="failed", error_code=exc.code, raw_path=None, normalized_path=None)
+            return await self._update_if_status(
+                row.id,
+                {"processing"},
+                status="failed",
+                error_code=exc.code,
+                raw_path=None,
+                normalized_path=None,
+                transcript=None,
+                transcript_digest=None,
+            )
         except Exception:
             self._cleanup_job_paths(row.raw_path, row.normalized_path)
-            return await self._update(row.id, status="failed", error_code="audio_processing_failed", raw_path=None, normalized_path=None)
+            return await self._update_if_status(
+                row.id,
+                {"processing"},
+                status="failed",
+                error_code="audio_processing_failed",
+                raw_path=None,
+                normalized_path=None,
+                transcript=None,
+                transcript_digest=None,
+            )
 
     async def confirm_transcript(
         self,
@@ -994,13 +1305,10 @@ class AudioIngressWorker:
         transcript_digest: str | None = None,
     ) -> AudioJobSnapshot:
         """Persist only the operator-confirmed transcript through SessionManager."""
+        request_id = _validate_request_id(request_id) or ""
         row = await self._job(request_id)
         if row is None:
             raise AudioConfirmationConflict("audio_job_not_found")
-        if row.status != "transcript_ready" or row.transcript_digest is None:
-            raise AudioConfirmationConflict("transcript_confirmation_unavailable")
-        if expected_transcript_digest and expected_transcript_digest != row.transcript_digest:
-            raise AudioConfirmationConflict()
         if not isinstance(transcript, str):
             raise AudioConfirmationConflict("transcript_invalid")
         transcript = transcript.strip()
@@ -1009,7 +1317,36 @@ class AudioIngressWorker:
         digest = _digest_text(transcript)
         if transcript_digest and transcript_digest != digest:
             raise AudioConfirmationConflict("transcript_digest_mismatch")
+        if row.status == "confirmed":
+            if row.confirmed_transcript_digest != digest:
+                raise AudioConfirmationConflict("transcript_confirmation_stale")
+            if expected_transcript_digest and expected_transcript_digest != row.confirmed_transcript_digest:
+                raise AudioConfirmationConflict("transcript_confirmation_stale")
+            return self._snapshot(row)
+        if row.status != "transcript_ready" or row.transcript_digest is None:
+            raise AudioConfirmationConflict("transcript_confirmation_unavailable")
+        if expected_transcript_digest and expected_transcript_digest != row.transcript_digest:
+            raise AudioConfirmationConflict()
         attachment_ref = json.loads(row.attachment_ref_json or "{}")
+        try:
+            identity = build_conversation_identity(
+                conversation_id=row.session_id,
+                thread_id=row.session_id,
+                owner_principal_id=row.owner_principal_id,
+                operator_session_id=row.operator_session_id,
+                device_id=f"web-operator-session:{row.operator_session_id or 'ambient'}",
+                channel="web",
+                transport="rest",
+                correlation_id=f"chat:{row.message_id}",
+                causation_id=row.message_id,
+            )
+            lineage = build_lineage(
+                identity,
+                attachment_refs=[attachment_ref],
+                message_id=row.message_id,
+            )
+        except ConversationIdentityError as exc:
+            raise AudioConfirmationConflict(exc.code) from exc
         metadata = {
             "audio": {
                 "schema_version": AUDIO_WORKER_SCHEMA_VERSION,
@@ -1019,6 +1356,7 @@ class AudioIngressWorker:
                 "decoded_duration_seconds": row.decoded_duration_seconds,
                 "normalized_wav_size_bytes": row.normalized_wav_size_bytes,
                 "transcript_digest": digest,
+                "confirmed_transcript_digest": digest,
                 "capture_consent_reference": row.capture_consent_reference,
                 "model_consent_reference": row.model_consent_reference,
                 "confirmed": True,
@@ -1026,67 +1364,163 @@ class AudioIngressWorker:
                 "live_provider_call_claimed": False,
                 "canonical_memory": "confirmed_transcript_persisted",
             },
-            "lineage": {
+            "lineage": lineage,
+            "ingress": {
+                "schema_version": "seraph.conversation.v1",
+                "message_id": row.message_id,
+                "idempotency_key_digest": row.request_digest,
+                "content_digest": digest,
+                "principal_id": row.owner_principal_id,
+                "device_id": identity.device_id,
+                "session_id": row.session_id,
                 "conversation_id": row.session_id,
                 "thread_id": row.session_id,
-                "owner_principal_id": row.owner_principal_id,
-                "operator_session_id": row.operator_session_id,
-                "device_id": "web-operator-session:" + str(row.operator_session_id or "unknown"),
                 "channel": "web",
                 "transport": "rest",
-                "correlation_id": "audio:" + row.request_id,
-                "causation_id": row.request_id,
+                "correlation_id": f"chat:{row.message_id}",
+                "causation_id": row.message_id,
                 "attachment_refs": [attachment_ref],
             },
         }
+        try:
+            persisted_metadata = json.loads(row.metadata_json or "{}")
+        except (TypeError, json.JSONDecodeError):
+            persisted_metadata = {}
+        identity_metadata = (
+            persisted_metadata.get("identity")
+            if isinstance(persisted_metadata, dict)
+            else None
+        )
+        idempotency_key_digest = (
+            identity_metadata.get("idempotency_key_digest")
+            if isinstance(identity_metadata, dict)
+            else None
+        )
+        if not isinstance(idempotency_key_digest, str) or len(idempotency_key_digest) != 64:
+            idempotency_key_digest = row.request_digest
+        metadata["ingress"]["idempotency_key_digest"] = idempotency_key_digest
         metadata_json = _bounded_json(metadata)
         try:
-            await session_manager.add_message(
+            existing, duplicate = await session_manager.reserve_ingress_message(
                 row.session_id,
-                "user",
                 transcript,
-                metadata_json=metadata_json,
                 message_id=row.message_id,
+                metadata_json=metadata_json,
                 attachment_refs=[attachment_ref],
             )
+            if duplicate and (
+                existing.session_id != row.session_id
+                or existing.role != "user"
+                or existing.content != transcript
+                or existing.metadata_json != metadata_json
+                or _digest_text(existing.content) != digest
+            ):
+                raise AudioConfirmationConflict("canonical_message_identity_conflict")
         except MessageIngressConflictError as exc:
-            raise AudioConfirmationConflict("canonical_message_identity_conflict") from exc
+            # A crash can leave the canonical message committed before the job
+            # status update.  Re-read and accept only the exact immutable
+            # confirmation; any other content remains a conflict.
+            existing = await session_manager.get_message(row.message_id)
+            if (
+                existing is None
+                or existing.session_id != row.session_id
+                or existing.role != "user"
+                or existing.content != transcript
+                or existing.metadata_json != metadata_json
+                or _digest_text(existing.content) != digest
+            ):
+                raise AudioConfirmationConflict("canonical_message_identity_conflict") from exc
         except ConversationIdentityError as exc:
             raise AudioConfirmationConflict(exc.code) from exc
         self._cleanup_job_paths(row.raw_path, row.normalized_path)
-        return await self._update(
+        return await self._update_if_status(
             row.id,
+            {"transcript_ready"},
             status="confirmed",
             confirmed_transcript_digest=digest,
             normalized_path=None,
             raw_path=None,
+            transcript=None,
         )
 
     async def cancel(self, request_id: str) -> AudioJobSnapshot:
+        request_id = _validate_request_id(request_id) or ""
         row = await self._job(request_id)
         if row is None:
             raise AudioWorkerError("audio_job_not_found", "audio job is not available")
-        if row.admission_operation_id:
+        if row.status in {"confirmed", "failed", "blocked", "cancelled"}:
+            self._cleanup_job_paths(row.raw_path, row.normalized_path)
+            return self._snapshot(row)
+        # Fence the durable status before asking an in-flight task or broker to
+        # stop.  A transport that returns after cancellation can then only see
+        # the terminal cancelled row and cannot write transcript_ready.
+        cancelled = await self._update_if_status(
+            row.id,
+            {"queued", "processing", "transcript_ready"},
+            status="cancelled",
+            error_code="cancelled",
+            raw_path=None,
+            normalized_path=None,
+            transcript=None,
+            transcript_digest=None,
+        )
+        if cancelled.admission_operation_id:
             try:
-                await self.admission_broker.cancel(row.admission_operation_id, owner_id=row.owner_principal_id)
+                await self.admission_broker.cancel(
+                    cancelled.admission_operation_id,
+                    owner_id=cancelled.owner_principal_id,
+                )
             except (KeyError, GpuAdmissionError):
                 pass
         self._cleanup_job_paths(row.raw_path, row.normalized_path)
-        return await self._update(row.id, status="cancelled", error_code="cancelled", raw_path=None, normalized_path=None)
+        async with self._task_lock:
+            task = self._tasks.get(request_id)
+        current_task = asyncio.current_task()
+        if task is not None and task is not current_task and not task.done():
+            task.cancel()
+            with suppress(asyncio.CancelledError, Exception):
+                await asyncio.shield(task)
+        return cancelled
 
     async def cleanup_after_restart(self, *, now: datetime | None = None) -> int:
         """Expire/revoke orphaned files and never re-upload them automatically."""
         current = _utc(now or self._now())
         removed = 0
         async with get_session() as db:
-            result = await db.execute(
-                select(AudioIngressJob).where(AudioIngressJob.status.in_(("queued", "processing", "transcript_ready")))
-            )
+            result = await db.execute(select(AudioIngressJob))
             rows = result.scalars().all()
             for row in rows:
-                deadline = _utc(row.raw_audio_retention_deadline)
-                should_expire = deadline <= current
+                deadline_value = row.raw_audio_retention_deadline
+                malformed_deadline = not isinstance(deadline_value, datetime)
+                if malformed_deadline:
+                    deadline = current
+                else:
+                    if deadline_value.tzinfo is None:
+                        # SQLite may materialize legacy DATETIME values without
+                        # their original offset; persisted Seraph timestamps are
+                        # UTC by contract.
+                        deadline_value = deadline_value.replace(tzinfo=timezone.utc)
+                    deadline = _utc(deadline_value)
+                if malformed_deadline:
+                    # Missing retention metadata is treated as expired so a
+                    # corrupt row cannot keep a quarantine path alive.
+                    should_expire = True
+                else:
+                    should_expire = deadline <= current
+                changed = False
+                # Clear any raw text left by a legacy or interrupted writer,
+                # regardless of its stale status.  Confirmed rows retain only
+                # their immutable digest; no transcript text is recoverable.
+                if row.transcript is not None:
+                    row.transcript = None
+                    changed = True
+                    if row.status != "confirmed":
+                        row.transcript_digest = None
                 if row.status in {"queued", "processing"}:
+                    should_expire = True
+                # An unconfirmed transcript is process-local by contract.  It
+                # is never resumed after restart; clear its digest and text.
+                if row.status == "transcript_ready":
                     should_expire = True
                 if should_expire:
                     self._cleanup_job_paths(row.raw_path, row.normalized_path)
@@ -1094,6 +1528,11 @@ class AudioIngressWorker:
                     row.error_code = "restart_cleanup_expired" if deadline <= current else "restart_recovery_required"
                     row.raw_path = None
                     row.normalized_path = None
+                    row.transcript = None
+                    row.transcript_digest = None
+                    row.updated_at = current
+                    changed = True
+                if changed:
                     row.updated_at = current
                     db.add(row)
                     removed += 1

@@ -46,12 +46,32 @@ def _operator(request: Request) -> tuple[str, str, object]:
     operator = getattr(request.state, "operator", None)
     principal = getattr(operator, "principal", None)
     owner = str(getattr(principal, "principal_id", "") or "").strip()
-    if not operator or not owner:
+    operator_session_id = str(getattr(operator, "session_id", "") or "").strip()
+    if (
+        not operator
+        or not principal
+        or not getattr(principal, "authenticated", False)
+        or getattr(principal, "revoked", False)
+        or not owner
+        or not operator_session_id
+    ):
         raise HTTPException(status_code=401, detail={"code": "authentication_required"})
     grants = getattr(principal, "grants", ())
-    if AuthorityGrant.INGRESS not in grants:
+    normalized_grants = {
+        str(getattr(grant, "value", grant))
+        for grant in grants
+    }
+    if AuthorityGrant.INGRESS.value not in normalized_grants:
         raise HTTPException(status_code=403, detail={"code": "audio_ingress_forbidden"})
-    return owner, str(getattr(operator, "session_id", "") or "") or None, operator
+    return owner, operator_session_id, operator
+
+
+def _has_model_inference_grant(operator: object) -> bool:
+    principal = getattr(operator, "principal", None)
+    return AuthorityGrant.MODEL_INFERENCE.value in {
+        str(getattr(grant, "value", grant))
+        for grant in getattr(principal, "grants", ())
+    }
 
 
 def _decode_payload(encoded: str) -> bytes:
@@ -79,17 +99,20 @@ def _consent(reference: str, expires_at: datetime, captured_at: datetime) -> Aud
 
 
 def _error(exc: AudioWorkerError) -> HTTPException:
-    status = 409 if exc.code in {"request_identity_conflict", "transcript_confirmation_stale", "canonical_message_identity_conflict"} else 422
+    status = 409 if exc.code in {
+        "request_identity_conflict",
+        "transcript_confirmation_stale",
+        "canonical_message_identity_conflict",
+        "canonical_attachment_identity_conflict",
+    } else 422
     return HTTPException(status_code=status, detail={"code": exc.code, "message": str(exc)})
 
 
 def _operator_payload(snapshot) -> dict:
-    payload = snapshot.as_dict()
-    if snapshot.transcript is not None:
-        # Transcript text is returned only on this authenticated owner-bound
-        # endpoint so the UI can edit it before the digest-bound confirmation.
-        payload["transcript"]["text"] = snapshot.transcript
-    return payload
+    # Unconfirmed transcript text is process-local and never crosses the API
+    # boundary.  The operator submits edited text together with the durable
+    # digest to confirm it.
+    return snapshot.as_dict()
 
 
 async def _submit(body: AudioIngressBody, request: Request) -> dict:
@@ -118,6 +141,7 @@ async def _submit(body: AudioIngressBody, request: Request) -> dict:
                 attachment_id=body.attachment_id,
                 request_id=body.request_id,
                 requested_capability=body.requested_capability,
+                model_inference_granted=_has_model_inference_grant(operator),
             ),
             process=True,
         )
@@ -135,8 +159,11 @@ async def ingest_audio(body: AudioIngressBody, request: Request) -> dict:
     return await _submit(body, request)
 
 
-async def _owned_job(request_id: str, request: Request):
+async def _owned_job(request_id: str, request: Request, *, require_model: bool = False):
     owner, _, _ = _operator(request)
+    operator = getattr(request.state, "operator", None)
+    if require_model and not _has_model_inference_grant(operator):
+        raise HTTPException(status_code=403, detail={"code": "audio_model_inference_forbidden"})
     try:
         snapshot = await default_audio_worker._snapshot_by_request(request_id)
     except AudioWorkerError as exc:
@@ -154,7 +181,7 @@ async def get_audio(request_id: str, request: Request) -> dict:
 
 @router.post("/audio/ptt/{request_id}/process")
 async def process_audio(request_id: str, request: Request) -> dict:
-    snapshot = await _owned_job(request_id, request)
+    snapshot = await _owned_job(request_id, request, require_model=True)
     try:
         result = await default_audio_worker.process(snapshot.request_id)
     except AudioWorkerError as exc:

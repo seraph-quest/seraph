@@ -395,6 +395,18 @@ async def _ensure_legacy_columns(conn) -> None:
             "CREATE INDEX IF NOT EXISTS ix_model_capability_proofs_receipt_id "
             "ON model_capability_proofs (receipt_id)"
         )
+
+    # #751 keeps the requested capability durable so restart/process recovery
+    # cannot silently reinterpret an audio request as chat.
+    audio_ingress_columns = await _add_missing_columns(
+        "audio_ingress_jobs",
+        {"requested_capability": "VARCHAR DEFAULT 'chat'"},
+    )
+    if "requested_capability" in audio_ingress_columns:
+        await conn.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_audio_ingress_jobs_requested_capability "
+            "ON audio_ingress_jobs (requested_capability)"
+        )
     if "receipt_hash" in proof_columns:
         await conn.exec_driver_sql(
             "CREATE INDEX IF NOT EXISTS ix_model_capability_proofs_receipt_hash "

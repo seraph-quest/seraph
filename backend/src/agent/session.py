@@ -19,6 +19,7 @@ from src.db.engine import get_session
 from src.db.models import (
     ApprovalRequest,
     AuditEvent,
+    AudioIngressJob,
     GuardianIntervention,
     MemoryEpisode,
     MemoryEpisodeType,
@@ -354,6 +355,27 @@ class SessionManager:
             )
             for intervention in interventions.scalars().all():
                 await db.delete(intervention)
+            # Audio jobs hold a foreign key to the canonical conversation.  A
+            # session deletion must revoke their quarantine paths and delete
+            # the metadata rows before removing the parent session.
+            audio_jobs = await db.execute(
+                select(AudioIngressJob).where(AudioIngressJob.session_id == session_id)
+            )
+            for audio_job in audio_jobs.scalars().all():
+                try:
+                    from src.guardian.audio_worker import AudioIngressWorker
+
+                    AudioIngressWorker._cleanup_job_paths(
+                        audio_job.raw_path,
+                        audio_job.normalized_path,
+                    )
+                except Exception:
+                    logger.warning(
+                        "Audio quarantine cleanup failed while deleting session %s",
+                        session_id,
+                        exc_info=True,
+                    )
+                await db.delete(audio_job)
             # A deleted conversation can never resume an old native delivery.
             # Preserve the outbox receipt while cancelling active handoffs so
             # a restarted daemon cannot dispatch stale content.

@@ -170,6 +170,7 @@ class AudioIngressJob(SQLModel, table=True):
     attachment_id: str = Field(index=True)
     attachment_ref_json: str = Field(default="{}")
     status: str = Field(default="queued", index=True)
+    requested_capability: str = Field(default="chat", index=True)
     raw_path: Optional[str] = Field(default=None)
     normalized_path: Optional[str] = Field(default=None)
     captured_at: datetime = Field(index=True)

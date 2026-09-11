@@ -2,22 +2,29 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timedelta, timezone
 import io
+import json
 from pathlib import Path
 from unittest.mock import patch
 import wave
 
 import pytest
+from dataclasses import replace
+from sqlmodel import select
 
 from config.settings import settings
-from src.agent.session import session_manager
+from src.agent.session import MessageIngressConflictError, session_manager
 from src.guardian.audio_ingress import AudioConsent, AudioConsentState
 from src.guardian.audio_worker import (
+    AudioConfirmationConflict,
     AudioIngressWorker,
     AudioUploadRequest,
+    AudioWorkerError,
     InterceptedAudioTransport,
 )
+from src.db.models import AudioIngressJob
 from src.model_fabric.remote_inference_admission import RemoteInferenceAdmissionBroker
 
 
@@ -58,6 +65,7 @@ def _request(session_id: str, *, request_id: str = "audio-test-1", model: bool =
             else None
         ),
         request_id=request_id,
+        model_inference_granted=True,
     )
 
 
@@ -80,7 +88,8 @@ async def test_audio_worker_normalizes_admits_confirms_and_is_idempotent(async_d
         quarantine_root=tmp_path,
     )
     with patch.object(settings, "operator_auth_secret", "test-audio-secret"):
-        snapshot = await worker.submit(_request(session.id), process=True)
+        first_request = _request(session.id)
+        snapshot = await worker.submit(first_request, process=True)
         assert snapshot.status == "transcript_ready"
         assert snapshot.decoded_duration_seconds is not None
         assert snapshot.normalized_wav_size_bytes is not None
@@ -92,7 +101,7 @@ async def test_audio_worker_normalizes_admits_confirms_and_is_idempotent(async_d
             expected_transcript_digest=snapshot.transcript_digest,
         )
         assert confirmed.status == "confirmed"
-        duplicate = await worker.submit(_request(session.id), process=True)
+        duplicate = await worker.submit(first_request, process=True)
         assert duplicate.duplicate is True
         assert duplicate.status == "confirmed"
         assert len(seen) == 1
@@ -131,3 +140,227 @@ async def test_audio_worker_separate_model_consent_and_cancel_cleanup(async_db, 
         cancelled = await worker.cancel(queued.request_id)
         assert cancelled.status == "cancelled"
         assert not list(tmp_path.iterdir())
+
+
+@pytest.mark.asyncio
+async def test_audio_worker_rejects_path_retry_keys_and_redacts_legacy_transcript(async_db, tmp_path: Path):
+    session = await session_manager.get_or_create("audio-session-boundary", owner_principal_id="operator:test")
+    worker = AudioIngressWorker(
+        transport=InterceptedAudioTransport({"transcript": "never persist this"}),
+        admission_broker=RemoteInferenceAdmissionBroker(),
+        quarantine_root=tmp_path,
+    )
+    with patch.object(settings, "operator_auth_secret", "test-audio-secret"):
+        for request_id in ("../escape", "/tmp/escape", r"C:\\escape"):
+            with pytest.raises(AudioWorkerError) as exc_info:
+                await worker.submit(_request(session.id, request_id=request_id), process=False)
+            assert exc_info.value.code == "invalid_request_id"
+        assert not list(tmp_path.iterdir())
+
+        queued = await worker.submit(_request(session.id, request_id="audio-legacy-row"), process=False)
+        async with async_db() as db:
+            row = await db.get(AudioIngressJob, queued.id)
+            assert row is not None
+            row.status = "transcript_ready"
+            row.transcript = "legacy unconfirmed text"
+            row.transcript_digest = "a" * 64
+            db.add(row)
+
+        snapshot = await worker._snapshot_by_request(queued.request_id)
+        assert snapshot.transcript is None
+        assert "text" not in snapshot.as_dict()["transcript"]
+        assert await worker.cleanup_after_restart() == 1
+        async with async_db() as db:
+            row = await db.get(AudioIngressJob, queued.id)
+            assert row is not None
+            assert row.transcript is None
+            assert row.transcript_digest is None
+
+
+@pytest.mark.asyncio
+async def test_audio_worker_rechecks_persisted_authority_and_consent(async_db, tmp_path: Path):
+    session = await session_manager.get_or_create("audio-session-consent", owner_principal_id="operator:test")
+    calls = 0
+
+    def intercepted(**_kwargs):
+        nonlocal calls
+        calls += 1
+        return "should not run"
+
+    worker = AudioIngressWorker(
+        transport=InterceptedAudioTransport(intercepted),
+        admission_broker=RemoteInferenceAdmissionBroker(),
+        quarantine_root=tmp_path,
+    )
+    with patch.object(settings, "operator_auth_secret", "test-audio-secret"):
+        missing = await worker.submit(
+            replace(_request(session.id, request_id="audio-missing-grant"), model_inference_granted=None),
+            process=False,
+        )
+        blocked = await worker.process(missing.request_id)
+        assert blocked.status == "blocked"
+        assert blocked.error_code == "model_inference_grant_missing"
+
+        no_grant = await worker.submit(_request(session.id, request_id="audio-no-grant"), process=False)
+        async with async_db() as db:
+            row = await db.get(AudioIngressJob, no_grant.id)
+            assert row is not None
+            metadata = json.loads(row.metadata_json)
+            metadata["authority"]["model_inference_granted"] = False
+            row.metadata_json = json.dumps(metadata, sort_keys=True)
+            db.add(row)
+        blocked = await worker.process(no_grant.request_id)
+        assert blocked.status == "blocked"
+        assert blocked.error_code == "model_inference_grant_missing"
+
+        revoked = await worker.submit(_request(session.id, request_id="audio-revoked"), process=False)
+        async with async_db() as db:
+            row = await db.get(AudioIngressJob, revoked.id)
+            assert row is not None
+            metadata = json.loads(row.metadata_json)
+            metadata["consent"]["model"]["state"] = "revoked"
+            row.metadata_json = json.dumps(metadata, sort_keys=True)
+            db.add(row)
+        blocked = await worker.process(revoked.request_id)
+        assert blocked.status == "blocked"
+        assert blocked.error_code == "cloud_upload_consent_revoked"
+        assert calls == 0
+
+
+@pytest.mark.asyncio
+async def test_audio_worker_full_digest_and_server_identity_conflicts(async_db, tmp_path: Path):
+    session = await session_manager.get_or_create("audio-session-identity", owner_principal_id="operator:test")
+    worker = AudioIngressWorker(
+        transport=InterceptedAudioTransport({"transcript": "ok"}),
+        admission_broker=RemoteInferenceAdmissionBroker(),
+        quarantine_root=tmp_path,
+    )
+    with patch.object(settings, "operator_auth_secret", "test-audio-secret"):
+        first = _request(session.id, request_id="audio-immutable")
+        accepted = await worker.submit(first, process=False)
+        changed_consent = replace(
+            first,
+            model_consent=replace(
+                first.model_consent,
+                expires_at=first.model_consent.expires_at + timedelta(minutes=1),
+            ),
+        )
+        with pytest.raises(AudioWorkerError) as exc_info:
+            await worker.submit(changed_consent, process=False)
+        assert exc_info.value.code == "request_identity_conflict"
+
+        caller_asserted_id = replace(_request(session.id, request_id="audio-asserted"), message_id="caller-message")
+        with pytest.raises(AudioWorkerError) as exc_info:
+            await worker.submit(caller_asserted_id, process=False)
+        assert exc_info.value.code == "canonical_message_identity_conflict"
+        assert accepted.message_id != "caller-message"
+
+
+@pytest.mark.asyncio
+async def test_audio_worker_cancel_fences_late_transport_result(async_db, tmp_path: Path):
+    session = await session_manager.get_or_create("audio-session-cancel-race", owner_principal_id="operator:test")
+    started = asyncio.Event()
+    calls = 0
+
+    async def intercepted(**_kwargs):
+        nonlocal calls
+        calls += 1
+        started.set()
+        await asyncio.Future()
+
+    worker = AudioIngressWorker(
+        transport=InterceptedAudioTransport(intercepted),
+        admission_broker=RemoteInferenceAdmissionBroker(),
+        quarantine_root=tmp_path,
+    )
+    with patch.object(settings, "operator_auth_secret", "test-audio-secret"):
+        queued = await worker.submit(_request(session.id, request_id="audio-cancel-race"), process=False)
+        processing = asyncio.create_task(worker.process(queued.request_id))
+        await asyncio.wait_for(started.wait(), timeout=2)
+        cancelled = await worker.cancel(queued.request_id)
+        assert cancelled.status == "cancelled"
+        with pytest.raises(asyncio.CancelledError):
+            await processing
+        final = await worker._snapshot_by_request(queued.request_id)
+        assert final.status == "cancelled"
+        assert final.transcript is None
+        assert final.transcript_digest is None
+        assert calls == 1
+
+
+@pytest.mark.asyncio
+async def test_audio_worker_confirmation_recovers_after_message_commit(async_db, tmp_path: Path, monkeypatch):
+    session = await session_manager.get_or_create("audio-session-confirm-retry", owner_principal_id="operator:test")
+    worker = AudioIngressWorker(
+        transport=InterceptedAudioTransport({"transcript": "generated"}),
+        admission_broker=RemoteInferenceAdmissionBroker(),
+        quarantine_root=tmp_path,
+    )
+    original_reserve = session_manager.reserve_ingress_message
+
+    async def reserve_then_crash(*args, **kwargs):
+        await original_reserve(*args, **kwargs)
+        raise MessageIngressConflictError(str(kwargs["message_id"]))
+
+    with patch.object(settings, "operator_auth_secret", "test-audio-secret"):
+        snapshot = await worker.submit(_request(session.id, request_id="audio-confirm-retry"), process=True)
+        monkeypatch.setattr(session_manager, "reserve_ingress_message", reserve_then_crash)
+        confirmed = await worker.confirm_transcript(
+            snapshot.request_id,
+            "operator confirmed",
+            expected_transcript_digest=snapshot.transcript_digest,
+        )
+        assert confirmed.status == "confirmed"
+        retry = await worker.confirm_transcript(snapshot.request_id, "operator confirmed")
+        assert retry.status == "confirmed"
+
+
+@pytest.mark.asyncio
+async def test_audio_worker_confirmation_rejects_tampered_existing_message(async_db, tmp_path: Path, monkeypatch):
+    session = await session_manager.get_or_create("audio-session-confirm-tamper", owner_principal_id="operator:test")
+    worker = AudioIngressWorker(
+        transport=InterceptedAudioTransport({"transcript": "generated"}),
+        admission_broker=RemoteInferenceAdmissionBroker(),
+        quarantine_root=tmp_path,
+    )
+    original_reserve = session_manager.reserve_ingress_message
+
+    async def reserve_tampered(*args, **kwargs):
+        metadata = json.loads(kwargs["metadata_json"])
+        metadata["audio"]["provider"] = "tampered"
+        await session_manager.add_message(
+            args[0],
+            "user",
+            args[1],
+            metadata_json=json.dumps(metadata, sort_keys=True),
+            message_id=kwargs["message_id"],
+            attachment_refs=kwargs["attachment_refs"],
+        )
+        return await original_reserve(*args, **kwargs)
+
+    with patch.object(settings, "operator_auth_secret", "test-audio-secret"):
+        snapshot = await worker.submit(_request(session.id, request_id="audio-confirm-tamper"), process=True)
+        monkeypatch.setattr(session_manager, "reserve_ingress_message", reserve_tampered)
+        with pytest.raises(AudioConfirmationConflict) as exc_info:
+            await worker.confirm_transcript(
+                snapshot.request_id,
+                "operator confirmed",
+                expected_transcript_digest=snapshot.transcript_digest,
+            )
+        assert exc_info.value.code == "canonical_message_identity_conflict"
+        assert (await worker.cancel(snapshot.request_id)).status == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_session_delete_removes_audio_rows_before_foreign_key(async_db, tmp_path: Path):
+    session = await session_manager.get_or_create("audio-session-delete", owner_principal_id="operator:test")
+    worker = AudioIngressWorker(
+        transport=InterceptedAudioTransport({"transcript": "unused"}),
+        admission_broker=RemoteInferenceAdmissionBroker(),
+        quarantine_root=tmp_path,
+    )
+    with patch.object(settings, "operator_auth_secret", "test-audio-secret"):
+        queued = await worker.submit(_request(session.id, request_id="audio-delete"), process=False)
+        assert await session_manager.delete(session.id, owner_principal_id="operator:test") is True
+        async with async_db() as db:
+            assert await db.get(AudioIngressJob, queued.id) is None

@@ -662,6 +662,27 @@ def _spec(*, job_id: str = "job-743-1", dedupe_key: str = "candidate-1") -> Dura
     )
 
 
+def test_goal_revision_requires_goal_id_before_admission():
+    spec = replace(_spec(), goal_id=None, goal_revision=4)
+    with pytest.raises(ValueError, match="goal_revision requires a canonical goal"):
+        _validate_admission_authority(spec)
+
+
+def test_declared_service_session_must_match_durable_session():
+    spec = replace(
+        _spec(),
+        goal_id=None,
+        goal_revision=None,
+        declared_authority={
+            "principal": "service:strategist",
+            "service_id": "service:strategist",
+            "session_id": "different-session",
+        },
+    )
+    with pytest.raises(ValueError, match="declared authority session_id"):
+        _validate_admission_authority(spec)
+
+
 @pytest.mark.asyncio
 async def test_admission_is_idempotent_and_lifecycle_records_safe_receipts(async_db):
     admitted = await durable_job_repository.admit_job(_spec())
@@ -1078,36 +1099,20 @@ async def test_malformed_effect_history_is_blocked_before_claim(async_db):
 
 
 @pytest.mark.asyncio
-async def test_unresolved_effect_blocks_requeue_and_claim(async_db):
+async def test_accepted_effect_requires_an_authenticated_owner_lease(async_db):
     admitted = await durable_job_repository.admit_job(
         _spec(job_id="job-743-unresolved-claim", dedupe_key="candidate-unresolved-claim")
     )
-    await durable_job_repository.record_effect(
-        admitted["job_id"],
-        effect_id="unresolved-claim-effect",
-        effect_type="destination_write",
-        target_path="controlled-ledger",
-        status="intent",
-        owner=None,
-        fencing_token=None,
-    )
-    with pytest.raises(DurableJobTransitionError, match="unresolved external effect"):
-        await durable_job_repository.queue_job(admitted["job_id"])
-
-    async with async_db() as db:
-        await db.execute(
-            update(WorkflowRunState)
-            .where(WorkflowRunState.run_identity == admitted["job_id"])
-            .values(status="queued")
+    with pytest.raises(DurableJobLeaseError, match="accepted jobs require an authenticated owner lease"):
+        await durable_job_repository.record_effect(
+            admitted["job_id"],
+            effect_id="unresolved-claim-effect",
+            effect_type="destination_write",
+            target_path="controlled-ledger",
+            status="intent",
+            owner=None,
+            fencing_token=None,
         )
-    recovered = await durable_job_repository.claim_job(
-        admitted["job_id"], owner="runner-unresolved-claim"
-    )
-    assert recovered["status"] == "unknown_external_effect"
-    assert recovered["attempt_count"] == 0
-    assert recovered["receipt"]["operator_action"] == (
-        "reconcile_external_effect_before_claim_or_retry"
-    )
 
 
 @pytest.mark.asyncio

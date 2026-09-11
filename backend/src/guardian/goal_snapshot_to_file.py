@@ -172,6 +172,12 @@ class GoalSnapshotToFileRequest(BaseModel):
     owner_principal_id: str = Field(min_length=1, max_length=160)
     service_id: str = Field(min_length=1, max_length=160)
     session_id: str = Field(min_length=1, max_length=160)
+    # Service work runs in its own session, so the canonical goal owner is
+    # carried as an explicit delegation target for durable admission. These
+    # values are hints from the caller; execute() verifies them against the
+    # freshly read goal before putting them in the authority declaration.
+    goal_owner_principal_id: str | None = Field(default=None, min_length=1, max_length=160)
+    goal_owner_session_id: str | None = Field(default=None, min_length=1, max_length=160)
     parent_job_id: str | None = Field(default=None, min_length=1, max_length=160)
     parent_fencing_token: int | None = Field(default=None, ge=1)
     capability_version: Literal[CAPABILITY_VERSION] = CAPABILITY_VERSION
@@ -190,6 +196,13 @@ class GoalSnapshotToFileRequest(BaseModel):
     @classmethod
     def _strip_text(cls, value: Any) -> str:
         return _text(value)
+
+    @field_validator("goal_owner_principal_id", "goal_owner_session_id", mode="before")
+    @classmethod
+    def _strip_optional_text(cls, value: Any) -> str | None:
+        if value is None:
+            return None
+        return _text(value) or None
 
     @field_validator("file_path", mode="before")
     @classmethod
@@ -218,6 +231,8 @@ class GoalSnapshotToFileRequest(BaseModel):
             raise ValueError("owner_principal_id must identify a service principal")
         if not self.service_id.startswith("service:") or not self.service_id[8:]:
             raise ValueError("service_id must identify a service")
+        if (self.goal_owner_principal_id is None) != (self.goal_owner_session_id is None):
+            raise ValueError("goal owner delegation requires both principal and session")
         if self.deadline_at > _now() + timedelta(seconds=MAX_DEADLINE_SECONDS):
             raise ValueError("deadline_at exceeds the bounded execution horizon")
         return self
@@ -1118,6 +1133,8 @@ class GoalSnapshotToFileAdapter:
         approval_context: dict[str, Any] | None,
         path: str,
         workflow_binding: dict[str, Any] | None = None,
+        goal_owner_principal_id: str | None = None,
+        goal_owner_session_id: str | None = None,
     ) -> dict[str, Any]:
         effect = _text(getattr(decision, "effect", None)) or _text(receipt.get("effect")) or "deny"
         stable_receipt = self._stable_authority_receipt(receipt)
@@ -1143,6 +1160,8 @@ class GoalSnapshotToFileAdapter:
             "service_id": self.request.service_id,
             "session_id": self.request.session_id,
             "goal_id": material.envelope.goal_id if material else self.request.goal_id,
+            "goal_owner_principal_id": goal_owner_principal_id,
+            "goal_owner_session_id": goal_owner_session_id,
             "authority_envelope": {
                 "schema_version": _text(receipt.get("schema_version")) or CAPABILITY_POLICY_SCHEMA_VERSION,
                 "allowed": bool(decision and decision.allowed),
@@ -1206,6 +1225,18 @@ class GoalSnapshotToFileAdapter:
             return self._blocked("goal_not_active")
         if current_revision != candidate.goal_revision:
             return self._blocked("stale_goal_revision")
+        canonical_goal_owner_principal_id = _text(getattr(current_goal, "owner_principal_id", None)) or None
+        canonical_goal_owner_session_id = _text(getattr(current_goal, "owner_session_id", None)) or None
+        requested_goal_owner = (
+            self.request.goal_owner_principal_id,
+            self.request.goal_owner_session_id,
+        )
+        canonical_goal_owner = (
+            canonical_goal_owner_principal_id,
+            canonical_goal_owner_session_id,
+        )
+        if any(value is not None for value in requested_goal_owner) and requested_goal_owner != canonical_goal_owner:
+            return self._blocked("request_goal_owner_binding_mismatch")
 
         self._resolved_workflow_binding = None
         workflow_tool, approval_context, workflow_reason = self._resolve_workflow_tool(path)
@@ -1254,6 +1285,8 @@ class GoalSnapshotToFileAdapter:
             approval_context=approval_context,
             path=path,
             workflow_binding=workflow_binding,
+            goal_owner_principal_id=canonical_goal_owner_principal_id,
+            goal_owner_session_id=canonical_goal_owner_session_id,
         )
         declared_authority.update(
             {

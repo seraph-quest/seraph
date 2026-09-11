@@ -356,8 +356,9 @@ class GoalRepository:
         *,
         expected_owner_principal_id: str | None = None,
         expected_owner_session_id: str | None = None,
+        expected_revision: int | None = None,
     ) -> bool:
-        """Delete a goal and all its descendants."""
+        """Delete a goal and all its descendants with an owner/revision CAS."""
         async with get_session() as db:
             result = await db.execute(select(Goal).where(Goal.id == goal_id))
             goal = result.scalars().first()
@@ -372,6 +373,9 @@ class GoalRepository:
                 )
                 if root_owner != expected_owner:
                     raise GoalOwnershipConflict("goal_owner_mismatch")
+            current_revision = max(int(goal.revision or 1), 1)
+            if expected_revision is not None and expected_revision != current_revision:
+                raise GoalRevisionConflict(goal_id, expected_revision, current_revision)
 
             # Delete descendants (path starts with this goal's full path)
             descendant_path = f"{goal.path}{goal.id}/"
@@ -457,7 +461,29 @@ class GoalRepository:
                 await db.delete(d)
                 await db.flush()
 
-            await db.delete(goal)
+            delete_guards = [
+                Goal.id == goal_id,
+                Goal.revision == current_revision,
+            ]
+            for column, value in zip(
+                (Goal.owner_principal_id, Goal.owner_session_id),
+                root_owner,
+            ):
+                delete_guards.append(column == value if value is not None else column.is_(None))
+            deleted = await db.execute(delete(Goal).where(*delete_guards))
+            if deleted.rowcount != 1:
+                latest_result = await db.execute(select(Goal).where(Goal.id == goal_id))
+                latest = latest_result.scalars().first()
+                latest_revision = (
+                    max(int(latest.revision or 1), 1)
+                    if latest is not None
+                    else current_revision
+                )
+                raise GoalRevisionConflict(
+                    goal_id,
+                    expected_revision if expected_revision is not None else current_revision,
+                    latest_revision,
+                )
             return True
 
     async def list_goals(

@@ -78,6 +78,14 @@ class GoalUpdate(BaseModel):
     expected_revision: Optional[int] = Field(default=None, ge=1)
 
 
+class GoalDeleteRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    # Optional keeps the existing DELETE-without-body API compatible while the
+    # repository still binds that request to the revision read at admission.
+    expected_revision: Optional[int] = Field(default=None, ge=1)
+
+
 class GoalStrategyCorrection(BaseModel):
     """Authenticated, bounded correction for a goal's web-brief choice."""
 
@@ -1049,7 +1057,11 @@ async def rollback_goal_strategy_correction(
 
 
 @router.delete("/goals/{goal_id}")
-async def delete_goal(goal_id: str, request: Request):
+async def delete_goal(
+    goal_id: str,
+    request: Request,
+    body: GoalDeleteRequest | None = None,
+):
     """Delete a goal and its descendants."""
     operator = _require_authenticated_operator(request)
     goal = await goal_repository.get(goal_id)
@@ -1058,12 +1070,41 @@ async def delete_goal(goal_id: str, request: Request):
     # Preserve the repository's descendant deletion/tombstone behavior only
     # after the canonical public owner/session binding has been verified.
     _require_goal_owner(goal, operator)
+    current_revision = max(int(goal.revision or 1), 1)
+    expected_revision = (
+        body.expected_revision
+        if body is not None and body.expected_revision is not None
+        else current_revision
+    )
+    if expected_revision != current_revision:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "stale_goal_revision",
+                "goal_id": goal_id,
+                "expected_revision": expected_revision,
+                "current_revision": current_revision,
+                "recovery": "Refresh the goal and resubmit against the current revision.",
+            },
+        )
     try:
         success = await goal_repository.delete(
             goal_id,
             expected_owner_principal_id=operator.principal.principal_id,
             expected_owner_session_id=operator.session_id,
+            expected_revision=expected_revision,
         )
+    except GoalRevisionConflict as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "stale_goal_revision",
+                "goal_id": exc.goal_id,
+                "expected_revision": exc.expected,
+                "current_revision": exc.current,
+                "recovery": "Refresh the goal and resubmit against the current revision.",
+            },
+        ) from exc
     except GoalOwnershipConflict as exc:
         raise HTTPException(status_code=403, detail={"code": exc.code}) from exc
     if not success:
@@ -1158,6 +1199,8 @@ async def run_goal_snapshot(goal_id: str, body: GoalSnapshotRunRequest, request:
             owner_principal_id=GOAL_SNAPSHOT_SERVICE_ID,
             service_id=GOAL_SNAPSHOT_SERVICE_ID,
             session_id=operator.session_id,
+            goal_owner_principal_id=goal.owner_principal_id,
+            goal_owner_session_id=goal.owner_session_id,
             evidence_refs=body.evidence_refs,
             reason=body.reason,
             expected_outcome=body.expected_outcome,

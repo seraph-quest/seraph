@@ -97,4 +97,8 @@ async def test_audio_job_owner_match_retains_expiring_snapshot_path():
         result = await _owned_job(request_id, request)
 
     assert result[0] is snapshot
-    read_snapshot.assert_awaited_once_with(request_id)
+    read_snapshot.assert_awaited_once_with(
+        request_id,
+        owner_principal_id=operator.principal.principal_id,
+        operator_session_id=operator.session_id,
+    )

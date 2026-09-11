@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timedelta, timezone
+import hashlib
 import io
 import json
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 import wave
 
 import pytest
@@ -390,6 +391,40 @@ async def test_audio_worker_mutations_require_owner_and_operator_session(async_d
 
 
 @pytest.mark.asyncio
+async def test_audio_worker_direct_process_rejects_wrong_owner_before_expiry_cleanup(async_db, tmp_path: Path):
+    session = await session_manager.get_or_create("audio-session-direct-auth", owner_principal_id=OPERATOR_OWNER)
+    worker = AudioIngressWorker(
+        transport=InterceptedAudioTransport({"transcript": "must not run"}),
+        admission_broker=RemoteInferenceAdmissionBroker(),
+        quarantine_root=tmp_path,
+    )
+    with patch.object(settings, "operator_auth_secret", "test-audio-secret"):
+        queued = await worker.submit(_request(session.id, request_id="audio-direct-auth"), process=False)
+
+    with (
+        patch.object(worker, "_expire_if_needed", new_callable=AsyncMock) as expire,
+        patch.object(worker, "_cleanup_job_paths") as cleanup,
+    ):
+        with pytest.raises(AudioWorkerError) as read_error:
+            await worker._snapshot_by_request(
+                queued.request_id,
+                owner_principal_id=OPERATOR_OWNER,
+                operator_session_id="operator-session-attacker",
+            )
+        with pytest.raises(AudioWorkerError) as exc_info:
+            await worker.process(
+                queued.request_id,
+                owner_principal_id=OPERATOR_OWNER,
+                operator_session_id="operator-session-attacker",
+            )
+
+    assert read_error.value.code == "audio_operator_session_mismatch"
+    assert exc_info.value.code == "audio_operator_session_mismatch"
+    expire.assert_not_awaited()
+    cleanup.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_audio_worker_cancel_fences_late_transport_result(async_db, tmp_path: Path):
     session = await session_manager.get_or_create("audio-session-cancel-race", owner_principal_id=OPERATOR_OWNER)
     started = asyncio.Event()
@@ -421,11 +456,13 @@ async def test_audio_worker_cancel_fences_late_transport_result(async_db, tmp_pa
             owner_principal_id=OPERATOR_OWNER,
             operator_session_id=OPERATOR_SESSION,
         )
-        assert cancelled.status == "cancelled"
+        assert cancelled.status == "degraded"
+        assert cancelled.error_code == "audio_transport_outcome_unknown"
         with pytest.raises(asyncio.CancelledError):
             await processing
         final = await worker._snapshot_by_request(queued.request_id)
-        assert final.status == "cancelled"
+        assert final.status == "degraded"
+        assert final.error_code == "audio_transport_outcome_unknown"
         assert final.transcript is None
         assert final.transcript_digest is None
         assert calls == 1
@@ -521,6 +558,44 @@ async def test_audio_worker_rechecks_current_model_authority_before_transport(as
 
 
 @pytest.mark.asyncio
+async def test_audio_worker_revocation_after_transport_returns_typed_unknown(async_db, tmp_path: Path):
+    session = await session_manager.get_or_create("audio-session-transport-revocation", owner_principal_id=OPERATOR_OWNER)
+    calls = 0
+    worker: AudioIngressWorker
+
+    async def intercepted(**_kwargs):
+        nonlocal calls
+        calls += 1
+        await worker.revoke_consent_grant(
+            MODEL_REF,
+            owner_principal_id=OPERATOR_OWNER,
+            operator_session_id=OPERATOR_SESSION,
+        )
+        return {"transcript": "must not become canonical"}
+
+    worker = AudioIngressWorker(
+        transport=InterceptedAudioTransport(intercepted),
+        admission_broker=RemoteInferenceAdmissionBroker(),
+        quarantine_root=tmp_path,
+    )
+    with patch.object(settings, "operator_auth_secret", "test-audio-secret"):
+        queued = await worker.submit(_request(session.id, request_id="audio-transport-revocation"), process=False)
+        result = await worker.process(
+            queued.request_id,
+            owner_principal_id=OPERATOR_OWNER,
+            operator_session_id=OPERATOR_SESSION,
+        )
+
+    assert calls == 1
+    assert result.status == "degraded"
+    assert result.error_code == "audio_transport_outcome_unknown"
+    final = await worker._snapshot_by_request(queued.request_id)
+    assert final.status == "degraded"
+    assert final.error_code == "audio_transport_outcome_unknown"
+    assert await session_manager.get_message(queued.message_id) is None
+
+
+@pytest.mark.asyncio
 async def test_audio_worker_runtime_cleanup_expires_deadline_and_files(async_db, tmp_path: Path):
     session = await session_manager.get_or_create("audio-session-runtime-cleanup", owner_principal_id=OPERATOR_OWNER)
     worker = AudioIngressWorker(
@@ -609,6 +684,43 @@ async def test_audio_worker_confirmation_recovers_after_message_commit(async_db,
             operator_session_id=OPERATOR_SESSION,
         )
         assert retry.status == "confirmed"
+
+
+@pytest.mark.asyncio
+async def test_audio_worker_restart_reconciles_reserved_canonical_message(async_db, tmp_path: Path, monkeypatch):
+    session = await session_manager.get_or_create("audio-session-confirm-restart", owner_principal_id=OPERATOR_OWNER)
+    worker = AudioIngressWorker(
+        transport=InterceptedAudioTransport({"transcript": "generated"}),
+        admission_broker=RemoteInferenceAdmissionBroker(),
+        quarantine_root=tmp_path,
+    )
+    original_cleanup = worker._cleanup_job_paths
+
+    def crash_after_message_commit(_raw_path, _normalized_path):
+        raise RuntimeError("simulated worker crash after canonical commit")
+
+    with patch.object(settings, "operator_auth_secret", "test-audio-secret"):
+        snapshot = await worker.submit(_request(session.id, request_id="audio-confirm-restart"), process=True)
+        monkeypatch.setattr(worker, "_cleanup_job_paths", crash_after_message_commit)
+        with pytest.raises(RuntimeError, match="simulated worker crash"):
+            await worker.confirm_transcript(
+                snapshot.request_id,
+                "operator confirmed",
+                expected_transcript_digest=snapshot.transcript_digest,
+                owner_principal_id=OPERATOR_OWNER,
+                operator_session_id=OPERATOR_SESSION,
+            )
+
+    monkeypatch.setattr(worker, "_cleanup_job_paths", original_cleanup)
+    reserved = await worker._snapshot_by_request(snapshot.request_id)
+    assert reserved.status == "confirming_reserved"
+    assert await session_manager.get_message(snapshot.message_id) is not None
+
+    assert await worker.cleanup_after_restart() == 1
+    recovered = await worker._snapshot_by_request(snapshot.request_id)
+    assert recovered.status == "confirmed"
+    assert recovered.confirmed_transcript_digest == hashlib.sha256(b"operator confirmed").hexdigest()
+    assert await session_manager.get_message(snapshot.message_id) is not None
 
 
 @pytest.mark.asyncio

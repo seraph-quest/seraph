@@ -250,7 +250,11 @@ async def _owned_job(request_id: str, request: Request, *, require_model: bool =
         raise HTTPException(status_code=404, detail={"code": "audio_job_not_found"})
 
     try:
-        snapshot = await default_audio_worker._snapshot_by_request(request_id)
+        snapshot = await default_audio_worker._snapshot_by_request(
+            request_id,
+            owner_principal_id=owner,
+            operator_session_id=operator_session_id,
+        )
     except AudioWorkerError as exc:
         raise HTTPException(status_code=404, detail={"code": exc.code}) from exc
     return snapshot, owner, operator_session_id, operator

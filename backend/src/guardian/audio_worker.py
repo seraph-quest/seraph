@@ -31,6 +31,7 @@ import shutil
 import stat
 import subprocess
 import tempfile
+from types import SimpleNamespace
 from typing import Any, Awaitable, Callable, Protocol
 import uuid
 import wave
@@ -48,7 +49,7 @@ from src.conversation.identity import (
     validate_attachment_refs,
 )
 from src.db.engine import get_session
-from src.db.models import AudioConsentGrant, AudioIngressJob
+from src.db.models import AudioConsentGrant, AudioIngressJob, Message
 from src.security.trust_contract import AuthorityGrant, TrustPrincipal
 from src.auth.service import AuthFailure, authenticate_session
 from src.model_fabric.remote_inference_admission import (
@@ -90,6 +91,7 @@ _AUDIO_STATUS = frozenset(
         "transcript_ready",
         "confirming",
         "confirming_reserved",
+        "transporting",
         "confirmed",
         "degraded",
         "failed",
@@ -1235,12 +1237,26 @@ class AudioIngressWorker:
                 deadline = deadline.replace(tzinfo=timezone.utc)
             deadline = _utc(deadline)
         expired = not isinstance(deadline, datetime) or deadline <= current
-        if expired and row.status in {"queued", "processing", "transcript_ready", "confirming", "confirming_reserved"}:
+        if expired and row.status in {
+            "queued",
+            "processing",
+            "transporting",
+            "transcript_ready",
+            "confirming",
+            "confirming_reserved",
+        }:
             self._cleanup_job_paths(row.raw_path, row.normalized_path)
             self._drop_review_transcript(row.request_id)
             return await self._update_if_status(
                 row.id,
-                {"queued", "processing", "transcript_ready", "confirming", "confirming_reserved"},
+                {
+                    "queued",
+                    "processing",
+                    "transporting",
+                    "transcript_ready",
+                    "confirming",
+                    "confirming_reserved",
+                },
                 status="failed",
                 error_code="raw_audio_retention_expired",
                 raw_path=None,
@@ -1360,6 +1376,117 @@ class AudioIngressWorker:
                 raise AudioWorkerError("audio_job_not_found", "audio job is not available")
             db.expunge(row)
             return self._snapshot(row), result.rowcount == 1
+
+    async def _claim_transport(
+        self,
+        row: AudioIngressJob,
+        *,
+        operation_id: str,
+    ) -> tuple[AudioJobSnapshot, bool]:
+        """Atomically fence the final transport boundary.
+
+        The broker lease only fences this worker process.  The durable status
+        transition closes the cancellation/revocation race between the last
+        authority read and the intercepted transport callback.  A callback is
+        allowed to start only while the row remains ``transporting``.
+        """
+        async with get_session() as db:
+            claimed = await db.execute(
+                update(AudioIngressJob)
+                .where(
+                    AudioIngressJob.id == row.id,
+                    AudioIngressJob.status == "processing",
+                    AudioIngressJob.admission_operation_id == operation_id,
+                    AudioIngressJob.owner_principal_id == row.owner_principal_id,
+                    AudioIngressJob.operator_session_id == row.operator_session_id,
+                )
+                .values(
+                    status="transporting",
+                    transport_status="claimed",
+                    updated_at=self._now(),
+                )
+            )
+            current = await db.get(AudioIngressJob, row.id)
+            if current is None:
+                raise AudioWorkerError("audio_job_not_found", "audio job is not available")
+            db.expunge(current)
+            return self._snapshot(current), claimed.rowcount == 1
+
+    @staticmethod
+    def _canonical_confirmation_matches(
+        row: AudioIngressJob,
+        message: Message | None,
+    ) -> bool:
+        """Verify a committed canonical message belongs to this reservation."""
+        digest = str(row.confirmed_transcript_digest or "")
+        if (
+            message is None
+            or not digest
+            or message.id != row.message_id
+            or message.session_id != row.session_id
+            or message.role != "user"
+            or _digest_text(message.content) != digest
+        ):
+            return False
+        try:
+            metadata = json.loads(message.metadata_json or "{}")
+        except (TypeError, json.JSONDecodeError):
+            return False
+        if not isinstance(metadata, dict):
+            return False
+        audio = metadata.get("audio")
+        ingress = metadata.get("ingress")
+        return bool(
+            isinstance(audio, dict)
+            and audio.get("request_id") == row.request_id
+            and audio.get("confirmed_transcript_digest") == digest
+            and audio.get("confirmed") is True
+            and isinstance(ingress, dict)
+            and ingress.get("message_id") == row.message_id
+            and ingress.get("session_id") == row.session_id
+        )
+
+    async def _assert_current_transport_authority(
+        self,
+        row: AudioIngressJob,
+    ) -> None:
+        """Re-read session, model grant, and consent at a transport boundary."""
+        try:
+            current = await authenticate_session(str(row.operator_session_id or ""), touch=False)
+        except AuthFailure as exc:
+            raise _AudioTransportBoundaryBlocked(
+                "model_inference_grant_revoked",
+                "the operator session is no longer current",
+            ) from exc
+        if current.session_id != row.operator_session_id or not self._principal_has_model_authority(
+            current.principal,
+            row,
+        ):
+            raise _AudioTransportBoundaryBlocked(
+                "model_inference_grant_revoked",
+                "model inference authority is no longer current",
+            )
+        try:
+            await self._resolve_upload_consents(
+                AudioUploadRequest(
+                    session_id=row.session_id,
+                    owner_principal_id=row.owner_principal_id,
+                    operator_session_id=row.operator_session_id,
+                    audio_bytes=b"placeholder",
+                    captured_at=row.captured_at,
+                    capture_consent=SimpleNamespace(reference=row.capture_consent_reference),
+                    model_consent=(
+                        SimpleNamespace(reference=row.model_consent_reference)
+                        if row.model_consent_reference
+                        else None
+                    ),
+                    requested_capability=row.requested_capability,
+                    model_inference_granted=True,
+                ),
+                now=self._now(),
+            )
+        except AudioWorkerError as exc:
+            raise _AudioTransportBoundaryBlocked(exc.code, str(exc)) from exc
 
     async def _insert_job(
         self,
@@ -1661,8 +1788,30 @@ class AudioIngressWorker:
                 raise AudioWorkerError(exc.code, "audio attachment proof was rejected") from exc
             raise AudioWorkerError("audio_ingress_failed", "audio upload could not be admitted") from exc
 
-    async def _snapshot_by_request(self, request_id: str, *, duplicate: bool = False) -> AudioJobSnapshot:
+    async def _snapshot_by_request(
+        self,
+        request_id: str,
+        *,
+        duplicate: bool = False,
+        owner_principal_id: str | None = None,
+        operator_session_id: str | None = None,
+    ) -> AudioJobSnapshot:
+        """Read one job, fencing cleanup behind its owning operator identity.
+
+        Internal callers that do not carry an operator identity receive a
+        read-only snapshot.  Expiry and quarantine cleanup are only reachable
+        after the caller proves the durable owner/session binding.
+        """
         _validate_request_id(request_id)
+        if owner_principal_id is None and operator_session_id is None:
+            row = await self._job(request_id)
+            if row is None:
+                raise AudioWorkerError("audio_job_not_found", "audio job is not available")
+            return replace(self._snapshot(row), duplicate=duplicate)
+        row = await self._job(request_id)
+        if row is None:
+            raise AudioWorkerError("audio_job_not_found", "audio job is not available")
+        self._assert_operator_session(row, owner_principal_id, operator_session_id)
         snapshot = await self._expire_if_needed(request_id)
         return replace(snapshot, duplicate=duplicate)
 
@@ -1676,11 +1825,13 @@ class AudioIngressWorker:
     ) -> AudioJobSnapshot:
         """Run one process task and register it for cancellation fencing."""
         request_id = _validate_request_id(request_id) or ""
-        current_snapshot = await self._expire_if_needed(request_id)
         row_for_identity = await self._job(request_id)
         if row_for_identity is None:
             raise AudioWorkerError("audio_job_not_found", "audio job is not available")
         self._assert_operator_session(row_for_identity, owner_principal_id, operator_session_id)
+        # Expiry/cleanup is side-effecting.  Authenticate the durable owner and
+        # operator session before allowing a direct worker caller to reach it.
+        await self._expire_if_needed(request_id)
         current_task = asyncio.current_task()
         wait_for: asyncio.Task[AudioJobSnapshot] | None = None
         async with self._task_lock:
@@ -2042,40 +2193,43 @@ class AudioIngressWorker:
                         "audio job is no longer admitted for transport",
                     )
                 try:
-                    self._assert_operator_session(
-                        latest,
-                        latest.owner_principal_id,
-                        latest.operator_session_id,
-                    )
+                    self._assert_operator_session(latest, latest.owner_principal_id, latest.operator_session_id)
                 except AudioWorkerError as exc:
                     raise _AudioTransportBoundaryBlocked(exc.code, str(exc)) from exc
-                if not await self._recheck_model_authority(latest):
+                try:
+                    await self._assert_current_transport_authority(latest)
+                except _AudioTransportBoundaryBlocked:
+                    raise
+                except AudioWorkerError as exc:
+                    raise _AudioTransportBoundaryBlocked(exc.code, str(exc)) from exc
+                claimed, won = await self._claim_transport(latest, operation_id=operation_id)
+                if not won or claimed.status != "transporting":
                     raise _AudioTransportBoundaryBlocked(
-                        "model_inference_grant_revoked",
-                        "model inference authority is no longer current",
+                        "audio_transport_claim_lost",
+                        "audio transport claim was lost before dispatch",
+                    )
+
+                # The claim itself is a durable fence, but cancellation and
+                # revocation may race it.  Re-read every authority source after
+                # claiming and immediately before invoking the callback.
+                final = await self._job(row.request_id)
+                if final is None or final.status != "transporting":
+                    raise _AudioTransportBoundaryBlocked(
+                        "audio_job_cancelled" if final and final.status == "cancelled" else "audio_transport_claim_lost",
+                        "audio transport claim is no longer current",
                     )
                 try:
-                    await self._resolve_upload_consents(
-                        AudioUploadRequest(
-                            session_id=latest.session_id,
-                            owner_principal_id=latest.owner_principal_id,
-                            operator_session_id=latest.operator_session_id,
-                            audio_bytes=b"placeholder",
-                            captured_at=latest.captured_at,
-                            capture_consent=persisted_capture,
-                            model_consent=persisted_model,
-                            requested_capability=latest.requested_capability,
-                            model_inference_granted=True,
-                        ),
-                        now=self._now(),
-                    )
+                    self._assert_operator_session(final, final.owner_principal_id, final.operator_session_id)
+                    await self._assert_current_transport_authority(final)
+                except _AudioTransportBoundaryBlocked:
+                    raise
                 except AudioWorkerError as exc:
                     raise _AudioTransportBoundaryBlocked(exc.code, str(exc)) from exc
                 return await self.transport.transcribe(
                     normalized_bytes,
-                    request_id=latest.request_id,
-                    session_id=latest.session_id,
-                    audio_digest=latest.audio_payload_digest,
+                    request_id=final.request_id,
+                    session_id=final.session_id,
+                    audio_digest=final.audio_payload_digest,
                 )
 
             try:
@@ -2086,6 +2240,39 @@ class AudioIngressWorker:
                 )
             except GpuAdmissionError as exc:
                 raise AudioWorkerError(f"admission_{getattr(exc, 'code', 'rejected')}", "audio admission rejected") from exc
+            # A callback may have started before a concurrent revocation or
+            # cancellation became visible.  Never convert that response into
+            # a transcript after the boundary has lost authority: preserve a
+            # typed unknown outcome instead.
+            post_transport = await self._job(row.request_id)
+            if post_transport is None:
+                raise _AudioTransportBoundaryBlocked(
+                    "audio_transport_outcome_unknown",
+                    "audio transport outcome cannot be reconciled",
+                )
+            if post_transport.status != "transporting":
+                if post_transport.status == "cancelled":
+                    return self._snapshot(post_transport)
+                raise _AudioTransportBoundaryBlocked(
+                    "audio_transport_outcome_unknown",
+                    "audio transport status changed before reconciliation",
+                )
+            try:
+                await self._assert_current_transport_authority(post_transport)
+            except _AudioTransportBoundaryBlocked as exc:
+                await self._update_if_status(
+                    row.id,
+                    {"transporting"},
+                    status="degraded",
+                    error_code="audio_transport_outcome_unknown",
+                    provider_status="unknown",
+                    transport_status="unknown",
+                    raw_path=None,
+                    normalized_path=None,
+                    transcript=None,
+                    transcript_digest=None,
+                )
+                raise exc
             transcript = parse_intercepted_transcript(response)
             transcript_digest = _digest_text(transcript)
             result_digest = _digest_text(_bounded_json({"request": row.request_digest, "transcript": transcript_digest}))
@@ -2094,7 +2281,7 @@ class AudioIngressWorker:
             # canonical memory before confirmation.
             updated = await self._update_if_status(
                 row.id,
-                {"processing"},
+                {"processing", "transporting"},
                 status="transcript_ready",
                 transcript=None,
                 transcript_digest=transcript_digest,
@@ -2110,22 +2297,41 @@ class AudioIngressWorker:
             return updated
         except asyncio.CancelledError:
             self._cleanup_job_paths(row.raw_path, row.normalized_path)
-            await self._update_if_status(
-                row.id,
-                {"processing", "queued"},
-                status="cancelled",
-                error_code="caller_cancelled",
-                raw_path=None,
-                normalized_path=None,
-                transcript=None,
-                transcript_digest=None,
-            )
+            current = await self._job(row.request_id)
+            if current is not None and current.status == "transporting":
+                # Cancellation after the durable transport claim cannot prove
+                # whether the intercepted callback crossed the external
+                # effect boundary.  Preserve a typed unknown outcome rather
+                # than reporting a clean cancellation.
+                await self._update_if_status(
+                    row.id,
+                    {"transporting"},
+                    status="degraded",
+                    error_code="audio_transport_outcome_unknown",
+                    provider_status="unknown",
+                    transport_status="unknown",
+                    raw_path=None,
+                    normalized_path=None,
+                    transcript=None,
+                    transcript_digest=None,
+                )
+            else:
+                await self._update_if_status(
+                    row.id,
+                    {"processing", "queued"},
+                    status="cancelled",
+                    error_code="caller_cancelled",
+                    raw_path=None,
+                    normalized_path=None,
+                    transcript=None,
+                    transcript_digest=None,
+                )
             raise
         except _AudioTransportBoundaryBlocked as exc:
             self._cleanup_job_paths(row.raw_path, row.normalized_path)
             return await self._update_if_status(
                 row.id,
-                {"processing"},
+                {"processing", "transporting"},
                 status="blocked",
                 error_code=exc.code,
                 raw_path=None,
@@ -2137,7 +2343,7 @@ class AudioIngressWorker:
             self._cleanup_job_paths(row.raw_path, row.normalized_path)
             return await self._update_if_status(
                 row.id,
-                {"processing"},
+                {"processing", "transporting"},
                 status="degraded",
                 error_code=exc.code,
                 provider_status="unavailable",
@@ -2151,7 +2357,7 @@ class AudioIngressWorker:
             self._cleanup_job_paths(row.raw_path, row.normalized_path)
             return await self._update_if_status(
                 row.id,
-                {"processing"},
+                {"processing", "transporting"},
                 status="degraded",
                 error_code=exc.code,
                 provider_status="unverified",
@@ -2165,7 +2371,7 @@ class AudioIngressWorker:
             self._cleanup_job_paths(row.raw_path, row.normalized_path)
             return await self._update_if_status(
                 row.id,
-                {"processing"},
+                {"processing", "transporting"},
                 status="failed",
                 error_code=exc.code,
                 raw_path=None,
@@ -2177,7 +2383,7 @@ class AudioIngressWorker:
             self._cleanup_job_paths(row.raw_path, row.normalized_path)
             return await self._update_if_status(
                 row.id,
-                {"processing"},
+                {"processing", "transporting"},
                 status="failed",
                 error_code="audio_processing_failed",
                 raw_path=None,
@@ -2436,6 +2642,7 @@ class AudioIngressWorker:
         self._assert_operator_session(row, owner_principal_id, operator_session_id)
         if row.status == "confirming_reserved":
             raise AudioWorkerError("confirmation_in_progress", "transcript confirmation has already fenced cancellation")
+        transport_outcome_unknown = row.status == "transporting"
         if row.status in {"confirmed", "failed", "blocked", "cancelled", "degraded"}:
             self._cleanup_job_paths(row.raw_path, row.normalized_path)
             self._drop_review_transcript(row.request_id)
@@ -2443,16 +2650,39 @@ class AudioIngressWorker:
         # Fence the durable status before asking an in-flight task or broker to
         # stop.  A transport that returns after cancellation can then only see
         # the terminal cancelled row and cannot write transcript_ready.
+        expected_cancel_statuses = (
+            {"transporting"}
+            if transport_outcome_unknown
+            else {"queued", "processing", "transcript_ready", "confirming"}
+        )
         cancelled = await self._update_if_status(
             row.id,
-            {"queued", "processing", "transcript_ready", "confirming"},
-            status="cancelled",
-            error_code="cancelled",
+            expected_cancel_statuses,
+            status="degraded" if transport_outcome_unknown else "cancelled",
+            error_code="audio_transport_outcome_unknown" if transport_outcome_unknown else "cancelled",
+            provider_status="unknown" if transport_outcome_unknown else row.provider_status,
+            transport_status="unknown" if transport_outcome_unknown else row.transport_status,
             raw_path=None,
             normalized_path=None,
             transcript=None,
             transcript_digest=None,
         )
+        if not transport_outcome_unknown and cancelled.status == "transporting":
+            # The claim won between the read and the cancellation fence.  A
+            # callback may already have crossed the boundary, so retain an
+            # explicit unknown outcome instead of reporting a clean cancel.
+            cancelled = await self._update_if_status(
+                row.id,
+                {"transporting"},
+                status="degraded",
+                error_code="audio_transport_outcome_unknown",
+                provider_status="unknown",
+                transport_status="unknown",
+                raw_path=None,
+                normalized_path=None,
+                transcript=None,
+                transcript_digest=None,
+            )
         if cancelled.status in {"confirming", "confirming_reserved"}:
             raise AudioWorkerError("confirmation_in_progress", "transcript confirmation has already fenced cancellation")
         if cancelled.admission_operation_id:
@@ -2510,6 +2740,44 @@ class AudioIngressWorker:
                 else:
                     should_expire = deadline <= current
                 changed = False
+                # ``reserve_ingress_message`` commits the canonical message
+                # and the confirming_reserved job fence together.  Startup
+                # recovery must reconcile that pair before applying expiry or
+                # clearing confirmation evidence; otherwise a crash after the
+                # message commit can leave an orphan canonical transcript.
+                if row.status == "confirming_reserved":
+                    existing_message = await db.get(Message, row.message_id)
+                    if row.transcript is not None:
+                        row.transcript = None
+                        changed = True
+                    if self._canonical_confirmation_matches(row, existing_message):
+                        self._cleanup_job_paths(row.raw_path, row.normalized_path)
+                        row.status = "confirmed"
+                        row.error_code = None
+                        row.transcript_digest = row.confirmed_transcript_digest or row.transcript_digest
+                        row.raw_path = None
+                        row.normalized_path = None
+                        changed = True
+                    elif recover_process_local or should_expire:
+                        # No canonical row exists, so retain both digests and
+                        # the reservation identity as an explicit unknown
+                        # outcome.  The evidence remains available for a
+                        # later operator reconciliation rather than being
+                        # silently erased by cleanup.
+                        self._cleanup_job_paths(row.raw_path, row.normalized_path)
+                        row.status = "degraded"
+                        row.error_code = "confirmation_recovery_required"
+                        row.raw_path = None
+                        row.normalized_path = None
+                        changed = True
+                    elif row.error_code != "confirmation_recovery_required":
+                        row.error_code = "confirmation_recovery_required"
+                        changed = True
+                    if changed:
+                        row.updated_at = current
+                        db.add(row)
+                        removed += 1
+                    continue
                 # Clear any raw text left by a legacy or interrupted writer,
                 # regardless of its stale status.  Confirmed rows retain only
                 # their immutable digest; no transcript text is recoverable.

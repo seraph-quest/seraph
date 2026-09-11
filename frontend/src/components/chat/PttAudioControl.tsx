@@ -6,6 +6,7 @@ export type PttAudioState =
   | "capturing"
   | "uploading"
   | "processing"
+  | "confirming"
   | "reloading"
   | "cancelling"
   | "review"
@@ -49,6 +50,24 @@ export function PttAudioControl({ sessionId, disabled = false, endpoint = "/api/
   const recorderRef = useRef<MediaRecorder | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const chunksRef = useRef<Blob[]>([]);
+  const actionSequenceRef = useRef(0);
+  const actionRef = useRef<{ sequence: number; controller: AbortController } | null>(null);
+
+  const beginAction = () => {
+    actionRef.current?.controller.abort();
+    const action = {
+      sequence: ++actionSequenceRef.current,
+      controller: new AbortController(),
+    };
+    actionRef.current = action;
+    return action;
+  };
+
+  const isCurrentAction = (sequence: number) => actionRef.current?.sequence === sequence;
+
+  const finishAction = (sequence: number) => {
+    if (isCurrentAction(sequence)) actionRef.current = null;
+  };
 
   const setServerConsent = async (boundary: "capture" | "model", enabled: boolean) => {
     if (consentPending) return;
@@ -129,6 +148,9 @@ export function PttAudioControl({ sessionId, disabled = false, endpoint = "/api/
       setTranscript("");
       setError(null);
       setState("confirmed");
+    } else if (payload.status === "confirming" || payload.status === "confirming_reserved") {
+      setError(null);
+      setState("confirming");
     } else if (payload.status === "cancelled") {
       setTranscript("");
       setError(null);
@@ -141,6 +163,10 @@ export function PttAudioControl({ sessionId, disabled = false, endpoint = "/api/
       setTranscript("");
       setState("degraded");
       setError(payload.error_code || "audio_processing_degraded");
+    } else if (payload.status === "queued" || payload.status === "processing" || payload.status === "transporting") {
+      setTranscript("");
+      setError(null);
+      setState("processing");
     } else {
       setTranscript("");
       setState("error");
@@ -220,66 +246,100 @@ export function PttAudioControl({ sessionId, disabled = false, endpoint = "/api/
 
   const confirmTranscript = async () => {
     if (!snapshot || state !== "review") return;
-    const response = await fetch(`${endpoint}/${snapshot.request_id}/confirm`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        transcript,
-        expected_transcript_digest: snapshot.transcript?.digest,
-      }),
-    });
-    if (!response.ok) {
-      setState("error");
-      setError("Transcript changed before confirmation.");
-      return;
+    const action = beginAction();
+    setState("confirming");
+    setError(null);
+    try {
+      const response = await fetch(`${endpoint}/${snapshot.request_id}/confirm`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          transcript,
+          expected_transcript_digest: snapshot.transcript?.digest,
+        }),
+        signal: action.controller.signal,
+      });
+      if (!isCurrentAction(action.sequence)) return;
+      if (!response.ok) {
+        setState("review");
+        setError("Transcript changed before confirmation.");
+        return;
+      }
+      applySnapshot((await response.json()) as AudioSnapshot);
+    } catch (cause) {
+      if (!isCurrentAction(action.sequence)) return;
+      setState("review");
+      setError(cause instanceof Error ? cause.message : "audio_confirmation_failed");
+    } finally {
+      finishAction(action.sequence);
     }
-    applySnapshot((await response.json()) as AudioSnapshot);
   };
 
   const reloadSnapshot = async () => {
-    if (!snapshot || state === "reloading" || state === "cancelling") return;
+    if (!snapshot || state === "reloading") return;
+    const action = beginAction();
     setState("reloading");
     setError(null);
     try {
-      const response = await fetch(`${endpoint}/${snapshot.request_id}`);
+      const response = await fetch(`${endpoint}/${snapshot.request_id}`, { signal: action.controller.signal });
       const payload = (await response.json()) as AudioSnapshot & { detail?: { code?: string } };
       if (!response.ok) throw new Error(payload.detail?.code || "audio_reload_failed");
+      if (!isCurrentAction(action.sequence)) return;
       applySnapshot(payload);
     } catch (cause) {
+      if (!isCurrentAction(action.sequence)) return;
       setTranscript("");
       setState("review_unavailable");
       setError(cause instanceof Error ? cause.message : "audio_reload_failed");
+    } finally {
+      finishAction(action.sequence);
     }
   };
 
   const retryProcessing = async () => {
     if (!snapshot) return;
+    const action = beginAction();
     setState("processing");
     setError(null);
     try {
-      const response = await fetch(`${endpoint}/${snapshot.request_id}/process`, { method: "POST" });
+      const response = await fetch(`${endpoint}/${snapshot.request_id}/process`, {
+        method: "POST",
+        signal: action.controller.signal,
+      });
       const payload = (await response.json()) as AudioSnapshot & { detail?: { code?: string } };
       if (!response.ok) throw new Error(payload.detail?.code || "audio_retry_failed");
+      if (!isCurrentAction(action.sequence)) return;
       applySnapshot(payload);
     } catch (cause) {
-      setState("error");
+      if (!isCurrentAction(action.sequence)) return;
+      setState("review_unavailable");
       setError(cause instanceof Error ? cause.message : "audio_retry_failed");
+    } finally {
+      finishAction(action.sequence);
     }
   };
 
   const cancelAudio = async () => {
-    if (!snapshot || state === "reloading" || state === "cancelling") return;
+    if (!snapshot || state === "cancelling") return;
     const previousState = state;
+    const action = beginAction();
     setState("cancelling");
     setError(null);
     try {
-      const response = await fetch(`${endpoint}/${snapshot.request_id}/cancel`, { method: "POST" });
+      const response = await fetch(`${endpoint}/${snapshot.request_id}/cancel`, {
+        method: "POST",
+        signal: action.controller.signal,
+      });
       const payload = (await response.json()) as AudioSnapshot & { detail?: { code?: string } };
       if (!response.ok) throw new Error(payload.detail?.code || "audio_cancel_failed");
+      if (!isCurrentAction(action.sequence)) return;
       applySnapshot(payload);
     } catch (cause) {
+      if (!isCurrentAction(action.sequence)) return;
       setState(previousState === "review" ? "review" : "review_unavailable");
       setError(cause instanceof Error ? cause.message : "audio_cancel_failed");
+    } finally {
+      finishAction(action.sequence);
     }
   };
 
@@ -297,7 +357,7 @@ export function PttAudioControl({ sessionId, disabled = false, endpoint = "/api/
       </div>
       <button
         type="button"
-        disabled={disabled || consentPending !== null || (!captureConsent && state === "idle") || ["uploading", "processing", "reloading", "cancelling", "requesting_capture", "review", "review_unavailable", "confirmed", "cancelled"].includes(state)}
+        disabled={disabled || consentPending !== null || (!captureConsent && state === "idle") || ["uploading", "processing", "confirming", "reloading", "cancelling", "requesting_capture", "review", "review_unavailable", "confirmed", "cancelled"].includes(state)}
         onPointerDown={() => void beginCapture()}
         onPointerUp={endCapture}
         onPointerCancel={endCapture}
@@ -307,19 +367,19 @@ export function PttAudioControl({ sessionId, disabled = false, endpoint = "/api/
       >
         {state === "capturing" ? "Release to stop" : "Hold to talk"}
       </button>
-      {state === "review" && (
+      {snapshot && ["review", "review_unavailable", "confirming", "reloading", "cancelling"].includes(state) && (
         <div className="flex gap-2 items-start">
           <textarea aria-label="Editable transcript" value={transcript} onChange={(event) => setTranscript(event.target.value)} className="flex-1 bg-retro-bg pixel-border-thin p-2 text-xs" />
           <div className="flex flex-col gap-2">
-            <button type="button" onClick={() => void confirmTranscript()} className="pixel-border-thin px-2 py-1 font-pixel text-[10px]">Confirm</button>
-            <button type="button" onClick={() => void reloadSnapshot()} className="pixel-border-thin px-2 py-1 font-pixel text-[10px]">Reload review</button>
-            <button type="button" onClick={() => void cancelAudio()} className="pixel-border-thin px-2 py-1 font-pixel text-[10px]">Cancel</button>
+            <button type="button" onClick={() => void confirmTranscript()} disabled={state !== "review"} className="pixel-border-thin px-2 py-1 font-pixel text-[10px]">Confirm</button>
+            <button type="button" onClick={() => void reloadSnapshot()} disabled={state === "reloading"} className="pixel-border-thin px-2 py-1 font-pixel text-[10px]">Reload review</button>
+            <button type="button" onClick={() => void cancelAudio()} disabled={state === "cancelling"} className="pixel-border-thin px-2 py-1 font-pixel text-[10px]">Cancel</button>
           </div>
         </div>
       )}
-      {snapshot && ["reloading", "cancelling"].includes(state) && (
+      {snapshot && ["confirming", "reloading", "cancelling"].includes(state) && (
         <div className="pixel-border-thin p-2 text-xs" role="status">
-          {state === "reloading" ? "Reloading transcript review…" : "Cancelling audio…"}
+          {state === "confirming" ? "Confirming transcript…" : state === "reloading" ? "Reloading transcript review…" : "Cancelling audio…"}
         </div>
       )}
       {snapshot && state === "review_unavailable" && (

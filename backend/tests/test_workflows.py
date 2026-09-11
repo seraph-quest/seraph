@@ -21,6 +21,7 @@ from src.workflows.manager import (
     DurableWorkflowStateUnavailable,
     WorkflowManager,
     WorkflowTool,
+    _bind_workflow_step_trust_principal,
     _assert_workflow_parent_recovery_authority,
     _approval_context_for_workflow,
     _checkpoint_context_allowed,
@@ -925,6 +926,111 @@ def test_workflow_tool_uses_unique_durable_identity_for_repeated_identical_runs(
     assert identities[0] != identities[1]
     assert identities[0].endswith(":run-101")
     assert identities[1].endswith(":run-202")
+
+
+def test_workflow_tool_binds_approval_identity_and_restores_context():
+    workflow = Workflow(
+        name="approval-workflow",
+        description="Run an approval-gated step",
+        inputs={},
+        steps=[
+            WorkflowStep(
+                id="execute",
+                tool="execute_code",
+                arguments={"code": "print('approved')"},
+            ),
+        ],
+        requires_tools=["execute_code"],
+    )
+    approval_tool = ApprovalTool(
+        DummyTool("execute_code", lambda **_kwargs: "executed"),
+        force_approval=True,
+    )
+    workflow_tool = WorkflowTool(workflow, {"execute_code": approval_tool})
+    principals_after_step: list[TrustPrincipal | None] = []
+
+    async def record_failed(**_kwargs):
+        principals_after_step.append(get_current_trust_principal())
+        return {}
+
+    state_repository = SimpleNamespace(
+        create_run=AsyncMock(return_value={}),
+        record_step_started=AsyncMock(return_value={}),
+        record_step_failed=AsyncMock(side_effect=record_failed),
+        record_step_completed=AsyncMock(return_value={}),
+        finish_run=AsyncMock(return_value={}),
+    )
+    principal = TrustPrincipal(
+        principal_id="operator:approval-workflow",
+        principal_type=PrincipalType.OPERATOR,
+        grants=(AuthorityGrant.CAPABILITY_EXECUTE,),
+        session_id="approval-session",
+        operator_session_id="operator-auth-session",
+    )
+    tokens = set_runtime_context(
+        "approval-session",
+        "high_risk",
+        trust_principal=principal,
+    )
+    try:
+        with (
+            patch("src.workflows.manager.workflow_state_repository", state_repository),
+            patch(
+                "src.tools.approval.approval_repository.consume_approved",
+                new_callable=AsyncMock,
+                return_value=None,
+            ) as consume_approved,
+            patch(
+                "src.tools.approval.approval_repository.get_or_create_pending",
+                new_callable=AsyncMock,
+                return_value=SimpleNamespace(id="approval-1", risk_level="high"),
+            ) as get_or_create_pending,
+            pytest.raises(ApprovalRequired),
+        ):
+            workflow_tool()
+    finally:
+        reset_runtime_context(tokens)
+
+    run_identity = state_repository.create_run.await_args.kwargs["run_identity"]
+    pending_details = get_or_create_pending.await_args.kwargs["details"]
+    assert pending_details["workflow_run_identity"] == run_identity
+    assert pending_details["approval_context"]["workflow_run_identity"] == run_identity
+    assert consume_approved.await_args.kwargs["approval_binding"]["workflow_run_identity"] == run_identity
+    assert principals_after_step == [principal]
+    assert get_current_trust_principal() is None
+
+
+def test_workflow_step_binding_rejects_conflicting_job_identity():
+    principal = TrustPrincipal(
+        principal_id="operator:conflicting-workflow",
+        principal_type=PrincipalType.OPERATOR,
+        grants=(AuthorityGrant.CAPABILITY_EXECUTE,),
+        session_id="conflicting-session",
+        job_id="stale-run",
+    )
+    tokens = set_runtime_context(
+        "conflicting-session",
+        "balanced",
+        trust_principal=principal,
+    )
+    try:
+        with pytest.raises(
+            DurableWorkflowStateUnavailable,
+            match="conflicts with the durable run",
+        ):
+            _bind_workflow_step_trust_principal("current-run")
+        assert get_current_trust_principal() == principal
+    finally:
+        reset_runtime_context(tokens)
+
+
+def test_workflow_step_binding_leaves_principal_less_context_unbound():
+    tokens = set_runtime_context("principal-less-session", "balanced")
+    try:
+        assert _bind_workflow_step_trust_principal("principal-less-run") is None
+        assert get_current_trust_principal() is None
+    finally:
+        reset_runtime_context(tokens)
 
 
 def test_workflow_tool_fails_closed_before_tool_call_when_required_durable_state_unavailable():

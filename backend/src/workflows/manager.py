@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
+from dataclasses import replace
 from datetime import datetime, timezone
 import hashlib
 import json
@@ -18,7 +19,12 @@ from smolagents import Tool
 from sqlmodel import col, select
 
 from src.audit.formatting import format_tool_call_summary, redact_for_audit
-from src.approval.runtime import get_current_session_id, get_current_trust_principal
+from src.approval.runtime import (
+    get_current_session_id,
+    get_current_trust_principal,
+    reset_runtime_trust_principal,
+    set_runtime_trust_principal,
+)
 from src.db.engine import get_session
 from src.db.models import AuditEvent
 from src.extensions.governance import build_governance_status
@@ -162,6 +168,32 @@ def _workflow_durable_owner_fields() -> dict[str, str]:
         }
     raise DurableWorkflowStateUnavailable(
         "canonical workflow admission principal type is unsupported"
+    )
+
+
+def _bind_workflow_step_trust_principal(run_identity: str):
+    """Bind the current durable run only while a workflow step executes.
+
+    Approval-bearing step tools read the runtime principal, so their approval
+    request must carry the exact run identity that will consume the decision.
+    A pre-existing different job identity indicates a nested or stale runtime
+    scope and must fail closed rather than being overwritten.
+    """
+    canonical_run_identity = str(run_identity or "").strip()
+    if not canonical_run_identity:
+        raise DurableWorkflowStateUnavailable(
+            "workflow step authority requires a non-empty durable run identity"
+        )
+    principal = get_current_trust_principal()
+    if principal is None:
+        return None
+    existing_job_id = str(getattr(principal, "job_id", "") or "").strip()
+    if existing_job_id and existing_job_id != canonical_run_identity:
+        raise DurableWorkflowStateUnavailable(
+            "workflow step authority job identity conflicts with the durable run"
+        )
+    return set_runtime_trust_principal(
+        replace(principal, job_id=canonical_run_identity)
     )
 
 
@@ -1947,10 +1979,17 @@ class WorkflowTool(Tool):
             step_started_at = _utc_now_iso()
             started = time.perf_counter()
             try:
-                result = tool(
-                    **rendered_arguments,
-                    sanitize_inputs_outputs=sanitize_inputs_outputs,
+                step_principal_token = _bind_workflow_step_trust_principal(
+                    durable_run_identity
                 )
+                try:
+                    result = tool(
+                        **rendered_arguments,
+                        sanitize_inputs_outputs=sanitize_inputs_outputs,
+                    )
+                finally:
+                    if step_principal_token is not None:
+                        reset_runtime_trust_principal(step_principal_token)
             except Exception as exc:
                 safe_error_summary = _safe_workflow_error_summary(exc)
                 step_completed_at = _utc_now_iso()

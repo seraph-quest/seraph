@@ -38,6 +38,7 @@ _PATCH_TARGETS = [
     "src.model_fabric.repository.get_session",
     "src.profile.service.get_db",
     "src.api.settings.get_db",  # aliased: `import get_session as get_db`
+    "src.api.nodes.get_session",
     "src.api.observer.get_session",
     "src.scheduler.jobs.memory_consolidation.get_session",
     "src.scheduler.jobs.screenshot_observation_digest.get_session",

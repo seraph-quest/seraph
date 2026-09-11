@@ -17,6 +17,11 @@ from src.auth.service import (
 
 _SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
 _PUBLIC_PATHS = {"/health", "/api/auth/login"}
+_PAIRED_EDGE_INGRESS_PATHS = {
+    "/api/nodes/edge/heartbeat",
+    "/api/nodes/edge/upload",
+    "/api/nodes/edge/ingest",
+}
 
 
 def _csv(value: str) -> set[str]:
@@ -120,7 +125,16 @@ class OperatorAuthMiddleware(BaseHTTPMiddleware):
         )
         if boundary_error:
             return JSONResponse({"detail": {"code": boundary_error}}, status_code=403)
-        if request.url.path in _PUBLIC_PATHS or not request.url.path.startswith("/api"):
+        # The paired edge authenticates with its scoped node credential at the
+        # ingress handler.  Keep the host/origin boundary enforced here, but do
+        # not require a browser operator cookie that a native daemon cannot
+        # safely hold. Artifact readback and pairing mutations remain operator
+        # authenticated because only these exact ingress paths are exempted.
+        if (
+            request.url.path in _PUBLIC_PATHS
+            or request.url.path in _PAIRED_EDGE_INGRESS_PATHS
+            or not request.url.path.startswith("/api")
+        ):
             return await call_next(request)
         try:
             operator = await authenticate_token(request.cookies.get(settings.operator_auth_cookie_name))

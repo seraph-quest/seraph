@@ -8,7 +8,7 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
 
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, HTTPException, Query, Request, Response
 from fastapi.responses import FileResponse, PlainTextResponse
 from pydantic import BaseModel, ConfigDict, Field
 from sqlmodel import col, select
@@ -16,8 +16,9 @@ from sqlmodel import col, select
 from config.settings import settings
 from src.audit.runtime import log_integration_event
 from src.agent.session import session_manager
+from src.auth.service import AuthenticatedOperator
 from src.db.engine import get_session
-from src.db.models import ScreenObservation
+from src.db.models import PairedEdgeArtifact, ScreenObservation
 from src.observer.image_metadata import local_image_metadata
 from src.observer.manager import context_manager
 from src.observer.native_notification_queue import native_notification_queue
@@ -217,11 +218,21 @@ def _require_authenticated_daemon(request: Request, worker_id: str) -> None:
 def _require_authenticated_operator_binding(request: Request) -> tuple[str, str]:
     """Resolve the authenticated browser principal and operator session."""
     operator = getattr(request.state, "operator", None)
-    principal_id = getattr(getattr(operator, "principal", None), "principal_id", None)
-    operator_session_id = getattr(operator, "session_id", None)
-    if not operator or not principal_id or not operator_session_id:
-        raise HTTPException(status_code=401, detail="authenticated operator request is required")
-    return str(principal_id), str(operator_session_id)
+    principal = getattr(operator, "principal", None)
+    principal_id = getattr(principal, "principal_id", None)
+    operator_session_id = str(getattr(operator, "session_id", "") or "")
+    principal_type = getattr(getattr(principal, "principal_type", None), "value", getattr(principal, "principal_type", None))
+    if (
+        not isinstance(operator, AuthenticatedOperator)
+        or not principal_id
+        or not operator_session_id
+        or principal_type != "operator"
+        or not bool(getattr(principal, "authenticated", False))
+        or bool(getattr(principal, "revoked", False))
+        or str(getattr(principal, "operator_session_id", "") or "") != operator_session_id
+    ):
+        raise HTTPException(status_code=401, detail={"code": "authenticated_operator_required"})
+    return str(principal_id), operator_session_id
 
 
 class QueuedInsightResponse(BaseModel):
@@ -347,6 +358,16 @@ class ObserverPresenceSurfaceResponse(BaseModel):
     requires_pairing: bool = False
     device_reach_allowed: bool | None = None
     blocked_reason: str | None = None
+    last_seen_at: str | None = None
+    last_ingest_at: str | None = None
+    last_capture_at: str | None = None
+    last_transport_status: str | None = None
+    spool_count: int = 0
+    spool_bytes: int = 0
+    spool_oldest_at: str | None = None
+    recovery_state: str | None = None
+    degraded_state: str | None = None
+    revision: int = 0
 
 
 class ObserverPresenceSummaryResponse(BaseModel):
@@ -551,10 +572,12 @@ def _screen_artifact_root() -> Path:
     return Path("~/Library/Application Support/Seraph/artifacts/screen-captures").expanduser().resolve()
 
 
-def _require_local_artifact_request(request: Request) -> None:
+def _require_local_artifact_request(request: Request) -> tuple[str, str]:
+    owner_principal_id, operator_session_id = _require_authenticated_operator_binding(request)
     client_host = request.client.host if request.client is not None else ""
     if client_host not in {"127.0.0.1", "::1", "localhost", "testclient"}:
         raise HTTPException(status_code=403, detail="Screen artifacts are only available from localhost")
+    return owner_principal_id, operator_session_id
 
 
 def _screen_artifact_path(raw_path: str | None) -> Path:
@@ -600,7 +623,7 @@ def _screen_capture_artifacts(observation: ScreenObservation) -> dict[str, Any] 
             if not isinstance(payload, dict):
                 return None
             provider = str(payload.get("provider") or "").strip()
-            if provider and provider != "screenshot_folder":
+            if provider and provider not in {"screenshot_folder", "paired_edge"}:
                 return None
             return payload
     return None
@@ -621,7 +644,7 @@ def _screen_artifact_response(observation: ScreenObservation) -> dict[str, Any] 
     if artifacts is None:
         return None
     artifact_links = {
-        "id": artifacts.get("id"),
+        "id": artifacts.get("id") or artifacts.get("artifact_id") or artifacts.get("readback_id"),
         "created_at": artifacts.get("created_at"),
         "provider": artifacts.get("provider"),
         "image_url": f"/api/observer/screen-artifacts/{observation.id}/image",
@@ -678,11 +701,23 @@ async def list_screen_artifacts(request: Request, limit: int = 20) -> dict[str, 
 
 
 @router.get("/observer/screen-artifacts/{observation_id}/image")
-async def get_screen_artifact_image(observation_id: str, request: Request) -> FileResponse:
+async def get_screen_artifact_image(observation_id: str, request: Request) -> Response:
     """Return a preserved screenshot image for local operator inspection."""
-    _require_local_artifact_request(request)
+    owner_principal_id, _ = _require_local_artifact_request(request)
     observation = await _screen_artifact_observation(observation_id)
     artifacts = _screen_capture_artifacts(observation) or {}
+    if artifacts.get("provider") == "paired_edge":
+        artifact_id = str(artifacts.get("artifact_id") or artifacts.get("readback_id") or "")
+        async with get_session() as db:
+            result = await db.execute(
+                select(PairedEdgeArtifact)
+                .where(col(PairedEdgeArtifact.artifact_id) == artifact_id)
+                .where(col(PairedEdgeArtifact.owner_principal_id) == owner_principal_id)
+            )
+            artifact = result.scalar_one_or_none()
+        if artifact is None:
+            raise HTTPException(status_code=404, detail="Paired edge artifact not found")
+        return Response(content=artifact.content, media_type=artifact.media_type)
     path = _artifact_path(str(artifacts.get("image_path") or ""), allowed_roots=_artifact_allowed_roots(artifacts))
     return FileResponse(path, media_type=_image_media_type(path))
 
@@ -694,6 +729,10 @@ async def _get_screen_artifact_provider_output(
     _require_local_artifact_request(request)
     observation = await _screen_artifact_observation(observation_id)
     artifacts = _screen_capture_artifacts(observation) or {}
+    if artifacts.get("provider") == "paired_edge":
+        return PlainTextResponse(
+            "Paired edge capture is stored as a server-owned artifact; no provider or model output was requested."
+        )
     if artifacts.get("provider") == "screenshot_folder" and not (
         artifacts.get("provider_output_path") or artifacts.get("codex_output_path")
     ):
@@ -725,6 +764,14 @@ async def get_screen_artifact_analysis(observation_id: str, request: Request) ->
     _require_local_artifact_request(request)
     observation = await _screen_artifact_observation(observation_id)
     artifacts = _screen_capture_artifacts(observation) or {}
+    if artifacts.get("provider") == "paired_edge":
+        return {
+            "provider": "paired_edge",
+            "artifact_id": artifacts.get("artifact_id") or artifacts.get("readback_id"),
+            "server_owned": True,
+            "summary": observation.summary,
+            "analysis": None,
+        }
     if artifacts.get("provider") == "screenshot_folder" and not artifacts.get("analysis_path"):
         image_path = _artifact_path(
             str(artifacts.get("image_path") or ""),
@@ -1569,7 +1616,18 @@ def _node_adapter_surface_detail(item: Any, *, package_label: str) -> str:
     name = str(getattr(item, "name", "") or "node adapter")
     adapter_kind = str(getattr(item, "adapter_kind", "") or "companion").replace("_", " ")
     runtime_state = str(getattr(item, "runtime_state", "") or "unknown").replace("_", " ")
-    return f"{package_label} adds {name} for {adapter_kind} device or companion reach ({runtime_state})."
+    pairing = getattr(item, "pairing", {})
+    if not isinstance(pairing, dict):
+        pairing = {}
+    last_seen = pairing.get("last_seen_at") or "never"
+    spool_count = pairing.get("spool_count") or 0
+    recovery = pairing.get("recovery_state") or "idle"
+    degraded = pairing.get("degraded_state")
+    detail = (
+        f"{package_label} adds {name} for {adapter_kind} device or companion reach "
+        f"({runtime_state}; last seen {last_seen}; spool {spool_count}; recovery {recovery})."
+    )
+    return f"{detail} Degraded: {degraded}." if degraded else detail
 
 
 def _node_adapter_surface_repair_hint(item: Any) -> str | None:
@@ -1812,6 +1870,16 @@ def _observer_presence_surface_payload() -> dict[str, Any]:
             "requires_network": bool(getattr(item, "requires_network", False)),
             "requires_daemon": bool(getattr(item, "requires_daemon", False)),
             **boundary_pairing,
+            "last_seen_at": item.pairing.get("last_seen_at"),
+            "last_ingest_at": item.pairing.get("last_ingest_at"),
+            "last_capture_at": item.pairing.get("last_capture_at"),
+            "last_transport_status": item.pairing.get("last_transport_status"),
+            "spool_count": item.pairing.get("spool_count", 0),
+            "spool_bytes": item.pairing.get("spool_bytes", 0),
+            "spool_oldest_at": item.pairing.get("spool_oldest_at"),
+            "recovery_state": item.pairing.get("recovery_state"),
+            "degraded_state": item.pairing.get("degraded_state"),
+            "revision": item.pairing.get("revision", 0),
         }
 
     surfaces = sorted(

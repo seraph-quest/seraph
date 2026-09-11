@@ -1533,6 +1533,16 @@ interface ObserverPresenceSurface {
   requires_pairing?: boolean;
   device_reach_allowed?: boolean | null;
   blocked_reason?: string | null;
+  last_seen_at?: string | null;
+  last_ingest_at?: string | null;
+  last_capture_at?: string | null;
+  last_transport_status?: string | null;
+  spool_count?: number;
+  spool_bytes?: number;
+  spool_oldest_at?: string | null;
+  recovery_state?: string | null;
+  degraded_state?: string | null;
+  revision?: number;
 }
 
 interface ObserverPresenceSurfaceSummary {
@@ -16050,6 +16060,9 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                       {surface.label}: {formatContinuityLabel(surface.status)}
                       {surface.package_label ? ` · ${surface.package_label}` : ""}
                       {continuityBoundaryParts(surface).length ? ` · ${continuityBoundaryParts(surface).join(" · ")}` : ""}
+                      {surface.last_seen_at ? ` · last seen ${surface.last_seen_at}` : ""}
+                      {surface.spool_count ? ` · spool ${surface.spool_count}` : ""}
+                      {surface.recovery_state ? ` · recovery ${formatContinuityLabel(surface.recovery_state)}` : ""}
                       {surface.repair_hint ? ` · ${surface.repair_hint}` : surface.follow_up_hint ? ` · ${surface.follow_up_hint}` : ""}
                     </div>
                   ))}

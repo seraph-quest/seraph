@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import json
 import hashlib
+import fcntl
 import os
 import re
+import tempfile
 from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
 from typing import Any
@@ -57,6 +59,15 @@ _SENSITIVE_ASSIGNMENT_PATTERN = re.compile(
 _SENSITIVE_BARE_VALUE_PATTERN = re.compile(
     r"(?i)(?:bearer\s+[A-Za-z0-9._~+/=-]{8,}|(?:secret|token|password)[-_][A-Za-z0-9._~+/=-]{6,})"
 )
+
+
+class ExtensionStateRevisionConflict(RuntimeError):
+    """Raised when a state write races a newer persisted snapshot."""
+
+    def __init__(self, expected: int, actual: int) -> None:
+        self.expected = expected
+        self.actual = actual
+        super().__init__(f"extension state revision changed (expected {expected}, actual {actual})")
 
 
 def _safe_reason(reason: Any, *, default: str = "operator lifecycle request") -> str:
@@ -178,18 +189,76 @@ def load_extension_state_payload() -> dict[str, Any]:
     extensions = payload.get("extensions")
     if not isinstance(extensions, dict):
         payload["extensions"] = {}
+    revision = payload.get("revision")
+    if isinstance(revision, bool) or not isinstance(revision, int) or revision < 0:
+        payload["revision"] = 0
     return payload
 
 
-def save_extension_state_payload(payload: dict[str, Any]) -> None:
+def _state_revision(payload: Mapping[str, Any]) -> int:
+    revision = payload.get("revision")
+    if isinstance(revision, bool) or not isinstance(revision, int) or revision < 0:
+        return 0
+    return revision
+
+
+def save_extension_state_payload(
+    payload: dict[str, Any],
+    *,
+    expected_revision: int | None = None,
+) -> int:
+    """Atomically persist extension state and return its new revision.
+
+    The JSON state file is intentionally still the canonical extension-state
+    surface, but writes now use a small optimistic CAS fence.  Existing
+    callers may omit ``expected_revision`` and retain their previous behavior;
+    pairing mutations pass the loaded revision so concurrent rotate/revoke
+    operations fail closed instead of silently overwriting one another.
+    """
     payload = payload if isinstance(payload, dict) else {"extensions": {}}
     extensions = payload.get("extensions")
     if not isinstance(extensions, dict):
         payload["extensions"] = {}
     path = state_path()
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w", encoding="utf-8") as handle:
-        json.dump(payload, handle, indent=2, sort_keys=True)
+    parent = os.path.dirname(path) or "."
+    os.makedirs(parent, exist_ok=True)
+    # The revision check and replacement must share an inter-process lock. A
+    # temporary-file replace alone prevents torn JSON but still lets two
+    # writers read the same revision and both report success.
+    lock_path = f"{path}.lock"
+    lock_fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        os.fchmod(lock_fd, 0o600)
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        current_revision = 0
+        try:
+            with open(path, "r", encoding="utf-8") as handle:
+                existing = json.load(handle)
+            if isinstance(existing, dict):
+                current_revision = _state_revision(existing)
+        except (OSError, json.JSONDecodeError):
+            current_revision = 0
+        if expected_revision is not None and expected_revision != current_revision:
+            raise ExtensionStateRevisionConflict(expected_revision, current_revision)
+        new_revision = current_revision + 1
+        payload["revision"] = new_revision
+        fd, temporary_path = tempfile.mkstemp(prefix=f".{STATE_FILE_NAME}.", dir=parent)
+        try:
+            os.fchmod(fd, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                json.dump(payload, handle, indent=2, sort_keys=True)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary_path, path)
+        finally:
+            try:
+                os.unlink(temporary_path)
+            except FileNotFoundError:
+                pass
+        return new_revision
+    finally:
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        os.close(lock_fd)
 
 
 def extension_state_entries(payload: dict[str, Any]) -> dict[str, Any]:
@@ -567,6 +636,10 @@ def revoke_node_adapter_pairing_entry(
     entry["trusted"] = False
     entry["trust_state"] = "untrusted"
     entry["pairing_state"] = "revoked"
+    # Keep the canonical lifecycle field in sync with the legacy operator
+    # fields.  Pairing validation reads this field first so revocation takes
+    # effect on the very next ingest, including requests using the old secret.
+    entry["lifecycle"] = "revoked"
     if reason:
         entry["revocation_reason"] = _safe_reason(reason, default="node adapter revocation")
     if revoked_at:

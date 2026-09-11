@@ -41,6 +41,30 @@ work in #743/#744.
 
 The producing app is intentionally anonymous to Seraph. Seraph does not call a recorder, read recorder metadata, require manifests, or expect any service handshake. The contract is just `.png`, `.jpg`, and `.jpeg` files in a configured folder.
 
+## Branch-local paired edge capture
+
+The `feat/749-paired-mac-edge-final` branch also demonstrates a **Partial**
+provider-free capture path for a paired native edge. It is local evidence for
+Epic #736 and is not shipped `develop` truth. A daemon sends synthetic capture
+bytes to the authenticated Seraph origin with a scoped credential, monotonic
+sequence, capture timestamp, content hash, MIME, size, policy, and data
+purpose. Seraph validates the owner, hash, and size independently, stores the
+bytes under a server-owned `edge_art_*` id, and exposes metadata and byte
+readback through the paired-edge API. A Mac filesystem path is diagnostic input
+only and cannot become the artifact id.
+
+When the origin is unavailable, `daemon/paired_edge.py` keeps a private bounded
+spool with ordering, request-id dedupe, retry backoff, age/byte/count limits,
+and restart recovery. The blocklist is evaluated before upload. Cloud and
+model egress are separate and disabled by default; this branch proof performs
+no provider or model call. The local journey test covers accepted upload,
+server readback, disconnect/spool/restart/drain exactly once, wrong
+credential/origin, hash/size/sequence failures, and immediate revocation.
+
+This path does not replace the screenshot-folder producer contract or claim
+real macOS capture permissions, hardware discovery, hosted provider access, or
+production edge rollout. Those platform surfaces remain follow-up work.
+
 ## Boundary
 
 The screenshot producer owns:

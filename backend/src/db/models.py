@@ -763,6 +763,49 @@ class ScreenObservation(SQLModel, table=True):
     created_at: datetime = Field(default_factory=_now)
 
 
+# ─── Paired edge artifacts ───────────────────────────────
+
+class PairedEdgeArtifact(SQLModel, table=True):
+    """Server-owned bytes accepted from a paired observation edge.
+
+    The edge may report a source path for diagnostics, but that path is never
+    persisted here and cannot participate in the canonical artifact ID.  A
+    request ID is the idempotency key for the authenticated pairing transport.
+    """
+
+    __tablename__ = "paired_edge_artifacts"
+    __table_args__ = (
+        Index(
+            "ux_paired_edge_artifacts_pairing_request",
+            "extension_id",
+            "reference",
+            "pairing_id",
+            "request_id",
+            unique=True,
+        ),
+        Index("ix_paired_edge_artifacts_owner_created", "owner_principal_id", "created_at"),
+    )
+
+    id: str = Field(default_factory=_uuid, primary_key=True)
+    artifact_id: str = Field(unique=True, index=True)
+    extension_id: str = Field(index=True)
+    reference: str = Field(index=True)
+    device_id: str = Field(index=True)
+    pairing_id: str = Field(index=True)
+    request_id: str = Field(index=True)
+    owner_principal_id: str = Field(index=True)
+    sequence: int = Field(index=True)
+    captured_at: datetime = Field(index=True)
+    content_hash: str = Field(index=True)
+    media_type: str
+    content_size: int
+    content: bytes
+    app_name: str = Field(default="")
+    window_title: str = Field(default="")
+    observation_json: Optional[str] = Field(default=None)
+    created_at: datetime = Field(default_factory=_now, index=True)
+
+
 # ─── Secret (Vault) ─────────────────────────────────────
 
 class Secret(SQLModel, table=True):

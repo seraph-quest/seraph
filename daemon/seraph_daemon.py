@@ -32,6 +32,24 @@ from uuid import uuid4
 
 import httpx
 
+# The paired edge transport is provider-free and can be used by the native
+# capture loop when a node is provisioned.  Keep the import compatible with
+# both ``python daemon/seraph_daemon.py`` and package-based test imports.
+try:
+    from paired_edge import (
+        DurableEdgeSpool,
+        EdgeTransportResult,
+        PairedEdgeTransport,
+        validate_edge_origin,
+    )
+except ImportError:  # pragma: no cover - package import fallback
+    from .paired_edge import (
+        DurableEdgeSpool,
+        EdgeTransportResult,
+        PairedEdgeTransport,
+        validate_edge_origin,
+    )
+
 logger = logging.getLogger("seraph_daemon")
 
 

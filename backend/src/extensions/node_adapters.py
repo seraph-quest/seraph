@@ -75,6 +75,17 @@ def _node_pairing_payload(raw_pairing: dict[str, Any] | None) -> dict[str, Any]:
             "paired_at": None,
             "revoked_at": None,
             "revocation_reason": None,
+            "last_seen_at": None,
+            "last_ingest_at": None,
+            "last_capture_at": None,
+            "last_transport_status": None,
+            "spool_count": 0,
+            "spool_bytes": 0,
+            "spool_oldest_at": None,
+            "recovery_state": None,
+            "degraded_state": None,
+            "revision": 0,
+            "credential_configured": False,
         }
 
     revoked = bool(raw_pairing.get("revoked")) or str(raw_pairing.get("pairing_state") or "") == "revoked"
@@ -116,6 +127,17 @@ def _node_pairing_payload(raw_pairing: dict[str, Any] | None) -> dict[str, Any]:
         "revocation_reason": (
             str(raw_pairing.get("revocation_reason") or raw_pairing.get("reason") or "") or None
         ),
+        "last_seen_at": str(raw_pairing.get("last_seen_at")) if raw_pairing.get("last_seen_at") is not None else None,
+        "last_ingest_at": str(raw_pairing.get("last_ingest_at")) if raw_pairing.get("last_ingest_at") is not None else None,
+        "last_capture_at": str(raw_pairing.get("last_capture_at")) if raw_pairing.get("last_capture_at") is not None else None,
+        "last_transport_status": str(raw_pairing.get("last_transport_status")) if raw_pairing.get("last_transport_status") is not None else None,
+        "spool_count": int(raw_pairing.get("spool_count") or 0) if isinstance(raw_pairing.get("spool_count"), int) else 0,
+        "spool_bytes": int(raw_pairing.get("spool_bytes") or 0) if isinstance(raw_pairing.get("spool_bytes"), int) else 0,
+        "spool_oldest_at": str(raw_pairing.get("spool_oldest_at")) if raw_pairing.get("spool_oldest_at") is not None else None,
+        "recovery_state": str(raw_pairing.get("recovery_state")) if raw_pairing.get("recovery_state") is not None else None,
+        "degraded_state": str(raw_pairing.get("degraded_state")) if raw_pairing.get("degraded_state") is not None else None,
+        "revision": int(raw_pairing.get("revision") or raw_pairing.get("generation") or 0) if isinstance(raw_pairing.get("revision", raw_pairing.get("generation", 0)), int) else 0,
+        "credential_configured": bool(raw_pairing.get("credential_configured") or raw_pairing.get("credential_ref")),
     }
 
 

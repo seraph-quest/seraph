@@ -7182,7 +7182,6 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
           setCapabilityPackReadback(readbackResult.payload as CapabilityPackReadback);
           setCapabilityPackReadbackError(null);
         } else if (!isCancelled()) {
-          setCapabilityPackReadback(null);
           setCapabilityPackReadbackError("Capability-pack lifecycle readback is unavailable; recovery state is unverified.");
         }
       } else {
@@ -7190,9 +7189,9 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
         setCapabilityPackReadbackError(null);
       }
     } else {
-      setExtensionPackages([]);
-      setCapabilityPackReadback(null);
-      setCapabilityPackReadbackError(null);
+      // Keep the last-known package/readback controls visible while metadata
+      // is temporarily unavailable; recovery actions must remain reviewable.
+      setCapabilityPackReadbackError("Capability-pack metadata is unavailable; showing the last known lifecycle state.");
     }
     setBrowserProviders(normalizeBrowserProviders(browserProvidersResult.payload));
     setBrowserSessions(normalizeBrowserSessions(browserSessionsResult.payload));

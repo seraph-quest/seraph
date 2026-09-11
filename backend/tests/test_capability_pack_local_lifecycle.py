@@ -134,6 +134,18 @@ def _activate(store: CapabilityPackLifecycle, root: Path, pack, *, owner: str, s
     return review
 
 
+def _goal_snapshot(owner: str, session: str, *, revision: int = 1, **values: object) -> dict[str, object]:
+    return {
+        "goal_id": "goal-local",
+        "revision": revision,
+        "status": "active",
+        "owner_principal_id": owner,
+        "session_id": session,
+        "canonical_source": "goals",
+        **values,
+    }
+
+
 def test_local_two_domain_execution_is_real_and_intercepted(tmp_path: Path):
     root, pack = _package(tmp_path)
     store = CapabilityPackLifecycle(tmp_path / "lifecycle.json")
@@ -168,7 +180,7 @@ def test_local_two_domain_execution_is_real_and_intercepted(tmp_path: Path):
         artifact_path="snapshot.md",
         owner_principal_id=owner,
         session_id=session,
-        goal_snapshot={"goal_id": "goal-local", "revision": 2, "title": "Keep proof bounded"},
+        goal_snapshot=_goal_snapshot(owner, session, revision=2, title="Keep proof bounded"),
     )
 
     assert calls == ["http://controlled.test/source"]
@@ -242,6 +254,10 @@ def test_reconcile_blocks_interrupted_running_job_and_dependency_validator_is_ex
         dependency_manifest,
         {"seraph.base": {"version": "1.2.0", "digest": "a" * 64}},
     ) == ()
+    assert "dependency is revoked" in validate_capability_pack_dependencies(
+        dependency_manifest,
+        {"seraph.base": {"version": "1.2.0", "digest": "a" * 64, "revoked": True}},
+    )[0]
     assert validate_capability_pack_dependencies(dependency_manifest, {})
 
 
@@ -319,7 +335,7 @@ def test_local_execution_fails_closed_for_empty_authority_and_unsafe_artifact_pa
             artifact_path="safe.md",
             owner_principal_id="operator:scopes",
             session_id="session-scopes",
-            goal_snapshot={"title": "blocked"},
+            goal_snapshot=_goal_snapshot("operator:scopes", "session-scopes", title="blocked"),
         )
 
     root, pack = _package(tmp_path / "unsafe")
@@ -335,7 +351,7 @@ def test_local_execution_fails_closed_for_empty_authority_and_unsafe_artifact_pa
             artifact_path="../escape.md",
             owner_principal_id="operator:unsafe",
             session_id="session-unsafe",
-            goal_snapshot={"title": "blocked"},
+            goal_snapshot=_goal_snapshot("operator:unsafe", "session-unsafe", title="blocked"),
         )
     with pytest.raises(CapabilityPackLifecycleError, match="must be relative"):
         store.execute_local(
@@ -347,7 +363,7 @@ def test_local_execution_fails_closed_for_empty_authority_and_unsafe_artifact_pa
             artifact_path=str(tmp_path / "absolute.md"),
             owner_principal_id="operator:unsafe",
             session_id="session-unsafe",
-            goal_snapshot={"title": "blocked"},
+            goal_snapshot=_goal_snapshot("operator:unsafe", "session-unsafe", title="blocked"),
         )
     artifact_root = tmp_path / "symlink-artifacts"
     outside = tmp_path / "outside"
@@ -364,7 +380,7 @@ def test_local_execution_fails_closed_for_empty_authority_and_unsafe_artifact_pa
             artifact_path="link/escape.md",
             owner_principal_id="operator:unsafe",
             session_id="session-unsafe",
-            goal_snapshot={"title": "blocked"},
+            goal_snapshot=_goal_snapshot("operator:unsafe", "session-unsafe", title="blocked"),
         )
 
 
@@ -388,7 +404,7 @@ def test_recovery_is_sticky_until_authenticated_resolution_and_identity_is_exact
             artifact_path="new.md",
             owner_principal_id=owner,
             session_id=session,
-            goal_snapshot={"title": "still blocked"},
+            goal_snapshot=_goal_snapshot(owner, session, title="still blocked"),
         )
     with pytest.raises(CapabilityPackLifecycleError, match="owner or session"):
         store.resolve_reconciliation(
@@ -424,7 +440,7 @@ def test_local_execution_binds_owner_session_and_full_request_idempotency(tmp_pa
             artifact_path="cross.md",
             owner_principal_id="operator:two",
             session_id="session-two",
-            goal_snapshot={"title": "denied"},
+            goal_snapshot=_goal_snapshot("operator:two", "session-two", title="denied"),
         )
 
     first = store.execute_local(
@@ -436,7 +452,7 @@ def test_local_execution_binds_owner_session_and_full_request_idempotency(tmp_pa
         artifact_path="first.md",
         owner_principal_id=owner,
         session_id=session,
-        goal_snapshot={"title": "first"},
+        goal_snapshot=_goal_snapshot(owner, session, title="first"),
     )
     assert "Goal: goal-local" in Path(first["execution"]["artifact"]["path"]).read_text(encoding="utf-8")
     with pytest.raises(CapabilityPackLifecycleError, match="request fingerprint"):
@@ -449,7 +465,7 @@ def test_local_execution_binds_owner_session_and_full_request_idempotency(tmp_pa
             artifact_path="second.md",
             owner_principal_id=owner,
             session_id=session,
-            goal_snapshot={"title": "changed"},
+            goal_snapshot=_goal_snapshot(owner, session, title="changed"),
         )
 
 
@@ -485,4 +501,80 @@ def test_revoke_leave_pinned_policy_preserves_running_job(tmp_path: Path):
         authority_digest=pack.authority_digest,
     )
     assert result["receipt"]["details"]["revoke_running_jobs"] == "leave_pinned_until_completion"
-    assert store.status(pack.id)["jobs"][0]["status"] == "running"
+    # The revoke policy leaves the in-flight row durable until the next
+    # status/restart reconciliation, which fences it into operator recovery.
+    assert store.reconcile(pack.id, owner_principal_id=owner, session_id=session)["status"] == "blocked"
+    assert store.status(pack.id)["jobs"][0]["status"] == "blocked"
+
+
+def test_succeeded_job_without_execution_receipt_cannot_replay_transport(tmp_path: Path):
+    root, pack = _package(tmp_path)
+    store = CapabilityPackLifecycle(tmp_path / "lifecycle.json")
+    owner = "operator:atomic"
+    session = "session-atomic"
+    _activate(store, root, pack, owner=owner, session=session)
+    calls: list[str] = []
+
+    first = store.execute_local(
+        pack.id,
+        goal_id="goal-local",
+        job_id="job-atomic",
+        domain="primary",
+        artifact_root=tmp_path / "artifacts",
+        artifact_path="brief.md",
+        owner_principal_id=owner,
+        session_id=session,
+        source_url="http://controlled.test/source",
+        intercepted_transport=lambda url, **_: {"url": url, "content": "once"},
+    )
+    state = json.loads((tmp_path / "lifecycle.json").read_text(encoding="utf-8"))
+    del state["local_executions"][first["job"]["job_id"]]
+    state["jobs"][first["job"]["job_id"]]["status"] = "succeeded"
+    (tmp_path / "lifecycle.json").write_text(json.dumps(state), encoding="utf-8")
+
+    with pytest.raises(CapabilityPackLifecycleError, match="blocked until interrupted"):
+        store.execute_local(
+            pack.id,
+            goal_id="goal-local",
+            job_id="job-atomic",
+            domain="primary",
+            artifact_root=tmp_path / "artifacts",
+            artifact_path="brief.md",
+            owner_principal_id=owner,
+            session_id=session,
+            source_url="http://controlled.test/source",
+            intercepted_transport=lambda url, **_: calls.append(url),
+        )
+    assert calls == []
+
+
+def test_goal_snapshot_binding_rejects_mismatch_and_noncanonical_rows(tmp_path: Path):
+    root, pack = _package(tmp_path)
+    store = CapabilityPackLifecycle(tmp_path / "lifecycle.json")
+    owner = "operator:goal-binding"
+    session = "session-goal-binding"
+    _activate(store, root, pack, owner=owner, session=session)
+    with pytest.raises(CapabilityPackLifecycleError, match="identity conflicts"):
+        store.execute_local(
+            pack.id,
+            goal_id="goal-local",
+            job_id="job-goal-mismatch",
+            domain="secondary",
+            artifact_root=tmp_path / "artifacts",
+            artifact_path="mismatch.md",
+            owner_principal_id=owner,
+            session_id=session,
+            goal_snapshot={**_goal_snapshot(owner, session), "goal_id": "other-goal"},
+        )
+    with pytest.raises(CapabilityPackLifecycleError, match="canonical persisted-goal source"):
+        store.execute_local(
+            pack.id,
+            goal_id="goal-local",
+            job_id="job-goal-source",
+            domain="secondary",
+            artifact_root=tmp_path / "artifacts",
+            artifact_path="source.md",
+            owner_principal_id=owner,
+            session_id=session,
+            goal_snapshot={**_goal_snapshot(owner, session), "canonical_source": "caller"},
+        )

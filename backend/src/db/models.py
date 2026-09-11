@@ -749,6 +749,8 @@ class TelegramTransportState(SQLModel, table=True):
     sequence: int = Field(default=0, index=True)
     rate_events_json: str = Field(default="[]")
     revoked_at: Optional[datetime] = Field(default=None, index=True)
+    last_update_at: Optional[datetime] = Field(default=None, index=True)
+    last_error: Optional[str] = Field(default=None, index=True)
     updated_at: datetime = Field(default_factory=_now, index=True)
 
 
@@ -806,12 +808,21 @@ class TelegramTransportOutbox(SQLModel, table=True):
     attempt_count: int = Field(default=0, index=True)
     max_attempts: int = Field(default=3, index=True)
     next_attempt_at: datetime = Field(default_factory=_now, index=True)
+    # Delivery claims are durable so two adapter processes cannot both treat
+    # the same row as theirs after a restart.  A lease expiry makes an
+    # interrupted call recoverable, while the monotonically increasing fence
+    # prevents a late callback from overwriting a newer attempt.
+    lease_owner: Optional[str] = Field(default=None, index=True)
+    lease_expires_at: Optional[datetime] = Field(default=None, index=True)
+    fencing_token: int = Field(default=0, index=True)
+    deadline_at: Optional[datetime] = Field(default=None, index=True)
     last_error: Optional[str] = Field(default=None, index=True)
     response_code: Optional[int] = Field(default=None, index=True)
     external_message_id: Optional[str] = Field(default=None, index=True)
     created_at: datetime = Field(default_factory=_now, index=True)
     updated_at: datetime = Field(default_factory=_now, index=True)
     delivered_at: Optional[datetime] = Field(default=None, index=True)
+    cancelled_at: Optional[datetime] = Field(default=None, index=True)
 
 
 class TelegramDeliveryAttempt(SQLModel, table=True):
@@ -830,6 +841,8 @@ class TelegramDeliveryAttempt(SQLModel, table=True):
     id: str = Field(default_factory=_uuid, primary_key=True)
     outbox_id: str = Field(index=True)
     attempt_index: int = Field(index=True)
+    lease_owner: Optional[str] = Field(default=None, index=True)
+    fencing_token: int = Field(default=0, index=True)
     status: str = Field(default="started", index=True)
     response_code: Optional[int] = Field(default=None, index=True)
     error_code: Optional[str] = Field(default=None, index=True)

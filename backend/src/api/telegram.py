@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException, Request
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, SecretStr
 
 from src.extensions.telegram_transport import TelegramTransportError, default_telegram_transport
 from src.security.trust_contract import AuthorityGrant
@@ -19,10 +19,18 @@ class TelegramPairBody(BaseModel):
     operator_id: int = Field(..., gt=0)
     chat_id: int = Field(..., gt=0)
     expires_at: datetime | None = None
+    # Write-only at the API boundary.  The adapter stores it in the scoped
+    # vault and exposes only a fingerprint in status/readback responses.
+    bot_token: SecretStr | None = Field(default=None, min_length=1, max_length=4096, repr=False)
 
 
 class TelegramConsentBody(BaseModel):
     boundary: str = Field(..., min_length=1, max_length=64)
+
+
+class TelegramPollBody(BaseModel):
+    limit: int = Field(default=100, ge=1, le=100)
+    timeout_seconds: float | None = Field(default=None, gt=0, le=60)
 
 
 class TelegramOutboundBody(BaseModel):
@@ -32,6 +40,11 @@ class TelegramOutboundBody(BaseModel):
     session_id: str | None = Field(default=None, min_length=1, max_length=256)
     kind: str = Field(default="text", pattern="^(text|voice)$")
     attachment_refs: list[dict[str, Any]] = Field(default_factory=list, max_length=8)
+
+
+class TelegramReconcileBody(BaseModel):
+    resolution: Literal["retry", "delivered"]
+    external_message_id: str | int | None = Field(default=None, max_length=256)
 
 
 def _operator(request: Request) -> tuple[str, str, object]:
@@ -70,6 +83,7 @@ async def pair_telegram(body: TelegramPairBody, request: Request) -> dict[str, A
             operator_session_id=session,
             operator_id=body.operator_id,
             chat_id=body.chat_id,
+            token=body.bot_token.get_secret_value() if body.bot_token is not None else None,
             expires_at=body.expires_at,
         )
     except TelegramTransportError as exc:
@@ -131,6 +145,21 @@ async def receive_telegram_update(payload: dict[str, Any], request: Request) -> 
         raise _error(exc) from exc
 
 
+@router.post("/telegram/poll")
+async def poll_telegram(body: TelegramPollBody, request: Request) -> dict[str, Any]:
+    """Run one authenticated, bounded long-poll through the injected seam."""
+    owner, session, _ = _operator(request)
+    try:
+        return await default_telegram_transport.poll_updates(
+            owner_principal_id=owner,
+            operator_session_id=session,
+            limit=body.limit,
+            timeout_seconds=body.timeout_seconds,
+        )
+    except TelegramTransportError as exc:
+        raise _error(exc) from exc
+
+
 @router.post("/telegram/outbox")
 async def enqueue_telegram(body: TelegramOutboundBody, request: Request) -> dict[str, Any]:
     owner, session, _ = _operator(request)
@@ -166,6 +195,38 @@ async def deliver_telegram(outbox_id: str, request: Request) -> dict[str, Any]:
             outbox_id,
             owner_principal_id=owner,
             operator_session_id=session,
+        )
+    except TelegramTransportError as exc:
+        raise _error(exc) from exc
+
+
+@router.get("/telegram/outbox/{outbox_id}")
+async def read_telegram_outbox(outbox_id: str, request: Request) -> dict[str, Any]:
+    owner, session, _ = _operator(request)
+    try:
+        return await default_telegram_transport.read_outbox(
+            outbox_id,
+            owner_principal_id=owner,
+            operator_session_id=session,
+        )
+    except TelegramTransportError as exc:
+        raise _error(exc) from exc
+
+
+@router.post("/telegram/outbox/{outbox_id}/reconcile")
+async def reconcile_telegram_outbox(
+    outbox_id: str,
+    body: TelegramReconcileBody,
+    request: Request,
+) -> dict[str, Any]:
+    owner, session, _ = _operator(request)
+    try:
+        return await default_telegram_transport.reconcile_outbox(
+            outbox_id,
+            owner_principal_id=owner,
+            operator_session_id=session,
+            resolution=body.resolution,
+            external_message_id=body.external_message_id,
         )
     except TelegramTransportError as exc:
         raise _error(exc) from exc

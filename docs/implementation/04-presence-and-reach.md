@@ -137,11 +137,17 @@ bot token is stored in the encrypted vault and status exposes only a
 fingerprint/configured flag.
 
 The adapter accepts updates and delivery outcomes only through an injected,
-recording HTTP-like transport. It opens no Telegram or model connection and
-does not claim a live bot. Text and quarantined voice metadata preserve the
-canonical #750 conversation lineage; voice remains a degraded #751 handoff
-until the governed audio adapter is available. Bounded timeout, 429, 5xx,
-revocation, and terminal receipts remain operator-visible, and the browser
+recording HTTP-like transport. Its bounded `getUpdates` path uses the durable
+cursor and has no public webhook; it opens no Telegram or model connection and
+does not claim a live bot. A supplied bot token is write-only at the API edge,
+stored under a hashed owner/chat vault reference, and represented in status by
+configuration and fingerprint metadata only. Text and quarantined voice
+metadata preserve the canonical #750 conversation lineage; voice remains a
+degraded #751 handoff until the governed audio worker supplies validated bytes
+and transcript confirmation. Bounded timeout, 429, 5xx, lease/fence,
+revocation, and terminal receipts remain operator-visible. Delivery readback
+includes redacted attempt history; timeout or lease ambiguity remains
+`unknown` until an explicit operator reconciliation, and the browser
 conversation remains the continuity surface.
 
 ## Working On Now

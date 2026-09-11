@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
+from dataclasses import replace
 from unittest.mock import patch
 
 import pytest
@@ -12,6 +14,14 @@ from src.extensions.telegram_transport import (
     TelegramTransportAdapter,
     TelegramTransportError,
 )
+from src.extensions.telegram_ingress import (
+    TelegramConsent,
+    TelegramConsentState,
+    TelegramIngressState,
+    TelegramUpdate,
+    ingest_telegram_update,
+)
+from src.db.models import TelegramTransportState
 
 
 def _update(update_id: int = 1, *, operator_id: int = 42, chat_id: int = 77, sequence: int | None = None):
@@ -27,6 +37,58 @@ def _update(update_id: int = 1, *, operator_id: int = 42, chat_id: int = 77, seq
     if sequence is not None:
         payload["sequence"] = sequence
     return payload
+
+
+def test_adapter_policy_uses_a_server_owned_authority_reference():
+    """The adapter policy must reach ingress validation, not invalid_policy."""
+    now = datetime(2026, 9, 11, 12, 0, tzinfo=timezone.utc)
+    row = TelegramTransportState(
+        id="telegram",
+        pairing_id="telegram-pairing:test",
+        pairing_state="active",
+        operator_id=42,
+        chat_id=77,
+        pairing_expires_at=now + timedelta(hours=1),
+        transit_consent_reference="telegram-consent:transit:test",
+        transit_consent_expires_at=now + timedelta(minutes=10),
+        model_consent_reference="telegram-consent:model:test",
+        model_consent_expires_at=now + timedelta(minutes=10),
+    )
+    adapter = TelegramTransportAdapter()
+    policy = adapter._policy(row, now=now)
+    consent = TelegramConsent(
+        reference="telegram-consent:transit:test",
+        state=TelegramConsentState.ACTIVE,
+        granted_at=now - timedelta(minutes=1),
+        expires_at=now + timedelta(minutes=10),
+        scope="telegram_transit",
+    )
+    model_consent = TelegramConsent(
+        reference="telegram-consent:model:test",
+        state=TelegramConsentState.ACTIVE,
+        granted_at=now - timedelta(minutes=1),
+        expires_at=now + timedelta(minutes=10),
+        scope="openrouter_inference",
+    )
+    update = TelegramUpdate(
+        operator_id=42,
+        chat_id=77,
+        update_id=1,
+        message_id=101,
+        received_at=now,
+        text="hello",
+        external_transit_consent=consent,
+        openrouter_consent=model_consent,
+    )
+    accepted, _ = ingest_telegram_update(TelegramIngressState(), update, policy, now=now)
+    assert accepted.status.value == "accepted"
+    blocked, _ = ingest_telegram_update(
+        TelegramIngressState(),
+        replace(update, chat_id=78),
+        policy,
+        now=now,
+    )
+    assert blocked.reason_code == "telegram_identity_not_allowlisted"
 
 
 @pytest.mark.asyncio

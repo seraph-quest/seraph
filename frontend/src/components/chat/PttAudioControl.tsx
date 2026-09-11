@@ -8,6 +8,7 @@ export type PttAudioState =
   | "review"
   | "confirmed"
   | "blocked"
+  | "degraded"
   | "error";
 
 type AudioSnapshot = {
@@ -29,23 +30,55 @@ interface PttAudioControlProps {
   endpoint?: string;
 }
 
-function consentReference(prefix: string): string {
-  const generated = typeof crypto !== "undefined" && "randomUUID" in crypto
-    ? crypto.randomUUID()
-    : `${prefix}-${Date.now()}`;
-  return `${prefix}-${generated}`.slice(0, 120);
-}
-
 export function PttAudioControl({ sessionId, disabled = false, endpoint = "/api/audio/ptt" }: PttAudioControlProps) {
   const [state, setState] = useState<PttAudioState>("idle");
   const [captureConsent, setCaptureConsent] = useState(false);
   const [modelConsent, setModelConsent] = useState(false);
+  const [captureConsentReference, setCaptureConsentReference] = useState<string | null>(null);
+  const [modelConsentReference, setModelConsentReference] = useState<string | null>(null);
   const [transcript, setTranscript] = useState("");
   const [snapshot, setSnapshot] = useState<AudioSnapshot | null>(null);
   const [error, setError] = useState<string | null>(null);
   const recorderRef = useRef<MediaRecorder | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const chunksRef = useRef<Blob[]>([]);
+
+  const setServerConsent = async (boundary: "capture" | "model", enabled: boolean) => {
+    const currentReference = boundary === "capture" ? captureConsentReference : modelConsentReference;
+    try {
+      if (!enabled) {
+        if (currentReference) {
+          await fetch(`${endpoint}/consent/${encodeURIComponent(currentReference)}/revoke`, { method: "POST" });
+        }
+        if (boundary === "capture") {
+          setCaptureConsentReference(null);
+          setCaptureConsent(false);
+        } else {
+          setModelConsentReference(null);
+          setModelConsent(false);
+        }
+        return;
+      }
+      const response = await fetch(`${endpoint}/consent`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ boundary }),
+      });
+      const payload = (await response.json()) as { reference?: string; detail?: { code?: string } };
+      if (!response.ok || !payload.reference) throw new Error(payload.detail?.code || "audio_consent_unavailable");
+      if (boundary === "capture") {
+        setCaptureConsentReference(payload.reference);
+        setCaptureConsent(true);
+      } else {
+        setModelConsentReference(payload.reference);
+        setModelConsent(true);
+      }
+    } catch (cause) {
+      if (boundary === "capture") setCaptureConsent(false);
+      else setModelConsent(false);
+      setError(cause instanceof Error ? cause.message : "audio_consent_unavailable");
+    }
+  };
 
   const stopStream = () => {
     streamRef.current?.getTracks().forEach((track) => track.stop());
@@ -93,6 +126,7 @@ export function PttAudioControl({ sessionId, disabled = false, endpoint = "/api/
   const uploadCapture = async (blob: Blob) => {
     setState("uploading");
     try {
+      if (!captureConsentReference) throw new Error("capture_consent_missing");
       const encoded = await new Promise<string>((resolve, reject) => {
         const reader = new FileReader();
         reader.onerror = () => reject(new Error("audio_read_failed"));
@@ -104,14 +138,8 @@ export function PttAudioControl({ sessionId, disabled = false, endpoint = "/api/
         session_id: sessionId,
         audio_base64: encoded,
         captured_at: capturedAt.toISOString(),
-        capture_consent_reference: consentReference("capture"),
-        capture_consent_expires_at: new Date(capturedAt.getTime() + 15 * 60_000).toISOString(),
-        ...(modelConsent
-          ? {
-              model_consent_reference: consentReference("model"),
-              model_consent_expires_at: new Date(capturedAt.getTime() + 15 * 60_000).toISOString(),
-            }
-          : {}),
+        capture_consent_reference: captureConsentReference,
+        ...(modelConsentReference ? { model_consent_reference: modelConsentReference } : {}),
       };
       const response = await fetch(endpoint, {
         method: "POST",
@@ -127,6 +155,9 @@ export function PttAudioControl({ sessionId, disabled = false, endpoint = "/api/
       } else if (payload.status === "blocked") {
         setState("blocked");
         setError(payload.error_code || "audio_processing_blocked");
+      } else if (payload.status === "degraded") {
+        setState("degraded");
+        setError(payload.error_code || "audio_processing_degraded");
       } else {
         setState("error");
         setError(payload.error_code || "audio_processing_failed");
@@ -160,11 +191,11 @@ export function PttAudioControl({ sessionId, disabled = false, endpoint = "/api/
     <section className="flex flex-col gap-2 mt-2" aria-label="Push to talk">
       <div className="flex items-center gap-3 text-[10px] font-pixel uppercase">
         <label className="flex items-center gap-1">
-          <input type="checkbox" checked={captureConsent} onChange={(event) => setCaptureConsent(event.target.checked)} disabled={disabled || state !== "idle"} />
+          <input type="checkbox" checked={captureConsent} onChange={(event) => void setServerConsent("capture", event.target.checked)} disabled={disabled || state !== "idle"} />
           Allow microphone capture
         </label>
         <label className="flex items-center gap-1">
-          <input type="checkbox" checked={modelConsent} onChange={(event) => setModelConsent(event.target.checked)} disabled={disabled || state !== "idle"} />
+          <input type="checkbox" checked={modelConsent} onChange={(event) => void setServerConsent("model", event.target.checked)} disabled={disabled || state !== "idle"} />
           Allow model processing
         </label>
       </div>

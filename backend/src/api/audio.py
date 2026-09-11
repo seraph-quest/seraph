@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import base64
 import binascii
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
+from typing import Literal
+from types import SimpleNamespace
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
-from src.guardian.audio_ingress import AudioConsent, AudioConsentState
 from src.guardian.audio_worker import (
     AudioConfirmationConflict,
     AudioUploadRequest,
@@ -27,7 +28,9 @@ class AudioIngressBody(BaseModel):
     audio_base64: str = Field(..., min_length=8, max_length=14_000_000)
     captured_at: datetime | None = None
     capture_consent_reference: str = Field(..., min_length=1, max_length=128)
-    capture_consent_expires_at: datetime
+    # Legacy clients may still send these fields, but the server deliberately
+    # ignores them.  Only the durable grant registry can authorize a boundary.
+    capture_consent_expires_at: datetime | None = None
     model_consent_reference: str | None = Field(default=None, min_length=1, max_length=128)
     model_consent_expires_at: datetime | None = None
     message_id: str | None = Field(default=None, max_length=256)
@@ -40,6 +43,10 @@ class TranscriptConfirmationBody(BaseModel):
     transcript: str = Field(..., min_length=1, max_length=20_000)
     expected_transcript_digest: str | None = Field(default=None, min_length=64, max_length=64)
     transcript_digest: str | None = Field(default=None, min_length=64, max_length=64)
+
+
+class AudioConsentGrantBody(BaseModel):
+    boundary: Literal["capture", "cloud_upload", "model"]
 
 
 def _operator(request: Request) -> tuple[str, str, object]:
@@ -84,26 +91,14 @@ def _decode_payload(encoded: str) -> bytes:
     return payload
 
 
-def _consent(reference: str, expires_at: datetime, captured_at: datetime) -> AudioConsent:
-    if captured_at.tzinfo is None:
-        captured_at = captured_at.replace(tzinfo=timezone.utc)
-    if expires_at.tzinfo is None:
-        expires_at = expires_at.replace(tzinfo=timezone.utc)
-    captured_at = captured_at.astimezone(timezone.utc)
-    return AudioConsent(
-        reference=reference,
-        state=AudioConsentState.ACTIVE,
-        granted_at=captured_at - timedelta(seconds=1),
-        expires_at=expires_at.astimezone(timezone.utc),
-    )
-
-
 def _error(exc: AudioWorkerError) -> HTTPException:
     status = 409 if exc.code in {
         "request_identity_conflict",
         "transcript_confirmation_stale",
         "canonical_message_identity_conflict",
         "canonical_attachment_identity_conflict",
+        "audio_operator_session_mismatch",
+        "confirmation_in_progress",
     } else 422
     return HTTPException(status_code=status, detail={"code": exc.code, "message": str(exc)})
 
@@ -121,12 +116,12 @@ async def _submit(body: AudioIngressBody, request: Request) -> dict:
     if captured_at.tzinfo is None:
         captured_at = captured_at.replace(tzinfo=timezone.utc)
     captured_at = captured_at.astimezone(timezone.utc)
-    if body.model_consent_reference and body.model_consent_expires_at:
-        model_consent = _consent(body.model_consent_reference, body.model_consent_expires_at, captured_at)
-    elif body.model_consent_reference or body.model_consent_expires_at:
-        raise HTTPException(status_code=422, detail={"code": "model_consent_incomplete"})
-    else:
-        model_consent = None
+    model_consent = (
+        SimpleNamespace(reference=body.model_consent_reference)
+        if body.model_consent_reference
+        else None
+    )
+    capture_consent = SimpleNamespace(reference=body.capture_consent_reference)
     try:
         snapshot = await default_audio_worker.submit(
             AudioUploadRequest(
@@ -135,7 +130,7 @@ async def _submit(body: AudioIngressBody, request: Request) -> dict:
                 operator_session_id=operator_session_id,
                 audio_bytes=_decode_payload(body.audio_base64),
                 captured_at=captured_at,
-                capture_consent=_consent(body.capture_consent_reference, body.capture_consent_expires_at, captured_at),
+                capture_consent=capture_consent,
                 model_consent=model_consent,
                 message_id=body.message_id,
                 attachment_id=body.attachment_id,
@@ -151,7 +146,6 @@ async def _submit(body: AudioIngressBody, request: Request) -> dict:
         raise HTTPException(status_code=422, detail={"code": "invalid_audio_request"}) from exc
     return _operator_payload(snapshot)
 
-
 @router.post("/audio/ptt")
 @router.post("/audio/ingress")
 async def ingest_audio(body: AudioIngressBody, request: Request) -> dict:
@@ -159,8 +153,63 @@ async def ingest_audio(body: AudioIngressBody, request: Request) -> dict:
     return await _submit(body, request)
 
 
+@router.post("/audio/ptt/consent")
+async def issue_audio_consent(body: AudioConsentGrantBody, request: Request) -> dict:
+    owner, operator_session_id, operator = _operator(request)
+    if body.boundary in {"cloud_upload", "model"} and not _has_model_inference_grant(operator):
+        raise HTTPException(status_code=403, detail={"code": "audio_model_inference_forbidden"})
+    try:
+        grant = await default_audio_worker.issue_consent_grant(
+            owner_principal_id=owner,
+            operator_session_id=operator_session_id,
+            boundary=body.boundary,
+        )
+    except AudioWorkerError as exc:
+        raise _error(exc) from exc
+    return {
+        "reference": grant.reference,
+        "boundary": "cloud_upload" if body.boundary == "model" else body.boundary,
+        "granted_at": grant.granted_at.isoformat(),
+        "expires_at": grant.expires_at.isoformat(),
+        "state": grant.state.value,
+    }
+
+
+@router.get("/audio/ptt/consent/{reference}")
+async def read_audio_consent(reference: str, request: Request) -> dict:
+    owner, operator_session_id, _ = _operator(request)
+    try:
+        grant = await default_audio_worker.read_consent_grant(
+            reference,
+            owner_principal_id=owner,
+            operator_session_id=operator_session_id,
+        )
+    except AudioWorkerError as exc:
+        raise HTTPException(status_code=404, detail={"code": exc.code}) from exc
+    return {
+        "reference": grant.reference,
+        "state": grant.state.value,
+        "granted_at": grant.granted_at.isoformat(),
+        "expires_at": grant.expires_at.isoformat(),
+    }
+
+
+@router.post("/audio/ptt/consent/{reference}/revoke")
+async def revoke_audio_consent(reference: str, request: Request) -> dict:
+    owner, operator_session_id, _ = _operator(request)
+    try:
+        await default_audio_worker.revoke_consent_grant(
+            reference,
+            owner_principal_id=owner,
+            operator_session_id=operator_session_id,
+        )
+    except AudioWorkerError as exc:
+        raise HTTPException(status_code=404, detail={"code": exc.code}) from exc
+    return {"reference": reference, "state": "revoked"}
+
+
 async def _owned_job(request_id: str, request: Request, *, require_model: bool = False):
-    owner, _, _ = _operator(request)
+    owner, operator_session_id, _ = _operator(request)
     operator = getattr(request.state, "operator", None)
     if require_model and not _has_model_inference_grant(operator):
         raise HTTPException(status_code=403, detail={"code": "audio_model_inference_forbidden"})
@@ -168,22 +217,26 @@ async def _owned_job(request_id: str, request: Request, *, require_model: bool =
         snapshot = await default_audio_worker._snapshot_by_request(request_id)
     except AudioWorkerError as exc:
         raise HTTPException(status_code=404, detail={"code": exc.code}) from exc
-    if snapshot.owner_principal_id != owner:
+    if snapshot.owner_principal_id != owner or snapshot.operator_session_id != operator_session_id:
         raise HTTPException(status_code=404, detail={"code": "audio_job_not_found"})
-    return snapshot
+    return snapshot, operator_session_id
 
 
 @router.get("/audio/ptt/{request_id}")
 @router.get("/audio/ingress/{request_id}")
 async def get_audio(request_id: str, request: Request) -> dict:
-    return _operator_payload(await _owned_job(request_id, request))
+    snapshot, _ = await _owned_job(request_id, request)
+    return _operator_payload(snapshot)
 
 
 @router.post("/audio/ptt/{request_id}/process")
 async def process_audio(request_id: str, request: Request) -> dict:
-    snapshot = await _owned_job(request_id, request, require_model=True)
+    snapshot, operator_session_id = await _owned_job(request_id, request, require_model=True)
     try:
-        result = await default_audio_worker.process(snapshot.request_id)
+        result = await default_audio_worker.process(
+            snapshot.request_id,
+            operator_session_id=operator_session_id,
+        )
     except AudioWorkerError as exc:
         raise _error(exc) from exc
     return _operator_payload(result)
@@ -191,13 +244,14 @@ async def process_audio(request_id: str, request: Request) -> dict:
 
 @router.post("/audio/ptt/{request_id}/confirm")
 async def confirm_audio(request_id: str, body: TranscriptConfirmationBody, request: Request) -> dict:
-    await _owned_job(request_id, request)
+    _, operator_session_id = await _owned_job(request_id, request)
     try:
         snapshot = await default_audio_worker.confirm_transcript(
             request_id,
             body.transcript,
             expected_transcript_digest=body.expected_transcript_digest,
             transcript_digest=body.transcript_digest,
+            operator_session_id=operator_session_id,
         )
     except AudioConfirmationConflict as exc:
         raise _error(exc) from exc
@@ -206,9 +260,9 @@ async def confirm_audio(request_id: str, body: TranscriptConfirmationBody, reque
 
 @router.post("/audio/ptt/{request_id}/cancel")
 async def cancel_audio(request_id: str, request: Request) -> dict:
-    await _owned_job(request_id, request)
+    _, operator_session_id = await _owned_job(request_id, request)
     try:
-        snapshot = await default_audio_worker.cancel(request_id)
+        snapshot = await default_audio_worker.cancel(request_id, operator_session_id=operator_session_id)
     except AudioWorkerError as exc:
         raise _error(exc) from exc
     return _operator_payload(snapshot)

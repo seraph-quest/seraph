@@ -193,7 +193,36 @@ class AudioIngressJob(SQLModel, table=True):
     confirmed_transcript_digest: Optional[str] = Field(default=None, index=True)
     result_digest: Optional[str] = Field(default=None, index=True)
     error_code: Optional[str] = Field(default=None, index=True)
+    provider_status: str = Field(default="unverified", index=True)
+    transport_status: str = Field(default="unknown", index=True)
     metadata_json: str = Field(default="{}")
+    created_at: datetime = Field(default_factory=_now, index=True)
+    updated_at: datetime = Field(default_factory=_now, index=True)
+
+
+class AudioConsentGrant(SQLModel, table=True):
+    """Server-issued consent for one audio boundary.
+
+    The browser may carry the opaque reference, but it cannot choose the
+    state, owner, operator session, or validity window that authorizes a
+    capture or model transfer.  Audio workers re-read this row before each
+    boundary crossing so revocation is effective for queued jobs too.
+    """
+
+    __tablename__ = "audio_consent_grants"
+    __table_args__ = (
+        Index("ux_audio_consent_grants_reference", "reference", unique=True),
+    )
+
+    id: str = Field(default_factory=_uuid, primary_key=True)
+    reference: str = Field(index=True)
+    owner_principal_id: str = Field(index=True)
+    operator_session_id: str = Field(index=True)
+    boundary: str = Field(index=True)  # capture | cloud_upload
+    state: str = Field(default="active", index=True)  # active | revoked
+    granted_at: datetime = Field(default_factory=_now, index=True)
+    expires_at: datetime = Field(index=True)
+    revoked_at: Optional[datetime] = Field(default=None, index=True)
     created_at: datetime = Field(default_factory=_now, index=True)
     updated_at: datetime = Field(default_factory=_now, index=True)
 

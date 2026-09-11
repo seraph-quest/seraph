@@ -52,6 +52,7 @@ OPERATOR_REQUIRED_TABLES = (
     "strategy_deltas",
     "memory_tombstones",
     "audio_ingress_jobs",
+    "audio_consent_grants",
 )
 
 _LEGACY_WORKFLOW_STATUS_MAP = {
@@ -400,13 +401,23 @@ async def _ensure_legacy_columns(conn) -> None:
     # cannot silently reinterpret an audio request as chat.
     audio_ingress_columns = await _add_missing_columns(
         "audio_ingress_jobs",
-        {"requested_capability": "VARCHAR DEFAULT 'chat'"},
+        {
+            "requested_capability": "VARCHAR DEFAULT 'chat'",
+            "provider_status": "VARCHAR DEFAULT 'unverified'",
+            "transport_status": "VARCHAR DEFAULT 'unknown'",
+        },
     )
     if "requested_capability" in audio_ingress_columns:
         await conn.exec_driver_sql(
             "CREATE INDEX IF NOT EXISTS ix_audio_ingress_jobs_requested_capability "
             "ON audio_ingress_jobs (requested_capability)"
         )
+    for column in ("provider_status", "transport_status"):
+        if column in audio_ingress_columns:
+            await conn.exec_driver_sql(
+                f"CREATE INDEX IF NOT EXISTS ix_audio_ingress_jobs_{column} "
+                f"ON audio_ingress_jobs ({column})"
+            )
     if "receipt_hash" in proof_columns:
         await conn.exec_driver_sql(
             "CREATE INDEX IF NOT EXISTS ix_model_capability_proofs_receipt_hash "

@@ -21,6 +21,7 @@ from src.guardian.audio_ingress import (
     AudioRequestIdentity,
     MAX_AUDIO_BYTES,
     build_openrouter_input_audio,
+    build_server_owned_audio_consent,
     canonical_audio_request_digest,
     serialize_audio_ingress_receipt,
     validate_audio_ingress,
@@ -39,11 +40,11 @@ def _consent(
     granted_at: datetime = NOW - timedelta(minutes=1),
     expires_at: datetime = NOW + timedelta(minutes=10),
 ) -> AudioConsent:
-    return AudioConsent(
-        reference=reference,
-        state=state,
-        granted_at=granted_at,
-        expires_at=expires_at,
+    return build_server_owned_audio_consent(
+        reference,
+        state,
+        granted_at,
+        expires_at,
     )
 
 
@@ -458,3 +459,19 @@ def test_malformed_consent_and_policy_shapes_fail_closed_without_receipt_content
     policy_result = validate_audio_ingress(_request(), policy=invalid_policy, now=NOW)
     assert policy_result.status is AudioIngressStatus.BLOCKED
     assert policy_result.reason_code == "invalid_policy"
+
+
+def test_caller_supplied_consent_metadata_is_not_authoritative():
+    caller_consent = AudioConsent(
+        reference=CAPTURE_REF,
+        state=AudioConsentState.ACTIVE,
+        granted_at=NOW - timedelta(minutes=1),
+        expires_at=NOW + timedelta(minutes=10),
+    )
+    result = validate_audio_ingress(
+        _request(capture_consent=caller_consent),
+        policy=_policy(),
+        now=NOW,
+    )
+    assert result.status is AudioIngressStatus.BLOCKED
+    assert result.reason_code == "capture_consent_untrusted"

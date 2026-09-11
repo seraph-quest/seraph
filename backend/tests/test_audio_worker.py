@@ -16,7 +16,7 @@ from sqlmodel import select
 
 from config.settings import settings
 from src.agent.session import MessageIngressConflictError, session_manager
-from src.guardian.audio_ingress import AudioConsent, AudioConsentState
+from src.guardian.audio_ingress import AudioConsent, AudioConsentState, build_server_owned_audio_consent
 from src.guardian.audio_worker import (
     AudioConfirmationConflict,
     AudioIngressWorker,
@@ -48,18 +48,18 @@ def _request(session_id: str, *, request_id: str = "audio-test-1", model: bool =
         operator_session_id="operator-session-test",
         audio_bytes=_wav(),
         captured_at=now,
-        capture_consent=AudioConsent(
-            reference="capture-test",
-            state=AudioConsentState.ACTIVE,
-            granted_at=now - timedelta(seconds=1),
-            expires_at=now + timedelta(minutes=15),
+        capture_consent=build_server_owned_audio_consent(
+            "audio-consent:capture:11111111111111111111111111111111",
+            AudioConsentState.ACTIVE,
+            now - timedelta(seconds=1),
+            now + timedelta(minutes=15),
         ),
         model_consent=(
-            AudioConsent(
-                reference="model-test",
-                state=AudioConsentState.ACTIVE,
-                granted_at=now - timedelta(seconds=1),
-                expires_at=now + timedelta(minutes=15),
+            build_server_owned_audio_consent(
+                "audio-consent:cloud_upload:22222222222222222222222222222222",
+                AudioConsentState.ACTIVE,
+                now - timedelta(seconds=1),
+                now + timedelta(minutes=15),
             )
             if model
             else None

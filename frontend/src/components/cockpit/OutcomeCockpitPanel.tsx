@@ -133,6 +133,8 @@ export interface OutcomeCockpitPanelProps {
   onContinue?: () => void;
   onRetry?: () => void;
   onBranch?: () => void;
+  /** Explicitly supplied by the parent after auth, run, and identity checks. */
+  recoveryAuthorized?: boolean;
 }
 
 const LOCKED_STATES: OutcomeCockpitState[] = [
@@ -267,15 +269,21 @@ export function OutcomeCockpitPanel({
   onContinue,
   onRetry,
   onBranch,
+  recoveryAuthorized = false,
 }: OutcomeCockpitPanelProps) {
   const approvalLocked = approvalLoadState !== "ready"
-    || actionLocked(approval?.state ?? "empty", approval?.authorized !== false);
+    || actionLocked(approval?.state ?? "empty", approval?.authorized === true);
+  const recoveryApprovalLocked = Boolean(approval) && (
+    approvalLoadState !== "ready"
+    || approval?.authorized !== true
+    || RECOVERY_LOCKED_STATES.includes(approval?.state ?? "empty")
+  );
   const approvalCardState: OutcomeCockpitState = approval?.state
     ?? (approvalLoadState === "loading" ? "loading" : approvalLoadState === "stale" ? "stale" : "empty");
   const recoveryLocked = !(
     work?.state
     && !RECOVERY_LOCKED_STATES.includes(work.state)
-  ) || !work;
+  ) || !work || !recoveryAuthorized || recoveryApprovalLocked;
   const workLoading = workLoadState === "loading";
   const workNeedsLoad = !work && ["partial_metadata", "stale", "degraded"].includes(workLoadState);
 
@@ -479,13 +487,13 @@ export function OutcomeCockpitPanel({
             <>
               {work && onInspectWork ? <ActionButton action={{ label: "Inspect current run", onClick: onInspectWork }} /> : null}
               {work?.canContinue && onContinue ? (
-                  <ActionButton action={{ label: "Continue run", onClick: onContinue, disabled: recoveryLocked }} />
+                  <ActionButton action={{ label: "Continue run", onClick: onContinue, disabled: recoveryLocked, title: recoveryLocked ? "Recovery authority is unavailable or the run is not identity-bound." : undefined }} />
               ) : null}
               {work?.canRetry && onRetry ? (
-                <ActionButton action={{ label: "Retry backend step", onClick: onRetry, disabled: recoveryLocked }} />
+                <ActionButton action={{ label: "Retry backend step", onClick: onRetry, disabled: recoveryLocked, title: recoveryLocked ? "Recovery authority is unavailable or the run is not identity-bound." : undefined }} />
               ) : null}
               {work?.canBranch && onBranch ? (
-                <ActionButton action={{ label: "Branch checkpoint", onClick: onBranch, disabled: recoveryLocked }} />
+                <ActionButton action={{ label: "Branch checkpoint", onClick: onBranch, disabled: recoveryLocked, title: recoveryLocked ? "Recovery authority is unavailable or the run is not identity-bound." : undefined }} />
               ) : null}
             </>
           )}

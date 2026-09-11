@@ -50,7 +50,9 @@ import {
   type OutcomeApprovalSummary,
 } from "./OutcomeCockpitPanel";
 import {
+  displayApprovalScopeTarget,
   displayApprovalOwnerMetadata,
+  goalWorkflowBindingState,
   isApprovalAuthorityReady,
   redactIdentifier,
   selectApprovalForWorkflow,
@@ -1309,6 +1311,9 @@ interface OperatorContinuityGraph {
 
 interface PendingApproval {
   id: string;
+  workflow_id?: string | null;
+  goal_id?: string | null;
+  criterion_id?: string | null;
   session_id?: string | null;
   thread_id?: string | null;
   approval_conversation_id?: string | null;
@@ -1367,6 +1372,9 @@ function normalizePendingApprovals(value: unknown): PendingApproval[] {
       : null;
     items.push({
       id: record.id,
+      workflow_id: optionalString(record.workflow_id ?? record.run_identity),
+      goal_id: optionalString(record.goal_id),
+      criterion_id: optionalString(record.criterion_id),
       session_id: optionalString(record.session_id),
       thread_id: optionalString(record.thread_id),
       approval_conversation_id: optionalString(record.approval_conversation_id ?? record.conversation_id),
@@ -5938,12 +5946,50 @@ function normalizeWorkflowRun(value: Record<string, unknown>): WorkflowRunRecord
   const actionHandle = actionHandleValue && typeof actionHandleValue === "object" && !Array.isArray(actionHandleValue)
     ? actionHandleValue as Record<string, unknown>
     : null;
+  const workflowArguments = value.arguments && typeof value.arguments === "object" && !Array.isArray(value.arguments)
+    ? value.arguments as Record<string, unknown>
+    : null;
+  const workflowMetadata = value.metadata && typeof value.metadata === "object" && !Array.isArray(value.metadata)
+    ? value.metadata as Record<string, unknown>
+    : null;
+  const workflowDurableMetadata = workflowMetadata?.durable_job
+    && typeof workflowMetadata.durable_job === "object"
+    && !Array.isArray(workflowMetadata.durable_job)
+    ? workflowMetadata.durable_job as Record<string, unknown>
+    : null;
+  const workflowIdentitySources = [value, workflowMetadata, workflowDurableMetadata, workflowArguments];
+  const readIdentityText = (...keys: string[]): string | null => {
+    for (const source of workflowIdentitySources) {
+      for (const key of keys) {
+        const candidate = source?.[key];
+        if (typeof candidate === "string" && candidate.trim()) return candidate.trim();
+      }
+    }
+    return null;
+  };
+  const readIdentityRevision = (...keys: string[]): number | null => {
+    for (const source of workflowIdentitySources) {
+      for (const key of keys) {
+        const candidate = source?.[key];
+        if (typeof candidate === "number" && Number.isInteger(candidate) && candidate >= 1) return candidate;
+      }
+    }
+    return null;
+  };
+  const workflowGoalId = readIdentityText("goal_id", "goalId");
+  const workflowGoalRevision = readIdentityRevision("goal_revision", "goalRevision");
+  const workflowCriterionId = readIdentityText("criterion_id", "criterionId");
+  const workflowCandidateId = readIdentityText("candidate_id", "candidateId");
 
   return {
     id: String(value.id ?? ""),
     toolName: String(value.tool_name ?? ""),
     workflowName: String(value.workflow_name ?? value.tool_name ?? ""),
     sessionId: typeof value.session_id === "string" ? value.session_id : null,
+    goalId: workflowGoalId,
+    goalRevision: workflowGoalRevision,
+    criterionId: workflowCriterionId,
+    candidateId: workflowCandidateId,
     status: (value.status as WorkflowRunRecord["status"]) ?? "running",
     startedAt: String(value.started_at ?? value.updated_at ?? ""),
     updatedAt: String(value.updated_at ?? value.started_at ?? ""),
@@ -6020,7 +6066,12 @@ function normalizeWorkflowRun(value: Record<string, unknown>): WorkflowRunRecord
             approvalContext: record.approval_context && typeof record.approval_context === "object" && !Array.isArray(record.approval_context)
               ? record.approval_context as Record<string, unknown>
               : null,
+            workflowId: typeof (record.workflow_id ?? record.run_identity) === "string"
+              ? String(record.workflow_id ?? record.run_identity)
+              : null,
+            goalId: typeof record.goal_id === "string" ? record.goal_id : null,
             goalRevision: typeof record.goal_revision === "number" && Number.isInteger(record.goal_revision) ? record.goal_revision : null,
+            criterionId: typeof record.criterion_id === "string" ? record.criterion_id : null,
             planRevision: typeof record.plan_revision === "number" && Number.isInteger(record.plan_revision) ? record.plan_revision : null,
           });
           return entries;
@@ -6100,7 +6151,7 @@ function collectGoalTitles(goals: GoalInfo[], limit: number): string[] {
 }
 
 /** Select the most actionable goal from the server-owned tree for the cockpit. */
-function findCurrentGoal(goals: GoalInfo[]): GoalInfo | null {
+function flattenGoalTree(goals: GoalInfo[]): GoalInfo[] {
   const candidates: GoalInfo[] = [];
   const visit = (items: GoalInfo[]) => {
     items.forEach((item) => {
@@ -6109,6 +6160,27 @@ function findCurrentGoal(goals: GoalInfo[]): GoalInfo | null {
     });
   };
   visit(goals);
+  return candidates;
+}
+
+const CURRENT_GOAL_STATUSES = new Set([
+  "active",
+  "in_progress",
+  "in-progress",
+  "running",
+  "paused",
+  "blocked",
+  "awaiting_approval",
+  "awaiting-approval",
+]);
+
+function activeGoalCandidates(goals: GoalInfo[]): GoalInfo[] {
+  return flattenGoalTree(goals).filter((goal) => CURRENT_GOAL_STATUSES.has(goal.status.trim().toLowerCase()));
+}
+
+/** Select a goal only when the server tree provides a unique actionable identity. */
+function findCurrentGoal(goals: GoalInfo[]): GoalInfo | null {
+  const candidates = flattenGoalTree(goals);
   const activeStatuses = new Set([
     "active",
     "in_progress",
@@ -6134,13 +6206,17 @@ function findCurrentGoal(goals: GoalInfo[]): GoalInfo | null {
     if (terminalStatuses.has(status)) return 2;
     return 1;
   };
-  return [...candidates]
+  const active = candidates.filter((goal) => rank(goal) === 0);
+  if (active.length > 1) return null;
+  if (active.length === 1) return active[0] ?? null;
+  const nonterminal = candidates.filter((goal) => rank(goal) === 1);
+  if (nonterminal.length !== 1) return null;
+  return [...nonterminal]
     .sort((left, right) => (
       rank(left) - rank(right)
       || left.level.localeCompare(right.level)
       || left.sort_order - right.sort_order
-    ))
-    .find((goal) => rank(goal) < 2) ?? null;
+    ))[0] ?? null;
 }
 
 function outcomeStateForReceipt(
@@ -7180,6 +7256,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   const goalLoopError = useQuestStore((s) => s.goalLoopError);
   const loadGoalLoop = useQuestStore((s) => s.loadGoalLoop);
   const refreshGoals = useQuestStore((s) => s.refresh);
+  const activeGoalsForCockpit = useMemo(() => activeGoalCandidates(goalTree), [goalTree]);
   const currentGoal = useMemo(() => findCurrentGoal(goalTree), [goalTree]);
 
   const handleResetWorkspace = useCallback(() => {
@@ -8529,20 +8606,36 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   ) {
     if (!workflow) return;
     const resolved = resolveWorkflowRun(workflow);
-    const fallbackDraft = options.fallbackDraft ?? resumePlanFallbackDraft(resolved);
-    const queueFallbackDraft = async () => {
-      if (!fallbackDraft) return;
-      if (options.fallbackThreadId) {
-        await queueThreadDraft(fallbackDraft, options.fallbackThreadId);
-        return;
-      }
-      queueComposerDraft(fallbackDraft);
-    };
-    if (!resolved.runIdentity) {
-      await queueFallbackDraft();
+    const label = options.label ?? resolved.workflowName;
+    if (
+      operatorAuth.status !== "authenticated"
+      || !operatorAuth.principalId
+      || !operatorAuth.sessionId
+    ) {
+      setOperatorStatus(`Live recovery control blocked ${label}: operator authority is unavailable.`);
       return;
     }
-    const label = options.label ?? resolved.workflowName;
+    const hasPendingApproval = Boolean(
+      (resolved.pendingApprovalCount ?? 0) > 0
+      || resolved.pendingApprovalIds?.length
+      || resolved.pendingApprovals?.length,
+    );
+    if (
+      approvalLoadState !== "ready"
+      || (hasPendingApproval && !isApprovalAuthorityReady(
+        approvalForWorkflow(resolved),
+        operatorAuth,
+        approvalLoadState,
+      ))
+    ) {
+      setOperatorStatus(`Live recovery control blocked ${label}: approval authority is unavailable or stale.`);
+      return;
+    }
+    const fallbackDraft = options.fallbackDraft ?? resumePlanFallbackDraft(resolved);
+    if (!resolved.runIdentity) {
+      setOperatorStatus(`Live recovery control blocked ${label}: run identity is unavailable.`);
+      return;
+    }
     setOperatorStatus(`Checking live recovery plan for ${label}...`);
     try {
       const action = options.action ?? "resume";
@@ -9605,8 +9698,33 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   ];
   const currentGoalLoop = currentGoal && goalLoopGoalId === currentGoal.id ? goalLoop : null;
   const latestGoalReceipt = currentGoalLoop?.receipts?.[0] ?? null;
+  // Keep the existing operator-triage candidate visible, but require the
+  // identity helper below to prove that it belongs to this goal before any
+  // effectful control can be exposed.
+  const outcomeWorkflow = m7PrimaryWorkflow;
+  const outcomeBindingState = outcomeWorkflow
+    ? goalWorkflowBindingState({
+      activeGoalCount: activeGoalsForCockpit.length,
+      goalId: currentGoal?.id,
+      goalRevision: currentGoal?.revision ?? currentGoalLoop?.goal.revision,
+      criterionId: currentGoalLoop?.criterion?.criterion_id ?? currentGoal?.success_criterion?.criterion_id,
+      workflowGoalId: outcomeWorkflow.goalId,
+      workflowGoalRevision: outcomeWorkflow.goalRevision,
+      workflowCriterionId: outcomeWorkflow.criterionId,
+    })
+    : activeGoalsForCockpit.length > 1 ? "ambiguous" : currentGoal ? "unlinked" : null;
+  const outcomeBindingUnavailableReason = outcomeBindingState === "stale"
+    ? "Workflow metadata is from a different goal revision; refresh before acting."
+    : outcomeBindingState === "ambiguous"
+      ? "Goal/workflow metadata is ambiguous; inspect the matching identifiers before acting."
+      : outcomeBindingState === "unlinked"
+        ? "The workflow is not linked to the current goal; consequential controls are locked."
+        : null;
   const goalOutcomeState: OutcomeCockpitState = (() => {
-    if (!currentGoal) return goalTree.length === 0 && loadingGoals ? "loading" : "empty";
+    if (!currentGoal) {
+      if (activeGoalsForCockpit.length > 1) return "partial_metadata";
+      return goalTree.length === 0 && loadingGoals ? "loading" : "empty";
+    }
     if (loadingGoals || goalLoopLoading) return "loading";
     if (goalLoopError) {
       if (goalLoopError.code === "stale_goal_revision") return "stale";
@@ -9619,17 +9737,25 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       latestGoalReceipt?.goal_revision != null
       && latestGoalReceipt.goal_revision !== currentGoalLoop.goal.revision
     ) return "stale";
+    if (
+      latestGoalReceipt
+      && latestGoalReceipt.goal_id !== currentGoal.id
+    ) return "stale";
+    if (
+      latestGoalReceipt
+      && (!latestGoalReceipt.goal_id || latestGoalReceipt.goal_revision == null || !latestGoalReceipt.criterion_id)
+    ) return "partial_metadata";
     if (!currentGoalLoop.criterion) return "partial_metadata";
     return outcomeStateForReceipt(latestGoalReceipt, true, currentGoal.status);
   })();
   const workflowLoadState = deepPaneLoadState.workflows;
-  const outcomeWorkflow = m7PrimaryWorkflow;
   const workOutcomeState: OutcomeCockpitState = (() => {
     if (workflowLoadState === "loading") return "loading";
     if (workflowLoadState === "stale") return "stale";
     if (workflowLoadState === "failed") return "degraded";
     if (workflowLoadState === "idle") return "partial_metadata";
     if (!outcomeWorkflow) return "empty";
+    if (outcomeBindingState && outcomeBindingState !== "matched") return "partial_metadata";
     if (outcomeWorkflow.status === "awaiting_approval") return "awaiting_approval";
     if (outcomeWorkflow.status === "failed") return "failed";
     if (outcomeWorkflow.status === "degraded") return "degraded";
@@ -9647,6 +9773,23 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     outcomeApproval,
     operatorAuth,
     approvalLoadState,
+  ) && outcomeBindingState === "matched";
+  const outcomeHasPendingApproval = Boolean(
+    outcomeWorkflow
+    && (
+      (outcomeWorkflow.pendingApprovalCount ?? 0) > 0
+      || outcomeWorkflow.pendingApprovalIds?.length
+      || outcomeWorkflow.pendingApprovals?.length
+    )
+  );
+  const recoveryAuthorityReady = Boolean(
+    outcomeWorkflow?.runIdentity
+    && outcomeBindingState === "matched"
+    && operatorAuth.status === "authenticated"
+    && operatorAuth.principalId
+    && operatorAuth.sessionId
+    && approvalLoadState === "ready"
+    && (!(outcomeHasPendingApproval || Boolean(outcomeApproval)) || approvalAuthorityReady)
   );
   const approvalOutcomeState: OutcomeCockpitState = (() => {
     if (!outcomeApproval) {
@@ -9655,6 +9798,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
         : approvalLoadState === "stale" ? "stale" : "empty";
     }
     if (approvalLoadState !== "ready") return approvalLoadState;
+    if (outcomeBindingState && outcomeBindingState !== "matched") return "partial_metadata";
     const status = outcomeApproval.status.toLowerCase();
     if (!approvalAuthorityReady || status === "unauthorized" || status === "forbidden") return "unauthorized";
     if (["expired", "stale", "revoked"].includes(status)) return "stale";
@@ -9728,6 +9872,8 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       threadLabel: outcomeWorkflow.threadLabel ?? outcomeWorkflow.threadId ?? outcomeWorkflow.sessionId ?? null,
       nextAction: outcomeApproval
         ? `Review approval for ${outcomeApproval.tool_name}`
+        : outcomeBindingUnavailableReason
+          ? outcomeBindingUnavailableReason
         : outcomeFailedStep
           ? `Inspect failed step ${outcomeFailedStep.id}`
           : outcomeWorkflow.status === "running"
@@ -9735,14 +9881,15 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
             : workflowCanContinue(outcomeWorkflow)
               ? `Continue ${outcomeWorkflow.resumeCheckpointLabel ?? "from the recorded checkpoint"}`
               : "Inspect backend receipt",
-      recoveryHint: outcomeWorkflow.approvalRecoveryMessage
+      recoveryHint: outcomeBindingUnavailableReason
+        ?? outcomeWorkflow.approvalRecoveryMessage
         ?? outcomeFailedStep?.recoveryHint
         ?? outcomeWorkflow.resumeCheckpointLabel
         ?? null,
       canInspect: true,
-      canContinue: workflowCanContinue(outcomeWorkflow),
-      canRetry: Boolean(outcomeWorkflow.retryFromStepDraft),
-      canBranch: Boolean(outcomeCheckpoint),
+      canContinue: recoveryAuthorityReady && workflowCanContinue(outcomeWorkflow),
+      canRetry: recoveryAuthorityReady && Boolean(outcomeWorkflow.retryFromStepDraft),
+      canBranch: recoveryAuthorityReady && Boolean(outcomeCheckpoint),
     }
     : null;
   const approvalScopeRecord = outcomeApproval?.approval_scope && typeof outcomeApproval.approval_scope === "object"
@@ -9750,14 +9897,10 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     : outcomeApproval?.approval_context && typeof outcomeApproval.approval_context === "object"
       ? outcomeApproval.approval_context
       : null;
-  const approvalTarget = approvalScopeRecord?.target && typeof approvalScopeRecord.target === "object"
-    ? approvalScopeRecord.target as Record<string, unknown>
-    : null;
   const approvalScopeLabels = outcomeApproval
     ? [
       ...(outcomeApproval.lifecycle_boundaries ?? []),
-      typeof approvalTarget?.type === "string" ? `target ${approvalTarget.type}` : null,
-      typeof approvalTarget?.reference === "string" ? `ref ${approvalTarget.reference}` : null,
+      ...displayApprovalScopeTarget(approvalScopeRecord),
       typeof outcomeApproval.goal_revision === "number" ? `goal revision ${outcomeApproval.goal_revision}` : null,
       typeof outcomeApproval.plan_revision === "number" ? `plan revision ${outcomeApproval.plan_revision}` : null,
     ].filter((value): value is string => Boolean(value))
@@ -9804,15 +9947,34 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     : null;
   const latestArtifact = [...artifacts]
     .sort((left, right) => new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime())[0] ?? null;
-  const artifactEvidenceEntry = operatorEvidenceEntries.find((entry) => entry.artifact) ?? null;
+  const latestArtifactLineage = latestArtifact ? resolveArtifactLineage(latestArtifact) : null;
+  const artifactSourceMatchesOutcome = Boolean(
+    outcomeWorkflow
+    && latestArtifactLineage?.sourceWorkflow
+    && !latestArtifactLineage.ambiguous
+    && (latestArtifactLineage.sourceWorkflow.runIdentity ?? latestArtifactLineage.sourceWorkflow.id)
+      === (outcomeWorkflow.runIdentity ?? outcomeWorkflow.id),
+  );
+  const artifactEvidenceEntry = artifactSourceMatchesOutcome
+    ? operatorEvidenceEntries.find((entry) => entry.artifact?.id === latestArtifact?.id) ?? null
+    : null;
+  const artifactLineageBound = Boolean(
+    outcomeBindingState === "matched" && artifactSourceMatchesOutcome,
+  );
   const outcomeEvidence: OutcomeEvidenceSummary = latestArtifact
     ? {
-      state: "active",
+      state: artifactLineageBound ? "active" : "partial_metadata",
       label: latestArtifact.filePath,
       summary: latestArtifact.summary,
       source: latestArtifact.source,
       createdAt: latestArtifact.createdAt,
-      provenance: artifactEvidenceEntry?.detail ?? latestArtifact.source,
+      provenance: artifactLineageBound
+        ? artifactEvidenceEntry?.detail ?? latestArtifact.source
+        : latestArtifactLineage?.ambiguous
+          ? "source ambiguous; artifact is not bound to the current workflow"
+          : latestArtifactLineage?.sourceWorkflow
+            ? "artifact belongs to a different workflow than the current goal"
+            : "source unresolved; artifact is not bound to the current workflow",
       handle: latestArtifact.id,
     }
     : {
@@ -9824,8 +9986,24 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       handle: null,
     };
   const outcomeExecution = latestGoalReceipt?.execution_status ?? "unknown";
+  const outcomeCriterionId = currentGoalLoop?.criterion?.criterion_id
+    ?? currentGoal?.success_criterion?.criterion_id
+    ?? null;
+  const outcomeReceiptIdentityState: OutcomeCockpitState | null = latestGoalReceipt
+    ? latestGoalReceipt.goal_id !== currentGoal?.id
+      || (latestGoalReceipt.goal_revision != null && currentGoalLoop?.goal.revision != null
+        && latestGoalReceipt.goal_revision !== currentGoalLoop.goal.revision)
+      || (latestGoalReceipt.criterion_id && outcomeCriterionId && latestGoalReceipt.criterion_id !== outcomeCriterionId)
+      ? "stale"
+      : !latestGoalReceipt.goal_id
+        || latestGoalReceipt.goal_revision == null
+        || !latestGoalReceipt.criterion_id
+        ? "partial_metadata"
+        : null
+    : null;
   const outcomeResult: OutcomeResultSummary = {
-    state: outcomeStateForReceipt(latestGoalReceipt, Boolean(currentGoalLoop?.criterion), currentGoal?.status),
+    state: outcomeReceiptIdentityState
+      ?? outcomeStateForReceipt(latestGoalReceipt, Boolean(currentGoalLoop?.criterion), currentGoal?.status),
     label: latestGoalReceipt?.receipt_type ?? latestGoalReceipt?.event_type ?? "No outcome receipt",
     summary: latestGoalReceipt
       ? [latestGoalReceipt.reason, latestGoalReceipt.artifact_ref ? `artifact ${latestGoalReceipt.artifact_ref}` : null].filter(Boolean).join(" · ") || "Receipt fields are available; inspect verification before deciding success."
@@ -10742,6 +10920,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
 
   function approvalForWorkflow(workflow: WorkflowRunRecord): PendingApproval | null {
     const selected = selectApprovalForWorkflow(pendingApprovals, {
+      workflowId: workflow.runIdentity ?? workflow.id,
       toolName: workflow.toolName,
       sessionId: workflow.sessionId,
       pendingApprovalIds: workflow.pendingApprovalIds,
@@ -10751,6 +10930,9 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     if (!attached) return null;
     return {
       id: attached.id,
+      workflow_id: attached.workflowId ?? workflow.runIdentity ?? workflow.id,
+      goal_id: attached.goalId ?? workflow.goalId,
+      criterion_id: attached.criterionId ?? workflow.criterionId,
       session_id: workflow.sessionId ?? null,
       thread_id: attached.threadId ?? workflow.threadId ?? workflow.sessionId ?? null,
       thread_label: attached.threadLabel ?? workflow.threadLabel ?? null,
@@ -12649,6 +12831,17 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     if (selectedInspector.kind === "approval") {
       const approval = selectedInspector.approval;
       const owner = displayApprovalOwnerMetadata(approval);
+      const approvalScope = approval.approval_scope ?? approval.approval_context;
+      const approvalScopeAction = approvalScope
+        && typeof approvalScope === "object"
+        && !Array.isArray(approvalScope)
+        && typeof approvalScope.action === "string"
+        ? approvalScope.action.trim()
+        : null;
+      const approvalScopeDisplay = [
+        approvalScopeAction ? `action ${approvalScopeAction}` : null,
+        ...displayApprovalScopeTarget(approvalScope),
+      ].filter((value): value is string => Boolean(value)).join(" · ") || "unavailable";
       title = approval.tool_name;
       meta = `${approval.risk_level} approval`;
       body = `approval request · ${approval.summary}`;
@@ -12665,7 +12858,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
         package_path: approval.package_path ?? "n/a",
         lifecycle_boundaries: approval.lifecycle_boundaries ?? [],
         permissions: approval.permissions ?? {},
-        approval_scope: approval.approval_scope ?? "unavailable",
+        approval_scope: approvalScopeDisplay,
         bound_revision: approval.goal_revision ?? approval.plan_revision ?? "unavailable",
         authority: approvalActionAllowed(approval) ? "ready" : "locked",
         owner_principal: owner.principal,
@@ -14701,6 +14894,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                       ? "active"
                       : workflowLoadState}
                 approvalLoadState={approvalLoadState}
+                recoveryAuthorized={recoveryAuthorityReady}
                 onOpenPriorities={() => setQuestPanelOpen(true)}
                 onLoadWork={() => void loadWorkflowRuns()}
                 onInspectWork={() => inspectWorkflowRun(outcomeWorkflow)}

@@ -1,7 +1,10 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  digestOpaqueReference,
+  displayApprovalScopeTarget,
   displayApprovalOwnerMetadata,
+  goalWorkflowBindingState,
   isApprovalAuthorityReady,
   selectApprovalForWorkflow,
 } from "./cockpitAuthority";
@@ -14,6 +17,7 @@ const auth = {
 
 const approval = {
   id: "approval-1",
+  workflow_id: "run-1",
   tool_name: "filesystem:workspace",
   status: "pending",
   session_id: "conversation-1",
@@ -89,6 +93,16 @@ describe("cockpit approval authority", () => {
     )).toBe(null);
   });
 
+  it("prefers an approval explicitly bound to the workflow identity", () => {
+    expect(selectApprovalForWorkflow(
+      [
+        { ...approval, id: "approval-other", workflow_id: "run-other" },
+        { ...approval, workflow_id: "run-1" },
+      ],
+      { workflowId: "run-1", toolName: "filesystem:workspace", sessionId: "conversation-1" },
+    )?.id).toBe("approval-1");
+  });
+
   it("keeps owner metadata inspectable without exposing full identifiers", () => {
     const metadata = displayApprovalOwnerMetadata({
       ...approval,
@@ -99,5 +113,45 @@ describe("cockpit approval authority", () => {
     expect(metadata.session).toBe("…sion-1");
     expect(metadata.source).toBe("operator_auth_session");
     expect(metadata.expiry).toBe("2026-09-09T12:00:00Z");
+  });
+
+  it("requires a unique matching goal and revision before binding workflow authority", () => {
+    expect(goalWorkflowBindingState({
+      activeGoalCount: 1,
+      goalId: "goal-1",
+      goalRevision: 4,
+      criterionId: "criterion-1",
+      workflowGoalId: "goal-1",
+      workflowGoalRevision: 4,
+      workflowCriterionId: "criterion-1",
+    })).toBe("matched");
+    expect(goalWorkflowBindingState({
+      activeGoalCount: 2,
+      goalId: "goal-1",
+      goalRevision: 4,
+      criterionId: "criterion-1",
+      workflowGoalId: "goal-1",
+      workflowGoalRevision: 4,
+      workflowCriterionId: "criterion-1",
+    })).toBe("ambiguous");
+    expect(goalWorkflowBindingState({
+      activeGoalCount: 1,
+      goalId: "goal-1",
+      goalRevision: 4,
+      criterionId: "criterion-1",
+      workflowGoalId: "goal-1",
+      workflowGoalRevision: 3,
+      workflowCriterionId: "criterion-1",
+    })).toBe("stale");
+    expect(goalWorkflowBindingState({ activeGoalCount: 1, goalId: "goal-1" })).toBe("unlinked");
+  });
+
+  it("keeps approval target references out of rendered scope labels", () => {
+    const labels = displayApprovalScopeTarget({
+      target: { type: "workspace", reference: "workspace/private/report.md" },
+    });
+    expect(labels).toContain("target workspace");
+    expect(labels.join(" ")).not.toContain("workspace/private/report.md");
+    expect(labels.join(" ")).toContain(digestOpaqueReference("workspace/private/report.md"));
   });
 });

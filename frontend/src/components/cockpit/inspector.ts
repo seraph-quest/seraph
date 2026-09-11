@@ -62,6 +62,10 @@ export interface WorkflowRunRecord {
   toolName: string;
   workflowName: string;
   sessionId?: string | null;
+  goalId?: string | null;
+  goalRevision?: number | null;
+  criterionId?: string | null;
+  candidateId?: string | null;
   status: "succeeded" | "failed" | "running" | "awaiting_approval" | "approved" | "denied" | "degraded";
   startedAt: string;
   updatedAt: string;
@@ -95,7 +99,10 @@ export interface WorkflowRunRecord {
     expiresAt?: string | number | null;
     approvalScope?: Record<string, unknown> | null;
     approvalContext?: Record<string, unknown> | null;
+    workflowId?: string | null;
+    goalId?: string | null;
     goalRevision?: number | null;
+    criterionId?: string | null;
     planRevision?: number | null;
   }>;
   threadId?: string | null;

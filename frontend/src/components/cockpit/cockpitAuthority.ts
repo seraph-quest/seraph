@@ -7,6 +7,9 @@
  */
 
 export type ApprovalAuthorityRecord = {
+  workflow_id?: unknown;
+  goal_id?: unknown;
+  criterion_id?: unknown;
   status?: unknown;
   approval_owner_principal_id?: unknown;
   approval_owner_operator_session_id?: unknown;
@@ -32,6 +35,8 @@ export type OperatorAuthBinding = {
 };
 
 export type ApprovalLoadState = "loading" | "ready" | "stale";
+
+export type GoalWorkflowBindingState = "matched" | "ambiguous" | "unlinked" | "stale";
 
 function text(value: unknown): string {
   return typeof value === "string" ? value.trim() : "";
@@ -64,6 +69,77 @@ function approvalScope(approval: ApprovalAuthorityRecord): Record<string, unknow
   return candidate && typeof candidate === "object" && !Array.isArray(candidate)
     ? candidate as Record<string, unknown>
     : null;
+}
+
+/**
+ * Bind a displayed workflow to the current goal before exposing any
+ * consequential control. Missing identity is intentionally distinguishable
+ * from a mismatch so the cockpit can show partial metadata without guessing.
+ */
+export function goalWorkflowBindingState({
+  activeGoalCount,
+  goalId,
+  goalRevision,
+  criterionId,
+  workflowGoalId,
+  workflowGoalRevision,
+  workflowCriterionId,
+}: {
+  activeGoalCount: number;
+  goalId?: string | null;
+  goalRevision?: number | null;
+  criterionId?: string | null;
+  workflowGoalId?: string | null;
+  workflowGoalRevision?: number | null;
+  workflowCriterionId?: string | null;
+}): GoalWorkflowBindingState {
+  if (activeGoalCount > 1) return "ambiguous";
+  if (!goalId || !workflowGoalId) return "unlinked";
+  if (goalId !== workflowGoalId) return "ambiguous";
+  if (
+    goalRevision == null
+    || workflowGoalRevision == null
+    || !criterionId
+    || !workflowCriterionId
+  ) return "unlinked";
+  if (goalRevision !== workflowGoalRevision) return "stale";
+  if (criterionId !== workflowCriterionId) return "stale";
+  return "matched";
+}
+
+/**
+ * Keep opaque approval target references out of rendered text while retaining
+ * a stable operator-inspection handle. This is a display fingerprint, not an
+ * authority decision; the raw scope remains in the backend-bound record.
+ */
+export function digestOpaqueReference(value: unknown): string {
+  const candidate = text(value);
+  if (!candidate) return "unavailable";
+  let first = 0x811c9dc5;
+  let second = 0x9e3779b9;
+  for (let index = 0; index < candidate.length; index += 1) {
+    const code = candidate.charCodeAt(index);
+    first = Math.imul(first ^ code, 0x01000193);
+    second = Math.imul(second ^ (code + index), 0x01000193);
+  }
+  return `digest:${(first >>> 0).toString(16).padStart(8, "0")}${(second >>> 0).toString(16).padStart(8, "0")}`;
+}
+
+/** Format only non-sensitive target metadata for the UI. */
+export function displayApprovalScopeTarget(scope: unknown): string[] {
+  const record = scope && typeof scope === "object" && !Array.isArray(scope)
+    ? scope as Record<string, unknown>
+    : null;
+  const target = record?.target && typeof record.target === "object" && !Array.isArray(record.target)
+    ? record.target as Record<string, unknown>
+    : null;
+  if (!target) return [];
+  return [
+    typeof target.type === "string" && target.type.trim() ? `target ${target.type.trim()}` : null,
+    Object.prototype.hasOwnProperty.call(target, "reference")
+      ? `target reference ${digestOpaqueReference(target.reference)}`
+      : null,
+  ].filter((value): value is string => Boolean(value));
 }
 
 /**
@@ -132,6 +208,7 @@ export type ApprovalCandidate = ApprovalAuthorityRecord & {
 };
 
 export type WorkflowApprovalBinding = {
+  workflowId?: unknown;
   toolName?: unknown;
   sessionId?: unknown;
   pendingApprovalIds?: readonly string[] | null;
@@ -152,6 +229,14 @@ export function selectApprovalForWorkflow<T extends ApprovalCandidate>(
     const attachedById = workflow.pendingApprovals?.find((approval) => pendingIds.includes(approval.id));
     if (attachedById) return attachedById as T;
     return null;
+  }
+
+  const workflowId = text(workflow.workflowId);
+  if (workflowId) {
+    const byWorkflow = pending.find((approval) => text(approval.workflow_id) === workflowId);
+    if (byWorkflow) return byWorkflow;
+    const attachedByWorkflow = workflow.pendingApprovals?.find((approval) => text(approval.workflow_id) === workflowId);
+    if (attachedByWorkflow) return attachedByWorkflow as T;
   }
 
   const toolName = text(workflow.toolName);

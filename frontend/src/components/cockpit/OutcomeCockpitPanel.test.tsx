@@ -243,6 +243,39 @@ describe("OutcomeCockpitPanel", () => {
     expect(onRetry).not.toHaveBeenCalled();
   });
 
+  it("locks every recovery effect when an active run lacks current authority", () => {
+    const onContinue = vi.fn();
+    const onRetry = vi.fn();
+    const onBranch = vi.fn();
+    renderFixture(
+      {
+        work: { state: "active", canContinue: true, canRetry: true, canBranch: true },
+        approval: { state: "stale", authorized: false },
+      },
+      { onContinue, onRetry, onBranch, recoveryAuthorized: true },
+    );
+
+    expect(screen.getByRole("button", { name: "Continue run" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Retry backend step" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Branch checkpoint" })).toBeDisabled();
+    expect(onContinue).not.toHaveBeenCalled();
+    expect(onRetry).not.toHaveBeenCalled();
+    expect(onBranch).not.toHaveBeenCalled();
+  });
+
+  it("allows an active recovery only when the parent proves authority", () => {
+    const onContinue = vi.fn();
+    renderFixture(
+      { work: { state: "active", canContinue: true }, approval: { state: "active", authorized: true } },
+      { onContinue, recoveryAuthorized: true },
+    );
+
+    const continueButton = screen.getByRole("button", { name: "Continue run" });
+    expect(continueButton).toBeEnabled();
+    fireEvent.click(continueButton);
+    expect(onContinue).toHaveBeenCalledOnce();
+  });
+
   it("keeps verification uncertainty and artifact lineage explicit", () => {
     renderFixture({
       evidence: {

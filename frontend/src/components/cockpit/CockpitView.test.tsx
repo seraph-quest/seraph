@@ -1192,6 +1192,14 @@ describe("CockpitView", () => {
         ));
       }
       if (url.includes("/api/sessions")) return Promise.resolve(mockResponse([{ id: "session-2", title: "Atlas thread" }]));
+      if (url.includes("/api/auth/session")) {
+        return Promise.resolve(mockResponse({
+          authenticated: true,
+          principal_id: "operator:test",
+          session_id: "operator-session-1",
+          absolute_expires_at: "2099-01-01T00:00:00Z",
+        }));
+      }
       if (url.includes("/api/goals/tree")) return Promise.resolve(mockResponse([]));
       if (url.includes("/api/goals/dashboard")) {
         return Promise.resolve(mockResponse({ domains: {}, active_count: 0, completed_count: 0, total_count: 0 }));
@@ -1254,7 +1262,6 @@ describe("CockpitView", () => {
               thread_label: "Atlas thread",
               replay_allowed: true,
               retry_from_step_draft: 'Retry step "write_file" for workflow "web-brief-to-file".',
-              run_identity: "root-1",
               root_run_identity: "root-1",
               checkpoint_context_available: true,
               action_handle: {
@@ -1302,17 +1309,9 @@ describe("CockpitView", () => {
     fireEvent.click(within(row as HTMLElement).getByRole("button", { name: "Retry step" }));
 
     await waitFor(() =>
-      expect(fetchMock).toHaveBeenCalledWith(
-        expect.stringContaining("/api/workflows/runs/root-1/control"),
-        expect.objectContaining({
-          method: "POST",
-          body: expect.stringContaining('"action_handle":{"kind":"workflow_control"'),
-        }),
-      ),
+      expect(screen.getByText("Live recovery control blocked web-brief-to-file: run identity is unavailable.")).toBeInTheDocument(),
     );
-    await waitFor(() =>
-      expect(screen.getByText("Live recovery control refused web-brief-to-file: Operator session was revoked during workflow control.")).toBeInTheDocument(),
-    );
+    expect(fetchMock.mock.calls.some(([input]) => String(input).includes("/api/workflows/runs/") && String(input).includes("/control"))).toBe(false);
     expect(screen.queryByDisplayValue('Retry step "write_file" for workflow "web-brief-to-file".')).not.toBeInTheDocument();
   });
 
@@ -6654,7 +6653,7 @@ describe("CockpitView", () => {
     expect(useChatStore.getState().sessionId).toBe("session-1");
   }, 15000);
 
-  it("uses workflow-attached approvals when the pending sidebar is capped away", async () => {
+  it("keeps workflow-attached approvals visible but locked without goal binding", async () => {
     fetchMock.mockImplementation((input: RequestInfo | URL) => {
       const url = String(input);
       if (url.includes("/api/sessions/session-2/messages")) {
@@ -6758,14 +6757,13 @@ describe("CockpitView", () => {
     await loadAllDeepPanes();
 
     const outcomePanel = await screen.findByTestId("outcome-cockpit-panel", {}, { timeout: 5000 });
-    expect(within(outcomePanel).getByRole("button", { name: "Approve" })).toBeEnabled();
-    expect(within(outcomePanel).getByRole("button", { name: "Deny" })).toBeEnabled();
-    fireEvent.click(await screen.findByRole("button", { name: "Continue" }, { timeout: 5000 }));
-
-    await waitFor(() => expect(useChatStore.getState().sessionId).toBe("session-2"), { timeout: 5000 });
-    expect(
-      await screen.findByDisplayValue("Continue workflow after approval.", {}, { timeout: 5000 }),
-    ).toBeInTheDocument();
+    expect(within(outcomePanel).getByRole("button", { name: "Approve" })).toBeDisabled();
+    expect(within(outcomePanel).getByRole("button", { name: "Deny" })).toBeDisabled();
+    expect(within(outcomePanel).getByTestId("outcome-approval-card")).toHaveAttribute("data-state", "partial_metadata");
+    expect(within(outcomePanel).queryByText("notes/brief.md")).not.toBeInTheDocument();
+    expect(within(outcomePanel).getByText(/target reference digest:/)).toBeInTheDocument();
+    expect(useChatStore.getState().sessionId).toBe("session-1");
+    expect(fetchMock.mock.calls.some(([input]) => String(input).includes("/api/workflows/runs/") && String(input).includes("/control"))).toBe(false);
   }, 15000);
 
   it("shows a visible pending state and fresh-thread guidance while the agent is working", async () => {
@@ -9679,6 +9677,7 @@ describe("CockpitView", () => {
         return Promise.resolve(mockResponse({
           runs: [{
             id: "run-1",
+            run_identity: "run-1",
             tool_name: "workflow_atlas_brief",
             workflow_name: "atlas-brief",
             session_id: "session-1",
@@ -9774,8 +9773,9 @@ describe("CockpitView", () => {
     expect(traceRow).not.toBeNull();
     fireEvent.click(traceRetryButton);
     await waitFor(() =>
-      expect(screen.getByDisplayValue('Run workflow "atlas-brief" with file_path="notes/brief.md", _seraph_resume_from_step="write_file".')).toBeInTheDocument(),
+      expect(screen.getByText("Live recovery control blocked atlas-brief: approval authority is unavailable or stale.")).toBeInTheDocument(),
     );
+    expect(screen.queryByDisplayValue('Run workflow "atlas-brief" with file_path="notes/brief.md", _seraph_resume_from_step="write_file".')).not.toBeInTheDocument();
 
     const stepRow = within(inspectorWindow as HTMLElement).getByText(/write_file · write_file failed · write_file blocked by approval/i).closest(".cockpit-inspector-stack-row");
     expect(stepRow).not.toBeNull();

@@ -405,12 +405,18 @@ async def build_m6_memory_superiority_payload(
     *,
     session_id: str | None = None,
     query: str | None = None,
+    owner_principal_id: str | None = None,
+    owner_session_id: str | None = None,
+    service_id: str | None = None,
 ) -> dict[str, Any]:
     from src.guardian.state import build_guardian_state
 
     state = await build_guardian_state(
         session_id=session_id,
         user_message=query or "What should memory change before Seraph acts?",
+        owner_principal_id=owner_principal_id,
+        owner_session_id=owner_session_id,
+        service_id=service_id,
     )
     counts = await _memory_counts()
     reconciliation = await summarize_memory_reconciliation_state()

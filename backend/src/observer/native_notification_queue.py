@@ -168,6 +168,34 @@ def _safe_reason(value: object) -> str:
     return raw[:MAX_REASON_CHARS] or "display_failed"
 
 
+def _goal_binding_reason(
+    row: NativeNotificationOutbox,
+    goal: Goal | None,
+) -> str | None:
+    """Return a fail-closed reason when a goal receipt is no longer valid."""
+    if goal is None:
+        return "goal_deleted"
+    if not row.owner_principal_id or not row.operator_session_id:
+        return "goal_owner_binding_missing"
+    if (
+        goal.owner_principal_id != row.owner_principal_id
+        or goal.owner_session_id != row.operator_session_id
+    ):
+        return "goal_owner_revoked"
+    if row.goal_revision is None:
+        return "goal_revision_missing"
+    try:
+        goal_revision = int(goal.revision)
+        row_revision = int(row.goal_revision)
+    except (TypeError, ValueError, OverflowError):
+        return "goal_revision_invalid"
+    if goal_revision < 1 or row_revision < 1:
+        return "goal_revision_invalid"
+    if goal_revision != row_revision:
+        return "goal_revision_changed"
+    return None
+
+
 def _payload_digest(values: dict[str, Any]) -> str:
     canonical = json.dumps(values, sort_keys=True, ensure_ascii=True, separators=(",", ":"))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
@@ -902,20 +930,7 @@ class NativeNotificationQueue:
             }
         for row in goal_rows:
             goal = goals_by_id.get(str(row.goal_id))
-            reason: str | None = None
-            if goal is None:
-                reason = "goal_deleted"
-            elif not row.owner_principal_id or not row.operator_session_id:
-                reason = "goal_owner_binding_missing"
-            elif (
-                goal.owner_principal_id != row.owner_principal_id
-                or goal.owner_session_id != row.operator_session_id
-            ):
-                reason = "goal_owner_revoked"
-            elif row.goal_revision is None:
-                reason = "goal_revision_missing"
-            elif int(goal.revision or 1) != int(row.goal_revision):
-                reason = "goal_revision_changed"
+            reason = _goal_binding_reason(row, goal)
             if reason is None:
                 continue
             transition = await db.execute(
@@ -1422,6 +1437,44 @@ class NativeNotificationQueue:
                     or (_aware(row.deadline_at) or now) <= now
                 ):
                     return False
+                if row.goal_id is not None:
+                    goal_result = await db.execute(
+                        select(Goal).where(Goal.id == row.goal_id)
+                    )
+                    reason = _goal_binding_reason(
+                        row,
+                        goal_result.scalar_one_or_none(),
+                    )
+                    if reason is not None:
+                        cancelled = await db.execute(
+                            update(NativeNotificationOutbox)
+                            .execution_options(synchronize_session=False)
+                            .where(
+                                NativeNotificationOutbox.id == notification_id,
+                                NativeNotificationOutbox.status == "failed",
+                            )
+                            .values(
+                                status="cancelled",
+                                cancelled_at=now,
+                                last_error=reason,
+                                degraded_state=reason,
+                                lease_owner=None,
+                                lease_expires_at=None,
+                                updated_at=now,
+                            )
+                        )
+                        if cancelled.rowcount != 1:
+                            return False
+                        await db.refresh(row)
+                        await self._finish_attempt(
+                            db,
+                            row,
+                            status="cancelled",
+                            now=now,
+                            error_code=reason,
+                        )
+                        await db.flush()
+                        return False
                 row.status = "queued"
                 row.last_error = None
                 row.degraded_state = None
@@ -1458,6 +1511,16 @@ class NativeNotificationQueue:
                 row = row_result.scalar_one_or_none()
                 if row is None or row.status != "unknown":
                     return False
+                if row.goal_id is not None and (
+                    not owner_principal_id
+                    or not operator_session_id
+                    or owner_principal_id != row.owner_principal_id
+                    or operator_session_id != row.operator_session_id
+                ):
+                    # Goal-bound recovery must carry the exact authenticated
+                    # owner/session fence; ambient or partial scopes cannot
+                    # replay an old delivery intent.
+                    return False
                 if owner_principal_id is not None:
                     owner_result = await db.execute(
                         select(NativeNotificationOutbox.id).where(
@@ -1482,20 +1545,7 @@ class NativeNotificationQueue:
                         select(Goal).where(Goal.id == row.goal_id)
                     )
                     goal = goal_result.scalar_one_or_none()
-                    reason: str | None = None
-                    if goal is None:
-                        reason = "goal_deleted"
-                    elif not row.owner_principal_id or not row.operator_session_id:
-                        reason = "goal_owner_binding_missing"
-                    elif (
-                        goal.owner_principal_id != row.owner_principal_id
-                        or goal.owner_session_id != row.operator_session_id
-                    ):
-                        reason = "goal_owner_revoked"
-                    elif row.goal_revision is None:
-                        reason = "goal_revision_missing"
-                    elif int(goal.revision or 1) != int(row.goal_revision):
-                        reason = "goal_revision_changed"
+                    reason = _goal_binding_reason(row, goal)
                     if reason is not None:
                         cancel_predicates = [
                             NativeNotificationOutbox.id == notification_id,

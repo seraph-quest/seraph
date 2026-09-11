@@ -227,6 +227,7 @@ def _goal_work_failure_details(
     capability_id: str,
     error: Exception,
     budget: object | None = None,
+    reason: str | None = None,
 ) -> dict[str, object]:
     """Keep the selected goal identity on candidate persistence/service failure."""
 
@@ -237,8 +238,9 @@ def _goal_work_failure_details(
             budget = None
     return {
         "status": "failed",
-        "reason": f"goal_work_error:{type(error).__name__}",
+        "reason": reason or f"goal_work_error:{type(error).__name__}",
         "goal_id": str(getattr(goal, "id", "") or "").strip() or None,
+        "goal_revision": max(int(getattr(goal, "revision", 1) or 1), 1),
         "capability_id": capability_id,
         "operator_visible": True,
         "goal_work_failure": True,
@@ -257,6 +259,7 @@ async def _record_goal_work_failure(
     effect_type: str,
     error: Exception,
     budget: object | None = None,
+    reason: str | None = None,
 ) -> dict[str, object]:
     """Persist a candidate failure before the parent delivery fence runs."""
 
@@ -265,6 +268,7 @@ async def _record_goal_work_failure(
         capability_id=capability_id,
         error=error,
         budget=budget,
+        reason=reason,
     )
     try:
         await durable_job_repository.record_effect(
@@ -313,6 +317,15 @@ def _goal_result_status(*, execution_status: object, verification: object) -> st
     if normalized_execution == "succeeded" and normalized_verification == "passed":
         return "succeeded"
     return "failed"
+
+
+def _adapter_result_matches_goal(result: object, goal: Goal, revision: int) -> bool:
+    """Require an adapter receipt to echo the selected canonical goal fence."""
+    return (
+        str(getattr(result, "goal_id", "") or "").strip()
+        == str(getattr(goal, "id", "") or "").strip()
+        and getattr(result, "goal_revision", None) == revision
+    )
 
 
 def _reasoning_digest(reasoning: object) -> str:
@@ -724,6 +737,17 @@ async def _run_opted_in_goal_web_brief(
                 error=TypeError("web brief service returned an invalid result"),
                 budget=budget,
             )
+        if not _adapter_result_matches_goal(result, goal, revision):
+            return await _record_goal_work_failure(
+                parent_job_id,
+                parent_fencing_token,
+                goal=goal,
+                capability_id="workflow.web-brief-to-file",
+                effect_type="web_brief_admission",
+                error=ValueError("web brief adapter returned a mismatched goal identity"),
+                budget=budget,
+                reason="goal_identity_mismatch",
+            )
         effect_status = _goal_result_status(
             execution_status=result.execution_status,
             verification=result.verification,
@@ -933,6 +957,17 @@ async def _run_opted_in_goal_snapshot(
             effect_type="goal_snapshot_admission",
             error=TypeError("goal snapshot service returned an invalid result"),
             budget=budget,
+        )
+    if not _adapter_result_matches_goal(result, goal, revision):
+        return await _record_goal_work_failure(
+            parent_job_id,
+            parent_fencing_token,
+            goal=goal,
+            capability_id="workflow.goal-snapshot-to-file",
+            effect_type="goal_snapshot_admission",
+            error=ValueError("goal snapshot adapter returned a mismatched goal identity"),
+            budget=budget,
+            reason="goal_identity_mismatch",
         )
     effect_status = _goal_result_status(
         execution_status=result.execution_status,

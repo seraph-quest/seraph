@@ -21,6 +21,7 @@ from src.scheduler.jobs.strategist_tick import (
     _run_opted_in_goal_web_brief,
     _run_opted_in_goal_snapshot,
     _goal_budget_admission,
+    _adapter_result_matches_goal,
     _goal_work_must_not_continue,
     run_strategist_tick,
 )
@@ -34,6 +35,27 @@ class _RecordingDurableJobs:
     async def record_effect(self, job_id, **kwargs):
         self.effects.append((job_id, kwargs))
         return {"status": kwargs["status"]}
+
+
+def test_adapter_result_identity_requires_exact_goal_and_revision():
+    goal = SimpleNamespace(id="goal-identity", revision=7)
+
+    assert _adapter_result_matches_goal(
+        SimpleNamespace(goal_id="goal-identity", goal_revision=7),
+        goal,
+        7,
+    ) is True
+    assert _adapter_result_matches_goal(
+        SimpleNamespace(goal_id="other-goal", goal_revision=7),
+        goal,
+        7,
+    ) is False
+    assert _adapter_result_matches_goal(
+        SimpleNamespace(goal_id="goal-identity", goal_revision=6),
+        goal,
+        7,
+    ) is False
+    assert _adapter_result_matches_goal(SimpleNamespace(), goal, 7) is False
 
 
 @pytest.mark.asyncio

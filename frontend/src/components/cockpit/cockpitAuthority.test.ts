@@ -18,6 +18,9 @@ const auth = {
 const approval = {
   id: "approval-1",
   workflow_id: "run-1",
+  goal_id: "goal-1",
+  criterion_id: "criterion-1",
+  goal_revision: 1,
   tool_name: "filesystem:workspace",
   status: "pending",
   session_id: "conversation-1",
@@ -99,7 +102,14 @@ describe("cockpit approval authority", () => {
         { ...approval, id: "approval-other", workflow_id: "run-other" },
         { ...approval, workflow_id: "run-1" },
       ],
-      { workflowId: "run-1", toolName: "filesystem:workspace", sessionId: "conversation-1" },
+      {
+        workflowId: "run-1",
+        goalId: "goal-1",
+        criterionId: "criterion-1",
+        goalRevision: 1,
+        toolName: "filesystem:workspace",
+        sessionId: "conversation-1",
+      },
     )?.id).toBe("approval-1");
   });
 

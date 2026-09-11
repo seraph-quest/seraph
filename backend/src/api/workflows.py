@@ -147,6 +147,8 @@ _WORKFLOW_SAFE_REFUSAL_CODES = _WORKFLOW_REPLAY_BLOCK_REASONS | {
     "workflow_control_fence_blocked",
     "workflow_action_handle_invalid",
     "workflow_action_handle_mismatch",
+    "workflow_identity_binding_missing",
+    "workflow_identity_binding_mismatch",
 }
 _WORKFLOW_SAFE_TOKEN_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
 _WORKFLOW_SAFE_ARTIFACT_ID_RE = re.compile(r"^art_[0-9a-f]{24}$")
@@ -310,6 +312,49 @@ def _workflow_owner_is_bound(run: dict[str, Any], principal_id: str) -> bool:
         and bool(owner_principal_id)
         and owner_principal_id == principal_id
     )
+
+
+def _workflow_identity_binding_detail(
+    *,
+    run: dict[str, Any],
+    run_identity: str,
+    operator_context: dict[str, Any] | None,
+) -> str | None:
+    """Require the caller to echo the server-owned goal/run identity exactly."""
+    context = operator_context if isinstance(operator_context, dict) else {}
+    expected_run_identity = str(run.get("run_identity") or run_identity).strip()
+    supplied_run_identity = str(context.get("workflow_run_identity") or "").strip()
+    if not expected_run_identity or not supplied_run_identity:
+        return "workflow_identity_binding_missing"
+    if supplied_run_identity != expected_run_identity:
+        return "workflow_identity_binding_mismatch"
+
+    required_fields = ("goal_id", "criterion_id", "goal_revision")
+    for field_name in required_fields:
+        expected = run.get(field_name)
+        supplied = context.get(field_name)
+        if expected is None or supplied is None:
+            return "workflow_identity_binding_missing"
+        if field_name == "goal_revision":
+            try:
+                if int(expected) != int(supplied):
+                    return "workflow_identity_binding_mismatch"
+            except (TypeError, ValueError, OverflowError):
+                return "workflow_identity_binding_missing"
+        elif str(expected).strip() != str(supplied).strip():
+            return "workflow_identity_binding_mismatch"
+
+    expected_plan_revision = run.get("plan_revision")
+    if expected_plan_revision is not None:
+        supplied_plan_revision = context.get("plan_revision")
+        if supplied_plan_revision is None:
+            return "workflow_identity_binding_missing"
+        try:
+            if int(expected_plan_revision) != int(supplied_plan_revision):
+                return "workflow_identity_binding_mismatch"
+        except (TypeError, ValueError, OverflowError):
+            return "workflow_identity_binding_missing"
+    return None
 
 
 def _safe_workflow_action(value: Any) -> str:
@@ -931,6 +976,11 @@ def _safe_workflow_run_projection(value: Any) -> dict[str, Any] | None:
         "availability": _safe_workflow_token(value.get("availability"), fallback="unknown"),
         "summary": f"Workflow {workflow_name} {status}",
         "session_id": _safe_workflow_token(value.get("session_id"), fallback="") or None,
+        "goal_id": _safe_workflow_token(value.get("goal_id"), fallback="") or None,
+        "goal_revision": _safe_workflow_count(value.get("goal_revision")) if value.get("goal_revision") is not None else None,
+        "criterion_id": _safe_workflow_token(value.get("criterion_id"), fallback="") or None,
+        "plan_revision": _safe_workflow_count(value.get("plan_revision")) if value.get("plan_revision") is not None else None,
+        "candidate_id": _safe_workflow_token(value.get("candidate_id"), fallback="") or None,
         "record_schema_version": _safe_workflow_count(value.get("record_schema_version")),
         "owner_kind": _safe_workflow_token(value.get("owner_kind"), fallback="legacy"),
         "owner_principal_id_digest": (
@@ -1767,6 +1817,35 @@ def _workflow_run_approval_key(run: dict[str, Any]) -> str:
         tool_name=tool_name,
         fingerprint=fingerprint,
     )
+
+
+def _workflow_identity_fields(value: Any) -> dict[str, Any]:
+    record = _as_record(value)
+    if record is None:
+        return {}
+    metadata = _as_record(record.get("metadata"))
+    durable = _as_record(metadata.get("durable_job")) if metadata else None
+    arguments = _as_record(record.get("arguments"))
+    sources = (record, metadata, durable, arguments)
+    fields: dict[str, Any] = {}
+    for name in ("goal_id", "criterion_id", "candidate_id"):
+        for source in sources:
+            candidate = source.get(name) if source else None
+            if candidate is not None and str(candidate).strip():
+                fields[name] = str(candidate).strip()
+                break
+    for name in ("goal_revision", "plan_revision"):
+        for source in sources:
+            candidate = source.get(name) if source else None
+            if isinstance(candidate, bool):
+                continue
+            try:
+                if candidate is not None and int(candidate) >= 0:
+                    fields[name] = int(candidate)
+                    break
+            except (TypeError, ValueError, OverflowError):
+                continue
+    return fields
 
 
 def _workflow_replay_draft(
@@ -2615,12 +2694,10 @@ async def _list_workflow_runs(
     pending_approvals = await approval_repository.list_pending(session_id=session_id, limit=100)
     workflow_statuses = _workflow_runtime_statuses()
     workflow_runtime_contexts = _workflow_runtime_approval_contexts()
-    pending_by_tool: dict[tuple[str | None, str], list[dict[str, Any]]] = defaultdict(list)
     pending_by_signature: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for approval in pending_approvals:
         tool_name = str(approval.get("tool_name") or "")
         approval_session_id = approval.get("session_id")
-        pending_by_tool[(approval_session_id, tool_name)].append(approval)
         pending_by_signature[
             _approval_projection_key(
                 session_id=approval_session_id if isinstance(approval_session_id, str) else None,
@@ -2659,6 +2736,7 @@ async def _list_workflow_runs(
                 "artifact_paths": _extract_artifact_paths(arguments),
                 "continued_error_steps": [],
                 "arguments": arguments,
+                **_workflow_identity_fields({**details, "arguments": arguments}),
                 "approval_context": _normalize_approval_context(
                     details.get("approval_context"),
                     workflow_name=str(details.get("workflow_name") or _workflow_name_from_tool(tool_name)),
@@ -2724,6 +2802,7 @@ async def _list_workflow_runs(
             "artifact_paths": [],
             "continued_error_steps": [],
             "arguments": _as_record(details.get("arguments")) or None,
+            **_workflow_identity_fields({**details, "arguments": _as_record(details.get("arguments")) or None}),
             "approval_context": _normalize_approval_context(
                 details.get("approval_context"),
                 workflow_name=str(details.get("workflow_name") or _workflow_name_from_tool(tool_name)),
@@ -2740,13 +2819,14 @@ async def _list_workflow_runs(
             if path not in artifact_paths:
                 artifact_paths.append(path)
 
+        for field_name, field_value in _workflow_identity_fields({**details, "arguments": details.get("arguments")}).items():
+            if run.get(field_name) is None:
+                run[field_name] = field_value
+
         workflow_meta = workflow_manager.get_tool_metadata(tool_name) or {}
         workflow_status = workflow_statuses.get(str(run["workflow_name"]))
         approval_key = _workflow_run_approval_key(run)
-        approvals = pending_by_signature.get(approval_key) or pending_by_tool.get(
-            (run.get("session_id"), tool_name),
-            [],
-        )
+        approvals = pending_by_signature.get(approval_key, [])
         recorded_approval_context = (
             _normalize_approval_context(
                 details.get("approval_context"),
@@ -3010,10 +3090,7 @@ async def _list_workflow_runs(
             workflow_meta = workflow_manager.get_tool_metadata(str(run["tool_name"])) or {}
             workflow_status = workflow_statuses.get(str(run["workflow_name"]))
             approval_key = _workflow_run_approval_key(run)
-            approvals = pending_by_signature.get(approval_key) or pending_by_tool.get(
-                (run.get("session_id"), str(run["tool_name"])),
-                [],
-            )
+            approvals = pending_by_signature.get(approval_key, [])
             recorded_approval_context = _normalize_approval_context(
                 run.get("approval_context"),
                 workflow_name=str(run["workflow_name"]),
@@ -3880,6 +3957,16 @@ async def control_workflow_run(
         ):
             await log_refusal(status_code=403, detail="workflow_owner_mismatch")
             raise HTTPException(status_code=403, detail="workflow_owner_mismatch")
+
+        if action in _WORKFLOW_REPLAY_ACTIONS:
+            identity_detail = _workflow_identity_binding_detail(
+                run=run,
+                run_identity=run_identity,
+                operator_context=req.operator_context,
+            )
+            if identity_detail is not None:
+                await log_refusal(status_code=409, detail=identity_detail)
+                raise HTTPException(status_code=409, detail=identity_detail)
 
         # The cockpit only receives opaque action handles. Resolve the handle
         # against this authenticated run before changing its durable fence;

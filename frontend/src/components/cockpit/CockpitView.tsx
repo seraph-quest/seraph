@@ -54,6 +54,7 @@ import {
   displayApprovalOwnerMetadata,
   goalWorkflowBindingState,
   isApprovalAuthorityReady,
+  redactApprovalText,
   redactIdentifier,
   selectApprovalForWorkflow,
   type ApprovalLoadState,
@@ -5978,6 +5979,7 @@ function normalizeWorkflowRun(value: Record<string, unknown>): WorkflowRunRecord
   };
   const workflowGoalId = readIdentityText("goal_id", "goalId");
   const workflowGoalRevision = readIdentityRevision("goal_revision", "goalRevision");
+  const workflowPlanRevision = readIdentityRevision("plan_revision", "planRevision");
   const workflowCriterionId = readIdentityText("criterion_id", "criterionId");
   const workflowCandidateId = readIdentityText("candidate_id", "candidateId");
 
@@ -5989,6 +5991,7 @@ function normalizeWorkflowRun(value: Record<string, unknown>): WorkflowRunRecord
     goalId: workflowGoalId,
     goalRevision: workflowGoalRevision,
     criterionId: workflowCriterionId,
+    planRevision: workflowPlanRevision,
     candidateId: workflowCandidateId,
     status: (value.status as WorkflowRunRecord["status"]) ?? "running",
     startedAt: String(value.started_at ?? value.updated_at ?? ""),
@@ -8248,10 +8251,12 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   function workflowCanContinue(workflow: WorkflowRunRecord): boolean {
     const approval = approvalForWorkflow(workflow);
     const continueTarget = approval?.thread_id ?? approval?.session_id ?? workflow.threadId ?? workflow.sessionId;
-    if ((approval?.resume_message ?? workflow.threadContinueMessage) && continueTarget) {
-      return true;
-    }
-    return workflowCheckpointActions(workflow).length > 0 || !!workflow.retryFromStepDraft;
+    const hasContinuation = Boolean(
+      ((approval?.resume_message ?? workflow.threadContinueMessage) && continueTarget)
+      || workflowCheckpointActions(workflow).length > 0
+      || workflow.retryFromStepDraft,
+    );
+    return hasContinuation;
   }
   function workflowBestContinuationRun(workflow: WorkflowRunRecord): WorkflowRunRecord | null {
     const resolved = resolveWorkflowRun(workflow);
@@ -8586,13 +8591,6 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     if (!workflow) return;
     setSelectedInspector({ kind: "workflow", workflow: resolveWorkflowRun(workflow) });
   }
-  function resumePlanFallbackDraft(workflow: WorkflowRunRecord): string | null {
-    const checkpointAction = workflowCheckpointActions(workflow)[0];
-    if (checkpointAction?.draft) return checkpointAction.draft;
-    if (workflow.retryFromStepDraft) return workflow.retryFromStepDraft;
-    if (workflow.replayAllowed !== false) return workflow.replayDraft ?? buildWorkflowReplayDraft(workflow);
-    return null;
-  }
   async function queueLiveWorkflowResumePlan(
     workflow: WorkflowRunRecord | null | undefined,
     options: {
@@ -8607,35 +8605,12 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     if (!workflow) return;
     const resolved = resolveWorkflowRun(workflow);
     const label = options.label ?? resolved.workflowName;
-    if (
-      operatorAuth.status !== "authenticated"
-      || !operatorAuth.principalId
-      || !operatorAuth.sessionId
-    ) {
-      setOperatorStatus(`Live recovery control blocked ${label}: operator authority is unavailable.`);
+    const authority = workflowRecoveryAuthority(resolved);
+    if (!authority.allowed) {
+      setOperatorStatus(`Live recovery control blocked ${label}: ${authority.reason}.`);
       return;
     }
-    const hasPendingApproval = Boolean(
-      (resolved.pendingApprovalCount ?? 0) > 0
-      || resolved.pendingApprovalIds?.length
-      || resolved.pendingApprovals?.length,
-    );
-    if (
-      approvalLoadState !== "ready"
-      || (hasPendingApproval && !isApprovalAuthorityReady(
-        approvalForWorkflow(resolved),
-        operatorAuth,
-        approvalLoadState,
-      ))
-    ) {
-      setOperatorStatus(`Live recovery control blocked ${label}: approval authority is unavailable or stale.`);
-      return;
-    }
-    const fallbackDraft = options.fallbackDraft ?? resumePlanFallbackDraft(resolved);
-    if (!resolved.runIdentity) {
-      setOperatorStatus(`Live recovery control blocked ${label}: run identity is unavailable.`);
-      return;
-    }
+    if (!resolved.runIdentity) return;
     setOperatorStatus(`Checking live recovery plan for ${label}...`);
     try {
       const action = options.action ?? "resume";
@@ -8656,6 +8631,11 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
               workflow_name: resolved.workflowName,
               status: resolved.status,
               thread_id: resolved.threadId,
+              workflow_run_identity: resolved.runIdentity,
+              goal_id: resolved.goalId,
+              goal_revision: resolved.goalRevision,
+              criterion_id: resolved.criterionId,
+              plan_revision: resolved.planRevision,
             },
           }),
         },
@@ -8686,12 +8666,13 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       const returnedActionHandle = planRecord?.action_handle && typeof planRecord.action_handle === "object" && !Array.isArray(planRecord.action_handle)
         ? planRecord.action_handle as Record<string, unknown>
         : null;
+      const approvalScope = authority.approval?.approval_scope ?? authority.approval?.approval_context;
       const draft = typeof planRecord?.draft === "string" && planRecord.draft.trim()
-        ? planRecord.draft
+        ? redactApprovalText(planRecord.draft, approvalScope)
         : (
           !returnedActionHandle && typeof planRecord?.continue_message === "string" && planRecord.continue_message.trim()
-            ? planRecord.continue_message
-            : returnedActionHandle ? null : fallbackDraft
+            ? redactApprovalText(planRecord.continue_message, approvalScope)
+            : null
         );
       if (!draft) {
         setOperatorStatus(
@@ -8737,10 +8718,12 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     scopeLabel: string,
     keyPrefix: string,
   ) {
+    const authority = workflowRecoveryAuthority(workflow);
     return workflowCheckpointActions(workflow).map((action) => (
       <button
         key={`${keyPrefix}:${action.stepId}:${action.label}`}
         className="cockpit-feedback-button"
+        disabled={!authority.allowed}
         aria-label={`${action.label} from ${scopeLabel} ${workflow.workflowName}`}
         onClick={() => void queueLiveWorkflowResumePlan(workflow, {
           action: action.kind === "retry_failed_step" ? "retry" : "branch",
@@ -8760,12 +8743,14 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     keyPrefix: string,
   ) {
     const failedStep = failedWorkflowStep(workflow);
+    const authority = workflowRecoveryAuthority(workflow);
     const controls: ReactNode[] = [];
     if (workflow.retryFromStepDraft) {
       controls.push(
         <button
           key={`${keyPrefix}:retry-step`}
           className="cockpit-feedback-button"
+          disabled={!authority.allowed}
           aria-label={`Retry step for ${scopeLabel} ${workflow.workflowName}`}
           onClick={() => void queueLiveWorkflowResumePlan(workflow, {
             action: "retry",
@@ -8783,6 +8768,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
         <button
           key={`${keyPrefix}:repair-replay`}
           className="cockpit-feedback-button"
+          disabled={!authority.allowed}
           aria-label={`Repair replay for ${scopeLabel} ${workflow.workflowName}`}
           onClick={() => void repairWorkflowReplay(workflow)}
         >
@@ -8795,8 +8781,9 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
         <button
           key={`${keyPrefix}:repair-step:${failedStep.id}`}
           className="cockpit-feedback-button"
+          disabled={!authority.allowed}
           aria-label={`Repair step ${failedStep.id} for ${scopeLabel} ${workflow.workflowName}`}
-          onClick={() => void runCapabilityActions(readActionList(failedStep.recoveryActions), `${workflow.workflowName} ${failedStep.id}`)}
+          onClick={() => void runCapabilityActions(readActionList(failedStep.recoveryActions), `${workflow.workflowName} ${failedStep.id}`, workflow)}
         >
           Repair Step
         </button>,
@@ -9194,11 +9181,13 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
         id: `approval:${approval.id}`,
         kind: "approval",
         label: `approval: ${approval.tool_name}`,
-        detail: `awaiting approval · ${approval.summary}`,
+        detail: `awaiting approval · ${redactApprovalText(approval.summary, approval.approval_scope ?? approval.approval_context)}`,
         meta: [approval.risk_level, threadLabel, formatAge(approval.created_at)].filter(Boolean).join(" · "),
         priority: 100,
         threadId: approval.thread_id ?? approval.session_id ?? null,
-        continueMessage: approval.resume_message ?? null,
+        continueMessage: approval.resume_message
+          ? redactApprovalText(approval.resume_message, approval.approval_scope ?? approval.approval_context)
+          : null,
         approval,
       });
     });
@@ -9242,7 +9231,9 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
         ].filter(Boolean).join(" · "),
         priority,
         threadId: approval?.thread_id ?? approval?.session_id ?? workflow.threadId ?? workflow.sessionId ?? null,
-        continueMessage: approval?.resume_message ?? workflow.threadContinueMessage ?? null,
+        continueMessage: approval?.resume_message
+          ? redactApprovalText(approval.resume_message, approval.approval_scope ?? approval.approval_context)
+          : workflow.threadContinueMessage ?? null,
         workflow,
       });
     });
@@ -9394,7 +9385,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
         id: `approval-context:${approval.id}`,
         kind: "approval",
         label: `approval context: ${approval.tool_name}`,
-        detail: `approval context · ${approval.summary}`,
+        detail: `approval context · ${redactApprovalText(approval.summary, approval.approval_scope ?? approval.approval_context)}`,
         meta: [
           approval.risk_level,
           approval.extension_action ? `extension ${approval.extension_action}` : null,
@@ -9403,7 +9394,9 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
         ].filter(Boolean).join(" · "),
         sortKey: new Date(approval.created_at).getTime(),
         threadId: approval.thread_id ?? approval.session_id ?? null,
-        continueMessage: approval.resume_message ?? null,
+        continueMessage: approval.resume_message
+          ? redactApprovalText(approval.resume_message, approval.approval_scope ?? approval.approval_context)
+          : null,
         approval,
       });
     }
@@ -9774,23 +9767,8 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     operatorAuth,
     approvalLoadState,
   ) && outcomeBindingState === "matched";
-  const outcomeHasPendingApproval = Boolean(
-    outcomeWorkflow
-    && (
-      (outcomeWorkflow.pendingApprovalCount ?? 0) > 0
-      || outcomeWorkflow.pendingApprovalIds?.length
-      || outcomeWorkflow.pendingApprovals?.length
-    )
-  );
-  const recoveryAuthorityReady = Boolean(
-    outcomeWorkflow?.runIdentity
-    && outcomeBindingState === "matched"
-    && operatorAuth.status === "authenticated"
-    && operatorAuth.principalId
-    && operatorAuth.sessionId
-    && approvalLoadState === "ready"
-    && (!(outcomeHasPendingApproval || Boolean(outcomeApproval)) || approvalAuthorityReady)
-  );
+  const outcomeRecoveryAuthority = outcomeWorkflow ? workflowRecoveryAuthority(outcomeWorkflow) : null;
+  const recoveryAuthorityReady = Boolean(outcomeRecoveryAuthority?.allowed);
   const approvalOutcomeState: OutcomeCockpitState = (() => {
     if (!outcomeApproval) {
       return approvalLoadState === "loading"
@@ -9916,7 +9894,10 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     ? {
       id: outcomeApproval.id,
       toolLabel: [outcomeApproval.extension_display_name, outcomeApproval.extension_action].filter(Boolean).join(" · ") || outcomeApproval.tool_name,
-      summary: outcomeApproval.summary,
+      summary: redactApprovalText(
+        outcomeApproval.summary,
+        outcomeApproval.approval_scope ?? outcomeApproval.approval_context,
+      ),
       riskLevel: outcomeApproval.risk_level,
       state: approvalOutcomeState,
       createdAt: outcomeApproval.created_at,
@@ -10095,7 +10076,13 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   function draftOperatorEvidenceEntry(entry: OperatorEvidenceEntry | null | undefined) {
     if (!entry) return;
     if (entry.approval?.resume_message) {
-      void queueThreadDraft(entry.approval.resume_message, entry.threadId ?? undefined);
+      void queueThreadDraft(
+        redactApprovalText(
+          entry.approval.resume_message,
+          entry.approval.approval_scope ?? entry.approval.approval_context,
+        ),
+        entry.threadId ?? undefined,
+      );
       return;
     }
     if (entry.artifact) {
@@ -10919,20 +10906,11 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   }, [governedExtensionRows]);
 
   function approvalForWorkflow(workflow: WorkflowRunRecord): PendingApproval | null {
-    const selected = selectApprovalForWorkflow(pendingApprovals, {
-      workflowId: workflow.runIdentity ?? workflow.id,
-      toolName: workflow.toolName,
-      sessionId: workflow.sessionId,
-      pendingApprovalIds: workflow.pendingApprovalIds,
-    });
-    if (selected) return selected;
-    const attached = workflow.pendingApprovals?.[0];
-    if (!attached) return null;
-    return {
+    const attachedApprovals: PendingApproval[] = (workflow.pendingApprovals ?? []).map((attached) => ({
       id: attached.id,
-      workflow_id: attached.workflowId ?? workflow.runIdentity ?? workflow.id,
-      goal_id: attached.goalId ?? workflow.goalId,
-      criterion_id: attached.criterionId ?? workflow.criterionId,
+      workflow_id: attached.workflowId ?? null,
+      goal_id: attached.goalId ?? null,
+      criterion_id: attached.criterionId ?? null,
       session_id: workflow.sessionId ?? null,
       thread_id: attached.threadId ?? workflow.threadId ?? workflow.sessionId ?? null,
       thread_label: attached.threadLabel ?? workflow.threadLabel ?? null,
@@ -10941,7 +10919,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       status: "pending",
       summary: attached.summary,
       created_at: attached.createdAt,
-      resume_message: attached.resumeMessage ?? workflow.approvalRecoveryMessage ?? null,
+      resume_message: attached.resumeMessage ?? null,
       approval_conversation_id: attached.approvalConversationId ?? workflow.sessionId ?? null,
       approval_owner_principal_id: attached.approvalOwnerPrincipalId,
       approval_owner_operator_session_id: attached.approvalOwnerOperatorSessionId,
@@ -10954,7 +10932,90 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       approval_context: attached.approvalContext,
       goal_revision: attached.goalRevision,
       plan_revision: attached.planRevision,
-    };
+    }));
+    const selected = selectApprovalForWorkflow(pendingApprovals, {
+      workflowId: workflow.runIdentity,
+      goalId: workflow.goalId,
+      goalRevision: workflow.goalRevision,
+      criterionId: workflow.criterionId,
+      planRevision: workflow.planRevision,
+      pendingApprovalIds: workflow.pendingApprovalIds,
+      pendingApprovals: attachedApprovals,
+    });
+    return selected;
+  }
+
+  function workflowRecoveryAuthority(workflow: WorkflowRunRecord | null | undefined): {
+    allowed: boolean;
+    reason: string;
+    workflow: WorkflowRunRecord | null;
+    approval: PendingApproval | null;
+  } {
+    if (!workflow) {
+      return {
+        allowed: false,
+        reason: "workflow identity is unavailable",
+        workflow: null,
+        approval: null,
+      };
+    }
+    const resolved = resolveWorkflowRun(workflow);
+    const approval = approvalForWorkflow(resolved);
+    const hasPendingApproval = Boolean(
+      (resolved.pendingApprovalCount ?? 0) > 0
+      || resolved.pendingApprovalIds?.length
+      || resolved.pendingApprovals?.length,
+    );
+    const bindingState = goalWorkflowBindingState({
+      activeGoalCount: activeGoalsForCockpit.length,
+      goalId: currentGoal?.id,
+      goalRevision: currentGoal?.revision ?? currentGoalLoop?.goal.revision,
+      criterionId: currentGoalLoop?.criterion?.criterion_id ?? currentGoal?.success_criterion?.criterion_id,
+      workflowGoalId: resolved.goalId,
+      workflowGoalRevision: resolved.goalRevision,
+      workflowCriterionId: resolved.criterionId,
+    });
+    if (operatorAuth.status !== "authenticated" || !operatorAuth.principalId || !operatorAuth.sessionId) {
+      return {
+        allowed: false,
+        reason: "operator authority is unavailable",
+        workflow: resolved,
+        approval,
+      };
+    }
+    if (!resolved.runIdentity) {
+      return {
+        allowed: false,
+        reason: "workflow run identity is unavailable",
+        workflow: resolved,
+        approval,
+      };
+    }
+    if (bindingState !== "matched") {
+      return {
+        allowed: false,
+        reason: "workflow goal, criterion, or revision binding is unavailable or stale",
+        workflow: resolved,
+        approval,
+      };
+    }
+    if (approvalLoadState !== "ready") {
+      return {
+        allowed: false,
+        reason: "approval authority is unavailable or stale",
+        workflow: resolved,
+        approval,
+      };
+    }
+    if ((hasPendingApproval || Boolean(approval)) && !isApprovalAuthorityReady(approval, operatorAuth, approvalLoadState)) {
+      return {
+        allowed: false,
+        reason: "approval authority is unavailable or stale",
+        workflow: resolved,
+        approval,
+      };
+    }
+    return { allowed: true, reason: "", workflow: resolved, approval };
   }
 
   function interventionsForWorkflow(workflow: WorkflowRunRecord): GuardianContinuityIntervention[] {
@@ -11801,7 +11862,10 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
         }
         appEventBus.emit("approval-resume", {
           sessionId: payload.session_id ?? approval.session_id ?? null,
-          message: payload.resume_message,
+          message: redactApprovalText(
+            payload.resume_message,
+            approval.approval_scope ?? approval.approval_context,
+          ),
         });
       }
     } catch {
@@ -12031,7 +12095,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       appendOperatorFeed(`No replay repair actions available for ${workflow.workflowName}`, "failed");
       return;
     }
-    await runCapabilityActions(actions, `${workflow.workflowName} replay`);
+    await runCapabilityActions(actions, `${workflow.workflowName} replay`, workflow);
   }
 
   function failedWorkflowStep(workflow: WorkflowRunRecord): WorkflowStepRecord | null {
@@ -12508,7 +12572,15 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   async function runCapabilityActions(
     actions: CapabilityAction[],
     label: string,
+    workflow?: WorkflowRunRecord | null,
   ) {
+    if (workflow) {
+      const authority = workflowRecoveryAuthority(workflow);
+      if (!authority.allowed) {
+        setOperatorStatus(`Workflow repair blocked ${label}: ${authority.reason}.`);
+        return;
+      }
+    }
     const allowedActions = actions.filter((action) => SUPPORTED_CAPABILITY_ACTION_TYPES.has(action.type));
     if (allowedActions.length === 0) {
       setOperatorStatus(`No safe repair actions available for ${label}`);
@@ -12818,6 +12890,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     const selectedWorkflow = selectedInspector?.kind === "workflow"
       ? resolveWorkflowRun(selectedInspector.workflow)
       : null;
+    const selectedWorkflowAuthority = selectedWorkflow ? workflowRecoveryAuthority(selectedWorkflow) : null;
     const selectedWorkflowApproval = selectedWorkflow ? approvalForWorkflow(selectedWorkflow) : null;
     const selectedWorkflowLatestBranch = selectedWorkflow ? workflowLatestBranchRun(selectedWorkflow) : null;
     const selectedWorkflowBestContinuation = selectedWorkflow ? workflowBestContinuationRun(selectedWorkflow) : null;
@@ -12844,14 +12917,16 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       ].filter((value): value is string => Boolean(value)).join(" · ") || "unavailable";
       title = approval.tool_name;
       meta = `${approval.risk_level} approval`;
-      body = `approval request · ${approval.summary}`;
+      body = `approval request · ${redactApprovalText(approval.summary, approval.approval_scope ?? approval.approval_context)}`;
       details = {
         approval_id: approval.id,
         session_id: approval.session_id ?? "n/a",
         thread: approval.thread_label ?? approval.thread_id ?? approval.session_id ?? "n/a",
         status: approval.status,
         resolution: approvalState[approval.id] ?? "pending",
-        resume_message: approval.resume_message ?? "n/a",
+        resume_message: approval.resume_message
+          ? redactApprovalText(approval.resume_message, approval.approval_scope ?? approval.approval_context)
+          : "n/a",
         extension_id: approval.extension_id ?? "n/a",
         extension_display_name: approval.extension_display_name ?? "n/a",
         extension_action: approval.extension_action ?? "n/a",
@@ -12902,7 +12977,9 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
         artifact_paths: workflow.artifactPaths,
         pending_approval: selectedWorkflowApproval ? selectedWorkflowApproval.id : "none",
         pending_approval_count: workflow.pendingApprovalCount ?? 0,
-        pending_approvals: workflow.pendingApprovals?.map((item) => item.summary).join(" | ") || "none",
+        pending_approvals: workflow.pendingApprovals
+          ?.map((item) => redactApprovalText(item.summary, item.approvalScope ?? item.approvalContext))
+          .join(" | ") || "none",
         replay_allowed: workflow.replayAllowed ?? false,
         replay_block_reason: workflow.replayBlockReason ?? "none",
         availability: workflow.availability ?? "unknown",
@@ -12975,6 +13052,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
               <>
 	                <button
 	                  className="cockpit-feedback-button"
+	                  disabled={!selectedWorkflowAuthority?.allowed}
 	                  onClick={() => void queueLiveWorkflowResumePlan(selectedWorkflow, {
 	                    action: "replay",
 	                    fallbackDraft: selectedWorkflow.replayDraft ?? buildWorkflowReplayDraft(selectedWorkflow),
@@ -12992,6 +13070,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                       <button
                         key={`${selectedWorkflow.id}:${action.stepId}`}
                         className="cockpit-feedback-button"
+                        disabled={!selectedWorkflowAuthority?.allowed}
                         onClick={() => void queueLiveWorkflowResumePlan(selectedWorkflow, {
                           action: action.kind === "retry_failed_step" ? "retry" : "branch",
                           stepId: action.stepId,
@@ -13010,6 +13089,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                   return (
                     <button
                       className="cockpit-feedback-button"
+                      disabled={!selectedWorkflowAuthority?.allowed}
                       onClick={() => void queueLiveWorkflowResumePlan(selectedWorkflow, {
                         action: "retry",
                         stepId: selectedWorkflow.resumeFromStep,
@@ -13179,7 +13259,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
             <div className="cockpit-inspector-stack-row">
               <div className="cockpit-key">pending approval</div>
               <div className="cockpit-value">
-                approval context · {selectedWorkflowApproval.summary}
+                approval context · {redactApprovalText(selectedWorkflowApproval.summary, selectedWorkflowApproval.approval_scope ?? selectedWorkflowApproval.approval_context)}
                 {selectedWorkflowApproval.thread_label
                   ? ` · ${selectedWorkflowApproval.thread_label}`
                   : selectedWorkflowApproval.thread_id
@@ -13193,7 +13273,10 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
 	                  aria-label={`Continue approval context for ${selectedWorkflowName}`}
 	                  onClick={() => void queueLiveWorkflowResumePlan(selectedWorkflow, {
 	                    action: "resume",
-	                    fallbackDraft: selectedWorkflowApproval.resume_message,
+                    fallbackDraft: redactApprovalText(
+                      selectedWorkflowApproval.resume_message,
+                      selectedWorkflowApproval.approval_scope ?? selectedWorkflowApproval.approval_context,
+                    ),
 	                    fallbackThreadId: selectedWorkflowApproval.thread_id ?? selectedWorkflowApproval.session_id,
 	                    label: selectedWorkflowName,
 	                  })}
@@ -13330,8 +13413,9 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                   {step.recoveryActions?.length ? (
                     <button
                       className="cockpit-feedback-button"
+                      disabled={!selectedWorkflowAuthority?.allowed}
                       aria-label={`Repair step ${step.id} in ${selectedWorkflowName}`}
-                      onClick={() => void runCapabilityActions(readActionList(step.recoveryActions), `${selectedWorkflow.workflowName} ${step.id}`)}
+                      onClick={() => void runCapabilityActions(readActionList(step.recoveryActions), `${selectedWorkflow.workflowName} ${step.id}`, selectedWorkflow)}
                     >
                       Repair
                     </button>
@@ -13950,7 +14034,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                     <button
                       className="cockpit-feedback-button"
                       aria-label={`Repair ${entry.scopeLabel} lineage event ${entry.failureStep.id}`}
-                      onClick={() => void runCapabilityActions(readActionList(entry.failureStep?.recoveryActions), `${entry.sourceWorkflow.workflowName} ${entry.failureStep?.id}`)}
+                      onClick={() => void runCapabilityActions(readActionList(entry.failureStep?.recoveryActions), `${entry.sourceWorkflow.workflowName} ${entry.failureStep?.id}`, entry.sourceWorkflow)}
                     >
                       Repair
                     </button>
@@ -14758,7 +14842,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                           <span className="cockpit-role">{approval.tool_name}</span>
                           <span className="cockpit-row-age">{formatAge(approval.created_at)}</span>
                         </div>
-                        <div className="cockpit-row-body">{approval.summary}</div>
+                        <div className="cockpit-row-body">{redactApprovalText(approval.summary, approval.approval_scope ?? approval.approval_context)}</div>
                         <div className="cockpit-row-meta">
                           {approval.risk_level} risk
                           {approval.thread_label
@@ -14774,7 +14858,10 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                             className="cockpit-feedback-button"
                             onClick={() =>
                               void queueThreadDraft(
-                                approval.resume_message ?? "",
+                                redactApprovalText(
+                                  approval.resume_message,
+                                  approval.approval_scope ?? approval.approval_context,
+                                ),
                                 approval.thread_id ?? approval.session_id,
                               )
                             }
@@ -15349,7 +15436,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                         {actionTarget.recommended_actions?.length ? (
                           <button
                             className="cockpit-feedback-button"
-                            onClick={() => void runCapabilityActions(actionTarget.recommended_actions ?? [], actionTarget.title)}
+                            onClick={() => void runCapabilityActions(actionTarget.recommended_actions ?? [], actionTarget.title, actionTargetWorkflow)}
                           >
                             Repair
                           </button>
@@ -15388,6 +15475,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
               <div className="cockpit-list">
                 {workflowRunsWithArtifacts.map((workflow) => {
                   const approval = approvalForWorkflow(workflow);
+                  const recoveryAuthority = workflowRecoveryAuthority(workflow);
                   const linkedInterventions = interventionsForWorkflow(workflow);
                   const failedStep = failedWorkflowStep(workflow);
                   return (
@@ -15497,6 +15585,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                           <>
                             <button
                               className="cockpit-feedback-button"
+                              disabled={!recoveryAuthority.allowed}
                               onClick={() => void queueLiveWorkflowResumePlan(workflow, {
                                 action: "replay",
                                 fallbackDraft: workflow.replayDraft ?? buildWorkflowReplayDraft(workflow),
@@ -15508,6 +15597,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                             {workflow.retryFromStepDraft && (
                               <button
                                 className="cockpit-feedback-button"
+                                disabled={!recoveryAuthority.allowed}
                                 onClick={() => void queueLiveWorkflowResumePlan(workflow, {
                                   action: "retry",
                                   stepId: workflow.resumeFromStep,
@@ -15527,6 +15617,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                             {workflow.replayRecommendedActions?.length ? (
                               <button
                                 className="cockpit-feedback-button"
+                                disabled={!recoveryAuthority.allowed}
                                 onClick={() => void repairWorkflowReplay(workflow)}
                               >
                                 Repair replay
@@ -15537,9 +15628,11 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                         {failedStep?.recoveryActions?.length ? (
                           <button
                             className="cockpit-feedback-button"
+                            disabled={!recoveryAuthority.allowed}
                             onClick={() => void runCapabilityActions(
                               readActionList(failedStep.recoveryActions),
                               `${workflow.workflowName} ${failedStep.id}`,
+                              workflow,
                             )}
                           >
                             Repair step
@@ -16523,6 +16616,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                             void runCapabilityActions(
                               readActionList(m7PrimaryFailure.step.recoveryActions),
                               `${m7PrimaryFailure.workflow.workflowName} ${m7PrimaryFailure.step.id}`,
+                              m7PrimaryFailure.workflow,
                             );
                           }
                         }}
@@ -17631,6 +17725,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                               onClick={() => void runCapabilityActions(
                                 readActionList(failedStep.recoveryActions),
                                 `${triageWorkflow.workflowName} ${failedStep.id}`,
+                                triageWorkflow,
                               )}
                             >
                               repair step
@@ -18109,6 +18204,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                                     onClick={() => void runCapabilityActions(
                                       readActionList(entry.latestFailure?.step.recoveryActions),
                                       `${entry.leadWorkflowName ?? "workflow"} ${entry.latestFailure?.step.id ?? "repair"}`,
+                                      entry.latestFailure?.workflow,
                                     )}
                                   >
                                     repair
@@ -18471,6 +18567,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                                 onClick={() => void runCapabilityActions(
                                   readActionList(latestFailure.step.recoveryActions),
                                   `${latestFailure.workflow.workflowName} ${latestFailure.step.id}`,
+                                  latestFailure.workflow,
                                 )}
                               >
                                 repair step

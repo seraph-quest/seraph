@@ -125,6 +125,20 @@ export function digestOpaqueReference(value: unknown): string {
   return `digest:${(first >>> 0).toString(16).padStart(8, "0")}${(second >>> 0).toString(16).padStart(8, "0")}`;
 }
 
+/** Replace an approval target reference in operator-facing copy with a stable digest. */
+export function redactApprovalText(value: unknown, scope: unknown): string {
+  const candidate = text(value);
+  if (!candidate) return "";
+  const record = scope && typeof scope === "object" && !Array.isArray(scope)
+    ? scope as Record<string, unknown>
+    : null;
+  const target = record?.target && typeof record.target === "object" && !Array.isArray(record.target)
+    ? record.target as Record<string, unknown>
+    : null;
+  const reference = text(target?.reference);
+  return reference ? candidate.split(reference).join(digestOpaqueReference(reference)) : candidate;
+}
+
 /** Format only non-sensitive target metadata for the UI. */
 export function displayApprovalScopeTarget(scope: unknown): string[] {
   const record = scope && typeof scope === "object" && !Array.isArray(scope)
@@ -209,13 +223,38 @@ export type ApprovalCandidate = ApprovalAuthorityRecord & {
 
 export type WorkflowApprovalBinding = {
   workflowId?: unknown;
+  goalId?: unknown;
+  goalRevision?: unknown;
+  criterionId?: unknown;
+  planRevision?: unknown;
   toolName?: unknown;
   sessionId?: unknown;
   pendingApprovalIds?: readonly string[] | null;
   pendingApprovals?: readonly ApprovalCandidate[] | null;
 };
 
-/** Select only an approval explicitly bound to the inspected workflow. */
+function approvalMatchesWorkflow(
+  approval: ApprovalCandidate,
+  workflow: WorkflowApprovalBinding,
+): boolean {
+  const workflowId = text(workflow.workflowId);
+  if (!workflowId || text(approval.workflow_id) !== workflowId) return false;
+
+  const workflowGoalId = text(workflow.goalId);
+  const workflowCriterionId = text(workflow.criterionId);
+  const workflowGoalRevision = workflow.goalRevision;
+  if (!workflowGoalId || !workflowCriterionId || !Number.isInteger(workflowGoalRevision)) return false;
+  if (text(approval.goal_id) !== workflowGoalId) return false;
+  if (text(approval.criterion_id) !== workflowCriterionId) return false;
+  if (!Number.isInteger(approval.goal_revision) || approval.goal_revision !== workflowGoalRevision) return false;
+  if (workflow.planRevision != null) {
+    if (!Number.isInteger(workflow.planRevision) || !Number.isInteger(approval.plan_revision)) return false;
+    if (approval.plan_revision !== workflow.planRevision) return false;
+  }
+  return true;
+}
+
+/** Select only an approval explicitly bound to the inspected workflow identity. */
 export function selectApprovalForWorkflow<T extends ApprovalCandidate>(
   pending: readonly T[],
   workflow: WorkflowApprovalBinding | null | undefined,
@@ -224,31 +263,20 @@ export function selectApprovalForWorkflow<T extends ApprovalCandidate>(
 
   const pendingIds = workflow.pendingApprovalIds?.filter((id) => typeof id === "string" && id.trim()) ?? [];
   if (pendingIds.length > 0) {
-    const byId = pending.find((approval) => pendingIds.includes(approval.id));
+    const byId = pending.find((approval) => pendingIds.includes(approval.id) && approvalMatchesWorkflow(approval, workflow));
     if (byId) return byId;
-    const attachedById = workflow.pendingApprovals?.find((approval) => pendingIds.includes(approval.id));
+    const attachedById = workflow.pendingApprovals?.find(
+      (approval) => pendingIds.includes(approval.id) && approvalMatchesWorkflow(approval, workflow),
+    );
     if (attachedById) return attachedById as T;
     return null;
   }
 
-  const workflowId = text(workflow.workflowId);
-  if (workflowId) {
-    const byWorkflow = pending.find((approval) => text(approval.workflow_id) === workflowId);
+  if (text(workflow.workflowId)) {
+    const byWorkflow = pending.find((approval) => approvalMatchesWorkflow(approval, workflow));
     if (byWorkflow) return byWorkflow;
-    const attachedByWorkflow = workflow.pendingApprovals?.find((approval) => text(approval.workflow_id) === workflowId);
+    const attachedByWorkflow = workflow.pendingApprovals?.find((approval) => approvalMatchesWorkflow(approval, workflow));
     if (attachedByWorkflow) return attachedByWorkflow as T;
   }
-
-  const toolName = text(workflow.toolName);
-  const sessionId = text(workflow.sessionId);
-  if (toolName && sessionId) {
-    const byContext = pending.find((approval) => (
-      text(approval.tool_name) === toolName
-      && (text(approval.session_id) || text(approval.thread_id)) === sessionId
-    ));
-    if (byContext) return byContext;
-  }
-
-  const attached = workflow.pendingApprovals?.[0];
-  return attached ? attached as T : null;
+  return null;
 }

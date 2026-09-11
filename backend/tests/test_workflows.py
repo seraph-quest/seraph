@@ -7222,8 +7222,8 @@ async def test_branch_child_control_consumes_child_action_handle_identity():
     )
 
     operator = _test_bypass_operator()
-    parent_identity = "session-owner:workflow_example:parent"
-    child_identity = "session-owner:workflow_example:child"
+    parent_identity = "test-auth-bypass:workflow_example:parent"
+    child_identity = "test-auth-bypass:workflow_example:child"
     raw_step_id = "child/checkpoint"
     child_run = {
         "id": "child-run",
@@ -7234,8 +7234,8 @@ async def test_branch_child_control_consumes_child_action_handle_identity():
         "branch_depth": 1,
         "workflow_name": "example",
         "tool_name": "workflow_example",
-        "session_id": "session-owner",
-        "thread_id": "session-owner",
+        "session_id": operator.session_id,
+        "thread_id": operator.session_id,
         "status": "running",
         "availability": "ready",
         "pending_approvals": [],
@@ -7243,6 +7243,11 @@ async def test_branch_child_control_consumes_child_action_handle_identity():
         "replay_block_reason": None,
         "owner_kind": "user",
         "owner_principal_id": operator.principal.principal_id,
+        "goal_id": "goal-child",
+        "criterion_id": "criterion-child",
+        "goal_revision": 1,
+        "plan_revision": 1,
+        "candidate_id": "candidate-child",
         "checkpoint_candidates": [{
             "step_id": raw_step_id,
             "label": "child checkpoint",
@@ -7267,7 +7272,7 @@ async def test_branch_child_control_consumes_child_action_handle_identity():
     assert projection["artifact_registry"][0]["file_path"] == "notes/child-output.md"
     assert "/tmp/child-private.md" not in json.dumps(projection)
 
-    lease_owner = _workflow_operator_owner(operator.principal.principal_id, "session-owner")
+    lease_owner = _workflow_operator_owner(operator.principal.principal_id, operator.session_id)
     lease = {
         "owner": lease_owner,
         "lease_id": "child-lease",
@@ -7326,6 +7331,19 @@ async def test_branch_child_control_consumes_child_action_handle_identity():
         ),
         patch("src.api.workflows._workflow_resume_plan", return_value=raw_plan),
         patch(
+            "src.api.workflows.goal_repository.get",
+            new_callable=AsyncMock,
+            return_value=SimpleNamespace(
+                id="goal-child",
+                revision=1,
+                success_criterion_json=json.dumps({
+                    "criterion_id": "criterion-child",
+                    "description": "Current child criterion",
+                    "target": "done",
+                }),
+            ),
+        ),
+        patch(
             "src.api.workflows.workflow_state_repository.acquire_or_renew_v2_lease",
             new_callable=AsyncMock,
             return_value={
@@ -7356,6 +7374,14 @@ async def test_branch_child_control_consumes_child_action_handle_identity():
                 action="branch",
                 step_id=action_handle["step_id"],
                 action_handle=action_handle,
+                operator_context={
+                    "workflow_run_identity": child_identity,
+                    "goal_id": "goal-child",
+                    "criterion_id": "criterion-child",
+                    "goal_revision": 1,
+                    "plan_revision": 1,
+                    "candidate_id": "candidate-child",
+                },
             ),
             _workflow_mutator_request(operator, "/api/workflows/runs/control"),
         )

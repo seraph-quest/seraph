@@ -122,6 +122,7 @@ _WORKFLOW_REPLAY_BLOCK_REASONS = frozenset(
         "secret_bearing_boundary",
         "high_risk_requires_manual_reentry",
         "durable_projection_missing",
+        "workflow_approval_ambiguous",
     }
 )
 _WORKFLOW_SAFE_REFUSAL_CODES = _WORKFLOW_REPLAY_BLOCK_REASONS | {
@@ -158,6 +159,7 @@ _WORKFLOW_SAFE_REFUSAL_CODES = _WORKFLOW_REPLAY_BLOCK_REASONS | {
     "stale_goal_revision",
     "workflow_criterion_stale",
     "workflow_plan_revision_stale",
+    "workflow_approval_ambiguous",
 }
 _WORKFLOW_SAFE_TOKEN_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
 _WORKFLOW_SAFE_ARTIFACT_ID_RE = re.compile(r"^art_[0-9a-f]{24}$")
@@ -346,11 +348,12 @@ def _workflow_identity_binding_detail(
         if expected is None or supplied is None:
             return "workflow_identity_binding_missing"
         if field_name == "goal_revision":
-            try:
-                if int(expected) != int(supplied):
-                    return "workflow_identity_binding_mismatch"
-            except (TypeError, ValueError, OverflowError):
+            expected_revision = _positive_json_integer(expected)
+            supplied_revision = _positive_json_integer(supplied)
+            if expected_revision is None or supplied_revision is None:
                 return "workflow_identity_binding_missing"
+            if expected_revision != supplied_revision:
+                return "workflow_identity_binding_mismatch"
         elif str(expected).strip() != str(supplied).strip():
             return "workflow_identity_binding_mismatch"
 
@@ -369,21 +372,43 @@ def _workflow_identity_binding_detail(
         supplied_plan_revision = context.get("plan_revision")
         if supplied_plan_revision is None:
             return "workflow_identity_binding_missing"
-        try:
-            if int(expected_plan_revision) != int(supplied_plan_revision):
-                return "workflow_identity_binding_mismatch"
-        except (TypeError, ValueError, OverflowError):
+        expected_revision = _positive_json_integer(expected_plan_revision)
+        supplied_revision = _positive_json_integer(supplied_plan_revision)
+        if expected_revision is None or supplied_revision is None:
             return "workflow_identity_binding_missing"
+        if expected_revision != supplied_revision:
+            return "workflow_identity_binding_mismatch"
     return None
+
+
+def _positive_json_integer(value: Any) -> int | None:
+    """Accept only positive JSON integer values for authority revisions."""
+    if type(value) is not int or value <= 0:
+        return None
+    return value
+
+
+def _workflow_canonical_plan_revision(goal: Any, *, current_goal_revision: int) -> int | None:
+    """Resolve the plan revision from canonical goal/plan state.
+
+    Goal currently stores its criterion and plan under the same compare-and-set
+    revision.  A future dedicated plan record may expose ``plan_revision``;
+    until then, the goal revision is the authoritative plan revision.  Caller
+    context is never used as a source of truth here.
+    """
+    explicit_revision = getattr(goal, "plan_revision", None)
+    if explicit_revision is not None:
+        return _positive_json_integer(explicit_revision)
+    return _positive_json_integer(current_goal_revision)
 
 
 async def _workflow_current_goal_binding_detail(run: dict[str, Any]) -> str | None:
     """Check a typed workflow identity against current canonical goal state."""
     goal_id = str(run.get("goal_id") or "").strip()
     criterion_id = str(run.get("criterion_id") or "").strip()
-    try:
-        expected_revision = int(run.get("goal_revision"))
-    except (TypeError, ValueError, OverflowError):
+    expected_revision = _positive_json_integer(run.get("goal_revision"))
+    expected_plan_revision = _positive_json_integer(run.get("plan_revision"))
+    if expected_revision is None or expected_plan_revision is None:
         return "workflow_identity_binding_missing"
     if not goal_id or not criterion_id:
         return "workflow_identity_binding_missing"
@@ -394,9 +419,8 @@ async def _workflow_current_goal_binding_detail(run: dict[str, Any]) -> str | No
         return "workflow_goal_unavailable"
     if goal is None or str(getattr(goal, "id", goal_id) or "").strip() != goal_id:
         return "workflow_goal_unavailable"
-    try:
-        current_revision = max(int(getattr(goal, "revision", 1) or 1), 1)
-    except (TypeError, ValueError, OverflowError):
+    current_revision = _positive_json_integer(getattr(goal, "revision", None))
+    if current_revision is None:
         return "workflow_goal_unavailable"
     if current_revision != expected_revision:
         return "stale_goal_revision"
@@ -413,13 +437,12 @@ async def _workflow_current_goal_binding_detail(run: dict[str, Any]) -> str | No
     if str(criterion_id_value or "").strip() != criterion_id:
         return "workflow_criterion_stale"
 
-    current_plan_revision = getattr(goal, "plan_revision", None)
-    if current_plan_revision is not None:
-        try:
-            if int(current_plan_revision) != int(run.get("plan_revision")):
-                return "workflow_plan_revision_stale"
-        except (TypeError, ValueError, OverflowError):
-            return "workflow_plan_revision_stale"
+    current_plan_revision = _workflow_canonical_plan_revision(
+        goal,
+        current_goal_revision=current_revision,
+    )
+    if current_plan_revision is None or current_plan_revision != expected_plan_revision:
+        return "workflow_plan_revision_stale"
     return None
 
 
@@ -804,6 +827,11 @@ def _canonical_workflow_projection_input(value: Any) -> dict[str, Any] | None:
         "owner_kind": owner.get("kind"),
         "owner_principal_id": owner.get("principal_id"),
         "service_id": owner.get("service_id"),
+        "goal_id": raw.get("goal_id") if raw.get("goal_id") is not None else authority.get("goal_id"),
+        "criterion_id": raw.get("criterion_id") if raw.get("criterion_id") is not None else authority.get("criterion_id"),
+        "goal_revision": raw.get("goal_revision") if raw.get("goal_revision") is not None else authority.get("goal_revision"),
+        "plan_revision": raw.get("plan_revision") if raw.get("plan_revision") is not None else authority.get("plan_revision"),
+        "candidate_id": raw.get("candidate_id") if raw.get("candidate_id") is not None else authority.get("candidate_id"),
         "status": status,
         "summary": f"Workflow {raw.get('workflow_name') or raw.get('job_kind') or 'workflow'} {status}",
         "started_at": started_at,
@@ -834,6 +862,7 @@ def _canonical_workflow_projection_input(value: Any) -> dict[str, Any] | None:
         "metadata": {
             "durable_job": {
                 "goal_id": raw.get("goal_id"),
+                "criterion_id": raw.get("criterion_id") if raw.get("criterion_id") is not None else authority.get("criterion_id"),
                 "goal_revision": raw.get("goal_revision"),
                 "plan_revision": raw.get("plan_revision"),
                 "candidate_id": raw.get("candidate_id"),
@@ -1885,6 +1914,115 @@ def _workflow_run_approval_key(run: dict[str, Any]) -> str:
     )
 
 
+def _workflow_approval_value(approval: dict[str, Any], *names: str) -> Any:
+    """Read an approval identity field from its flattened or nested receipt."""
+    details = approval.get("details")
+    nested = details if isinstance(details, dict) else {}
+    for name in names:
+        if approval.get(name) is not None:
+            return approval.get(name)
+        if nested.get(name) is not None:
+            return nested.get(name)
+    return None
+
+
+def _workflow_approval_matches_identity(
+    run: dict[str, Any],
+    approval: dict[str, Any],
+) -> bool:
+    """Require a pending approval to carry the complete run authority identity."""
+    if not isinstance(approval, dict):
+        return False
+    expected_run_identity = str(run.get("run_identity") or "").strip()
+    approval_run_identity = str(
+        _workflow_approval_value(
+            approval,
+            "workflow_run_identity",
+            "run_identity",
+            "durable_job_id",
+            "job_id",
+        )
+        or ""
+    ).strip()
+    if not expected_run_identity or approval_run_identity != expected_run_identity:
+        return False
+
+    expected_workflow = str(run.get("workflow_name") or run.get("tool_name") or "").strip()
+    approval_workflow = str(
+        _workflow_approval_value(approval, "workflow_name")
+        or _workflow_approval_value(approval, "tool_name")
+        or ""
+    ).strip()
+    if not expected_workflow or approval_workflow not in {
+        expected_workflow,
+        str(run.get("tool_name") or "").strip(),
+    }:
+        return False
+
+    expected_session = str(run.get("session_id") or "").strip()
+    approval_session = str(_workflow_approval_value(approval, "session_id") or "").strip()
+    if not expected_session or approval_session != expected_session:
+        return False
+
+    expected_owner_kind = str(run.get("owner_kind") or "").strip()
+    approval_owner_kind = str(
+        _workflow_approval_value(approval, "owner_kind", "approval_owner_kind") or ""
+    ).strip()
+    if not expected_owner_kind or approval_owner_kind != expected_owner_kind:
+        return False
+
+    expected_owner = str(run.get("owner_principal_id") or "").strip()
+    approval_owner = str(
+        _workflow_approval_value(
+            approval,
+            "owner_principal_id",
+            "approval_owner_principal_id",
+        )
+        or ""
+    ).strip()
+    if not expected_owner or approval_owner != expected_owner:
+        return False
+
+    for field_name in ("goal_id", "criterion_id", "candidate_id"):
+        expected = str(run.get(field_name) or "").strip()
+        if field_name == "candidate_id" and not expected:
+            continue
+        actual = str(_workflow_approval_value(approval, field_name) or "").strip()
+        if not expected or actual != expected:
+            return False
+    for field_name in ("goal_revision", "plan_revision"):
+        expected = _positive_json_integer(run.get(field_name))
+        actual = _positive_json_integer(_workflow_approval_value(approval, field_name))
+        if expected is None or actual is None or actual != expected:
+            return False
+
+    pending_ids = run.get("pending_approval_ids")
+    approval_id = str(_workflow_approval_value(approval, "id", "approval_id") or "").strip()
+    if isinstance(pending_ids, list) and pending_ids:
+        if not approval_id or approval_id not in {
+            str(item).strip() for item in pending_ids if str(item).strip()
+        }:
+            return False
+    return bool(approval_id)
+
+
+def _workflow_unique_approval(
+    run: dict[str, Any],
+    approvals: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    """Return the sole authority-bound approval; ambiguity fails closed."""
+    if not approvals:
+        return None
+    matches = [
+        approval
+        for approval in approvals
+        if _workflow_approval_matches_identity(run, approval)
+    ]
+    if len(matches) != 1:
+        raise HTTPException(status_code=409, detail="workflow_approval_ambiguous")
+    return matches[0]
+
+
 def _workflow_identity_fields(value: Any) -> dict[str, Any]:
     record = _as_record(value)
     if record is None:
@@ -1892,7 +2030,8 @@ def _workflow_identity_fields(value: Any) -> dict[str, Any]:
     metadata = _as_record(record.get("metadata"))
     durable = _as_record(metadata.get("durable_job")) if metadata else None
     arguments = _as_record(record.get("arguments"))
-    sources = (record, metadata, durable, arguments)
+    authority = _as_record(record.get("declared_authority"))
+    sources = (record, metadata, durable, authority, arguments)
     fields: dict[str, Any] = {}
     for name in ("goal_id", "criterion_id", "candidate_id"):
         for source in sources:
@@ -1905,12 +2044,10 @@ def _workflow_identity_fields(value: Any) -> dict[str, Any]:
             candidate = source.get(name) if source else None
             if isinstance(candidate, bool):
                 continue
-            try:
-                if candidate is not None and int(candidate) >= 0:
-                    fields[name] = int(candidate)
-                    break
-            except (TypeError, ValueError, OverflowError):
-                continue
+            normalized = _positive_json_integer(candidate)
+            if normalized is not None:
+                fields[name] = normalized
+                break
     return fields
 
 
@@ -2050,6 +2187,7 @@ def _workflow_checkpoint_candidates(
     approvals: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
     workflow_name = str(run["workflow_name"])
+    approval = _workflow_unique_approval(run, approvals)
     arguments = run.get("arguments")
     continued_error_steps = set(str(step_id) for step_id in run.get("continued_error_steps", []))
     root_run_identity = (
@@ -2064,7 +2202,7 @@ def _workflow_checkpoint_candidates(
     )
     parent_revision, parent_lease_id, parent_fencing_token = _workflow_parent_recovery_metadata(run)
     candidates: list[dict[str, Any]] = []
-    if approvals:
+    if approval is not None:
         candidates.append({
             "step_id": "approval_gate",
             "label": "Approval gate",
@@ -2073,8 +2211,8 @@ def _workflow_checkpoint_candidates(
             "step_tool": None,
             "resume_draft": None,
             "continue_message": (
-                approvals[0].get("resume_message")
-                if approvals and isinstance(approvals[0], dict)
+                approval.get("resume_message")
+                if isinstance(approval, dict)
                 else None
             ),
         })
@@ -2902,8 +3040,16 @@ async def _list_workflow_runs(
 
         workflow_meta = workflow_manager.get_tool_metadata(tool_name) or {}
         workflow_status = workflow_statuses.get(str(run["workflow_name"]))
+        # Pending approvals remain display data until one receipt carries the
+        # complete canonical identity.  List ordering cannot select recovery
+        # authority.
+        run["run_identity"] = event_projection_key
         approval_key = _workflow_run_approval_key(run)
         approvals = pending_by_signature.get(approval_key, [])
+        try:
+            recovery_approvals = [_workflow_unique_approval(run, approvals)] if approvals else []
+        except HTTPException:
+            recovery_approvals = []
         recorded_approval_context = (
             _normalize_approval_context(
                 details.get("approval_context"),
@@ -3056,7 +3202,7 @@ async def _list_workflow_runs(
         lineage = _workflow_branch_lineage(
             run_identity=run_identity,
             details=details,
-            approvals=approvals,
+            approvals=recovery_approvals,
             continued_error_steps=list(run.get("continued_error_steps", [])),
         )
         resume_surface_allowed = _workflow_resume_surface_allowed(
@@ -3065,7 +3211,7 @@ async def _list_workflow_runs(
         resume_from_step = (
             (
                 "approval_gate"
-                if approvals
+                if recovery_approvals
                 else (run["continued_error_steps"][0] if run.get("continued_error_steps") else None)
             )
             if resume_surface_allowed
@@ -3112,7 +3258,7 @@ async def _list_workflow_runs(
             "resume_from_step": resume_from_step,
             "retry_from_step_draft": retry_from_step_draft,
             "resume_checkpoint_label": _resume_checkpoint_label(
-                approvals=approvals,
+                approvals=recovery_approvals,
                 continued_error_steps=list(run.get("continued_error_steps", [])),
             ) if resume_surface_allowed else None,
             "approval_recovery_message": _workflow_recovery_message(
@@ -3122,9 +3268,9 @@ async def _list_workflow_runs(
                 availability=str(run["availability"]),
             ),
             "thread_continue_message": (
-                approvals[0].get("resume_message")
-                if approvals
-                and isinstance(approvals[0], dict)
+                recovery_approvals[0].get("resume_message")
+                if recovery_approvals
+                and isinstance(recovery_approvals[0], dict)
                 and _workflow_continue_message_allowed(
                     replay_block_reason=replay_block_reason,
                     approval_context=current_approval_context,
@@ -3155,8 +3301,8 @@ async def _list_workflow_runs(
             **lineage,
         })
         if resume_surface_allowed:
-            run["checkpoint_candidates"] = _workflow_checkpoint_candidates(run, approvals=approvals)
-            run["resume_plan"] = _workflow_resume_plan(run, approvals=approvals)
+            run["checkpoint_candidates"] = _workflow_checkpoint_candidates(run, approvals=recovery_approvals)
+            run["resume_plan"] = _workflow_resume_plan(run, approvals=recovery_approvals)
         else:
             run["checkpoint_candidates"] = []
             run["resume_plan"] = None
@@ -3166,8 +3312,23 @@ async def _list_workflow_runs(
         for run in run_queue:
             workflow_meta = workflow_manager.get_tool_metadata(str(run["tool_name"])) or {}
             workflow_status = workflow_statuses.get(str(run["workflow_name"]))
+            run_identity = build_workflow_run_identity(
+                run.get("session_id") if isinstance(run.get("session_id"), str) else None,
+                str(run["tool_name"]),
+                str(run.get("run_fingerprint") or "none"),
+                run_discriminator=(
+                    str(run.get("id"))
+                    if isinstance(run.get("id"), str) and str(run.get("id")).strip()
+                    else None
+                ),
+            )
+            run["run_identity"] = run_identity
             approval_key = _workflow_run_approval_key(run)
             approvals = pending_by_signature.get(approval_key, [])
+            try:
+                recovery_approvals = [_workflow_unique_approval(run, approvals)] if approvals else []
+            except HTTPException:
+                recovery_approvals = []
             recorded_approval_context = _normalize_approval_context(
                 run.get("approval_context"),
                 workflow_name=str(run["workflow_name"]),
@@ -3269,20 +3430,10 @@ async def _list_workflow_runs(
                         step["recovery_actions"] = []
                         step["recovery_hint"] = None
                         step["is_recoverable"] = False
-            run_identity = build_workflow_run_identity(
-                run.get("session_id") if isinstance(run.get("session_id"), str) else None,
-                str(run["tool_name"]),
-                str(run.get("run_fingerprint") or "none"),
-                run_discriminator=(
-                    str(run.get("id"))
-                    if isinstance(run.get("id"), str) and str(run.get("id")).strip()
-                    else None
-                ),
-            )
             lineage = _workflow_branch_lineage(
                 run_identity=run_identity,
                 details={},
-                approvals=approvals,
+                approvals=recovery_approvals,
                 continued_error_steps=list(run.get("continued_error_steps", [])),
             )
             resume_surface_allowed = _workflow_resume_surface_allowed(
@@ -3291,7 +3442,7 @@ async def _list_workflow_runs(
             resume_from_step = (
                 (
                     "approval_gate"
-                    if approvals
+                    if recovery_approvals
                     else (run["continued_error_steps"][0] if run.get("continued_error_steps") else None)
                 )
                 if resume_surface_allowed
@@ -3338,7 +3489,7 @@ async def _list_workflow_runs(
                 "resume_from_step": resume_from_step,
                 "retry_from_step_draft": retry_from_step_draft,
                 "resume_checkpoint_label": _resume_checkpoint_label(
-                    approvals=approvals,
+                    approvals=recovery_approvals,
                     continued_error_steps=list(run.get("continued_error_steps", [])),
                 ) if resume_surface_allowed else None,
                 "approval_recovery_message": _workflow_recovery_message(
@@ -3348,9 +3499,9 @@ async def _list_workflow_runs(
                     availability=str(run["availability"]),
                 ),
                 "thread_continue_message": (
-                    approvals[0].get("resume_message")
-                    if approvals
-                    and isinstance(approvals[0], dict)
+                    recovery_approvals[0].get("resume_message")
+                    if recovery_approvals
+                    and isinstance(recovery_approvals[0], dict)
                     and _workflow_continue_message_allowed(
                         replay_block_reason=replay_block_reason,
                         approval_context=current_approval_context,
@@ -3381,8 +3532,8 @@ async def _list_workflow_runs(
                 **lineage,
             })
             if resume_surface_allowed:
-                run["checkpoint_candidates"] = _workflow_checkpoint_candidates(run, approvals=approvals)
-                run["resume_plan"] = _workflow_resume_plan(run, approvals=approvals)
+                run["checkpoint_candidates"] = _workflow_checkpoint_candidates(run, approvals=recovery_approvals)
+                run["resume_plan"] = _workflow_resume_plan(run, approvals=recovery_approvals)
             else:
                 run["checkpoint_candidates"] = []
                 run["resume_plan"] = None
@@ -3757,6 +3908,20 @@ async def build_workflow_resume_plan(
             )
             await _workflow_session_fence(request, revocation_scope)
             raise HTTPException(status_code=403, detail=detail)
+        if str(run.get("session_id") or "") != str(active_session_id or ""):
+            detail = "workflow_owner_mismatch"
+            await _record_workflow_route_receipt(
+                event_type="workflow_resume_plan_refused",
+                session_id=active_session_id,
+                run_identity=run_identity,
+                action="resume",
+                status_code=403,
+                detail=detail,
+                workflow_name=run.get("workflow_name"),
+                step_id=req.step_id if req is not None else None,
+            )
+            await _workflow_session_fence(request, revocation_scope)
+            raise HTTPException(status_code=403, detail=detail)
         if _is_typed_workflow_run(run):
             # Refresh the typed row so a stale list projection cannot produce
             # a resume draft with an old revision, lease, or parent fence.
@@ -3831,6 +3996,40 @@ async def build_workflow_resume_plan(
                 )
                 await _workflow_session_fence(request, revocation_scope)
                 raise HTTPException(status_code=423, detail=detail)
+        else:
+            identity_detail = _workflow_identity_binding_detail(
+                run=run,
+                run_identity=run_identity,
+                operator_context=req.operator_context if req is not None else None,
+                require_plan_revision=True,
+            )
+            if identity_detail is not None:
+                await _record_workflow_route_receipt(
+                    event_type="workflow_resume_plan_refused",
+                    session_id=active_session_id,
+                    run_identity=run_identity,
+                    action="resume",
+                    status_code=409,
+                    detail=identity_detail,
+                    workflow_name=run.get("workflow_name"),
+                    step_id=req.step_id if req is not None else None,
+                )
+                await _workflow_session_fence(request, revocation_scope)
+                raise HTTPException(status_code=409, detail=identity_detail)
+            goal_detail = await _workflow_current_goal_binding_detail(run)
+            if goal_detail is not None:
+                await _record_workflow_route_receipt(
+                    event_type="workflow_resume_plan_refused",
+                    session_id=active_session_id,
+                    run_identity=run_identity,
+                    action="resume",
+                    status_code=409,
+                    detail=goal_detail,
+                    workflow_name=run.get("workflow_name"),
+                    step_id=req.step_id if req is not None else None,
+                )
+                await _workflow_session_fence(request, revocation_scope)
+                raise HTTPException(status_code=409, detail=goal_detail)
         replay_block_reason = str(run.get("replay_block_reason") or "").strip() or None
         if replay_block_reason or run.get("replay_allowed") is False:
             detail = _workflow_replay_block_detail(replay_block_reason)
@@ -4069,15 +4268,23 @@ async def control_workflow_run(
             raise HTTPException(status_code=403, detail="workflow_owner_mismatch")
 
         if action in _WORKFLOW_IDENTITY_BOUND_ACTIONS:
+            if str(run.get("session_id") or "") != str(active_session_id or ""):
+                await log_refusal(status_code=403, detail="workflow_owner_mismatch")
+                raise HTTPException(status_code=403, detail="workflow_owner_mismatch")
             identity_detail = _workflow_identity_binding_detail(
                 run=run,
                 run_identity=run_identity,
                 operator_context=req.operator_context,
-                require_plan_revision=_is_typed_workflow_run(run),
+                require_plan_revision=True,
             )
             if identity_detail is not None:
                 await log_refusal(status_code=409, detail=identity_detail)
                 raise HTTPException(status_code=409, detail=identity_detail)
+            if not _is_typed_workflow_run(run):
+                goal_detail = await _workflow_current_goal_binding_detail(run)
+                if goal_detail is not None:
+                    await log_refusal(status_code=409, detail=goal_detail)
+                    raise HTTPException(status_code=409, detail=goal_detail)
 
         # The cockpit only receives opaque action handles. Resolve the handle
         # against this authenticated run before changing its durable fence;

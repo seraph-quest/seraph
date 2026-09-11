@@ -561,6 +561,13 @@ def _safe_inputs_digest(inputs: Any) -> tuple[str, dict[str, Any]]:
     return _digest(inputs), {"redacted": True, "keys": keys, "shape": type(inputs).__name__}
 
 
+def _positive_revision(value: Any) -> int | None:
+    """Accept only positive JSON integer revisions at durable boundaries."""
+    if type(value) is not int or value <= 0:
+        return None
+    return value
+
+
 def _binding(
     *,
     owner_principal_id: str,
@@ -613,6 +620,10 @@ def _validate_admission_authority(spec: "DurableJobSpec") -> None:
         raise ValueError("service authority must declare the matching service_id")
     if identity.owner_kind == "user" and _text(authority_service_id):
         raise ValueError("user authority cannot declare service_id")
+    for field_name in ("goal_revision", "plan_revision"):
+        value = getattr(spec, field_name, None)
+        if value is not None and _positive_revision(value) is None:
+            raise ValueError(f"{field_name} must be a positive JSON integer")
 
 
 def _deadline_identity(value: datetime | str | None) -> str | None:
@@ -1140,12 +1151,14 @@ def _validate_approval_resume_receipt(
         expected = getattr(run, field_name, None)
         actual = raw.get(field_name)
         if field_name in {"goal_revision", "plan_revision"}:
-            try:
-                actual = int(actual) if actual is not None else None
-            except (TypeError, ValueError) as exc:
+            expected_revision = _positive_revision(expected)
+            actual_revision = _positive_revision(actual)
+            if expected_revision is None or actual_revision is None:
                 raise DurableJobTransitionError(
                     f"approval resume {field_name} is malformed"
-                ) from exc
+                )
+            actual = actual_revision
+            expected = expected_revision
         if actual != expected:
             raise DurableJobTransitionError(f"approval resume {field_name} is stale")
     expected_budget = _authority_budget_microusd(authority)

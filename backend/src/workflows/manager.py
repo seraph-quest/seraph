@@ -958,6 +958,14 @@ def _workflow_contract_fields(
             raise DurableWorkflowStateUnavailable(f"durable workflow {name} is malformed")
         return normalized
 
+    def identity_revision(name: str) -> int | None:
+        value = pick(name)
+        if value is None or value == "":
+            return None
+        if type(value) is not int or value <= 0:
+            raise DurableWorkflowStateUnavailable(f"durable workflow {name} is malformed")
+        return value
+
     raw_dependencies = pick("dependencies")
     if raw_dependencies is None:
         dependencies: tuple[str, ...] = ()
@@ -975,10 +983,29 @@ def _workflow_contract_fields(
         )
     else:
         raise DurableWorkflowStateUnavailable("durable workflow dependencies are malformed")
+    goal_id = optional_text("goal_id")
+    criterion_id = optional_text("criterion_id")
+    goal_revision = identity_revision("goal_revision")
+    plan_revision = identity_revision("plan_revision")
+    if goal_id is not None and (
+        criterion_id is None
+        or goal_revision is None
+        or plan_revision is None
+    ):
+        raise DurableWorkflowStateUnavailable(
+            "durable workflow canonical goal identity is incomplete"
+        )
+    if goal_id is None and any(
+        value is not None for value in (criterion_id, goal_revision, plan_revision)
+    ):
+        raise DurableWorkflowStateUnavailable(
+            "durable workflow canonical goal identity is incomplete"
+        )
     return {
-        "goal_id": optional_text("goal_id"),
-        "goal_revision": optional_int("goal_revision"),
-        "plan_revision": optional_int("plan_revision"),
+        "goal_id": goal_id,
+        "criterion_id": criterion_id,
+        "goal_revision": goal_revision,
+        "plan_revision": plan_revision,
         "candidate_id": optional_text("candidate_id"),
         "dependencies": dependencies,
         "deadline_at": pick("deadline_at"),
@@ -1484,6 +1511,7 @@ def _admit_canonical_workflow_job(
     }
     for field_name in (
         "goal_id",
+        "criterion_id",
         "goal_revision",
         "plan_revision",
         "candidate_id",

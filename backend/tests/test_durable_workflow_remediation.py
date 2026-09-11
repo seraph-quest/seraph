@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 from contextvars import ContextVar
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -68,6 +69,30 @@ def _canonical_job(*, status: str = "running") -> dict:
         },
         "lease": {"fencing_token": 2},
     }
+
+
+def _typed_operator_context(typed: dict) -> dict:
+    return {
+        "workflow_run_identity": typed["run_identity"],
+        "goal_id": typed["goal_id"],
+        "criterion_id": typed["criterion_id"],
+        "goal_revision": typed["goal_revision"],
+        "plan_revision": typed["plan_revision"],
+        "candidate_id": typed["candidate_id"],
+    }
+
+
+def _typed_goal():
+    return SimpleNamespace(
+        id="goal-typed",
+        revision=2,
+        plan_revision=3,
+        success_criterion_json=json.dumps({
+            "criterion_id": "criterion-typed",
+            "description": "Current criterion",
+            "target": "done",
+        }),
+    )
 
 
 class _RecordingRepository:
@@ -142,6 +167,7 @@ def test_canonical_admission_persists_full_workflow_contract():
             run_fingerprint="fingerprint-contract",
             audit_arguments={
                 "goal_id": "goal-contract",
+                "criterion_id": "criterion-contract",
                 "goal_revision": 9,
                 "plan_revision": 4,
                 "candidate_id": "candidate-contract",
@@ -180,6 +206,7 @@ def test_contract_projection_binds_goal_plan_candidate_dependencies_deadline_bud
     fields = _workflow_contract_fields(
         {
             "goal_id": "goal-1",
+            "criterion_id": "criterion-1",
             "goal_revision": 3,
             "plan_revision": 8,
             "candidate_id": "candidate-1",
@@ -192,6 +219,7 @@ def test_contract_projection_binds_goal_plan_candidate_dependencies_deadline_bud
 
     assert fields == {
         "goal_id": "goal-1",
+        "criterion_id": "criterion-1",
         "goal_revision": 3,
         "plan_revision": 8,
         "candidate_id": "candidate-1",
@@ -263,6 +291,11 @@ def _typed_api_job(*, status: str = "running", lease_owner: str | None = None) -
         "status": status,
         "owner": {"kind": "user", "principal_id": "operator:durable-test", "service_id": None},
         "declared_authority": {
+            "goal_id": "goal-typed",
+            "criterion_id": "criterion-typed",
+            "goal_revision": 2,
+            "plan_revision": 3,
+            "candidate_id": "candidate-typed",
             "workflow_name": "typed-workflow",
             "risk_level": "low",
             "execution_boundaries": ["workspace_write"],
@@ -272,6 +305,7 @@ def _typed_api_job(*, status: str = "running", lease_owner: str | None = None) -
         "dependencies": ["dependency-1"],
         "resource_claims": ["cpu"],
         "goal_id": "goal-typed",
+        "criterion_id": "criterion-typed",
         "goal_revision": 2,
         "plan_revision": 3,
         "candidate_id": "candidate-typed",
@@ -401,6 +435,7 @@ async def test_typed_control_uses_canonical_fence_and_rejects_stale_owner():
     with (
         patch("src.api.workflows.durable_job_repository.get_job", new_callable=AsyncMock, return_value=typed),
         patch("src.api.workflows.durable_job_repository.pause_job", new_callable=AsyncMock, return_value=transitioned) as pause,
+        patch("src.api.workflows.goal_repository.get", new_callable=AsyncMock, return_value=_typed_goal()),
     ):
         result = await _control_typed_workflow_run(
             run_identity=typed["run_identity"],
@@ -408,6 +443,7 @@ async def test_typed_control_uses_canonical_fence_and_rejects_stale_owner():
             run=typed,
             principal_id="operator:durable-test",
             session_id="session-durable",
+            operator_context=_typed_operator_context(typed),
         )
 
     pause.assert_awaited_once_with(
@@ -421,7 +457,10 @@ async def test_typed_control_uses_canonical_fence_and_rejects_stale_owner():
     assert result["run"]["status"] == "paused"
 
     stale = _typed_api_job(status="running", lease_owner="workflow-runner:stale")
-    with patch("src.api.workflows.durable_job_repository.get_job", new_callable=AsyncMock, return_value=stale):
+    with (
+        patch("src.api.workflows.durable_job_repository.get_job", new_callable=AsyncMock, return_value=stale),
+        patch("src.api.workflows.goal_repository.get", new_callable=AsyncMock, return_value=_typed_goal()),
+    ):
         with pytest.raises(HTTPException) as error:
             await _control_typed_workflow_run(
                 run_identity=stale["run_identity"],
@@ -429,6 +468,7 @@ async def test_typed_control_uses_canonical_fence_and_rejects_stale_owner():
                 run=stale,
                 principal_id="operator:durable-test",
                 session_id="session-durable",
+                operator_context=_typed_operator_context(stale),
             )
     assert error.value.status_code == 409
     assert error.value.detail == "workflow_control_lease_blocked"
@@ -456,13 +496,17 @@ async def test_control_route_never_sends_schema_v2_row_to_legacy_repository():
         patch("src.api.workflows._find_workflow_run_for_control", new_callable=AsyncMock, return_value=typed),
         patch("src.api.workflows.durable_job_repository.get_job", new_callable=AsyncMock, return_value=typed),
         patch("src.api.workflows.durable_job_repository.pause_job", new_callable=AsyncMock, return_value=transitioned) as pause,
+        patch("src.api.workflows.goal_repository.get", new_callable=AsyncMock, return_value=_typed_goal()),
         patch("src.api.workflows.workflow_state_repository.acquire_or_renew_v2_lease", new_callable=AsyncMock) as legacy_lease,
         patch("src.api.workflows.workflow_state_repository.record_v2_transition", new_callable=AsyncMock) as legacy_transition,
         patch("src.api.workflows.workflow_state_repository.record_v2_operator_recovery_control", new_callable=AsyncMock) as legacy_control,
     ):
         result = await control_workflow_run(
             typed["run_identity"],
-            WorkflowRunControlRequest(action="pause"),
+            WorkflowRunControlRequest(
+                action="pause",
+                operator_context=_typed_operator_context(typed),
+            ),
             request,
         )
 

@@ -730,9 +730,9 @@ class ApprovalRepository:
             if observed is None:
                 return None
             if _field_name in {"goal_revision", "plan_revision"}:
-                try:
-                    observed = int(observed)
-                except (TypeError, ValueError):
+                if type(expected) is not int or expected <= 0:
+                    return None
+                if type(observed) is not int or observed <= 0:
                     return None
             if observed != expected:
                 return None

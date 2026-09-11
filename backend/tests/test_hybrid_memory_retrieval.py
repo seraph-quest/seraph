@@ -4,7 +4,7 @@ import pytest
 
 from src.agent.session import SessionManager
 from src.db.models import MemoryEpisodeType, MemoryKind
-from src.memory.hybrid_retrieval import retrieve_hybrid_memory
+from src.memory.hybrid_retrieval import _validate_vector_hits, retrieve_hybrid_memory
 from src.memory.repository import memory_repository
 
 
@@ -25,6 +25,12 @@ async def test_hybrid_retrieval_combines_semantic_episode_and_vector_hits(async_
         confidence=0.9,
         project_entity_id=atlas.id,
     )
+    await memory_repository.create_memory(
+        content="Atlas stakeholder brief needs a summary update.",
+        kind=MemoryKind.fact,
+        summary="Atlas stakeholder brief needs a summary update.",
+        embedding_id="vec-atlas-brief",
+    )
     await memory_repository.create_episode(
         episode_type=MemoryEpisodeType.workflow,
         session_id="s1",
@@ -40,6 +46,7 @@ async def test_hybrid_retrieval_combines_semantic_episode_and_vector_hits(async_
         return_value=(
             [
                 {
+                    "id": "vec-atlas-brief",
                     "text": "Atlas stakeholder brief needs a summary update.",
                     "category": "fact",
                     "score": 0.18,
@@ -50,7 +57,7 @@ async def test_hybrid_retrieval_combines_semantic_episode_and_vector_hits(async_
         ),
     ):
         result = await retrieve_hybrid_memory(
-            query="Atlas upload summary",
+            query="upload status",
             active_projects=("Atlas",),
             limit=6,
         )
@@ -256,3 +263,75 @@ async def test_hybrid_retrieval_filters_shared_embedding_hits_when_text_is_stale
     assert "Atlas launch is delayed." not in result.context
     assert "[project] Atlas launch on track" in result.context
     assert all(hit.text != "Atlas launch is delayed." for hit in result.hits)
+
+
+@pytest.mark.asyncio
+async def test_hybrid_retrieval_rejects_unknown_identity_vector_hits(async_db):
+    with patch(
+        "src.memory.hybrid_retrieval.search_with_status",
+        return_value=(
+            [
+                {
+                    "text": "Unknown deleted payload must never be recalled.",
+                    "category": "fact",
+                    "score": 0.01,
+                },
+            ],
+            False,
+        ),
+    ):
+        result = await retrieve_hybrid_memory(
+            query="deleted payload",
+            limit=4,
+        )
+
+    assert result.context == ""
+    assert result.hits == ()
+
+
+def test_hybrid_retrieval_rejects_malformed_vector_score():
+    validated, reason = _validate_vector_hits(
+        [
+            {
+                "id": "vec-invalid",
+                "text": "Must never become canonical context.",
+                "score": "not-a-number",
+            }
+        ]
+    )
+
+    assert validated == []
+    assert reason == "canonical_vector_score_invalid"
+
+
+@pytest.mark.asyncio
+async def test_hybrid_retrieval_returns_empty_degraded_result_for_malformed_vector_score(async_db):
+    await memory_repository.create_memory(
+        content="Canonical status memory.",
+        summary="Canonical status memory.",
+        embedding_id="vec-invalid",
+    )
+
+    with patch(
+        "src.memory.hybrid_retrieval.search_with_status",
+        return_value=(
+            [
+                {
+                    "id": "vec-invalid",
+                    "text": "Must never become canonical context.",
+                    "category": "fact",
+                    "score": "not-a-number",
+                }
+            ],
+            False,
+        ),
+    ):
+        result = await retrieve_hybrid_memory(query="status", limit=4)
+
+    assert result.context == ""
+    assert result.hits == ()
+    assert result.degraded is True
+    assert result.diagnostics[0] == {
+        "reason": "canonical_vector_score_invalid",
+        "status": "degraded_no_learning",
+    }

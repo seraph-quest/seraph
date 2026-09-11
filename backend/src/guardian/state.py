@@ -549,7 +549,13 @@ def _memory_benchmark_diagnostic_lines(
         if not isinstance(item, dict):
             continue
         ranking_policy = str(item.get("ranking_policy") or "").strip()
-        suppressed_contradictions = int(item.get("suppressed_contradiction_count") or 0)
+        suppressed_contradictions = sum(
+            int(item.get(key) or 0)
+            for key in (
+                "suppressed_contradiction_count",
+                "canonical_provider_conflict_suppressed_count",
+            )
+        )
         status_filter = str(item.get("status_filter") or "").strip()
         suppression_reasons = [
             str(reason)
@@ -898,6 +904,9 @@ async def build_guardian_state(
     memory_query: str | None = None,
     intervention_type: str = "advisory",
     refresh_observer: bool = False,
+    owner_principal_id: str | None = None,
+    owner_session_id: str | None = None,
+    service_id: str | None = None,
 ) -> GuardianState:
     """Build one explicit guardian-state object from current repo surfaces."""
     from src.memory.soul import render_soul_text
@@ -915,8 +924,15 @@ async def build_guardian_state(
     from src.observer.manager import context_manager
     from src.observer.screen_repository import screen_observation_repo
 
+    observer_scope = {
+        "owner_principal_id": owner_principal_id,
+        "owner_session_id": owner_session_id,
+        "service_id": service_id,
+    }
     observer_context = (
-        await context_manager.refresh() if refresh_observer else context_manager.get_context()
+        await context_manager.refresh(**observer_scope)
+        if refresh_observer
+        else context_manager.get_context(**observer_scope)
     )
     normalized_intervention_type = str(intervention_type or "").strip() or "advisory"
     soul_context = render_soul_text(await sync_soul_file_to_profile())

@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import { API_URL } from "../config/constants";
+import { apiFetch } from "../lib/api";
 import type {
   ChatMessage,
   ConnectionStatus,
@@ -242,7 +243,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
 
   fetchToolRegistry: async () => {
     try {
-      const res = await fetch(`${API_URL}/api/tools`);
+      const res = await apiFetch(`${API_URL}/api/tools`);
       if (res.ok) {
         const data = await res.json();
         // API returns array directly (or {tools: [...]})
@@ -261,7 +262,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
 
   fetchProfile: async () => {
     try {
-      const res = await fetch(`${API_URL}/api/user/profile`);
+      const res = await apiFetch(`${API_URL}/api/user/profile`);
       if (res.ok) {
         const data = await res.json();
         set({ onboardingCompleted: data.onboarding_completed });
@@ -273,7 +274,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
 
   skipOnboarding: async () => {
     try {
-      const res = await fetch(`${API_URL}/api/user/onboarding/skip`, { method: "POST" });
+      const res = await apiFetch(`${API_URL}/api/user/onboarding/skip`, { method: "POST" });
       if (res.ok) {
         set({ onboardingCompleted: true });
       }
@@ -284,7 +285,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
 
   restartOnboarding: async () => {
     try {
-      const res = await fetch(`${API_URL}/api/user/onboarding/restart`, { method: "POST" });
+      const res = await apiFetch(`${API_URL}/api/user/onboarding/restart`, { method: "POST" });
       if (res.ok) {
         safeStorageRemove(LAST_SESSION_KEY);
         set({ onboardingCompleted: false, sessionId: null, messages: [] });
@@ -296,7 +297,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
 
   loadSessions: async () => {
     try {
-      const res = await fetch(`${API_URL}/api/sessions`);
+      const res = await apiFetch(`${API_URL}/api/sessions`);
       if (res.ok) {
         const sessions = await res.json();
         set((state) => {
@@ -345,7 +346,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
 
   switchSession: async (sessionId: string, continuityState?: SessionContinuityState) => {
     try {
-      const res = await fetch(`${API_URL}/api/sessions/${sessionId}/messages`);
+      const res = await apiFetch(`${API_URL}/api/sessions/${sessionId}/messages`);
       if (res.ok) {
         const msgs = await res.json();
         const chatMessages: ChatMessage[] = msgs.map((m: Record<string, unknown>) => {
@@ -393,7 +394,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
 
   deleteSession: async (sessionId: string) => {
     try {
-      await fetch(`${API_URL}/api/sessions/${sessionId}`, { method: "DELETE" });
+      await apiFetch(`${API_URL}/api/sessions/${sessionId}`, { method: "DELETE" });
       const { sessions, sessionId: currentId } = get();
       set({ sessions: sessions.filter((s) => s.id !== sessionId) });
       if (currentId === sessionId) {
@@ -407,7 +408,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
 
   renameSession: async (sessionId: string, title: string) => {
     try {
-      const res = await fetch(`${API_URL}/api/sessions/${sessionId}`, {
+      const res = await apiFetch(`${API_URL}/api/sessions/${sessionId}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ title }),
@@ -423,7 +424,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
 
   generateSessionTitle: async (sessionId: string) => {
     try {
-      const res = await fetch(`${API_URL}/api/sessions/${sessionId}/generate-title`, {
+      const res = await apiFetch(`${API_URL}/api/sessions/${sessionId}/generate-title`, {
         method: "POST",
       });
       if (res.ok) {

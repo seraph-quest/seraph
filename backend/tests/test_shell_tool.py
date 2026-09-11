@@ -7,8 +7,16 @@ import httpx
 import pytest
 
 from src.audit.repository import audit_repository
+from src.audit.runtime import reset_integration_timeout_rate_limit_state
 from src.tools.execute_code_tool import execute_code
 from src.tools.shell_tool import shell_execute
+
+
+@pytest.fixture(autouse=True)
+def reset_timeout_rate_limits():
+    reset_integration_timeout_rate_limit_state()
+    yield
+    reset_integration_timeout_rate_limit_state()
 
 
 class TestShellExecute:
@@ -151,3 +159,25 @@ class TestShellExecute:
         assert events
         assert events[0]["tool_name"] == "sandbox:snekbox"
         assert events[0]["details"]["timeout_seconds"] == 35
+        assert events[0]["details"]["timeout_rate_limited"] is True
+
+    @patch("src.tools.shell_tool.httpx.Client")
+    def test_timeout_runtime_audit_is_rate_limited(self, MockClient, async_db):
+        MockClient.return_value.__enter__ = MagicMock(
+            return_value=MagicMock(post=MagicMock(side_effect=httpx.TimeoutException("timeout")))
+        )
+        MockClient.return_value.__exit__ = MagicMock(return_value=False)
+
+        first = shell_execute("import time; time.sleep(999)")
+        second = shell_execute("import time; time.sleep(999)")
+        assert "timed out" in first.lower()
+        assert "timed out" in second.lower()
+
+        async def _fetch():
+            events = await audit_repository.list_events(limit=10)
+            return [e for e in events if e["event_type"] == "integration_timed_out"]
+
+        events = asyncio.run(_fetch())
+        assert len(events) == 1
+        assert events[0]["tool_name"] == "sandbox:snekbox"
+        assert events[0]["details"]["timeout_rate_limit_group"] == "sandbox:snekbox::"

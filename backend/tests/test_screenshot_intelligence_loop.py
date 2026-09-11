@@ -11,6 +11,8 @@ import pytest
 from unittest.mock import AsyncMock, MagicMock
 
 from config.settings import settings
+from src.approval.runtime import reset_runtime_context, set_runtime_context
+from src.security.trust_contract import AuthorityGrant, PrincipalType, TrustPrincipal
 
 
 @pytest.mark.asyncio
@@ -110,11 +112,37 @@ async def test_screenshot_folder_analysis_digest_report_and_status_loop(
         "src.scheduler.jobs.end_of_day_goal_report.completion_with_fallback",
         completion,
     )
-    monkeypatch.setattr("src.scheduler.screen_llm_policy.settings.screen_derived_llm_allow_remote", True)
+    from src.scheduler.screen_llm_policy import ScreenDerivedLlmDecision
+
+    async def admitted_screen_llm_decision(runtime_path: str) -> ScreenDerivedLlmDecision:
+        return ScreenDerivedLlmDecision(
+            allowed=True,
+            reason="test_openrouter_profile_ready",
+            runtime_path=runtime_path,
+            runtime_profile="openrouter",
+        )
+
+    # The loop uses a deterministic analyzer stub.  Admit the governed route
+    # explicitly so the test does not depend on live OpenRouter credentials or
+    # a persisted proof bundle.
+    monkeypatch.setattr(
+        "src.observer.screenshot_folder_source.screenshot_semantic_analysis_enabled",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        "src.scheduler.jobs.screenshot_observation_digest.screen_derived_llm_decision",
+        admitted_screen_llm_decision,
+    )
+    monkeypatch.setattr(
+        "src.scheduler.jobs.end_of_day_goal_report.screen_derived_llm_decision",
+        admitted_screen_llm_decision,
+    )
     monkeypatch.setenv("SERAPH_SCREENSHOT_FOLDER", str(screenshot_root))
-    monkeypatch.setattr("src.api.settings.settings.screen_analysis_provider", "local-vlm")
-    monkeypatch.setattr("src.api.settings.settings.local_vlm_base_url", "http://gpu:8088")
-    monkeypatch.setattr("src.api.settings.settings.local_vlm_model", "gemma-test")
+    monkeypatch.setattr("src.api.settings.settings.screen_analysis_provider", "openrouter")
+    monkeypatch.setattr(
+        "src.api.settings.settings.screen_analysis_model",
+        "openrouter/google/gemini-2.5-flash",
+    )
     async with async_db() as db:
         db.add(
             Goal(
@@ -131,13 +159,26 @@ async def test_screenshot_folder_analysis_digest_report_and_status_loop(
     scan_result = await scan_screenshot_folder(screenshot_root, limit=10)
     duplicate_scan_result = await scan_screenshot_folder(screenshot_root, limit=10)
     analysis_result = await analyze_pending_screenshot_folder_observations(limit=10)
-    digest_result = await build_screenshot_observation_digest(
-        window_start=datetime(2026, 6, 30, 10, 0, tzinfo=timezone.utc),
-        window_end=datetime(2026, 6, 30, 10, 30, tzinfo=timezone.utc),
+    tokens = set_runtime_context(
+        "screenshot-intelligence-loop",
+        "high_risk",
+        trust_principal=TrustPrincipal(
+            principal_id="service:screenshot-intelligence-test",
+            principal_type=PrincipalType.SERVICE,
+            grants=(AuthorityGrant.MODEL_INFERENCE,),
+            session_id="screenshot-intelligence-loop",
+        ),
     )
-    with monkeypatch.context() as report_patch:
-        report_patch.setattr(settings, "user_timezone", "UTC")
-        report = await build_end_of_day_goal_report(date(2026, 6, 30))
+    try:
+        digest_result = await build_screenshot_observation_digest(
+            window_start=datetime(2026, 6, 30, 10, 0, tzinfo=timezone.utc),
+            window_end=datetime(2026, 6, 30, 10, 30, tzinfo=timezone.utc),
+        )
+        with monkeypatch.context() as report_patch:
+            report_patch.setattr(settings, "user_timezone", "UTC")
+            report = await build_end_of_day_goal_report(date(2026, 6, 30))
+    finally:
+        reset_runtime_context(tokens)
 
     status = (await client.get("/api/settings/artifact-storage")).json()
     async with async_db() as db:

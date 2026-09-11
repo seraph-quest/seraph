@@ -1,8 +1,12 @@
 """Tests for GoalRepository (src/goals/repository.py)."""
 
+from datetime import datetime, timedelta, timezone
+
 import pytest
 
-from src.goals.repository import GoalRepository
+from src.db.models import NativeNotificationOutbox, QueuedInsight, StrategyDelta, WorkflowRunState
+from src.goals.repository import GoalOwnershipConflict, GoalRepository
+from src.observer.insight_queue import insight_queue
 
 
 @pytest.fixture
@@ -25,6 +29,21 @@ class TestCreate:
         child = await repo.create("Annual", level="annual", domain="growth", parent_id=parent.id)
         assert child.parent_id == parent.id
         assert child.path == f"/{parent.id}/"
+
+    async def test_rejects_cross_owner_parent_before_child_insert(self, async_db, repo):
+        owner_a = {"owner_principal_id": "operator:a", "owner_session_id": "session:a"}
+        parent = await repo.create("Owner A", **owner_a)
+
+        with pytest.raises(GoalOwnershipConflict) as exc:
+            await repo.create(
+                "Cross-owner child",
+                parent_id=parent.id,
+                owner_principal_id="operator:b",
+                owner_session_id="session:b",
+            )
+
+        assert exc.value.code == "goal_parent_owner_mismatch"
+        assert await repo.list_goals(owner_principal_id="operator:b", owner_session_id="session:b") == []
 
     async def test_invalid_level(self, async_db, repo):
         with pytest.raises(ValueError, match="Invalid level"):
@@ -62,6 +81,12 @@ class TestUpdate:
         updated = await repo.update(goal.id, status="completed")
         assert updated.status == "completed"
 
+    async def test_level_and_domain(self, async_db, repo):
+        goal = await repo.create("Test")
+        updated = await repo.update(goal.id, level="weekly", domain="health")
+        assert updated.level == "weekly"
+        assert updated.domain == "health"
+
     async def test_invalid_status(self, async_db, repo):
         goal = await repo.create("Test")
         with pytest.raises(ValueError, match="Invalid status"):
@@ -69,6 +94,27 @@ class TestUpdate:
 
     async def test_nonexistent(self, async_db, repo):
         assert await repo.update("nope", title="X") is None
+
+    async def test_reparent_rejects_cross_owner_parent_before_mutation(self, async_db, repo):
+        owner_a = {"owner_principal_id": "operator:a", "owner_session_id": "session:a"}
+        owner_b = {"owner_principal_id": "operator:b", "owner_session_id": "session:b"}
+        parent_a = await repo.create("Parent A", **owner_a)
+        parent_b = await repo.create("Parent B", **owner_b)
+        child = await repo.create("Child", parent_id=parent_a.id, **owner_a)
+
+        with pytest.raises(GoalOwnershipConflict) as exc:
+            await repo.update(
+                child.id,
+                parent_id=parent_b.id,
+                expected_owner_principal_id=owner_a["owner_principal_id"],
+                expected_owner_session_id=owner_a["owner_session_id"],
+                expected_revision=child.revision,
+            )
+
+        assert exc.value.code == "goal_parent_owner_mismatch"
+        persisted = await repo.get(child.id)
+        assert persisted.parent_id == parent_a.id
+        assert persisted.path == f"/{parent_a.id}/"
 
 
 class TestDelete:
@@ -85,6 +131,152 @@ class TestDelete:
         child = await repo.create("Child", level="annual", domain="growth", parent_id=parent.id)
         await repo.delete(parent.id)
         assert await repo.get(child.id) is None
+
+    async def test_delete_cancels_goal_bound_effects_before_cascade(self, async_db, repo):
+        owner = {"owner_principal_id": "operator:a", "owner_session_id": "session:a"}
+        goal = await repo.create("Delete me", **owner)
+        now = datetime.now(timezone.utc)
+        async with async_db() as db:
+            db.add(
+                QueuedInsight(
+                    content="queued insight",
+                    goal_id=goal.id,
+                    owner_principal_id=owner["owner_principal_id"],
+                    operator_session_id=owner["owner_session_id"],
+                    budget_period_key="2026-09-11",
+                    budget_limit=2,
+                )
+            )
+            db.add(
+                NativeNotificationOutbox(
+                    idempotency_key="delete-goal-notification",
+                    payload_digest="digest",
+                    title="queued notification",
+                    body="body",
+                    goal_id=goal.id,
+                    owner_principal_id=owner["owner_principal_id"],
+                    operator_session_id=owner["owner_session_id"],
+                    budget_period_key="2026-09-11",
+                    budget_limit=2,
+                    deadline_at=now + timedelta(hours=1),
+                    status="queued",
+                )
+            )
+            db.add(
+                StrategyDelta(
+                    goal_id=goal.id,
+                    source_event_id="delete-goal-delta",
+                    author_id=owner["owner_principal_id"],
+                    status="proposed",
+                )
+            )
+            db.add(
+                WorkflowRunState(
+                    run_identity="delete-goal-run",
+                    root_run_identity="delete-goal-run",
+                    workflow_name="goal-snapshot-to-file",
+                    goal_id=goal.id,
+                    status="accepted",
+                )
+            )
+
+        assert await repo.delete(
+            goal.id,
+            expected_owner_principal_id=owner["owner_principal_id"],
+            expected_owner_session_id=owner["owner_session_id"],
+        ) is True
+        assert await repo.get(goal.id) is None
+        async with async_db() as db:
+            queued = (await db.execute(QueuedInsight.__table__.select())).all()
+            outbox = (
+                await db.execute(
+                    NativeNotificationOutbox.__table__.select().where(
+                        NativeNotificationOutbox.idempotency_key == "delete-goal-notification"
+                    )
+                )
+            ).first()
+            delta = (
+                await db.execute(
+                    StrategyDelta.__table__.select().where(
+                        StrategyDelta.source_event_id == "delete-goal-delta"
+                    )
+                )
+            ).first()
+            run = (
+                await db.execute(
+                    WorkflowRunState.__table__.select().where(
+                        WorkflowRunState.run_identity == "delete-goal-run"
+                    )
+                )
+            ).first()
+        assert queued == []
+        assert outbox.status == "cancelled"
+        assert outbox.last_error == "goal_deleted"
+        assert delta.status == "rejected"
+        assert run.status == "cancelled"
+        assert run.failure_reason == "goal_deleted"
+
+    @pytest.mark.parametrize(
+        "status",
+        ["running", "failed", "unknown_external_effect", "cost_liability"],
+    )
+    async def test_delete_fences_active_and_uncertain_jobs(self, async_db, repo, status):
+        owner = {"owner_principal_id": "operator:fence", "owner_session_id": "session:fence"}
+        goal = await repo.create("Fence me", **owner)
+        async with async_db() as db:
+            db.add(
+                WorkflowRunState(
+                    run_identity=f"delete-fence-{status}",
+                    root_run_identity=f"delete-fence-{status}",
+                    workflow_name="goal-snapshot-to-file",
+                    goal_id=goal.id,
+                    status=status,
+                    revision=7,
+                    fencing_token=3,
+                    lease_owner="stale-runner" if status == "running" else None,
+                    lease_expires_at=datetime.now(timezone.utc) + timedelta(minutes=5)
+                    if status == "running"
+                    else None,
+                )
+            )
+
+        assert await repo.delete(
+            goal.id,
+            expected_owner_principal_id=owner["owner_principal_id"],
+            expected_owner_session_id=owner["owner_session_id"],
+        ) is True
+        async with async_db() as db:
+            run = (
+                await db.execute(
+                    WorkflowRunState.__table__.select().where(
+                        WorkflowRunState.run_identity == f"delete-fence-{status}"
+                    )
+                )
+            ).first()
+        assert run.status == "cancelled"
+        assert run.failure_reason == "goal_deleted"
+        assert run.revision == 8
+        assert run.fencing_token == 4
+        assert run.lease_owner is None
+        assert run.lease_expires_at is None
+
+    async def test_goal_bound_insight_persists_revision_and_stale_rows_are_removed(
+        self, async_db, repo
+    ):
+        owner = {"owner_principal_id": "operator:queue", "operator_session_id": "session:queue"}
+        goal = await repo.create("Queue revision", **owner)
+        queued = await insight_queue.enqueue(
+            content="Revision-bound update",
+            goal_id=goal.id,
+            owner_principal_id=owner["owner_principal_id"],
+            operator_session_id=owner["operator_session_id"],
+            budget_period_key="2026-09-11",
+            budget_limit=2,
+        )
+        assert queued.goal_revision == goal.revision == 1
+
+        await repo.update(goal.id, title="Revision changed", expected_revision=1)
+        assert await insight_queue.peek_all() == []
 
 
 class TestListGoals:
@@ -111,12 +303,18 @@ class TestListGoals:
 class TestGetTree:
     async def test_nested_structure(self, async_db, repo):
         parent = await repo.create("Vision", level="vision")
-        await repo.create("Annual", level="annual", parent_id=parent.id)
+        await repo.create(
+            "Annual",
+            level="annual",
+            parent_id=parent.id,
+            proactive_enabled=True,
+        )
         tree = await repo.get_tree()
         assert len(tree) == 1
         assert tree[0]["title"] == "Vision"
         assert len(tree[0]["children"]) == 1
         assert tree[0]["children"][0]["title"] == "Annual"
+        assert tree[0]["children"][0]["proactive_enabled"] is True
 
     async def test_empty(self, async_db, repo):
         tree = await repo.get_tree()

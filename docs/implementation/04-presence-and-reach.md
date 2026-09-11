@@ -8,12 +8,80 @@
 
 - primary design doc: [06. Presence And Reach](/research/presence-and-reach)
 
+## Branch-local #751 Audio Vertical Slice
+
+The `feat/751-ptt-audio-impl` branch adds a **Partial**, provider-free
+push-to-talk (PTT) vertical slice in
+[`backend/src/guardian/audio_ingress.py`](../../backend/src/guardian/audio_ingress.py).
+This is branch-local work and is not shipped `develop` truth. The authenticated
+`/api/audio/ptt` and `/api/audio/ingress` routes use #750 server-owned session,
+message, attachment, and request identities, persist one SQLite
+`audio_ingress_jobs` row per idempotency key, and expose owner-bound status,
+confirm, process, and cancel routes. Quarantined uploads are checked by actual
+container signatures and duration, decoded with bounded local `ffprobe`/`ffmpeg`
+when needed, and normalized to mono 16 kHz PCM16 WAV at no more than 2 MiB.
+Short generated WAV fixtures prove the same path without a live microphone.
+Raw and normalized files are private, removed on success, failure, cancel, or
+restart recovery, and have a 15-minute retention deadline. Cleanup failures are
+durable degraded states with private paths retained for a bounded retry; the
+operator receipt reports that raw bytes remain until cleanup succeeds. Separate
+capture and model consent handles are carried into the signed #750 attachment
+receipt.
+
+The pure validator still checks standard base64 shape and metadata-reported byte
+count, the 10 MiB audio cap, one stream, the MIME/container/codec allowlist,
+metadata-reported duration up to 60 seconds, normalized-WAV metadata up to 2
+MiB, consent freshness, and request/attachment identity conflicts. Transcript
+text from the intercepted transport is untrusted and process-local; only its
+digest crosses the job/API boundary. The operator supplies the final text and
+digest, which are persisted through the canonical session message path after
+digest-bound confirmation.
+
+The payload builder emits only the documented OpenRouter `input_audio` content
+shape. It performs no network call, decoding, codec inspection, shell command,
+Whisper/Piper/VLM invocation, local-model fallback, or canonical persistence.
+The default provider state is `unverified`, so an API key, model capability,
+route health, and live consent/runtime proof are required before a later
+adapter can treat a request as accepted for execution. Receipts contain IDs,
+digests, bounded metadata, consent handles, and provider state; raw audio and
+transcripts are explicitly excluded. Duration and normalized-WAV limits remain
+metadata assertions until a governed decoder/attachment owner supplies the
+runtime proof.
+
+`trusted_adapter_id`, `provider_proof_reference`, and
+`consent_proof_reference` are handles supplied by that later trusted adapter;
+the pure validator checks their shape but cannot establish their authenticity
+or perform a live provider/consent check. A `ready` provider without all three
+handles returns `degraded` with `trusted_adapter_proof_required`, so callers
+cannot treat caller-asserted provider or consent metadata as execution proof.
+
+The transport is an explicitly intercepted, provider-free test boundary and is
+admitted through the shared bounded remote-inference broker; the default worker
+has no transport and cannot make a provider call. A server-owned transport lease
+is claimed only after a same-transaction consent check, and consent revocation
+invalidates pending claims; a callback that races a committed revocation is
+reported as an unknown outcome. Confirmation reserves the canonical message and
+job fence atomically, rechecks the durable owner and operator-session lifetime
+inside that reservation transaction, and restart recovery reconciles the pair.
+An already-admitted processing request that discovers a revoked session records
+a typed blocked receipt; unauthenticated direct calls do not mutate the job.
+The focused browser seam in
+`frontend/src/components/chat/PttAudioControl.tsx` requires a deliberate
+microphone grant, keeps model consent separate, prefers WebM/Opus then MP4,
+and confirms operator-supplied text by the returned digest without receiving
+unconfirmed transcript text from the API. Delayed recorder-stop callbacks are
+discarded when capture generation, session, or the browser capture gate is no
+longer current. This slice makes no speech-quality, live-provider, GPU, VLM, or
+live-microphone claim. The input shape remains compatible with the existing
+audio ingress contract and the documented OpenRouter audio shape for a future
+separately governed adapter.
+
 ## Shipped On `develop`
 
 - [x] browser-based guardian cockpit as the only supported browser shell
 - [x] WebSocket conversation path
 - [x] native macOS observer daemon for screen and OCR ingest
-- [x] daemon screen analysis can now choose local Apple Vision, local `codex exec`, or explicit OpenRouter cloud OCR; local Codex writes only a temporary PNG for the CLI invocation and deletes it after analysis or failure unless local capture preservation is explicitly enabled
+- [x] daemon screen analysis can use configured local or remote inference routes; preserved captures expose provider-neutral image/output/analysis artifacts, while the removed `codex exec` path remains only as deprecated artifact-read compatibility under #739
 - [x] screen captures can be preserved as durable local artifacts for future re-analysis, pairing each allowed image with redacted provider output and normalized JSON behind localhost-only observer artifact endpoints
 - [x] observer refresh pipeline across time, calendar, git, goals, and screen context
 - [x] proactive delivery gating and queued-bundle delivery inside the current product
@@ -38,6 +106,74 @@
 - [x] Batch DC selected-channel reach/media campaign proof now adds `always_available_reach_operations_v1`, `voice_media_parity_runtime_v1`, `mobile_cross_surface_continuity_v1`, `reach_degraded_recovery_field_campaign`, plus `/api/operator/always-available-reach-media`, covering selected mobile/messaging/native/browser/web campaign windows, pairing/revocation, rate-limit and abuse recovery, 14-day equivalent degraded-recovery metrics, voice/media quality and latency receipts, correction/deletion/privacy controls, provider-regression fallback, cross-surface continuity, false/missed delivery metrics, operator repair, redacted receipts, and blocked claims without claiming OpenClaw-class reach, complete channel coverage, always-available operation, voice/media parity, production readiness, or full parity
 - [x] Batch CH browser-provider usability proof now adds `managed_browser_provider_attestation`, `live_multi_operator_usability_study`, `browser_computer_use_recovery_drill`, plus `/api/operator/browser-provider-usability-proof`, covering local/managed/remote browser provider identity, evidence mode, session partitioning, credential and download/upload boundaries, provider degradation, recorded-live multi-operator usability metrics, and fail-closed browser recovery drills without claiming safe autonomous browser/computer-use, full browser parity, best cockpit, solved operator control, production readiness, or full parity
 - [x] the one excellent reach-channel canary now selects native notifications as the only canary channel and exposes `one_excellent_reach_channel_canary`, `/api/operator/one-reach-channel-canary`, and the cockpit benchmark-proof card for pairing, revocation, health, retry/fallback, same-thread continuity, memory/context continuity, approval handoff, audit trail, degraded-state UI, and explicit rejection of Slack/Discord/Telegram/channel sprawl until one channel meets the bar
+
+## Web Ingress Contract (Partial On The Epic Branch)
+
+The #750 web slice adds a typed, server-owned `seraph.chat.message.v1`
+envelope to REST `/api/chat` and WebSocket `/ws/chat`.  Seraph binds the
+envelope to the authenticated principal, operator session, device label, and
+canonical conversation before model dispatch; a supplied `idempotency_key` or
+`message_id` produces a session-scoped UUID5 server message identity.  If both
+aliases are supplied, their normalized opaque values must match or the ingress
+is rejected before session reservation.  The
+redacted envelope and SHA-256 content/key digests are persisted in the user
+`Message.metadata_json`, and accepted, duplicate, and identity-conflict
+receipts are written to the canonical audit path without message content.
+REST and WebSocket turns reject empty or whitespace-only message content before
+reservation, audit, or model dispatch.
+
+Retries that reuse the same identity in the same session receive a deterministic
+409/error receipt before model dispatch.  Reuse with changed content or bound
+metadata is rejected as an identity conflict, and an explicit unknown session
+is rejected rather than created.  The branch-local #750 slice now projects the
+same conversation, thread, owner, operator-session, device, channel, transport,
+correlation, causation, and redacted attachment metadata into REST responses,
+WebSocket frames, session history, approvals, and native-notification receipts.
+`Session.id` remains the sole conversation key; these fields are lineage
+receipts rather than a second conversation store.  Session ownership and
+operator-session validity are checked again before native outbox claim, and
+deleted or revoked conversations are cancelled with an explicit degraded
+reason so a restart cannot dispatch stale work.
+
+Native notifications use the existing SQLite outbox and delivery-attempt
+tables.  An idempotency key is bound to one payload digest, so retries across
+queue instances or process restarts return the same notification row.  Lease
+expiry, daemon failure, and ambiguous handoff become operator-visible
+`unknown` recovery receipts with preserved attempt and fencing metadata;
+revoked, expired, missing, or deleted owners remain cancelled and visible to
+recovery.  Attachment references retain only bounded public metadata such as
+an attachment id, media type, hash, size, duration, voice-note flag, and
+quarantine status; file paths, provider URLs, and credentials are discarded.
+No live Telegram, macOS provider, or other external adapter is claimed by this
+slice; those adapters still require their own authenticated transport and
+runtime proof.
+
+## Telegram Transport (Branch-Local #752 Partial)
+
+The `feat/752-telegram-contract` contract is now exercised by a provider-free
+local transport adapter. Telegram transit remains an external channel and
+both the `telegram_transit` and `openrouter_inference` consent grants are
+stored and rechecked on replay, receipt, and delivery. Pairing, the allow-listed
+operator/chat identity, cursor, replay ledger, canonical `Session`/`Message`
+handoff, and Telegram outbox are durable in the workspace SQLite database.
+Pairing state is bound to the authenticated operator principal and operator
+session; cross-owner or cross-session calls fail closed. The scoped synthetic
+bot token is stored in the encrypted vault and status exposes only a
+fingerprint/configured flag.
+
+The adapter accepts updates and delivery outcomes only through an injected,
+recording HTTP-like transport. Its bounded `getUpdates` path uses the durable
+cursor and has no public webhook; it opens no Telegram or model connection and
+does not claim a live bot. A supplied bot token is write-only at the API edge,
+stored under a hashed owner/chat vault reference, and represented in status by
+configuration and fingerprint metadata only. Text and quarantined voice
+metadata preserve the canonical #750 conversation lineage; voice remains a
+degraded #751 handoff until the governed audio worker supplies validated bytes
+and transcript confirmation. Bounded timeout, 429, 5xx, lease/fence,
+revocation, and terminal receipts remain operator-visible. Delivery readback
+includes redacted attempt history; timeout or lease ambiguity remains
+`unknown` until an explicit operator reconciliation, and the browser
+conversation remains the continuity surface.
 
 ## Working On Now
 
@@ -81,6 +217,71 @@ System Settings > Privacy & Security > Automation to the terminal application
 running Seraph, then restart the daemon. Window-title presence also requires
 Accessibility permission. OCR or screenshot analysis requires Screen Recording
 or Screen & System Audio Recording permission.
+
+## Branch-local #749 pairing ingress contract
+
+The `feat/749-pairing-contract` branch adds a **Partial** server-side contract
+in `backend/src/extensions/node_pairing.py`. It is not shipped truth on
+`develop` and it does not claim a live Mac edge. The immutable request and
+state snapshots cover device, pairing, request, capture timestamp, monotonic
+sequence, content hash, media type, bounded size, policy version, capability
+scope, data purpose, and a scoped credential fingerprint. Pure validation
+returns the stable `accepted`, `duplicate`, `out_of_order`, `expired`,
+`revoked`, `oversized`, `blocked`, or `retryable` states. The bounded replay
+ledger advances only after an accepted request and never stores a raw token.
+
+Pairing lifecycle transitions are operator-owned `pair`, `rotate`, `revoke`,
+and `expire` snapshots. Rotation retires the previous fingerprint; revocation
+and expiry remove the active fingerprint. The ingress capability allow-list is
+read/observation-oriented and explicitly rejects action authority. Receipts
+contain metadata, digests, policy and state facts while redacting source paths,
+content, raw credentials, and full credential fingerprints. This contract does
+not authenticate a transport or read an artifact; callers still need to verify
+the payload hash before governed ingestion.
+
+The remaining #749 boundaries are an authenticated HTTPS/origin protocol,
+server-side artifact persistence and readback, real paired-Mac receipts,
+durable integration with the node state store, and operator UI/runtime wiring.
+Those boundaries must remain visibly blocked or partial until their own
+focused implementation and runtime evidence exists. No local GPU, VLM, or
+model/provider call is required by this contract.
+
+## Branch-local #749 paired edge completion
+
+The `feat/749-paired-mac-edge-final` slice adds a **Partial** provider-free
+local vertical behind the same contract. It is not shipped `develop` truth and
+does not claim macOS permission, hardware, Telegram, OpenRouter, GPU, VLM, or
+cloud-provider readiness. Pairing returns a raw credential once, stores only
+an opaque vault reference and scoped fingerprint, and protects state writes
+with a file lock plus revision/CAS. Pair, reconnect, rotate, expire, and
+revoke remain operator-owned; revocation changes the lifecycle field used by
+ingress validation so the next request is rejected immediately.
+
+The daemon adapter in `daemon/paired_edge.py` posts heartbeat and capture
+envelopes over the configured local HTTP origin with bearer authentication,
+origin and device headers, request/device/pairing ids, monotonic sequence,
+capture time, hash, MIME, size, policy, and scope. The server independently
+checks the credential, owner, hash, and size before applying the pure pairing
+replay contract. Accepted bytes receive a server-owned `edge_art_*` artifact
+and readback id; a reported Mac path is never used as an artifact id or
+persisted as a source path. `accepted`, `duplicate`, `out_of_order`,
+`expired`, `revoked`, `oversized`, `blocked`, and `retryable` responses have
+stable HTTP/status mappings.
+
+Disconnects use a private bounded durable JSON spool (count, bytes, age,
+retries, exponential backoff, retention, sequence ordering, and request-id
+dedupe). The capture blocklist runs before bytes are posted, and cloud/model
+egress is disabled by default. Node adapter and observer continuity payloads
+expose paired/revoked state, last seen/ingest times, spool and recovery
+telemetry, degraded state, revision, and disabled action authority. The
+demonstrated local receipt is `backend/tests/test_paired_edge_local_journey.py`
+plus `daemon/tests/test_paired_edge_transport.py`; it uses synthetic bytes and
+an in-process loopback/ASGI origin only.
+
+Platform limits remain explicit: a real Mac capture producer, macOS permission
+prompts, device discovery, hosted provider transport, and production rollout
+still require separate implementation and review. The local proof does not
+turn those limits into readiness claims.
 
 ## Still To Do On `develop`
 

@@ -2,13 +2,17 @@ import logging
 import difflib
 import hashlib
 import json
+import os
+from contextlib import contextmanager
 from pathlib import Path
+from typing import Iterator
 
 from smolagents import tool
 
 from config.settings import settings
 from src.artifacts.registry import build_artifact_record
 from src.audit.runtime import log_integration_event_sync
+from src.security.authority_envelope import check_filesystem_scope
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +47,14 @@ _SECRET_FILE_SUFFIXES = {
     ".pem",
     ".pfx",
 }
+_MAX_FILE_READ_BYTES = 1 * 1024 * 1024
+_MAX_FILE_WRITE_BYTES = 1 * 1024 * 1024
+_MAX_PATCH_INPUT_BYTES = 1 * 1024 * 1024
+_MAX_PATCH_RESULT_BYTES = 1 * 1024 * 1024
+_MAX_PATCH_DIFF_BYTES = 1 * 1024 * 1024
+_MAX_PATCH_RECEIPT_BYTES = 4 * 1024 * 1024
+_FILE_READ_CHUNK_BYTES = 64 * 1024
+_TRUNCATION_MARKER = b"\n...[truncated]..."
 
 
 def _filesystem_details(file_path: str, operation: str, **extra: object) -> dict[str, object]:
@@ -56,12 +68,173 @@ def _filesystem_details(file_path: str, operation: str, **extra: object) -> dict
 def _safe_resolve(file_path: str) -> Path:
     """Resolve a file path ensuring it stays within the workspace directory."""
     workspace = Path(settings.workspace_dir).resolve()
-    resolved = (workspace / file_path).resolve()
+    candidate = workspace / file_path
+    resolved = candidate.resolve()
     try:
         resolved.relative_to(workspace)
     except ValueError:
         raise ValueError(f"Path traversal blocked: {file_path}")
+    boundary = check_filesystem_scope(str(candidate), (str(workspace),))
+    if not boundary.allowed:
+        if boundary.reason_code == "filesystem_symlink_blocked":
+            raise ValueError(f"Symlink traversal blocked: {file_path}")
+        raise ValueError(f"Path traversal blocked: {file_path}")
     return resolved
+
+
+@contextmanager
+def _open_workspace_file(
+    resolved: Path,
+    *,
+    flags: int,
+    mode: int = 0o600,
+    create_parents: bool = False,
+) -> Iterator[int]:
+    """Open a workspace file through descriptor-relative, no-follow handles.
+
+    ``_safe_resolve`` establishes the policy boundary, while this helper
+    closes the remaining write TOCTOU window: every parent component and the
+    final file are opened with ``O_NOFOLLOW`` relative to a directory handle.
+    A concurrent symlink replacement therefore fails closed instead of
+    redirecting a write outside the workspace.
+    """
+    workspace = Path(settings.workspace_dir).resolve()
+    try:
+        relative = resolved.relative_to(workspace)
+    except ValueError as exc:
+        raise ValueError("workspace file is outside the canonical workspace") from exc
+    parts = relative.parts
+    if not parts or any(part in {"", ".", ".."} for part in parts):
+        raise ValueError("workspace file path is invalid")
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | nofollow
+    root_fd = os.open(workspace, directory_flags)
+    parent_fd = root_fd
+    final_fd: int | None = None
+    try:
+        for part in parts[:-1]:
+            try:
+                next_fd = os.open(part, directory_flags, dir_fd=parent_fd)
+            except FileNotFoundError:
+                if not create_parents:
+                    raise
+                try:
+                    os.mkdir(part, 0o700, dir_fd=parent_fd)
+                except FileExistsError:
+                    pass
+                next_fd = os.open(part, directory_flags, dir_fd=parent_fd)
+            if parent_fd != root_fd:
+                os.close(parent_fd)
+            parent_fd = next_fd
+        final_fd = os.open(parts[-1], flags | nofollow, mode, dir_fd=parent_fd)
+        yield final_fd
+        final_fd = None
+    finally:
+        if final_fd is not None:
+            try:
+                os.close(final_fd)
+            except OSError:
+                # ``os.fdopen`` owns and closes the descriptor when a caller
+                # raises while the yielded stream is active.
+                pass
+        if parent_fd != root_fd:
+            os.close(parent_fd)
+        os.close(root_fd)
+
+
+@contextmanager
+def _open_workspace_text(
+    resolved: Path,
+    *,
+    write: bool = False,
+    create_parents: bool = False,
+) -> Iterator[object]:
+    flags = os.O_RDWR if write else os.O_RDONLY
+    if write and create_parents:
+        flags |= os.O_CREAT
+    with _open_workspace_file(
+        resolved,
+        flags=flags,
+        create_parents=create_parents,
+    ) as file_fd:
+        with os.fdopen(file_fd, "r+" if write else "r", encoding="utf-8") as stream:
+            yield stream
+
+
+def _assert_bounded_text(content: str, *, limit: int, label: str) -> int:
+    """Validate text size before it reaches a workspace write or receipt."""
+    if not isinstance(content, str):
+        raise ValueError(f"{label} must be text")
+    encoded_length = len(content.encode("utf-8"))
+    if encoded_length > limit:
+        raise ValueError(f"{label} exceeds the bounded workspace policy ({limit} bytes)")
+    return encoded_length
+
+
+def _write_workspace_text_bounded(
+    resolved: Path,
+    content: str,
+    *,
+    max_bytes: int = _MAX_FILE_WRITE_BYTES,
+    create_parents: bool = True,
+) -> int:
+    """Write bounded text through the descriptor-relative no-follow seam."""
+    encoded_length = _assert_bounded_text(content, limit=max_bytes, label="workspace content")
+    with _open_workspace_text(resolved, write=True, create_parents=create_parents) as stream:
+        stream.seek(0)
+        stream.truncate()
+        stream.write(content)
+        stream.flush()
+        os.fsync(stream.fileno())
+    return encoded_length
+
+
+def _read_workspace_text_bounded(
+    resolved: Path,
+    *,
+    max_bytes: int = _MAX_FILE_READ_BYTES,
+) -> tuple[str, bool]:
+    """Read at most ``max_bytes`` from a workspace file before decoding it."""
+    limit = max(1, int(max_bytes))
+    data = bytearray()
+    with _open_workspace_file(resolved, flags=os.O_RDONLY) as file_fd:
+        while len(data) <= limit:
+            chunk = os.read(file_fd, min(_FILE_READ_CHUNK_BYTES, limit + 1 - len(data)))
+            if not chunk:
+                break
+            data.extend(chunk)
+    return _decode_bounded_text(data, limit=limit)
+
+
+def _read_text_stream_bounded(
+    stream: object,
+    *,
+    max_bytes: int = _MAX_FILE_READ_BYTES,
+) -> tuple[str, bool]:
+    """Bound a read on an already-open descriptor before text decoding."""
+    limit = max(1, int(max_bytes))
+    buffer = getattr(stream, "buffer", None)
+    if buffer is None:
+        raw = str(stream.read(limit + 1)).encode("utf-8", errors="replace")  # type: ignore[attr-defined]
+        return _decode_bounded_text(raw, limit=limit)
+    data = bytearray()
+    while len(data) <= limit:
+        chunk = buffer.read(min(_FILE_READ_CHUNK_BYTES, limit + 1 - len(data)))
+        if not chunk:
+            break
+        data.extend(chunk)
+    return _decode_bounded_text(data, limit=limit)
+
+
+def _decode_bounded_text(data: bytes | bytearray, *, limit: int) -> tuple[str, bool]:
+    truncated = len(data) > limit
+    if truncated:
+        marker = _TRUNCATION_MARKER
+        if len(marker) >= limit:
+            data = bytearray(marker[:limit])
+        else:
+            data = data[: limit - len(marker)] + marker
+    return bytes(data).decode("utf-8", errors="replace"), truncated
 
 
 def _is_secret_like_workspace_path(file_path: str) -> bool:
@@ -104,6 +277,9 @@ def _patch_receipt(
     applied: bool,
     before_hash_guarded: bool,
 ) -> str:
+    _assert_bounded_text(before, limit=_MAX_FILE_READ_BYTES, label="patch source")
+    _assert_bounded_text(after, limit=_MAX_PATCH_RESULT_BYTES, label="patch result")
+    _assert_bounded_text(diff, limit=_MAX_PATCH_DIFF_BYTES, label="patch diff")
     changed_lines = sum(1 for line in diff.splitlines() if line.startswith(("+", "-")) and not line.startswith(("+++", "---")))
     artifact = build_artifact_record(
         file_path=file_path,
@@ -113,7 +289,7 @@ def _patch_receipt(
         recovery_hint="Apply the rollback restore_text hash through apply_workspace_patch after checking expected_before_sha256.",
         content=after,
     )
-    return json.dumps(
+    receipt = json.dumps(
         {
             "artifact_id": artifact["artifact_id"],
             "artifact": artifact,
@@ -137,6 +313,8 @@ def _patch_receipt(
         },
         sort_keys=True,
     )
+    _assert_bounded_text(receipt, limit=_MAX_PATCH_RECEIPT_BYTES, label="patch receipt")
+    return receipt
 
 
 def _replacement_diff(file_path: str, before: str, after: str) -> str:
@@ -203,12 +381,12 @@ def read_file(file_path: str) -> str:
         return f"Error: Not a file: {file_path}"
 
     try:
-        content = resolved.read_text(encoding="utf-8")
+        content, truncated = _read_workspace_text_bounded(resolved)
         log_integration_event_sync(
             integration_type="filesystem",
             name="workspace",
             outcome="succeeded",
-            details=_filesystem_details(file_path, "read", length=len(content)),
+            details=_filesystem_details(file_path, "read", length=len(content), truncated=truncated),
         )
         return content
     except Exception as exc:
@@ -234,6 +412,7 @@ def write_file(file_path: str, content: str) -> str:
         A confirmation message.
     """
     try:
+        _assert_bounded_text(content, limit=_MAX_FILE_WRITE_BYTES, label="file content")
         _assert_not_secret_like_path(file_path, "write")
         resolved = _safe_resolve(file_path)
     except ValueError as exc:
@@ -246,8 +425,7 @@ def write_file(file_path: str, content: str) -> str:
         raise
 
     try:
-        resolved.parent.mkdir(parents=True, exist_ok=True)
-        resolved.write_text(content, encoding="utf-8")
+        _write_workspace_text_bounded(resolved, content, max_bytes=_MAX_FILE_WRITE_BYTES)
         log_integration_event_sync(
             integration_type="filesystem",
             name="workspace",
@@ -285,11 +463,17 @@ def preview_workspace_patch(
         A JSON receipt containing the diff, hashes, and application status.
     """
     try:
+        _assert_bounded_text(old_text, limit=_MAX_PATCH_INPUT_BYTES, label="old_text")
+        _assert_bounded_text(new_text, limit=_MAX_PATCH_INPUT_BYTES, label="new_text")
         _assert_not_secret_like_path(file_path, "preview_patch")
         resolved = _safe_resolve(file_path)
-        before = resolved.read_text(encoding="utf-8")
+        before, truncated = _read_workspace_text_bounded(resolved)
+        if truncated:
+            raise ValueError("File exceeds the bounded workspace read policy")
         after, occurrence_count = _replace_once(before, old_text, new_text, expected_occurrences)
+        _assert_bounded_text(after, limit=_MAX_PATCH_RESULT_BYTES, label="patch result")
         diff = _replacement_diff(file_path, before, after)
+        _assert_bounded_text(diff, limit=_MAX_PATCH_DIFF_BYTES, label="patch diff")
         log_integration_event_sync(
             integration_type="filesystem",
             name="workspace",
@@ -351,15 +535,26 @@ def apply_workspace_patch(
         A JSON receipt containing the diff, hashes, and application status.
     """
     try:
+        _assert_bounded_text(old_text, limit=_MAX_PATCH_INPUT_BYTES, label="old_text")
+        _assert_bounded_text(new_text, limit=_MAX_PATCH_INPUT_BYTES, label="new_text")
         _assert_not_secret_like_path(file_path, "apply_patch")
         resolved = _safe_resolve(file_path)
-        before = resolved.read_text(encoding="utf-8")
-        before_sha256 = _sha256_text(before)
-        if expected_before_sha256 and expected_before_sha256 != before_sha256:
-            raise ValueError("Current file content does not match expected_before_sha256")
-        after, occurrence_count = _replace_once(before, old_text, new_text, expected_occurrences)
-        diff = _replacement_diff(file_path, before, after)
-        resolved.write_text(after, encoding="utf-8")
+        with _open_workspace_text(resolved, write=True) as stream:
+            before, truncated = _read_text_stream_bounded(stream)
+            if truncated:
+                raise ValueError("File exceeds the bounded workspace read policy")
+            before_sha256 = _sha256_text(before)
+            if expected_before_sha256 and expected_before_sha256 != before_sha256:
+                raise ValueError("Current file content does not match expected_before_sha256")
+            after, occurrence_count = _replace_once(before, old_text, new_text, expected_occurrences)
+            _assert_bounded_text(after, limit=_MAX_PATCH_RESULT_BYTES, label="patch result")
+            diff = _replacement_diff(file_path, before, after)
+            _assert_bounded_text(diff, limit=_MAX_PATCH_DIFF_BYTES, label="patch diff")
+            stream.seek(0)
+            stream.truncate()
+            stream.write(after)
+            stream.flush()
+            os.fsync(stream.fileno())
         log_integration_event_sync(
             integration_type="filesystem",
             name="workspace",
@@ -401,3 +596,15 @@ def apply_workspace_patch(
         )
         logger.exception("Failed to apply workspace patch")
         return f"Error: Failed to apply workspace patch: {exc}"
+
+
+# ``smolagents.tool`` returns a generic SimpleTool object, so its Python
+# module no longer identifies the adapter that owns the implementation. Keep
+# an explicit marker for the authority wrapper's final-host adoption check.
+for _native_filesystem_tool in (
+    read_file,
+    write_file,
+    preview_workspace_patch,
+    apply_workspace_patch,
+):
+    setattr(_native_filesystem_tool, "seraph_native_capability", True)

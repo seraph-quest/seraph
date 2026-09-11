@@ -3,13 +3,172 @@
 from __future__ import annotations
 
 import json
+import hashlib
+import fcntl
 import os
+import re
+import tempfile
+from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
 from typing import Any
 
 from config.settings import settings
 
 STATE_FILE_NAME = "extensions-state.json"
+_REASON_MAX_LENGTH = 160
+_SENSITIVE_DETAIL_KEYS = {
+    "authorization",
+    "api_key",
+    "apikey",
+    "x-api-key",
+    "auth_header",
+    "credential",
+    "error",
+    "headers",
+    "message",
+    "password",
+    "private_key",
+    "path",
+    "reason",
+    "resume_message",
+    "secret",
+    "summary",
+    "token",
+    "url",
+}
+_ERROR_SCOPE_KEYS = {"error", "original_error", "cause", "details", "exception", "failure"}
+_SAFE_ERROR_KEYS = {
+    "code",
+    "type",
+    "error_code",
+    "error_type",
+    "reason_code",
+    "status_code",
+}
+_PRIVATE_PATH_PATTERN = re.compile(
+    r"(^|[\s'\"=:])"
+    r"((?:/(?:Users|private|tmp|var|home|etc|Volumes|opt|run|srv)/[^\s'\",;)]*"
+    r"|~/?[^\s'\",;)]*"
+    r"|[A-Za-z]:\\[^\s'\",;)]*))"
+)
+_EXTERNAL_URL_PATTERN = re.compile(r"https?://[^\s'\",;)\]}]+", re.IGNORECASE)
+_SENSITIVE_ASSIGNMENT_PATTERN = re.compile(
+    r"(?i)\b(authorization|api[_-]?key|access[_-]?token|client[_-]?secret|password|secret|token)"
+    r"(\s*[:=]\s*)[^\s,;]+"
+)
+_SENSITIVE_BARE_VALUE_PATTERN = re.compile(
+    r"(?i)(?:bearer\s+[A-Za-z0-9._~+/=-]{8,}|(?:secret|token|password)[-_][A-Za-z0-9._~+/=-]{6,})"
+)
+
+
+class ExtensionStateRevisionConflict(RuntimeError):
+    """Raised when a state write races a newer persisted snapshot."""
+
+    def __init__(self, expected: int, actual: int) -> None:
+        self.expected = expected
+        self.actual = actual
+        super().__init__(f"extension state revision changed (expected {expected}, actual {actual})")
+
+
+def _safe_reason(reason: Any, *, default: str = "operator lifecycle request") -> str:
+    """Persist a bounded reason without retaining operator-supplied text."""
+
+    text = " ".join(str(reason or "").split())[:_REASON_MAX_LENGTH]
+    if not text:
+        return default
+    digest = hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+    return f"{default} (input:{digest})"
+
+
+def _redacted_text(value: str) -> str:
+    digest = hashlib.sha256(value.encode("utf-8")).hexdigest()[:16]
+    return f"[redacted:{digest}]"
+
+
+def _redact_inline_text(value: str) -> str:
+    """Remove identifiable paths, URLs, and inline secret assignments."""
+    text = _PRIVATE_PATH_PATTERN.sub(
+        lambda match: f"{match.group(1)}[private path:{hashlib.sha256(match.group(2).encode('utf-8')).hexdigest()[:16]}]",
+        value,
+    )
+    text = _EXTERNAL_URL_PATTERN.sub(
+        lambda match: f"[redacted url:{hashlib.sha256(match.group(0).encode('utf-8')).hexdigest()[:16]}]",
+        text,
+    )
+    text = _SENSITIVE_ASSIGNMENT_PATTERN.sub(
+        lambda match: f"{match.group(1)}{match.group(2)}[redacted]",
+        text,
+    )
+    return _SENSITIVE_BARE_VALUE_PATTERN.sub("[redacted]", text)
+
+
+def redact_lifecycle_error_text(value: Any) -> str:
+    """Redact a scalar lifecycle error using the shared text contract."""
+    return _redact_inline_text(str(value))
+
+
+def redact_lifecycle_receipt_value(
+    value: Any,
+    *,
+    key: str | None = None,
+    _error_scope: bool = False,
+) -> Any:
+    """Recursively redact lifecycle state and API receipt values.
+
+    Error-like branches are treated as sensitive by default, including
+    ``original_error``, ``cause``, and nested ``details``. Only explicit safe
+    ``code``/``type`` fields survive so operators retain a stable failure
+    classification without exposing exception text, paths, or credentials.
+    """
+    key_text = str(key or "").strip().lower()
+    sensitive_key = (
+        key_text in _SENSITIVE_DETAIL_KEYS
+        or "reason" in key_text
+        or "url" in key_text
+        or "secret" in key_text
+        or "token" in key_text
+        or "credential" in key_text
+    )
+    error_scope = _error_scope or key_text in _ERROR_SCOPE_KEYS
+    if isinstance(value, Mapping):
+        result: dict[str, Any] = {}
+        for item_key, item in value.items():
+            normalized_key = str(item_key)
+            normalized_lower = normalized_key.lower()
+            if error_scope and normalized_lower in _SAFE_ERROR_KEYS:
+                result[normalized_key] = item if isinstance(item, (str, int, float, bool)) or item is None else str(item)
+                continue
+            result[normalized_key] = redact_lifecycle_receipt_value(
+                item,
+                key=normalized_key,
+                _error_scope=error_scope,
+            )
+        return result
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        return [
+            redact_lifecycle_receipt_value(item, key=key, _error_scope=error_scope)
+            for item in value
+        ]
+    if isinstance(value, (bytes, bytearray)):
+        return f"[binary:{len(value)} bytes]"
+    if isinstance(value, str):
+        if error_scope or sensitive_key:
+            return _redacted_text(value)
+        return _redact_inline_text(value)
+    return value
+
+
+def _safe_detail_value(key: str, value: Any) -> Any:
+    return redact_lifecycle_receipt_value(value, key=key)
+
+
+def _safe_lifecycle_details(details: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(details, dict):
+        return {}
+    return {
+        str(key): _safe_detail_value(str(key), value)
+        for key, value in details.items()
+    }
 
 
 def state_path() -> str:
@@ -30,18 +189,76 @@ def load_extension_state_payload() -> dict[str, Any]:
     extensions = payload.get("extensions")
     if not isinstance(extensions, dict):
         payload["extensions"] = {}
+    revision = payload.get("revision")
+    if isinstance(revision, bool) or not isinstance(revision, int) or revision < 0:
+        payload["revision"] = 0
     return payload
 
 
-def save_extension_state_payload(payload: dict[str, Any]) -> None:
+def _state_revision(payload: Mapping[str, Any]) -> int:
+    revision = payload.get("revision")
+    if isinstance(revision, bool) or not isinstance(revision, int) or revision < 0:
+        return 0
+    return revision
+
+
+def save_extension_state_payload(
+    payload: dict[str, Any],
+    *,
+    expected_revision: int | None = None,
+) -> int:
+    """Atomically persist extension state and return its new revision.
+
+    The JSON state file is intentionally still the canonical extension-state
+    surface, but writes now use a small optimistic CAS fence.  Existing
+    callers may omit ``expected_revision`` and retain their previous behavior;
+    pairing mutations pass the loaded revision so concurrent rotate/revoke
+    operations fail closed instead of silently overwriting one another.
+    """
     payload = payload if isinstance(payload, dict) else {"extensions": {}}
     extensions = payload.get("extensions")
     if not isinstance(extensions, dict):
         payload["extensions"] = {}
     path = state_path()
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w", encoding="utf-8") as handle:
-        json.dump(payload, handle, indent=2, sort_keys=True)
+    parent = os.path.dirname(path) or "."
+    os.makedirs(parent, exist_ok=True)
+    # The revision check and replacement must share an inter-process lock. A
+    # temporary-file replace alone prevents torn JSON but still lets two
+    # writers read the same revision and both report success.
+    lock_path = f"{path}.lock"
+    lock_fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        os.fchmod(lock_fd, 0o600)
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        current_revision = 0
+        try:
+            with open(path, "r", encoding="utf-8") as handle:
+                existing = json.load(handle)
+            if isinstance(existing, dict):
+                current_revision = _state_revision(existing)
+        except (OSError, json.JSONDecodeError):
+            current_revision = 0
+        if expected_revision is not None and expected_revision != current_revision:
+            raise ExtensionStateRevisionConflict(expected_revision, current_revision)
+        new_revision = current_revision + 1
+        payload["revision"] = new_revision
+        fd, temporary_path = tempfile.mkstemp(prefix=f".{STATE_FILE_NAME}.", dir=parent)
+        try:
+            os.fchmod(fd, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                json.dump(payload, handle, indent=2, sort_keys=True)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary_path, path)
+        finally:
+            try:
+                os.unlink(temporary_path)
+            except FileNotFoundError:
+                pass
+        return new_revision
+    finally:
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        os.close(lock_fd)
 
 
 def extension_state_entries(payload: dict[str, Any]) -> dict[str, Any]:
@@ -141,7 +358,7 @@ def revoke_extension_governance(
         if key_id not in revoked_key_ids:
             revoked_key_ids.append(key_id)
     if reason:
-        governance["revocation_reason"] = reason
+        governance["revocation_reason"] = _safe_reason(reason, default="operator governance revocation")
     return governance
 
 
@@ -189,7 +406,7 @@ def append_extension_lifecycle_event(
         "status": status,
         "actor": actor,
         "created_at": _utc_now(),
-        "details": details or {},
+        "details": _safe_lifecycle_details(details),
     }
     events.append(event)
     lifecycle["last_event"] = event
@@ -220,7 +437,7 @@ def add_extension_rollback_snapshot(
         "path": snapshot_path,
         "version": version,
         "digest": digest,
-        "reason": reason,
+        "reason": _safe_reason(reason, default="rollback snapshot"),
         "created_by": created_by,
         "created_at": _utc_now(),
     }
@@ -247,7 +464,7 @@ def set_extension_quarantine(
     quarantine = {
         "active": active,
         "state": "quarantined" if active else "cleared",
-        "reason": reason,
+        "reason": _safe_reason(reason),
         "actor": actor,
         "digest": digest,
         "version": version,
@@ -419,8 +636,12 @@ def revoke_node_adapter_pairing_entry(
     entry["trusted"] = False
     entry["trust_state"] = "untrusted"
     entry["pairing_state"] = "revoked"
+    # Keep the canonical lifecycle field in sync with the legacy operator
+    # fields.  Pairing validation reads this field first so revocation takes
+    # effect on the very next ingest, including requests using the old secret.
+    entry["lifecycle"] = "revoked"
     if reason:
-        entry["revocation_reason"] = reason
+        entry["revocation_reason"] = _safe_reason(reason, default="node adapter revocation")
     if revoked_at:
         entry["revoked_at"] = revoked_at
     return entry

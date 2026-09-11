@@ -6,7 +6,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+pytestmark = pytest.mark.usefixtures("mocked_canonical_inference_context")
+
 from src.audit.repository import audit_repository
+from src.security.trust_contract import canonical_digest
 
 
 class TestActivityDigest:
@@ -149,6 +152,9 @@ class TestActivityDigest:
             await run_activity_digest()
 
         assert mock_completion.await_args.kwargs["runtime_path"] == "activity_digest"
+        call = mock_completion.await_args.kwargs
+        assert call["request_context"].data_digest == canonical_digest(call["messages"])
+        assert call["request_context"].data_digest != canonical_digest(call["messages"][0]["content"])
 
     @pytest.mark.asyncio
     async def test_llm_timeout(self):

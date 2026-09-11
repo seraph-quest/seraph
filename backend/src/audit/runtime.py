@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import threading
+import time
 from typing import Any
 
 from src.audit.repository import audit_repository
@@ -12,6 +13,51 @@ from src.utils.background import track_task
 
 logger = logging.getLogger(__name__)
 _SYNC_AUDIT_WAIT_SECONDS = 5.0
+_INTEGRATION_TIMEOUT_RATE_LIMIT_SECONDS = 300.0
+_integration_timeout_lock = threading.Lock()
+_integration_timeout_state: dict[str, dict[str, float]] = {}
+
+
+def _integration_timeout_group_key(
+    *,
+    integration_type: str,
+    name: str,
+    details: dict[str, Any] | None,
+) -> str:
+    action = str((details or {}).get("action") or "")
+    hostname = str((details or {}).get("hostname") or "")
+    return f"{integration_type}:{name}:{hostname}:{action}"
+
+
+def _integration_timeout_rate_limit_details(
+    *,
+    integration_type: str,
+    name: str,
+    details: dict[str, Any] | None,
+    window_seconds: float = _INTEGRATION_TIMEOUT_RATE_LIMIT_SECONDS,
+) -> dict[str, Any] | None:
+    now = time.monotonic()
+    group_key = _integration_timeout_group_key(integration_type=integration_type, name=name, details=details)
+    with _integration_timeout_lock:
+        state = _integration_timeout_state.get(group_key)
+        if state is not None and now - state["last_logged_at"] < window_seconds:
+            state["suppressed_count"] = state.get("suppressed_count", 0.0) + 1.0
+            return None
+        suppressed_count = int(state.get("suppressed_count", 0.0)) if state is not None else 0
+        _integration_timeout_state[group_key] = {"last_logged_at": now, "suppressed_count": 0.0}
+    return {
+        **(details or {}),
+        "timeout_rate_limited": True,
+        "timeout_rate_limit_group": group_key,
+        "timeout_rate_limit_window_seconds": window_seconds,
+        "suppressed_count_since_last": suppressed_count,
+    }
+
+
+def reset_integration_timeout_rate_limit_state() -> None:
+    """Clear in-memory timeout grouping state for tests and local diagnostics."""
+    with _integration_timeout_lock:
+        _integration_timeout_state.clear()
 
 
 def _run_coro_on_dedicated_loop(coro, *, label: str) -> None:
@@ -121,25 +167,48 @@ async def log_integration_event(
     name: str,
     outcome: str,
     details: dict[str, Any] | None = None,
-) -> None:
-    """Record an external integration lifecycle event without breaking callers."""
+    session_id: str | None = None,
+    actor: str = "system",
+    policy_mode: str = "full",
+    principal_id: str | None = None,
+) -> bool:
+    """Record an integration lifecycle event and report persistence state.
+
+    Existing callers retain the fail-open behavior when they ignore the return
+    value. Governed operator routes may supply authenticated lineage and fail
+    closed or return an explicit degraded receipt when persistence fails.
+    """
     summary = f"{integration_type.replace('_', ' ').capitalize()} {name} {outcome.replace('_', ' ')}"
     try:
+        event_details: dict[str, Any] = {
+            "integration_type": integration_type,
+            "name": name,
+            **(details or {}),
+        }
+        if session_id or principal_id:
+            existing_lineage = event_details.get("lineage")
+            lineage = dict(existing_lineage) if isinstance(existing_lineage, dict) else {}
+            lineage.update(
+                {
+                    "principal_id": principal_id or actor,
+                    "session_id": session_id,
+                }
+            )
+            event_details["lineage"] = lineage
         await audit_repository.log_event(
-            actor="system",
+            session_id=session_id,
+            actor=actor,
             event_type=f"integration_{outcome}",
             tool_name=f"{integration_type}:{name}",
             risk_level="low",
-            policy_mode="full",
+            policy_mode=policy_mode,
             summary=summary,
-            details={
-                "integration_type": integration_type,
-                "name": name,
-                **(details or {}),
-            },
+            details=event_details,
         )
+        return True
     except Exception:
         logger.debug("Failed to record integration runtime audit event", exc_info=True)
+        return False
 
 
 async def log_observer_delivery_event(
@@ -208,6 +277,31 @@ def log_integration_event_sync(
         )
     except Exception:
         logger.debug("Failed to run integration runtime audit logger", exc_info=True)
+
+
+def log_integration_timeout_event_sync(
+    *,
+    integration_type: str,
+    name: str,
+    details: dict[str, Any] | None = None,
+    window_seconds: float = _INTEGRATION_TIMEOUT_RATE_LIMIT_SECONDS,
+) -> None:
+    """Record a grouped integration timeout without spamming repeated outages."""
+    rate_limited_details = _integration_timeout_rate_limit_details(
+        integration_type=integration_type,
+        name=name,
+        details=details,
+        window_seconds=window_seconds,
+    )
+    if rate_limited_details is None:
+        logger.debug("Suppressed repeated integration timeout audit for %s:%s", integration_type, name)
+        return
+    log_integration_event_sync(
+        integration_type=integration_type,
+        name=name,
+        outcome="timed_out",
+        details=rate_limited_details,
+    )
 
 
 def log_background_task_event_sync(

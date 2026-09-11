@@ -17,6 +17,11 @@ def main() -> int:
     parser.add_argument("--api-key", default=None, help="Optional API key; omitted for keyless local gateways")
     parser.add_argument("--output-dir", type=Path, default=None, help="Directory for sanitized verification receipts")
     parser.add_argument("--timeout-seconds", type=int, default=60)
+    parser.add_argument(
+        "--allow-legacy-local-probe",
+        action="store_true",
+        help="Allow historical local generation checks; requires OPENROUTER_PROVIDER_ONLY=false",
+    )
     args = parser.parse_args()
 
     receipt = verify_local_runtime_profiles_sync(
@@ -25,6 +30,7 @@ def main() -> int:
         api_key=args.api_key,
         output_dir=args.output_dir,
         timeout_seconds=args.timeout_seconds,
+        allow_legacy_local_probe=args.allow_legacy_local_probe,
     )
     print(json.dumps({
         "receipt_path": receipt["receipt_path"],

@@ -7,10 +7,12 @@ import pytest
 
 from src.agent.session import SessionManager
 from src.approval.runtime import reset_runtime_context, set_runtime_context
+from src.security.trust_contract import AuthorityGrant, PrincipalType, TrustPrincipal
 from src.memory.consolidator import ConsolidationResult
 from src.db.models import MemoryKind
 from src.memory.flush import flush_session_memory
 from src.memory.repository import memory_repository
+from src.tools.process_tools import SessionProcessCleanupError, process_runtime_manager
 from src.workflows.loader import Workflow, WorkflowStep
 from src.workflows.manager import WorkflowTool
 
@@ -149,26 +151,39 @@ async def test_retry_after_snapshot_partial_does_not_double_strengthen(async_db)
         "soul_updates": {},
     })
 
-    with patch(
-        "src.memory.consolidator.completion_with_fallback",
-        AsyncMock(return_value=mock_resp),
-    ), patch(
-        "src.memory.consolidator.add_memory",
-        return_value="vec-1",
-    ) as mock_add_memory, patch(
-        "src.memory.consolidator.refresh_bounded_guardian_snapshot",
-        AsyncMock(side_effect=[RuntimeError("snapshot down"), None]),
-    ):
-        first = await flush_session_memory(
-            "flush-idempotent",
-            trigger="post_response",
-            manager=manager,
-        )
-        second = await flush_session_memory(
-            "flush-idempotent",
-            trigger="session_end",
-            manager=manager,
-        )
+    tokens = set_runtime_context(
+        "flush-idempotent",
+        "high_risk",
+        trust_principal=TrustPrincipal(
+            principal_id="service:memory-flush-test",
+            principal_type=PrincipalType.SERVICE,
+            grants=(AuthorityGrant.MODEL_INFERENCE,),
+            session_id="flush-idempotent",
+        ),
+    )
+    try:
+        with patch(
+            "src.memory.consolidator.completion_with_fallback",
+            AsyncMock(return_value=mock_resp),
+        ), patch(
+            "src.memory.consolidator.add_memory",
+            return_value="vec-1",
+        ) as mock_add_memory, patch(
+            "src.memory.consolidator.refresh_bounded_guardian_snapshot",
+            AsyncMock(side_effect=[RuntimeError("snapshot down"), None]),
+        ):
+            first = await flush_session_memory(
+                "flush-idempotent",
+                trigger="post_response",
+                manager=manager,
+            )
+            second = await flush_session_memory(
+                "flush-idempotent",
+                trigger="session_end",
+                manager=manager,
+            )
+    finally:
+        reset_runtime_context(tokens)
 
     memories = await memory_repository.list_memories_by_kinds(
         kinds=(MemoryKind.communication_preference,),
@@ -217,6 +232,94 @@ async def test_delete_triggers_session_end_flush(async_db):
     assert deleted is True
     mock_flush.assert_awaited_once()
     assert mock_flush.await_args.kwargs["trigger"] == "session_end"
+
+
+async def test_delete_holds_process_cleanup_fence_through_database_teardown(async_db):
+    manager = SessionManager()
+    await manager.get_or_create("delete-fence-session")
+    events = []
+
+    original_begin = process_runtime_manager.begin_session_cleanup
+    original_end = process_runtime_manager.end_session_cleanup
+
+    def begin(session_id):
+        events.append("begin")
+        acquired = original_begin(session_id)
+        assert acquired is True
+        return acquired
+
+    def end(session_id):
+        events.append("end")
+        original_end(session_id)
+
+    async def flush(*_args, **_kwargs):
+        events.append("flush")
+        assert "delete-fence-session" in process_runtime_manager._stopping_sessions
+
+    def stop(session_id, *, cleanup_fence_held, fail_closed):
+        events.append("stop")
+        assert session_id == "delete-fence-session"
+        assert cleanup_fence_held is True
+        assert fail_closed is True
+        assert session_id in process_runtime_manager._stopping_sessions
+        return 0
+
+    with (
+        patch("src.agent.session.flush_session_memory", side_effect=flush),
+        patch.object(process_runtime_manager, "begin_session_cleanup", side_effect=begin),
+        patch.object(process_runtime_manager, "end_session_cleanup", side_effect=end),
+        patch.object(process_runtime_manager, "stop_processes_for_session", side_effect=stop),
+    ):
+        assert await manager.delete("delete-fence-session") is True
+
+    assert events == ["begin", "flush", "stop", "end"]
+    assert "delete-fence-session" not in process_runtime_manager._stopping_sessions
+
+
+async def test_delete_fails_closed_when_process_cleanup_fence_is_owned(async_db):
+    manager = SessionManager()
+    session_id = "delete-fence-conflict"
+    await manager.get_or_create(session_id)
+    assert process_runtime_manager.begin_session_cleanup(session_id) is True
+    try:
+        with patch("src.agent.session.flush_session_memory", new_callable=AsyncMock) as mock_flush:
+            assert await manager.delete(session_id) is False
+        mock_flush.assert_not_awaited()
+        assert await manager.get(session_id) is not None
+    finally:
+        process_runtime_manager.end_session_cleanup(session_id)
+
+
+async def test_delete_fails_closed_when_process_cleanup_is_incomplete(async_db):
+    manager = SessionManager()
+    session_id = "delete-process-unknown"
+    await manager.get_or_create(session_id)
+    receipt = {
+        "session_id": session_id,
+        "requested": 1,
+        "stopped": 0,
+        "unknown": 1,
+        "failed": 0,
+        "conflict": 0,
+    }
+
+    with (
+        patch("src.agent.session.flush_session_memory", new_callable=AsyncMock),
+        patch.object(
+            process_runtime_manager,
+            "stop_processes_for_session",
+            side_effect=SessionProcessCleanupError(receipt),
+        ) as stop_processes,
+    ):
+        deleted = await manager.delete(session_id)
+
+    assert deleted is False
+    stop_processes.assert_called_once_with(
+        session_id,
+        cleanup_fence_held=True,
+        fail_closed=True,
+    )
+    assert await manager.get(session_id) is not None
 
 
 def test_workflow_completion_triggers_memory_flush():

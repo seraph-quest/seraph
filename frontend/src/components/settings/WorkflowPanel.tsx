@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 
 import { API_URL } from "../../config/constants";
+import { apiFetch } from "../../lib/api";
 import { useChatStore } from "../../stores/chatStore";
 import { buildWorkflowDraft, type WorkflowInfo } from "./workflowDraft";
 
@@ -82,7 +83,7 @@ export function WorkflowPanel() {
 
   const fetchWorkflows = useCallback(async () => {
     try {
-      const response = await fetch(`${API_URL}/api/workflows`);
+      const response = await apiFetch(`${API_URL}/api/workflows`);
       if (!response.ok) {
         setStatus("Failed to load workflows");
         return;
@@ -104,7 +105,7 @@ export function WorkflowPanel() {
   const handleToggle = async (name: string, enabled: boolean) => {
     setStatus(`${enabled ? "Enabling" : "Disabling"} ${name}...`);
     try {
-      const response = await fetch(`${API_URL}/api/workflows/${name}`, {
+      const response = await apiFetch(`${API_URL}/api/workflows/${name}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ enabled }),
@@ -123,7 +124,7 @@ export function WorkflowPanel() {
   const handleReload = async () => {
     setStatus("Reloading workflows...");
     try {
-      const response = await fetch(`${API_URL}/api/workflows/reload`, { method: "POST" });
+      const response = await apiFetch(`${API_URL}/api/workflows/reload`, { method: "POST" });
       if (!response.ok) {
         setStatus("Failed to reload workflows");
         return;

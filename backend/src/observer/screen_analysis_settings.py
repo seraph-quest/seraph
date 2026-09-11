@@ -8,8 +8,33 @@ from pathlib import Path
 
 from config.settings import settings
 
-VALID_SCREEN_ANALYSIS_PROVIDERS = {"", "apple-vision", "local-vlm", "openrouter"}
+# The active phase has one semantic-analysis provider. Historical provider
+# values are invalidated on read instead of remaining an executable escape
+# hatch to local VLM or Apple Vision routes.
+VALID_SCREEN_ANALYSIS_PROVIDERS = {"", "openrouter"}
+OPENROUTER_SCREEN_MODEL_PREFIX = "openrouter/"
 SCREENSHOT_FOLDER_ENV = "SERAPH_SCREENSHOT_FOLDER"
+
+
+def normalize_openrouter_model_identifier(value: object) -> str:
+    """Return an explicitly OpenRouter-qualified model id or an empty value.
+
+    Screenshot settings are persisted across runtime migrations. Requiring the
+    provider prefix makes a stale local/VLM model unexecutable even when a
+    historical settings file still contains it.
+    """
+    candidate = str(value or "").strip()
+    if not candidate.startswith(OPENROUTER_SCREEN_MODEL_PREFIX):
+        return ""
+    model_id = candidate.removeprefix(OPENROUTER_SCREEN_MODEL_PREFIX)
+    if (
+        not model_id
+        or "/" not in model_id
+        or any(character.isspace() or ord(character) < 32 for character in model_id)
+        or len(model_id) > 256
+    ):
+        return ""
+    return f"{OPENROUTER_SCREEN_MODEL_PREFIX}{model_id}"
 
 
 def screen_analysis_settings_path() -> Path:
@@ -59,7 +84,7 @@ def read_screen_analysis_settings() -> dict[str, object]:
     payload["provider"] = provider
     payload["enabled"] = bool(payload.get("enabled"))
     payload["preserve_captures"] = bool(payload.get("preserve_captures"))
-    payload["model"] = str(payload.get("model") or "")
+    payload["model"] = normalize_openrouter_model_identifier(payload.get("model"))
     payload["archive_dir"] = str(Path(str(payload.get("archive_dir") or "")).expanduser().resolve())
 
     screenshot_folder = str(payload.get("screenshot_folder") or "").strip()
@@ -106,7 +131,10 @@ def effective_screen_analysis_enabled() -> bool:
 
 def effective_screen_analysis_model() -> str:
     """Return the model label Seraph should send/report for screenshot semantic analysis."""
-    return settings.local_vlm_model.strip() or str(read_screen_analysis_settings().get("model") or "").strip()
+    configured = normalize_openrouter_model_identifier(settings.screen_analysis_model)
+    if configured:
+        return configured
+    return normalize_openrouter_model_identifier(read_screen_analysis_settings().get("model"))
 
 
 def _default_screen_analysis_settings() -> dict[str, object]:
@@ -114,7 +142,7 @@ def _default_screen_analysis_settings() -> dict[str, object]:
         os.environ.get("SERAPH_SCREEN_ANALYSIS_PROVIDER", "").strip()
         or settings.screen_analysis_provider.strip()
     )
-    model = settings.local_vlm_model.strip() or settings.codex_local_model.strip()
+    model = normalize_openrouter_model_identifier(settings.screen_analysis_model)
     screen_archive_dir = _screen_archive_dir()
     env_screenshot_folder = os.environ.get(SCREENSHOT_FOLDER_ENV, "").strip()
     payload: dict[str, object] = {

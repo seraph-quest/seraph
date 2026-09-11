@@ -14,6 +14,7 @@ import json
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from sqlalchemy import or_
 from sqlmodel import col, select
 
 from src.db.engine import get_session
@@ -38,7 +39,7 @@ SOURCE_PROJECTION_CLAIM_BOUNDARY = (
     "audit_projected_workflow_receipt_not_durable_state_machine"
 )
 TRUST_BOUNDARY_BLOCK_REASONS = {"approval_context_changed", "approval_context_missing"}
-TERMINAL_STATUSES = {"completed", "succeeded", "failed", "cancelled"}
+TERMINAL_STATUSES = {"completed", "succeeded", "degraded", "failed", "cancelled"}
 DURABLE_WORKFLOW_ENGINE_BENCHMARK_SUITE_NAME = DURABLE_WORKFLOW_ENGINE_SUITE_NAME
 DURABLE_WORKFLOW_ENGINE_BENCHMARK_SCENARIO_NAMES = DURABLE_WORKFLOW_ENGINE_SCENARIO_NAMES
 PRODUCTION_DURABLE_ORCHESTRATION_SUITE_NAME = "production_durable_orchestration"
@@ -107,6 +108,28 @@ def _as_list(value: Any) -> list[Any]:
     return value if isinstance(value, list) else []
 
 
+def _is_typed_durable_run(run: WorkflowRunState) -> bool:
+    """Return whether a row belongs to the #743 typed job contract.
+
+    The legacy projection has its own serializer and mutation methods. Once a
+    row has a typed schema version or an idempotency binding, those methods
+    must not be able to reset ownership or terminal state behind the durable
+    repository's CAS/fencing checks.
+    """
+    try:
+        schema_version = int(getattr(run, "record_schema_version", 1) or 1)
+    except (TypeError, ValueError):
+        schema_version = 1
+    return schema_version >= 2 or bool(getattr(run, "idempotency_binding", None))
+
+
+def _assert_legacy_mutable(run: WorkflowRunState) -> None:
+    if _is_typed_durable_run(run):
+        raise RuntimeError(
+            "typed durable jobs must be mutated through DurableJobRepository"
+        )
+
+
 def _parse_iso(value: Any) -> datetime | None:
     if isinstance(value, datetime):
         return value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
@@ -151,6 +174,13 @@ def _workflow_v2_metadata(metadata: dict[str, Any] | None) -> dict[str, Any]:
 def _lease_active(lease: dict[str, Any], now: datetime | None = None) -> bool:
     expires_at = _parse_iso(lease.get("expires_at"))
     return bool(lease.get("lease_id") and expires_at and expires_at > (now or _utc_now()))
+
+
+def _sync_lease_revision(v2: dict[str, Any]) -> None:
+    """Keep an active fencing lease at the revision it currently fences."""
+    lease = _as_dict(v2.get("lease"))
+    if lease.get("lease_id"):
+        v2["lease"] = {**lease, "revision": int(v2.get("revision") or 0)}
 
 
 def _stable_id(prefix: str, *parts: Any) -> str:
@@ -409,6 +439,8 @@ class WorkflowStateRepository:
             "workflow_name": run.workflow_name,
             "tool_name": run.tool_name,
             "session_id": run.session_id,
+            "conversation_id": getattr(run, "conversation_id", None) or run.session_id,
+            "operator_session_id": getattr(run, "operator_session_id", None),
             "status": run.status,
             "branch_kind": run.branch_kind,
             "branch_depth": run.branch_depth,
@@ -426,6 +458,37 @@ class WorkflowStateRepository:
             "updated_at": run.updated_at.isoformat(),
             "finished_at": run.finished_at.isoformat() if run.finished_at else None,
             "metadata": _loads(run.metadata_json, {}),
+            "job_id": run.run_identity,
+            "record_schema_version": int(getattr(run, "record_schema_version", 1) or 1),
+            "parent_job_id": getattr(run, "parent_job_id", None),
+            "job_kind": getattr(run, "job_kind", "workflow"),
+            "owner_kind": getattr(run, "owner_kind", "legacy"),
+            "owner_principal_id": getattr(run, "owner_principal_id", None),
+            "service_id": getattr(run, "service_id", None),
+            "goal_id": getattr(run, "goal_id", None),
+            "goal_revision": getattr(run, "goal_revision", None),
+            "plan_revision": getattr(run, "plan_revision", None),
+            "candidate_id": getattr(run, "candidate_id", None),
+            "capability_version": getattr(run, "capability_version", "workflow-v1"),
+            "input_digest": getattr(run, "input_digest", None),
+            "authority_digest": getattr(run, "authority_digest", None),
+            "budget_digest": getattr(run, "budget_digest", None),
+            "idempotency_scope": getattr(run, "idempotency_scope", None),
+            "idempotency_key": getattr(run, "idempotency_key", None),
+            "idempotency_binding": getattr(run, "idempotency_binding", None),
+            "priority": int(getattr(run, "priority", 50) or 0),
+            "dependencies": _loads(getattr(run, "dependencies_json", None), []),
+            "resource_claims": _loads(getattr(run, "resource_claims_json", None), []),
+            "deadline_at": run.deadline_at.isoformat() if getattr(run, "deadline_at", None) else None,
+            "lease_owner": getattr(run, "lease_owner", None),
+            "lease_expires_at": run.lease_expires_at.isoformat() if getattr(run, "lease_expires_at", None) else None,
+            "fencing_token": int(getattr(run, "fencing_token", 0) or 0),
+            "attempt_count": int(getattr(run, "attempt_count", 0) or 0),
+            "max_attempts": int(getattr(run, "max_attempts", 1) or 1),
+            "failure_reason": getattr(run, "failure_reason", None),
+            "checkpoint_receipts": _loads(getattr(run, "checkpoint_receipts_json", None), []),
+            "artifact_receipts": _loads(getattr(run, "artifact_receipts_json", None), []),
+            "effect_receipts": _loads(getattr(run, "effect_receipts_json", None), []),
             "step_records": step_records,
             "state_source": "durable_workflow_state",
             "claim_boundary": DURABLE_WORKFLOW_ENGINE_CLAIM_BOUNDARY,
@@ -475,6 +538,8 @@ class WorkflowStateRepository:
         workflow_name: str,
         tool_name: str,
         session_id: str | None,
+        conversation_id: str | None = None,
+        operator_session_id: str | None = None,
         run_fingerprint: str,
         arguments: dict[str, Any],
         approval_context: dict[str, Any],
@@ -482,6 +547,9 @@ class WorkflowStateRepository:
         root_run_identity: str | None = None,
         branch_kind: str | None = None,
         branch_depth: int = 0,
+        owner_kind: str = "legacy",
+        owner_principal_id: str | None = None,
+        service_id: str | None = None,
     ) -> dict[str, Any]:
         now = _utc_now()
         async with get_session() as db:
@@ -489,6 +557,8 @@ class WorkflowStateRepository:
             existing = (
                 await db.execute(select(WorkflowRunState).where(WorkflowRunState.run_identity == run_identity))
             ).scalars().first()
+            if existing is not None:
+                _assert_legacy_mutable(existing)
             run = existing or WorkflowRunState(
                 run_identity=run_identity,
                 root_run_identity=root_run_identity or run_identity,
@@ -496,13 +566,31 @@ class WorkflowStateRepository:
                 workflow_name=workflow_name,
                 tool_name=tool_name,
                 session_id=session_id,
+                conversation_id=conversation_id or session_id,
+                operator_session_id=operator_session_id,
                 run_fingerprint=run_fingerprint,
+                # Rows created through this compatibility projection remain
+                # legacy until explicitly admitted by DurableJobRepository.
+                record_schema_version=1,
             )
             run.status = "running"
+            run.conversation_id = conversation_id or session_id
+            run.operator_session_id = operator_session_id
             run.arguments_json = _dumps(arguments)
             run.approval_context_json = _dumps(approval_context)
             run.branch_kind = branch_kind
             run.branch_depth = int(branch_depth or 0)
+            run.owner_kind = str(owner_kind or "legacy").strip().lower() or "legacy"
+            run.owner_principal_id = (
+                str(owner_principal_id).strip()
+                if owner_principal_id is not None and str(owner_principal_id).strip()
+                else None
+            )
+            run.service_id = (
+                str(service_id).strip()
+                if service_id is not None and str(service_id).strip()
+                else None
+            )
             run.heartbeat_at = now
             run.updated_at = now
             if existing is None:
@@ -523,6 +611,11 @@ class WorkflowStateRepository:
     ) -> dict[str, Any]:
         now = _utc_now()
         async with get_session() as db:
+            run = (
+                await db.execute(select(WorkflowRunState).where(WorkflowRunState.run_identity == run_identity))
+            ).scalars().first()
+            if run is not None:
+                _assert_legacy_mutable(run)
             existing = (
                 await db.execute(
                     select(WorkflowStepState)
@@ -542,9 +635,6 @@ class WorkflowStateRepository:
             step.updated_at = now
             if existing is None:
                 db.add(step)
-            run = (
-                await db.execute(select(WorkflowRunState).where(WorkflowRunState.run_identity == run_identity))
-            ).scalars().first()
             if run is not None:
                 run.heartbeat_at = now
                 run.updated_at = now
@@ -567,6 +657,11 @@ class WorkflowStateRepository:
     ) -> dict[str, Any]:
         now = _utc_now()
         async with get_session() as db:
+            run = (
+                await db.execute(select(WorkflowRunState).where(WorkflowRunState.run_identity == run_identity))
+            ).scalars().first()
+            if run is not None:
+                _assert_legacy_mutable(run)
             step = (
                 await db.execute(
                     select(WorkflowStepState)
@@ -592,9 +687,6 @@ class WorkflowStateRepository:
             step.error_summary = error_summary
             step.completed_at = now
             step.updated_at = now
-            run = (
-                await db.execute(select(WorkflowRunState).where(WorkflowRunState.run_identity == run_identity))
-            ).scalars().first()
             if run is not None:
                 run.heartbeat_at = now
                 run.updated_at = now
@@ -625,6 +717,7 @@ class WorkflowStateRepository:
             ).scalars().first()
             if run is None:
                 return None
+            _assert_legacy_mutable(run)
             run.status = status
             run.checkpoint_context_json = _dumps(checkpoint_context or {})
             run.artifact_paths_json = _dumps(artifact_paths or [])
@@ -652,6 +745,7 @@ class WorkflowStateRepository:
             ).scalars().first()
             if run is None:
                 return None
+            _assert_legacy_mutable(run)
             run.heartbeat_at = now
             run.updated_at = now
             await db.flush()
@@ -675,6 +769,7 @@ class WorkflowStateRepository:
             ).scalars().first()
             if run is None:
                 return None
+            _assert_legacy_mutable(run)
             metadata = _workflow_v2_metadata(_loads(run.metadata_json, {}))
             v2 = metadata["orchestration_v2"]
             current_lease = _as_dict(v2.get("lease"))
@@ -747,6 +842,7 @@ class WorkflowStateRepository:
             ).scalars().first()
             if run is None:
                 return None
+            _assert_legacy_mutable(run)
             metadata = _workflow_v2_metadata(_loads(run.metadata_json, {}))
             v2 = metadata["orchestration_v2"]
             ledger = [
@@ -828,6 +924,7 @@ class WorkflowStateRepository:
                 ledger.append(receipt)
                 v2["transition_ledger"] = ledger
                 v2["revision"] = revision + 1
+                _sync_lease_revision(v2)
                 run.heartbeat_at = now
                 run.updated_at = now
                 run.metadata_json = _dumps(metadata)
@@ -851,6 +948,7 @@ class WorkflowStateRepository:
             ).scalars().first()
             if run is None:
                 return None
+            _assert_legacy_mutable(run)
             metadata = _workflow_v2_metadata(_loads(run.metadata_json, {}))
             v2 = metadata["orchestration_v2"]
             ledger = [
@@ -878,6 +976,7 @@ class WorkflowStateRepository:
                 }
                 ledger.append(receipt)
                 v2["trigger_ledger"] = ledger
+                _sync_lease_revision(v2)
                 run.heartbeat_at = now
                 run.updated_at = now
                 run.metadata_json = _dumps(metadata)
@@ -899,6 +998,7 @@ class WorkflowStateRepository:
             ).scalars().first()
             if run is None:
                 return None
+            _assert_legacy_mutable(run)
             stored_context = _loads(run.approval_context_json, {})
             metadata = _workflow_v2_metadata(_loads(run.metadata_json, {}))
             v2 = metadata["orchestration_v2"]
@@ -973,6 +1073,7 @@ class WorkflowStateRepository:
             ).scalars().first()
             if run is None:
                 return None
+            _assert_legacy_mutable(run)
             metadata = _workflow_v2_metadata(_loads(run.metadata_json, {}))
             v2 = metadata["orchestration_v2"]
             lease = _as_dict(v2.get("lease"))
@@ -1039,6 +1140,7 @@ class WorkflowStateRepository:
             ).scalars().first()
             if run is None:
                 return None
+            _assert_legacy_mutable(run)
             metadata = _workflow_v2_metadata(_loads(run.metadata_json, {}))
             v2 = metadata["orchestration_v2"]
             receipt = {
@@ -1088,6 +1190,7 @@ class WorkflowStateRepository:
             ).scalars().first()
             if run is None:
                 return None
+            _assert_legacy_mutable(run)
             metadata = _workflow_v2_metadata(_loads(run.metadata_json, {}))
             v2 = metadata["orchestration_v2"]
             receipt = {
@@ -1140,6 +1243,7 @@ class WorkflowStateRepository:
             ).scalars().first()
             if run is None:
                 return None
+            _assert_legacy_mutable(run)
             metadata = _workflow_v2_metadata(_loads(run.metadata_json, {}))
             v2 = metadata["orchestration_v2"]
             receipt = {
@@ -1188,6 +1292,7 @@ class WorkflowStateRepository:
             ).scalars().first()
             if run is None:
                 return None
+            _assert_legacy_mutable(run)
             metadata = _workflow_v2_metadata(_loads(run.metadata_json, {}))
             v2 = metadata["orchestration_v2"]
             receipt = {
@@ -1227,6 +1332,10 @@ class WorkflowStateRepository:
         target: str,
         operator_context: dict[str, Any] | None = None,
         enabled: bool = True,
+        owner: str | None = None,
+        expected_revision: int | None = None,
+        lease_id: str | None = None,
+        transition_key: str | None = None,
     ) -> dict[str, Any] | None:
         now = _utc_now()
         async with get_session() as db:
@@ -1235,8 +1344,34 @@ class WorkflowStateRepository:
             ).scalars().first()
             if run is None:
                 return None
+            _assert_legacy_mutable(run)
             metadata = _workflow_v2_metadata(_loads(run.metadata_json, {}))
             v2 = metadata["orchestration_v2"]
+            revision = int(v2.get("revision") or 0)
+            lease = _as_dict(v2.get("lease"))
+            transition = next(
+                (
+                    item
+                    for item in _as_list(v2.get("transition_ledger"))
+                    if isinstance(item, dict) and item.get("transition_key") == transition_key
+                ),
+                None,
+            ) if transition_key else None
+            blocked_reason = None
+            if owner is not None:
+                if not _lease_active(lease, now) or lease.get("owner") != owner:
+                    blocked_reason = "active_owner_lease_required"
+                elif lease_id is not None and str(lease.get("lease_id") or "") != str(lease_id):
+                    blocked_reason = "lease_mismatch"
+                elif expected_revision is not None and int(expected_revision) != revision:
+                    blocked_reason = "revision_mismatch"
+                elif transition_key is not None and not isinstance(transition, dict):
+                    blocked_reason = "transition_binding_missing"
+                elif (
+                    isinstance(transition, dict)
+                    and transition.get("owner") != owner
+                ):
+                    blocked_reason = "transition_owner_mismatch"
             safe_target = _safe_operator_recovery_target(target)
             receipt = {
                 "kind": "operator_recovery_control",
@@ -1249,6 +1384,15 @@ class WorkflowStateRepository:
                 "receipt_after_action": (
                     f"operator-control:{action}:{_stable_id('recovery_control', run_identity, target)}"
                 ),
+                "status": "blocked" if blocked_reason else "recorded",
+                "blocked_reason": blocked_reason,
+                "owner": owner,
+                "lease_id_digest": _stable_digest(lease_id) if lease_id is not None else None,
+                "expected_revision": expected_revision,
+                "actual_revision": revision,
+                "transition_key": transition_key,
+                "transition_revision": transition.get("revision") if isinstance(transition, dict) else None,
+                "fence_binding": "owner_lease_revision_transition" if owner is not None else "unbound_legacy",
                 "external_action_allowed": False,
                 "recorded_at": now.isoformat(),
                 "operator_visible": True,
@@ -1261,6 +1405,9 @@ class WorkflowStateRepository:
             ]
             receipts.append(receipt)
             v2["operator_recovery_control_receipts"] = receipts[-10:]
+            if not blocked_reason and owner is not None:
+                v2["revision"] = revision + 1
+                _sync_lease_revision(v2)
             run.metadata_json = _dumps(metadata)
             run.updated_at = now
             await db.flush()
@@ -1283,6 +1430,7 @@ class WorkflowStateRepository:
             ).scalars().first()
             if run is None:
                 return None
+            _assert_legacy_mutable(run)
             metadata = _workflow_v2_metadata(_loads(run.metadata_json, {}))
             v2 = metadata["orchestration_v2"]
             receipt = {
@@ -1322,6 +1470,7 @@ class WorkflowStateRepository:
             ).scalars().first()
             if run is None:
                 return None
+            _assert_legacy_mutable(run)
             reviews = (
                 await db.execute(
                     select(WorkflowArtifactReview)
@@ -1359,6 +1508,7 @@ class WorkflowStateRepository:
             receipts.append(receipt)
             v2["artifact_adoption_receipts"] = receipts[-10:]
             v2["revision"] = int(v2.get("revision") or 0) + 1
+            _sync_lease_revision(v2)
             run.metadata_json = _dumps(metadata)
             run.updated_at = now
             await db.flush()
@@ -1374,6 +1524,19 @@ class WorkflowStateRepository:
                 select(WorkflowRunState)
                 .where(WorkflowRunState.status == "running")
                 .where(WorkflowRunState.heartbeat_at < cutoff)
+                # Schema-v2/idempotency-bound jobs are owned by
+                # DurableJobRepository.recover_stale_jobs, which applies the
+                # revision/fencing CAS and explicit external-effect
+                # classification.  Keep this compatibility helper limited to
+                # schema-v1 rows so it cannot manufacture the illegal
+                # ``interrupted`` state on a typed job.
+                .where(
+                    or_(
+                        WorkflowRunState.record_schema_version < 2,
+                        WorkflowRunState.record_schema_version.is_(None),
+                    )
+                )
+                .where(WorkflowRunState.idempotency_binding.is_(None))
             )
             runs = result.scalars().all()
             now = _utc_now()
@@ -1428,9 +1591,17 @@ class WorkflowStateRepository:
             payload["artifact_reviews"] = [self._serialize_review(review) for review in reviews]
             for item in [run, *steps, *reviews]:
                 db.expunge(item)
+            metadata = _as_dict(payload.get("metadata"))
+            orchestration_v2 = _as_dict(metadata.get("orchestration_v2"))
             return {
                 "workflow_name": payload["workflow_name"],
                 "run_fingerprint": payload["run_fingerprint"],
+                "session_id": payload["session_id"],
+                "conversation_id": payload["conversation_id"],
+                "operator_session_id": payload["operator_session_id"],
+                "owner_kind": payload["owner_kind"],
+                "owner_principal_id": payload["owner_principal_id"],
+                "service_id": payload["service_id"],
                 "approval_context": payload["approval_context"],
                 "step_records": payload["step_records"],
                 "checkpoint_step_ids": [step["id"] for step in payload["step_records"]],
@@ -1440,6 +1611,9 @@ class WorkflowStateRepository:
                 "checkpoint_context": payload["checkpoint_context"],
                 "checkpoint_context_available": payload["checkpoint_context_available"],
                 "durable_run_identity": payload["run_identity"],
+                "revision": orchestration_v2.get("revision"),
+                "lease": _as_dict(orchestration_v2.get("lease")),
+                "orchestration_v2": orchestration_v2,
                 "state_source": "durable_workflow_state",
             }
 
@@ -1518,6 +1692,25 @@ class WorkflowStateRepository:
 
 
 workflow_state_repository = WorkflowStateRepository()
+
+# The typed #743 invocation contract uses this same WorkflowRunState table and
+# session factory.  Re-exporting keeps workflow callers on the existing kernel
+# module while avoiding a second durable state authority.
+from src.workflows.job_runtime import (  # noqa: E402
+    DURABLE_JOB_RECORD_SCHEMA_VERSION,
+    DURABLE_JOB_STATUSES,
+    DURABLE_JOB_TERMINAL_STATUSES,
+    DURABLE_JOB_TRANSITIONS,
+    DurableJobError,
+    DurableJobIdempotencyConflict,
+    DurableJobIdentity,
+    DurableJobLeaseError,
+    DurableJobNotFound,
+    DurableJobRepository,
+    DurableJobSpec,
+    DurableJobTransitionError,
+    durable_job_repository,
+)
 
 
 def _canonical_state_id(prefix: str, payload: Any) -> str:

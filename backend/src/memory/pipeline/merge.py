@@ -208,11 +208,25 @@ async def persist_extracted_memories(
     persisted_memories: list[ConsolidatedMemoryItem] = []
 
     for item in extracted_memories:
-        metadata = dict(item.metadata or {})
+        # Extraction is an untrusted proposal.  LLM/OCR/tool payloads cannot
+        # smuggle operator provenance, privacy boundaries, or control state
+        # into canonical memory metadata; those fields are authored only by
+        # the authenticated operator-control seam.
+        metadata = {
+            str(key): value
+            for key, value in dict(item.metadata or {}).items()
+            if str(key) not in {"provenance", "operator_control", "privacy_boundary"}
+        }
         metadata.update(
             {
                 "writer": writer_name,
                 "source": "llm_extract",
+                "source_role": "inferred",
+                "provenance": {
+                    "kind": "inferred_extraction",
+                    "source": "llm_extract",
+                    "source_session_id": session_id,
+                },
             }
         )
         if item.subject_name:
@@ -333,21 +347,20 @@ async def persist_extracted_memories(
                 project_entity_id=link_resolution.project_entity_id,
                 metadata=metadata,
                 last_confirmed_at=item.last_confirmed_at,
+                additional_sources=[
+                    {
+                        "source_type": "message",
+                        "source_session_id": session_id,
+                        "source_message_id": extra_source.id or None,
+                        "snippet": extra_source.content,
+                    }
+                    for extra_source in selected_sources[1:]
+                ],
             )
             structured_succeeded = True
             source_link_count += created_memory.message_source_count
             if created_memory.session_source_created:
                 source_link_count += 1
-            for extra_source in selected_sources[1:]:
-                source_result = await memory_repository.add_memory_source(
-                    memory_id=created_memory.memory_id,
-                    source_type="message",
-                    source_session_id=session_id,
-                    source_message_id=extra_source.id or None,
-                    snippet=extra_source.content,
-                )
-                if source_result.created:
-                    source_link_count += 1
             stored += 1
             created += 1
             persisted_memories.append(item)

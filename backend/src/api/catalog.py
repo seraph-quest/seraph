@@ -10,11 +10,13 @@ from pathlib import Path
 import tempfile
 from typing import Any
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from packaging.version import InvalidVersion, Version
 import yaml
 
 from config.settings import settings
+from src.approval.runtime import get_current_approval_mode, reset_runtime_context, set_runtime_context
+from src.auth.service import bind_operator_principal
 from src.extensions.doctor import doctor_snapshot
 from src.extensions.lifecycle import (
     _compatibility_payload,
@@ -463,14 +465,26 @@ def _catalog_install_approval_preview(name: str) -> tuple[str, dict[str, Any]] |
     return None
 
 
-async def require_catalog_install_approval(name: str, *, consume: bool = True) -> None:
+async def require_catalog_install_approval(
+    name: str,
+    *,
+    consume: bool = True,
+    session_id: str | None = None,
+    owner_operator_session_id: str | None = None,
+) -> None:
     lifecycle_preview = _catalog_install_approval_preview(name)
     if lifecycle_preview is None:
         return
     action, preview = lifecycle_preview
     from src.api.extensions import _require_extension_lifecycle_approval
 
-    await _require_extension_lifecycle_approval(action, preview, consume=consume)
+    await _require_extension_lifecycle_approval(
+        action,
+        preview,
+        consume=consume,
+        session_id=session_id,
+        owner_operator_session_id=owner_operator_session_id,
+    )
 
 
 def install_catalog_item_by_name(name: str) -> dict[str, Any]:
@@ -794,55 +808,69 @@ async def get_catalog():
 
 
 @router.post("/catalog/install/{name}", status_code=201)
-async def install_item(name: str):
+async def install_item(name: str, request: Request):
     """Install a skill or MCP server from the catalog."""
-    await require_catalog_install_approval(name)
-    result = install_catalog_item_by_name(name)
-    if result["ok"]:
-        payload = {"status": result["status"], "name": name, "type": result["type"]}
-        if "extension_id" in result:
-            payload["extension_id"] = result["extension_id"]
-        return payload
-    if result["status"] == "already_installed":
-        if result["type"] == "skill":
-            detail = f"Skill '{name}' is already installed"
-        elif result["type"] == "mcp_server":
-            detail = f"MCP server '{name}' is already installed"
-        else:
-            detail = f"Extension package '{name}' is already installed"
-        raise HTTPException(status_code=409, detail=detail)
-    if result["status"] == "not_bundled":
-        raise HTTPException(
-            status_code=400,
-            detail=f"Skill '{name}' is not bundled and cannot be auto-installed",
-        )
-    if result["status"] == "missing_bundle":
-        missing_label = (
-            "skill file"
-            if result["type"] == "skill"
-            else "extension package"
-            if result["type"] == "extension_pack"
-            else "connector package"
-        )
-        raise HTTPException(status_code=404, detail=f"Bundled {missing_label} for '{name}' not found")
-    if result["status"] == "installed_file_invalid":
-        raise HTTPException(
-            status_code=422,
-            detail=f"Installed skill '{name}' could not be loaded; fix or replace the skill file before retrying",
-        )
-    if result["status"] == "validation_failed":
-        raise HTTPException(
-            status_code=422,
-            detail=result.get("detail") or f"Catalog item '{name}' failed extension validation",
-        )
-    if result["status"] == "install_failed":
-        raise HTTPException(
-            status_code=502,
-            detail=result.get("detail") or f"Catalog item '{name}' could not be installed",
-        )
-    if result["status"] == "missing_url":
-        raise HTTPException(
-            status_code=400,
-            detail=f"MCP server '{name}' is missing a URL in the catalog",
-        )
-    raise HTTPException(status_code=404, detail=f"'{name}' not found in catalog")
+    # capabilities.py imports the catalog helpers above, so keep this shared
+    # authority import local to avoid importing that module during initialization.
+    from src.api.capabilities import _require_authenticated_capability_operator
+
+    operator = _require_authenticated_capability_operator(request)
+    active_session_id = operator.session_id
+    tokens = set_runtime_context(
+        active_session_id,
+        get_current_approval_mode(),
+        trust_principal=bind_operator_principal(operator, active_session_id),
+    )
+    try:
+        await require_catalog_install_approval(name, session_id=active_session_id)
+        result = install_catalog_item_by_name(name)
+        if result["ok"]:
+            payload = {"status": result["status"], "name": name, "type": result["type"]}
+            if "extension_id" in result:
+                payload["extension_id"] = result["extension_id"]
+            return payload
+        if result["status"] == "already_installed":
+            if result["type"] == "skill":
+                detail = f"Skill '{name}' is already installed"
+            elif result["type"] == "mcp_server":
+                detail = f"MCP server '{name}' is already installed"
+            else:
+                detail = f"Extension package '{name}' is already installed"
+            raise HTTPException(status_code=409, detail=detail)
+        if result["status"] == "not_bundled":
+            raise HTTPException(
+                status_code=400,
+                detail=f"Skill '{name}' is not bundled and cannot be auto-installed",
+            )
+        if result["status"] == "missing_bundle":
+            missing_label = (
+                "skill file"
+                if result["type"] == "skill"
+                else "extension package"
+                if result["type"] == "extension_pack"
+                else "connector package"
+            )
+            raise HTTPException(status_code=404, detail=f"Bundled {missing_label} for '{name}' not found")
+        if result["status"] == "installed_file_invalid":
+            raise HTTPException(
+                status_code=422,
+                detail=f"Installed skill '{name}' could not be loaded; fix or replace the skill file before retrying",
+            )
+        if result["status"] == "validation_failed":
+            raise HTTPException(
+                status_code=422,
+                detail=result.get("detail") or f"Catalog item '{name}' failed extension validation",
+            )
+        if result["status"] == "install_failed":
+            raise HTTPException(
+                status_code=502,
+                detail=result.get("detail") or f"Catalog item '{name}' could not be installed",
+            )
+        if result["status"] == "missing_url":
+            raise HTTPException(
+                status_code=400,
+                detail=f"MCP server '{name}' is missing a URL in the catalog",
+            )
+        raise HTTPException(status_code=404, detail=f"'{name}' not found in catalog")
+    finally:
+        reset_runtime_context(tokens)

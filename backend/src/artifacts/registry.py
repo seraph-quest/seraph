@@ -7,10 +7,35 @@ from pathlib import Path
 from typing import Any
 
 from config.settings import settings
+from src.security.trust_contract import (
+    EgressClass,
+    TrustDecision,
+    TrustOperation,
+    TrustRequest,
+    canonical_digest,
+    evaluate_trust,
+)
+from src.workspace import (
+    UnknownWorkspacePathError,
+    WorkspaceStateError,
+    canonical_workspace_registry,
+    canonical_workspace_root,
+)
 
 
 def _workspace_root() -> Path:
-    return Path(settings.workspace_dir).resolve()
+    return canonical_workspace_root(settings.workspace_dir)
+
+
+def _workspace_state(file_path: str) -> dict[str, str | None]:
+    """Return registry ownership without exposing the host workspace path."""
+    try:
+        state_class = canonical_workspace_registry(_workspace_root()).classify_path(file_path)
+    except UnknownWorkspacePathError:
+        return {"class": None, "status": "unclassified"}
+    except WorkspaceStateError:
+        return {"class": None, "status": "blocked"}
+    return {"class": state_class.value, "status": "classified"}
 
 
 def _safe_workspace_path(file_path: str) -> Path | None:
@@ -26,6 +51,73 @@ def _safe_workspace_path(file_path: str) -> Path | None:
 
 def _hash_bytes(payload: bytes) -> str:
     return hashlib.sha256(payload).hexdigest()
+
+
+def _enum_value(value: object) -> str:
+    return str(getattr(value, "value", value))
+
+
+def _legacy_artifact_trust() -> dict[str, Any]:
+    return {
+        "state": "legacy_unclassified",
+        "policy_version": None,
+        "egress_class": None,
+        "principal": None,
+        "decision": None,
+        "provenance": [],
+    }
+
+
+def _governed_artifact_trust(
+    *,
+    content_sha256: str,
+    request: TrustRequest | None,
+    decision: TrustDecision | None,
+) -> dict[str, Any]:
+    if request is None or decision is None:
+        raise ValueError("Governed artifacts require an authority request and decision")
+    if _enum_value(request.operation) != TrustOperation.ARTIFACT_TRANSFER.value:
+        raise ValueError("Governed artifact authority must use artifact_transfer")
+    if not content_sha256 or request.data_digest != content_sha256:
+        raise ValueError("Governed artifact authority must bind the exact content digest")
+    try:
+        EgressClass(_enum_value(request.egress_class))
+    except ValueError as exc:
+        raise ValueError("Governed artifacts require a known data egress class") from exc
+
+    evaluated = evaluate_trust(request)
+    if decision != evaluated or not evaluated.allowed:
+        raise PermissionError(
+            "Governed artifact authority was denied "
+            f"({evaluated.reason_code})"
+        )
+
+    return {
+        "state": "governed",
+        "policy_version": request.policy_version,
+        "egress_class": _enum_value(request.egress_class),
+        "principal": {
+            "principal_id_digest": canonical_digest(
+                {"principal_id": request.principal.principal_id}
+            ),
+            "principal_type": _enum_value(request.principal.principal_type),
+            "authenticated": request.principal.authenticated,
+            "revoked": request.principal.revoked,
+        },
+        "decision": decision.as_dict(),
+        "provenance": [
+            {
+                "origin": _enum_value(item.origin),
+                "source_ref_digest": canonical_digest({"source_id": item.source_id}),
+                "data_digest_receipt": canonical_digest(
+                    {"data_digest": item.data_digest}
+                ),
+                "egress_class": _enum_value(item.egress_class),
+                "instruction_authority": item.instruction_authority,
+            }
+            for item in request.provenance
+        ],
+    }
 
 
 def artifact_id_for(
@@ -58,6 +150,9 @@ def build_artifact_record(
     trust_boundary: str | dict[str, Any] | None = None,
     recovery_hint: str | None = None,
     content: str | bytes | None = None,
+    governed: bool = False,
+    trust_request: TrustRequest | None = None,
+    trust_decision: TrustDecision | None = None,
 ) -> dict[str, Any]:
     raw_bytes: bytes | None = None
     resolved = _safe_workspace_path(file_path)
@@ -71,12 +166,24 @@ def build_artifact_record(
 
     content_sha256 = _hash_bytes(raw_bytes) if raw_bytes is not None else ""
     size_bytes = len(raw_bytes) if raw_bytes is not None else 0
+    workspace_state = _workspace_state(file_path)
     artifact_id = artifact_id_for(
         file_path=file_path,
         artifact_type=artifact_type,
         producer=producer,
         run_id=run_id,
         content_sha256=content_sha256,
+    )
+    if not governed and (trust_request is not None or trust_decision is not None):
+        raise ValueError("Trust metadata requires governed=True")
+    artifact_trust = (
+        _governed_artifact_trust(
+            content_sha256=content_sha256,
+            request=trust_request,
+            decision=trust_decision,
+        )
+        if governed
+        else _legacy_artifact_trust()
     )
     return {
         "artifact_id": artifact_id,
@@ -88,8 +195,11 @@ def build_artifact_record(
         "content_sha256": content_sha256,
         "size_bytes": size_bytes,
         "trust_boundary": trust_boundary or "workspace_write",
+        "trust": artifact_trust,
         "recovery_hint": recovery_hint or "Use the producer rollback receipt or regenerate from the recorded run inputs.",
         "exists": bool(resolved is not None and resolved.exists()),
+        "workspace_state_class": workspace_state["class"],
+        "workspace_state_status": workspace_state["status"],
     }
 
 
@@ -121,4 +231,3 @@ def artifact_records_from_paths(
             )
         )
     return records
-

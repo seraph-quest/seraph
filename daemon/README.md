@@ -1,5 +1,11 @@
 # Seraph Native macOS Daemon
 
+> **Partial/transitional implementation:** This daemon currently posts to the
+> Mac-hosted Seraph backend. The accepted target is a paired, revocable Mac edge
+> connected to the authenticated GPU-hosted core; see
+> [ADR-004](../docs/implementation/decisions/004-gpu-core-mac-edge-topology.md).
+> This README describes current behavior, not proof that the target edge ships.
+
 Lightweight polling daemon that captures the active window (app name + window title) and posts it to the Seraph backend. Runs natively on macOS — outside Docker.
 
 ## Running the Full Project
@@ -244,11 +250,12 @@ Without `--ocr`, the payload is simpler (no `observation` field):
 
 ## Native Notifications
 
-When the browser is not connected but the daemon is alive, Seraph can now fall back to native macOS notifications for selected proactive messages. The daemon polls the backend for one pending notification, shows it with `osascript`, then acknowledges it so it is not repeated.
+When the browser is not connected but the daemon is alive, Seraph can now fall back to native macOS notifications for selected proactive messages. The daemon polls the durable backend outbox with a unique worker identity, records a fenced display attempt, shows it with `osascript`, then acknowledges that receipt so it is not replayed by another worker.
 
 This is a first presence path, not a full desktop shell:
-- notification delivery is best-effort
-- pending notifications are currently in-memory on the backend
+- notification delivery is best-effort and does not prove exactly-once OS display
+- pending, claimed, display-attempted, acknowledged, failed, cancelled, and unknown states are durable in the backend
+- an expired lease or daemon failure becomes `unknown` and requires explicit operator reconciliation before retry
 - broader channel controls and richer desktop presence are still future work
 
 ## How It Works

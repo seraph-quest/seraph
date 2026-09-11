@@ -9,6 +9,15 @@ DEFAULT_ENV_FILE = REPO_ROOT / ".env.dev"
 
 class Settings(BaseSettings):
     openrouter_api_key: str = ""
+    # Active inference policy.  A blank upstream allow-list intentionally keeps
+    # paid dispatch blocked until the operator has selected approved upstreams
+    # in the model-fabric settings surface.
+    openrouter_provider_only: bool = True
+    openrouter_allow_fallbacks: bool = False
+    openrouter_require_parameters: bool = True
+    openrouter_data_collection: str = "deny"
+    openrouter_allowed_upstreams: str = ""
+    openrouter_zero_data_retention: bool = False
     openai_api_key: str = ""
     anthropic_api_key: str = ""
     default_model: str = "openrouter/anthropic/claude-sonnet-4"
@@ -39,14 +48,6 @@ class Settings(BaseSettings):
     provider_task_classes: str = ""  # semicolon-separated model_or_glob=task_class entries
     provider_budget_classes: str = ""  # semicolon-separated model_or_glob=low|medium|high entries
     llm_target_cooldown_seconds: int = 300  # temporarily deprioritize failed LLM targets across requests
-    codex_local_enabled: bool = True
-    codex_local_command: str = "codex"
-    codex_local_model: str = "gpt-5.5"
-    codex_local_reasoning_effort: str = "low"
-    codex_local_sandbox: str = "read-only"
-    codex_local_approval_policy: str = "never"
-    codex_local_allow_workspace_write: bool = False
-    codex_local_timeout_seconds: int = 600
     model_temperature: float = 0.7
     model_max_tokens: int = 4096
     agent_max_steps: int = 10
@@ -54,9 +55,31 @@ class Settings(BaseSettings):
     database_echo: bool = False
     workspace_dir: str = "/app/data"
 
+    # Single-operator authentication. Authentication is activated when a
+    # credential is configured and is mandatory in production. The explicit
+    # test bypass is accepted only when deployment_environment is ``test``.
+    deployment_environment: str = "development"
+    operator_auth_secret: str = ""
+    operator_auth_secret_hash: str = ""
+    # Secret material for the local adopted-capability journal MAC. Keep this
+    # separate from the auth cookie secret when possible; the hash form is
+    # accepted for deployments that only provision a verifier-like secret.
+    capability_journal_secret: str = ""
+    capability_journal_secret_hash: str = ""
+    operator_auth_cookie_name: str = "seraph_operator_session"
+    operator_auth_cookie_secure: bool = False
+    operator_auth_idle_seconds: int = 3600
+    operator_auth_absolute_seconds: int = 86400
+    operator_auth_allowed_hosts: str = "localhost,127.0.0.1,test"
+    operator_auth_allowed_origins: str = "http://localhost:3001,http://127.0.0.1:3001"
+    operator_auth_trusted_proxy_ips: str = ""
+    operator_auth_allow_unauthenticated_tests: bool = False
+    operator_auth_backend_workers: int = 1
+    operator_auth_revocation_poll_seconds: float = 2.0
+
     # Phase 1 — Soul & Memory
     soul_file: str = "soul.md"
-    embedding_model: str = "all-MiniLM-L6-v2"
+    embedding_model: str = ""
     memory_search_top_k: int = 5
     context_window_token_budget: int = 12000  # max tokens for conversation history
     context_window_keep_first: int = 2        # always keep first N messages
@@ -116,14 +139,18 @@ class Settings(BaseSettings):
     screenshot_folder_analysis_interval_seconds: int = 1
     screenshot_folder_analysis_limit: int = 100
     screenshot_folder_analysis_concurrency: int = 2
-    screenshot_folder_analysis_job_timeout_seconds: int = 30
+    # Match the bounded OpenRouter vision request deadline.  A shorter job
+    # timeout would cancel a queued/active remote request while its provider
+    # outcome is still uncertain.
+    screenshot_folder_analysis_job_timeout_seconds: int = 120
     screenshot_observation_digest_enabled: bool = True
     screenshot_observation_digest_interval_min: int = 15
     screenshot_observation_digest_window_min: int = 30
     screenshot_observation_digest_max_chars: int = 6000
     screen_derived_llm_allow_remote: bool = False
     screen_derived_llm_require_profile_proof: bool = True
-    screen_analysis_provider: str = ""  # local-vlm enables semantic screenshot analysis
+    screen_analysis_provider: str = ""  # openrouter enables governed semantic screenshot analysis
+    screen_analysis_model: str = ""
     seraph_vlm_mode: str = ""  # gpu-server, mac-wrapper, or empty for legacy local VLM config
     seraph_vlm_base_url: str = ""  # wrapper base URL, e.g. http://192.168.1.26:8001
     seraph_vlm_backend_url: str = ""  # model backend behind the wrapper, e.g. http://192.168.1.26:8000/v1

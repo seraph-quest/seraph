@@ -6,18 +6,20 @@ Seraph is an active workspace-first AI guardian project. The fastest way to cont
 
 - Read [`README.md`](README.md) for the current public project story.
 - Read [`docs/implementation/STATUS.md`](docs/implementation/STATUS.md) for what is already shipped on `develop`.
-- Read [`docs/implementation/00-master-roadmap.md`](docs/implementation/00-master-roadmap.md) for the current priority queue.
+- Read the [`Project Constitution`](docs/implementation/00-project-constitution.md) for accepted direction.
+- Use the GitHub Project and owning issue for current priority and execution state.
 
 ## Branching Rules
 
 Never commit directly to `develop` or `main`.
 
-Use one of these branch patterns off `develop`:
+Use one of these branch patterns from the base required by the owning issue:
 
 - `feat/<short-name>`
 - `fix/<short-name>`
 
-Target `develop` with your pull request. Only merge `develop` into `main` when explicitly requested by a maintainer.
+Normally target `develop`. Epic #736 milestone PRs target its integration branch
+as defined by ADR-005. Only merge `develop` into `main` when explicitly requested.
 
 ## Local Setup
 

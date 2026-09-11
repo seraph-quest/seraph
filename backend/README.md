@@ -1,5 +1,15 @@
 # Seraph Backend
 
+> The canonical product and provider boundary is defined by the
+> [Project Constitution](../docs/implementation/00-project-constitution.md).
+> Model profiles provide inference only; Seraph owns its capability runtime.
+>
+> **Active Epic #736/#775 phase:** OpenRouter is the only executable inference
+> gateway. Local, direct-vendor, generic OpenAI-compatible, and fallback
+> recipes below are retained as historical configuration examples and are not
+> active setup paths. Use `../env.dev.example` or `../env.prod.example` for
+> the current CPU-host deployment contract.
+
 AI assistant backend powered by FastAPI, smolagents, and LiteLLM-compatible provider routing.
 
 ## Setup
@@ -24,14 +34,7 @@ AI assistant backend powered by FastAPI, smolagents, and LiteLLM-compatible prov
    ./manage.sh -e dev local up
    ```
 
-4. Or run only the backend manually:
-   ```bash
-   cd backend
-   source ../.env.dev
-   uv run uvicorn src.app:create_app --factory --host 0.0.0.0 --port 8004 --reload
-   ```
-
-5. Run via Docker:
+4. Run via Docker:
    ```bash
    ./manage.sh -e dev up -d
    ```
@@ -72,27 +75,20 @@ Receive (streamed):
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `OPENROUTER_API_KEY` | - | OpenRouter API key used by the default example profile |
-| `OPENAI_API_KEY` | - | Remote OpenAI API key used by the `codex-openai` and `gpt-5.5-low` built-in profiles; this does not configure a local Codex command/operator process |
+| `OPENAI_API_KEY` | - | Remote OpenAI API key used by named OpenAI model profiles |
 | `ANTHROPIC_API_KEY` | - | Anthropic API key used by the `claude-anthropic` built-in profile |
 | `DEFAULT_MODEL` | `openrouter/anthropic/claude-sonnet-4` | LLM model identifier |
 | `LLM_API_KEY` | - | Generic primary API key override for LiteLLM-compatible providers |
 | `LLM_API_BASE` | `https://openrouter.ai/api/v1` | Primary OpenAI-compatible API base |
-| `LLM_PROVIDER_PROFILES` | - | JSON object defining named provider/operator profiles with provider kind, model, API base, env secret, options, metadata, fallback chain, enabled state, and safety notes |
+| `LLM_PROVIDER_PROFILES` | - | JSON object defining named inference profiles with provider kind, model, API base, env secret, options, metadata, fallback chain, enabled state, and safety notes |
 | `MODEL_TEMPERATURE` | `0.7` | Generation temperature |
 | `MODEL_MAX_TOKENS` | `4096` | Max response tokens |
 | `AGENT_MAX_STEPS` | `10` | Max agent reasoning steps |
 | `DEBUG` | `false` | Enable debug mode |
 | `WORKSPACE_DIR` | `/app/data` | Agent file workspace |
 | `LOCAL_MODEL` | - | Model id for the local runtime profile |
-| `LOCAL_LLM_API_KEY` | - | Optional API key for the local runtime profile |
-| `LOCAL_LLM_API_BASE` | - | API base for the local runtime profile |
-| `CODEX_LOCAL_ENABLED` | `true` | Enables the local command-backed Codex operator adapter |
-| `CODEX_LOCAL_COMMAND` | `codex` | Local Codex executable name or path |
-| `CODEX_LOCAL_MODEL` | `gpt-5.5` | Model option passed to `codex exec` |
-| `CODEX_LOCAL_SANDBOX` | `read-only` | Sandbox option passed to local `codex exec` |
-| `CODEX_LOCAL_APPROVAL_POLICY` | `never` | Approval policy option passed to local `codex exec` |
-| `CODEX_LOCAL_ALLOW_WORKSPACE_WRITE` | `false` | Explicit opt-in required before local Codex may use `workspace-write` |
-| `CODEX_LOCAL_TIMEOUT_SECONDS` | `600` | Timeout for local Codex operator invocations |
+| `LOCAL_LLM_API_KEY` | - | Historical local-runtime credential; inactive while OpenRouter-only mode is enabled |
+| `LOCAL_LLM_API_BASE` | - | Historical local-runtime endpoint; inactive while OpenRouter-only mode is enabled |
 | `SCREEN_CAPTURE_ARCHIVE_DIR` | `~/Library/Application Support/Seraph/artifacts/screen-captures` | Durable local archive root for preserved screen capture images, redacted provider output, and normalized JSON served by localhost-only observer artifact endpoints |
 | `SCREEN_ANALYSIS_MIN_SECONDS_BETWEEN_CAPTURES` | `0` | Minimum seconds between screen-analysis captures; `0` disables this throttle |
 | `SCREEN_ANALYSIS_MAX_DAILY_CAPTURES` | `0` | Daily screen-analysis capture cap; `0` means unlimited |
@@ -142,7 +138,11 @@ Receive (streamed):
 | `LLM_LOG_MAX_BYTES` | `52428800` | Max bytes per log file before rotation (50 MB) |
 | `LLM_LOG_BACKUP_COUNT` | `5` | Number of rotated log files to keep |
 
-Provider/operator profile recipes:
+## Historical profile recipes
+
+The following recipes document the pre-#775 configurable provider surface for
+rollback and migration review. They must not be enabled for the active
+OpenRouter-only phase.
 
 ```bash
 # Built-in named profiles:
@@ -171,22 +171,11 @@ LLM_API_BASE=https://openrouter.ai/api/v1
 DEFAULT_MODEL=openrouter/anthropic/claude-sonnet-4
 FALLBACK_MODELS=openai/gpt-4.1-mini,openai/gpt-4.1-nano
 
-# Remote OpenAI API operator profiles. `codex-openai` and `gpt-5.5-low`
-# select cloud API routing for Seraph; they are separate from any local Codex
-# command/operator process. The low reasoning setting is an option on the
-# profile, not part of the model id.
+# Remote OpenAI API model profiles. Profile names are API routing identifiers,
+# not external agent runtimes. Low reasoning is a request option, not part of
+# the model id.
 OPENAI_API_KEY=your-openai-key
 RUNTIME_PROFILE_PREFERENCES=chat_agent=codex-openai|openrouter
-
-# Local Codex command-backed operator. This does not use OPENAI_API_KEY and is
-# exposed separately from provider profiles as codex-local.
-CODEX_LOCAL_ENABLED=true
-CODEX_LOCAL_COMMAND=codex
-CODEX_LOCAL_MODEL=gpt-5.5
-CODEX_LOCAL_SANDBOX=read-only
-CODEX_LOCAL_APPROVAL_POLICY=never
-CODEX_LOCAL_ALLOW_WORKSPACE_WRITE=false
-CODEX_LOCAL_TIMEOUT_SECONDS=600
 
 # Anthropic/Claude-oriented routes.
 ANTHROPIC_API_KEY=your-anthropic-key
@@ -201,7 +190,10 @@ RUNTIME_PROFILE_PREFERENCES=chat_agent=openai-compatible|openrouter
 FALLBACK_MODELS=your-provider/smaller-model
 ```
 
-These examples configure routing and operator posture only. They do not assert that a local model, remote OpenAI API route, local Codex operator, Claude-oriented route, or generic endpoint has equivalent behavior.
+These examples configure inference routing only. Names such as `codex-openai`
+and `claude-anthropic` identify API model profiles; they do not invoke Codex CLI,
+Claude Code, or another external agent runtime, and do not imply equivalent
+model behavior.
 
 Runtime routing examples:
 

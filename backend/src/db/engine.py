@@ -684,6 +684,43 @@ async def _ensure_legacy_columns(conn) -> None:
             )
 
 
+async def _ensure_telegram_transport_columns(conn) -> None:
+    """Add fields introduced after the initial #752 transport migration.
+
+    ``SQLModel.metadata.create_all`` creates new tables but does not alter an
+    existing SQLite table.  Keep this additive and idempotent so a workspace
+    that already exercised the provider-free transport can restart safely
+    after lease/readback hardening lands.
+    """
+    definitions = {
+        "telegram_transport_states": {
+            "last_update_at": "DATETIME",
+            "last_error": "VARCHAR",
+        },
+        "telegram_transport_outbox": {
+            "lease_owner": "VARCHAR",
+            "lease_expires_at": "DATETIME",
+            "fencing_token": "INTEGER DEFAULT 0",
+            "deadline_at": "DATETIME",
+            "cancelled_at": "DATETIME",
+        },
+        "telegram_delivery_attempts": {
+            "lease_owner": "VARCHAR",
+            "fencing_token": "INTEGER DEFAULT 0",
+        },
+    }
+    for table_name, columns_to_add in definitions.items():
+        result = await conn.exec_driver_sql(f"PRAGMA table_info({table_name})")
+        existing = {row[1] for row in result.fetchall()}
+        if not existing:
+            continue
+        for column, sql_type in columns_to_add.items():
+            if column not in existing:
+                await conn.exec_driver_sql(
+                    f"ALTER TABLE {table_name} ADD COLUMN {column} {sql_type}"
+                )
+
+
 async def _ensure_search_indexes(conn) -> None:
     await conn.exec_driver_sql(
         """
@@ -864,6 +901,7 @@ async def init_db() -> None:
         # make duplicate legacy bindings abort startup before the migration can
         # preserve and block those rows for operator reconciliation.
         await _ensure_legacy_columns(conn)
+        await _ensure_telegram_transport_columns(conn)
         await conn.run_sync(SQLModel.metadata.create_all)
         await _ensure_memory_indexes(conn)
         await _ensure_search_indexes(conn)

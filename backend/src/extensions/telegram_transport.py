@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import math
 import secrets
 import uuid
 from dataclasses import dataclass, field, replace
@@ -64,6 +65,13 @@ TELEGRAM_PAIRING_MAX_TTL = timedelta(days=30)
 TELEGRAM_DEFAULT_MAX_ATTEMPTS = 3
 TELEGRAM_MAX_TEXT_CHARS = 50_000
 TELEGRAM_MAX_UPDATE_BYTES = 1_000_000
+TELEGRAM_MAX_POLL_BATCH = 100
+TELEGRAM_DEFAULT_POLL_TIMEOUT_SECONDS = 30.0
+TELEGRAM_MAX_POLL_TIMEOUT_SECONDS = 60.0
+TELEGRAM_DEFAULT_EFFECT_TIMEOUT_SECONDS = 15.0
+TELEGRAM_MAX_EFFECT_TIMEOUT_SECONDS = 60.0
+TELEGRAM_DELIVERY_LEASE_SECONDS = 90.0
+TELEGRAM_DELIVERY_DEADLINE_SECONDS = 24 * 60 * 60
 
 
 class TelegramTransportError(RuntimeError):
@@ -76,6 +84,15 @@ class TelegramTransportError(RuntimeError):
 
 class InjectedTelegramTransport(Protocol):
     intercepted: bool
+
+    async def get_updates(
+        self,
+        *,
+        token: str,
+        offset: int,
+        timeout_seconds: float,
+        limit: int,
+    ) -> object: ...
 
     async def send_message(self, *, token: str, chat_id: int, text: str, idempotency_key: str) -> object: ...
 
@@ -100,8 +117,43 @@ class RecordingTelegramTransport:
     """
 
     responses: list[object] = field(default_factory=list)
+    poll_responses: list[object] = field(default_factory=list)
     intercepted: bool = True
     calls: list[dict[str, Any]] = field(default_factory=list)
+    requests: list[dict[str, Any]] = field(default_factory=list)
+
+    async def get_updates(
+        self,
+        *,
+        token: str,
+        offset: int,
+        timeout_seconds: float,
+        limit: int,
+    ) -> object:
+        """Record a Telegram ``getUpdates`` shaped request without a socket.
+
+        The adapter uses this seam to exercise request construction and
+        response parsing.  A token is intentionally represented only by its
+        presence; it never crosses into a call or operator receipt.
+        """
+        request = {
+            "method": "getUpdates",
+            "offset": offset,
+            "timeout_seconds": timeout_seconds,
+            "limit": limit,
+            "token_present": bool(token),
+        }
+        self.requests.append(request)
+        response: object = {"ok": True, "result": []}
+        if self.poll_responses:
+            response = self.poll_responses.pop(0)
+            if callable(response):
+                response = response()
+            if isawaitable(response):
+                response = await response
+            if isinstance(response, BaseException):
+                raise response
+        return response
 
     async def _response(self, *, kind: str, chat_id: int, idempotency_key: str, **payload: Any) -> object:
         self.calls.append({"kind": kind, "chat_id": chat_id, "idempotency_key": idempotency_key, **payload})
@@ -117,6 +169,12 @@ class RecordingTelegramTransport:
         return {"status_code": 200, "message_id": f"recorded:{uuid.uuid4().hex[:12]}"}
 
     async def send_message(self, *, token: str, chat_id: int, text: str, idempotency_key: str) -> object:
+        self.requests.append({
+            "method": "sendMessage",
+            "chat_id": chat_id,
+            "idempotency_key": idempotency_key,
+            "token_present": bool(token),
+        })
         return await self._response(
             kind="text",
             chat_id=chat_id,
@@ -134,6 +192,12 @@ class RecordingTelegramTransport:
         caption: str,
         idempotency_key: str,
     ) -> object:
+        self.requests.append({
+            "method": "sendVoice",
+            "chat_id": chat_id,
+            "idempotency_key": idempotency_key,
+            "token_present": bool(token),
+        })
         return await self._response(
             kind="voice",
             chat_id=chat_id,
@@ -265,11 +329,40 @@ class TelegramTransportAdapter:
         *,
         transport: InjectedTelegramTransport | None = None,
         max_attempts: int = TELEGRAM_DEFAULT_MAX_ATTEMPTS,
+        poll_timeout_seconds: float = TELEGRAM_DEFAULT_POLL_TIMEOUT_SECONDS,
+        effect_timeout_seconds: float = TELEGRAM_DEFAULT_EFFECT_TIMEOUT_SECONDS,
+        delivery_lease_seconds: float = TELEGRAM_DELIVERY_LEASE_SECONDS,
+        delivery_deadline_seconds: int = TELEGRAM_DELIVERY_DEADLINE_SECONDS,
     ) -> None:
         if max_attempts < 1 or max_attempts > 5:
             raise ValueError("max_attempts must be between 1 and 5")
+        if (
+            isinstance(poll_timeout_seconds, bool)
+            or not 0 < float(poll_timeout_seconds) <= TELEGRAM_MAX_POLL_TIMEOUT_SECONDS
+        ):
+            raise ValueError("poll_timeout_seconds must be between zero and sixty seconds")
+        if (
+            isinstance(effect_timeout_seconds, bool)
+            or not 0 < float(effect_timeout_seconds) <= TELEGRAM_MAX_EFFECT_TIMEOUT_SECONDS
+        ):
+            raise ValueError("effect_timeout_seconds must be between zero and sixty seconds")
+        if (
+            isinstance(delivery_lease_seconds, bool)
+            or not 1 <= float(delivery_lease_seconds) <= 300
+        ):
+            raise ValueError("delivery_lease_seconds must be between one and three hundred seconds")
+        if (
+            isinstance(delivery_deadline_seconds, bool)
+            or not 1 <= int(delivery_deadline_seconds) <= 7 * 24 * 60 * 60
+        ):
+            raise ValueError("delivery_deadline_seconds must be between one second and seven days")
         self.transport = transport or RecordingTelegramTransport()
         self.max_attempts = max_attempts
+        self.poll_timeout_seconds = float(poll_timeout_seconds)
+        self.effect_timeout_seconds = float(effect_timeout_seconds)
+        self.delivery_lease_seconds = float(delivery_lease_seconds)
+        self.delivery_deadline_seconds = int(delivery_deadline_seconds)
+        self.worker_id = f"telegram-worker:{uuid.uuid4().hex}"
         self._lock = asyncio.Lock()
 
     async def _state(self, db) -> TelegramTransportState | None:
@@ -316,7 +409,10 @@ class TelegramTransportAdapter:
         raw_token = str(token or "").strip() or f"telegram-test-token-{secrets.token_urlsafe(24)}"
         if len(raw_token.encode()) > 4096:
             raise TelegramTransportError("telegram_token_invalid", "Telegram token is too large")
-        secret_ref = f"{TELEGRAM_TOKEN_SECRET_PREFIX}{owner}:{chat_id}"
+        # The vault reference is scoped to the authenticated owner and paired
+        # chat without copying either value into a secret key or receipt.
+        secret_scope = hashlib.sha256(f"{owner}:{chat_id}".encode("utf-8")).hexdigest()
+        secret_ref = f"{TELEGRAM_TOKEN_SECRET_PREFIX}{secret_scope}"
         async with self._lock:
             async with db_engine.get_session() as db:
                 existing = await self._state(db)
@@ -349,6 +445,8 @@ class TelegramTransportAdapter:
                     "sequence": 0,
                     "rate_events_json": "[]",
                     "revoked_at": None,
+                    "last_update_at": None,
+                    "last_error": None,
                     "updated_at": current,
                 }
                 if existing is None:
@@ -465,6 +563,7 @@ class TelegramTransportAdapter:
                 "pairing_state": "unpaired",
                 "transport_mode": "injected_recording",
                 "live_transport": False,
+                "polling_enabled": False,
             }
         def consent_payload(reference: str | None, expiry: datetime | None) -> dict[str, Any]:
             expires = _aware(expiry)
@@ -487,12 +586,19 @@ class TelegramTransportAdapter:
             "token_fingerprint": row.token_fingerprint,
             "cursor": row.cursor,
             "sequence": row.sequence,
+            "last_update_at": _aware(row.last_update_at).isoformat() if _aware(row.last_update_at) else None,
+            "last_error": row.last_error,
             "consent": {
                 "telegram_transit": consent_payload(row.transit_consent_reference, row.transit_consent_expires_at),
                 "openrouter_inference": consent_payload(row.model_consent_reference, row.model_consent_expires_at),
             },
             "transport_mode": "injected_recording" if getattr(self.transport, "intercepted", False) else "unavailable",
             "live_transport": False,
+            "polling_enabled": bool(
+                getattr(self.transport, "intercepted", False)
+                and callable(getattr(self.transport, "get_updates", None))
+                and row.pairing_state == "active"
+            ),
         }
 
     async def status(self, *, owner_principal_id: str | None = None, operator_session_id: str | None = None) -> dict[str, Any]:
@@ -502,7 +608,217 @@ class TelegramTransportAdapter:
                 row.owner_principal_id != _owner(owner_principal_id) or row.operator_session_id != _session(operator_session_id)
             ):
                 raise TelegramTransportError("telegram_authority_mismatch", "Telegram pairing belongs to another operator session")
-            return self._state_payload_from_row(row)
+            payload = self._state_payload_from_row(row)
+            if row is not None:
+                latest_result = await db.execute(
+                    select(TelegramInboundUpdate)
+                    .where(TelegramInboundUpdate.owner_principal_id == row.owner_principal_id)
+                    .where(TelegramInboundUpdate.operator_session_id == row.operator_session_id)
+                    .order_by(TelegramInboundUpdate.created_at.desc())
+                    .limit(1)
+                )
+                latest = latest_result.scalar_one_or_none()
+                payload["last_update"] = (
+                    {
+                        "status": latest.status,
+                        "reason_code": latest.reason_code,
+                        "update_id": latest.update_id,
+                        "sequence": latest.sequence,
+                        "canonical_message_id": latest.canonical_message_id,
+                        "created_at": (_aware(latest.created_at) or _now()).isoformat(),
+                    }
+                    if latest is not None
+                    else None
+                )
+                count_result = await db.execute(
+                    select(TelegramTransportOutbox.status, TelegramTransportOutbox.id)
+                    .where(TelegramTransportOutbox.owner_principal_id == row.owner_principal_id)
+                    .where(TelegramTransportOutbox.operator_session_id == row.operator_session_id)
+                )
+                counts: dict[str, int] = {}
+                for status_value, _outbox_id in count_result.all():
+                    counts[str(status_value)] = counts.get(str(status_value), 0) + 1
+                payload["outbox_counts"] = counts
+            return payload
+
+    @staticmethod
+    def _poll_items(response: object) -> list[dict[str, Any]]:
+        """Parse the bounded subset of Telegram ``getUpdates`` responses.
+
+        The real HTTP client is intentionally outside this branch.  Keeping
+        response parsing here means an injected transport exercises the same
+        shape and failure rules that a future client must satisfy.
+        """
+        if isinstance(response, dict):
+            if response.get("ok") is False:
+                # Telegram's error text can contain untrusted provider data;
+                # expose only the numeric status in a bounded reason code.
+                code = response.get("error_code")
+                if isinstance(code, bool) or not isinstance(code, int):
+                    code = 502
+                raise TelegramTransportError(
+                    "telegram_poll_http_error",
+                    f"Telegram polling returned status {max(400, min(code, 599))}",
+                )
+            items = response.get("result")
+        else:
+            items = response
+        if not isinstance(items, list) or len(items) > TELEGRAM_MAX_POLL_BATCH:
+            raise TelegramTransportError("telegram_response_invalid", "Telegram polling response is not a bounded update list")
+        normalized: list[dict[str, Any]] = []
+        for item in items:
+            if not isinstance(item, dict):
+                raise TelegramTransportError("telegram_response_invalid", "Telegram polling returned an invalid update")
+            update_id = item.get("update_id")
+            if isinstance(update_id, bool) or not isinstance(update_id, int) or update_id <= 0:
+                raise TelegramTransportError("telegram_response_invalid", "Telegram polling returned an invalid update id")
+            normalized.append(item)
+        return normalized
+
+    @staticmethod
+    def _poll_update_id(payload: dict[str, Any]) -> int:
+        update_id = payload.get("update_id")
+        if isinstance(update_id, bool) or not isinstance(update_id, int) or update_id <= 0:
+            raise TelegramTransportError("telegram_response_invalid", "Telegram polling returned an invalid update id")
+        return update_id
+
+    async def _advance_cursor(
+        self,
+        *,
+        owner_principal_id: str,
+        operator_session_id: str,
+        update_id: int,
+    ) -> bool:
+        """Commit a Telegram polling offset after its update was observed."""
+        async with self._lock:
+            async with db_engine.get_session() as db:
+                row = await self._state(db)
+                if (
+                    row is None
+                    or row.owner_principal_id != owner_principal_id
+                    or row.operator_session_id != operator_session_id
+                    or row.pairing_state != "active"
+                ):
+                    return False
+                row.cursor = max(row.cursor, update_id)
+                row.updated_at = _now()
+                db.add(row)
+                await db.flush()
+                return True
+
+    async def poll_updates(
+        self,
+        *,
+        owner_principal_id: str,
+        operator_session_id: str,
+        limit: int = TELEGRAM_MAX_POLL_BATCH,
+        timeout_seconds: float | None = None,
+    ) -> dict[str, Any]:
+        """Fetch and normalize one bounded long-poll batch.
+
+        This method is an explicit operator/runtime action, not a background
+        loop.  It uses the durable cursor as Telegram's offset, admits each
+        update through :meth:`ingest_update`, and advances the cursor only for
+        updates that were actually observed.  No public webhook is exposed.
+        """
+        owner = _owner(owner_principal_id)
+        operator_session = _session(operator_session_id)
+        if isinstance(limit, bool) or not 1 <= limit <= TELEGRAM_MAX_POLL_BATCH:
+            raise TelegramTransportError("invalid_limit", "Telegram polling limit is outside the bound")
+        timeout = self.poll_timeout_seconds if timeout_seconds is None else float(timeout_seconds)
+        if isinstance(timeout, bool) or not 0 < timeout <= TELEGRAM_MAX_POLL_TIMEOUT_SECONDS or not math.isfinite(timeout):
+            raise TelegramTransportError("invalid_timeout", "Telegram polling timeout is outside the bound")
+        getter = getattr(self.transport, "get_updates", None)
+        if not callable(getter):
+            raise TelegramTransportError("telegram_transport_unavailable", "The configured Telegram transport cannot poll updates")
+
+        async with self._lock:
+            async with db_engine.get_session() as db:
+                row = await self._state(db)
+                if row is None or row.owner_principal_id != owner or row.operator_session_id != operator_session:
+                    raise TelegramTransportError("telegram_authority_mismatch", "Telegram pairing belongs to another operator session")
+                current = _now()
+                self._assert_active_row(row, current=current)
+                token = await vault_repository.get(row.token_secret_ref or "")
+                if not token:
+                    raise TelegramTransportError("telegram_token_unavailable", "Scoped Telegram token is unavailable")
+                cursor_before = row.cursor
+
+        try:
+            response = await asyncio.wait_for(
+                getter(
+                    token=token,
+                    offset=cursor_before + 1,
+                    timeout_seconds=timeout,
+                    limit=limit,
+                ),
+                timeout=timeout + 1.0,
+            )
+            items = self._poll_items(response)
+        except (TimeoutError, asyncio.TimeoutError) as exc:
+            async with self._lock:
+                async with db_engine.get_session() as db:
+                    row = await self._state(db)
+                    if row is not None and row.owner_principal_id == owner and row.operator_session_id == operator_session:
+                        row.last_error = "telegram_poll_timeout"
+                        row.updated_at = _now()
+                        db.add(row)
+            raise TelegramTransportError("telegram_poll_timeout", "Telegram polling exceeded its bounded timeout") from exc
+        except TelegramTransportError:
+            raise
+        except Exception as exc:
+            async with self._lock:
+                async with db_engine.get_session() as db:
+                    row = await self._state(db)
+                    if row is not None and row.owner_principal_id == owner and row.operator_session_id == operator_session:
+                        row.last_error = f"telegram_poll_exception:{type(exc).__name__}"[:128]
+                        row.updated_at = _now()
+                        db.add(row)
+            raise TelegramTransportError("telegram_poll_failed", "Telegram polling failed") from exc
+
+        results: list[dict[str, Any]] = []
+        for item in items:
+            update_id = self._poll_update_id(item)
+            try:
+                receipt = await self.ingest_update(
+                    item,
+                    owner_principal_id=owner,
+                    operator_session_id=operator_session,
+                )
+                result = {
+                    "update_id": update_id,
+                    "status": receipt.get("status"),
+                    "reason_code": receipt.get("reason_code"),
+                    "idempotency_key": receipt.get("idempotency_key"),
+                }
+            except TelegramTransportError as exc:
+                # A malformed or stale item must not terminate the whole
+                # batch.  Keep only the bounded operator-safe reason.
+                result = {"update_id": update_id, "status": "blocked", "reason_code": exc.code}
+            results.append(result)
+            if not await self._advance_cursor(
+                owner_principal_id=owner,
+                operator_session_id=operator_session,
+                update_id=update_id,
+            ):
+                break
+
+        cursor_after = cursor_before
+        async with db_engine.get_session() as db:
+            row = await self._state(db)
+            if row is not None and row.owner_principal_id == owner and row.operator_session_id == operator_session:
+                cursor_after = row.cursor
+        return {
+            "schema_version": TELEGRAM_TRANSPORT_SCHEMA_VERSION,
+            "status": "accepted" if results else "idle",
+            "cursor_before": cursor_before,
+            "cursor_after": cursor_after,
+            "updates_received": len(items),
+            "updates_processed": len(results),
+            "updates": results,
+            "transport": "injected_recording" if getattr(self.transport, "intercepted", False) else "unavailable",
+            "live_transport": False,
+        }
 
     async def _build_update(self, payload: dict[str, Any], row: TelegramTransportState, *, now: datetime) -> TelegramUpdate:
         if not isinstance(payload, dict):
@@ -510,7 +826,7 @@ class TelegramTransportAdapter:
         try:
             if len(repr(payload).encode("utf-8", "replace")) > TELEGRAM_MAX_UPDATE_BYTES:
                 raise TelegramTransportError("update_too_large", "Telegram update exceeds the local bound")
-        except (MemoryError, UnicodeError) as exc:
+        except (MemoryError, RecursionError, TypeError, UnicodeError) as exc:
             raise TelegramTransportError("update_too_large", "Telegram update exceeds the local bound") from exc
         message = payload.get("message") if isinstance(payload.get("message"), dict) else payload
         user = message.get("from") if isinstance(message.get("from"), dict) else message
@@ -541,13 +857,29 @@ class TelegramTransportAdapter:
             if isinstance(content, bytes):
                 content_hash = "sha256:" + hashlib.sha256(content).hexdigest()
                 size_bytes = len(content)
+            try:
+                normalized_size = int(size_bytes or 0)
+                normalized_duration = float(
+                    attachment_payload.get("duration_seconds")
+                    or attachment_payload.get("duration")
+                    or 0
+                )
+            except (TypeError, ValueError, OverflowError) as exc:
+                raise TelegramTransportError("invalid_attachment", "Telegram attachment metadata is invalid") from exc
+            if (
+                isinstance(size_bytes, bool)
+                or normalized_size < 0
+                or not math.isfinite(normalized_duration)
+                or normalized_duration < 0
+            ):
+                raise TelegramTransportError("invalid_attachment", "Telegram attachment metadata is invalid")
             attachment = TelegramAttachmentMetadata(
                 attachment_id=str(attachment_id or ""),
-                media_type=str(attachment_payload.get("media_type") or "audio/ogg"),
-                size_bytes=int(size_bytes or 0),
+                media_type=str(attachment_payload.get("media_type") or "audio/ogg").strip().lower(),
+                size_bytes=normalized_size,
                 content_hash=str(content_hash or ""),
                 voice_note=True,
-                duration_seconds=float(attachment_payload.get("duration_seconds") or attachment_payload.get("duration") or 0),
+                duration_seconds=normalized_duration,
                 file_reference=None,
             )
             text = None
@@ -604,6 +936,7 @@ class TelegramTransportAdapter:
             chat_id=row.chat_id,
             lifecycle=TelegramPairingLifecycleState.ACTIVE,
             expires_at=_aware(row.pairing_expires_at),
+            authority_reference=f"telegram-authority:{row.pairing_id}",
             server_owned_identity=True,
         )
         return TelegramIngressPolicy(
@@ -655,8 +988,19 @@ class TelegramTransportAdapter:
                     )
                     existing = existing_result.scalar_one_or_none()
                     if existing is not None:
+                        row.last_update_at = current
+                        row.last_error = None
+                        db.add(row)
+                        await db.flush()
                         return json.loads(existing.receipt_json)
                 if result.status.value not in {"accepted", "degraded"}:
+                    # Keep the operator-visible degraded/blocked reason
+                    # durable even when the rejected update is intentionally
+                    # excluded from the accepted replay ledger.
+                    row.last_update_at = current
+                    row.last_error = result.reason_code[:128]
+                    db.add(row)
+                    await db.flush()
                     return TelegramTransportReceipt(
                         status=result.status.value,
                         reason_code=result.reason_code,
@@ -784,6 +1128,8 @@ class TelegramTransportAdapter:
                 ))
                 row.cursor = max(row.cursor, update_payload.update_id)
                 row.sequence = max(row.sequence, next_state.last_sequence)
+                row.last_update_at = current
+                row.last_error = None if result.status.value == "accepted" else result.reason_code[:128]
                 row.rate_events_json = json.dumps([
                     {"idempotency_key": event.idempotency_key, "accepted_at": (_aware(event.accepted_at) or current).isoformat()}
                     for event in next_state.rate_events[-20:]
@@ -909,6 +1255,7 @@ class TelegramTransportAdapter:
                     attempt_count=0,
                     max_attempts=self.max_attempts,
                     next_attempt_at=current,
+                    deadline_at=current + timedelta(seconds=self.delivery_deadline_seconds),
                     created_at=current,
                     updated_at=current,
                 ))
@@ -944,34 +1291,58 @@ class TelegramTransportAdapter:
             "status": row.status,
             "attempt_count": row.attempt_count,
             "max_attempts": row.max_attempts,
+            "next_attempt_at": (_aware(row.next_attempt_at) or _now()).isoformat(),
+            "deadline_at": _aware(row.deadline_at).isoformat() if _aware(row.deadline_at) else None,
+            "fencing_token": row.fencing_token,
+            "lease_active": bool(
+                row.lease_owner
+                and _aware(row.lease_expires_at)
+                and (_aware(row.lease_expires_at) or _now()) > _now()
+            ),
             "last_error": row.last_error,
             "response_code": row.response_code,
             "external_message_id": row.external_message_id,
             "created_at": (_aware(row.created_at) or _now()).isoformat(),
             "updated_at": (_aware(row.updated_at) or _now()).isoformat(),
             "delivered_at": (_aware(row.delivered_at).isoformat() if row.delivered_at else None),
+            "cancelled_at": (_aware(row.cancelled_at).isoformat() if row.cancelled_at else None),
         }
 
     @staticmethod
     def _response(response: object) -> tuple[int, str | None]:
         if isinstance(response, dict):
             code = response.get("status_code", response.get("status", 200))
-            try:
-                code_int = int(code)
-            except (TypeError, ValueError):
+            if isinstance(code, bool):
+                code_int = 502
+            else:
+                try:
+                    code_int = int(code)
+                except (TypeError, ValueError, OverflowError):
+                    code_int = 502
+            if not 100 <= code_int <= 599:
                 code_int = 502
             message_id = response.get("message_id")
-            return code_int, str(message_id) if message_id is not None else None
+            if message_id is not None and not isinstance(message_id, (str, int)):
+                message_id = None
+            safe_message_id = str(message_id)[:256] if message_id is not None else None
+            return code_int, safe_message_id
         return 502, None
 
     async def deliver(self, outbox_id: str, *, owner_principal_id: str, operator_session_id: str) -> dict[str, Any]:
         owner = _owner(owner_principal_id)
         operator_session = _session(operator_session_id)
+        outbox_key = str(outbox_id).strip()
+        if not outbox_key or len(outbox_key) > 256:
+            raise TelegramTransportError("telegram_outbox_not_found", "Telegram outbox item is not available")
+
+        # Claim the row with a durable fence.  The in-process lock reduces
+        # local contention; the conditional update remains authoritative when
+        # another worker/process is delivering the same idempotency key.
         async with self._lock:
             async with db_engine.get_session() as db:
                 result = await db.execute(
                     select(TelegramTransportOutbox).where(
-                        TelegramTransportOutbox.id == str(outbox_id),
+                        TelegramTransportOutbox.id == outbox_key,
                         TelegramTransportOutbox.owner_principal_id == owner,
                         TelegramTransportOutbox.operator_session_id == operator_session,
                     )
@@ -981,9 +1352,33 @@ class TelegramTransportAdapter:
                     raise TelegramTransportError("telegram_outbox_not_found", "Telegram outbox item is not available")
                 if row.status == "delivered":
                     return self._outbox_payload(row)
-                if row.status in {"cancelled", "failed"}:
+                if row.status in {"cancelled", "failed", "unknown"}:
                     return self._outbox_payload(row)
                 current = _now()
+                deadline = _aware(row.deadline_at)
+                if deadline is not None and deadline <= current:
+                    row.status = "failed"
+                    row.last_error = "telegram_delivery_deadline_expired"
+                    row.updated_at = current
+                    db.add(row)
+                    return self._outbox_payload(row)
+                if row.status == "sending":
+                    lease_expires = _aware(row.lease_expires_at)
+                    if lease_expires is not None and lease_expires > current:
+                        payload = self._outbox_payload(row)
+                        payload.update({"reason_code": "telegram_delivery_in_flight", "retryable": True})
+                        return payload
+                    # A crashed worker may leave a sending row behind.  The
+                    # outcome is ambiguous because Telegram may have accepted
+                    # the request; require readback/reconciliation instead of
+                    # silently sending a duplicate.
+                    row.status = "unknown"
+                    row.last_error = "telegram_delivery_lease_expired"
+                    row.lease_owner = None
+                    row.lease_expires_at = None
+                    row.updated_at = current
+                    db.add(row)
+                    return self._outbox_payload(row)
                 if row.attempt_count >= row.max_attempts:
                     row.status = "failed"
                     row.last_error = "telegram_delivery_attempts_exhausted"
@@ -994,79 +1389,138 @@ class TelegramTransportAdapter:
                 if state is None or state.owner_principal_id != owner or state.operator_session_id != operator_session:
                     raise TelegramTransportError("telegram_authority_mismatch", "Telegram pairing belongs to another operator session")
                 self._assert_active_row(state, current=current)
-                # The final pairing/consent check is immediately before the
-                # injected callback.  The local lock makes revoke and send
-                # mutually exclusive in one backend process.
                 token = await vault_repository.get(state.token_secret_ref or "")
                 if not token:
                     raise TelegramTransportError("telegram_token_unavailable", "Scoped Telegram token is unavailable")
-                row.attempt_count += 1
-                attempt_index = row.attempt_count
-                row.status = "sending"
-                row.updated_at = current
+                try:
+                    refs = validate_attachment_refs(
+                        json.loads(row.attachment_refs_json or "[]"),
+                        owner_principal_id=owner,
+                    ) if row.kind == "voice" else []
+                except (ConversationIdentityError, TypeError, ValueError, json.JSONDecodeError) as exc:
+                    row.status = "cancelled"
+                    row.cancelled_at = current
+                    row.last_error = "attachment_reference_invalid"
+                    row.attachment_refs_json = "[]"
+                    row.updated_at = current
+                    db.add(row)
+                    raise TelegramTransportError("attachment_reference_invalid", "Telegram voice attachment proof is invalid") from exc
+                # Incrementing the fence and attempt count is one conditional
+                # state transition.  An old worker cannot later finalize this
+                # row because every final update includes both values.
+                next_fence = int(row.fencing_token or 0) + 1
+                attempt_index = int(row.attempt_count or 0) + 1
+                lease_expires = current + timedelta(seconds=self.delivery_lease_seconds)
+                claim = await db.execute(
+                    update(TelegramTransportOutbox)
+                    .where(
+                        TelegramTransportOutbox.id == row.id,
+                        TelegramTransportOutbox.status == "queued",
+                        TelegramTransportOutbox.attempt_count == row.attempt_count,
+                        TelegramTransportOutbox.fencing_token == row.fencing_token,
+                    )
+                    .values(
+                        attempt_count=attempt_index,
+                        status="sending",
+                        lease_owner=self.worker_id,
+                        lease_expires_at=lease_expires,
+                        fencing_token=next_fence,
+                        updated_at=current,
+                    )
+                )
+                if claim.rowcount != 1:
+                    refreshed = await db.execute(select(TelegramTransportOutbox).where(TelegramTransportOutbox.id == row.id))
+                    current_row = refreshed.scalar_one_or_none()
+                    return self._outbox_payload(current_row or row)
+                await db.refresh(row)
                 attempt = TelegramDeliveryAttempt(
                     outbox_id=row.id,
                     attempt_index=attempt_index,
                     status="started",
+                    lease_owner=self.worker_id,
+                    fencing_token=next_fence,
                     started_at=current,
                 )
-                db.add(row)
                 db.add(attempt)
                 await db.flush()
                 content = row.content
-                refs = json.loads(row.attachment_refs_json or "[]")
                 key = row.idempotency_key
                 kind = row.kind
-            # Never hold a database transaction across injected user code.
-            try:
-                if kind == "voice":
-                    response = await self.transport.send_voice(
+        # Never hold a database transaction across injected user code.  The
+        # lease/fence makes this safe across adapter instances.
+        try:
+            if kind == "voice":
+                response = await asyncio.wait_for(
+                    self.transport.send_voice(
                         token=token,
                         chat_id=row.chat_id,
                         attachment=refs[0] if refs else {},
                         caption=content,
                         idempotency_key=key,
-                    )
-                else:
-                    response = await self.transport.send_message(
+                    ),
+                    timeout=self.effect_timeout_seconds,
+                )
+            else:
+                response = await asyncio.wait_for(
+                    self.transport.send_message(
                         token=token,
                         chat_id=row.chat_id,
                         text=content,
                         idempotency_key=key,
-                    )
-                response_code, external_message_id = self._response(response)
-                error = None
-            except (TimeoutError, asyncio.TimeoutError):
-                response_code, external_message_id, error = None, None, "telegram_delivery_timeout"
-            except Exception as exc:
-                response_code, external_message_id, error = None, None, f"telegram_delivery_exception:{type(exc).__name__}"
+                    ),
+                    timeout=self.effect_timeout_seconds,
+                )
+            response_code, external_message_id = self._response(response)
+            error = None
+        except (TimeoutError, asyncio.TimeoutError):
+            response_code, external_message_id, error = None, None, "telegram_delivery_timeout"
+        except Exception as exc:
+            response_code, external_message_id, error = None, None, f"telegram_delivery_exception:{type(exc).__name__}"
+
+        async with self._lock:
             async with db_engine.get_session() as db:
                 current = _now()
                 state = await self._state(db)
-                result = await db.execute(select(TelegramTransportOutbox).where(TelegramTransportOutbox.id == row.id))
+                result = await db.execute(select(TelegramTransportOutbox).where(TelegramTransportOutbox.id == outbox_key))
                 fresh = result.scalar_one_or_none()
                 attempt_result = await db.execute(
                     select(TelegramDeliveryAttempt).where(
-                        TelegramDeliveryAttempt.outbox_id == row.id,
+                        TelegramDeliveryAttempt.outbox_id == outbox_key,
                         TelegramDeliveryAttempt.attempt_index == attempt_index,
+                        TelegramDeliveryAttempt.fencing_token == next_fence,
                     )
                 )
                 attempt_row = attempt_result.scalar_one_or_none()
                 if fresh is None or attempt_row is None:
                     raise TelegramTransportError("telegram_delivery_state_lost", "Telegram delivery receipt could not be persisted")
-                revoked = state is None or state.pairing_state != "active" or state.owner_principal_id != owner or state.operator_session_id != operator_session
+                # A newer claimant owns the row.  A late callback has no right
+                # to finalize it or expose its response.
+                if fresh.fencing_token != next_fence or fresh.lease_owner != self.worker_id or fresh.status != "sending":
+                    return self._outbox_payload(fresh)
+                revoked = (
+                    state is None
+                    or state.pairing_state != "active"
+                    or state.owner_principal_id != owner
+                    or state.operator_session_id != operator_session
+                    or not state.transit_consent_reference
+                    or not _aware(state.transit_consent_expires_at)
+                    or (_aware(state.transit_consent_expires_at) or current) <= current
+                )
                 if revoked:
                     fresh.status = "unknown"
-                    fresh.last_error = "telegram_pairing_revoked_during_delivery"
+                    fresh.last_error = "telegram_authority_revoked_during_delivery"
                     receipt_status = "unknown"
-                    reason = "telegram_pairing_revoked_during_delivery"
+                    reason = "telegram_authority_revoked_during_delivery"
                     retryable = False
                 elif error:
+                    # A timeout/exception may have happened after Telegram
+                    # accepted the request.  Keep it unknown until external
+                    # readback or an operator reconciliation decision.
                     fresh.status = "unknown"
                     fresh.last_error = error
                     receipt_status = "unknown"
                     reason = error
-                    retryable = attempt_index < fresh.max_attempts
+                    retryable = False
                 elif response_code is not None and 200 <= response_code < 300:
                     fresh.status = "delivered"
                     fresh.external_message_id = external_message_id
@@ -1082,7 +1536,7 @@ class TelegramTransportAdapter:
                     reason = "telegram_transport_unauthorized"
                     retryable = False
                 elif response_code == 429 or (response_code is not None and response_code >= 500):
-                    if attempt_index < fresh.max_attempts:
+                    if attempt_index < fresh.max_attempts and (fresh.deadline_at is None or _aware(fresh.deadline_at) > current):
                         fresh.status = "queued"
                         fresh.next_attempt_at = current + timedelta(seconds=min(60, 2 ** (attempt_index - 1)))
                         fresh.last_error = f"telegram_transport_http_{response_code}"
@@ -1091,7 +1545,7 @@ class TelegramTransportAdapter:
                         retryable = True
                     else:
                         fresh.status = "failed"
-                        fresh.last_error = f"telegram_transport_http_{response_code}"
+                        fresh.last_error = "telegram_transport_attempts_exhausted"
                         receipt_status = "failed"
                         reason = "telegram_transport_attempts_exhausted"
                         retryable = False
@@ -1102,6 +1556,8 @@ class TelegramTransportAdapter:
                     reason = "telegram_transport_terminal"
                     retryable = False
                 fresh.response_code = response_code
+                fresh.lease_owner = None
+                fresh.lease_expires_at = None
                 fresh.updated_at = current
                 attempt_row.status = receipt_status
                 attempt_row.response_code = response_code
@@ -1128,6 +1584,121 @@ class TelegramTransportAdapter:
                 .limit(limit)
             )
             return [self._outbox_payload(row) for row in result.scalars().all()]
+
+    @staticmethod
+    def _attempt_payload(row: TelegramDeliveryAttempt) -> dict[str, Any]:
+        return {
+            "id": row.id,
+            "attempt_index": row.attempt_index,
+            "status": row.status,
+            "response_code": row.response_code,
+            "error_code": row.error_code,
+            "fencing_token": row.fencing_token,
+            "started_at": (_aware(row.started_at) or _now()).isoformat(),
+            "finished_at": _aware(row.finished_at).isoformat() if _aware(row.finished_at) else None,
+        }
+
+    async def read_outbox(
+        self,
+        outbox_id: str,
+        *,
+        owner_principal_id: str,
+        operator_session_id: str,
+    ) -> dict[str, Any]:
+        """Read one redacted delivery receipt and its durable attempts."""
+        owner = _owner(owner_principal_id)
+        operator_session = _session(operator_session_id)
+        async with db_engine.get_session() as db:
+            result = await db.execute(
+                select(TelegramTransportOutbox).where(
+                    TelegramTransportOutbox.id == str(outbox_id).strip(),
+                    TelegramTransportOutbox.owner_principal_id == owner,
+                    TelegramTransportOutbox.operator_session_id == operator_session,
+                )
+            )
+            row = result.scalar_one_or_none()
+            if row is None:
+                raise TelegramTransportError("telegram_outbox_not_found", "Telegram outbox item is not available")
+            attempts_result = await db.execute(
+                select(TelegramDeliveryAttempt)
+                .where(TelegramDeliveryAttempt.outbox_id == row.id)
+                .order_by(TelegramDeliveryAttempt.attempt_index.asc())
+            )
+            payload = self._outbox_payload(row)
+            payload["attempts"] = [self._attempt_payload(item) for item in attempts_result.scalars().all()]
+            return payload
+
+    async def reconcile_outbox(
+        self,
+        outbox_id: str,
+        *,
+        owner_principal_id: str,
+        operator_session_id: str,
+        resolution: str,
+        external_message_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Resolve an ambiguous delivery only through an explicit operator action.
+
+        ``retry`` is permitted only inside the original bounded attempt and
+        deadline.  ``delivered`` requires an external message identifier from
+        an operator readback; a timeout is never promoted automatically.
+        """
+        owner = _owner(owner_principal_id)
+        operator_session = _session(operator_session_id)
+        if resolution not in {"retry", "delivered"}:
+            raise TelegramTransportError("invalid_reconciliation", "Telegram reconciliation resolution is invalid")
+        if resolution == "delivered":
+            if not isinstance(external_message_id, (str, int)) or not str(external_message_id).strip() or len(str(external_message_id)) > 256:
+                raise TelegramTransportError("external_message_id_required", "External Telegram message id is required")
+            external_id = str(external_message_id).strip()
+        else:
+            external_id = None
+        async with self._lock:
+            async with db_engine.get_session() as db:
+                result = await db.execute(
+                    select(TelegramTransportOutbox).where(
+                        TelegramTransportOutbox.id == str(outbox_id).strip(),
+                        TelegramTransportOutbox.owner_principal_id == owner,
+                        TelegramTransportOutbox.operator_session_id == operator_session,
+                    )
+                )
+                row = result.scalar_one_or_none()
+                if row is None:
+                    raise TelegramTransportError("telegram_outbox_not_found", "Telegram outbox item is not available")
+                if row.status in {"delivered", "cancelled"}:
+                    return self._outbox_payload(row)
+                if row.status != "unknown":
+                    raise TelegramTransportError("telegram_reconciliation_not_required", "Telegram delivery is not ambiguous")
+                current = _now()
+                if resolution == "retry":
+                    state = await self._state(db)
+                    if state is None or state.owner_principal_id != owner or state.operator_session_id != operator_session:
+                        raise TelegramTransportError("telegram_authority_mismatch", "Telegram pairing belongs to another operator session")
+                    self._assert_active_row(state, current=current)
+                    if row.attempt_count >= row.max_attempts:
+                        raise TelegramTransportError("telegram_delivery_attempts_exhausted", "Telegram delivery retry budget is exhausted")
+                    if row.deadline_at is not None and (_aware(row.deadline_at) or current) <= current:
+                        raise TelegramTransportError("telegram_delivery_deadline_expired", "Telegram delivery deadline has expired")
+                    row.status = "queued"
+                    row.next_attempt_at = current
+                    row.last_error = "operator_reconciled_retry"
+                    row.response_code = None
+                else:
+                    row.status = "delivered"
+                    row.external_message_id = external_id
+                    row.delivered_at = current
+                    row.last_error = "operator_reconciled_delivered"
+                row.lease_owner = None
+                row.lease_expires_at = None
+                row.updated_at = current
+                db.add(row)
+                await db.flush()
+                payload = self._outbox_payload(row)
+                payload.update({
+                    "reason_code": "operator_reconciled_retry" if resolution == "retry" else "operator_reconciled_delivered",
+                    "retryable": resolution == "retry",
+                })
+                return payload
 
 
 default_telegram_transport = TelegramTransportAdapter()

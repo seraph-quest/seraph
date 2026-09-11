@@ -68,6 +68,75 @@ def _pending_is_expired(value: object, *, now: datetime) -> bool:
     return value is None or _approval_is_expired(value, now=now)
 
 
+def _pending_approval_matches_identity(
+    request: ApprovalRequest,
+    *,
+    conversation_id: str | None,
+    owner_principal_id: str | None,
+    owner_operator_session_id: str | None,
+) -> bool:
+    """Match a pending row without allowing a legacy row to shadow it.
+
+    ``get_or_create_pending`` historically selected the newest row before
+    checking its owner.  That made an ownerless legacy row win over a newer
+    row requested by an authenticated operator.  Treat every owner binding as
+    part of the lookup key and require the canonical conversation on rows
+    that can be reused.
+    """
+    expected_conversation = str(conversation_id or "").strip()
+    if not expected_conversation:
+        return False
+    actual_conversation = str(
+        getattr(request, "conversation_id", None)
+        or _approval_detail_value(
+            _approval_details(request),
+            "conversation_id",
+            "approval_conversation_id",
+        )
+        or ""
+    ).strip()
+    if actual_conversation != expected_conversation:
+        return False
+
+    details = _approval_details(request)
+    actual_owner = str(
+        getattr(request, "owner_principal_id", None)
+        or _approval_detail_value(
+            details,
+            "owner_principal_id",
+            "approval_owner_principal_id",
+        )
+        or ""
+    ).strip()
+    actual_operator_session = str(
+        getattr(request, "operator_session_id", None)
+        or _approval_detail_value(
+            details,
+            "operator_session_id",
+            "approval_owner_operator_session_id",
+            "approval_owner_auth_session_id",
+            "approval_owner_session_id",
+        )
+        or ""
+    ).strip()
+    expected_owner = str(owner_principal_id or "").strip()
+    expected_operator_session = str(owner_operator_session_id or "").strip()
+
+    # Bound callers may reuse only a row carrying both halves of the same
+    # owner identity.  An ownerless legacy row is deliberately not a match.
+    if expected_owner or expected_operator_session:
+        return bool(
+            expected_owner
+            and expected_operator_session
+            and actual_owner == expected_owner
+            and actual_operator_session == expected_operator_session
+        )
+
+    # An unbound caller can reuse only an explicitly unbound row.  This keeps
+    # a bound operator's approval from being selected by an ambient request.
+    return not actual_owner and not actual_operator_session
+
+
 def _approval_attachment_refs(request: ApprovalRequest) -> list[dict[str, Any]]:
     try:
         parsed = json.loads(request.attachment_refs_json or "[]")
@@ -463,18 +532,35 @@ class ApprovalRepository:
                 .where(ApprovalRequest.status == "pending")
                 .order_by(col(ApprovalRequest.created_at).desc())
             )
-            request = existing.scalars().first()
-            if request:
-                if supplied_owner and request.owner_principal_id not in (None, supplied_owner):
-                    raise ConversationIdentityError(
-                        "conversation_owner_mismatch",
-                        "Approval request belongs to another operator.",
-                    )
-                if not _pending_is_expired(request.expires_at, now=pending_now):
-                    db.expunge(request)
-                    return request
-                # Expire the old row atomically before creating a new bounded
-                # request with the same fingerprint.
+            pending_rows = _approval_rows(existing)
+            matching_rows = [
+                request
+                for request in pending_rows
+                if _pending_approval_matches_identity(
+                    request,
+                    conversation_id=canonical_session_id,
+                    owner_principal_id=supplied_owner,
+                    owner_operator_session_id=supplied_operator_session,
+                )
+            ]
+            current_rows = [
+                request
+                for request in matching_rows
+                if not _pending_is_expired(request.expires_at, now=pending_now)
+            ]
+            if len(current_rows) > 1:
+                raise ConversationIdentityError(
+                    "approval_ambiguous",
+                    "Multiple pending approvals match the same operator identity.",
+                )
+            if current_rows:
+                request = current_rows[0]
+                db.expunge(request)
+                return request
+            # Expire matching stale rows atomically before creating a new
+            # bounded request.  Rows belonging to another owner remain
+            # untouched and cannot shadow the request being created.
+            for request in matching_rows:
                 await db.execute(
                     update(ApprovalRequest)
                     .execution_options(synchronize_session=False)

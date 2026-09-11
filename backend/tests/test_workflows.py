@@ -5425,6 +5425,8 @@ class TestWorkflowApi:
             "workflow_name": "example",
             "tool_name": "workflow_example",
             "session_id": "session-candidate-symmetric",
+            "conversation_id": "session-candidate-symmetric",
+            "operator_session_id": "operator-session-candidate-symmetric",
             "owner_kind": "service",
             "owner_principal_id": "service:example",
             "goal_id": "goal-candidate-symmetric",
@@ -5436,9 +5438,13 @@ class TestWorkflowApi:
         }
         approval = {
             "id": "approval-candidate-symmetric",
+            "status": "pending",
+            "expires_at": "2099-01-01T00:00:00+00:00",
             "workflow_run_identity": run["run_identity"],
             "workflow_name": run["workflow_name"],
             "session_id": run["session_id"],
+            "conversation_id": run["conversation_id"],
+            "operator_session_id": run["operator_session_id"],
             "owner_kind": run["owner_kind"],
             "owner_principal_id": run["owner_principal_id"],
             "goal_id": run["goal_id"],
@@ -5451,6 +5457,21 @@ class TestWorkflowApi:
         assert not _workflow_approval_matches_identity(run, approval)
         run["candidate_id"] = "candidate-present"
         assert _workflow_approval_matches_identity(run, approval)
+
+        approval["conversation_id"] = "other-conversation"
+        assert not _workflow_approval_matches_identity(run, approval)
+        approval["conversation_id"] = run["conversation_id"]
+        approval["operator_session_id"] = "other-operator-session"
+        assert not _workflow_approval_matches_identity(run, approval)
+        approval["operator_session_id"] = run["operator_session_id"]
+        approval.pop("conversation_id")
+        assert not _workflow_approval_matches_identity(run, approval)
+        approval["conversation_id"] = run["conversation_id"]
+        approval["expires_at"] = "2020-01-01T00:00:00+00:00"
+        assert not _workflow_approval_matches_identity(run, approval)
+        approval["expires_at"] = "2099-01-01T00:00:00+00:00"
+        approval["status"] = "approved"
+        assert not _workflow_approval_matches_identity(run, approval)
 
     @pytest.mark.asyncio
     async def test_workflow_control_refuses_durable_owner_mismatch_before_lease(self):

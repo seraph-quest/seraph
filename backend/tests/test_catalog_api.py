@@ -1018,11 +1018,20 @@ class TestCatalogAPI:
         assert approve.status_code == 200
 
         operator = _test_bypass_operator()
-        await require_catalog_install_approval(
-            "seraph.hermes-browserbase",
-            consume=False,
-            session_id=operator.session_id,
+        tokens = catalog_api.set_runtime_context(
+            operator.session_id,
+            catalog_api.get_current_approval_mode(),
+            trust_principal=catalog_api.bind_operator_principal(operator, operator.session_id),
         )
+        try:
+            await require_catalog_install_approval(
+                "seraph.hermes-browserbase",
+                consume=False,
+                session_id=operator.session_id,
+                owner_operator_session_id=operator.session_id,
+            )
+        finally:
+            catalog_api.reset_runtime_context(tokens)
 
         install = await client.post("/api/catalog/install/seraph.hermes-browserbase")
         assert install.status_code == 201

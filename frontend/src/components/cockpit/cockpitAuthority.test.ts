@@ -50,6 +50,11 @@ describe("cockpit approval authority", () => {
       auth,
       "ready",
     )).toBe(false);
+    expect(isApprovalAuthorityReady(
+      { ...approval, approval_conversation_id: "other-conversation" },
+      auth,
+      "ready",
+    )).toBe(false);
   });
 
   it("treats a missing approval status as non-actionable", () => {
@@ -115,6 +120,9 @@ describe("cockpit approval authority", () => {
         planRevision: 1,
         toolName: "filesystem:workspace",
         sessionId: "conversation-1",
+        conversationId: "conversation-1",
+        ownerPrincipalId: auth.principalId,
+        operatorSessionId: auth.sessionId,
       },
     )?.id).toBe("approval-1");
   });
@@ -191,6 +199,10 @@ describe("cockpit approval authority", () => {
         goalRevision: 1,
         criterionId: "criterion-1",
         planRevision: 1,
+        sessionId: "conversation-1",
+        conversationId: "conversation-1",
+        ownerPrincipalId: auth.principalId,
+        operatorSessionId: auth.sessionId,
       },
     )).toBe(null);
   });
@@ -206,6 +218,9 @@ describe("cockpit approval authority", () => {
         planRevision: 1,
         candidateId: "candidate-current",
         sessionId: "conversation-1",
+        conversationId: "conversation-1",
+        ownerPrincipalId: auth.principalId,
+        operatorSessionId: auth.sessionId,
       },
     )).toBe(null);
     expect(selectApprovalForWorkflow(
@@ -218,6 +233,9 @@ describe("cockpit approval authority", () => {
         planRevision: 1,
         candidateId: "candidate-current",
         sessionId: "conversation-1",
+        conversationId: "conversation-1",
+        ownerPrincipalId: auth.principalId,
+        operatorSessionId: auth.sessionId,
       },
     )?.id).toBe("approval-1");
   });
@@ -232,6 +250,9 @@ describe("cockpit approval authority", () => {
         criterionId: "criterion-1",
         planRevision: 1,
         sessionId: "conversation-1",
+        conversationId: "conversation-1",
+        ownerPrincipalId: auth.principalId,
+        operatorSessionId: auth.sessionId,
       },
     )).toBe(null);
   });

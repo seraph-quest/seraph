@@ -1,7 +1,7 @@
 """Workflows API — list, toggle, reload reusable multi-step workflows."""
 
 from collections import defaultdict
-from datetime import datetime
+from datetime import datetime, timezone
 import hashlib
 import json
 import logging
@@ -1993,6 +1993,46 @@ def _workflow_approval_value(approval: dict[str, Any], *names: str) -> Any:
     return None
 
 
+def _workflow_run_identity_value(run: dict[str, Any], *names: str) -> Any:
+    """Read a workflow identity field from its canonical projection sources."""
+    metadata = run.get("metadata")
+    metadata = metadata if isinstance(metadata, dict) else {}
+    durable = metadata.get("durable_job")
+    durable = durable if isinstance(durable, dict) else {}
+    declared_authority = run.get("declared_authority")
+    declared_authority = declared_authority if isinstance(declared_authority, dict) else {}
+    approval_context = run.get("approval_context")
+    approval_context = approval_context if isinstance(approval_context, dict) else {}
+    for source in (run, metadata, durable, declared_authority, approval_context):
+        for name in names:
+            if source.get(name) is not None:
+                return source.get(name)
+    return None
+
+
+def _workflow_approval_expiry(approval: dict[str, Any]) -> datetime | None:
+    """Parse the finite decision deadline carried by a pending projection."""
+    value = _workflow_approval_value(
+        approval,
+        "approval_owner_expires_at",
+        "approval_expires_at",
+        "decision_expires_at",
+        "expires_at",
+    )
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, datetime):
+        return value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+    try:
+        return datetime.fromtimestamp(float(value), tz=timezone.utc)
+    except (TypeError, ValueError, OverflowError):
+        try:
+            parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        except (TypeError, ValueError):
+            return None
+        return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=timezone.utc)
+
+
 def _workflow_approval_matches_identity(
     run: dict[str, Any],
     approval: dict[str, Any],
@@ -2000,7 +2040,10 @@ def _workflow_approval_matches_identity(
     """Require a pending approval to carry the complete run authority identity."""
     if not isinstance(approval, dict):
         return False
-    expected_run_identity = str(run.get("run_identity") or "").strip()
+    expected_run_identity = str(
+        _workflow_run_identity_value(run, "run_identity", "workflow_run_identity", "job_id")
+        or ""
+    ).strip()
     approval_run_identity = str(
         _workflow_approval_value(
             approval,
@@ -2014,7 +2057,9 @@ def _workflow_approval_matches_identity(
     if not expected_run_identity or approval_run_identity != expected_run_identity:
         return False
 
-    expected_workflow = str(run.get("workflow_name") or run.get("tool_name") or "").strip()
+    expected_workflow = str(
+        _workflow_run_identity_value(run, "workflow_name", "tool_name") or ""
+    ).strip()
     approval_workflow = str(
         _workflow_approval_value(approval, "workflow_name")
         or _workflow_approval_value(approval, "tool_name")
@@ -2022,23 +2067,72 @@ def _workflow_approval_matches_identity(
     ).strip()
     if not expected_workflow or approval_workflow not in {
         expected_workflow,
-        str(run.get("tool_name") or "").strip(),
+        str(_workflow_run_identity_value(run, "tool_name") or "").strip(),
     }:
         return False
 
-    expected_session = str(run.get("session_id") or "").strip()
+    expected_session = str(
+        _workflow_run_identity_value(run, "session_id", "thread_id") or ""
+    ).strip()
     approval_session = str(_workflow_approval_value(approval, "session_id") or "").strip()
     if not expected_session or approval_session != expected_session:
         return False
 
-    expected_owner_kind = str(run.get("owner_kind") or "").strip()
+    expected_conversation = str(
+        _workflow_run_identity_value(
+            run,
+            "conversation_id",
+            "approval_conversation_id",
+        )
+        or expected_session
+        or ""
+    ).strip()
+    approval_conversation = str(
+        _workflow_approval_value(
+            approval,
+            "conversation_id",
+            "approval_conversation_id",
+        )
+        or ""
+    ).strip()
+    if not expected_conversation or not approval_conversation or approval_conversation != expected_conversation:
+        return False
+
+    expected_operator_session = str(
+        _workflow_run_identity_value(
+            run,
+            "operator_session_id",
+            "approval_owner_operator_session_id",
+            "approval_owner_auth_session_id",
+        )
+        or ""
+    ).strip()
+    approval_operator_session = str(
+        _workflow_approval_value(
+            approval,
+            "operator_session_id",
+            "approval_owner_operator_session_id",
+            "approval_owner_auth_session_id",
+        )
+        or ""
+    ).strip()
+    if (
+        not expected_operator_session
+        or not approval_operator_session
+        or approval_operator_session != expected_operator_session
+    ):
+        return False
+
+    expected_owner_kind = str(_workflow_run_identity_value(run, "owner_kind") or "").strip()
     approval_owner_kind = str(
         _workflow_approval_value(approval, "owner_kind", "approval_owner_kind") or ""
     ).strip()
     if not expected_owner_kind or approval_owner_kind != expected_owner_kind:
         return False
 
-    expected_owner = str(run.get("owner_principal_id") or "").strip()
+    expected_owner = str(
+        _workflow_run_identity_value(run, "owner_principal_id") or ""
+    ).strip()
     approval_owner = str(
         _workflow_approval_value(
             approval,
@@ -2051,15 +2145,22 @@ def _workflow_approval_matches_identity(
         return False
 
     for field_name in ("goal_id", "criterion_id", "candidate_id"):
-        expected = str(run.get(field_name) or "").strip()
+        expected = str(_workflow_run_identity_value(run, field_name) or "").strip()
         actual = str(_workflow_approval_value(approval, field_name) or "").strip()
         if actual != expected:
             return False
     for field_name in ("goal_revision", "plan_revision"):
-        expected = _positive_json_integer(run.get(field_name))
+        expected = _positive_json_integer(_workflow_run_identity_value(run, field_name))
         actual = _positive_json_integer(_workflow_approval_value(approval, field_name))
         if expected is None or actual is None or actual != expected:
             return False
+
+    status = str(_workflow_approval_value(approval, "status") or "").strip().lower()
+    if status not in {"pending", "awaiting_approval", "approval_required"}:
+        return False
+    expiry = _workflow_approval_expiry(approval)
+    if expiry is None or expiry <= datetime.now(timezone.utc):
+        return False
 
     pending_ids = run.get("pending_approval_ids")
     approval_id = str(_workflow_approval_value(approval, "id", "approval_id") or "").strip()
@@ -2098,6 +2199,21 @@ def _workflow_identity_fields(value: Any) -> dict[str, Any]:
     authority = _as_record(record.get("declared_authority"))
     sources = (record, metadata, durable, authority, arguments)
     fields: dict[str, Any] = {}
+    for name in (
+        "owner_kind",
+        "owner_principal_id",
+        "service_id",
+        "conversation_id",
+        "approval_conversation_id",
+        "operator_session_id",
+        "approval_owner_operator_session_id",
+        "approval_owner_auth_session_id",
+    ):
+        for source in sources[:-1]:
+            candidate = source.get(name) if source else None
+            if candidate is not None and str(candidate).strip():
+                fields[name] = str(candidate).strip()
+                break
     for name in ("goal_id", "criterion_id", "candidate_id"):
         for source in sources:
             candidate = source.get(name) if source else None

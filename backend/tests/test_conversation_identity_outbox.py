@@ -527,6 +527,51 @@ async def _add_owner(get_session, *, session_id: str, owner_id: str, operator_se
 
 
 @pytest.mark.asyncio
+async def test_pending_selection_does_not_reuse_ownerless_legacy_row(
+    file_db,
+    monkeypatch,
+):
+    get_session, _ = file_db
+    monkeypatch.setattr("src.approval.repository.get_session", get_session)
+    await _add_owner(
+        get_session,
+        session_id="conversation-pending-owner-binding",
+        owner_id="operator:pending-owner",
+        operator_session_id="operator-session-pending-owner",
+    )
+    common = dict(
+        session_id="conversation-pending-owner-binding",
+        tool_name="owner-bound-tool",
+        risk_level="high",
+        summary="Owner-bound approval",
+        fingerprint="owner-bound-fingerprint",
+    )
+    legacy = await approval_repository.get_or_create_pending(
+        **common,
+        details={"expires_at": (datetime.now(timezone.utc) + timedelta(minutes=5)).timestamp()},
+    )
+    bound = await approval_repository.get_or_create_pending(
+        **common,
+        details={
+            "owner_principal_id": "operator:pending-owner",
+            "approval_owner_operator_session_id": "operator-session-pending-owner",
+        },
+    )
+
+    assert bound.id != legacy.id
+    assert bound.owner_principal_id == "operator:pending-owner"
+    assert bound.operator_session_id == "operator-session-pending-owner"
+    reused = await approval_repository.get_or_create_pending(
+        **common,
+        details={
+            "owner_principal_id": "operator:pending-owner",
+            "approval_owner_operator_session_id": "operator-session-pending-owner",
+        },
+    )
+    assert reused.id == bound.id
+
+
+@pytest.mark.asyncio
 async def test_approval_expiry_and_atomic_consume_replay(file_db, monkeypatch):
     get_session, _ = file_db
     monkeypatch.setattr("src.approval.repository.get_session", get_session)

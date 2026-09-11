@@ -13,7 +13,10 @@ export type ApprovalAuthorityRecord = {
   status?: unknown;
   approval_owner_principal_id?: unknown;
   approval_owner_operator_session_id?: unknown;
+  owner_principal_id?: unknown;
+  operator_session_id?: unknown;
   approval_conversation_id?: unknown;
+  conversation_id?: unknown;
   session_id?: unknown;
   thread_id?: unknown;
   approval_owner_source?: unknown;
@@ -191,16 +194,16 @@ export function isApprovalAuthorityReady(
   const status = text(approval.status).toLowerCase();
   if (!status || !["pending", "awaiting_approval", "approval_required"].includes(status)) return false;
 
-  const ownerPrincipal = text(approval.approval_owner_principal_id);
-  const ownerSession = text(approval.approval_owner_operator_session_id);
+  const ownerPrincipal = text(approval.approval_owner_principal_id ?? approval.owner_principal_id);
+  const ownerSession = text(approval.approval_owner_operator_session_id ?? approval.operator_session_id);
   const currentPrincipal = text(auth.principalId);
   const currentSession = text(auth.sessionId);
   if (!ownerPrincipal || !ownerSession || !currentPrincipal || !currentSession) return false;
   if (ownerPrincipal !== currentPrincipal || ownerSession !== currentSession) return false;
 
-  const conversation = text(approval.approval_conversation_id);
+  const conversation = text(approval.approval_conversation_id ?? approval.conversation_id);
   const executionSession = text(approval.session_id) || text(approval.thread_id);
-  if (conversation && (!executionSession || conversation !== executionSession)) return false;
+  if (!conversation || !executionSession || conversation !== executionSession) return false;
 
   if (!approvalScope(approval) || Object.keys(approvalScope(approval) ?? {}).length === 0) return false;
   const suppliedExpiry = approvalExpiry(approval);
@@ -219,8 +222,8 @@ export function redactIdentifier(value: unknown): string {
 
 export function displayApprovalOwnerMetadata(approval: ApprovalAuthorityRecord | null | undefined) {
   return {
-    principal: redactIdentifier(approval?.approval_owner_principal_id),
-    session: redactIdentifier(approval?.approval_owner_operator_session_id),
+    principal: redactIdentifier(approval?.approval_owner_principal_id ?? approval?.owner_principal_id),
+    session: redactIdentifier(approval?.approval_owner_operator_session_id ?? approval?.operator_session_id),
     source: text(approval?.approval_owner_source ?? approval?.approval_source) || "unavailable",
     expiry: displayText(
       approval?.approval_owner_expires_at
@@ -245,6 +248,9 @@ export type WorkflowApprovalBinding = {
   candidateId?: unknown;
   toolName?: unknown;
   sessionId?: unknown;
+  conversationId?: unknown;
+  ownerPrincipalId?: unknown;
+  operatorSessionId?: unknown;
   pendingApprovalIds?: readonly string[] | null;
   pendingApprovals?: readonly ApprovalCandidate[] | null;
 };
@@ -262,8 +268,25 @@ function approvalMatchesWorkflow(
   if (!workflowSessionId) return false;
   if (
     text(approval.session_id) !== workflowSessionId
-    || text(approval.approval_conversation_id) !== workflowSessionId
+    || text(approval.approval_conversation_id ?? approval.conversation_id)
+      !== (text(workflow.conversationId) || workflowSessionId)
   ) return false;
+
+  const workflowOwnerPrincipalId = text(workflow.ownerPrincipalId);
+  const approvalOwnerPrincipalId = text(
+    approval.approval_owner_principal_id ?? approval.owner_principal_id,
+  );
+  if (!workflowOwnerPrincipalId || !approvalOwnerPrincipalId || workflowOwnerPrincipalId !== approvalOwnerPrincipalId) {
+    return false;
+  }
+
+  const workflowOperatorSessionId = text(workflow.operatorSessionId);
+  const approvalOperatorSessionId = text(
+    approval.approval_owner_operator_session_id ?? approval.operator_session_id,
+  );
+  if (!workflowOperatorSessionId || !approvalOperatorSessionId || workflowOperatorSessionId !== approvalOperatorSessionId) {
+    return false;
+  }
 
   const workflowGoalId = text(workflow.goalId);
   const workflowCriterionId = text(workflow.criterionId);

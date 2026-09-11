@@ -37,6 +37,7 @@ from src.workflows.job_runtime import (
     _verified_readback_exists,
     _safe_inputs_digest,
     _safe_structure,
+    _is_typed_admission_receipt,
     _validate_admission_authority,
     _validate_retry_actor,
     durable_job_repository,
@@ -681,6 +682,32 @@ def test_declared_service_session_must_match_durable_session():
     )
     with pytest.raises(ValueError, match="declared authority session_id"):
         _validate_admission_authority(spec)
+
+
+def test_ownerless_effect_projection_only_accepts_typed_authority_denials():
+    run = SimpleNamespace(status="accepted")
+    details = {
+        "decision": "deny",
+        "redacted_receipt": {"reason_code": "approval_missing"},
+    }
+    assert _is_typed_admission_receipt(
+        run,
+        effect_type="authority_gate",
+        receipt_kind="effect",
+        status="blocked",
+        details=details,
+        owner=None,
+        fencing_token=None,
+    )
+    assert not _is_typed_admission_receipt(
+        run,
+        effect_type="destination_write",
+        receipt_kind="effect",
+        status="intent",
+        details=details,
+        owner=None,
+        fencing_token=None,
+    )
 
 
 @pytest.mark.asyncio

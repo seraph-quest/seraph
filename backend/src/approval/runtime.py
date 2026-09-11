@@ -1,6 +1,13 @@
 """Execution context shared with tool wrappers during agent runs."""
 
 from contextvars import ContextVar, Token
+import hashlib
+import hmac
+import json
+import secrets
+import threading
+import time
+from typing import Any, Mapping
 
 from src.security.trust_contract import (
     AuthorityGrant,
@@ -15,6 +22,158 @@ _current_trust_principal: ContextVar[TrustPrincipal | None] = ContextVar(
     "trust_principal",
     default=None,
 )
+_current_fencing_token: ContextVar[str | None] = ContextVar("capability_fencing_token", default=None)
+
+# Approval rows are consumed by the async repository and then handed to the
+# synchronous capability host.  The short-lived binding below is an opaque
+# repository receipt rather than a caller-controlled ``approved`` flag.  The
+# durable approval row remains the source of authority; the process-local
+# registry prevents a caller from manufacturing a valid binding by merely
+# importing a signing helper.
+_CAPABILITY_APPROVAL_KEY = secrets.token_bytes(32)
+_CAPABILITY_APPROVAL_RECEIPT_TTL_SECONDS = 300.0
+_CAPABILITY_APPROVAL_RECEIPT_LIMIT = 1024
+_CAPABILITY_APPROVAL_RECEIPTS: dict[str, tuple[str, float]] = {}
+_CAPABILITY_APPROVAL_RECEIPTS_LOCK = threading.Lock()
+
+
+def _approval_payload_body(payload: Mapping[str, Any]) -> tuple[dict[str, Any], bytes]:
+    body = {str(key): value for key, value in payload.items() if key != "binding_mac"}
+    encoded = json.dumps(body, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
+    return body, encoded
+
+
+def _approval_repository_proof_bytes(payload: Mapping[str, Any]) -> bytes:
+    """Canonicalize the consumed row and exact binding for repository proof.
+
+    This helper only defines the bytes covered by the repository provenance
+    MAC.  It does not issue a receipt or mutate the process-local registry.
+    The row fields are repeated explicitly so mutable caller fields cannot be
+    substituted for the row identity that was conditionally consumed.
+    """
+    body, _ = _approval_payload_body(payload)
+    row = {
+        "approval_id": body.get("approval_id"),
+        "status": body.get("status"),
+        "session_id": body.get("session_id"),
+        "tool_name": body.get("tool_name"),
+        "fingerprint": body.get("fingerprint"),
+        "resolved_at": body.get("approval_resolved_at"),
+    }
+    return json.dumps(
+        {"row": row, "binding": body},
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    ).encode("utf-8")
+
+
+def seal_capability_approval(payload: Mapping[str, Any]) -> dict[str, Any]:
+    """Reject caller-side approval fabrication.
+
+    Approval bindings are issued only by ``ApprovalRepository`` after an
+    approved database row has been conditionally changed to ``consumed``.
+    Keeping this historical name as a failing shim makes accidental use
+    visible while avoiding a public signing primitive.
+    """
+    raise RuntimeError("approval_seal_internal_only")
+
+
+def _seal_capability_approval(
+    payload: Mapping[str, Any],
+    *,
+    repository_proof: str | None = None,
+) -> dict[str, Any]:
+    """Issue an opaque binding for a repository-consumed approval row.
+
+    The public helper above cannot mint an approval.  This seam accepts only
+    a MAC computed by ``ApprovalRepository`` after its conditional
+    approved->consumed update.  The MAC covers the exact row identity,
+    ``resolved_at``, and binding payload.  A payload or caller-constructed
+    model therefore cannot manufacture a repository receipt.
+    """
+    if not isinstance(repository_proof, str) or not repository_proof:
+        raise RuntimeError("approval_seal_proof_missing")
+    body, encoded = _approval_payload_body(payload)
+    if (
+        body.get("status") != "consumed"
+        or not body.get("approval_id")
+        or not body.get("session_id")
+        or not body.get("tool_name")
+        or not body.get("fingerprint")
+        or not body.get("approval_resolved_at")
+    ):
+        raise RuntimeError("approval_seal_proof_invalid")
+    expected_proof = hmac.new(
+        _CAPABILITY_APPROVAL_KEY,
+        _approval_repository_proof_bytes(payload),
+        hashlib.sha256,
+    ).hexdigest()
+    if not hmac.compare_digest(repository_proof, expected_proof):
+        raise RuntimeError("approval_seal_proof_invalid")
+    receipt_token = secrets.token_urlsafe(32)
+    body["receipt_token"] = receipt_token
+    encoded = json.dumps(body, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
+    body["binding_mac"] = hmac.new(_CAPABILITY_APPROVAL_KEY, encoded, hashlib.sha256).hexdigest()
+    issued_at = time.monotonic()
+    with _CAPABILITY_APPROVAL_RECEIPTS_LOCK:
+        cutoff = issued_at - _CAPABILITY_APPROVAL_RECEIPT_TTL_SECONDS
+        for token, (_, token_time) in list(_CAPABILITY_APPROVAL_RECEIPTS.items()):
+            if token_time < cutoff:
+                _CAPABILITY_APPROVAL_RECEIPTS.pop(token, None)
+        while len(_CAPABILITY_APPROVAL_RECEIPTS) >= _CAPABILITY_APPROVAL_RECEIPT_LIMIT:
+            _CAPABILITY_APPROVAL_RECEIPTS.pop(next(iter(_CAPABILITY_APPROVAL_RECEIPTS)))
+        _CAPABILITY_APPROVAL_RECEIPTS[receipt_token] = (
+            hashlib.sha256(encoded).hexdigest(),
+            issued_at,
+        )
+    return body
+
+
+def verify_capability_approval(payload: Mapping[str, Any]) -> bool:
+    """Verify a currently issued repository approval binding.
+
+    Verification is deliberately process-local and short lived.  A binding
+    from a prior process cannot authorize an effect after restart, while the
+    durable approval row remains auditable as consumed.
+    """
+    verified, _ = _approval_binding_record(payload)
+    return verified
+
+
+def _approval_binding_record(payload: Mapping[str, Any]) -> tuple[bool, str | None]:
+    supplied = payload.get("binding_mac")
+    receipt_token = payload.get("receipt_token")
+    if not isinstance(supplied, str) or not isinstance(receipt_token, str):
+        return False, None
+    body = {str(key): value for key, value in payload.items() if key != "binding_mac"}
+    encoded = json.dumps(body, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
+    expected = hmac.new(_CAPABILITY_APPROVAL_KEY, encoded, hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(supplied, expected):
+        return False, None
+    with _CAPABILITY_APPROVAL_RECEIPTS_LOCK:
+        issued = _CAPABILITY_APPROVAL_RECEIPTS.get(receipt_token)
+        if issued is None:
+            return False, None
+        digest, issued_at = issued
+        if time.monotonic() - issued_at > _CAPABILITY_APPROVAL_RECEIPT_TTL_SECONDS:
+            _CAPABILITY_APPROVAL_RECEIPTS.pop(receipt_token, None)
+            return False, None
+        return hmac.compare_digest(digest, hashlib.sha256(encoded).hexdigest()), receipt_token
+
+
+def _consume_capability_approval(payload: Mapping[str, Any]) -> bool:
+    """Consume one repository-issued receipt at the host boundary."""
+    verified, receipt_token = _approval_binding_record(payload)
+    if not verified or receipt_token is None:
+        return False
+    with _CAPABILITY_APPROVAL_RECEIPTS_LOCK:
+        # Re-check under the write lock so two concurrent effects cannot use
+        # one consumed approval receipt.
+        if receipt_token not in _CAPABILITY_APPROVAL_RECEIPTS:
+            return False
+        _CAPABILITY_APPROVAL_RECEIPTS.pop(receipt_token, None)
+    return True
 
 
 def set_runtime_context(
@@ -53,6 +212,28 @@ def get_current_approval_mode() -> str:
 def get_current_trust_principal() -> TrustPrincipal | None:
     """Return the authenticated principal bound to the current runtime turn."""
     return _current_trust_principal.get()
+
+
+def set_runtime_trust_principal(principal: TrustPrincipal | None) -> Token:
+    """Temporarily bind a verified service/job principal to the current turn."""
+    return _current_trust_principal.set(principal)
+
+
+def reset_runtime_trust_principal(token: Token) -> None:
+    _current_trust_principal.reset(token)
+
+
+def set_runtime_fencing_token(token: str | None) -> Token:
+    """Bind a durable job lease fence to the current execution context."""
+    return _current_fencing_token.set(str(token) if token is not None else None)
+
+
+def reset_runtime_fencing_token(token: Token) -> None:
+    _current_fencing_token.reset(token)
+
+
+def get_current_fencing_token() -> str | None:
+    return _current_fencing_token.get()
 
 
 def scheduled_workflow_service_principal(

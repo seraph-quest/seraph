@@ -1,6 +1,7 @@
 """Persistence for pending approval requests."""
 
 import hashlib
+import hmac
 import json
 from datetime import datetime, timedelta, timezone
 from typing import Any, Mapping
@@ -11,6 +12,11 @@ from sqlmodel import select, col
 from src.db.engine import get_session
 from src.db.models import ApprovalRequest, Session
 from src.db.session_refs import ensure_sessions_exist
+from src.approval.runtime import (
+    _CAPABILITY_APPROVAL_KEY,
+    _approval_repository_proof_bytes,
+    _seal_capability_approval,
+)
 from src.conversation.identity import (
     ConversationIdentityError,
     build_conversation_identity,
@@ -474,7 +480,7 @@ class ApprovalRepository:
         tool_name: str,
         fingerprint: str,
         owner_operator_session_id: str | None = None,
-    ) -> bool:
+    ) -> dict[str, Any] | bool | None:
         async with get_session() as db:
             result = await db.execute(
                 select(ApprovalRequest)
@@ -526,7 +532,39 @@ class ApprovalRepository:
                 )
                 .values(status="consumed", resolved_at=now)
             )
-            return consumed.rowcount == 1
+            if consumed.rowcount != 1:
+                return None
+            details: dict[str, Any]
+            try:
+                parsed_details = json.loads(request.details_json) if request.details_json else {}
+            except (TypeError, ValueError):
+                parsed_details = {}
+            details = dict(parsed_details) if isinstance(parsed_details, Mapping) else {}
+            binding_payload = {
+                "approval_id": str(request.id),
+                "status": "consumed",
+                "session_id": str(request.session_id or ""),
+                "tool_name": str(request.tool_name),
+                "fingerprint": str(request.fingerprint),
+                "owner_operator_session_id": str(owner_operator_session_id or ""),
+                "approval_expires_at": details.get("approval_expires_at"),
+                "approval_context": (
+                    dict(details["approval_context"])
+                    if isinstance(details.get("approval_context"), Mapping)
+                    else None
+                ),
+                "approval_resolved_at": now.isoformat(),
+                "consumed_at": now.isoformat(),
+            }
+            repository_proof = hmac.new(
+                _CAPABILITY_APPROVAL_KEY,
+                _approval_repository_proof_bytes(binding_payload),
+                hashlib.sha256,
+            ).hexdigest()
+            return _seal_capability_approval(
+                binding_payload,
+                repository_proof=repository_proof,
+            )
 
     async def consume_approved_for_resume(
         self,

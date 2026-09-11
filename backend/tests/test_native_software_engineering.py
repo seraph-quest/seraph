@@ -26,6 +26,23 @@ from src.workflows.native_software_engineering import (
 )
 
 
+def test_native_artifact_writer_rejects_symlink_and_oversized_payload(tmp_path, monkeypatch):
+    monkeypatch.setattr(settings, "workspace_dir", str(tmp_path))
+    artifact_dir = tmp_path / ".seraph" / "native-software-engineering" / "jobs" / "job" / "artifacts"
+    artifact_dir.mkdir(parents=True)
+    outside = tmp_path / "outside.json"
+    outside.write_text("keep", encoding="utf-8")
+    link = artifact_dir / "result.json"
+    link.symlink_to(outside)
+
+    with pytest.raises(native_swe.NativeSoftwareEngineeringError, match="artifact_write_blocked"):
+        native_swe._write_json(link, {"status": "forged"})
+    assert outside.read_text(encoding="utf-8") == "keep"
+
+    with pytest.raises(native_swe.NativeSoftwareEngineeringError, match="artifact_size_exceeded"):
+        native_swe._write_json(artifact_dir / "large.json", {"payload": "x" * (1 * 1024 * 1024)})
+
+
 class _FakeNativeJobRepository:
     """Small in-memory durable contract for the cancellation race proof."""
 
@@ -115,7 +132,9 @@ async def test_native_cancel_forwards_dispatch_revision_fence():
 
 
 @pytest.fixture(autouse=True)
-def _native_service_principal():
+def _native_service_principal(monkeypatch):
+    monkeypatch.setattr(settings, "capability_journal_secret", "test-capability-journal-secret")
+    monkeypatch.setattr(settings, "capability_journal_secret_hash", "")
     tokens = set_runtime_context(
         "native-swe-fixture-session",
         "high_risk",
@@ -455,7 +474,9 @@ async def test_runner_required_approval_stops_before_apply(async_db, tmp_path, m
     result = await run_native_software_engineering_fixture(
         fixture_root=native_software_engineering_fixture_root(),
         job_id="native-swe-awaiting-approval",
-        session_id="native-swe-awaiting-approval-session",
+        # The service principal fixture is explicitly bound to this session;
+        # an unbound request must remain fail-closed before admission.
+        session_id="native-swe-fixture-session",
         patch_approval="required",
     )
 

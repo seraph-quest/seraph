@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import threading
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -578,3 +580,284 @@ def test_goal_snapshot_binding_rejects_mismatch_and_noncanonical_rows(tmp_path: 
             session_id=session,
             goal_snapshot={**_goal_snapshot(owner, session), "canonical_source": "caller"},
         )
+
+
+def test_review_does_not_accept_phantom_dependency_from_external_map(tmp_path: Path):
+    manifest_text = _manifest().replace(
+        "dependencies: []",
+        f"dependencies: [{{id: seraph.missing, version: '>=1', digest: {'a' * 64}}}]",
+    )
+    root, pack = _package(tmp_path, manifest_text=manifest_text)
+    store = CapabilityPackLifecycle(tmp_path / "lifecycle.json")
+
+    with pytest.raises(CapabilityPackLifecycleError, match="dependency is unavailable: seraph.missing"):
+        store.review(
+            pack,
+            root_path=root,
+            goal_id="goal-local",
+            available_dependencies={
+                "seraph.missing": {"version": "1.2.0", "digest": "a" * 64},
+            },
+        )
+
+
+def test_accepted_job_requires_recovery_and_reconciliation_is_pack_scoped(tmp_path: Path):
+    first_root, first = _package(tmp_path / "first")
+    second_root, second = _package(
+        tmp_path / "second",
+        manifest_text=_manifest().replace("id: seraph.local-proof-pack", "id: seraph.second-proof-pack"),
+    )
+    store = CapabilityPackLifecycle(tmp_path / "lifecycle.json")
+    first_owner, first_session = "operator:first", "session:first"
+    second_owner, second_session = "operator:second", "session:second"
+    _activate(store, first_root, first, owner=first_owner, session=first_session)
+    _activate(store, second_root, second, owner=second_owner, session=second_session)
+    store.register_job(
+        first.id,
+        goal_id="goal-local",
+        job_id="job-accepted-after-restart",
+        status="accepted",
+        owner_principal_id=first_owner,
+        session_id=first_session,
+    )
+    store.register_job(
+        first.id,
+        goal_id="goal-local",
+        job_id="job-queued-after-restart",
+        status="queued",
+        owner_principal_id=first_owner,
+        session_id=first_session,
+    )
+
+    first_reconciliation = store.reconcile(
+        first.id,
+        owner_principal_id=first_owner,
+        session_id=first_session,
+    )
+    assert first_reconciliation["status"] == "blocked"
+    assert first_reconciliation["changes"] == [
+        {
+            "job_id": "job-accepted-after-restart",
+            "status": "blocked",
+            "reason": "interrupted_accepted_job_requires_operator_recovery",
+        },
+        {
+            "job_id": "job-queued-after-restart",
+            "status": "blocked",
+            "reason": "interrupted_accepted_job_requires_operator_recovery",
+        },
+    ]
+    assert {job["status"] for job in store.status(first.id)["jobs"]} == {"blocked"}
+
+    second_reconciliation = store.reconcile(
+        second.id,
+        owner_principal_id=second_owner,
+        session_id=second_session,
+    )
+    assert second_reconciliation["status"] == "clean"
+    assert second_reconciliation["scope"] == second.id
+    assert store.status(second.id)["reconciliation"]["status"] == "clean"
+    assert store.status(first.id)["reconciliation"]["status"] == "blocked"
+
+
+def test_dependency_revoke_fences_dependent_pointer_and_jobs(tmp_path: Path):
+    base_root, base = _package(
+        tmp_path / "base",
+        manifest_text=_manifest().replace("id: seraph.local-proof-pack", "id: seraph.base-proof-pack"),
+    )
+    store = CapabilityPackLifecycle(tmp_path / "lifecycle.json")
+    base_owner, base_session = "operator:base", "session:base"
+    base_review = _activate(store, base_root, base, owner=base_owner, session=base_session)
+    base_digest = base_review["review"]["digest"]
+    dependent_text = _manifest().replace(
+        "id: seraph.local-proof-pack", "id: seraph.dependent-proof-pack"
+    ).replace(
+        "dependencies: []",
+        f"dependencies: [{{id: {base.id}, version: '>=1', digest: {base_digest}}}]",
+    )
+    dependent_root, dependent = _package(tmp_path / "dependent", manifest_text=dependent_text)
+    dependent_owner, dependent_session = "operator:dependent", "session:dependent"
+    dependent_review = _activate(
+        store,
+        dependent_root,
+        dependent,
+        owner=dependent_owner,
+        session=dependent_session,
+    )
+    store.register_job(
+        dependent.id,
+        goal_id="goal-local",
+        job_id="dependent-pinned-job",
+        status="queued",
+        owner_principal_id=dependent_owner,
+        session_id=dependent_session,
+    )
+    base_revoke_approval = store.create_operator_approval(
+        base.id,
+        action="revoke",
+        goal_id="goal-local",
+        digest=base_digest,
+        version=base.version,
+        owner_principal_id=base_owner,
+        session_id=base_session,
+        content_digest=base_digest,
+        authority_digest=base.authority_digest,
+    )["approval"]["approval_id"]
+
+    revoked = store.revoke(
+        base.id,
+        approval_id=base_revoke_approval,
+        owner_principal_id=base_owner,
+        session_id=base_session,
+        content_digest=base_digest,
+        authority_digest=base.authority_digest,
+    )
+    dependent_status = store.status(dependent.id)
+    assert revoked["receipt"]["details"]["dependency_dependents"]
+    assert dependent_status["active"]["status"] == "revoked"
+    assert dependent_status["jobs"][0]["status"] == "cancelled"
+    assert dependent_review["review"]["digest"] in dependent_status["revoked_digests"]
+    with pytest.raises(CapabilityPackLifecycleError, match="revoked|binding is invalid"):
+        store.build_execution_contract(
+            dependent.id,
+            goal_id="goal-local",
+            job_id="dependent-after-revoke",
+        )
+
+
+def test_local_artifact_write_and_receipt_commit_are_exclusive_against_revoke(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    root, pack = _package(tmp_path)
+    store = CapabilityPackLifecycle(tmp_path / "lifecycle.json")
+    owner, session = "operator:artifact-fence", "session:artifact-fence"
+    review = _activate(store, root, pack, owner=owner, session=session)
+    digest = review["review"]["digest"]
+    revoke_approval = store.create_operator_approval(
+        pack.id,
+        action="revoke",
+        goal_id="goal-local",
+        digest=digest,
+        version=pack.version,
+        owner_principal_id=owner,
+        session_id=session,
+        content_digest=digest,
+        authority_digest=pack.authority_digest,
+    )["approval"]["approval_id"]
+
+    import src.extensions.capability_pack as capability_pack_module
+
+    original_write = capability_pack_module._write_canary_artifact
+    revoke_started = threading.Event()
+    revoke_finished = threading.Event()
+    revoke_errors: list[BaseException] = []
+
+    def revoke_in_thread() -> None:
+        revoke_started.set()
+        try:
+            store.revoke(
+                pack.id,
+                approval_id=revoke_approval,
+                owner_principal_id=owner,
+                session_id=session,
+                content_digest=digest,
+                authority_digest=pack.authority_digest,
+            )
+        except BaseException as exc:  # pragma: no cover - assertion below reports it
+            revoke_errors.append(exc)
+        finally:
+            revoke_finished.set()
+
+    def gated_write(path: Path, content: bytes) -> None:
+        revoke_thread.start()
+        assert revoke_started.wait(1)
+        # The revoke worker may start, but it must not finish while the
+        # authority transaction owns the lifecycle lock.
+        assert not revoke_finished.wait(0.2)
+        original_write(path, content)
+
+    monkeypatch.setattr(capability_pack_module, "_write_canary_artifact", gated_write)
+    revoke_thread = threading.Thread(target=revoke_in_thread)
+    result = store.execute_local(
+        pack.id,
+        goal_id="goal-local",
+        job_id="job-artifact-fence",
+        domain="primary",
+        artifact_root=tmp_path / "artifacts",
+        artifact_path="brief.md",
+        owner_principal_id=owner,
+        session_id=session,
+        source_url="http://controlled.test/source",
+        intercepted_transport=lambda _url, **_: {"content": "bounded"},
+    )
+    revoke_thread.join(timeout=2)
+    assert not revoke_thread.is_alive()
+    assert not revoke_errors
+    assert result["status"] == "succeeded"
+    assert result["job"]["status"] == "succeeded"
+    assert store.status(pack.id)["active"]["status"] == "revoked"
+
+
+@pytest.mark.asyncio
+async def test_capability_pack_api_uses_persisted_goal_content(monkeypatch: pytest.MonkeyPatch):
+    from src.api.capability_packs import LocalExecutionRequest, capability_pack_execute_local
+
+    persisted_goal = SimpleNamespace(
+        id="goal-local",
+        parent_id=None,
+        path="/",
+        title="Persisted title",
+        description="Persisted description",
+        level="daily",
+        domain="productivity",
+        status="active",
+        start_date=None,
+        due_date=None,
+        sort_order=0,
+        revision=4,
+        success_criterion_json=None,
+        proactive_enabled=True,
+        created_at=None,
+        updated_at=None,
+    )
+    operator = SimpleNamespace(
+        principal=SimpleNamespace(principal_id="operator:api"),
+        session_id="session:api",
+    )
+    captured: dict[str, object] = {}
+
+    async def get_goal(_goal_id: str):
+        return persisted_goal
+
+    class FakeStore:
+        def execute_local(self, pack_id: str, **kwargs: object):
+            captured["pack_id"] = pack_id
+            captured.update(kwargs)
+            return {"status": "succeeded"}
+
+    monkeypatch.setattr("src.api.capability_packs._require_authenticated_capability_operator", lambda _request: operator)
+    monkeypatch.setattr("src.api.capability_packs.goal_repository.get", get_goal)
+    monkeypatch.setattr("src.api.capability_packs._store", lambda: FakeStore())
+    request = LocalExecutionRequest(
+        goal_id="goal-local",
+        job_id="job-api-canonical",
+        domain="secondary",
+        goal_snapshot={
+            "goal_id": "goal-local",
+            "revision": 4,
+            "owner_principal_id": "operator:api",
+            "session_id": "session:api",
+            "title": "FORGED TITLE",
+            "description": "FORGED DESCRIPTION",
+            "canonical_source": "goals",
+        },
+    )
+    result = await capability_pack_execute_local("seraph.local-proof-pack", request, SimpleNamespace())
+    snapshot = captured["goal_snapshot"]
+    assert result == {"status": "succeeded"}
+    assert isinstance(snapshot, dict)
+    assert snapshot["title"] == "Persisted title"
+    assert snapshot["description"] == "Persisted description"
+    assert snapshot["revision"] == 4
+    assert "FORGED TITLE" not in json.dumps(snapshot)

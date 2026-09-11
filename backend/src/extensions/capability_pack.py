@@ -1347,6 +1347,36 @@ def validate_capability_pack_dependencies(
     return tuple(errors)
 
 
+def _dependency_records_from_state(
+    state: Mapping[str, Any],
+    manifest: CapabilityPackManifest,
+) -> dict[str, dict[str, Any]]:
+    """Project only durable dependency records for one reviewed manifest.
+
+    External availability maps are useful for an advisory preflight, but they
+    cannot establish authority.  Lifecycle decisions must always re-read the
+    reviewed version and revocation ledger from the same durable state file.
+    """
+
+    versions = state.get("versions")
+    revoked = state.get("revoked")
+    records: dict[str, dict[str, Any]] = {}
+    for dependency in manifest.dependencies:
+        dependency_versions = versions.get(dependency.id, {}) if isinstance(versions, Mapping) else {}
+        candidate = (
+            dependency_versions.get(dependency.digest)
+            if isinstance(dependency_versions, Mapping)
+            else None
+        )
+        if not isinstance(candidate, Mapping):
+            continue
+        record = dict(candidate)
+        revoked_digests = revoked.get(dependency.id, []) if isinstance(revoked, Mapping) else []
+        record["revoked"] = bool(record.get("revoked")) or dependency.digest in revoked_digests
+        records[dependency.id] = record
+    return records
+
+
 def capability_pack_digest(package_root: str | Path) -> str:
     """Hash package content while excluding mutable top-level signature text."""
     root = Path(package_root)
@@ -1866,6 +1896,109 @@ class CapabilityPackLifecycle:
             job["cancel_reason"] = reason
             cancelled += 1
         return cancelled
+
+    @staticmethod
+    def _record_depends_on(
+        record: Mapping[str, Any],
+        *,
+        dependency_pack_id: str,
+        dependency_digest: str,
+    ) -> bool:
+        dependencies = record.get("dependencies")
+        if not isinstance(dependencies, (list, tuple)):
+            return False
+        return any(
+            isinstance(dependency, Mapping)
+            and dependency.get("id") == dependency_pack_id
+            and dependency.get("digest") == dependency_digest
+            for dependency in dependencies
+        )
+
+    def _cascade_dependency_revocation(
+        self,
+        state: dict[str, Any],
+        *,
+        dependency_pack_id: str,
+        dependency_digest: str,
+    ) -> list[dict[str, Any]]:
+        """Quarantine every reviewed version that transitively needs a revoke.
+
+        Revoking a dependency is an authority change for all consumers.  The
+        cascade is applied while the caller holds the lifecycle transaction
+        lock, so no dependent pointer or pinned job can cross the revocation
+        boundary between the dependency check and the state commit.
+        """
+
+        pending = [(dependency_pack_id, dependency_digest)]
+        seen: set[tuple[str, str]] = set()
+        affected: list[dict[str, Any]] = []
+        versions_by_pack = state.get("versions")
+        while pending:
+            revoked_pack, revoked_digest = pending.pop(0)
+            source = (revoked_pack, revoked_digest)
+            if source in seen:
+                continue
+            seen.add(source)
+            if not isinstance(versions_by_pack, Mapping):
+                break
+            for candidate_pack_id, raw_versions in versions_by_pack.items():
+                if not isinstance(raw_versions, Mapping):
+                    continue
+                for raw_digest, raw_record in raw_versions.items():
+                    if not isinstance(raw_record, Mapping):
+                        continue
+                    candidate_digest = str(raw_digest)
+                    if not _DIGEST_RE.fullmatch(candidate_digest):
+                        continue
+                    if not self._record_depends_on(
+                        raw_record,
+                        dependency_pack_id=revoked_pack,
+                        dependency_digest=revoked_digest,
+                    ):
+                        continue
+                    candidate_id = str(candidate_pack_id)
+                    if candidate_id == revoked_pack and candidate_digest == revoked_digest:
+                        continue
+                    revoked_digests = state.setdefault("revoked", {}).setdefault(candidate_id, [])
+                    was_revoked = candidate_digest in revoked_digests
+                    if not was_revoked:
+                        revoked_digests.append(candidate_digest)
+                    pointer = state.setdefault("active", {}).get(candidate_id)
+                    pointer_fenced = False
+                    if (
+                        isinstance(pointer, Mapping)
+                        and pointer.get("digest") == candidate_digest
+                        and pointer.get("status") in {"active", "paused"}
+                    ):
+                        next_pointer = dict(pointer)
+                        next_pointer.update(
+                            {
+                                "status": "revoked",
+                                "revoked_by_dependency": revoked_pack,
+                                "revoked_dependency_digest": revoked_digest,
+                            }
+                        )
+                        state["active"][candidate_id] = next_pointer
+                        pointer_fenced = True
+                    cancelled_jobs = self._cancel_pack_jobs(
+                        state,
+                        candidate_id,
+                        digest=candidate_digest,
+                        reason="dependency_revoked",
+                    )
+                    if not was_revoked or pointer_fenced or cancelled_jobs:
+                        affected.append(
+                            {
+                                "pack_id": candidate_id,
+                                "digest": candidate_digest,
+                                "pointer_fenced": pointer_fenced,
+                                "cancelled_jobs": cancelled_jobs,
+                                "dependency_pack_id": revoked_pack,
+                                "dependency_digest": revoked_digest,
+                            }
+                        )
+                    pending.append((candidate_id, candidate_digest))
+        return affected
 
     def register_job(
         self,
@@ -2407,6 +2540,12 @@ class CapabilityPackLifecycle:
         if canonical is None:
             return False
         manifest, digest, publisher_trust = canonical
+        dependency_errors = validate_capability_pack_dependencies(
+            manifest,
+            _dependency_records_from_state(state, manifest),
+        )
+        if dependency_errors:
+            return False
         review_id = _review_digest(
             pack_id=manifest.id,
             version=manifest.version,
@@ -2510,9 +2649,10 @@ class CapabilityPackLifecycle:
             load_capability_pack_workflows(root_path, pack)
         except (CapabilityPackError, OSError, UnicodeDecodeError) as exc:
             raise CapabilityPackLifecycleError(str(exc)) from exc
-        # External dependency records are advisory until the state transaction
-        # below confirms the exact reviewed digest.  This avoids accepting a
-        # review merely because the caller supplied a stale availability map.
+        # External dependency records are an advisory preflight only.  The
+        # durable state transaction below must independently contain each
+        # reviewed dependency at the exact digest and version, so a caller
+        # cannot make a phantom dependency look available.
         if available_dependencies is not None:
             dependency_errors = validate_capability_pack_dependencies(pack, available_dependencies)
             if dependency_errors:
@@ -2547,29 +2687,12 @@ class CapabilityPackLifecycle:
         }
         with self._state_lock():
             state = self._load()
-            revoked_dependency_errors: list[str] = []
-            for dependency in pack.dependencies:
-                dependency_versions = state.get("versions", {}).get(dependency.id, {})
-                candidate = dependency_versions.get(dependency.digest) if isinstance(dependency_versions, Mapping) else None
-                if dependency.digest in state.get("revoked", {}).get(dependency.id, []) or (
-                    isinstance(candidate, Mapping) and bool(candidate.get("revoked"))
-                ):
-                    revoked_dependency_errors.append(f"dependency is revoked: {dependency.id}")
-            if revoked_dependency_errors:
-                raise CapabilityPackLifecycleError("; ".join(revoked_dependency_errors))
-            if available_dependencies is None:
-                available_records: dict[str, Any] = {}
-                for dependency in pack.dependencies:
-                    dependency_versions = state["versions"].get(dependency.id, {})
-                    if isinstance(dependency_versions, Mapping):
-                        candidate = dependency_versions.get(dependency.digest)
-                        if isinstance(candidate, Mapping):
-                            record = dict(candidate)
-                            record["revoked"] = bool(record.get("revoked")) or dependency.digest in state.get("revoked", {}).get(dependency.id, [])
-                            available_records[dependency.id] = record
-                state_dependency_errors = validate_capability_pack_dependencies(pack, available_records)
-                if state_dependency_errors:
-                    raise CapabilityPackLifecycleError("; ".join(state_dependency_errors))
+            state_dependency_errors = validate_capability_pack_dependencies(
+                pack,
+                _dependency_records_from_state(state, pack),
+            )
+            if state_dependency_errors:
+                raise CapabilityPackLifecycleError("; ".join(state_dependency_errors))
             state["reviews"][review_id] = review
             versions = state["versions"].setdefault(pack.id, {})
             existing_version = versions.get(digest)
@@ -2639,15 +2762,10 @@ class CapabilityPackLifecycle:
         for key, value in expected.items():
             if review.get(key) != value or review.get("status") != "approved":
                 raise CapabilityPackLifecycleError(f"review binding mismatch for {key}")
-        available_dependencies: dict[str, Any] = {}
-        for dependency in pack.dependencies:
-            dependency_versions = state.get("versions", {}).get(dependency.id, {})
-            candidate = dependency_versions.get(dependency.digest) if isinstance(dependency_versions, Mapping) else None
-            if isinstance(candidate, Mapping):
-                dependency_record = dict(candidate)
-                dependency_record["revoked"] = bool(dependency_record.get("revoked")) or dependency.digest in state.get("revoked", {}).get(dependency.id, [])
-                available_dependencies[dependency.id] = dependency_record
-        dependency_errors = validate_capability_pack_dependencies(pack, available_dependencies)
+        dependency_errors = validate_capability_pack_dependencies(
+            pack,
+            _dependency_records_from_state(state, pack),
+        )
         if dependency_errors:
             raise CapabilityPackLifecycleError("; ".join(dependency_errors))
         revoked = state["revoked"].get(pack.id, [])
@@ -2912,6 +3030,11 @@ class CapabilityPackLifecycle:
             revoked = state["revoked"].setdefault(pack_id, [])
             if target_digest not in revoked:
                 revoked.append(target_digest)
+            dependency_dependents = self._cascade_dependency_revocation(
+                state,
+                dependency_pack_id=pack_id,
+                dependency_digest=target_digest,
+            )
             next_pointer = dict(pointer) if isinstance(pointer, Mapping) and pointer.get("digest") == target_digest else None
             if next_pointer is not None:
                 next_pointer["status"] = "revoked"
@@ -2943,7 +3066,21 @@ class CapabilityPackLifecycle:
                 and job.get("digest") == target_digest
                 and job.get("status") == "running"
             )
-            receipt = self._record_receipt(state, action="revoke", status="revoked", pack_id=pack_id, details={"digest": target_digest, "reason_code": canonical_digest(reason)[:16], "approval_id": approval_id, "cancelled_jobs": cancelled_jobs, "pinned_running_jobs": pinned_jobs, "revoke_running_jobs": revoke_policy})
+            receipt = self._record_receipt(
+                state,
+                action="revoke",
+                status="revoked",
+                pack_id=pack_id,
+                details={
+                    "digest": target_digest,
+                    "reason_code": canonical_digest(reason)[:16],
+                    "approval_id": approval_id,
+                    "cancelled_jobs": cancelled_jobs,
+                    "pinned_running_jobs": pinned_jobs,
+                    "revoke_running_jobs": revoke_policy,
+                    "dependency_dependents": dependency_dependents,
+                },
+            )
             self._commit(state)
         return {"status": "revoked", "pointer": _public_pointer(next_pointer), "receipt": receipt}
 
@@ -3211,6 +3348,7 @@ class CapabilityPackLifecycle:
         """Reconcile interrupted local jobs before a new job can load a pack."""
 
         selected_pack = _validate_pack_id(pack_id) if pack_id is not None else None
+        scope_key = selected_pack or "*"
         with self._state_lock():
             state = self._load()
             if selected_pack is not None:
@@ -3260,6 +3398,12 @@ class CapabilityPackLifecycle:
                         # A process restart cannot safely infer whether the
                         # workflow wrote an effect before its final receipt.
                         reason = "interrupted_local_execution_requires_operator_recovery"
+                    elif job_status in {"accepted", "queued"}:
+                        # A restart cannot prove that an accepted row was
+                        # never claimed by a worker.  Keep the job visible and
+                        # require an explicit operator recovery decision rather
+                        # than silently leaving it looking runnable.
+                        reason = "interrupted_accepted_job_requires_operator_recovery"
                 if reason is None:
                     continue
                 mutable_job = dict(raw_job)
@@ -3275,26 +3419,48 @@ class CapabilityPackLifecycle:
                 state["jobs"][item_job_id] = mutable_job
                 changes.append({"job_id": item_job_id, "status": next_status, "reason": reason})
             current = state.get("reconciliation") if isinstance(state.get("reconciliation"), Mapping) else {}
+            by_pack = current.get("by_pack") if isinstance(current.get("by_pack"), Mapping) else {}
+            previous_scope = by_pack.get(scope_key) if isinstance(by_pack, Mapping) else None
             unresolved = any(
                 isinstance(item, Mapping) and item.get("status") == "blocked"
+                and (selected_pack is None or item.get("pack_id") == selected_pack)
                 for item in state.get("jobs", {}).values()
             )
-            if changes or (current.get("status") == "clean" and unresolved):
-                state["reconciliation"] = {
-                    "status": "blocked" if unresolved or any(item["status"] == "blocked" for item in changes) else "clean",
+            scope_status = "blocked" if unresolved or any(item["status"] == "blocked" for item in changes) else "clean"
+            if changes or not isinstance(previous_scope, Mapping) or previous_scope.get("status") != scope_status:
+                scope_reconciliation = {
+                    "scope": selected_pack,
+                    "status": scope_status,
                     "updated_at": _utc_now(),
                     "changes": changes,
+                }
+                updated_by_pack = {str(key): deepcopy(value) for key, value in by_pack.items()}
+                updated_by_pack[scope_key] = scope_reconciliation
+                state["reconciliation"] = {
+                    "scope": selected_pack,
+                    "status": scope_status,
+                    "updated_at": scope_reconciliation["updated_at"],
+                    "changes": changes,
+                    "by_pack": updated_by_pack,
                 }
                 if changes:
                     self._record_receipt(
                         state,
                         action="reconcile",
-                        status=state["reconciliation"]["status"],
+                        status=scope_status,
                         pack_id=selected_pack or "lifecycle",
-                        details=state["reconciliation"],
+                        details=scope_reconciliation,
                     )
                 self._commit(state)
-            return deepcopy(dict(state.get("reconciliation") or {"status": "clean", "changes": []}))
+                return deepcopy(scope_reconciliation)
+            if isinstance(previous_scope, Mapping):
+                return deepcopy(dict(previous_scope))
+            return {
+                "scope": selected_pack,
+                "status": scope_status,
+                "updated_at": None,
+                "changes": [],
+            }
 
     def resolve_reconciliation(
         self,
@@ -3337,20 +3503,29 @@ class CapabilityPackLifecycle:
             )
             state["jobs"][job_id] = mutable_job
             unresolved = any(
-                isinstance(item, Mapping) and item.get("status") == "blocked"
+                isinstance(item, Mapping)
+                and item.get("status") == "blocked"
+                and item.get("pack_id") == pack_id
                 for item in state.get("jobs", {}).values()
             )
-            state["reconciliation"] = {
+            updated_at = _utc_now()
+            resolution = {
+                "scope": pack_id,
                 "status": "blocked" if unresolved else "clean",
-                "updated_at": _utc_now(),
+                "updated_at": updated_at,
                 "changes": [],
                 "resolved_job_id": job_id,
                 "resolution_action": action,
             }
+            current_reconciliation = state.get("reconciliation") if isinstance(state.get("reconciliation"), Mapping) else {}
+            by_pack = current_reconciliation.get("by_pack") if isinstance(current_reconciliation.get("by_pack"), Mapping) else {}
+            updated_by_pack = {str(key): deepcopy(value) for key, value in by_pack.items()}
+            updated_by_pack[pack_id] = resolution
+            state["reconciliation"] = {**resolution, "by_pack": updated_by_pack}
             receipt = self._record_receipt(
                 state,
                 action="reconcile:resolve",
-                status=state["reconciliation"]["status"],
+                status=resolution["status"],
                 pack_id=pack_id,
                 details={
                     "job_id": job_id,
@@ -3364,7 +3539,7 @@ class CapabilityPackLifecycle:
                 "status": state["reconciliation"]["status"],
                 "job": deepcopy(mutable_job),
                 "receipt": receipt,
-                "reconciliation": deepcopy(state["reconciliation"]),
+                "reconciliation": deepcopy(resolution),
             }
 
     def execute_local(
@@ -3605,77 +3780,12 @@ class CapabilityPackLifecycle:
                 raise CapabilityPackLifecycleError("local artifact is missing the canonical goal identity")
             if len(content.encode("utf-8")) > max_artifact_bytes:
                 raise CapabilityPackLifecycleError("local artifact exceeds the reviewed pack artifact limit")
-            artifact = self._safe_local_artifact_path(
-                request.artifact_path,
-                base_root=artifact_root or (self.state_path.parent / "capability-pack-artifacts"),
-                max_bytes=max_artifact_bytes,
-            )
-            # Re-read the pin immediately before the side effect.  Revoke or
-            # rollback therefore wins over a stale in-flight source response.
-            with self._state_lock(shared=True):
-                current_state = self._load()
-                current_job = current_state["jobs"].get(job_id)
-                current_pointer = current_state["active"].get(pack_id)
-                if not isinstance(current_job, Mapping) or current_job.get("digest") != pinned_digest:
-                    raise CapabilityPackLifecycleError("local job pin is unavailable")
-                if current_job.get("status") != "running":
-                    raise CapabilityPackLifecycleError("local job is no longer runnable")
-                allow_revoked_completion = (
-                    isinstance(current_pointer, Mapping)
-                    and current_pointer.get("digest") == pinned_digest
-                    and current_pointer.get("status") == "revoked"
-                    and pinned_job.get("cancel_on_revoke") is False
-                )
-                if (
-                    not isinstance(current_pointer, Mapping)
-                    or current_pointer.get("digest") != pinned_digest
-                    or (current_pointer.get("status") != "active" and not allow_revoked_completion)
-                ):
-                    raise CapabilityPackLifecycleError("local job was revoked or replaced before artifact write")
             data = content.encode("utf-8")
-            _write_canary_artifact(artifact, data)
-            readback = artifact.read_bytes()
-            if readback != data:
-                raise CapabilityPackLifecycleError("local artifact readback digest mismatch")
-            if not any(line.strip() == goal_marker for line in readback.decode("utf-8", errors="strict").splitlines()):
-                raise CapabilityPackLifecycleError("local artifact readback is missing the canonical goal identity")
-            content_digest = hashlib.sha256(data).hexdigest()
-            execution = {
-                "schema_version": CAPABILITY_PACK_LOCAL_EXECUTION_SCHEMA,
-                "execution_mode": "local_functional",
-                "domain": domain,
-                "workflow": workflow.as_dict(),
-                "pack_id": pack_id,
-                "version": pinned_version,
-                "digest": pinned_digest,
-                "goal_id": goal_id,
-                "goal_revision": canonical_goal_snapshot.get("revision") if canonical_goal_snapshot else None,
-                "canonical_goal_identity": {
-                    "goal_id": goal_id,
-                    "revision": canonical_goal_snapshot.get("revision") if canonical_goal_snapshot else None,
-                    "status": canonical_goal_snapshot.get("status") if canonical_goal_snapshot else None,
-                    "owner_principal_id": owner_principal_id,
-                    "session_id": session_id,
-                    "source": canonical_goal_snapshot.get("canonical_source") if canonical_goal_snapshot else None,
-                },
-                "job_id": job_id,
-                "owner_principal_id": owner_principal_id,
-                "session_id": session_id,
-                "authority_digest": pinned_authority_digest,
-                "transport": "intercepted" if domain == "primary" else "none",
-                "provider_calls": 0,
-                "live_network_calls": 0,
-                "source_refs": source_refs,
-                "artifact": {
-                    "path": str(artifact),
-                    "bytes": len(data),
-                    "digest": content_digest,
-                    "readback_digest": hashlib.sha256(readback).hexdigest(),
-                    "readback_ok": True,
-                },
-                "outcome": outcome,
-                "memory": {"status": "no_learning", "canonical_authority": "guardian_canonical_memory"},
-            }
+            # The authority recheck, artifact write/readback, and durable
+            # success receipt share one exclusive lifecycle transaction.  A
+            # concurrent revoke or replacement therefore linearizes either
+            # before the effect (and blocks it) or after a fully recorded
+            # effect; it cannot leave an unaccounted artifact behind.
             with self._state_lock():
                 state = self._load()
                 final_pointer = state["active"].get(pack_id)
@@ -3684,6 +3794,7 @@ class CapabilityPackLifecycle:
                     isinstance(final_pointer, Mapping)
                     and final_pointer.get("digest") == pinned_digest
                     and final_pointer.get("status") == "revoked"
+                    and not final_pointer.get("revoked_by_dependency")
                     and pinned_job.get("cancel_on_revoke") is False
                 )
                 if (
@@ -3692,6 +3803,7 @@ class CapabilityPackLifecycle:
                     or final_pointer.get("digest") != pinned_digest
                     or not isinstance(final_job, Mapping)
                     or final_job.get("status") != "running"
+                    or (final_pointer.get("status") == "active" and not self._pointer_binding_valid(state, pack_id, final_pointer))
                     or (pinned_digest in state.get("revoked", {}).get(pack_id, []) and not allow_revoked_completion)
                 ):
                     mutable_job = dict(final_job) if isinstance(final_job, Mapping) else {"job_id": job_id}
@@ -3713,6 +3825,54 @@ class CapabilityPackLifecycle:
                     )
                     self._commit(state)
                     raise CapabilityPackLifecycleError(mutable_job["cancel_reason"])
+                artifact = self._safe_local_artifact_path(
+                    request.artifact_path,
+                    base_root=artifact_root or (self.state_path.parent / "capability-pack-artifacts"),
+                    max_bytes=max_artifact_bytes,
+                )
+                _write_canary_artifact(artifact, data)
+                readback = artifact.read_bytes()
+                if readback != data:
+                    raise CapabilityPackLifecycleError("local artifact readback digest mismatch")
+                if not any(line.strip() == goal_marker for line in readback.decode("utf-8", errors="strict").splitlines()):
+                    raise CapabilityPackLifecycleError("local artifact readback is missing the canonical goal identity")
+                content_digest = hashlib.sha256(data).hexdigest()
+                execution = {
+                    "schema_version": CAPABILITY_PACK_LOCAL_EXECUTION_SCHEMA,
+                    "execution_mode": "local_functional",
+                    "domain": domain,
+                    "workflow": workflow.as_dict(),
+                    "pack_id": pack_id,
+                    "version": pinned_version,
+                    "digest": pinned_digest,
+                    "goal_id": goal_id,
+                    "goal_revision": canonical_goal_snapshot.get("revision") if canonical_goal_snapshot else None,
+                    "canonical_goal_identity": {
+                        "goal_id": goal_id,
+                        "revision": canonical_goal_snapshot.get("revision") if canonical_goal_snapshot else None,
+                        "status": canonical_goal_snapshot.get("status") if canonical_goal_snapshot else None,
+                        "owner_principal_id": owner_principal_id,
+                        "session_id": session_id,
+                        "source": canonical_goal_snapshot.get("canonical_source") if canonical_goal_snapshot else None,
+                    },
+                    "job_id": job_id,
+                    "owner_principal_id": owner_principal_id,
+                    "session_id": session_id,
+                    "authority_digest": pinned_authority_digest,
+                    "transport": "intercepted" if domain == "primary" else "none",
+                    "provider_calls": 0,
+                    "live_network_calls": 0,
+                    "source_refs": source_refs,
+                    "artifact": {
+                        "path": str(artifact),
+                        "bytes": len(data),
+                        "digest": content_digest,
+                        "readback_digest": hashlib.sha256(readback).hexdigest(),
+                        "readback_ok": True,
+                    },
+                    "outcome": outcome,
+                    "memory": {"status": "no_learning", "canonical_authority": "guardian_canonical_memory"},
+                }
                 mutable_job = dict(final_job)
                 mutable_job.update(
                     {
@@ -3781,7 +3941,7 @@ class CapabilityPackLifecycle:
         session_id: str | None = None,
     ) -> dict[str, Any]:
         pack_id = _validate_pack_id(pack_id)
-        self.reconcile(
+        reconciliation = self.reconcile(
             pack_id,
             owner_principal_id=owner_principal_id,
             session_id=session_id,
@@ -3797,7 +3957,11 @@ class CapabilityPackLifecycle:
                 )
             versions = state["versions"].get(pack_id, {})
             active = _public_pointer(pointer)
-            if isinstance(pointer, Mapping) and not self._pointer_binding_valid(state, pack_id, pointer):
+            if (
+                isinstance(pointer, Mapping)
+                and pointer.get("status") != "revoked"
+                and not self._pointer_binding_valid(state, pack_id, pointer)
+            ):
                 active = {
                     "pack_id": pack_id,
                     "status": "invalid",
@@ -3820,7 +3984,11 @@ class CapabilityPackLifecycle:
                     if isinstance(execution, Mapping) and execution.get("pack_id") == pack_id
                 ],
                 "receipts": [deepcopy(item) for item in state["receipts"] if isinstance(item, Mapping) and item.get("pack_id") == pack_id],
-                "reconciliation": deepcopy(dict(state.get("reconciliation") or {})),
+                # Reconciliation is scoped per pack.  The top-level state
+                # retains the latest scope for compatibility, while callers
+                # asking for one pack must never inherit another pack's
+                # blocked/clean result.
+                "reconciliation": deepcopy(reconciliation),
                 "generation": state.get("generation", 0),
             }
 

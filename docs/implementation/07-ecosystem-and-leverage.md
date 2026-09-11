@@ -184,6 +184,17 @@ reconciles interrupted running jobs to an operator-visible blocked state before
 new work is admitted.  This local proof remains branch-local until the Epic
 review and merge receipts land on `develop`.
 
+The lifecycle rechecks every declared dependency against the durable reviewed
+version and revocation ledger, so caller-supplied availability cannot create a
+phantom dependency.  Revoking a reviewed dependency fences active dependent
+versions and cancels their pinned jobs transitively.  Restart reconciliation is
+scoped to the requested pack and moves accepted, queued, or running work to an
+explicit operator-recovery state when its outcome cannot be inferred.  The
+local artifact write, readback, and success receipt share the final exclusive
+lifecycle transaction.  The execute-local API uses only the persisted goal row
+for snapshot content; request data can assert identity and revision but cannot
+replace title, description, criterion, or scheduling fields.
+
 Operator readback is available at `GET /api/capability-packs/{pack_id}` and
 reconciliation at `POST /api/capability-packs/{pack_id}/reconcile`; both are
 authenticated.  The cockpit operator surface shows the active digest/version,

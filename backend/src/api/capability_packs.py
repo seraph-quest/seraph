@@ -13,7 +13,7 @@ from src.extensions.capability_pack import (
     CapabilityPackLifecycleError,
     canonical_digest,
 )
-from src.goals.repository import goal_repository
+from src.goals.repository import deserialize_success_criterion, goal_repository
 
 
 router = APIRouter()
@@ -41,6 +41,43 @@ class ReconciliationResolutionRequest(BaseModel):
 
 def _store() -> CapabilityPackLifecycle:
     return CapabilityPackLifecycle()
+
+
+def _canonical_goal_snapshot(goal: Any, *, owner_principal_id: str, session_id: str) -> dict[str, Any]:
+    """Serialize only the persisted goal row for capability-pack execution.
+
+    The request may carry a revision and identity assertion, but its mutable
+    content is never copied into the artifact.  This keeps the API's snapshot
+    source authoritative even when a caller submits forged title, description,
+    criterion, or scheduling fields.
+    """
+
+    criterion = deserialize_success_criterion(goal)
+
+    def _iso(value: Any) -> str | None:
+        return value.isoformat() if value is not None and hasattr(value, "isoformat") else None
+
+    return {
+        "goal_id": str(goal.id),
+        "parent_id": goal.parent_id,
+        "path": goal.path,
+        "title": goal.title,
+        "description": goal.description,
+        "level": str(goal.level.value if hasattr(goal.level, "value") else goal.level),
+        "domain": str(goal.domain.value if hasattr(goal.domain, "value") else goal.domain),
+        "status": str(goal.status.value if hasattr(goal.status, "value") else goal.status),
+        "start_date": _iso(getattr(goal, "start_date", None)),
+        "due_date": _iso(getattr(goal, "due_date", None)),
+        "sort_order": goal.sort_order,
+        "revision": max(int(goal.revision or 1), 1),
+        "success_criterion": criterion.model_dump(mode="json") if criterion else None,
+        "proactive_enabled": bool(getattr(goal, "proactive_enabled", False)),
+        "created_at": _iso(getattr(goal, "created_at", None)),
+        "updated_at": _iso(getattr(goal, "updated_at", None)),
+        "owner_principal_id": owner_principal_id,
+        "session_id": session_id,
+        "canonical_source": "goals",
+    }
 
 
 @router.get("/capability-packs/{pack_id}")
@@ -103,15 +140,11 @@ async def capability_pack_execute_local(
                     "recovery": "Refresh the goal and resubmit against the current revision.",
                 },
             )
-        canonical_goal_snapshot = {
-            **req.goal_snapshot,
-            "goal_id": goal.id,
-            "revision": current_revision,
-            "status": str(goal.status.value if hasattr(goal.status, "value") else goal.status),
-            "owner_principal_id": principal_id,
-            "session_id": operator.session_id,
-            "canonical_source": "goals",
-        }
+        canonical_goal_snapshot = _canonical_goal_snapshot(
+            goal,
+            owner_principal_id=principal_id,
+            session_id=operator.session_id,
+        )
         if canonical_goal_snapshot["status"] != "active":
             raise HTTPException(status_code=409, detail={"code": "goal_not_active", "goal_id": req.goal_id})
 

@@ -682,11 +682,14 @@ async def test_audio_worker_confirmation_session_revoke_is_atomic_with_message_r
     )
     original_authority = worker._require_current_operator_authority
     revoke_on_next_check = False
+    confirmation_authority_checks = 0
 
     async def revoke_after_last_check(**kwargs):
-        nonlocal revoke_on_next_check
+        nonlocal confirmation_authority_checks, revoke_on_next_check
         principal = await original_authority(**kwargs)
         if revoke_on_next_check:
+            confirmation_authority_checks += 1
+        if revoke_on_next_check and confirmation_authority_checks == 2:
             revoke_on_next_check = False
             # The reserve transaction must re-read this durable row rather
             # than trusting the worker's earlier successful check.

@@ -63,6 +63,8 @@ invalidates pending claims; a callback that races a committed revocation is
 reported as an unknown outcome. Confirmation reserves the canonical message and
 job fence atomically, rechecks the durable owner and operator-session lifetime
 inside that reservation transaction, and restart recovery reconciles the pair.
+An already-admitted processing request that discovers a revoked session records
+a typed blocked receipt; unauthenticated direct calls do not mutate the job.
 The focused browser seam in
 `frontend/src/components/chat/PttAudioControl.tsx` requires a deliberate
 microphone grant, keeps model consent separate, prefers WebM/Opus then MP4,

@@ -405,6 +405,8 @@ async def _ensure_legacy_columns(conn) -> None:
             "requested_capability": "VARCHAR DEFAULT 'chat'",
             "provider_status": "VARCHAR DEFAULT 'unverified'",
             "transport_status": "VARCHAR DEFAULT 'unknown'",
+            "transport_lease_id": "VARCHAR",
+            "cleanup_status": "VARCHAR DEFAULT 'complete'",
         },
     )
     if "requested_capability" in audio_ingress_columns:
@@ -412,7 +414,7 @@ async def _ensure_legacy_columns(conn) -> None:
             "CREATE INDEX IF NOT EXISTS ix_audio_ingress_jobs_requested_capability "
             "ON audio_ingress_jobs (requested_capability)"
         )
-    for column in ("provider_status", "transport_status"):
+    for column in ("provider_status", "transport_status", "transport_lease_id", "cleanup_status"):
         if column in audio_ingress_columns:
             await conn.exec_driver_sql(
                 f"CREATE INDEX IF NOT EXISTS ix_audio_ingress_jobs_{column} "

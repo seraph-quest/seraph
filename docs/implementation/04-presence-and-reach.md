@@ -22,8 +22,11 @@ container signatures and duration, decoded with bounded local `ffprobe`/`ffmpeg`
 when needed, and normalized to mono 16 kHz PCM16 WAV at no more than 2 MiB.
 Short generated WAV fixtures prove the same path without a live microphone.
 Raw and normalized files are private, removed on success, failure, cancel, or
-restart recovery, and have a 15-minute retention deadline. Separate capture and
-model consent handles are carried into the signed #750 attachment receipt.
+restart recovery, and have a 15-minute retention deadline. Cleanup failures are
+durable degraded states with private paths retained for a bounded retry; the
+operator receipt reports that raw bytes remain until cleanup succeeds. Separate
+capture and model consent handles are carried into the signed #750 attachment
+receipt.
 
 The pure validator still checks standard base64 shape and metadata-reported byte
 count, the 10 MiB audio cap, one stream, the MIME/container/codec allowlist,
@@ -54,7 +57,12 @@ cannot treat caller-asserted provider or consent metadata as execution proof.
 
 The transport is an explicitly intercepted, provider-free test boundary and is
 admitted through the shared bounded remote-inference broker; the default worker
-has no transport and cannot make a provider call. The focused browser seam in
+has no transport and cannot make a provider call. A server-owned transport lease
+is claimed only after a same-transaction consent check, and consent revocation
+invalidates pending claims; a callback that races a committed revocation is
+reported as an unknown outcome. Confirmation reserves the canonical message and
+job fence atomically and restart recovery reconciles the pair. The focused
+browser seam in
 `frontend/src/components/chat/PttAudioControl.tsx` requires a deliberate
 microphone grant, keeps model consent separate, prefers WebM/Opus then MP4,
 and confirms operator-supplied text by the returned digest without receiving

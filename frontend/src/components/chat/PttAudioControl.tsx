@@ -55,6 +55,7 @@ export function PttAudioControl({ sessionId, disabled = false, endpoint = "/api/
   const captureActiveRef = useRef(false);
   const actionSequenceRef = useRef(0);
   const actionRef = useRef<{ sequence: number; controller: AbortController } | null>(null);
+  const mountedSessionRef = useRef(sessionId);
 
   const beginAction = () => {
     actionRef.current?.controller.abort();
@@ -134,7 +135,7 @@ export function PttAudioControl({ sessionId, disabled = false, endpoint = "/api/
     streamRef.current = null;
   };
 
-  useEffect(() => () => {
+  const stopCaptureResources = () => {
     actionRef.current?.controller.abort();
     actionRef.current = null;
     captureActiveRef.current = false;
@@ -152,7 +153,23 @@ export function PttAudioControl({ sessionId, disabled = false, endpoint = "/api/
     }
     stopStream();
     chunksRef.current = [];
-  }, []);
+  };
+
+  useEffect(() => stopCaptureResources, []);
+
+  useEffect(() => {
+    const sessionChanged = mountedSessionRef.current !== sessionId;
+    mountedSessionRef.current = sessionId;
+    if (!controlDisabled && !sessionChanged) return;
+    // A disabled cockpit (or a switched conversation) must immediately revoke
+    // browser-side capture resources and invalidate pending upload responses.
+    // The server remains the authority for any already-admitted job.
+    stopCaptureResources();
+    setSnapshot(null);
+    setTranscript("");
+    setState("idle");
+    setError(null);
+  }, [controlDisabled, sessionId]);
 
   const applySnapshot = (payload: AudioSnapshot) => {
     setSnapshot(payload);

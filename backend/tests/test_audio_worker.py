@@ -522,6 +522,149 @@ async def test_audio_worker_direct_process_rejects_wrong_owner_before_expiry_cle
 
 
 @pytest.mark.asyncio
+async def test_audio_worker_direct_process_reauthenticates_before_expiry_cleanup(async_db, tmp_path: Path):
+    session = await session_manager.get_or_create("audio-session-direct-revoked", owner_principal_id=OPERATOR_OWNER)
+    worker = AudioIngressWorker(
+        transport=InterceptedAudioTransport({"transcript": "must not run"}),
+        admission_broker=RemoteInferenceAdmissionBroker(),
+        quarantine_root=tmp_path,
+    )
+    with patch.object(settings, "operator_auth_secret", "test-audio-secret"):
+        queued = await worker.submit(_request(session.id, request_id="audio-direct-revoked"), process=False)
+    await revoke_session(OPERATOR_SESSION)
+
+    with (
+        patch.object(worker, "_expire_if_needed", new_callable=AsyncMock) as expire,
+        patch.object(worker, "_cleanup_job_paths") as cleanup,
+    ):
+        with pytest.raises(AudioWorkerError) as exc_info:
+            await worker.process(
+                queued.request_id,
+                owner_principal_id=OPERATOR_OWNER,
+                operator_session_id=OPERATOR_SESSION,
+            )
+
+    assert exc_info.value.code == "audio_operator_session_invalid"
+    expire.assert_not_awaited()
+    cleanup.assert_not_called()
+    assert (await worker._snapshot_by_request(queued.request_id)).status == "queued"
+    assert list(tmp_path.iterdir())
+
+
+@pytest.mark.asyncio
+async def test_audio_worker_transport_claim_rechecks_revocation_in_same_transaction(async_db, tmp_path: Path, monkeypatch):
+    session = await session_manager.get_or_create("audio-session-transport-claim", owner_principal_id=OPERATOR_OWNER)
+    calls = 0
+    worker = AudioIngressWorker(
+        transport=InterceptedAudioTransport({"transcript": "must not run"}),
+        admission_broker=RemoteInferenceAdmissionBroker(),
+        quarantine_root=tmp_path,
+    )
+    original_boundary_check = worker._assert_current_transport_authority
+    boundary_checks = 0
+
+    async def revoke_before_claim(row):
+        nonlocal boundary_checks
+        if boundary_checks == 0:
+            boundary_checks += 1
+            await worker.revoke_consent_grant(
+                MODEL_REF,
+                owner_principal_id=OPERATOR_OWNER,
+                operator_session_id=OPERATOR_SESSION,
+            )
+            return
+        await original_boundary_check(row)
+
+    def intercepted(**_kwargs):
+        nonlocal calls
+        calls += 1
+        return {"transcript": "must not run"}
+
+    worker.transport = InterceptedAudioTransport(intercepted)
+    monkeypatch.setattr(worker, "_assert_current_transport_authority", revoke_before_claim)
+    with patch.object(settings, "operator_auth_secret", "test-audio-secret"):
+        queued = await worker.submit(_request(session.id, request_id="audio-claim-revoked"), process=False)
+        blocked = await worker.process(
+            queued.request_id,
+            owner_principal_id=OPERATOR_OWNER,
+            operator_session_id=OPERATOR_SESSION,
+        )
+
+    assert blocked.status == "blocked"
+    assert blocked.error_code == "cloud_upload_consent_revoked"
+    assert calls == 0
+
+
+@pytest.mark.asyncio
+async def test_audio_worker_confirmation_keeps_message_job_pair_after_reauth_loss(async_db, tmp_path: Path, monkeypatch):
+    session = await session_manager.get_or_create("audio-session-confirm-revoked-after-reserve", owner_principal_id=OPERATOR_OWNER)
+    worker = AudioIngressWorker(
+        transport=InterceptedAudioTransport({"transcript": "generated"}),
+        admission_broker=RemoteInferenceAdmissionBroker(),
+        quarantine_root=tmp_path,
+    )
+    original_reserve = session_manager.reserve_ingress_message
+
+    async def reserve_then_revoke(*args, **kwargs):
+        await original_reserve(*args, **kwargs)
+        await revoke_session(OPERATOR_SESSION)
+        raise MessageIngressConflictError(str(kwargs["message_id"]))
+
+    with patch.object(settings, "operator_auth_secret", "test-audio-secret"):
+        snapshot = await worker.submit(_request(session.id, request_id="audio-confirm-revoked-after-reserve"), process=True)
+        monkeypatch.setattr(session_manager, "reserve_ingress_message", reserve_then_revoke)
+        confirmed = await worker.confirm_transcript(
+            snapshot.request_id,
+            "operator confirmed",
+            expected_transcript_digest=snapshot.transcript_digest,
+            owner_principal_id=OPERATOR_OWNER,
+            operator_session_id=OPERATOR_SESSION,
+        )
+
+    assert confirmed.status == "confirmed"
+    assert await session_manager.get_message(snapshot.message_id) is not None
+
+
+@pytest.mark.asyncio
+async def test_audio_worker_cleanup_failure_is_degraded_and_retryable(async_db, tmp_path: Path, monkeypatch):
+    session = await session_manager.get_or_create("audio-session-cleanup-retry", owner_principal_id=OPERATOR_OWNER)
+    worker = AudioIngressWorker(
+        transport=InterceptedAudioTransport({"transcript": "unused"}),
+        admission_broker=RemoteInferenceAdmissionBroker(),
+        quarantine_root=tmp_path,
+    )
+    with patch.object(settings, "operator_auth_secret", "test-audio-secret"):
+        queued = await worker.submit(_request(session.id, request_id="audio-cleanup-retry"), process=False)
+
+    original_unlink = worker._unlink_tree
+    monkeypatch.setattr(worker, "_unlink_tree", lambda _path: False)
+    with patch.object(settings, "operator_auth_secret", "test-audio-secret"):
+        degraded = await worker.cancel(
+            queued.request_id,
+            owner_principal_id=OPERATOR_OWNER,
+            operator_session_id=OPERATOR_SESSION,
+        )
+    assert degraded.status == "degraded"
+    assert degraded.error_code == "audio_cleanup_failed"
+    assert degraded.cleanup_status == "failed"
+    assert degraded.as_dict()["cleanup"] == {"status": "failed", "retryable": True}
+    assert degraded.as_dict()["privacy"]["raw_audio_persisted_after_cleanup"] is True
+    assert list(tmp_path.iterdir())
+
+    monkeypatch.setattr(worker, "_unlink_tree", original_unlink)
+    with patch.object(settings, "operator_auth_secret", "test-audio-secret"):
+        recovered = await worker._snapshot_by_request(
+            queued.request_id,
+            owner_principal_id=OPERATOR_OWNER,
+            operator_session_id=OPERATOR_SESSION,
+        )
+    assert recovered.status == "degraded"
+    assert recovered.cleanup_status == "complete"
+    assert recovered.as_dict()["privacy"]["raw_audio_persisted_after_cleanup"] is False
+    assert not list(tmp_path.iterdir())
+
+
+@pytest.mark.asyncio
 async def test_audio_worker_cancel_fences_late_transport_result(async_db, tmp_path: Path):
     session = await session_manager.get_or_create("audio-session-cancel-race", owner_principal_id=OPERATOR_OWNER)
     started = asyncio.Event()

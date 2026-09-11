@@ -188,6 +188,10 @@ class AudioIngressJob(SQLModel, table=True):
     model_consent_reference: str = Field(default="")
     raw_audio_retention_deadline: datetime = Field(index=True)
     admission_operation_id: Optional[str] = Field(default=None, index=True)
+    # A server-owned lease fences the final intercepted transport boundary.
+    # It is intentionally never exposed to browser callers; revocation and
+    # cancellation can invalidate the durable row while a worker is waiting.
+    transport_lease_id: Optional[str] = Field(default=None, index=True)
     transcript: Optional[str] = Field(default=None)
     transcript_digest: Optional[str] = Field(default=None, index=True)
     confirmed_transcript_digest: Optional[str] = Field(default=None, index=True)
@@ -195,6 +199,7 @@ class AudioIngressJob(SQLModel, table=True):
     error_code: Optional[str] = Field(default=None, index=True)
     provider_status: str = Field(default="unverified", index=True)
     transport_status: str = Field(default="unknown", index=True)
+    cleanup_status: str = Field(default="complete", index=True)
     metadata_json: str = Field(default="{}")
     created_at: datetime = Field(default_factory=_now, index=True)
     updated_at: datetime = Field(default_factory=_now, index=True)

@@ -6,6 +6,7 @@ import pytest
 
 from src.db.models import NativeNotificationOutbox, QueuedInsight, StrategyDelta, WorkflowRunState
 from src.goals.repository import GoalOwnershipConflict, GoalRepository
+from src.observer.insight_queue import insight_queue
 
 
 @pytest.fixture
@@ -214,6 +215,68 @@ class TestDelete:
         assert delta.status == "rejected"
         assert run.status == "cancelled"
         assert run.failure_reason == "goal_deleted"
+
+    @pytest.mark.parametrize(
+        "status",
+        ["running", "failed", "unknown_external_effect", "cost_liability"],
+    )
+    async def test_delete_fences_active_and_uncertain_jobs(self, async_db, repo, status):
+        owner = {"owner_principal_id": "operator:fence", "owner_session_id": "session:fence"}
+        goal = await repo.create("Fence me", **owner)
+        async with async_db() as db:
+            db.add(
+                WorkflowRunState(
+                    run_identity=f"delete-fence-{status}",
+                    root_run_identity=f"delete-fence-{status}",
+                    workflow_name="goal-snapshot-to-file",
+                    goal_id=goal.id,
+                    status=status,
+                    revision=7,
+                    fencing_token=3,
+                    lease_owner="stale-runner" if status == "running" else None,
+                    lease_expires_at=datetime.now(timezone.utc) + timedelta(minutes=5)
+                    if status == "running"
+                    else None,
+                )
+            )
+
+        assert await repo.delete(
+            goal.id,
+            expected_owner_principal_id=owner["owner_principal_id"],
+            expected_owner_session_id=owner["owner_session_id"],
+        ) is True
+        async with async_db() as db:
+            run = (
+                await db.execute(
+                    WorkflowRunState.__table__.select().where(
+                        WorkflowRunState.run_identity == f"delete-fence-{status}"
+                    )
+                )
+            ).first()
+        assert run.status == "cancelled"
+        assert run.failure_reason == "goal_deleted"
+        assert run.revision == 8
+        assert run.fencing_token == 4
+        assert run.lease_owner is None
+        assert run.lease_expires_at is None
+
+    async def test_goal_bound_insight_persists_revision_and_stale_rows_are_removed(
+        self, async_db, repo
+    ):
+        owner = {"owner_principal_id": "operator:queue", "operator_session_id": "session:queue"}
+        goal = await repo.create("Queue revision", **owner)
+        queued = await insight_queue.enqueue(
+            content="Revision-bound update",
+            goal_id=goal.id,
+            owner_principal_id=owner["owner_principal_id"],
+            operator_session_id=owner["operator_session_id"],
+            budget_period_key="2026-09-11",
+            budget_limit=2,
+        )
+        assert queued.goal_revision == goal.revision == 1
+
+        await repo.update(goal.id, title="Revision changed", expected_revision=1)
+        assert await insight_queue.peek_all() == []
 
 
 class TestListGoals:

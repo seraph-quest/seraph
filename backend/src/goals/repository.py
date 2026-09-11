@@ -432,6 +432,14 @@ class GoalRepository:
                         "awaiting_approval",
                         "paused",
                         "blocked",
+                        # Deletion is an authority revocation.  These states
+                        # must be fenced as well; otherwise a stale runner or
+                        # recovery request could resurrect work after the
+                        # canonical goal row is gone.
+                        "running",
+                        "failed",
+                        "unknown_external_effect",
+                        "cost_liability",
                     }),
                 )
                 .values(
@@ -440,6 +448,8 @@ class GoalRepository:
                     lease_owner=None,
                     lease_expires_at=None,
                     finished_at=now,
+                    fencing_token=WorkflowRunState.fencing_token + 1,
+                    revision=WorkflowRunState.revision + 1,
                     updated_at=now,
                 )
             )

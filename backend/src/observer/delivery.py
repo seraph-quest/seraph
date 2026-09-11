@@ -234,15 +234,27 @@ async def _bundle_owner_binding(items: list[object]) -> tuple[str | None, str | 
         if _queued_item_text(item, "budget_period_key")
     }
     budget_limits: list[object] = []
+    goal_revision_values: list[object] = []
     for item in items:
         value = getattr(item, "budget_limit", None)
         if value is not None and not any(value == existing for existing in budget_limits):
             budget_limits.append(value)
+        goal_revision_values.append(getattr(item, "goal_revision", None))
     if goal_ids or budget_period_keys or budget_limits:
         if len(goal_ids) != 1 or len(budget_period_keys) != 1 or len(budget_limits) != 1:
             raise ConversationIdentityError(
                 "goal_budget_binding_invalid",
                 "A goal-bound bundle requires one complete budget binding.",
+            )
+        goal_revisions = {
+            revision
+            for revision in goal_revision_values
+            if isinstance(revision, int) and not isinstance(revision, bool) and revision >= 1
+        }
+        if len(goal_revisions) != 1 or len(goal_revisions) != len(goal_revision_values):
+            raise ConversationIdentityError(
+                "goal_revision_binding_invalid",
+                "A goal-bound bundle requires one valid canonical goal revision.",
             )
         budget_limit = budget_limits[0]
         if isinstance(budget_limit, bool) or not isinstance(budget_limit, int) or budget_limit < 0:
@@ -283,7 +295,7 @@ def _bundle_content(items: list[object]) -> str:
 
 
 def _group_native_bundle_items(items: list[object]) -> list[list[object]]:
-    session_groups: dict[tuple[str, str, str, int | None, str, str], list[object]] = {}
+    session_groups: dict[tuple[str, str, str, int | None, int | None, str, str], list[object]] = {}
     ambient_items: list[object] = []
     for item in items:
         session_id = _queued_item_text(item, "session_id")
@@ -292,6 +304,9 @@ def _group_native_bundle_items(items: list[object]) -> list[list[object]]:
         budget_limit = getattr(item, "budget_limit", None)
         if not isinstance(budget_limit, int) or isinstance(budget_limit, bool):
             budget_limit = None
+        goal_revision = getattr(item, "goal_revision", None)
+        if not isinstance(goal_revision, int) or isinstance(goal_revision, bool) or goal_revision < 1:
+            goal_revision = None
         owner_principal_id = _queued_item_text(item, "owner_principal_id")
         operator_session_id = _queued_item_text(item, "operator_session_id")
         group_key = (
@@ -299,6 +314,7 @@ def _group_native_bundle_items(items: list[object]) -> list[list[object]]:
             budget_goal_id,
             budget_period_key,
             budget_limit,
+            goal_revision,
             owner_principal_id,
             operator_session_id,
         )
@@ -1320,6 +1336,13 @@ async def deliver_queued_bundle() -> int:
                 group_budget_limit = getattr(first_item, "budget_limit", None) if first_item is not None else None
                 if not isinstance(group_budget_limit, int) or isinstance(group_budget_limit, bool):
                     group_budget_limit = None
+                group_goal_revision = getattr(first_item, "goal_revision", None) if first_item is not None else None
+                if (
+                    not isinstance(group_goal_revision, int)
+                    or isinstance(group_goal_revision, bool)
+                    or group_goal_revision < 1
+                ):
+                    group_goal_revision = None
                 try:
                     native_principal = _delegated_native_principal(
                         _current_trust_principal(),
@@ -1345,6 +1368,7 @@ async def deliver_queued_bundle() -> int:
                             operator_session_id=group_operator_session_id,
                             source_insight_ids=source_insight_ids,
                             goal_id=group_goal_id or None,
+                            goal_revision=group_goal_revision,
                             budget_period_key=group_budget_period_key or None,
                             budget_limit=group_budget_limit,
                         )

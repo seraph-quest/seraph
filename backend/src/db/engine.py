@@ -167,6 +167,10 @@ async def _ensure_legacy_columns(conn) -> None:
         await conn.exec_driver_sql(
             "ALTER TABLE queued_insights ADD COLUMN operator_session_id VARCHAR"
         )
+    if queued_insight_columns and "goal_revision" not in queued_insight_columns:
+        await conn.exec_driver_sql(
+            "ALTER TABLE queued_insights ADD COLUMN goal_revision INTEGER"
+        )
 
     guardian_intervention_columns = await _table_columns("guardian_interventions")
     if guardian_intervention_columns and "active_project" not in guardian_intervention_columns:
@@ -410,11 +414,12 @@ async def _ensure_legacy_columns(conn) -> None:
         "queued_insights",
         {
             "goal_id": "VARCHAR",
+            "goal_revision": "INTEGER",
             "budget_period_key": "VARCHAR",
             "budget_limit": "INTEGER",
         },
     )
-    for column in ("goal_id", "budget_period_key", "budget_limit"):
+    for column in ("goal_id", "goal_revision", "budget_period_key", "budget_limit"):
         if column in insight_budget_columns:
             await conn.exec_driver_sql(
                 f"CREATE INDEX IF NOT EXISTS ix_queued_insights_{column} "

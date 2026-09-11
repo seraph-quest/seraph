@@ -46,12 +46,21 @@ async def _remove_invalid_goal_rows(db, rows: list[QueuedInsight]) -> list[Queue
             valid.append(row)
             continue
         goal = goals.get(row.goal_id)
+        try:
+            canonical_goal_revision = max(int(goal.revision or 1), 1) if goal is not None else None
+        except (TypeError, ValueError, OverflowError):
+            canonical_goal_revision = None
         if (
             goal is None
             or not row.owner_principal_id
             or not row.operator_session_id
             or goal.owner_principal_id != row.owner_principal_id
             or goal.owner_session_id != row.operator_session_id
+            or row.goal_revision is None
+            or isinstance(row.goal_revision, bool)
+            or not isinstance(row.goal_revision, int)
+            or row.goal_revision < 1
+            or canonical_goal_revision != row.goal_revision
         ):
             await db.delete(row)
             continue
@@ -73,11 +82,17 @@ class InsightQueue:
         owner_principal_id: str | None = None,
         operator_session_id: str | None = None,
         goal_id: str | None = None,
+        goal_revision: int | None = None,
         budget_period_key: str | None = None,
         budget_limit: int | None = None,
     ) -> QueuedInsight:
         """Add an insight to the queue."""
-        goal_bound = bool(goal_id or budget_period_key or budget_limit is not None)
+        goal_bound = bool(
+            goal_id
+            or goal_revision is not None
+            or budget_period_key
+            or budget_limit is not None
+        )
         if goal_bound and (
             not isinstance(goal_id, str)
             or not goal_id.strip()
@@ -90,6 +105,14 @@ class InsightQueue:
             or not owner_principal_id.strip()
             or not isinstance(operator_session_id, str)
             or not operator_session_id.strip()
+            or (
+                goal_revision is not None
+                and (
+                    isinstance(goal_revision, bool)
+                    or not isinstance(goal_revision, int)
+                    or goal_revision < 1
+                )
+            )
         ):
             raise ConversationIdentityError(
                 "goal_owner_binding_missing",
@@ -121,6 +144,15 @@ class InsightQueue:
                         "goal_owner_mismatch",
                         "Goal-bound queued insight does not match the canonical goal owner.",
                     )
+                canonical_goal_revision = max(int(goal.revision or 1), 1)
+                if goal_revision is None:
+                    goal_revision = canonical_goal_revision
+                elif goal_revision != canonical_goal_revision:
+                    raise ConversationIdentityError(
+                        "goal_revision_mismatch",
+                        "Goal-bound queued insight does not match the canonical goal revision.",
+                    )
+                insight.goal_revision = goal_revision
             db.add(insight)
         logger.info("Queued insight (type=%s, urgency=%d)", intervention_type, urgency)
         return insight

@@ -597,6 +597,9 @@ class QueuedInsight(SQLModel, table=True):
     owner_principal_id: Optional[str] = Field(default=None, index=True)
     operator_session_id: Optional[str] = Field(default=None, index=True)
     goal_id: Optional[str] = Field(default=None, index=True)
+    # Revision fence for goal-bound deferred delivery.  A queued insight is
+    # only valid for the canonical goal revision that produced it.
+    goal_revision: Optional[int] = Field(default=None, index=True)
     budget_period_key: Optional[str] = Field(default=None, index=True)
     budget_limit: Optional[int] = Field(default=None, index=True)
     content: str

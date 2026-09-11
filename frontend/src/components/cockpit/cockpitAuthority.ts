@@ -81,17 +81,25 @@ export function goalWorkflowBindingState({
   goalId,
   goalRevision,
   criterionId,
+  planRevision,
+  candidateId,
   workflowGoalId,
   workflowGoalRevision,
   workflowCriterionId,
+  workflowPlanRevision,
+  workflowCandidateId,
 }: {
   activeGoalCount: number;
   goalId?: string | null;
   goalRevision?: number | null;
   criterionId?: string | null;
+  planRevision?: number | null;
+  candidateId?: string | null;
   workflowGoalId?: string | null;
   workflowGoalRevision?: number | null;
   workflowCriterionId?: string | null;
+  workflowPlanRevision?: number | null;
+  workflowCandidateId?: string | null;
 }): GoalWorkflowBindingState {
   if (activeGoalCount > 1) return "ambiguous";
   if (!goalId || !workflowGoalId) return "unlinked";
@@ -101,9 +109,13 @@ export function goalWorkflowBindingState({
     || workflowGoalRevision == null
     || !criterionId
     || !workflowCriterionId
+    || planRevision == null
+    || workflowPlanRevision == null
   ) return "unlinked";
   if (goalRevision !== workflowGoalRevision) return "stale";
   if (criterionId !== workflowCriterionId) return "stale";
+  if (planRevision !== workflowPlanRevision) return "stale";
+  if (workflowCandidateId != null && (!candidateId || candidateId !== workflowCandidateId)) return "stale";
   return "matched";
 }
 
@@ -174,7 +186,7 @@ export function isApprovalAuthorityReady(
   if (!approval || approvalLoadState !== "ready" || auth.status !== "authenticated") return false;
 
   const status = text(approval.status).toLowerCase();
-  if (status && !["pending", "awaiting_approval", "approval_required"].includes(status)) return false;
+  if (!status || !["pending", "awaiting_approval", "approval_required"].includes(status)) return false;
 
   const ownerPrincipal = text(approval.approval_owner_principal_id);
   const ownerSession = text(approval.approval_owner_operator_session_id);
@@ -247,10 +259,8 @@ function approvalMatchesWorkflow(
   if (text(approval.goal_id) !== workflowGoalId) return false;
   if (text(approval.criterion_id) !== workflowCriterionId) return false;
   if (!Number.isInteger(approval.goal_revision) || approval.goal_revision !== workflowGoalRevision) return false;
-  if (workflow.planRevision != null) {
-    if (!Number.isInteger(workflow.planRevision) || !Number.isInteger(approval.plan_revision)) return false;
-    if (approval.plan_revision !== workflow.planRevision) return false;
-  }
+  if (!Number.isInteger(workflow.planRevision) || !Number.isInteger(approval.plan_revision)) return false;
+  if (approval.plan_revision !== workflow.planRevision) return false;
   return true;
 }
 
@@ -262,21 +272,13 @@ export function selectApprovalForWorkflow<T extends ApprovalCandidate>(
   if (!workflow) return null;
 
   const pendingIds = workflow.pendingApprovalIds?.filter((id) => typeof id === "string" && id.trim()) ?? [];
-  if (pendingIds.length > 0) {
-    const byId = pending.find((approval) => pendingIds.includes(approval.id) && approvalMatchesWorkflow(approval, workflow));
-    if (byId) return byId;
-    const attachedById = workflow.pendingApprovals?.find(
-      (approval) => pendingIds.includes(approval.id) && approvalMatchesWorkflow(approval, workflow),
-    );
-    if (attachedById) return attachedById as T;
-    return null;
-  }
-
-  if (text(workflow.workflowId)) {
-    const byWorkflow = pending.find((approval) => approvalMatchesWorkflow(approval, workflow));
-    if (byWorkflow) return byWorkflow;
-    const attachedByWorkflow = workflow.pendingApprovals?.find((approval) => approvalMatchesWorkflow(approval, workflow));
-    if (attachedByWorkflow) return attachedByWorkflow as T;
-  }
-  return null;
+  const candidates = [
+    ...pending,
+    ...(workflow.pendingApprovals ?? []),
+  ].filter((approval) => (
+    (pendingIds.length === 0 || pendingIds.includes(approval.id))
+    && approvalMatchesWorkflow(approval, workflow)
+  ));
+  const uniqueCandidates = [...new Map(candidates.map((approval) => [approval.id, approval])).values()];
+  return uniqueCandidates.length === 1 ? uniqueCandidates[0] as T : null;
 }

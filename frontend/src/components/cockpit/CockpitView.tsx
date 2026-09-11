@@ -8636,6 +8636,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
               goal_revision: resolved.goalRevision,
               criterion_id: resolved.criterionId,
               plan_revision: resolved.planRevision,
+              candidate_id: resolved.candidateId,
             },
           }),
         },
@@ -9701,9 +9702,13 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       goalId: currentGoal?.id,
       goalRevision: currentGoal?.revision ?? currentGoalLoop?.goal.revision,
       criterionId: currentGoalLoop?.criterion?.criterion_id ?? currentGoal?.success_criterion?.criterion_id,
+      planRevision: latestGoalReceipt?.plan_revision ?? null,
+      candidateId: latestGoalReceipt?.candidate_id ?? null,
       workflowGoalId: outcomeWorkflow.goalId,
       workflowGoalRevision: outcomeWorkflow.goalRevision,
       workflowCriterionId: outcomeWorkflow.criterionId,
+      workflowPlanRevision: outcomeWorkflow.planRevision,
+      workflowCandidateId: outcomeWorkflow.candidateId,
     })
     : activeGoalsForCockpit.length > 1 ? "ambiguous" : currentGoal ? "unlinked" : null;
   const outcomeBindingUnavailableReason = outcomeBindingState === "stale"
@@ -10971,9 +10976,13 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       goalId: currentGoal?.id,
       goalRevision: currentGoal?.revision ?? currentGoalLoop?.goal.revision,
       criterionId: currentGoalLoop?.criterion?.criterion_id ?? currentGoal?.success_criterion?.criterion_id,
+      planRevision: latestGoalReceipt?.plan_revision ?? null,
+      candidateId: latestGoalReceipt?.candidate_id ?? null,
       workflowGoalId: resolved.goalId,
       workflowGoalRevision: resolved.goalRevision,
       workflowCriterionId: resolved.criterionId,
+      workflowPlanRevision: resolved.planRevision,
+      workflowCandidateId: resolved.candidateId,
     });
     if (operatorAuth.status !== "authenticated" || !operatorAuth.principalId || !operatorAuth.sessionId) {
       return {

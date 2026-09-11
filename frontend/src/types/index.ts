@@ -165,6 +165,7 @@ export interface GoalLoopReceipt {
   dedupe_key?: string | null;
   goal_id?: string | null;
   goal_revision?: number | null;
+  plan_revision?: number | null;
   criterion_id?: string | null;
   action?: GoalLoopCandidateAction | null;
   capability_id?: string | null;

@@ -5137,6 +5137,9 @@ class TestWorkflowApi:
             "workflow_name": "example",
             "tool_name": "workflow_example",
             "session_id": "session-1",
+            "goal_id": "goal-1",
+            "criterion_id": "criterion-1",
+            "goal_revision": 1,
             "pending_approvals": [],
             "replay_allowed": True,
             "replay_block_reason": None,
@@ -5172,7 +5175,16 @@ class TestWorkflowApi:
             with pytest.raises(HTTPException) as raised:
                 await control_workflow_run(
                     run_identity,
-                    WorkflowRunControlRequest(action="retry", target="/tmp/private-output.txt"),
+                    WorkflowRunControlRequest(
+                        action="retry",
+                        target="/tmp/private-output.txt",
+                        operator_context={
+                            "workflow_run_identity": run_identity,
+                            "goal_id": "goal-1",
+                            "criterion_id": "criterion-1",
+                            "goal_revision": 1,
+                        },
+                    ),
                     _workflow_mutator_request(operator, "/api/workflows/runs/control"),
                 )
 
@@ -5199,6 +5211,9 @@ class TestWorkflowApi:
             "workflow_name": "example",
             "tool_name": "workflow_example",
             "session_id": "session-1",
+            "goal_id": "goal-1",
+            "criterion_id": "criterion-1",
+            "goal_revision": 1,
             "pending_approvals": [],
             "replay_allowed": True,
             "replay_block_reason": None,
@@ -5243,13 +5258,126 @@ class TestWorkflowApi:
         ):
             payload = await control_workflow_run(
                 run_identity,
-                WorkflowRunControlRequest(action="retry", step_id="checkpoint-1"),
+                WorkflowRunControlRequest(
+                    action="retry",
+                    step_id="checkpoint-1",
+                    operator_context={
+                        "workflow_run_identity": run_identity,
+                        "goal_id": "goal-1",
+                        "criterion_id": "criterion-1",
+                        "goal_revision": 1,
+                    },
+                ),
                 _workflow_mutator_request(operator, "/api/workflows/runs/control"),
             )
 
         assert payload["status"] == "recorded"
         assert transition.await_args.kwargs["expected_revision"] == 7
         assert events == ["transition", "control"]
+
+    @pytest.mark.asyncio
+    async def test_typed_pause_and_revoke_require_complete_identity_before_mutation(self):
+        from src.api.workflows import WorkflowRunControlRequest, control_workflow_run
+
+        operator = _test_bypass_operator()
+        run_identity = "session-1:workflow_example:typed-authority"
+        run = {
+            "record_schema_version": 2,
+            "run_identity": run_identity,
+            "workflow_name": "example",
+            "tool_name": "workflow_example",
+            "session_id": operator.session_id,
+            "goal_id": "goal-1",
+            "criterion_id": "criterion-1",
+            "goal_revision": 1,
+            "plan_revision": 2,
+            "candidate_id": "candidate-1",
+            "owner_kind": "user",
+            "owner_principal_id": operator.principal.principal_id,
+            "lease": {"owner": "worker", "fencing_token": 3},
+            "revision": 4,
+        }
+        with (
+            patch("src.api.workflows._begin_rest_revocation_watch", return_value=None),
+            patch("src.api.workflows._find_workflow_run_for_control", new_callable=AsyncMock, return_value=run),
+            patch("src.api.workflows.audit_repository.log_event", new_callable=AsyncMock) as audit,
+            patch("src.api.workflows.durable_job_repository.get_job", new_callable=AsyncMock) as get_job,
+            patch("src.api.workflows.durable_job_repository.pause_job", new_callable=AsyncMock) as pause,
+            patch("src.api.workflows.durable_job_repository.revoke_job", new_callable=AsyncMock) as revoke,
+        ):
+            for action in ("pause", "revoke"):
+                with pytest.raises(HTTPException) as raised:
+                    await control_workflow_run(
+                        run_identity,
+                        WorkflowRunControlRequest(action=action),
+                        _workflow_mutator_request(operator, "/api/workflows/runs/control"),
+                    )
+                assert raised.value.status_code == 409
+                assert raised.value.detail == "workflow_identity_binding_missing"
+
+        get_job.assert_not_awaited()
+        pause.assert_not_awaited()
+        revoke.assert_not_awaited()
+        assert audit.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_typed_recovery_rechecks_current_canonical_goal_before_transition(self):
+        from src.api.workflows import WorkflowRunControlRequest, control_workflow_run
+
+        operator = _test_bypass_operator()
+        run_identity = "session-1:workflow_example:typed-stale-goal"
+        run = {
+            "record_schema_version": 2,
+            "run_identity": run_identity,
+            "workflow_name": "example",
+            "tool_name": "workflow_example",
+            "session_id": operator.session_id,
+            "goal_id": "goal-1",
+            "criterion_id": "criterion-1",
+            "goal_revision": 1,
+            "plan_revision": 2,
+            "candidate_id": "candidate-1",
+            "owner_kind": "user",
+            "owner_principal_id": operator.principal.principal_id,
+            "lease": {"owner": "worker", "fencing_token": 3},
+            "revision": 4,
+        }
+        context = {
+            "workflow_run_identity": run_identity,
+            "goal_id": "goal-1",
+            "criterion_id": "criterion-1",
+            "goal_revision": 1,
+            "plan_revision": 2,
+            "candidate_id": "candidate-1",
+        }
+        current_goal = SimpleNamespace(
+            id="goal-1",
+            revision=2,
+            success_criterion_json=json.dumps({
+                "criterion_id": "criterion-1",
+                "description": "Current criterion",
+                "target": "done",
+            }),
+        )
+        with (
+            patch("src.api.workflows._begin_rest_revocation_watch", return_value=None),
+            patch("src.api.workflows._find_workflow_run_for_control", new_callable=AsyncMock, return_value=run),
+            patch("src.api.workflows.durable_job_repository.get_job", new_callable=AsyncMock, return_value=run),
+            patch("src.api.workflows.goal_repository.get", new_callable=AsyncMock, return_value=current_goal),
+            patch("src.api.workflows.audit_repository.log_event", new_callable=AsyncMock) as audit,
+            patch("src.api.workflows.durable_job_repository.pause_job", new_callable=AsyncMock) as pause,
+        ):
+            with pytest.raises(HTTPException) as raised:
+                await control_workflow_run(
+                    run_identity,
+                    WorkflowRunControlRequest(action="pause", operator_context=context),
+                    _workflow_mutator_request(operator, "/api/workflows/runs/control"),
+                )
+
+        assert raised.value.status_code == 409
+        assert raised.value.detail == "stale_goal_revision"
+        pause.assert_not_awaited()
+        assert audit.await_count == 1
 
     @pytest.mark.asyncio
     async def test_workflow_control_refuses_durable_owner_mismatch_before_lease(self):
@@ -5382,6 +5510,9 @@ class TestWorkflowApi:
             "workflow_name": "example",
             "tool_name": "workflow_example",
             "session_id": "session-1",
+            "goal_id": "goal-1",
+            "criterion_id": "criterion-1",
+            "goal_revision": 1,
             "pending_approvals": [],
             "replay_allowed": True,
             "replay_block_reason": None,
@@ -5422,7 +5553,16 @@ class TestWorkflowApi:
             for index, step_id in enumerate(step_ids):
                 await control_workflow_run(
                     f"session-1:workflow_example:redacted-{index}",
-                    WorkflowRunControlRequest(action="retry", step_id=step_id),
+                    WorkflowRunControlRequest(
+                        action="retry",
+                        step_id=step_id,
+                        operator_context={
+                            "workflow_run_identity": f"session-1:workflow_example:redacted-{index}",
+                            "goal_id": "goal-1",
+                            "criterion_id": "criterion-1",
+                            "goal_revision": 1,
+                        },
+                    ),
                     _workflow_mutator_request(operator, "/api/workflows/runs/control"),
                 )
 
@@ -5458,6 +5598,9 @@ class TestWorkflowApi:
                 "workflow_name": "example",
                 "tool_name": "workflow_example",
                 "session_id": "session-1",
+                "goal_id": "goal-1",
+                "criterion_id": "criterion-1",
+                "goal_revision": 1,
                 "pending_approvals": [],
                 "replay_allowed": False,
                 "replay_block_reason": reason,
@@ -5476,7 +5619,16 @@ class TestWorkflowApi:
                 with pytest.raises(HTTPException) as raised:
                     await control_workflow_run(
                         run_identity,
-                        WorkflowRunControlRequest(action="retry", target="/tmp/private-output.txt"),
+                        WorkflowRunControlRequest(
+                            action="retry",
+                            target="/tmp/private-output.txt",
+                            operator_context={
+                                "workflow_run_identity": run_identity,
+                                "goal_id": "goal-1",
+                                "criterion_id": "criterion-1",
+                                "goal_revision": 1,
+                            },
+                        ),
                         _workflow_mutator_request(operator, "/api/workflows/runs/control"),
                     )
 
@@ -5540,6 +5692,9 @@ class TestWorkflowApi:
                 "workflow_name": "example",
                 "tool_name": "workflow_example",
                 "session_id": "session-1",
+                "goal_id": "goal-1",
+                "criterion_id": "criterion-1",
+                "goal_revision": 1,
                 "pending_approvals": [],
                 "replay_allowed": True,
                 "replay_block_reason": None,
@@ -5560,7 +5715,16 @@ class TestWorkflowApi:
                 with pytest.raises(RuntimeError, match="provider failed"):
                     await control_workflow_run(
                         run["run_identity"],
-                        WorkflowRunControlRequest(action="retry", step_id="/tmp/private-step"),
+                        WorkflowRunControlRequest(
+                            action="retry",
+                            step_id="/tmp/private-step",
+                            operator_context={
+                                "workflow_run_identity": run["run_identity"],
+                                "goal_id": "goal-1",
+                                "criterion_id": "criterion-1",
+                                "goal_revision": 1,
+                            },
+                        ),
                         _workflow_mutator_request(operator, "/api/workflows/runs/control"),
                     )
             failure_details = audit_log.await_args.kwargs["details"]

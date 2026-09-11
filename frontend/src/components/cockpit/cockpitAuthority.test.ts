@@ -21,6 +21,7 @@ const approval = {
   goal_id: "goal-1",
   criterion_id: "criterion-1",
   goal_revision: 1,
+  plan_revision: 1,
   tool_name: "filesystem:workspace",
   status: "pending",
   session_id: "conversation-1",
@@ -49,6 +50,10 @@ describe("cockpit approval authority", () => {
       auth,
       "ready",
     )).toBe(false);
+  });
+
+  it("treats a missing approval status as non-actionable", () => {
+    expect(isApprovalAuthorityReady({ ...approval, status: undefined }, auth, "ready")).toBe(false);
   });
 
   it("locks rows while approval data is stale and when its supplied expiry has passed", () => {
@@ -107,6 +112,7 @@ describe("cockpit approval authority", () => {
         goalId: "goal-1",
         criterionId: "criterion-1",
         goalRevision: 1,
+        planRevision: 1,
         toolName: "filesystem:workspace",
         sessionId: "conversation-1",
       },
@@ -131,29 +137,62 @@ describe("cockpit approval authority", () => {
       goalId: "goal-1",
       goalRevision: 4,
       criterionId: "criterion-1",
+      planRevision: 8,
       workflowGoalId: "goal-1",
       workflowGoalRevision: 4,
       workflowCriterionId: "criterion-1",
+      workflowPlanRevision: 8,
     })).toBe("matched");
     expect(goalWorkflowBindingState({
       activeGoalCount: 2,
       goalId: "goal-1",
       goalRevision: 4,
       criterionId: "criterion-1",
+      planRevision: 8,
       workflowGoalId: "goal-1",
       workflowGoalRevision: 4,
       workflowCriterionId: "criterion-1",
+      workflowPlanRevision: 8,
     })).toBe("ambiguous");
     expect(goalWorkflowBindingState({
       activeGoalCount: 1,
       goalId: "goal-1",
       goalRevision: 4,
       criterionId: "criterion-1",
+      planRevision: 8,
       workflowGoalId: "goal-1",
       workflowGoalRevision: 3,
       workflowCriterionId: "criterion-1",
+      workflowPlanRevision: 8,
     })).toBe("stale");
     expect(goalWorkflowBindingState({ activeGoalCount: 1, goalId: "goal-1" })).toBe("unlinked");
+    expect(goalWorkflowBindingState({
+      activeGoalCount: 1,
+      goalId: "goal-1",
+      goalRevision: 4,
+      criterionId: "criterion-1",
+      planRevision: 8,
+      workflowGoalId: "goal-1",
+      workflowGoalRevision: 4,
+      workflowCriterionId: "criterion-1",
+      workflowPlanRevision: 9,
+    })).toBe("stale");
+  });
+
+  it("fails closed when multiple approvals share the exact workflow identity", () => {
+    expect(selectApprovalForWorkflow(
+      [
+        { ...approval, id: "approval-1" },
+        { ...approval, id: "approval-2" },
+      ],
+      {
+        workflowId: "run-1",
+        goalId: "goal-1",
+        goalRevision: 1,
+        criterionId: "criterion-1",
+        planRevision: 1,
+      },
+    )).toBe(null);
   });
 
   it("keeps approval target references out of rendered scope labels", () => {

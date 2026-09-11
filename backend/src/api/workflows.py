@@ -40,6 +40,7 @@ from src.extensions.registry import default_manifest_roots_for_workspace
 from src.extensions.workflow_runtimes import list_workflow_runtime_inventory
 from src.observer.manager import context_manager
 from src.extensions.workspace_package import save_workspace_contribution
+from src.goals.repository import deserialize_success_criterion, goal_repository
 from src.tools.policy import get_current_tool_policy_mode
 from src.workflows.loader import parse_workflow_content
 from src.workflows.manager import (
@@ -68,6 +69,7 @@ class UpdateWorkflowRequest(BaseModel):
 
 class WorkflowResumePlanRequest(BaseModel):
     step_id: str | None = None
+    operator_context: dict[str, Any] | None = None
 
 
 class WorkflowRunControlRequest(BaseModel):
@@ -106,6 +108,9 @@ _WORKFLOW_REPLAY_ACTIONS = frozenset({"resume", "retry", "repair", "branch", "re
 # actions that can affect recovery state require a durable user ownership
 # binding; service-owned runs are never operator-controllable.
 _WORKFLOW_INSPECTION_ACTIONS = frozenset({"audit"})
+_WORKFLOW_IDENTITY_BOUND_ACTIONS = frozenset(
+    _WORKFLOW_CONTROL_ACTIONS - _WORKFLOW_INSPECTION_ACTIONS
+)
 _WORKFLOW_REPLAY_BLOCK_REASONS = frozenset(
     {
         "approval_context_changed",
@@ -149,6 +154,10 @@ _WORKFLOW_SAFE_REFUSAL_CODES = _WORKFLOW_REPLAY_BLOCK_REASONS | {
     "workflow_action_handle_mismatch",
     "workflow_identity_binding_missing",
     "workflow_identity_binding_mismatch",
+    "workflow_goal_unavailable",
+    "stale_goal_revision",
+    "workflow_criterion_stale",
+    "workflow_plan_revision_stale",
 }
 _WORKFLOW_SAFE_TOKEN_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
 _WORKFLOW_SAFE_ARTIFACT_ID_RE = re.compile(r"^art_[0-9a-f]{24}$")
@@ -319,6 +328,7 @@ def _workflow_identity_binding_detail(
     run: dict[str, Any],
     run_identity: str,
     operator_context: dict[str, Any] | None,
+    require_plan_revision: bool = False,
 ) -> str | None:
     """Require the caller to echo the server-owned goal/run identity exactly."""
     context = operator_context if isinstance(operator_context, dict) else {}
@@ -344,7 +354,17 @@ def _workflow_identity_binding_detail(
         elif str(expected).strip() != str(supplied).strip():
             return "workflow_identity_binding_mismatch"
 
+    expected_candidate_id = run.get("candidate_id")
+    if expected_candidate_id is not None:
+        supplied_candidate_id = context.get("candidate_id")
+        if not str(expected_candidate_id).strip() or not str(supplied_candidate_id or "").strip():
+            return "workflow_identity_binding_missing"
+        if str(expected_candidate_id).strip() != str(supplied_candidate_id).strip():
+            return "workflow_identity_binding_mismatch"
+
     expected_plan_revision = run.get("plan_revision")
+    if require_plan_revision and expected_plan_revision is None:
+        return "workflow_identity_binding_missing"
     if expected_plan_revision is not None:
         supplied_plan_revision = context.get("plan_revision")
         if supplied_plan_revision is None:
@@ -354,6 +374,52 @@ def _workflow_identity_binding_detail(
                 return "workflow_identity_binding_mismatch"
         except (TypeError, ValueError, OverflowError):
             return "workflow_identity_binding_missing"
+    return None
+
+
+async def _workflow_current_goal_binding_detail(run: dict[str, Any]) -> str | None:
+    """Check a typed workflow identity against current canonical goal state."""
+    goal_id = str(run.get("goal_id") or "").strip()
+    criterion_id = str(run.get("criterion_id") or "").strip()
+    try:
+        expected_revision = int(run.get("goal_revision"))
+    except (TypeError, ValueError, OverflowError):
+        return "workflow_identity_binding_missing"
+    if not goal_id or not criterion_id:
+        return "workflow_identity_binding_missing"
+    try:
+        goal = await goal_repository.get(goal_id)
+    except Exception:
+        logger.exception("Canonical goal lookup failed before workflow recovery")
+        return "workflow_goal_unavailable"
+    if goal is None or str(getattr(goal, "id", goal_id) or "").strip() != goal_id:
+        return "workflow_goal_unavailable"
+    try:
+        current_revision = max(int(getattr(goal, "revision", 1) or 1), 1)
+    except (TypeError, ValueError, OverflowError):
+        return "workflow_goal_unavailable"
+    if current_revision != expected_revision:
+        return "stale_goal_revision"
+
+    criterion = deserialize_success_criterion(goal)
+    if criterion is None:
+        raw_criterion = getattr(goal, "success_criterion", None)
+        if isinstance(raw_criterion, dict):
+            criterion_id_value = raw_criterion.get("criterion_id") or raw_criterion.get("id")
+        else:
+            criterion_id_value = getattr(raw_criterion, "criterion_id", None)
+    else:
+        criterion_id_value = criterion.criterion_id
+    if str(criterion_id_value or "").strip() != criterion_id:
+        return "workflow_criterion_stale"
+
+    current_plan_revision = getattr(goal, "plan_revision", None)
+    if current_plan_revision is not None:
+        try:
+            if int(current_plan_revision) != int(run.get("plan_revision")):
+                return "workflow_plan_revision_stale"
+        except (TypeError, ValueError, OverflowError):
+            return "workflow_plan_revision_stale"
     return None
 
 
@@ -2256,6 +2322,17 @@ async def _control_typed_workflow_run(
     if current is None:
         raise HTTPException(status_code=404, detail="workflow_run_not_found")
     run = current
+    identity_detail = _workflow_identity_binding_detail(
+        run=run,
+        run_identity=run_identity,
+        operator_context=operator_context,
+        require_plan_revision=True,
+    )
+    if identity_detail is not None:
+        raise HTTPException(status_code=409, detail=identity_detail)
+    goal_detail = await _workflow_current_goal_binding_detail(run)
+    if goal_detail is not None:
+        raise HTTPException(status_code=409, detail=goal_detail)
     lease = run.get("lease") if isinstance(run.get("lease"), dict) else {}
     lease_owner = str(lease.get("owner") or "").strip() or None
     try:
@@ -3706,6 +3783,39 @@ async def build_workflow_resume_plan(
                 detail = "workflow_run_not_found"
                 await _workflow_session_fence(request, revocation_scope)
                 raise HTTPException(status_code=404, detail=detail)
+            identity_detail = _workflow_identity_binding_detail(
+                run=run,
+                run_identity=run_identity,
+                operator_context=req.operator_context if req is not None else None,
+                require_plan_revision=True,
+            )
+            if identity_detail is not None:
+                await _record_workflow_route_receipt(
+                    event_type="workflow_resume_plan_refused",
+                    session_id=active_session_id,
+                    run_identity=run_identity,
+                    action="resume",
+                    status_code=409,
+                    detail=identity_detail,
+                    workflow_name=run.get("workflow_name"),
+                    step_id=req.step_id if req is not None else None,
+                )
+                await _workflow_session_fence(request, revocation_scope)
+                raise HTTPException(status_code=409, detail=identity_detail)
+            goal_detail = await _workflow_current_goal_binding_detail(run)
+            if goal_detail is not None:
+                await _record_workflow_route_receipt(
+                    event_type="workflow_resume_plan_refused",
+                    session_id=active_session_id,
+                    run_identity=run_identity,
+                    action="resume",
+                    status_code=409,
+                    detail=goal_detail,
+                    workflow_name=run.get("workflow_name"),
+                    step_id=req.step_id if req is not None else None,
+                )
+                await _workflow_session_fence(request, revocation_scope)
+                raise HTTPException(status_code=409, detail=goal_detail)
             typed_lease = run.get("lease") if isinstance(run.get("lease"), dict) else {}
             typed_lease_owner = str(typed_lease.get("owner") or "").strip()
             if typed_lease_owner and typed_lease_owner != _workflow_canonical_lease_owner(run_identity):
@@ -3958,11 +4068,12 @@ async def control_workflow_run(
             await log_refusal(status_code=403, detail="workflow_owner_mismatch")
             raise HTTPException(status_code=403, detail="workflow_owner_mismatch")
 
-        if action in _WORKFLOW_REPLAY_ACTIONS:
+        if action in _WORKFLOW_IDENTITY_BOUND_ACTIONS:
             identity_detail = _workflow_identity_binding_detail(
                 run=run,
                 run_identity=run_identity,
                 operator_context=req.operator_context,
+                require_plan_revision=_is_typed_workflow_run(run),
             )
             if identity_detail is not None:
                 await log_refusal(status_code=409, detail=identity_detail)

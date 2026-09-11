@@ -39,8 +39,79 @@ class ReconciliationResolutionRequest(BaseModel):
     action: str = Field(default="cancel", pattern=r"^(cancel|recover)$")
 
 
+class CapabilityPackLifecycleResponse(BaseModel):
+    """Stable operator response shared by every lifecycle transition."""
+
+    model_config = ConfigDict(extra="allow")
+
+    status: str
+    pointer: dict[str, Any] | None = None
+    receipt: dict[str, Any] | None = None
+
+
+class CapabilityPackVersionRequest(BaseModel):
+    """Reviewed package material required for activation or update."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    manifest: dict[str, Any]
+    root_path: str = Field(min_length=1, max_length=4096)
+    goal_id: str = Field(min_length=1, max_length=256)
+    review_id: str = Field(min_length=1, max_length=256)
+    approval_id: str = Field(min_length=1, max_length=256)
+    content_digest: str | None = Field(default=None, min_length=64, max_length=64)
+    authority_digest: str | None = Field(default=None, min_length=64, max_length=64)
+
+
+class CapabilityPackApprovalRequest(BaseModel):
+    """Exact durable approval binding for an existing active version."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    approval_id: str = Field(min_length=1, max_length=256)
+    reason: str = Field(default="operator_requested", min_length=1, max_length=256)
+    content_digest: str | None = Field(default=None, min_length=64, max_length=64)
+    authority_digest: str | None = Field(default=None, min_length=64, max_length=64)
+
+
+class CapabilityPackRollbackRequest(CapabilityPackApprovalRequest):
+    goal_id: str | None = Field(default=None, min_length=1, max_length=256)
+
+
+class CapabilityPackRevokeRequest(CapabilityPackApprovalRequest):
+    digest: str | None = Field(default=None, min_length=64, max_length=64)
+
+
 def _store() -> CapabilityPackLifecycle:
     return CapabilityPackLifecycle()
+
+
+def _operator_identity(request: Request) -> tuple[Any, str, str]:
+    operator = _require_authenticated_capability_operator(request)
+    principal_id = str(getattr(operator.principal, "principal_id", "") or "")
+    return operator, principal_id, operator.session_id
+
+
+def _lifecycle_http_error(exc: Exception) -> HTTPException:
+    """Return a redacted error; paths and approval internals never cross API."""
+
+    message = str(exc).lower()
+    if any(token in message for token in ("owner", "session", "identity", "approval", "authority")):
+        status_code = 403
+        code = "capability_pack_authority_denied"
+    elif any(token in message for token in ("requires an active", "has no active", "no rollback", "already")):
+        status_code = 409
+        code = "capability_pack_invalid_state"
+    else:
+        status_code = 422
+        code = "capability_pack_lifecycle_rejected"
+    return HTTPException(
+        status_code=status_code,
+        detail={
+            "code": code,
+            "recovery": "Refresh the authenticated pack readback and submit a matching reviewed approval.",
+        },
+    )
 
 
 def _canonical_goal_snapshot(goal: Any, *, owner_principal_id: str, session_id: str) -> dict[str, Any]:
@@ -88,6 +159,159 @@ async def capability_pack_readback(pack_id: str, request: Request) -> dict[str, 
         return _store().status(pack_id, owner_principal_id=principal_id, session_id=operator.session_id)
     except (CapabilityPackLifecycleError, ValueError) as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.post(
+    "/capability-packs/{pack_id}/activate",
+    response_model=CapabilityPackLifecycleResponse,
+)
+async def capability_pack_activate(
+    pack_id: str,
+    req: CapabilityPackVersionRequest,
+    request: Request,
+) -> CapabilityPackLifecycleResponse:
+    _operator, principal_id, session_id = _operator_identity(request)
+    if str(req.manifest.get("id") or "") != pack_id:
+        raise HTTPException(status_code=422, detail={"code": "pack_identity_mismatch"})
+    try:
+        return _store().activate(
+            req.manifest,
+            root_path=req.root_path,
+            goal_id=req.goal_id,
+            review_id=req.review_id,
+            approval_id=req.approval_id,
+            owner_principal_id=principal_id,
+            session_id=session_id,
+            content_digest=req.content_digest,
+            authority_digest=req.authority_digest,
+        )
+    except (CapabilityPackLifecycleError, ValueError) as exc:
+        raise _lifecycle_http_error(exc) from exc
+
+
+@router.post(
+    "/capability-packs/{pack_id}/update",
+    response_model=CapabilityPackLifecycleResponse,
+)
+async def capability_pack_update(
+    pack_id: str,
+    req: CapabilityPackVersionRequest,
+    request: Request,
+) -> CapabilityPackLifecycleResponse:
+    _operator, principal_id, session_id = _operator_identity(request)
+    if str(req.manifest.get("id") or "") != pack_id:
+        raise HTTPException(status_code=422, detail={"code": "pack_identity_mismatch"})
+    try:
+        return _store().update(
+            req.manifest,
+            root_path=req.root_path,
+            goal_id=req.goal_id,
+            review_id=req.review_id,
+            approval_id=req.approval_id,
+            owner_principal_id=principal_id,
+            session_id=session_id,
+            content_digest=req.content_digest,
+            authority_digest=req.authority_digest,
+        )
+    except (CapabilityPackLifecycleError, ValueError) as exc:
+        raise _lifecycle_http_error(exc) from exc
+
+
+@router.post(
+    "/capability-packs/{pack_id}/pause",
+    response_model=CapabilityPackLifecycleResponse,
+)
+async def capability_pack_pause(
+    pack_id: str,
+    req: CapabilityPackApprovalRequest,
+    request: Request,
+) -> CapabilityPackLifecycleResponse:
+    _operator, principal_id, session_id = _operator_identity(request)
+    try:
+        return _store().pause(
+            pack_id,
+            approval_id=req.approval_id,
+            reason=req.reason,
+            owner_principal_id=principal_id,
+            session_id=session_id,
+            content_digest=req.content_digest,
+            authority_digest=req.authority_digest,
+        )
+    except (CapabilityPackLifecycleError, ValueError) as exc:
+        raise _lifecycle_http_error(exc) from exc
+
+
+@router.post(
+    "/capability-packs/{pack_id}/rollback",
+    response_model=CapabilityPackLifecycleResponse,
+)
+async def capability_pack_rollback(
+    pack_id: str,
+    req: CapabilityPackRollbackRequest,
+    request: Request,
+) -> CapabilityPackLifecycleResponse:
+    _operator, principal_id, session_id = _operator_identity(request)
+    try:
+        return _store().rollback(
+            pack_id,
+            goal_id=req.goal_id,
+            approval_id=req.approval_id,
+            owner_principal_id=principal_id,
+            session_id=session_id,
+            content_digest=req.content_digest,
+            authority_digest=req.authority_digest,
+        )
+    except (CapabilityPackLifecycleError, ValueError) as exc:
+        raise _lifecycle_http_error(exc) from exc
+
+
+@router.post(
+    "/capability-packs/{pack_id}/revoke",
+    response_model=CapabilityPackLifecycleResponse,
+)
+async def capability_pack_revoke(
+    pack_id: str,
+    req: CapabilityPackRevokeRequest,
+    request: Request,
+) -> CapabilityPackLifecycleResponse:
+    _operator, principal_id, session_id = _operator_identity(request)
+    try:
+        return _store().revoke(
+            pack_id,
+            digest=req.digest,
+            approval_id=req.approval_id,
+            reason=req.reason,
+            owner_principal_id=principal_id,
+            session_id=session_id,
+            content_digest=req.content_digest,
+            authority_digest=req.authority_digest,
+        )
+    except (CapabilityPackLifecycleError, ValueError) as exc:
+        raise _lifecycle_http_error(exc) from exc
+
+
+@router.post(
+    "/capability-packs/{pack_id}/uninstall",
+    response_model=CapabilityPackLifecycleResponse,
+)
+async def capability_pack_uninstall(
+    pack_id: str,
+    req: CapabilityPackApprovalRequest,
+    request: Request,
+) -> CapabilityPackLifecycleResponse:
+    _operator, principal_id, session_id = _operator_identity(request)
+    try:
+        return _store().uninstall(
+            pack_id,
+            approval_id=req.approval_id,
+            reason=req.reason,
+            owner_principal_id=principal_id,
+            session_id=session_id,
+            content_digest=req.content_digest,
+            authority_digest=req.authority_digest,
+        )
+    except (CapabilityPackLifecycleError, ValueError) as exc:
+        raise _lifecycle_http_error(exc) from exc
 
 
 @router.post("/capability-packs/{pack_id}/reconcile")
@@ -148,13 +372,6 @@ async def capability_pack_execute_local(
         if canonical_goal_snapshot["status"] != "active":
             raise HTTPException(status_code=409, detail={"code": "goal_not_active", "goal_id": req.goal_id})
 
-    def intercepted_transport(_url: str, *, query: str | None = None) -> Any:
-        # The API deliberately injects request data as an in-process fixture;
-        # this path never constructs an HTTP client or permits live egress.
-        if source_payload is None:
-            raise CapabilityPackLifecycleError("source_payload is required for primary local execution")
-        return source_payload
-
     try:
         return _store().execute_local(
             pack_id,
@@ -167,8 +384,8 @@ async def capability_pack_execute_local(
             source_url=req.source_url or "local://intercepted/source",
             query=req.query,
             goal_snapshot=canonical_goal_snapshot,
+            source_payload=source_payload,
             source_payload_digest=canonical_digest(source_payload) if source_payload is not None else None,
-            intercepted_transport=intercepted_transport if req.domain in {"primary", "research", "research_brief"} else None,
         )
     except CapabilityPackLifecycleError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -194,4 +411,13 @@ async def capability_pack_resolve_reconciliation(
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
-__all__ = ["LocalExecutionRequest", "ReconciliationResolutionRequest", "router"]
+__all__ = [
+    "CapabilityPackApprovalRequest",
+    "CapabilityPackLifecycleResponse",
+    "CapabilityPackRevokeRequest",
+    "CapabilityPackRollbackRequest",
+    "CapabilityPackVersionRequest",
+    "LocalExecutionRequest",
+    "ReconciliationResolutionRequest",
+    "router",
+]

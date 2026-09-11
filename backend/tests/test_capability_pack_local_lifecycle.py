@@ -188,6 +188,11 @@ def test_local_two_domain_execution_is_real_and_intercepted(tmp_path: Path):
     assert calls == ["http://controlled.test/source"]
     assert primary["execution"]["transport"] == "intercepted"
     assert primary["execution"]["live_network_calls"] == 0
+    assert primary["execution"]["governed_workflow"]["executor"] == "capability_pack_internal_governed_host_v1"
+    assert [step["status"] for step in primary["execution"]["governed_workflow"]["steps"]] == [
+        "succeeded",
+        "succeeded",
+    ]
     assert primary["execution"]["artifact"]["readback_ok"] is True
     assert secondary["execution"]["transport"] == "none"
     assert secondary["execution"]["artifact"]["readback_ok"] is True
@@ -210,6 +215,32 @@ def test_local_two_domain_execution_is_real_and_intercepted(tmp_path: Path):
     )
     assert deduped["status"] == "deduped"
     assert calls == ["http://controlled.test/source"]
+
+
+def test_local_execution_accepts_only_a_value_for_the_production_source_boundary(tmp_path: Path):
+    root, pack = _package(tmp_path)
+    store = CapabilityPackLifecycle(tmp_path / "lifecycle.json")
+    owner = "operator:local-value"
+    session = "session-local-value"
+    _activate(store, root, pack, owner=owner, session=session)
+
+    result = store.execute_local(
+        pack.id,
+        goal_id="goal-local",
+        job_id="job-value-boundary",
+        domain="primary",
+        artifact_root=tmp_path / "artifacts",
+        artifact_path="value.md",
+        owner_principal_id=owner,
+        session_id=session,
+        source_url="local://intercepted/source",
+        source_payload={"content": "already intercepted"},
+    )
+
+    assert result["status"] == "succeeded"
+    assert result["execution"]["provider_calls"] == 0
+    assert result["execution"]["live_network_calls"] == 0
+    assert result["execution"]["governed_workflow"]["steps"][0]["effect"] == "intercepted_input"
 
 
 def test_authenticated_approval_binds_owner_session_content_and_authority(tmp_path: Path):
@@ -306,9 +337,90 @@ def test_operator_api_routes_are_registered_for_readback_and_local_controls():
 
     paths = {route.path for route in api_router.routes}
     assert "/api/capability-packs/{pack_id}" in paths
+    for action in ("activate", "update", "pause", "rollback", "revoke", "uninstall"):
+        assert f"/api/capability-packs/{{pack_id}}/{action}" in paths
     assert "/api/capability-packs/{pack_id}/reconcile" in paths
     assert "/api/capability-packs/{pack_id}/reconcile/resolve" in paths
     assert "/api/capability-packs/{pack_id}/execute-local" in paths
+
+
+@pytest.mark.asyncio
+async def test_lifecycle_api_routes_bind_authenticated_owner_and_approval(monkeypatch: pytest.MonkeyPatch):
+    from src.api.capability_packs import (
+        CapabilityPackApprovalRequest,
+        CapabilityPackRevokeRequest,
+        CapabilityPackRollbackRequest,
+        CapabilityPackVersionRequest,
+        capability_pack_activate,
+        capability_pack_pause,
+        capability_pack_rollback,
+        capability_pack_revoke,
+        capability_pack_uninstall,
+        capability_pack_update,
+    )
+
+    operator = SimpleNamespace(
+        principal=SimpleNamespace(principal_id="operator:api", principal_type="operator"),
+        session_id="session:api",
+    )
+    captured: list[tuple[str, dict[str, object]]] = []
+
+    class FakeStore:
+        def _result(self, action: str, **kwargs: object):
+            captured.append((action, kwargs))
+            return {"status": "active", "pointer": {"pack_id": "seraph.local-proof-pack"}, "receipt": {"action": action}}
+
+        def activate(self, manifest, **kwargs):
+            return self._result("activate", manifest=manifest, **kwargs)
+
+        def update(self, manifest, **kwargs):
+            return self._result("update", manifest=manifest, **kwargs)
+
+        def pause(self, pack_id, **kwargs):
+            return self._result("pause", pack_id=pack_id, **kwargs)
+
+        def rollback(self, pack_id, **kwargs):
+            return self._result("rollback", pack_id=pack_id, **kwargs)
+
+        def revoke(self, pack_id, **kwargs):
+            return self._result("revoke", pack_id=pack_id, **kwargs)
+
+        def uninstall(self, pack_id, **kwargs):
+            return self._result("uninstall", pack_id=pack_id, **kwargs)
+
+    monkeypatch.setattr("src.api.capability_packs._require_authenticated_capability_operator", lambda _request: operator)
+    monkeypatch.setattr("src.api.capability_packs._store", lambda: FakeStore())
+    request = SimpleNamespace()
+    version = CapabilityPackVersionRequest(
+        manifest={"id": "seraph.local-proof-pack"},
+        root_path="/private/reviewed-pack",
+        goal_id="goal-local",
+        review_id="review:one",
+        approval_id="approval:one",
+    )
+    approval = CapabilityPackApprovalRequest(approval_id="approval:one")
+    rollback = CapabilityPackRollbackRequest(approval_id="approval:one", goal_id="goal-local")
+    revoke = CapabilityPackRevokeRequest(approval_id="approval:one", digest="a" * 64)
+
+    await capability_pack_activate("seraph.local-proof-pack", version, request)
+    await capability_pack_update("seraph.local-proof-pack", version, request)
+    await capability_pack_pause("seraph.local-proof-pack", approval, request)
+    await capability_pack_rollback("seraph.local-proof-pack", rollback, request)
+    await capability_pack_revoke("seraph.local-proof-pack", revoke, request)
+    await capability_pack_uninstall("seraph.local-proof-pack", approval, request)
+
+    assert [action for action, _ in captured] == [
+        "activate",
+        "update",
+        "pause",
+        "rollback",
+        "revoke",
+        "uninstall",
+    ]
+    for _action, kwargs in captured:
+        assert kwargs["owner_principal_id"] == "operator:api"
+        assert kwargs["session_id"] == "session:api"
+        assert kwargs["approval_id"] == "approval:one"
 
 
 def test_local_execution_fails_closed_for_empty_authority_and_unsafe_artifact_paths(tmp_path: Path):

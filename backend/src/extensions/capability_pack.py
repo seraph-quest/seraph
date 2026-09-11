@@ -1282,6 +1282,15 @@ def load_capability_pack_workflows(
                 name=str(workflow.name),
                 file_path=str(path),
                 step_tools=step_tools,
+                steps=tuple(
+                    CapabilityPackWorkflowStep(
+                        step_id=str(step.id),
+                        tool=str(step.tool),
+                        arguments=deepcopy(dict(step.arguments)),
+                    )
+                    for step in workflow.steps
+                ),
+                result_template=str(workflow.result_template or ""),
             )
         )
     return tuple(loaded)
@@ -1622,6 +1631,12 @@ class CapabilityPackLoadedWorkflow:
     name: str
     file_path: str
     step_tools: tuple[str, ...]
+    # Keep the parsed step contract private to the local host.  It is never
+    # exposed in operator readback because arguments may contain untrusted
+    # caller data, but retaining the steps lets execution prove that the
+    # reviewed workflow was actually traversed.
+    steps: tuple["CapabilityPackWorkflowStep", ...] = ()
+    result_template: str = ""
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -1629,6 +1644,154 @@ class CapabilityPackLoadedWorkflow:
             "file_path": self.file_path,
             "step_tools": list(self.step_tools),
         }
+
+
+@dataclass(frozen=True)
+class CapabilityPackWorkflowStep:
+    """The immutable subset of one reviewed declarative workflow step."""
+
+    step_id: str
+    tool: str
+    arguments: Mapping[str, Any]
+
+
+@dataclass(frozen=True)
+class CapabilityPackGovernedWorkflowResult:
+    """Provider-free result produced by the internal capability-pack host."""
+
+    content: str
+    steps: tuple[dict[str, Any], ...]
+    executor: str = "capability_pack_internal_governed_host_v1"
+    provider_calls: int = 0
+    live_network_calls: int = 0
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "executor": self.executor,
+            "status": "succeeded",
+            "provider_calls": self.provider_calls,
+            "live_network_calls": self.live_network_calls,
+            "steps": [deepcopy(step) for step in self.steps],
+            "content_digest": canonical_digest(self.content),
+        }
+
+
+class _CapabilityPackLocalWorkflowHost:
+    """Execute the reviewed pack workflow through a fixed local tool host.
+
+    The general workflow manager accepts the application's live tool graph,
+    including provider and connector tools.  A capability-pack local proof
+    has a stricter boundary: its source is an already intercepted value and
+    its only effect is the lifecycle-owned artifact commit.  This adapter
+    therefore consumes the same parsed declarative step contract while
+    allowing only the provider-free tools already admitted by
+    ``load_capability_pack_workflows``.  It has no callback or dynamic import
+    seam and never performs network or model work.
+    """
+
+    _SOURCE_TOOLS = {"get_goals", "local_source", "web_search"}
+    _OUTPUT_TOOLS = {"render_markdown", "write_file"}
+    _ALLOWED_TOOLS = _SOURCE_TOOLS | _OUTPUT_TOOLS
+
+    @staticmethod
+    def _bounded_text(value: Any) -> str:
+        if isinstance(value, bytes):
+            value = value.decode("utf-8", errors="replace")
+        if isinstance(value, (dict, list)):
+            return json.dumps(value, sort_keys=True, ensure_ascii=True)
+        return str(value or "").strip()
+
+    def execute(
+        self,
+        workflow: CapabilityPackLoadedWorkflow,
+        request: CapabilityPackLocalExecutionRequest,
+        *,
+        source_payload: Any = None,
+        goal_snapshot: Mapping[str, Any] | str | None = None,
+        max_artifact_bytes: int,
+    ) -> CapabilityPackGovernedWorkflowResult:
+        if not workflow.steps:
+            raise CapabilityPackLifecycleError(
+                "reviewed local workflow has no executable step contract"
+            )
+        source_text = self._bounded_text(source_payload)
+        snapshot_text = self._bounded_text(goal_snapshot)
+        if request.domain == "primary" and not source_text:
+            raise CapabilityPackLifecycleError("governed local source step returned no content")
+        if request.domain == "secondary" and not snapshot_text:
+            raise CapabilityPackLifecycleError("governed goal snapshot step returned no content")
+        if len((source_text or snapshot_text).encode("utf-8")) > MAX_LOCAL_SOURCE_BYTES:
+            raise CapabilityPackLifecycleError("governed local input exceeds the source limit")
+
+        if request.domain == "primary":
+            content = (
+                f"# Local research brief\n\nGoal: {request.goal_id}\n"
+                f"Query: {request.query or request.goal_id}\n"
+                f"Source: {request.source_url}\n\n{source_text}\n"
+            )
+            expected_source_tools = {"web_search", "local_source"}
+        else:
+            content = f"# Goal snapshot\n\nGoal: {request.goal_id}\n\n{snapshot_text}\n"
+            expected_source_tools = {"get_goals"}
+
+        step_receipts: list[dict[str, Any]] = []
+        source_seen = False
+        output_seen = False
+        for step in workflow.steps:
+            tool_name = str(step.tool).strip()
+            if tool_name not in self._ALLOWED_TOOLS:
+                raise CapabilityPackLifecycleError(
+                    f"reviewed local workflow requests unsupported tool: {tool_name}"
+                )
+            if tool_name in self._SOURCE_TOOLS:
+                if tool_name not in expected_source_tools:
+                    raise CapabilityPackLifecycleError(
+                        f"governed local workflow source tool does not match {request.domain} domain"
+                    )
+                result = source_text if request.domain == "primary" else snapshot_text
+                source_seen = True
+                effect = "intercepted_input"
+            elif tool_name == "render_markdown":
+                result = content
+                effect = "staged_output"
+                output_seen = True
+            else:
+                # ``write_file`` is intentionally staged.  The lifecycle
+                # transaction owns the sole filesystem effect after its final
+                # authority and cancellation check.
+                result = content
+                effect = "staged_artifact_write"
+                output_seen = True
+            step_receipts.append(
+                {
+                    "step_id": step.step_id,
+                    "tool": tool_name,
+                    "status": "succeeded",
+                    "effect": effect,
+                    "result_digest": canonical_digest(result),
+                }
+            )
+
+        if not source_seen:
+            raise CapabilityPackLifecycleError(
+                "reviewed local workflow must contain one admitted source step"
+            )
+        if not output_seen:
+            raise CapabilityPackLifecycleError(
+                "reviewed local workflow must contain one staged output step"
+            )
+        if f"Goal: {request.goal_id}" not in content.splitlines():
+            raise CapabilityPackLifecycleError(
+                "governed local workflow output is missing the canonical goal identity"
+            )
+        if len(content.encode("utf-8")) > max_artifact_bytes:
+            raise CapabilityPackLifecycleError(
+                "governed local workflow output exceeds the reviewed artifact limit"
+            )
+        return CapabilityPackGovernedWorkflowResult(
+            content=content,
+            steps=tuple(step_receipts),
+        )
 
 
 def _local_scope_requirements(workflow: CapabilityPackLoadedWorkflow) -> tuple[tuple[str, ...], tuple[str, ...]]:
@@ -3556,17 +3719,21 @@ class CapabilityPackLifecycle:
         source_url: str | None = None,
         query: str | None = None,
         goal_snapshot: Mapping[str, Any] | str | None = None,
+        source_payload: Any = None,
         source_payload_digest: str | None = None,
         intercepted_transport: Callable[..., Any] | None = None,
         transport: Callable[..., Any] | None = None,
-        workflow_runner: Callable[..., Any] | None = None,
     ) -> dict[str, Any]:
-        """Execute one real local workflow through an injected transport.
+        """Execute one real local workflow through the internal governed host.
 
-        The primary domain accepts source data only from ``intercepted_transport``;
-        no HTTP client or provider path exists in this method.  The secondary
-        domain consumes a caller-provided goal snapshot.  Both paths write and
-        read back a bounded artifact and persist a pinned job/outcome receipt.
+        The primary domain accepts either an already intercepted source value
+        or the legacy test-only ``intercepted_transport`` seam; no HTTP client
+        or provider path exists in this method.  The secondary domain consumes
+        a caller-provided canonical goal snapshot.  Both paths traverse the
+        reviewed declarative workflow through ``_CapabilityPackLocalWorkflowHost``,
+        write and read back a bounded artifact, and persist a pinned
+        job/outcome receipt.  There is deliberately no caller-supplied
+        workflow callback.
         """
 
         pack_id = _validate_pack_id(pack_id)
@@ -3574,8 +3741,12 @@ class CapabilityPackLifecycle:
         job_id = _validate_goal_id(job_id)
         owner_principal_id = _validate_goal_id(owner_principal_id)
         session_id = _validate_goal_id(session_id)
+        if source_payload is not None and source_payload_digest is None:
+            source_payload_digest = canonical_digest(source_payload)
         if source_payload_digest is not None and not _DIGEST_RE.fullmatch(str(source_payload_digest)):
             raise CapabilityPackLifecycleError("source payload digest must be a SHA-256 digest")
+        if source_payload is not None and source_payload_digest != canonical_digest(source_payload):
+            raise CapabilityPackLifecycleError("source payload digest does not match the intercepted value")
         domain_aliases = {
             "research": "primary",
             "research_brief": "primary",
@@ -3587,7 +3758,11 @@ class CapabilityPackLifecycle:
             raise CapabilityPackLifecycleError("local execution domain must be primary or secondary")
         if domain == "primary" and intercepted_transport is None:
             intercepted_transport = transport
-        if domain == "primary" and not callable(intercepted_transport):
+        if domain == "primary" and source_payload is not None and intercepted_transport is not None:
+            raise CapabilityPackLifecycleError(
+                "provide source_payload or an intercepted transport, not both"
+            )
+        if domain == "primary" and source_payload is None and not callable(intercepted_transport):
             raise CapabilityPackLifecycleError("primary local execution requires an intercepted transport")
         if domain == "secondary" and goal_snapshot is None:
             raise CapabilityPackLifecycleError("secondary local execution requires a goal snapshot")
@@ -3650,6 +3825,18 @@ class CapabilityPackLifecycle:
                 name="web-brief-to-file" if domain == "primary" else "goal-snapshot-to-file",
                 file_path="builtin:seraph-local-workflow",
                 step_tools=("web_search", "write_file") if domain == "primary" else ("get_goals", "write_file"),
+                steps=(
+                    CapabilityPackWorkflowStep(
+                        step_id="source",
+                        tool="web_search" if domain == "primary" else "get_goals",
+                        arguments={},
+                    ),
+                    CapabilityPackWorkflowStep(
+                        step_id="save",
+                        tool="write_file",
+                        arguments={},
+                    ),
+                ),
             )
         required_tools, required_filesystem = _local_scope_requirements(workflow)
         artifact_root_value = artifact_root or (self.state_path.parent / "capability-pack-artifacts")
@@ -3727,54 +3914,30 @@ class CapabilityPackLifecycle:
             expected_digest=pinned_digest,
         )
         try:
-            source_payload: Any = None
+            resolved_source_payload: Any = source_payload
             if domain == "primary":
                 if not source_url:
                     raise CapabilityPackLifecycleError("primary local execution requires a controlled source URL")
-                assert intercepted_transport is not None
-                try:
-                    source_payload = intercepted_transport(source_url, query=query)
-                except TypeError:
-                    source_payload = intercepted_transport(source_url)
-                if isinstance(source_payload, bytes):
-                    if len(source_payload) > MAX_LOCAL_SOURCE_BYTES:
-                        raise CapabilityPackLifecycleError("intercepted source exceeds local source limit")
-                    source_payload = source_payload.decode("utf-8", errors="replace")
-                if isinstance(source_payload, (dict, list)):
-                    source_text = json.dumps(source_payload, sort_keys=True, ensure_ascii=True)
-                else:
-                    source_text = str(source_payload or "").strip()
-                if not source_text:
-                    raise CapabilityPackLifecycleError("intercepted source returned no content")
-                if len(source_text.encode("utf-8")) > MAX_LOCAL_SOURCE_BYTES:
-                    raise CapabilityPackLifecycleError("intercepted source exceeds local source limit")
-                content = (
-                    f"# Local research brief\n\nGoal: {goal_id}\nQuery: {query or goal_id}\n"
-                    f"Source: {source_url}\n\n{source_text}\n"
-                )
+                if resolved_source_payload is None:
+                    assert intercepted_transport is not None
+                    try:
+                        resolved_source_payload = intercepted_transport(source_url, query=query)
+                    except TypeError:
+                        resolved_source_payload = intercepted_transport(source_url)
                 outcome = "local_research_brief_verified"
-                source_refs = [f"intercepted:{canonical_digest(source_url, source_text)}"]
+                source_refs = [f"intercepted:{canonical_digest(source_url, resolved_source_payload)}"]
             else:
-                if canonical_goal_snapshot is not None:
-                    snapshot_text = json.dumps(canonical_goal_snapshot, sort_keys=True, indent=2, ensure_ascii=True)
-                else:
-                    snapshot_text = str(goal_snapshot or "").strip()
-                if not snapshot_text:
-                    raise CapabilityPackLifecycleError("goal snapshot returned no content")
-                if len(snapshot_text.encode("utf-8")) > MAX_LOCAL_SOURCE_BYTES:
-                    raise CapabilityPackLifecycleError("goal snapshot exceeds local source limit")
-                content = f"# Goal snapshot\n\nGoal: {goal_id}\n\n{snapshot_text}\n"
                 outcome = "local_goal_snapshot_verified"
-                source_refs = [f"goal-snapshot:{canonical_digest(goal_id, snapshot_text)}"]
-            if workflow_runner is not None:
-                if not callable(workflow_runner):
-                    raise CapabilityPackLifecycleError("workflow runner must be callable")
-                try:
-                    runner_result = workflow_runner(workflow, request, content)
-                except TypeError:
-                    runner_result = workflow_runner(workflow.name, request.as_dict(), content)
-                if runner_result is not None:
-                    content = str(runner_result)
+                resolved_source_payload = canonical_goal_snapshot if canonical_goal_snapshot is not None else goal_snapshot
+                source_refs = [f"goal-snapshot:{canonical_digest(goal_id, resolved_source_payload)}"]
+            governed_workflow = _CapabilityPackLocalWorkflowHost().execute(
+                workflow,
+                request,
+                source_payload=resolved_source_payload if domain == "primary" else None,
+                goal_snapshot=resolved_source_payload if domain == "secondary" else None,
+                max_artifact_bytes=max_artifact_bytes,
+            )
+            content = governed_workflow.content
             goal_marker = f"Goal: {goal_id}"
             if not any(line.strip() == goal_marker for line in content.splitlines()):
                 raise CapabilityPackLifecycleError("local artifact is missing the canonical goal identity")
@@ -3871,6 +4034,7 @@ class CapabilityPackLifecycle:
                         "readback_ok": True,
                     },
                     "outcome": outcome,
+                    "governed_workflow": governed_workflow.as_dict(),
                     "memory": {"status": "no_learning", "canonical_authority": "guardian_canonical_memory"},
                 }
                 mutable_job = dict(final_job)

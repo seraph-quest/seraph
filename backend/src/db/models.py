@@ -145,6 +145,93 @@ class Message(SQLModel, table=True):
     session: Optional[Session] = Relationship(back_populates="messages")
 
 
+# ─── Audio ingress ───────────────────────────────────────
+
+class AudioIngressJob(SQLModel, table=True):
+    """Durable metadata for one bounded push-to-talk processing attempt.
+
+    Audio bytes live only in a short-lived quarantine directory.  This row is
+    deliberately metadata-only after cleanup and is the idempotency anchor for
+    retries, cancellation, restart recovery, and transcript confirmation.
+    """
+
+    __tablename__ = "audio_ingress_jobs"
+    __table_args__ = (
+        Index("ux_audio_ingress_jobs_request_id", "request_id", unique=True),
+    )
+
+    id: str = Field(default_factory=_uuid, primary_key=True)
+    request_id: str = Field(index=True)
+    request_digest: str = Field(index=True)
+    owner_principal_id: str = Field(index=True)
+    operator_session_id: Optional[str] = Field(default=None, index=True)
+    session_id: str = Field(foreign_key="sessions.id", index=True)
+    message_id: str = Field(index=True)
+    attachment_id: str = Field(index=True)
+    attachment_ref_json: str = Field(default="{}")
+    status: str = Field(default="queued", index=True)
+    requested_capability: str = Field(default="chat", index=True)
+    raw_path: Optional[str] = Field(default=None)
+    normalized_path: Optional[str] = Field(default=None)
+    captured_at: datetime = Field(index=True)
+    audio_payload_digest: str = Field(index=True)
+    audio_size_bytes: int = Field(default=0)
+    duration_seconds: float = Field(default=0.0)
+    decoded_duration_seconds: Optional[float] = Field(default=None)
+    media_type: str = Field(default="audio/wav")
+    container: str = Field(default="wav")
+    codec: str = Field(default="pcm_s16le")
+    sample_rate_hz: int = Field(default=16_000)
+    channels: int = Field(default=1)
+    normalized_wav_size_bytes: Optional[int] = Field(default=None)
+    capture_consent_reference: str = Field(default="")
+    model_consent_reference: str = Field(default="")
+    raw_audio_retention_deadline: datetime = Field(index=True)
+    admission_operation_id: Optional[str] = Field(default=None, index=True)
+    # A server-owned lease fences the final intercepted transport boundary.
+    # It is intentionally never exposed to browser callers; revocation and
+    # cancellation can invalidate the durable row while a worker is waiting.
+    transport_lease_id: Optional[str] = Field(default=None, index=True)
+    transcript: Optional[str] = Field(default=None)
+    transcript_digest: Optional[str] = Field(default=None, index=True)
+    confirmed_transcript_digest: Optional[str] = Field(default=None, index=True)
+    result_digest: Optional[str] = Field(default=None, index=True)
+    error_code: Optional[str] = Field(default=None, index=True)
+    provider_status: str = Field(default="unverified", index=True)
+    transport_status: str = Field(default="unknown", index=True)
+    cleanup_status: str = Field(default="complete", index=True)
+    metadata_json: str = Field(default="{}")
+    created_at: datetime = Field(default_factory=_now, index=True)
+    updated_at: datetime = Field(default_factory=_now, index=True)
+
+
+class AudioConsentGrant(SQLModel, table=True):
+    """Server-issued consent for one audio boundary.
+
+    The browser may carry the opaque reference, but it cannot choose the
+    state, owner, operator session, or validity window that authorizes a
+    capture or model transfer.  Audio workers re-read this row before each
+    boundary crossing so revocation is effective for queued jobs too.
+    """
+
+    __tablename__ = "audio_consent_grants"
+    __table_args__ = (
+        Index("ux_audio_consent_grants_reference", "reference", unique=True),
+    )
+
+    id: str = Field(default_factory=_uuid, primary_key=True)
+    reference: str = Field(index=True)
+    owner_principal_id: str = Field(index=True)
+    operator_session_id: str = Field(index=True)
+    boundary: str = Field(index=True)  # capture | cloud_upload
+    state: str = Field(default="active", index=True)  # active | revoked
+    granted_at: datetime = Field(default_factory=_now, index=True)
+    expires_at: datetime = Field(index=True)
+    revoked_at: Optional[datetime] = Field(default=None, index=True)
+    created_at: datetime = Field(default_factory=_now, index=True)
+    updated_at: datetime = Field(default_factory=_now, index=True)
+
+
 # ─── Session Todo ───────────────────────────────────────
 
 class SessionTodo(SQLModel, table=True):

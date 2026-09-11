@@ -379,6 +379,22 @@ async def lifespan(app: FastAPI):
         logging.getLogger(__name__).exception(
             "Durable job restart recovery failed; stale work remains operator-visible"
         )
+    # Audio quarantine files and unconfirmed transcript state are process-local
+    # and must never resume after a crash.  Run the durable cleanup before any
+    # scheduler work can admit a stale audio job.
+    try:
+        from src.guardian.audio_worker import cleanup_audio_ingress_jobs
+
+        cleaned_audio_jobs = await cleanup_audio_ingress_jobs()
+        if cleaned_audio_jobs:
+            logging.getLogger(__name__).warning(
+                "Cleaned %d stale audio ingress job(s) during startup",
+                cleaned_audio_jobs,
+            )
+    except Exception:
+        logging.getLogger(__name__).exception(
+            "Audio ingress restart cleanup failed; stale work remains blocked and operator-visible"
+        )
     ensure_soul_exists()
     init_llm_logging()
     # Load persisted settings before scheduler starts

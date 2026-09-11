@@ -8,22 +8,34 @@
 
 - primary design doc: [06. Presence And Reach](/research/presence-and-reach)
 
-## Branch-local #751 Audio Preflight Contract
+## Branch-local #751 Audio Vertical Slice
 
-The `feat/751-audio-contract` branch adds a **Partial** provider-free
-push-to-talk (PTT) ingress contract in
+The `feat/751-ptt-audio-impl` branch adds a **Partial**, provider-free
+push-to-talk (PTT) vertical slice in
 [`backend/src/guardian/audio_ingress.py`](../../backend/src/guardian/audio_ingress.py).
-This is branch-local work and is not shipped `develop` truth. It accepts
-server-owned session, message, attachment, and request identities from the
-canonical ingress owner (for example, the #750 web ingress slice), then
-returns typed `accepted`, `blocked`, `degraded`, or `duplicate` results with
-stable reason codes. The pure validator checks standard base64 shape and
-metadata-reported byte count, the 10 MiB audio cap, one stream, the
-MIME/container/codec allowlist, metadata-reported duration up to 60 seconds,
-normalized-WAV metadata up to 2 MiB, separate current capture and cloud-upload
-consent, a raw-audio retention deadline no more than 15 minutes after capture,
-request/attachment identity conflicts, and transcript confirmation before
-non-chat capabilities.
+This is branch-local work and is not shipped `develop` truth. The authenticated
+`/api/audio/ptt` and `/api/audio/ingress` routes use #750 server-owned session,
+message, attachment, and request identities, persist one SQLite
+`audio_ingress_jobs` row per idempotency key, and expose owner-bound status,
+confirm, process, and cancel routes. Quarantined uploads are checked by actual
+container signatures and duration, decoded with bounded local `ffprobe`/`ffmpeg`
+when needed, and normalized to mono 16 kHz PCM16 WAV at no more than 2 MiB.
+Short generated WAV fixtures prove the same path without a live microphone.
+Raw and normalized files are private, removed on success, failure, cancel, or
+restart recovery, and have a 15-minute retention deadline. Cleanup failures are
+durable degraded states with private paths retained for a bounded retry; the
+operator receipt reports that raw bytes remain until cleanup succeeds. Separate
+capture and model consent handles are carried into the signed #750 attachment
+receipt.
+
+The pure validator still checks standard base64 shape and metadata-reported byte
+count, the 10 MiB audio cap, one stream, the MIME/container/codec allowlist,
+metadata-reported duration up to 60 seconds, normalized-WAV metadata up to 2
+MiB, consent freshness, and request/attachment identity conflicts. Transcript
+text from the intercepted transport is untrusted and process-local; only its
+digest crosses the job/API boundary. The operator supplies the final text and
+digest, which are persisted through the canonical session message path after
+digest-bound confirmation.
 
 The payload builder emits only the documented OpenRouter `input_audio` content
 shape. It performs no network call, decoding, codec inspection, shell command,
@@ -43,13 +55,24 @@ or perform a live provider/consent check. A `ready` provider without all three
 handles returns `degraded` with `trusted_adapter_proof_required`, so callers
 cannot treat caller-asserted provider or consent metadata as execution proof.
 
-The remaining work is the #750/#751 integration with canonical session,
-attachment, and outbox persistence, governed OpenRouter admission and key/model
-capability checks, actual codec/duration verification, deletion/retention
-execution, browser PTT capture, and live operator receipts. The input shape is
-based on the [OpenRouter audio guide](https://openrouter.ai/docs/guides/overview/multimodal/audio)
-and [speech-to-text input contract](https://openrouter.ai/docs/guides/overview/multimodal/stt),
-accessed 2026-09-10.
+The transport is an explicitly intercepted, provider-free test boundary and is
+admitted through the shared bounded remote-inference broker; the default worker
+has no transport and cannot make a provider call. A server-owned transport lease
+is claimed only after a same-transaction consent check, and consent revocation
+invalidates pending claims; a callback that races a committed revocation is
+reported as an unknown outcome. Confirmation reserves the canonical message and
+job fence atomically, rechecks the durable owner and operator-session lifetime
+inside that reservation transaction, and restart recovery reconciles the pair.
+The focused browser seam in
+`frontend/src/components/chat/PttAudioControl.tsx` requires a deliberate
+microphone grant, keeps model consent separate, prefers WebM/Opus then MP4,
+and confirms operator-supplied text by the returned digest without receiving
+unconfirmed transcript text from the API. Delayed recorder-stop callbacks are
+discarded when capture generation, session, or the browser capture gate is no
+longer current. This slice makes no speech-quality, live-provider, GPU, VLM, or
+live-microphone claim. The input shape remains compatible with the existing
+audio ingress contract and the documented OpenRouter audio shape for a future
+separately governed adapter.
 
 ## Shipped On `develop`
 

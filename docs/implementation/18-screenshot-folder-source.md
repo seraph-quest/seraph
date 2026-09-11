@@ -41,17 +41,17 @@ work in #743/#744.
 
 The producing app is intentionally anonymous to Seraph. Seraph does not call a recorder, read recorder metadata, require manifests, or expect any service handshake. The contract is just `.png`, `.jpg`, and `.jpeg` files in a configured folder.
 
-## Branch-local paired edge capture
+## Paired edge capture
 
-The `feat/749-paired-mac-edge-final` branch also demonstrates a **Partial**
-provider-free capture path for a paired native edge. It is local evidence for
-Epic #736 and is not shipped `develop` truth. A daemon sends synthetic capture
-bytes to the authenticated Seraph origin with a scoped credential, monotonic
-sequence, capture timestamp, content hash, MIME, size, policy, and data
-purpose. Seraph validates the owner, hash, and size independently, stores the
-bytes under a server-owned `edge_art_*` id, and exposes metadata and byte
-readback through the paired-edge API. A Mac filesystem path is diagnostic input
-only and cannot become the artifact id.
+The paired-edge milestone provides a **Partial**, provider-free capture path for
+a paired native edge. A daemon sends synthetic capture bytes to the
+authenticated Seraph origin with a scoped credential, monotonic sequence,
+capture timestamp, content hash, MIME, size, policy, and data purpose. Seraph
+validates the owner, hash, and size independently, stores the bytes under a
+server-owned `edge_art_*` id, and exposes metadata and byte readback through
+the paired-edge API. A Mac filesystem path is diagnostic input only and cannot
+become the artifact id. This remains bounded edge capability evidence, not a
+claim of broad production reach or live-provider readiness.
 
 When the origin is unavailable, `daemon/paired_edge.py` keeps a private bounded
 spool with ordering, request-id dedupe, retry backoff, age/byte/count limits,
@@ -433,8 +433,8 @@ Seraph-side controls:
 - `GUARDIAN_STATE_TIMEOUT_SECONDS` bounds chat context assembly. If guardian/operator context is slow or degraded, chat falls back to a minimal agent context instead of leaving the operator stuck at "responding" before the model request is dispatched.
 - `LOCAL_RUNTIME_CONTEXT_WINDOW_TOKENS` is Seraph's configured prompt budget for local Gemma-compatible chat backends. It must match the GPU server `--ctx-size` operationally; the current local target is `32768`.
 - `LOCAL_RUNTIME_PROMPT_SAFETY_RATIO`, `LOCAL_RUNTIME_TOOL_RESERVE_TOKENS`, and `LOCAL_RUNTIME_MIN_SECTION_TOKENS` control deterministic prompt compaction for local runtime profiles. Seraph compacts guardian state, observer context, memories, active skills, and conversation history before creating the `ToolCallingAgent`, while preserving the fixed Seraph identity instructions. `FallbackLiteLLMModel.generate` and `completion_with_fallback_sync` also run a final profile-aware message compaction pass for local-profile targets, preserving the current user turn and reserving the effective output-token budget before LiteLLM sees the request. Local profile status exposes the configured context window, safety ratio, tool reserve, and prompt budget so operators can verify the runtime contract. This is the Seraph-side guardrail that prevents oversized local prompts from reaching the backend as raw `exceed_context_size_error`.
-- **Branch-local #740 target; not shipped `develop` truth:** governed model-fabric text calls use Seraph's direct HTTPX OpenAI-compatible adapter, not LiteLLM transport. Canonical model-fabric profiles therefore carry the exact model identifier accepted by their configured backend. The legacy `LOCAL_MODEL`/`local-gemma-*` registration path still uses its existing LiteLLM-oriented `openai/` naming until #739 removes that transitional path. The target topology sends text to `LOCAL_LLM_API_BASE=http://192.168.1.26:8000/v1`; `${SERAPH_VLM_BASE_URL}/v1` remains an optional wrapper chat proxy, while screenshot analysis remains the distinct `${SERAPH_VLM_BASE_URL}/v1/analyze-file` adapter.
-- **Branch-local #740 pricing provenance:** remote profile `cost_source` is a bounded source identifier (`[A-Za-z0-9_.:-]`, at most 128 characters), not a free-form label or URL. This matches the sanitized receipt contract, so accepted configuration cannot fail only after a model response is transported and receipt construction begins.
+- **Historical #740 model-fabric/GPU route:** governed text calls used Seraph's direct HTTPX OpenAI-compatible adapter, not LiteLLM transport. Canonical profiles therefore carried the exact model identifier accepted by their configured backend. The legacy `LOCAL_MODEL`/`local-gemma-*` registration path retained its LiteLLM-oriented `openai/` naming until #739 removed that transitional path. The historical topology sent text to `LOCAL_LLM_API_BASE=http://192.168.1.26:8000/v1`; `${SERAPH_VLM_BASE_URL}/v1` remained an optional wrapper chat proxy, while screenshot analysis remained the distinct `${SERAPH_VLM_BASE_URL}/v1/analyze-file` adapter.
+- **Historical #740 pricing provenance:** remote profile `cost_source` was a bounded source identifier (`[A-Za-z0-9_.:-]`, at most 128 characters), not a free-form label or URL. This matched the sanitized receipt contract, so accepted configuration could not fail only after a model response was transported and receipt construction began.
 - Fresh profiles use `onboarding_agent` before normal chat. Configure `onboarding_agent=local-gemma-chat-thinking` alongside `chat_agent=local-gemma-chat-thinking`, or the first "Hello" from a new operator can still route through the cloud default while the normal chat profile is correctly registered.
 - If delegation is enabled, chat uses `orchestrator_agent`, so `orchestrator_agent=local-gemma-chat-thinking` must also be configured. Otherwise the delegated chat surface can still route through the cloud default while the local chat profile is correctly registered.
 - Scheduled strategist/proactive checks use `strategist_agent`, so `strategist_agent=local-gemma-strategist-fast` must be configured with the other local chat-style paths. The strategist decision path is a bounded direct JSON completion, not a multi-step tool-calling agent loop, because local Gemma can otherwise keep retrying parse-wobbly JSON as malformed tool calls. The strategist profile disables thinking so the JSON lands in `message.content` instead of being consumed as hidden reasoning.

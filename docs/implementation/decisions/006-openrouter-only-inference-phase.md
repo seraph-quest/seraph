@@ -56,6 +56,11 @@ fallback. Canonical memory remains local; remote embeddings are versioned by
 model, dimension, and schema before an index switch, with lexical degraded
 retrieval available only when clearly labeled.
 
+Live route verification is an operation gate for dispatching a capability, not
+an implementation merge gate. Provider-free tests use injected or intercepted
+transports to prove policy, admission, schema, and blocked/degraded behavior
+without a provider key, paid request, or external network call.
+
 ## Relationship to earlier ADRs
 
 - This ADR narrows ADR-001's currently selectable provider families for this
@@ -91,6 +96,12 @@ an application/configuration release must not silently re-enable one.
 
 The migration ticket #775 owns the versioned configuration migration, active
 route guard, vision/embedding adapters, CPU-only lifecycle, and receipts.
-Acceptance requires negative absence tests plus authorized text, vision, and
-embedding live receipts. #751/#752 own audio capability proof. #744 owns the
-shared remote admission extension after #743's durable job contract.
+Implementation acceptance requires negative absence tests, deterministic
+provider-free tests using intercepted transports, static/configuration checks,
+and keyless health receipts. Live text, vision, embedding, provider-quality,
+edge, voice, and Telegram receipts are optional operational evidence; they are
+not required for merge and remain externally unverified until an authorised
+canary supplies them. #751/#752 own audio capability proof. #744 owns the
+shared remote admission extension after #743's durable job contract. The
+evolution/research work in #771 remains explicitly deferred and does not gate
+this phase.

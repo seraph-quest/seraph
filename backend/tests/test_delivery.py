@@ -20,7 +20,7 @@ from src.guardian.learning_evidence import (
     neutral_axis_evidence,
     ordered_learning_axes,
 )
-from src.db.models import MemoryKind
+from src.db.models import MemoryKind, Session
 from src.memory.procedural import sync_learning_signal_memories
 from src.memory.procedural_guidance import ProceduralMemoryGuidance
 from src.memory.repository import memory_repository
@@ -350,7 +350,7 @@ async def test_native_channel_adapter_can_deliver_queued_bundle_without_websocke
 
 
 @pytest.mark.asyncio
-async def test_native_bundle_delivery_preserves_shared_thread_continuity():
+async def test_native_bundle_delivery_preserves_shared_thread_continuity(async_db):
     ctx = _make_context()
     patches, mock_cm, mock_ws, mock_iq = _patch_deps(ctx, persist_intervention=False)
     mock_cm.is_daemon_connected.return_value = True
@@ -373,6 +373,8 @@ async def test_native_bundle_delivery_preserves_shared_thread_continuity():
     for p in patches:
         p.start()
     try:
+        async with async_db() as db:
+            db.add(Session(id="session-123", owner_principal_id="operator:test-delivery"))
         await native_notification_queue.clear()
         with patch("src.observer.delivery._active_channel_adapters", return_value={"native_notification"}):
             delivered = await deliver_queued_bundle()
@@ -392,7 +394,7 @@ async def test_native_bundle_delivery_preserves_shared_thread_continuity():
 
 
 @pytest.mark.asyncio
-async def test_native_bundle_delivery_partitions_mixed_sessions_into_separate_notifications():
+async def test_native_bundle_delivery_partitions_mixed_sessions_into_separate_notifications(async_db):
     ctx = _make_context()
     patches, mock_cm, mock_ws, mock_iq = _patch_deps(ctx, persist_intervention=False)
     mock_cm.is_daemon_connected.return_value = True
@@ -415,6 +417,9 @@ async def test_native_bundle_delivery_partitions_mixed_sessions_into_separate_no
     for p in patches:
         p.start()
     try:
+        async with async_db() as db:
+            db.add(Session(id="session-123", owner_principal_id="operator:test-delivery"))
+            db.add(Session(id="session-456", owner_principal_id="operator:test-delivery"))
         await native_notification_queue.clear()
         with patch("src.observer.delivery._active_channel_adapters", return_value={"native_notification"}):
             delivered = await deliver_queued_bundle()
@@ -701,6 +706,8 @@ async def test_queue_when_blocked():
             reasoning="",
             intervention_id=msg.intervention_id,
             session_id=None,
+            owner_principal_id="service:test-delivery",
+            operator_session_id=None,
         )
     finally:
         for p in patches:

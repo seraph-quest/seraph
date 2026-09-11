@@ -21,6 +21,7 @@ from src.memory.repository import memory_repository
 from src.models.schemas import WSResponse
 from src.observer.context import CurrentContext
 from src.observer.delivery import _active_channel_adapters, deliver_or_queue, deliver_queued_bundle
+from src.conversation.identity import ConversationIdentityError
 from src.observer.intervention_policy import InterventionAction
 from src.observer.native_notification_queue import native_notification_queue
 from src.scheduler.connection_manager import BroadcastResult
@@ -34,6 +35,27 @@ def _make_context(**overrides) -> CurrentContext:
     )
     defaults.update(overrides)
     return CurrentContext(**defaults)
+
+
+@pytest.mark.asyncio
+async def test_goal_bound_delivery_without_owner_is_rejected_before_transport():
+    message = WSResponse(
+        type="proactive",
+        content="goal update",
+        intervention_type="goal_update",
+        urgency=3,
+    )
+    with pytest.raises(ConversationIdentityError) as exc:
+        await deliver_or_queue(
+            message,
+            notification_budget={
+                "goal_id": "goal-a",
+                "budget_period_key": "2026-09-11",
+                "budget_limit": 1,
+            },
+        )
+
+    assert exc.value.code == "goal_owner_binding_missing"
 
 
 def _patch_deps(ctx, *, use_actual_learning_signal: bool = False):

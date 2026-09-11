@@ -749,6 +749,8 @@ async def chat(request: ChatRequest, http_request: HttpRequest):
                 build_guardian_state(
                     session_id=session.id,
                     user_message=request.message,
+                    owner_principal_id=operator.principal.principal_id,
+                    owner_session_id=operator.session_id,
                 ),
                 timeout=max(float(settings.guardian_state_timeout_seconds), 0.5),
             )
@@ -769,7 +771,10 @@ async def chat(request: ChatRequest, http_request: HttpRequest):
         revocation_scope = _begin_rest_revocation_watch(http_request)
         tokens = set_runtime_context(
             session.id,
-            obs_manager.get_context().approval_mode,
+            obs_manager.get_context(
+                owner_principal_id=operator.principal.principal_id,
+                owner_session_id=operator.session_id,
+            ).approval_mode,
             trust_principal=chat_principal,
         )
         llm_request_token = set_current_llm_request_id(llm_request_id)

@@ -223,7 +223,13 @@ def _run_agent_to_queue(agent, message: str, queue: asyncio.Queue, loop: asyncio
         loop.call_soon_threadsafe(queue.put_nowait, _DONE)
 
 
-async def _build_agent(session_id: str, message: str):
+async def _build_agent(
+    session_id: str,
+    message: str,
+    *,
+    owner_principal_id: str | None = None,
+    owner_session_id: str | None = None,
+):
     """Build the appropriate agent (onboarding vs normal) for this request.
 
     Returns (agent, is_onboarding, specialist_names).
@@ -238,6 +244,8 @@ async def _build_agent(session_id: str, message: str):
             build_guardian_state(
                 session_id=session_id,
                 user_message=message,
+                owner_principal_id=owner_principal_id,
+                owner_session_id=owner_session_id,
             ),
             timeout=max(float(settings.guardian_state_timeout_seconds), 0.5),
         )
@@ -852,7 +860,12 @@ async def websocket_chat(websocket: WebSocket):
                     seq=_next_seq(),
                 ).model_dump_json()
             )
-            agent, is_onboarding, specialist_names = await _build_agent(session.id, ws_msg.message)
+            agent, is_onboarding, specialist_names = await _build_agent(
+                session.id,
+                ws_msg.message,
+                owner_principal_id=operator.principal.principal_id,
+                owner_session_id=operator.session_id,
+            )
             await websocket.send_text(
                 WSResponse(
                     type="status",
@@ -876,7 +889,10 @@ async def websocket_chat(websocket: WebSocket):
                 _register_request(llm_request_id)
                 tokens = set_runtime_context(
                     session.id,
-                    context_manager.get_context().approval_mode,
+                    context_manager.get_context(
+                        owner_principal_id=operator.principal.principal_id,
+                        owner_session_id=operator.session_id,
+                    ).approval_mode,
                     trust_principal=chat_principal,
                 )
                 revocation_guard_token = set_revocation_guard(revocation_guard)

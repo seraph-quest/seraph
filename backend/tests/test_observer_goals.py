@@ -6,6 +6,12 @@ from src.audit.repository import audit_repository
 from src.observer.sources.goal_source import gather_goals
 
 
+_OWNER_SCOPE = {
+    "owner_principal_id": "operator:test",
+    "owner_session_id": "operator-session:test",
+}
+
+
 class TestGoalSource:
     @pytest.mark.asyncio
     async def test_no_goals(self, async_db):
@@ -13,7 +19,7 @@ class TestGoalSource:
         mock_repo.list_goals.return_value = []
 
         with patch("src.goals.repository.goal_repository", mock_repo):
-            result = await gather_goals()
+            result = await gather_goals(**_OWNER_SCOPE)
 
         assert result["active_goals_summary"] == ""
         events = await audit_repository.list_events(limit=5)
@@ -34,7 +40,7 @@ class TestGoalSource:
         mock_repo.list_goals.return_value = [goal1, goal2, goal3]
 
         with patch("src.goals.repository.goal_repository", mock_repo):
-            result = await gather_goals()
+            result = await gather_goals(**_OWNER_SCOPE)
 
         summary = result["active_goals_summary"]
         assert "productivity" in summary
@@ -58,7 +64,7 @@ class TestGoalSource:
         mock_repo.list_goals.return_value = goals
 
         with patch("src.goals.repository.goal_repository", mock_repo):
-            result = await gather_goals()
+            result = await gather_goals(**_OWNER_SCOPE)
 
         summary = result["active_goals_summary"]
         assert "(+2 more)" in summary
@@ -69,7 +75,7 @@ class TestGoalSource:
         mock_repo.list_goals.side_effect = RuntimeError("db error")
 
         with patch("src.goals.repository.goal_repository", mock_repo):
-            result = await gather_goals()
+            result = await gather_goals(**_OWNER_SCOPE)
 
         assert result["active_goals_summary"] == ""
         events = await audit_repository.list_events(limit=5)
@@ -79,3 +85,25 @@ class TestGoalSource:
             and event["details"]["error"] == "db error"
             for event in events
         )
+
+    @pytest.mark.asyncio
+    async def test_without_scope_fails_closed_without_global_read(self):
+        mock_repo = AsyncMock()
+
+        with patch("src.goals.repository.goal_repository", mock_repo):
+            result = await gather_goals()
+
+        assert result["active_goals_summary"] == ""
+        assert result["observer_source_status"] == "degraded"
+        mock_repo.list_goals.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_registered_service_scope_is_the_only_global_read(self):
+        mock_repo = AsyncMock()
+        mock_repo.list_goals.return_value = []
+
+        with patch("src.goals.repository.goal_repository", mock_repo):
+            result = await gather_goals(service_id="service:strategist")
+
+        assert result["active_goals_summary"] == ""
+        mock_repo.list_goals.assert_awaited_once_with(status="active")

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import urlparse
 
 from src.approval.runtime import get_current_session_id, get_current_trust_principal
@@ -16,6 +16,8 @@ from src.tools.browser_tool import browse_webpage
 from src.tools.mcp_manager import mcp_manager
 from src.tools.approval import require_capability_authority
 from src.tools.web_search_tool import search_web_records
+from src.security.site_policy import evaluate_site_access
+from config.settings import settings
 
 
 def _utc_now() -> str:
@@ -43,6 +45,17 @@ def _is_error_result(value: object) -> bool:
 def _parse_hostname(url: str) -> str:
     parsed = urlparse(url)
     return parsed.hostname or ""
+
+
+def _test_destination_granted(url: str, grant: str | None) -> bool:
+    """Allow one exact loopback destination only for injected test transport."""
+
+    return (
+        settings.deployment_environment == "test"
+        and isinstance(grant, str)
+        and grant == f"goal-local-source:{url}"
+        and _parse_hostname(url) in {"127.0.0.1", "::1", "localhost"}
+    )
 
 
 @dataclass(frozen=True)
@@ -1868,6 +1881,8 @@ def collect_source_evidence_bundle(
     session_id: str = "",
     owner_session_id: str = "",
     max_results: int = 5,
+    transport: Callable[[str], object] | None = None,
+    test_destination_grant: str | None = None,
 ) -> dict[str, Any]:
     # This adapter is also called directly by the public capabilities API, so
     # the factory's AuthorityTool wrapper cannot be its only trust boundary.
@@ -1886,6 +1901,7 @@ def collect_source_evidence_bundle(
             "session_id": session_id,
             "owner_session_id": owner_session_id,
             "max_results": max_results,
+            "transport_injected": transport is not None,
         },
     )
     inventory = list_source_capability_inventory()
@@ -1976,12 +1992,42 @@ def collect_source_evidence_bundle(
             response["warnings"].append("browse_webpage evidence collection requires an explicit URL.")
             return response
         assert_runtime_not_revoked()
-        content = browse_webpage(url.strip(), action="extract")
+        requested_url = url.strip()
+        if transport is None:
+            content = browse_webpage(requested_url, action="extract")
+        else:
+            # The production adapter and site policy still own source
+            # selection and destination checks.  Tests may inject only the
+            # HTTP transport, and only with a grant bound to this exact URL;
+            # production callers cannot use this loopback exception.
+            site_decision = evaluate_site_access(requested_url, resolve_dns=True)
+            exact_test_grant = _test_destination_granted(
+                requested_url,
+                test_destination_grant,
+            )
+            if (
+                not site_decision.allowed
+                and not (
+                    exact_test_grant
+                    and site_decision.reason == "internal_private"
+                )
+            ):
+                response["status"] = "failed"
+                response["warnings"].append(
+                    f"Source destination denied by site policy ({site_decision.reason or 'unknown'})."
+                )
+                return response
+            try:
+                content = transport(requested_url)
+            except Exception as exc:
+                response["status"] = "failed"
+                response["warnings"].append(f"Injected source transport failed: {type(exc).__name__}")
+                return response
         if _is_error_result(content):
             response["status"] = "failed"
             response["warnings"].append(str(content))
             return response
-        response["items"] = [_build_page_item(url.strip(), str(content), source_name)]
+        response["items"] = [_build_page_item(requested_url, str(content), source_name)]
         response["status"] = "ok"
     elif source_name == "browser_session":
         runtime_owner_session_id = get_current_session_id()

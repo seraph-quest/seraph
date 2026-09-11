@@ -561,7 +561,12 @@ async def test_operator_m6_memory_superiority_surface_delegates_to_memory_payloa
     assert resp.status_code == 200
     assert resp.json()["summary"]["behavior_receipt_count"] == 1
     assert resp.json()["behavior_receipts"][0]["changed_dimensions"] == ["recall_context", "action_posture"]
-    build_payload.assert_awaited_once_with(session_id="session-1", query="Atlas")
+    build_payload.assert_awaited_once_with(
+        session_id="session-1",
+        query="Atlas",
+        owner_principal_id="operator:test-bypass",
+        owner_session_id="test-auth-bypass",
+    )
 
 
 @pytest.mark.asyncio

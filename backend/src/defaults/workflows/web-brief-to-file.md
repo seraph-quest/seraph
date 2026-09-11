@@ -11,6 +11,11 @@ inputs:
   file_path:
     type: string
     description: Workspace-relative output path for the saved brief.
+  goal_id:
+    type: string
+    description: Canonical goal identity persisted for durable artifact readback.
+    required: false
+    default: ""
 steps:
   - id: search
     tool: web_search
@@ -21,6 +26,8 @@ steps:
     arguments:
       file_path: "{{ file_path }}"
       content: |
+        Goal ID: {{ goal_id }}
+
         Web brief for "{{ query }}"
 
         {{ steps.search.result }}

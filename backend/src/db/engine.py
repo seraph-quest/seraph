@@ -114,6 +114,27 @@ async def _ensure_legacy_columns(conn) -> None:
         await conn.exec_driver_sql(
             "CREATE INDEX IF NOT EXISTS ix_goals_proactive_enabled ON goals (proactive_enabled)"
         )
+    goal_columns = await _table_columns("goals")
+    if goal_columns and "owner_principal_id" not in goal_columns:
+        await conn.exec_driver_sql(
+            "ALTER TABLE goals ADD COLUMN owner_principal_id VARCHAR"
+        )
+    if goal_columns and "owner_session_id" not in goal_columns:
+        await conn.exec_driver_sql(
+            "ALTER TABLE goals ADD COLUMN owner_session_id VARCHAR"
+        )
+    if goal_columns and "admission_budget_json" not in goal_columns:
+        await conn.exec_driver_sql(
+            "ALTER TABLE goals ADD COLUMN admission_budget_json VARCHAR"
+        )
+    if goal_columns and "owner_principal_id" in await _table_columns("goals"):
+        await conn.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_goals_owner_principal_id ON goals (owner_principal_id)"
+        )
+    if goal_columns and "owner_session_id" in await _table_columns("goals"):
+        await conn.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_goals_owner_session_id ON goals (owner_session_id)"
+        )
 
     user_profile_columns = await _table_columns("user_profiles")
     if user_profile_columns and "tool_policy_mode" not in user_profile_columns:
@@ -145,6 +166,10 @@ async def _ensure_legacy_columns(conn) -> None:
     if queued_insight_columns and "operator_session_id" not in queued_insight_columns:
         await conn.exec_driver_sql(
             "ALTER TABLE queued_insights ADD COLUMN operator_session_id VARCHAR"
+        )
+    if queued_insight_columns and "goal_revision" not in queued_insight_columns:
+        await conn.exec_driver_sql(
+            "ALTER TABLE queued_insights ADD COLUMN goal_revision INTEGER"
         )
 
     guardian_intervention_columns = await _table_columns("guardian_interventions")
@@ -350,6 +375,10 @@ async def _ensure_legacy_columns(conn) -> None:
     outbox_lineage_columns = await _add_missing_columns(
         "native_notification_outbox",
         {
+            "goal_id": "VARCHAR",
+            "goal_revision": "INTEGER",
+            "budget_period_key": "VARCHAR",
+            "budget_limit": "INTEGER",
             "operator_session_id": "VARCHAR",
             "device_id": "VARCHAR",
             "channel": "VARCHAR DEFAULT 'native_notification'",
@@ -362,6 +391,10 @@ async def _ensure_legacy_columns(conn) -> None:
         },
     )
     for column in (
+        "goal_id",
+        "goal_revision",
+        "budget_period_key",
+        "budget_limit",
         "operator_session_id",
         "device_id",
         "channel",
@@ -375,6 +408,22 @@ async def _ensure_legacy_columns(conn) -> None:
             await conn.exec_driver_sql(
                 f"CREATE INDEX IF NOT EXISTS ix_native_notification_outbox_{column} "
                 f"ON native_notification_outbox ({column})"
+            )
+
+    insight_budget_columns = await _add_missing_columns(
+        "queued_insights",
+        {
+            "goal_id": "VARCHAR",
+            "goal_revision": "INTEGER",
+            "budget_period_key": "VARCHAR",
+            "budget_limit": "INTEGER",
+        },
+    )
+    for column in ("goal_id", "goal_revision", "budget_period_key", "budget_limit"):
+        if column in insight_budget_columns:
+            await conn.exec_driver_sql(
+                f"CREATE INDEX IF NOT EXISTS ix_queued_insights_{column} "
+                f"ON queued_insights ({column})"
             )
 
     proof_columns = await _add_missing_columns(

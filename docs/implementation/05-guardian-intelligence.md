@@ -74,13 +74,17 @@
 
 **Status:** Partial on the milestone branch; not Shipped on `develop`.
 
-The first additive slice stores an inspectable success criterion and monotonic
-goal revision on the existing `Goal` record. `POST /api/goals/{goal_id}/candidates`
+The first additive slice stores an inspectable success criterion, monotonic
+goal revision, nullable owner principal/session binding, and persisted
+admission budget on the existing `Goal` record. `POST /api/goals/{goal_id}/candidates`
 creates a deterministic candidate decision with `act`, `clarify`, `defer`, or
 `silent` action, while `GET /api/goals/{goal_id}/loop` exposes the criterion and
 redacted candidate/outcome/no-learning receipts. Candidates retain the goal
 revision and cannot dispatch after a goal is paused, abandoned, edited, or
-expired. Candidate identity now includes a canonical input digest.
+expired. Both public loop routes authenticate before reading the goal and
+require the canonical persisted owner principal and operator session; legacy
+ownerless goals remain scheduler-only. Candidate identity now includes a
+canonical input digest.
 
 The branch-local `goal-snapshot-to-file` adapter re-reads the active goal and
 revision, admits one service-owned, bounded, idempotent job through the existing
@@ -91,9 +95,12 @@ step sequence digest; unregistered, extra, missing, or reordered definitions
 are blocked before dispatch. It records fenced execution,
 artifact, effect, and readback receipts; verifies a workspace-contained output,
 its content digest, and the goal ID; then returns the result through the
-existing goal-conditioned loop with explicit `no_learning`. Stale, cancelled,
-unavailable, failed, and unreadable paths remain blocked or failed with no
-learning.
+existing goal-conditioned loop with explicit `no_learning`. A restart replay
+re-reads the durable artifact and output before it can return
+`verification=passed`; missing projections or corrupt readbacks degrade to an
+explicit blocked result instead of reconstructing positive defaults. Stale,
+cancelled, unavailable, failed, and unreadable paths remain blocked or failed
+with no learning.
 
 The branch-local authenticated `POST /api/goals/{goal_id}/snapshot` endpoint is
 the first operator-triggered canary boundary for this adapter. It accepts only
@@ -115,9 +122,30 @@ artifact-readback verifier and consent evidence. An explicit criterion target
 with `query` and `file_path` selects the registered `web-brief-to-file`
 workflow; other eligible goals use `goal-snapshot-to-file`. Both paths reuse
 the same parent durable effect receipt and record no learning by default.
-Missing criteria, malformed targets, paused/retired goals, and disabled
-permissions produce an inspectable skip/no-learning state. This remains a
+Missing criteria, malformed targets, paused/retired goals, disabled
+permissions, missing or expired reviewed budgets, outstanding-job limits, and
+quiet hours produce an inspectable defer/skip/no-learning state. A reviewed
+budget carries the outstanding-job, attempt, runtime, notification, period,
+and quiet-hour limits used by the strategist admission gate. This remains a
 bounded canary; it does not claim broad autonomous planning.
+
+The direct authenticated `POST /api/goals/{goal_id}/snapshot` route is a
+deliberate manual boundary outside that standing scheduler admission budget.
+Its fixed service request remains bounded by the adapter's one-job, one-attempt
+and runtime limits, while the operator and audit receipts explicitly record
+`authenticated_manual_operator_request_outside_standing_goal_admission_budget`.
+Persisted reviewed goal budgets therefore govern autonomous strategist runs;
+they are not silently reused as a quota for an explicit operator canary.
+
+Notification reservations are durable and scoped to the goal and budget
+period. The native outbox reserves a notification under an immediate SQLite
+transaction before inserting a distinct idempotency key; retries return the
+existing row and do not consume another reservation. Deferred bundle items
+carry the same goal/period binding through restart and are grouped before
+delivery, so a later native handoff cannot bypass the reviewed notification
+limit. A full reservation records an operator-visible denial and leaves the
+deferred item recoverable; it does not silently fall through to an ungoverned
+native send.
 
 The branch-local correction slice adds an authenticated
 `POST /api/goals/{goal_id}/strategy-corrections` boundary for the explicit
@@ -169,14 +197,30 @@ replays the same goal/revision candidate instead of creating another workspace
 write; operator-triggered runs use a separate scope. A stale, expired, or
 non-running parent is rejected before child admission.
 
-**Live/runtime limits:** This is a partial branch-local slice, not the full
-guardian brief journey. Its provider requires the app-started workflow
-registry, governed tool wrappers, and a migrated durable-state database; the
-focused tests monkeypatch only that existing tool boundary and perform a real
-temporary-file readback, including a source-URL predicate for the brief. No
-live service, scheduler run, operator approval, external public-source
-readback, or full #736 journey receipt was produced here, and no completion or
-learning claim is made.
+The file-backed local journey now exercises both scheduler-selected domains
+against one temporary SQLite database and workspace. It creates distinct
+snapshot and web-brief jobs, artifacts, and independent readbacks, proves a
+duplicate tick and a worker restart replay without a second file write, and
+persists candidate, outcome, and no-learning receipts. The web-brief leg reads
+from a deterministic localhost HTTP source through the production
+`collect_source_evidence_bundle` adapter and site policy with an exact test-only
+destination grant, then applies an authenticated
+query/path/priority correction and verifies the next artifact uses it; a
+durable rollback makes a later run use the original target again. A denied
+destination is rejected before the injected transport runs. The replay path
+rehydrates the typed outcome from redacted audit details, rechecks artifact and
+readback fields after database reopen, and confirms the durable job identity
+before returning scheduler receipts.
+
+**Live/runtime limits:** This remains a partial branch-local slice, not the
+full guardian brief journey. The proof uses a deterministic injected workflow
+tool at the existing governed boundary and a localhost-only source; it makes
+no paid or live OpenRouter/provider request and does not establish public-source
+quality, model usefulness, broad autonomous planning, or learned preference
+quality. Production still requires the app-started workflow registry, governed
+tool wrappers, and migrated durable-state database, while missing/corrupt
+readback, stale/revoked authority, and unavailable workflow paths remain
+blocked or failed with explicit no-learning receipts.
 
 ## Branch-local #753 canonical memory actor boundary
 

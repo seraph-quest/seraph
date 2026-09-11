@@ -527,6 +527,12 @@ class Goal(SQLModel, table=True):
     # The authenticated goals API records the operator grant; the scheduler
     # must never infer permission from an active status or criterion alone.
     proactive_enabled: bool = Field(default=False, index=True)
+    # Nullable so existing local databases and manually-created legacy goals
+    # remain readable. Public loop routes require both bindings; scheduler
+    # service runs use their own explicit service authority.
+    owner_principal_id: Optional[str] = Field(default=None, index=True)
+    owner_session_id: Optional[str] = Field(default=None, index=True)
+    admission_budget_json: Optional[str] = Field(default=None)
     created_at: datetime = Field(default_factory=_now)
     updated_at: datetime = Field(default_factory=_now)
 
@@ -590,6 +596,12 @@ class QueuedInsight(SQLModel, table=True):
     session_id: Optional[str] = Field(default=None, foreign_key="sessions.id", index=True)
     owner_principal_id: Optional[str] = Field(default=None, index=True)
     operator_session_id: Optional[str] = Field(default=None, index=True)
+    goal_id: Optional[str] = Field(default=None, index=True)
+    # Revision fence for goal-bound deferred delivery.  A queued insight is
+    # only valid for the canonical goal revision that produced it.
+    goal_revision: Optional[int] = Field(default=None, index=True)
+    budget_period_key: Optional[str] = Field(default=None, index=True)
+    budget_limit: Optional[int] = Field(default=None, index=True)
     content: str
     intervention_type: str = Field(default="advisory")
     urgency: int = Field(default=3)
@@ -659,6 +671,15 @@ class NativeNotificationOutbox(SQLModel, table=True):
     payload_digest: str = Field(index=True)
     intervention_id: Optional[str] = Field(default=None, index=True)
     owner_principal_id: Optional[str] = Field(default=None, index=True)
+    # Optional standing-goal budget reservation binding. Legacy/manual
+    # notifications leave these fields null and retain their existing queue
+    # semantics.
+    goal_id: Optional[str] = Field(default=None, index=True)
+    # Revision fence for goal-bound effects.  A notification may only be
+    # recovered while its canonical goal still has this revision.
+    goal_revision: Optional[int] = Field(default=None, index=True)
+    budget_period_key: Optional[str] = Field(default=None, index=True)
+    budget_limit: Optional[int] = Field(default=None, index=True)
     operator_session_id: Optional[str] = Field(default=None, index=True)
     device_id: Optional[str] = Field(default=None, index=True)
     channel: str = Field(default="native_notification", index=True)

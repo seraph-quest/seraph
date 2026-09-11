@@ -12,7 +12,7 @@ import pytest
 from sqlalchemy import update
 from sqlmodel import select
 from src.db.engine import _ensure_legacy_columns, _map_legacy_workflow_status
-from src.db.models import ApprovalRequest, WorkflowRunState
+from src.db.models import ApprovalRequest, Goal, WorkflowRunState
 
 from src.workflows.job_runtime import (
     DURABLE_JOB_STATUSES,
@@ -37,6 +37,7 @@ from src.workflows.job_runtime import (
     _verified_readback_exists,
     _safe_inputs_digest,
     _safe_structure,
+    _is_typed_admission_receipt,
     _validate_admission_authority,
     _validate_retry_actor,
     durable_job_repository,
@@ -662,6 +663,53 @@ def _spec(*, job_id: str = "job-743-1", dedupe_key: str = "candidate-1") -> Dura
     )
 
 
+def test_goal_revision_requires_goal_id_before_admission():
+    spec = replace(_spec(), goal_id=None, goal_revision=4)
+    with pytest.raises(ValueError, match="goal_revision requires a canonical goal"):
+        _validate_admission_authority(spec)
+
+
+def test_declared_service_session_must_match_durable_session():
+    spec = replace(
+        _spec(),
+        goal_id=None,
+        goal_revision=None,
+        declared_authority={
+            "principal": "service:strategist",
+            "service_id": "service:strategist",
+            "session_id": "different-session",
+        },
+    )
+    with pytest.raises(ValueError, match="declared authority session_id"):
+        _validate_admission_authority(spec)
+
+
+def test_ownerless_effect_projection_only_accepts_typed_authority_denials():
+    run = SimpleNamespace(status="accepted")
+    details = {
+        "decision": "deny",
+        "redacted_receipt": {"reason_code": "approval_missing"},
+    }
+    assert _is_typed_admission_receipt(
+        run,
+        effect_type="authority_gate",
+        receipt_kind="effect",
+        status="blocked",
+        details=details,
+        owner=None,
+        fencing_token=None,
+    )
+    assert not _is_typed_admission_receipt(
+        run,
+        effect_type="destination_write",
+        receipt_kind="effect",
+        status="intent",
+        details=details,
+        owner=None,
+        fencing_token=None,
+    )
+
+
 @pytest.mark.asyncio
 async def test_admission_is_idempotent_and_lifecycle_records_safe_receipts(async_db):
     admitted = await durable_job_repository.admit_job(_spec())
@@ -1078,36 +1126,20 @@ async def test_malformed_effect_history_is_blocked_before_claim(async_db):
 
 
 @pytest.mark.asyncio
-async def test_unresolved_effect_blocks_requeue_and_claim(async_db):
+async def test_accepted_effect_requires_an_authenticated_owner_lease(async_db):
     admitted = await durable_job_repository.admit_job(
         _spec(job_id="job-743-unresolved-claim", dedupe_key="candidate-unresolved-claim")
     )
-    await durable_job_repository.record_effect(
-        admitted["job_id"],
-        effect_id="unresolved-claim-effect",
-        effect_type="destination_write",
-        target_path="controlled-ledger",
-        status="intent",
-        owner=None,
-        fencing_token=None,
-    )
-    with pytest.raises(DurableJobTransitionError, match="unresolved external effect"):
-        await durable_job_repository.queue_job(admitted["job_id"])
-
-    async with async_db() as db:
-        await db.execute(
-            update(WorkflowRunState)
-            .where(WorkflowRunState.run_identity == admitted["job_id"])
-            .values(status="queued")
+    with pytest.raises(DurableJobLeaseError, match="accepted jobs require an authenticated owner lease"):
+        await durable_job_repository.record_effect(
+            admitted["job_id"],
+            effect_id="unresolved-claim-effect",
+            effect_type="destination_write",
+            target_path="controlled-ledger",
+            status="intent",
+            owner=None,
+            fencing_token=None,
         )
-    recovered = await durable_job_repository.claim_job(
-        admitted["job_id"], owner="runner-unresolved-claim"
-    )
-    assert recovered["status"] == "unknown_external_effect"
-    assert recovered["attempt_count"] == 0
-    assert recovered["receipt"]["operator_action"] == (
-        "reconcile_external_effect_before_claim_or_retry"
-    )
 
 
 @pytest.mark.asyncio
@@ -1478,6 +1510,73 @@ async def test_illegal_transition_stale_lease_and_restart_recovery_are_fail_clos
             owner="runner-a",
             fencing_token=token,
         )
+
+
+@pytest.mark.asyncio
+async def test_stale_goal_revision_recovery_clears_expired_lease_without_effects(async_db):
+    goal = Goal(
+        id="goal-stale-recovery",
+        title="Stale recovery goal",
+        revision=5,
+        owner_principal_id="operator:goal-owner",
+        owner_session_id="goal-owner-session",
+    )
+    async with async_db() as db:
+        db.add(goal)
+        await db.flush()
+
+    spec = DurableJobSpec(
+        identity=DurableJobIdentity(
+            job_id="job-stale-goal-revision",
+            owner_kind="service",
+            owner_principal_id="service:strategist",
+            job_kind="goal-snapshot-to-file",
+            capability_version="1",
+            idempotency_scope="goal-snapshot-to-file-scheduler",
+            idempotency_key="stale-goal-revision",
+        ),
+        inputs={"goal_id": goal.id, "file_path": "goals/stale.md"},
+        session_id="service-goal-session",
+        goal_id=goal.id,
+        goal_revision=5,
+        declared_authority={
+            "principal": "service:strategist",
+            "owner_kind": "service",
+            "service_id": "service:strategist",
+            "session_id": "service-goal-session",
+            "goal_owner_principal_id": "operator:goal-owner",
+            "goal_owner_session_id": "goal-owner-session",
+        },
+        service_id="service:strategist",
+    )
+    admitted = await durable_job_repository.admit_job(spec)
+    await durable_job_repository.queue_job(admitted["job_id"])
+    claimed = await durable_job_repository.claim_job(
+        admitted["job_id"], owner="runner-stale-goal", lease_seconds=1
+    )
+
+    async with async_db() as db:
+        await db.execute(
+            update(Goal)
+            .where(Goal.id == goal.id)
+            .values(revision=6, updated_at=datetime.now(timezone.utc))
+        )
+
+    recovered = await durable_job_repository.recover_stale_jobs(
+        now=datetime.now(timezone.utc) + timedelta(seconds=5)
+    )
+    recovered_job = next(item for item in recovered if item["job_id"] == admitted["job_id"])
+
+    assert recovered_job["status"] == "blocked"
+    assert recovered_job["failure_reason"] == "stale_goal_revision"
+    assert recovered_job["lease"]["owner"] is None
+    assert recovered_job["lease"]["expires_at"] is None
+    assert recovered_job["effects"] == []
+    assert recovered_job["receipt"]["reason"] == "stale_goal_revision"
+    assert recovered_job["receipt"]["recovery_state"] == "stale_goal_revision"
+    assert recovered_job["receipt"]["stale_goal_revision"] is True
+    assert recovered_job["receipt"]["previous_owner"] == "runner-stale-goal"
+    assert recovered_job["lease"]["fencing_token"] == claimed["lease"]["fencing_token"] + 1
 
 
 @pytest.mark.asyncio

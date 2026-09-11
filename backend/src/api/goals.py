@@ -5,12 +5,12 @@ from typing import Any, Optional
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy.exc import SQLAlchemyError
 
 from src.audit.repository import audit_repository
 from src.auth.service import AuthenticatedOperator
-from src.goals.contracts import GoalCandidateRequest, GoalSuccessCriterion
+from src.goals.contracts import GoalAdmissionBudget, GoalCandidateRequest, GoalSuccessCriterion
 from src.guardian.goal_snapshot_to_file import (
     GoalSnapshotToFileRequest,
     GoalSnapshotToFileResult,
@@ -25,7 +25,9 @@ from src.memory.control import (
     update_strategy_delta,
 )
 from src.goals.repository import (
+    GoalOwnershipConflict,
     GoalRevisionConflict,
+    deserialize_admission_budget,
     deserialize_success_criterion,
     goal_repository,
 )
@@ -51,6 +53,10 @@ class GoalCreate(BaseModel):
     due_date: Optional[str] = None
     success_criterion: Optional[GoalSuccessCriterion] = None
     proactive_enabled: bool = False
+    admission_budget: Optional[GoalAdmissionBudget] = Field(
+        default=None,
+        validation_alias=AliasChoices("admission_budget", "budget"),
+    )
 
 
 class GoalUpdate(BaseModel):
@@ -61,9 +67,22 @@ class GoalUpdate(BaseModel):
     level: Optional[str] = None
     domain: Optional[str] = None
     status: Optional[str] = None
+    parent_id: Optional[str] = None
     due_date: Optional[str] = None
     success_criterion: Optional[GoalSuccessCriterion] = None
     proactive_enabled: Optional[bool] = None
+    admission_budget: Optional[GoalAdmissionBudget] = Field(
+        default=None,
+        validation_alias=AliasChoices("admission_budget", "budget"),
+    )
+    expected_revision: Optional[int] = Field(default=None, ge=1)
+
+
+class GoalDeleteRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    # Optional keeps the existing DELETE-without-body API compatible while the
+    # repository still binds that request to the revision read at admission.
     expected_revision: Optional[int] = Field(default=None, ge=1)
 
 
@@ -126,6 +145,9 @@ class GoalSnapshotRunRequest(BaseModel):
 
 
 GOAL_SNAPSHOT_SERVICE_ID = "service:goal-snapshot"
+GOAL_SNAPSHOT_MANUAL_BUDGET_BOUNDARY = (
+    "authenticated_manual_operator_request_outside_standing_goal_admission_budget"
+)
 
 
 def _require_authenticated_operator(request: Request) -> AuthenticatedOperator:
@@ -138,13 +160,38 @@ def _require_authenticated_operator(request: Request) -> AuthenticatedOperator:
         raise HTTPException(status_code=401, detail={"code": "authentication_required"})
     grants = {str(getattr(grant, "value", grant)) for grant in principal.grants}
     if (
+        principal.principal_type is not PrincipalType.OPERATOR
+        or
         not principal.authenticated
         or principal.revoked
+        or not str(getattr(principal, "principal_id", "") or "").strip()
         or not session_id
+        or str(getattr(principal, "session_id", "") or "").strip() != session_id
+        or str(getattr(principal, "operator_session_id", "") or "").strip() != session_id
         or AuthorityGrant.CAPABILITY_EXECUTE.value not in grants
     ):
         raise HTTPException(status_code=401, detail={"code": "session_unavailable"})
     return operator
+
+
+def _require_goal_owner(goal: Any, operator: AuthenticatedOperator) -> None:
+    """Bind public goal reads/proposals to the canonical persisted owner."""
+
+    owner_id = str(getattr(goal, "owner_principal_id", "") or "").strip()
+    owner_session = str(getattr(goal, "owner_session_id", "") or "").strip()
+    if not owner_id or not owner_session:
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "code": "goal_owner_unbound",
+                "recovery": "Bind the goal through the authenticated goals API before using its public loop routes.",
+            },
+        )
+    if owner_id != operator.principal.principal_id or owner_session != operator.session_id:
+        raise HTTPException(
+            status_code=403,
+            detail={"code": "goal_owner_mismatch"},
+        )
 
 
 def _goal_snapshot_service_principal(operator: AuthenticatedOperator) -> TrustPrincipal:
@@ -352,47 +399,83 @@ def _goal_payload(goal) -> dict:
         "revision": max(int(goal.revision or 1), 1),
         "success_criterion": criterion.model_dump(mode="json") if criterion else None,
         "proactive_enabled": bool(getattr(goal, "proactive_enabled", False)),
+        "owner_principal_id": getattr(goal, "owner_principal_id", None),
+        "owner_session_id": getattr(goal, "owner_session_id", None),
+        "admission_budget": (
+            deserialize_admission_budget(goal).model_dump(mode="json")
+            if deserialize_admission_budget(goal) else None
+        ),
     }
 
 
 @router.get("/goals")
 async def list_goals(
+    request: Request,
     level: Optional[str] = None,
     domain: Optional[str] = None,
     status: Optional[str] = None,
 ):
-    """List goals, optionally filtered."""
-    goals = await goal_repository.list_goals(level=level, domain=domain, status=status)
+    """List the authenticated operator's goals, optionally filtered."""
+    operator = _require_authenticated_operator(request)
+    goals = await goal_repository.list_goals(
+        level=level,
+        domain=domain,
+        status=status,
+        owner_principal_id=operator.principal.principal_id,
+        owner_session_id=operator.session_id,
+    )
     return [_goal_payload(goal) for goal in goals]
 
 
 @router.get("/goals/tree")
-async def get_goal_tree():
-    """Get the full goal tree as nested structure."""
-    return await goal_repository.get_tree()
+async def get_goal_tree(request: Request):
+    """Get the authenticated operator's goal tree as nested structure."""
+    operator = _require_authenticated_operator(request)
+    return await goal_repository.get_tree(
+        owner_principal_id=operator.principal.principal_id,
+        owner_session_id=operator.session_id,
+    )
 
 
 @router.get("/goals/dashboard")
-async def get_goal_dashboard():
-    """Get summary stats for the goals UI."""
-    return await goal_repository.get_dashboard()
+async def get_goal_dashboard(request: Request):
+    """Get summary stats for the authenticated operator's goals."""
+    operator = _require_authenticated_operator(request)
+    return await goal_repository.get_dashboard(
+        owner_principal_id=operator.principal.principal_id,
+        owner_session_id=operator.session_id,
+    )
 
 
 @router.post("/goals")
 async def create_goal(body: GoalCreate, request: Request):
     """Create a new goal."""
+    operator = _require_authenticated_operator(request)
+    if body.parent_id:
+        parent = await goal_repository.get(body.parent_id)
+        if parent is None:
+            raise HTTPException(status_code=404, detail="Parent goal not found")
+        # This also rejects a legacy/unbound parent before the child row exists.
+        _require_goal_owner(parent, operator)
     due = datetime.fromisoformat(body.due_date) if body.due_date else None
-    operator = _require_authenticated_operator(request) if body.proactive_enabled else None
-    goal = await goal_repository.create(
-        title=body.title,
-        level=body.level,
-        domain=body.domain,
-        parent_id=body.parent_id,
-        description=body.description,
-        due_date=due,
-        success_criterion=body.success_criterion,
-        proactive_enabled=False,
-    )
+    try:
+        goal = await goal_repository.create(
+            title=body.title,
+            level=body.level,
+            domain=body.domain,
+            parent_id=body.parent_id,
+            description=body.description,
+            due_date=due,
+            success_criterion=body.success_criterion,
+            proactive_enabled=False,
+            owner_principal_id=operator.principal.principal_id,
+            owner_session_id=operator.session_id,
+            admission_budget=body.admission_budget,
+        )
+    except GoalOwnershipConflict as exc:
+        raise HTTPException(status_code=403, detail={"code": exc.code}) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     if body.proactive_enabled:
         await _record_proactive_permission(
             operator,
@@ -404,6 +487,8 @@ async def create_goal(body: GoalCreate, request: Request):
         goal = await goal_repository.update(
             goal_id=goal.id,
             proactive_enabled=True,
+            expected_owner_principal_id=operator.principal.principal_id,
+            expected_owner_session_id=operator.session_id,
             expected_revision=max(int(goal.revision or 1), 1),
         )
     return {
@@ -419,50 +504,69 @@ async def create_goal(body: GoalCreate, request: Request):
             else None
         ),
         "proactive_enabled": bool(getattr(goal, "proactive_enabled", False)),
+        "owner_principal_id": getattr(goal, "owner_principal_id", None),
+        "owner_session_id": getattr(goal, "owner_session_id", None),
     }
 
 
 @router.patch("/goals/{goal_id}")
 async def update_goal(goal_id: str, body: GoalUpdate, request: Request):
     """Update a goal."""
-    due = datetime.fromisoformat(body.due_date) if body.due_date else None
-    operator = _require_authenticated_operator(request) if body.proactive_enabled is not None else None
-    current = await goal_repository.get(goal_id) if body.proactive_enabled is not None else None
-    if body.proactive_enabled is not None and current is None:
+    operator = _require_authenticated_operator(request)
+    current = await goal_repository.get(goal_id)
+    if current is None:
         raise HTTPException(status_code=404, detail="Goal not found")
-    if body.proactive_enabled is not None:
-        current_revision = max(int(current.revision or 1), 1)
-        if body.expected_revision is not None and body.expected_revision != current_revision:
-            raise HTTPException(
-                status_code=409,
-                detail={
-                    "code": "stale_goal_revision",
-                    "goal_id": goal_id,
-                    "expected_revision": body.expected_revision,
-                    "current_revision": current_revision,
-                    "recovery": "Refresh the goal and resubmit against the current revision.",
-                },
-            )
-        if body.proactive_enabled:
-            await _record_proactive_permission(
-                operator,
-                goal_id=goal_id,
-                enabled=True,
-                revision=current_revision,
-                phase="before_enable",
-            )
-    try:
-        goal = await goal_repository.update(
+    # Legacy rows without both owner fields have no trustworthy public-session
+    # binding.  They must be migrated through an explicit trusted path rather
+    # than claimed by whichever authenticated session submits this request.
+    _require_goal_owner(current, operator)
+    current_revision = max(int(current.revision or 1), 1)
+    if body.expected_revision is not None and body.expected_revision != current_revision:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "stale_goal_revision",
+                "goal_id": goal_id,
+                "expected_revision": body.expected_revision,
+                "current_revision": current_revision,
+                "recovery": "Refresh the goal and resubmit against the current revision.",
+            },
+        )
+    requested_parent = body.parent_id if "parent_id" in body.model_fields_set else None
+    if "parent_id" in body.model_fields_set and requested_parent:
+        parent = await goal_repository.get(requested_parent)
+        if parent is None:
+            raise HTTPException(status_code=404, detail="Parent goal not found")
+        _require_goal_owner(parent, operator)
+    due = datetime.fromisoformat(body.due_date) if body.due_date else None
+    if body.proactive_enabled:
+        await _record_proactive_permission(
+            operator,
             goal_id=goal_id,
-            title=body.title,
-            description=body.description,
-            level=body.level,
-            domain=body.domain,
-            status=body.status,
-            due_date=due,
-            success_criterion=body.success_criterion,
-            proactive_enabled=body.proactive_enabled,
-            expected_revision=body.expected_revision,
+            enabled=True,
+            revision=current_revision,
+            phase="before_enable",
+        )
+    try:
+        update_kwargs = {
+            "goal_id": goal_id,
+            "title": body.title,
+            "description": body.description,
+            "level": body.level,
+            "domain": body.domain,
+            "status": body.status,
+            "due_date": due,
+            "success_criterion": body.success_criterion,
+            "proactive_enabled": body.proactive_enabled,
+            "admission_budget": body.admission_budget,
+            "expected_owner_principal_id": operator.principal.principal_id,
+            "expected_owner_session_id": operator.session_id,
+            "expected_revision": body.expected_revision,
+        }
+        if "parent_id" in body.model_fields_set:
+            update_kwargs["parent_id"] = requested_parent
+        goal = await goal_repository.update(
+            **update_kwargs,
         )
     except GoalRevisionConflict as exc:
         raise HTTPException(
@@ -475,6 +579,8 @@ async def update_goal(goal_id: str, body: GoalUpdate, request: Request):
                 "recovery": "Refresh the goal and resubmit against the current revision.",
             },
         ) from exc
+    except GoalOwnershipConflict as exc:
+        raise HTTPException(status_code=403, detail={"code": exc.code}) from exc
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     if not goal:
@@ -514,6 +620,7 @@ async def apply_goal_strategy_correction(
     goal = await goal_repository.get(goal_id)
     if goal is None:
         raise HTTPException(status_code=404, detail="Goal not found")
+    _require_goal_owner(goal, operator)
     current_revision = max(int(goal.revision or 1), 1)
     delta_id = _strategy_delta_id(goal_id, body.correction_id)
     try:
@@ -701,6 +808,8 @@ async def apply_goal_strategy_correction(
         updated_goal = await goal_repository.update(
             goal_id=goal_id,
             success_criterion=updated_criterion,
+            expected_owner_principal_id=operator.principal.principal_id,
+            expected_owner_session_id=operator.session_id,
             expected_revision=body.expected_revision,
         )
     except GoalRevisionConflict as exc:
@@ -715,6 +824,9 @@ async def apply_goal_strategy_correction(
                 "recovery": "Refresh the goal and submit a new correction id.",
             },
         ) from exc
+    except GoalOwnershipConflict as exc:
+        await _reject_pending_strategy_delta(existing.delta_id)
+        raise HTTPException(status_code=403, detail={"code": exc.code}) from exc
     except ValueError as exc:
         await _reject_pending_strategy_delta(existing.delta_id)
         raise HTTPException(
@@ -778,6 +890,7 @@ async def rollback_goal_strategy_correction(
     goal = await goal_repository.get(goal_id)
     if goal is None:
         raise HTTPException(status_code=404, detail="Goal not found")
+    _require_goal_owner(goal, operator)
     try:
         delta = await get_strategy_delta(delta_id)
     except SQLAlchemyError as exc:
@@ -885,6 +998,8 @@ async def rollback_goal_strategy_correction(
         updated_goal = await goal_repository.update(
             goal_id=goal_id,
             success_criterion=restored_criterion,
+            expected_owner_principal_id=operator.principal.principal_id,
+            expected_owner_session_id=operator.session_id,
             expected_revision=body.expected_revision,
         )
     except GoalRevisionConflict as exc:
@@ -898,6 +1013,8 @@ async def rollback_goal_strategy_correction(
                 "recovery": "Refresh the goal and resubmit the rollback against the current revision.",
             },
         ) from exc
+    except GoalOwnershipConflict as exc:
+        raise HTTPException(status_code=403, detail={"code": exc.code}) from exc
     if updated_goal is None:
         raise HTTPException(status_code=404, detail="Goal not found")
     try:
@@ -940,20 +1057,69 @@ async def rollback_goal_strategy_correction(
 
 
 @router.delete("/goals/{goal_id}")
-async def delete_goal(goal_id: str):
+async def delete_goal(
+    goal_id: str,
+    request: Request,
+    body: GoalDeleteRequest | None = None,
+):
     """Delete a goal and its descendants."""
-    success = await goal_repository.delete(goal_id)
+    operator = _require_authenticated_operator(request)
+    goal = await goal_repository.get(goal_id)
+    if goal is None:
+        raise HTTPException(status_code=404, detail="Goal not found")
+    # Preserve the repository's descendant deletion/tombstone behavior only
+    # after the canonical public owner/session binding has been verified.
+    _require_goal_owner(goal, operator)
+    current_revision = max(int(goal.revision or 1), 1)
+    expected_revision = (
+        body.expected_revision
+        if body is not None and body.expected_revision is not None
+        else current_revision
+    )
+    if expected_revision != current_revision:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "stale_goal_revision",
+                "goal_id": goal_id,
+                "expected_revision": expected_revision,
+                "current_revision": current_revision,
+                "recovery": "Refresh the goal and resubmit against the current revision.",
+            },
+        )
+    try:
+        success = await goal_repository.delete(
+            goal_id,
+            expected_owner_principal_id=operator.principal.principal_id,
+            expected_owner_session_id=operator.session_id,
+            expected_revision=expected_revision,
+        )
+    except GoalRevisionConflict as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "stale_goal_revision",
+                "goal_id": exc.goal_id,
+                "expected_revision": exc.expected,
+                "current_revision": exc.current,
+                "recovery": "Refresh the goal and resubmit against the current revision.",
+            },
+        ) from exc
+    except GoalOwnershipConflict as exc:
+        raise HTTPException(status_code=403, detail={"code": exc.code}) from exc
     if not success:
         raise HTTPException(status_code=404, detail="Goal not found")
     return {"status": "ok"}
 
 
 @router.get("/goals/{goal_id}/loop")
-async def inspect_goal_loop(goal_id: str):
+async def inspect_goal_loop(goal_id: str, request: Request):
     """Inspect a goal's criterion and candidate/outcome receipts."""
+    operator = _require_authenticated_operator(request)
     goal = await goal_repository.get(goal_id)
     if not goal:
         raise HTTPException(status_code=404, detail="Goal not found")
+    _require_goal_owner(goal, operator)
     criterion = deserialize_success_criterion(goal)
     try:
         strategy_deltas = await list_strategy_deltas(goal_id)
@@ -968,8 +1134,17 @@ async def inspect_goal_loop(goal_id: str):
 
 
 @router.post("/goals/{goal_id}/candidates")
-async def propose_goal_loop_candidate(goal_id: str, body: GoalCandidateRequest):
+async def propose_goal_loop_candidate(
+    goal_id: str,
+    body: GoalCandidateRequest,
+    request: Request,
+):
     """Create one bounded candidate decision for operator inspection."""
+    operator = _require_authenticated_operator(request)
+    goal = await goal_repository.get(goal_id)
+    if not goal:
+        raise HTTPException(status_code=404, detail="Goal not found")
+    _require_goal_owner(goal, operator)
     try:
         decision = await propose_goal_candidate(goal_id, body)
     except LookupError as exc:
@@ -991,12 +1166,16 @@ async def run_goal_snapshot(goal_id: str, body: GoalSnapshotRunRequest, request:
     or a second execution path.  The service identity is fixed in code and is
     bound to the operator session for the child durable job; all goal, authority,
     workflow, artifact, and readback checks remain in ``GoalSnapshotToFileService``.
+    Reviewed standing-goal admission budgets apply to scheduler admissions;
+    this explicit operator canary is a separate manual boundary and records
+    that fact in its operator and audit receipts.
     """
 
     operator = _require_authenticated_operator(request)
     goal = await goal_repository.get(goal_id)
     if goal is None:
         raise HTTPException(status_code=404, detail="Goal not found")
+    _require_goal_owner(goal, operator)
     current_revision = max(int(goal.revision or 1), 1)
     if body.expected_revision != current_revision:
         raise HTTPException(
@@ -1020,6 +1199,8 @@ async def run_goal_snapshot(goal_id: str, body: GoalSnapshotRunRequest, request:
             owner_principal_id=GOAL_SNAPSHOT_SERVICE_ID,
             service_id=GOAL_SNAPSHOT_SERVICE_ID,
             session_id=operator.session_id,
+            goal_owner_principal_id=goal.owner_principal_id,
+            goal_owner_session_id=goal.owner_session_id,
             evidence_refs=body.evidence_refs,
             reason=body.reason,
             expected_outcome=body.expected_outcome,
@@ -1039,6 +1220,7 @@ async def run_goal_snapshot(goal_id: str, body: GoalSnapshotRunRequest, request:
         "session_id_digest": _session_digest(operator.session_id),
         "delegated_service_id": GOAL_SNAPSHOT_SERVICE_ID,
         "authority_boundary": "authenticated_operator_to_fixed_service",
+        "budget_boundary": GOAL_SNAPSHOT_MANUAL_BUDGET_BOUNDARY,
     }
     try:
         await audit_repository.log_event(
@@ -1053,6 +1235,7 @@ async def run_goal_snapshot(goal_id: str, body: GoalSnapshotRunRequest, request:
                 "goal_revision": current_revision,
                 "session_id_digest": _session_digest(operator.session_id),
                 "delegated_service_id": GOAL_SNAPSHOT_SERVICE_ID,
+                "budget_boundary": GOAL_SNAPSHOT_MANUAL_BUDGET_BOUNDARY,
                 "execution_status": payload.get("execution_status"),
                 "verification": payload.get("verification"),
                 "learning": payload.get("learning"),

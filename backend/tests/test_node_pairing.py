@@ -25,6 +25,7 @@ from src.extensions.node_pairing import (
     serialize_transition_receipt,
     validate_pairing_request,
 )
+from src.extensions import paired_edge
 
 
 NOW = datetime(2026, 9, 10, 12, 0, 0, tzinfo=timezone.utc)
@@ -114,6 +115,68 @@ def test_valid_ingress_advances_replay_ledger_and_duplicate_is_safe():
     assert duplicate.status is PairingIngressStatus.DUPLICATE
     assert duplicate.retryable is False
     assert ingest_pairing_request(outcome.state, request, now=NOW).state == outcome.state
+
+
+@pytest.mark.asyncio
+async def test_authenticated_edge_ingress_returns_persisted_owner_principal(monkeypatch):
+    """A valid paired request must build an owner-bound envelope."""
+
+    extension_id = "seraph.test-edge"
+    reference = "connectors/nodes/device.yaml"
+    name = "test-edge"
+    credential = "edge-test-credential"
+    scope = paired_edge.canonical_edge_scope(
+        device_id=DEVICE_ID,
+        pairing_id=PAIRING_ID,
+        capability_scope="media.ingest",
+        data_purpose="screen_capture",
+    )
+    state = NodePairingState(
+        device_id=DEVICE_ID,
+        pairing_id=PAIRING_ID,
+        lifecycle=PairingLifecycleState.PAIRED,
+        credential_fingerprint=scoped_credential_fingerprint(credential, scope),
+        credential_scope_digest=hashlib.sha256(scope.encode()).hexdigest(),
+        paired_at=NOW,
+    )
+    credential_key = paired_edge._credential_key(extension_id, reference, PAIRING_ID, credential)
+    entry = paired_edge.pairing_entry_from_state(
+        state,
+        base_entry={"name": name, "reference": reference},
+        credential_ref=(
+            f"{paired_edge.PAIRING_CREDENTIAL_PREFIX}"
+            f"{hashlib.sha256(credential_key.encode()).hexdigest()[:24]}"
+        ),
+        credential_scope=scope,
+        owner_principal_id="operator:test-edge",
+    )
+    payload = {"revision": 7, "extensions": {extension_id: {"node_pairings": {reference: entry}}}}
+
+    async def get_credential(key: str) -> str | None:
+        return credential if key == credential_key else None
+
+    monkeypatch.setattr(paired_edge.vault_repository, "get", get_credential)
+    authenticated = await paired_edge.authenticate_edge_request(
+        payload,
+        extension_id=extension_id,
+        reference=reference,
+        name=name,
+        device_id=DEVICE_ID,
+        pairing_id=PAIRING_ID,
+        request_id="edge-request-1",
+        sequence=1,
+        captured_at=NOW,
+        content_hash=CONTENT_HASH,
+        media_type="application/json",
+        content_size=0,
+        capability_scope="media.ingest",
+        data_purpose="screen_capture",
+        policy_version=DEFAULT_POLICY_VERSION,
+        presented_credential=credential,
+    )
+
+    assert authenticated.owner_principal_id == "operator:test-edge"
+    assert authenticated.request.request_id == "edge-request-1"
 
 
 @pytest.mark.parametrize(

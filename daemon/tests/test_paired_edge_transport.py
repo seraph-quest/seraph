@@ -251,3 +251,101 @@ def test_spooled_heartbeat_keeps_endpoint_and_sequence_order(tmp_path):
         await online.close()
 
     asyncio.run(run())
+
+
+def test_capture_queues_behind_existing_backlog_and_drain_stops_on_retryable(tmp_path):
+    async def run() -> None:
+        calls: list[int] = []
+
+        def first_request_fails(request: httpx.Request) -> httpx.Response:
+            calls.append(1)
+            return httpx.Response(503, json={"status": "accepted"}, request=request)
+
+        transport = PairedEdgeTransport(
+            origin="https://localhost:8004",
+            credential="credential",
+            device_id="device",
+            pairing_id="pairing",
+            spool_path=tmp_path / "backlog.json",
+            http_client=httpx.AsyncClient(transport=httpx.MockTransport(first_request_fails)),
+        )
+        first = await transport.capture(b"first", app="Safari")
+        second = await transport.capture(b"second", app="Safari")
+        assert first.status == "retryable" and first.queued is True
+        assert second.status == "retryable" and second.queued is True
+        assert calls == [1]
+        assert [item.sequence for item in transport.spool.items] == [1, 2]
+        await transport.close()
+
+        drain_calls: list[int] = []
+
+        def retry_first(request: httpx.Request) -> httpx.Response:
+            drain_calls.append(1)
+            return httpx.Response(503, json={"status": "accepted"}, request=request)
+
+        drainer = PairedEdgeTransport(
+            origin="https://localhost:8004",
+            credential="credential",
+            device_id="device",
+            pairing_id="pairing",
+            spool_path=tmp_path / "backlog.json",
+            http_client=httpx.AsyncClient(transport=httpx.MockTransport(retry_first)),
+        )
+        results = await drainer.drain()
+        assert [(result.sequence, result.status) for result in results] == [(1, "retryable")]
+        assert drain_calls == [1]
+        assert [item.sequence for item in drainer.spool.items] == [1, 2]
+        await drainer.close()
+
+    asyncio.run(run())
+
+
+def test_http_error_cannot_be_accepted_and_origin_denial_is_actionable(tmp_path):
+    async def run() -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                403,
+                json={"status": "accepted", "detail": {"code": "origin_forbidden"}},
+                request=request,
+            )
+
+        transport = PairedEdgeTransport(
+            origin="https://localhost:8004",
+            credential="credential",
+            device_id="device",
+            pairing_id="pairing",
+            spool_path=tmp_path / "origin.json",
+            http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+        )
+        result = await transport.capture(b"safe", app="Safari")
+        assert result.status == "blocked"
+        assert result.reason_code == "edge_origin_not_allowed_configure_operator_auth_allowed_origins"
+        assert result.queued is False
+        await transport.close()
+
+    asyncio.run(run())
+
+
+def test_http_terminal_receipt_preserves_revocation_but_not_success(tmp_path):
+    async def run() -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                410,
+                json={"status": "revoked", "reason_code": "pairing_revoked"},
+                request=request,
+            )
+
+        transport = PairedEdgeTransport(
+            origin="https://localhost:8004",
+            credential="credential",
+            device_id="device",
+            pairing_id="pairing",
+            spool_path=tmp_path / "revoked.json",
+            http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+        )
+        result = await transport.capture(b"safe", app="Safari")
+        assert result.status == "revoked"
+        assert result.queued is False
+        await transport.close()
+
+    asyncio.run(run())

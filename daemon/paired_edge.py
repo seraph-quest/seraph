@@ -104,13 +104,19 @@ def _response_outcome(http_status: int, response: dict[str, object]) -> tuple[st
     if http_status == 403:
         if status == "revoked" or reason in {"pairing_revoked", "credential_revoked", "credential_rotated_or_revoked"}:
             return "revoked", reason or "http_403_revoked"
+        if reason == "origin_forbidden":
+            return "blocked", "edge_origin_not_allowed_configure_operator_auth_allowed_origins"
         return "blocked", reason or "http_403_forbidden"
-    if status in _KNOWN_RESULT_STATUSES:
-        return status, reason or "server_response"
     if http_status >= 500:
         return "retryable", reason or f"http_{http_status}_server_error"
     if http_status >= 400:
+        if status in {"revoked", "expired", "oversized", "blocked", "out_of_order"}:
+            return status, reason or f"http_{http_status}_terminal"
         return "blocked", reason or f"http_{http_status}_client_error"
+    if not 200 <= http_status < 300:
+        return "retryable", reason or f"http_{http_status}_unexpected_status"
+    if status in _KNOWN_RESULT_STATUSES:
+        return status, reason or "server_response"
     return "retryable", reason or "server_response"
 
 
@@ -670,6 +676,24 @@ class PairedEdgeTransport:
                 window_title=window_title,
                 observation=observation,
             )
+            if self.spool.count:
+                queued = self.spool.enqueue(
+                    payload,
+                    request_id=str(payload["request_id"]),
+                    sequence=sequence,
+                    content_size=len(content),
+                    endpoint=_EDGE_UPLOAD_PATH,
+                    kind="capture",
+                )
+                result = EdgeTransportResult(
+                    status="retryable" if queued else "blocked",
+                    reason_code="queued_behind_pending_items" if queued else "spool_full",
+                    request_id=str(payload["request_id"]),
+                    sequence=sequence,
+                    queued=queued,
+                )
+                self.last_result = result
+                return result
             return await self._send_or_queue(
                 payload,
                 path=_EDGE_UPLOAD_PATH,
@@ -702,6 +726,8 @@ class PairedEdgeTransport:
                     else:
                         self.spool.retry(item.request_id, error=reason)
                     results.append(result)
+                    if status == "retryable":
+                        break
                 except (httpx.HTTPError, OSError, ValueError) as exc:
                     self.spool.retry(item.request_id, error="backend_unreachable")
                     results.append(
@@ -713,6 +739,7 @@ class PairedEdgeTransport:
                             queued=True,
                         )
                     )
+                    break
         if results:
             self.last_result = results[-1]
         return results

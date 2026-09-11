@@ -525,6 +525,9 @@ async def authenticate_edge_request(
         raise ValueError("authentication_required")
     if not hmac.compare_digest(stored, presented_credential):
         raise ValueError("authentication_failed")
+    owner_principal_id = str(entry.get("owner_principal_id") or "").strip()
+    if not owner_principal_id:
+        raise ValueError("pairing_owner_missing")
     fingerprint = scoped_credential_fingerprint(presented_credential, credential_scope)
     request = NodePairingRequest(
         device_id=device_id,

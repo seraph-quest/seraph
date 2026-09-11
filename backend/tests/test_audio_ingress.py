@@ -21,7 +21,7 @@ from src.guardian.audio_ingress import (
     AudioRequestIdentity,
     MAX_AUDIO_BYTES,
     build_openrouter_input_audio,
-    build_server_owned_audio_consent,
+    _build_server_owned_audio_consent,
     canonical_audio_request_digest,
     serialize_audio_ingress_receipt,
     validate_audio_ingress,
@@ -40,7 +40,7 @@ def _consent(
     granted_at: datetime = NOW - timedelta(minutes=1),
     expires_at: datetime = NOW + timedelta(minutes=10),
 ) -> AudioConsent:
-    return build_server_owned_audio_consent(
+    return _build_server_owned_audio_consent(
         reference,
         state,
         granted_at,

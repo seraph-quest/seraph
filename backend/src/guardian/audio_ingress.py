@@ -187,7 +187,7 @@ class AudioConsent:
     _provenance: object | None = field(default=None, repr=False, compare=False)
 
 
-def build_server_owned_audio_consent(
+def _build_server_owned_audio_consent(
     reference: str,
     state: AudioConsentState,
     granted_at: datetime,
@@ -195,9 +195,9 @@ def build_server_owned_audio_consent(
 ) -> AudioConsent:
     """Build consent evidence after a server-owned registry readback.
 
-    The helper is intentionally small and metadata-only.  Production callers
-    should obtain the values from ``AudioConsentGrant`` through the worker;
-    it does not turn request JSON into authority.
+    This is deliberately private.  The only runtime caller is the worker after
+    it has read a matching durable ``AudioConsentGrant`` row.  Request and
+    transport data cannot reach the provenance marker used here.
     """
 
     consent = AudioConsent(
@@ -1148,7 +1148,6 @@ __all__ = [
     "OPENROUTER_PROVIDER",
     "OpenRouterInputAudio",
     "build_audio_ingress_receipt",
-    "build_server_owned_audio_consent",
     "build_openrouter_input_audio",
     "canonical_audio_request_digest",
     "serialize_audio_ingress_receipt",

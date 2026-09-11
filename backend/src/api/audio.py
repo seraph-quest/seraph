@@ -41,7 +41,7 @@ class AudioIngressBody(BaseModel):
 
 class TranscriptConfirmationBody(BaseModel):
     transcript: str = Field(..., min_length=1, max_length=20_000)
-    expected_transcript_digest: str | None = Field(default=None, min_length=64, max_length=64)
+    expected_transcript_digest: str = Field(..., min_length=64, max_length=64)
     transcript_digest: str | None = Field(default=None, min_length=64, max_length=64)
 
 
@@ -99,15 +99,27 @@ def _error(exc: AudioWorkerError) -> HTTPException:
         "canonical_attachment_identity_conflict",
         "audio_operator_session_mismatch",
         "confirmation_in_progress",
+        "transcript_confirmation_digest_required",
+        "model_inference_grant_revoked",
     } else 422
     return HTTPException(status_code=status, detail={"code": exc.code, "message": str(exc)})
 
 
-def _operator_payload(snapshot) -> dict:
-    # Unconfirmed transcript text is process-local and never crosses the API
-    # boundary.  The operator submits edited text together with the durable
-    # digest to confirm it.
-    return snapshot.as_dict()
+def _operator_payload(snapshot, *, owner_principal_id: str, operator_session_id: str) -> dict:
+    payload = snapshot.as_dict()
+    review_text = default_audio_worker.review_transcript(
+        snapshot.request_id,
+        owner_principal_id=owner_principal_id,
+        operator_session_id=operator_session_id,
+    )
+    if review_text is not None and snapshot.status == "transcript_ready":
+        payload["transcript"] = {
+            "text": review_text,
+            "digest": snapshot.transcript_digest,
+            "confirmed_digest": snapshot.confirmed_transcript_digest,
+            "review_only": True,
+        }
+    return payload
 
 
 async def _submit(body: AudioIngressBody, request: Request) -> dict:
@@ -139,12 +151,17 @@ async def _submit(body: AudioIngressBody, request: Request) -> dict:
                 model_inference_granted=_has_model_inference_grant(operator),
             ),
             process=True,
+            authority_principal=getattr(operator, "principal", None),
         )
     except AudioWorkerError as exc:
         raise _error(exc) from exc
     except ValueError as exc:
         raise HTTPException(status_code=422, detail={"code": "invalid_audio_request"}) from exc
-    return _operator_payload(snapshot)
+    return _operator_payload(
+        snapshot,
+        owner_principal_id=owner,
+        operator_session_id=operator_session_id,
+    )
 
 @router.post("/audio/ptt")
 @router.post("/audio/ingress")
@@ -219,32 +236,42 @@ async def _owned_job(request_id: str, request: Request, *, require_model: bool =
         raise HTTPException(status_code=404, detail={"code": exc.code}) from exc
     if snapshot.owner_principal_id != owner or snapshot.operator_session_id != operator_session_id:
         raise HTTPException(status_code=404, detail={"code": "audio_job_not_found"})
-    return snapshot, operator_session_id
+    return snapshot, operator_session_id, operator
 
 
 @router.get("/audio/ptt/{request_id}")
 @router.get("/audio/ingress/{request_id}")
 async def get_audio(request_id: str, request: Request) -> dict:
-    snapshot, _ = await _owned_job(request_id, request)
-    return _operator_payload(snapshot)
+    snapshot, operator_session_id, operator = await _owned_job(request_id, request)
+    owner = str(operator.principal.principal_id)
+    return _operator_payload(
+        snapshot,
+        owner_principal_id=owner,
+        operator_session_id=operator_session_id,
+    )
 
 
 @router.post("/audio/ptt/{request_id}/process")
 async def process_audio(request_id: str, request: Request) -> dict:
-    snapshot, operator_session_id = await _owned_job(request_id, request, require_model=True)
+    snapshot, operator_session_id, operator = await _owned_job(request_id, request, require_model=True)
     try:
         result = await default_audio_worker.process(
             snapshot.request_id,
             operator_session_id=operator_session_id,
+            authority_principal=getattr(operator, "principal", None),
         )
     except AudioWorkerError as exc:
         raise _error(exc) from exc
-    return _operator_payload(result)
+    return _operator_payload(
+        result,
+        owner_principal_id=str(operator.principal.principal_id),
+        operator_session_id=operator_session_id,
+    )
 
 
 @router.post("/audio/ptt/{request_id}/confirm")
 async def confirm_audio(request_id: str, body: TranscriptConfirmationBody, request: Request) -> dict:
-    _, operator_session_id = await _owned_job(request_id, request)
+    _, operator_session_id, operator = await _owned_job(request_id, request)
     try:
         snapshot = await default_audio_worker.confirm_transcript(
             request_id,
@@ -255,14 +282,22 @@ async def confirm_audio(request_id: str, body: TranscriptConfirmationBody, reque
         )
     except AudioConfirmationConflict as exc:
         raise _error(exc) from exc
-    return _operator_payload(snapshot)
+    return _operator_payload(
+        snapshot,
+        owner_principal_id=str(operator.principal.principal_id),
+        operator_session_id=operator_session_id,
+    )
 
 
 @router.post("/audio/ptt/{request_id}/cancel")
 async def cancel_audio(request_id: str, request: Request) -> dict:
-    _, operator_session_id = await _owned_job(request_id, request)
+    _, operator_session_id, operator = await _owned_job(request_id, request)
     try:
         snapshot = await default_audio_worker.cancel(request_id, operator_session_id=operator_session_id)
     except AudioWorkerError as exc:
         raise _error(exc) from exc
-    return _operator_payload(snapshot)
+    return _operator_payload(
+        snapshot,
+        owner_principal_id=str(operator.principal.principal_id),
+        operator_session_id=operator_session_id,
+    )

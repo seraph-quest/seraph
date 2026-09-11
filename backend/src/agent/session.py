@@ -363,9 +363,9 @@ class SessionManager:
             )
             for audio_job in audio_jobs.scalars().all():
                 try:
-                    from src.guardian.audio_worker import AudioIngressWorker
+                    from src.guardian.audio_worker import cleanup_audio_job_paths
 
-                    AudioIngressWorker._cleanup_job_paths(
+                    cleanup_audio_job_paths(
                         audio_job.raw_path,
                         audio_job.normalized_path,
                     )
@@ -843,6 +843,9 @@ class SessionManager:
         message_id: str,
         metadata_json: str,
         attachment_refs: object = None,
+        confirmation_job_id: str | None = None,
+        confirmation_digest: str | None = None,
+        confirmation_operator_session_id: str | None = None,
     ) -> tuple[Message, bool]:
         """Persist one user ingress before dispatch and detect safe retries.
 
@@ -850,6 +853,68 @@ class SessionManager:
         key.  SQLite's existing primary-key constraint closes the small race
         between concurrent retries without adding a parallel receipt table.
         """
+        confirmation_mode = any(
+            value is not None
+            for value in (
+                confirmation_job_id,
+                confirmation_digest,
+                confirmation_operator_session_id,
+            )
+        )
+        if confirmation_mode and not all(
+            isinstance(value, str) and value
+            for value in (
+                confirmation_job_id,
+                confirmation_digest,
+                confirmation_operator_session_id,
+            )
+        ):
+            raise ValueError("confirmation reservation fence is incomplete")
+        if confirmation_mode:
+            assert confirmation_job_id is not None
+            assert confirmation_digest is not None
+            assert confirmation_operator_session_id is not None
+            # Claim the durable job fence and insert the canonical message in
+            # the same transaction.  Cancellation can win before this update;
+            # once it does, no message reservation is possible.
+            async with get_session() as db:
+                claimed = await db.execute(
+                    update(AudioIngressJob)
+                    .where(
+                        AudioIngressJob.id == confirmation_job_id,
+                        AudioIngressJob.status == "confirming",
+                        AudioIngressJob.confirmed_transcript_digest == confirmation_digest,
+                        AudioIngressJob.operator_session_id == confirmation_operator_session_id,
+                    )
+                    .values(status="confirming_reserved", updated_at=datetime.now(timezone.utc))
+                )
+                if claimed.rowcount != 1:
+                    raise MessageIngressConflictError(message_id)
+                existing = await db.get(Message, message_id)
+                if existing is not None:
+                    if (
+                        existing.session_id != session_id
+                        or existing.role != "user"
+                        or not self._ingress_metadata_matches(existing.metadata_json, metadata_json)
+                        or existing.content != content
+                    ):
+                        raise MessageIngressConflictError(message_id)
+                    db.expunge(existing)
+                    return existing, True
+                try:
+                    message = await self._add_message_in_db(
+                        db,
+                        session_id,
+                        "user",
+                        content,
+                        metadata_json=metadata_json,
+                        message_id=message_id,
+                        attachment_refs=attachment_refs,
+                    )
+                except IntegrityError as exc:
+                    raise MessageIngressConflictError(message_id) from exc
+                return message, False
+
         existing = await self.get_message(message_id)
         if existing is not None:
             if (
@@ -882,6 +947,107 @@ class SessionManager:
                 raise MessageIngressConflictError(message_id)
             return raced, True
         return message, False
+
+    async def _add_message_in_db(
+        self,
+        db,
+        session_id: str,
+        role: str,
+        content: str,
+        step_number: int | None = None,
+        tool_used: str | None = None,
+        metadata_json: str | None = None,
+        message_id: str | None = None,
+        attachment_refs: object = None,
+    ) -> Message:
+        """Insert a message while retaining the caller's transaction."""
+        if len(content) > 50_000:
+            content = content[:50_000] + "\n\n[truncated]"
+        episode_metadata: dict | None = None
+        if metadata_json:
+            try:
+                parsed_metadata = json.loads(metadata_json)
+            except json.JSONDecodeError:
+                parsed_metadata = None
+            if isinstance(parsed_metadata, dict):
+                episode_metadata = parsed_metadata
+        lineage = episode_metadata.get("lineage") if isinstance(episode_metadata, dict) else None
+        if not isinstance(lineage, dict) and isinstance(episode_metadata, dict):
+            candidate = episode_metadata.get("ingress")
+            lineage = candidate if isinstance(candidate, dict) else None
+        if not isinstance(lineage, dict):
+            lineage = {}
+        lineage_owner_principal_id = str(
+            lineage.get("owner_principal_id") or lineage.get("principal_id") or ""
+        ).strip() or None
+        lineage_attachment_refs = lineage.get("attachment_refs")
+        attachment_input = attachment_refs if attachment_refs is not None else lineage_attachment_refs
+        safe_attachment_refs = validate_attachment_refs(
+            attachment_input,
+            owner_principal_id=lineage_owner_principal_id,
+        )
+        lineage_conversation_id = str(
+            lineage.get("conversation_id") or lineage.get("session_id") or session_id
+        ).strip() or session_id
+        lineage_thread_id = str(
+            lineage.get("thread_id") or lineage_conversation_id
+        ).strip() or lineage_conversation_id
+        msg = Message(
+            id=message_id or uuid.uuid4().hex,
+            session_id=session_id,
+            conversation_id=lineage_conversation_id,
+            thread_id=lineage_thread_id,
+            owner_principal_id=lineage_owner_principal_id,
+            operator_session_id=str(lineage.get("operator_session_id") or "").strip() or None,
+            device_id=str(lineage.get("device_id") or "").strip() or None,
+            channel=str(lineage.get("channel") or "").strip() or None,
+            transport=str(lineage.get("transport") or "").strip() or None,
+            correlation_id=str(lineage.get("correlation_id") or "").strip() or None,
+            causation_id=str(lineage.get("causation_id") or "").strip() or None,
+            attachment_refs_json=json.dumps(safe_attachment_refs, sort_keys=True),
+            role=role,
+            content=content,
+            step_number=step_number,
+            tool_used=tool_used,
+            metadata_json=metadata_json,
+        )
+        db.add(msg)
+        result = await db.execute(select(Session).where(Session.id == session_id))
+        session = result.scalars().first()
+        if session:
+            session.updated_at = datetime.now(timezone.utc)
+            db.add(session)
+        await db.flush()
+        episode_draft = build_message_episode(
+            role=role,
+            content=content,
+            tool_used=tool_used,
+            metadata=episode_metadata,
+        )
+        if episode_draft is not None:
+            try:
+                async with db.begin_nested():
+                    db.add(
+                        MemoryEpisode(
+                            session_id=session_id,
+                            episode_type=episode_draft.episode_type,
+                            summary=episode_draft.summary,
+                            content=episode_draft.content,
+                            source_message_id=msg.id,
+                            source_tool_name=episode_draft.source_tool_name,
+                            source_role=episode_draft.source_role,
+                            salience=episode_draft.salience,
+                            confidence=episode_draft.confidence,
+                            metadata_json=json.dumps(episode_draft.metadata or {}, sort_keys=True),
+                            observed_at=msg.created_at,
+                            created_at=msg.created_at,
+                        )
+                    )
+                    await db.flush()
+            except Exception:
+                logger.debug("Failed to persist episodic event for message %s", msg.id, exc_info=True)
+        db.expunge(msg)
+        return msg
 
     async def add_message(
         self,

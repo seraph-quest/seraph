@@ -122,6 +122,7 @@ async def test_artifact_storage_settings_exposes_safe_operator_posture(client, t
         patch.object(settings, "workspace_dir", str(tmp_path / "workspace")),
         patch.object(settings, "local_llm_api_base", ""),
         patch.object(settings, "local_vlm_base_url", ""),
+        patch.object(settings, "local_vlm_model", ""),
         patch.object(settings, "seraph_vlm_base_url", ""),
         patch.object(settings, "screen_analysis_provider", ""),
     ):
@@ -131,7 +132,7 @@ async def test_artifact_storage_settings_exposes_safe_operator_posture(client, t
     data = resp.json()
     assert data["screen"]["analysis_enabled"] is True
     assert data["screen"]["provider"] == ""
-    assert data["screen"]["model"]
+    assert data["screen"]["model"] == ""
     assert "capture_mode" not in data["screen"]
     assert "daemon_status" not in data["screen"]
     assert "archive_dir" not in data["screen"]
@@ -158,7 +159,7 @@ async def test_artifact_storage_settings_exposes_safe_operator_posture(client, t
 
 
 @pytest.mark.asyncio
-async def test_screen_analysis_settings_exposes_env_screenshot_folder_and_local_vlm(client, tmp_path, monkeypatch):
+async def test_screen_analysis_settings_rejects_retired_local_vlm_and_exposes_folder(client, tmp_path, monkeypatch):
     screenshot_root = tmp_path / "captures"
     screenshot_root.mkdir()
     monkeypatch.setenv("SERAPH_SCREENSHOT_FOLDER", str(screenshot_root))
@@ -171,14 +172,14 @@ async def test_screen_analysis_settings_exposes_env_screenshot_folder_and_local_
 
     assert resp.status_code == 200
     data = resp.json()
-    assert data["provider"] == "local-vlm"
-    assert data["model"] == "gemma-local"
+    assert data["provider"] == ""
+    assert data["model"] == ""
     assert data["screenshot_folder"] == str(screenshot_root.resolve())
     assert data["screenshot_folder_source"] == "SERAPH_SCREENSHOT_FOLDER"
 
 
 @pytest.mark.asyncio
-async def test_artifact_storage_exposes_gpu_vlm_runtime_without_secret(client, tmp_path, monkeypatch):
+async def test_artifact_storage_marks_legacy_gpu_vlm_runtime_inactive(client, tmp_path, monkeypatch):
     screenshot_root = tmp_path / "captures"
     screenshot_root.mkdir()
     monkeypatch.setenv("SERAPH_SCREENSHOT_FOLDER", str(screenshot_root))
@@ -198,6 +199,8 @@ async def test_artifact_storage_exposes_gpu_vlm_runtime_without_secret(client, t
     data = resp.json()
     runtime = data["local_runtime"]["vlm_runtime"]
     assert runtime["mode"] == "gpu-server"
+    assert runtime["active"] is False
+    assert runtime["disabled_reason"] == "local_vlm_disabled_openrouter_only"
     assert runtime["base_url"] == "http://192.168.1.26:8001"
     assert runtime["backend_url"] == "http://192.168.1.26:8000/v1"
     assert runtime["chat_api_base"] == "http://192.168.1.26:8001/v1"
@@ -271,6 +274,84 @@ async def test_artifact_storage_returns_env_folder_when_pipeline_summary_times_o
     assert data["screenshot_folder"]["analysis"]["latest_failure"] == "analysis metadata timed out"
     assert data["screenshot_folder"]["analysis"]["persistence"]["db_lock_retries"] == 7
     assert data["screenshot_folder"]["analysis"]["persistence"]["selection_db_lock_failures"] == 2
+
+
+@pytest.mark.asyncio
+async def test_artifact_storage_returns_partial_status_when_screenshot_summaries_are_slow(
+    client,
+    tmp_path,
+    monkeypatch,
+):
+    screenshot_root = tmp_path / "captures"
+    screenshot_root.mkdir()
+    monkeypatch.setenv("SERAPH_SCREENSHOT_FOLDER", str(screenshot_root))
+
+    def slow_folder_summary(_root):
+        time.sleep(2)
+        return {}
+
+    async def slow_pipeline_summary(root=None):
+        await asyncio.sleep(2)
+        return {}
+
+    with (
+        patch.object(settings, "workspace_dir", str(tmp_path / "workspace")),
+        patch.object(settings, "screen_analysis_provider", "local-vlm"),
+        patch("src.api.settings._SCREENSHOT_FOLDER_SUMMARY_TIMEOUT_S", 0.01),
+        patch("src.api.settings._SCREENSHOT_PIPELINE_SUMMARY_TIMEOUT_S", 0.01),
+        patch("src.api.settings._screenshot_folder_summary", slow_folder_summary),
+        patch("src.api.settings._screenshot_folder_pipeline_summary", slow_pipeline_summary),
+    ):
+        started_at = time.monotonic()
+        resp = await client.get("/api/settings/artifact-storage")
+        elapsed = time.monotonic() - started_at
+
+    assert resp.status_code == 200
+    assert elapsed < 0.5
+    data = resp.json()
+    assert data["screenshot_folder"]["summary_status"] == "partial"
+    assert data["screenshot_folder"]["summary_failure"] == "summary_timeout"
+    assert data["screenshot_folder"]["analysis"]["metadata_status"] == "partial"
+    assert data["screenshot_folder"]["analysis"]["metadata_failure"] == "analysis metadata timed out"
+    assert data["screenshot_folder"]["analysis"]["latest_failure"] == "analysis metadata timed out"
+
+
+@pytest.mark.asyncio
+async def test_health_and_sessions_stay_fast_when_artifact_summaries_are_slow(
+    client,
+    tmp_path,
+    monkeypatch,
+):
+    screenshot_root = tmp_path / "captures"
+    screenshot_root.mkdir()
+    monkeypatch.setenv("SERAPH_SCREENSHOT_FOLDER", str(screenshot_root))
+
+    def slow_folder_summary(_root):
+        time.sleep(2)
+        return {}
+
+    async def slow_pipeline_summary(root=None):
+        await asyncio.sleep(2)
+        return {}
+
+    with (
+        patch.object(settings, "workspace_dir", str(tmp_path / "workspace")),
+        patch("src.api.settings._SCREENSHOT_FOLDER_SUMMARY_TIMEOUT_S", 0.01),
+        patch("src.api.settings._SCREENSHOT_PIPELINE_SUMMARY_TIMEOUT_S", 0.01),
+        patch("src.api.settings._screenshot_folder_summary", slow_folder_summary),
+        patch("src.api.settings._screenshot_folder_pipeline_summary", slow_pipeline_summary),
+    ):
+        health_started = time.monotonic()
+        health_resp = await client.get("/health")
+        health_elapsed = time.monotonic() - health_started
+        sessions_started = time.monotonic()
+        sessions_resp = await client.get("/api/sessions")
+        sessions_elapsed = time.monotonic() - sessions_started
+
+    assert health_resp.status_code == 200
+    assert sessions_resp.status_code == 200
+    assert health_elapsed < 1.0
+    assert sessions_elapsed < 1.0
 
 
 @pytest.mark.asyncio
@@ -638,8 +719,8 @@ async def test_screen_analysis_settings_persist_and_drive_artifact_storage(clien
             "/api/settings/screen-analysis",
             json={
                 "enabled": True,
-                "provider": "local-vlm",
-                "model": "unsloth/gemma-4-26B-A4B-it-GGUF:UD-Q4_K_M",
+                "provider": "openrouter",
+                "model": "openrouter/google/gemini-2.5-flash",
                 "preserve_captures": True,
                 "archive_dir": str(archive),
                 "screenshot_folder": str(screenshot_root),
@@ -649,8 +730,8 @@ async def test_screen_analysis_settings_persist_and_drive_artifact_storage(clien
         assert resp.status_code == 200
         data = resp.json()
         assert data["enabled"] is True
-        assert data["provider"] == "local-vlm"
-        assert data["model"] == "unsloth/gemma-4-26B-A4B-it-GGUF:UD-Q4_K_M"
+        assert data["provider"] == "openrouter"
+        assert data["model"] == "openrouter/google/gemini-2.5-flash"
         assert data["preserve_captures"] is True
         assert data["archive_dir"] == str(archive)
         assert data["screenshot_folder"] == str(screenshot_root)
@@ -660,7 +741,8 @@ async def test_screen_analysis_settings_persist_and_drive_artifact_storage(clien
 
         storage = (await client.get("/api/settings/artifact-storage")).json()
         assert storage["screen"]["analysis_enabled"] is True
-        assert storage["screen"]["provider"] == "local-vlm"
+        assert storage["screen"]["provider"] == "openrouter"
+        assert storage["screen"]["model"] == "openrouter/google/gemini-2.5-flash"
         assert "archive_dir" not in storage["screen"]
         assert "preservation_enabled" not in storage["screen"]
         assert storage["screenshot_folder"]["path"] == str(screenshot_root)
@@ -838,6 +920,18 @@ async def test_screen_analysis_settings_reject_invalid_provider(client, tmp_path
         )
 
     assert resp.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_screen_analysis_settings_reject_unqualified_model(client, tmp_path):
+    with patch.object(settings, "workspace_dir", str(tmp_path / "workspace")):
+        resp = await client.put(
+            "/api/settings/screen-analysis",
+            json={"model": "local/gemma-vision"},
+        )
+
+    assert resp.status_code == 422
+    assert "OpenRouter-qualified" in resp.json()["detail"]
 
 
 def test_screen_artifact_summary_skips_files_deleted_during_stat(tmp_path, monkeypatch):

@@ -10,7 +10,7 @@ from src.browser.sessions import browser_session_runtime
 from src.extensions.browser_providers import list_browser_provider_inventory, select_active_browser_provider
 from src.extensions.registry import ExtensionRegistry, default_manifest_roots_for_workspace
 from src.extensions.state import connector_enabled_overrides, load_extension_state_payload
-from src.tools.browser_tool import browse_webpage
+from src.tools.browser_tool import browse_webpage, redact_browser_error
 
 
 def _resolve_browser_provider(requested_name: str = "") -> tuple[dict[str, str], str | None]:
@@ -49,6 +49,10 @@ def _resolve_browser_provider(requested_name: str = "") -> tuple[dict[str, str],
 
 def _browser_capture_failed(content: str) -> bool:
     return str(content or "").startswith("Error:")
+
+
+def _browser_capture_error(content: object) -> str:
+    return redact_browser_error(content)
 
 
 def _require_owner_session_id() -> str | None:
@@ -175,7 +179,7 @@ def browser_session(
             return "Error: browser_session open requires a URL."
         content = browse_webpage(url.strip(), action=normalized_capture)
         if _browser_capture_failed(content):
-            return content
+            return _browser_capture_error(content)
         payload = browser_session_runtime.open_session(
             owner_session_id=owner_session_id,
             url=url.strip(),
@@ -199,6 +203,17 @@ def browser_session(
     if normalized_action == "snapshot":
         if not session_id.strip():
             return "Error: browser_session snapshot requires a session_id."
+        session_payload = browser_session_runtime.get_session(
+            session_id.strip(),
+            owner_session_id=owner_session_id,
+        )
+        if session_payload is None:
+            return f"Error: Browser session '{session_id}' was not found."
+        if session_payload.get("replayable") is False:
+            return (
+                "Error: Browser session replay is unavailable after reload because "
+                "the private execution target was not persisted."
+            )
         capture_url = browser_session_runtime.get_session_capture_url(
             session_id.strip(),
             owner_session_id=owner_session_id,
@@ -207,7 +222,7 @@ def browser_session(
             return f"Error: Browser session '{session_id}' was not found."
         content = browse_webpage(capture_url, action=normalized_capture)
         if _browser_capture_failed(content):
-            return content
+            return _browser_capture_error(content)
         payload = browser_session_runtime.snapshot_session(
             owner_session_id=owner_session_id,
             session_id=session_id.strip(),

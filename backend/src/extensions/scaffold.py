@@ -12,7 +12,7 @@ from typing import Callable
 import yaml
 
 from .doctor import ExtensionDoctorReport, doctor_snapshot
-from .layout import CONTRIBUTION_LAYOUTS
+from .layout import CONTRIBUTION_LAYOUTS, reject_symlink_entries
 from .manifest import ExtensionKind, ExtensionTrust
 from .registry import ExtensionRegistry
 from src.tools.policy import get_tool_execution_boundaries
@@ -296,6 +296,7 @@ def scaffold_extension_package(
     publisher_name: str = "Seraph",
 ) -> ScaffoldedExtensionPackage:
     package_path = Path(package_root)
+    reject_symlink_entries(package_path)
     parsed_kind = ExtensionKind(kind)
     ExtensionTrust(trust)
 
@@ -315,6 +316,7 @@ def scaffold_extension_package(
         raise ValueError(f"connector-pack scaffolds must include at least one connector contribution: {supported}")
 
     package_path.mkdir(parents=True, exist_ok=True)
+    reject_symlink_entries(package_path)
     manifest_path = package_path / "manifest.yaml"
     if manifest_path.exists():
         raise FileExistsError(f"manifest already exists: {manifest_path}")
@@ -389,6 +391,7 @@ def validate_extension_package(
     *,
     seraph_version: str | None = None,
 ) -> ExtensionDoctorReport:
+    reject_symlink_entries(Path(package_root))
     snapshot_registry = ExtensionRegistry(
         manifest_roots=[str(package_root)],
         skill_dirs=[],

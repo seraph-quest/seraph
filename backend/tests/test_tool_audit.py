@@ -8,8 +8,10 @@ from config.settings import settings
 from src.agent.onboarding import create_onboarding_agent
 from src.agent.session import session_manager
 from src.approval.runtime import reset_runtime_context, set_runtime_context
+from src.security.trust_contract import AuthorityGrant, PrincipalType, TrustPrincipal
 from src.audit.repository import audit_repository
 from src.observer.context import CurrentContext
+from src.tools.approval import AuthorityTool
 from src.tools.audit import AuditedTool, wrap_tools_for_audit
 from src.tools.secret_ref_tools import wrap_tools_for_secret_refs
 from src.tools.todo_tool import todo
@@ -117,6 +119,15 @@ class DummyAuthenticatedMCPDefaultAuditTool(Tool):
 
 def _tool_context() -> CurrentContext:
     return CurrentContext(tool_policy_mode="full", mcp_policy_mode="full")
+
+
+def _onboarding_operator_principal() -> TrustPrincipal:
+    return TrustPrincipal(
+        principal_id="operator:onboarding-test",
+        principal_type=PrincipalType.OPERATOR,
+        grants=(AuthorityGrant.CAPABILITY_EXECUTE,),
+        session_id="onboarding-test-session",
+    )
 
 
 def test_audited_tool_logs_call_and_result(async_db):
@@ -280,7 +291,57 @@ def test_onboarding_agent_uses_audited_tools():
     agent = create_onboarding_agent()
 
     for tool_name in ("view_soul", "update_soul", "create_goal", "get_goals"):
-        assert isinstance(agent.tools[tool_name], AuditedTool)
+        assert isinstance(agent.tools[tool_name], AuthorityTool)
+        assert isinstance(agent.tools[tool_name].wrapped_tool, AuditedTool)
+
+
+@pytest.mark.parametrize(
+    "session_id, principal",
+    [
+        (None, _onboarding_operator_principal()),
+        ("onboarding-test-session", None),
+    ],
+    ids=["missing-session", "missing-principal"],
+)
+def test_onboarding_agent_blocks_governed_tool_without_runtime_authority(session_id, principal):
+    agent = create_onboarding_agent("Review https://example.com/about during onboarding.")
+    tokens = set_runtime_context(session_id, "off", trust_principal=principal)
+    try:
+        with patch("src.agent.onboarding.base_browse_webpage.forward") as mock_browse:
+            with pytest.raises(PermissionError, match="runtime authority is unavailable"):
+                agent.tools["browse_webpage"](url="https://example.com/about")
+            mock_browse.assert_not_called()
+    finally:
+        reset_runtime_context(tokens)
+
+
+def test_onboarding_agent_blocks_guardian_state_dispatch_without_runtime_authority():
+    agent = create_onboarding_agent()
+
+    with patch("src.agent.onboarding.view_soul.forward", return_value="soul") as mock_view:
+        with pytest.raises(PermissionError, match="runtime authority is unavailable"):
+            agent.tools["view_soul"]()
+
+    mock_view.assert_not_called()
+
+
+def test_onboarding_agent_authorized_principal_can_dispatch_guardian_state_tool():
+    agent = create_onboarding_agent()
+    tokens = set_runtime_context(
+        "onboarding-test-session",
+        "off",
+        trust_principal=_onboarding_operator_principal(),
+    )
+    try:
+        with (
+            patch.object(AuditedTool, "_log_event", return_value=None),
+            patch("src.agent.onboarding.view_soul.forward", return_value="soul") as mock_view,
+        ):
+            assert agent.tools["view_soul"]() == "soul"
+    finally:
+        reset_runtime_context(tokens)
+
+    mock_view.assert_called_once_with()
 
 
 def test_onboarding_agent_instructions_clarify_tool_scope():
@@ -293,7 +354,8 @@ def test_onboarding_agent_instructions_clarify_tool_scope():
 def test_onboarding_agent_enables_browser_for_explicit_user_link():
     agent = create_onboarding_agent("Review https://example.com/about during onboarding.")
 
-    assert isinstance(agent.tools["browse_webpage"], AuditedTool)
+    assert isinstance(agent.tools["browse_webpage"], AuthorityTool)
+    assert isinstance(agent.tools["browse_webpage"].wrapped_tool, AuditedTool)
     assert "You may inspect only the exact URL(s) below" in agent.instructions
     assert "`https://example.com/about`" in agent.instructions
     assert "Do not search the web" in agent.instructions
@@ -308,36 +370,69 @@ def test_onboarding_agent_keeps_browser_disabled_without_explicit_link():
 
 def test_onboarding_agent_browser_scope_is_runtime_enforced():
     agent = create_onboarding_agent("Review https://example.com/about during onboarding.")
+    tokens = set_runtime_context(
+        "onboarding-test-session",
+        "off",
+        trust_principal=_onboarding_operator_principal(),
+    )
 
-    with patch("src.agent.onboarding.base_browse_webpage.forward", return_value="about page") as mock_browse:
-        assert agent.tools["browse_webpage"](url="https://example.com/about") == "about page"
-        assert "limited to the exact URL" in agent.tools["browse_webpage"](
-            url="https://example.com/elsewhere"
-        )
+    try:
+        with (
+            patch.object(AuditedTool, "_log_event", return_value=None),
+            patch("src.agent.onboarding.base_browse_webpage.forward", return_value="about page") as mock_browse,
+        ):
+            assert agent.tools["browse_webpage"](url="https://example.com/about") == "about page"
+            assert "limited to the exact URL" in agent.tools["browse_webpage"](
+                url="https://example.com/elsewhere"
+            )
+    finally:
+        reset_runtime_context(tokens)
 
     mock_browse.assert_called_once_with("https://example.com/about", action="extract")
 
 
 def test_onboarding_agent_normalizes_quoted_explicit_urls():
     agent = create_onboarding_agent('Review "https://example.com/about".')
+    tokens = set_runtime_context(
+        "onboarding-test-session",
+        "off",
+        trust_principal=_onboarding_operator_principal(),
+    )
 
-    with patch("src.agent.onboarding.base_browse_webpage.forward", return_value="about page") as mock_browse:
-        assert agent.tools["browse_webpage"](url="https://example.com/about") == "about page"
+    try:
+        with (
+            patch.object(AuditedTool, "_log_event", return_value=None),
+            patch("src.agent.onboarding.base_browse_webpage.forward", return_value="about page") as mock_browse,
+        ):
+            assert agent.tools["browse_webpage"](url="https://example.com/about") == "about page"
+    finally:
+        reset_runtime_context(tokens)
 
     mock_browse.assert_called_once_with("https://example.com/about", action="extract")
 
 
 def test_onboarding_agent_normalizes_bare_domains_for_webpage_access():
     agent = create_onboarding_agent("Check natgurlain.com to get to know me.")
+    tokens = set_runtime_context(
+        "onboarding-test-session",
+        "off",
+        trust_principal=_onboarding_operator_principal(),
+    )
 
-    with patch("src.agent.onboarding.base_browse_webpage.forward", return_value="profile page") as mock_browse:
-        assert agent.tools["browse_webpage"](url="https://natgurlain.com") == "profile page"
+    try:
+        with (
+            patch.object(AuditedTool, "_log_event", return_value=None),
+            patch("src.agent.onboarding.base_browse_webpage.forward", return_value="profile page") as mock_browse,
+        ):
+            assert agent.tools["browse_webpage"](url="https://natgurlain.com") == "profile page"
+    finally:
+        reset_runtime_context(tokens)
 
     mock_browse.assert_called_once_with("https://natgurlain.com", action="extract")
 
 
 @patch("src.agent.onboarding.LiteLLMModel")
-def test_onboarding_agent_uses_local_profile_runtime_path(mock_model_cls):
+def test_onboarding_agent_uses_openrouter_when_local_profile_is_configured(mock_model_cls):
     mock_model_cls.return_value = object()
     with (
         patch.object(settings, "default_model", "openrouter/anthropic/claude-sonnet-4"),
@@ -351,5 +446,7 @@ def test_onboarding_agent_uses_local_profile_runtime_path(mock_model_cls):
         create_onboarding_agent()
 
     call_kwargs = mock_model_cls.call_args[1]
-    assert call_kwargs["model_id"] == "ollama/llama3.2"
-    assert call_kwargs["api_base"] == "http://localhost:11434/v1"
+    assert call_kwargs["model_id"] == "openrouter/anthropic/claude-sonnet-4"
+    assert call_kwargs["api_base"] == "https://openrouter.ai/api/v1"
+    assert call_kwargs["runtime_profile"] == "openrouter"
+    assert call_kwargs["runtime_path"] == "onboarding_agent"

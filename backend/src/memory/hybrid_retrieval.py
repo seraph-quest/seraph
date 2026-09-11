@@ -1,18 +1,27 @@
 from __future__ import annotations
 
 import asyncio
+import logging
+import math
 import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from sqlalchemy import func, or_
+from sqlalchemy.exc import SQLAlchemyError
 from sqlmodel import col, select
 
 from src.db.engine import get_session
 from src.db.models import Memory, MemoryEpisode, MemoryStatus
-from src.memory.repository import memory_repository
+from src.memory.repository import (
+    _canonical_memory_deletion_marker,
+    _canonical_memory_without_tombstone_clause,
+    memory_repository,
+)
 from src.memory.types import bucket_name_for_kind
 from src.memory.vector_store import search_with_status
+
+logger = logging.getLogger(__name__)
 
 
 _STOPWORDS = {
@@ -262,15 +271,128 @@ def _render_result(
     )
 
 
+def _degraded_canonical_retrieval_result(
+    *,
+    reason: str = "canonical_memory_read_unavailable",
+) -> HybridMemoryRetrievalResult:
+    return HybridMemoryRetrievalResult(
+        context="",
+        buckets={},
+        degraded=True,
+        hits=(),
+        diagnostics=(
+            {
+                "reason": reason,
+                "status": "degraded_no_learning",
+            },
+        ),
+    )
+
+
+def _validate_vector_hits(
+    raw_hits: object,
+) -> tuple[list[dict[str, object]], str | None]:
+    """Validate untrusted vector output before it can enter canonical context."""
+
+    if not isinstance(raw_hits, (list, tuple)):
+        return [], "canonical_vector_payload_invalid"
+    validated: list[dict[str, object]] = []
+    for hit in raw_hits:
+        if not isinstance(hit, dict):
+            return [], "canonical_vector_payload_invalid"
+        normalized = dict(hit)
+        if "score" in normalized:
+            raw_score = normalized["score"]
+            if raw_score is None or isinstance(raw_score, bool):
+                return [], "canonical_vector_score_invalid"
+            try:
+                score = float(raw_score)
+            except (TypeError, ValueError, OverflowError):
+                return [], "canonical_vector_score_invalid"
+            if not math.isfinite(score):
+                return [], "canonical_vector_score_invalid"
+            normalized["score"] = score
+        if "text" in normalized and normalized["text"] is not None:
+            if not isinstance(normalized["text"], str):
+                return [], "canonical_vector_payload_invalid"
+        validated.append(normalized)
+    return validated, None
+
+
 async def retrieve_hybrid_memory(
     *,
     query: str,
     active_projects: tuple[str, ...] = (),
     limit: int = 8,
 ) -> HybridMemoryRetrievalResult:
+    """Retrieve canonical memory with a fail-closed database boundary."""
+
+    try:
+        return await _retrieve_hybrid_memory(
+            query=query,
+            active_projects=active_projects,
+            limit=limit,
+        )
+    except asyncio.CancelledError:
+        raise
+    except SQLAlchemyError:
+        return _degraded_canonical_retrieval_result()
+    except Exception:
+        # Provider/index payloads and local adapters are untrusted inputs at
+        # this boundary.  Keep the failure visible while preventing malformed
+        # data from becoming canonical context.
+        logger.exception("Canonical hybrid memory retrieval failed")
+        return _degraded_canonical_retrieval_result()
+
+
+async def _retrieve_hybrid_memory(
+    *,
+    query: str,
+    active_projects: tuple[str, ...] = (),
+    limit: int = 8,
+) -> HybridMemoryRetrievalResult:
     normalized_query = _normalize_text(query)
+    try:
+        tombstone_reconciliation = await memory_repository.reconcile_memory_tombstones()
+    except SQLAlchemyError:
+        # A failed local authority check must not fall through to a possibly
+        # stale derived index.  Keep the outage explicit and return no memory.
+        return HybridMemoryRetrievalResult(
+            context="",
+            buckets={},
+            degraded=True,
+            hits=(),
+            diagnostics=(
+                {
+                    "reason": "canonical_tombstone_reconciliation_unavailable",
+                    "status": "degraded_no_learning",
+                },
+            ),
+        )
+    if tombstone_reconciliation.get("status") != "ready":
+        return HybridMemoryRetrievalResult(
+            context="",
+            buckets={},
+            degraded=True,
+            hits=(),
+            diagnostics=(
+                {
+                    "reason": "canonical_tombstone_reconciliation_degraded",
+                    "status": "degraded_no_learning",
+                    "tombstone_reconciliation": tombstone_reconciliation,
+                },
+            ),
+        )
     if not normalized_query:
-        return HybridMemoryRetrievalResult(context="", buckets={}, degraded=False, hits=())
+        return HybridMemoryRetrievalResult(
+            context="",
+            buckets={},
+            degraded=False,
+            hits=(),
+            diagnostics=(
+                {"tombstone_reconciliation": tombstone_reconciliation},
+            ),
+        )
 
     terms = _query_terms(normalized_query)
     project_entities = await memory_repository.find_entities_by_names(
@@ -292,6 +414,7 @@ async def retrieve_hybrid_memory(
         semantic_stmt = (
             select(Memory)
             .where(Memory.status == MemoryStatus.active)
+            .where(_canonical_memory_without_tombstone_clause())
             .order_by(
                 col(Memory.importance).desc(),
                 col(Memory.last_confirmed_at).desc(),
@@ -304,13 +427,18 @@ async def retrieve_hybrid_memory(
                 or_(*[memory_text.like(pattern) for pattern in query_term_patterns])
             )
         semantic_result = await db.execute(semantic_stmt)
-        semantic_memories = semantic_result.scalars().all()
+        semantic_memories = [
+            memory
+            for memory in semantic_result.scalars().all()
+            if _canonical_memory_deletion_marker(memory) is None
+        ]
 
         linked_memories: list[Memory] = []
         if project_entity_ids:
             linked_stmt = (
                 select(Memory)
                 .where(Memory.status == MemoryStatus.active)
+                .where(_canonical_memory_without_tombstone_clause())
                 .where(col(Memory.project_entity_id).in_(project_entity_ids))
                 .order_by(
                     col(Memory.importance).desc(),
@@ -320,7 +448,11 @@ async def retrieve_hybrid_memory(
                 .limit(max(limit * 4, 12))
             )
             linked_result = await db.execute(linked_stmt)
-            linked_memories = linked_result.scalars().all()
+            linked_memories = [
+                memory
+                for memory in linked_result.scalars().all()
+                if _canonical_memory_deletion_marker(memory) is None
+            ]
 
         episode_stmt = (
             select(MemoryEpisode)
@@ -358,6 +490,11 @@ async def retrieve_hybrid_memory(
         normalized_query,
         max(limit * 2, 8),
     )
+    vector_hits, vector_validation_error = _validate_vector_hits(vector_hits)
+    if vector_validation_error is not None:
+        return _degraded_canonical_retrieval_result(
+            reason=vector_validation_error,
+        )
     active_vector_ids: set[str] | None = None
     active_vector_texts: dict[str, set[str]] = {}
     vector_hit_ids = tuple(
@@ -371,6 +508,7 @@ async def retrieve_hybrid_memory(
                 await db.execute(
                     select(Memory.embedding_id, Memory.id, Memory.summary, Memory.content)
                     .where(Memory.status == MemoryStatus.active)
+                    .where(_canonical_memory_without_tombstone_clause())
                     .where(
                         or_(
                             col(Memory.embedding_id).in_(vector_hit_ids),
@@ -445,7 +583,7 @@ async def retrieve_hybrid_memory(
 
     for hit in vector_hits:
         hit_id = str(hit.get("id") or "").strip()
-        if hit_id and active_vector_ids is not None and hit_id not in active_vector_ids:
+        if not hit_id or active_vector_ids is None or hit_id not in active_vector_ids:
             continue
         text = _normalize_text(str(hit.get("text") or ""))
         if not text:
@@ -483,4 +621,13 @@ async def retrieve_hybrid_memory(
 
     deduped_hits = _dedupe_hits(combined_hits)
     ranked_hits, diagnostics = _apply_contradiction_aware_ranking(deduped_hits)
-    return _render_result(ranked_hits, limit=limit, degraded=vector_degraded, diagnostics=diagnostics)
+    diagnostics = (
+        *diagnostics,
+        {"tombstone_reconciliation": tombstone_reconciliation},
+    )
+    return _render_result(
+        ranked_hits,
+        limit=limit,
+        degraded=vector_degraded or tombstone_reconciliation.get("status") == "degraded",
+        diagnostics=diagnostics,
+    )

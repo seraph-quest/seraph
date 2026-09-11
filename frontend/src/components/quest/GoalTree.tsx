@@ -1,4 +1,5 @@
-import { useQuestStore } from "../../stores/questStore";
+import { useState } from "react";
+import { GoalUpdateError, useQuestStore } from "../../stores/questStore";
 import type { GoalInfo } from "../../types";
 
 const STATUS_ICONS: Record<string, string> = {
@@ -21,11 +22,29 @@ interface Props {
   goals: GoalInfo[];
   depth: number;
   onEdit?: (goal: GoalInfo) => void;
+  onInspect?: (goal: GoalInfo) => void;
 }
 
-export function GoalTree({ goals, depth, onEdit }: Props) {
+export function GoalTree({ goals, depth, onEdit, onInspect }: Props) {
   const updateGoal = useQuestStore((s) => s.updateGoal);
   const deleteGoal = useQuestStore((s) => s.deleteGoal);
+  const [error, setError] = useState<string | null>(null);
+
+  const toggleGoal = (goal: GoalInfo, isCompleted: boolean) => {
+    setError(null);
+    void updateGoal(goal.id, {
+      status: isCompleted ? "active" : "completed",
+      ...(typeof goal.revision === "number" ? { expected_revision: goal.revision } : {}),
+    }).catch((err: unknown) => {
+      if (err instanceof GoalUpdateError && err.code === "stale_goal_revision") {
+        setError("This priority changed elsewhere. Refresh before changing its status.");
+      } else if (err instanceof GoalUpdateError) {
+        setError(err.message);
+      } else {
+        setError("Priority status could not be updated.");
+      }
+    });
+  };
 
   return (
     <div className={depth > 0 ? "ml-3 border-l border-retro-border/15 pl-2" : ""}>
@@ -41,11 +60,7 @@ export function GoalTree({ goals, depth, onEdit }: Props) {
                 className={`text-[11px] font-mono shrink-0 ${
                   isCompleted ? "text-green-400/70" : "text-retro-text/50"
                 } hover:text-retro-highlight`}
-                onClick={() => {
-                  updateGoal(goal.id, {
-                    status: isCompleted ? "active" : "completed",
-                  });
-                }}
+                onClick={() => toggleGoal(goal, isCompleted)}
               >
                 {icon}
               </button>
@@ -65,11 +80,39 @@ export function GoalTree({ goals, depth, onEdit }: Props) {
                     })}
                   </span>
                 )}
+                {goal.success_criterion && (
+                  <span
+                    className="block text-[9px] text-retro-text/40 truncate"
+                    title={`Success criterion: ${goal.success_criterion.description}`}
+                    data-testid={`goal-criterion-${goal.id}`}
+                  >
+                    ✓ {goal.success_criterion.description}
+                    {goal.success_criterion.evidence_refs.length > 0
+                      ? ` · ${goal.success_criterion.evidence_refs.length} evidence ref${goal.success_criterion.evidence_refs.length === 1 ? "" : "s"}`
+                      : " · evidence pending"}
+                  </span>
+                )}
+                {error && (
+                  <div className="text-[9px] text-rose-400" role="status" aria-live="polite">
+                    {error}
+                  </div>
+                )}
                 <span className="text-[9px] text-retro-text/20 ml-1 hidden group-hover:inline">
                   {goal.level}
                 </span>
               </div>
-              <div className="hidden group-hover:flex items-center gap-0.5 shrink-0">
+              <div className="flex items-center gap-0.5 shrink-0 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100">
+                {onInspect && (
+                  <button
+                    type="button"
+                    onClick={() => onInspect(goal)}
+                    className="text-[9px] text-retro-text/30 hover:text-retro-highlight px-0.5"
+                    title="Inspect goal loop"
+                    aria-label={`Inspect ${goal.title}`}
+                  >
+                    ?
+                  </button>
+                )}
                 {onEdit && (
                   <button
                     onClick={() => onEdit(goal)}
@@ -93,7 +136,7 @@ export function GoalTree({ goals, depth, onEdit }: Props) {
               </div>
             </div>
             {goal.children && goal.children.length > 0 && (
-              <GoalTree goals={goal.children} depth={depth + 1} onEdit={onEdit} />
+              <GoalTree goals={goal.children} depth={depth + 1} onEdit={onEdit} onInspect={onInspect} />
             )}
           </div>
         );

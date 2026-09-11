@@ -22,6 +22,8 @@ from src.local_runtime_profile_verifier import (
     local_runtime_profile_receipt_dir,
 )
 from src.local_runtime_profiles import local_runtime_profile_statuses
+from src.model_fabric.configuration import effective_workload_policy
+from src.security.trust_contract import EgressClass
 from src.vlm_runtime import (
     deferred_vlm_live_probe,
     effective_vlm_base_url,
@@ -31,9 +33,9 @@ from src.vlm_runtime import (
 from src.observer.manager import context_manager
 from src.observer.screen_analysis_settings import (
     SCREENSHOT_FOLDER_ENV,
-    VALID_SCREEN_ANALYSIS_PROVIDERS,
     effective_screen_analysis_model,
     effective_screen_analysis_provider,
+    normalize_openrouter_model_identifier,
     read_screen_analysis_settings,
     screen_analysis_settings_path,
     write_screen_analysis_settings,
@@ -88,7 +90,9 @@ class McpPolicyModeRequest(BaseModel):
     mode: str
 
 
-_VALID_SCREEN_ANALYSIS_PROVIDERS = VALID_SCREEN_ANALYSIS_PROVIDERS
+# Active screenshot semantic analysis is OpenRouter-only. Retained settings
+# from the historical local/Apple routes are normalized away by the reader.
+_VALID_SCREEN_ANALYSIS_PROVIDERS = frozenset({"", "openrouter"})
 _VALID_TOOL_POLICY_MODES = set(TOOL_POLICY_MODES)
 _VALID_MCP_POLICY_MODES = set(MCP_POLICY_MODES)
 _VALID_APPROVAL_MODES = {"off", "high_risk"}
@@ -319,6 +323,8 @@ def _screenshot_folder_summary(root: Path) -> dict[str, object]:
         "last_image_at_source": latest_captured_at_source,
         "exists": True,
         "readable": True,
+        "summary_status": "ready",
+        "summary_failure": None,
     }
 
 
@@ -332,6 +338,8 @@ def _fallback_screenshot_folder_summary(root: Path, *, status: str) -> dict[str,
         "last_image_at_source": None,
         "exists": exists,
         "readable": readable,
+        "summary_status": "partial",
+        "summary_failure": status,
     }
 
 
@@ -446,6 +454,7 @@ async def _screenshot_folder_pipeline_summary(root: Path | None = None) -> dict[
             "pending": 0,
             "succeeded": 0,
             "failed": 0,
+            "blocked": 0,
             "needs_reanalysis": 0,
             "source_missing": 0,
             "stale_root": 0,
@@ -477,7 +486,7 @@ async def _screenshot_folder_pipeline_summary(root: Path | None = None) -> dict[
                 recorded_at = status.get("recorded_at")
                 if isinstance(recorded_at, str):
                     latest_analyzed_at = recorded_at
-            if state == "failed" and latest_failure is None:
+            if state in {"failed", "blocked"} and latest_failure is None:
                 latest_failure = str(status.get("reason") or "analysis failed")
 
         visual_runs = _screenshot_visual_run_summary(visual_detail_payloads)
@@ -503,6 +512,7 @@ async def _screenshot_folder_pipeline_summary(root: Path | None = None) -> dict[
         "analysis_status": status_counts,
         "analysis_backlog": status_counts["pending"] + status_counts["needs_reanalysis"] + status_counts["unknown"],
         "analysis_failures": status_counts["failed"],
+        "analysis_blocked": status_counts["blocked"],
         "stale_count": status_counts["source_missing"] + status_counts["stale_root"],
         "source_missing_count": status_counts["source_missing"],
         "stale_root_count": status_counts["stale_root"],
@@ -514,6 +524,8 @@ async def _screenshot_folder_pipeline_summary(root: Path | None = None) -> dict[
         "latest_failure": latest_failure,
         "digest_count": digest_count,
         "latest_digest_at": _utc_iso(latest_digest.observed_at) if latest_digest is not None else None,
+        "metadata_status": "ready",
+        "metadata_failure": None,
     }
 
 
@@ -545,6 +557,8 @@ def _empty_screenshot_folder_pipeline_summary(*, latest_failure: str | None = No
         "latest_failure": latest_failure,
         "digest_count": 0,
         "latest_digest_at": None,
+        "metadata_status": "partial",
+        "metadata_failure": latest_failure,
     }
 
 
@@ -792,7 +806,13 @@ async def set_screen_analysis_settings(body: ScreenAnalysisSettingsRequest):
             )
         payload["provider"] = body.provider
     if body.model is not None:
-        payload["model"] = body.model.strip()
+        model = normalize_openrouter_model_identifier(body.model)
+        if body.model.strip() and not model:
+            raise HTTPException(
+                status_code=422,
+                detail="Screenshot analysis model must be an OpenRouter-qualified id such as openrouter/provider/model",
+            )
+        payload["model"] = model
     if body.preserve_captures is not None:
         payload["preserve_captures"] = body.preserve_captures
     if body.archive_dir is not None:
@@ -895,12 +915,29 @@ async def get_artifact_storage_settings():
     report_archive_dir, report_archive_source = _report_archive_dir()
     report_dir_status = _archive_dir_status(report_archive_dir)
     screenshot_folder, screenshot_folder_source = _screenshot_folder()
-    screenshot_source, report_receipts, screenshot_pipeline, local_runtime_proof = await asyncio.gather(
+    screenshot_source_result, report_receipts_result, screenshot_pipeline_result, local_runtime_proof_result = await asyncio.gather(
         _screenshot_folder_summary_fast(screenshot_folder),
         _report_receipt_summary_fast(report_archive_dir),
         _screenshot_folder_pipeline_summary_fast(screenshot_folder),
         _local_runtime_profile_proof_summary_fast(),
+        return_exceptions=True,
     )
+    screenshot_source = (
+        _fallback_screenshot_folder_summary(screenshot_folder, status="summary_unavailable")
+        if isinstance(screenshot_source_result, Exception)
+        else screenshot_source_result
+    )
+    report_receipts = (
+        {"receipt_count": 0, "last_receipt_at": None}
+        if isinstance(report_receipts_result, Exception)
+        else report_receipts_result
+    )
+    screenshot_pipeline = (
+        _empty_screenshot_folder_pipeline_summary(latest_failure="analysis metadata unavailable")
+        if isinstance(screenshot_pipeline_result, Exception)
+        else screenshot_pipeline_result
+    )
+    local_runtime_proof = None if isinstance(local_runtime_proof_result, Exception) else local_runtime_proof_result
     screenshot_image_count = int(screenshot_source["image_count"] or 0)
     screenshot_observation_count = int(screenshot_pipeline["observation_count"] or 0)
     screenshot_processed_count = int(
@@ -920,7 +957,42 @@ async def get_artifact_storage_settings():
     )
     screen_analysis = await get_screen_analysis_settings()
     vlm_status = effective_vlm_status(live_probe=deferred_vlm_live_probe())
+    chat_policy = effective_workload_policy("chat_agent")
+    inference_policy = {
+        "provider": "openrouter",
+        "active_only": bool(settings.openrouter_provider_only),
+        "api_base": "https://openrouter.ai/api/v1",
+        "credential_configured": bool(settings.openrouter_api_key.strip()),
+        "allowed_upstreams": [
+            item.strip()
+            for item in settings.openrouter_allowed_upstreams.split(",")
+            if item.strip()
+        ],
+        "data_collection": settings.openrouter_data_collection,
+        "require_parameters": bool(settings.openrouter_require_parameters),
+        "zero_data_retention": bool(settings.openrouter_zero_data_retention),
+        "fallbacks_allowed": bool(settings.openrouter_allow_fallbacks),
+        "chat_cloud_egress": chat_policy.egress_class.value,
+        "chat_cloud_consent": bool(chat_policy.cloud_egress_acknowledged),
+        "chat_budget_microusd": chat_policy.max_cost_microusd,
+        "status": (
+            "ready"
+            if (
+                settings.openrouter_provider_only
+                and settings.openrouter_api_key.strip()
+                and chat_policy.egress_class is not EgressClass.LOCAL_ONLY
+                and chat_policy.cloud_egress_acknowledged
+                and bool(settings.openrouter_allowed_upstreams.strip())
+                and not settings.openrouter_allow_fallbacks
+                and settings.openrouter_require_parameters
+                and settings.openrouter_data_collection == "deny"
+                and set(chat_policy.allowed_provider_kinds) == {"openrouter"}
+            )
+            else "configuration_required"
+        ),
+    }
     return {
+        "inference": inference_policy,
         "screen": {
             "analysis_enabled": screen_analysis["enabled"],
             "provider": screen_analysis["provider"],
@@ -937,11 +1009,13 @@ async def get_artifact_storage_settings():
             "status": screenshot_source["status"],
             "exists": screenshot_source["exists"],
             "readable": screenshot_source["readable"],
+            "summary_status": screenshot_source.get("summary_status", "ready"),
+            "summary_failure": screenshot_source.get("summary_failure"),
             "stored_artifacts": ["image"],
             "analysis": {
                 "provider": effective_screen_analysis_provider() or "not_configured",
                 "model": effective_screen_analysis_model(),
-                "base_url_configured": bool(effective_vlm_base_url()),
+                "base_url_configured": bool(settings.openrouter_api_key.strip()),
                 "runtime": vlm_status,
                 **screenshot_pipeline,
             },
@@ -959,6 +1033,10 @@ async def get_artifact_storage_settings():
             },
         },
         "local_runtime": {
+            # The legacy provider flag can disable the active cloud phase, but
+            # it must never make the retired local/GPU route executable again.
+            "active": False,
+            "disabled_reason": "local_inference_disabled_openrouter_only",
             "gateway_configured": bool(
                 settings.local_llm_api_base.strip() or effective_vlm_base_url()
             ),

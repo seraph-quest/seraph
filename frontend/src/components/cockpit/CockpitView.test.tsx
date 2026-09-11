@@ -49,10 +49,13 @@ function emptyCapabilityOverview(overrides: Record<string, unknown> = {}) {
 function mockCockpitBaselineFetch(
   fetchMock: ReturnType<typeof vi.fn>,
   options: {
+    runtimeStatus?: Record<string, unknown>;
+    runtimeStatusFailure?: number;
     capabilities?: Record<string, unknown>;
     extensions?: Record<string, unknown>;
     browserProviders?: Record<string, unknown>;
     browserSessions?: Record<string, unknown>;
+    operatorControlPlane?: Record<string, unknown>;
   },
 ) {
   fetchMock.mockImplementation((input: RequestInfo | URL) => {
@@ -63,13 +66,16 @@ function mockCockpitBaselineFetch(
       return Promise.resolve(mockResponse({ domains: {}, active_count: 0, completed_count: 0, total_count: 0 }));
     }
     if (url.includes("/api/runtime/status")) {
-      return Promise.resolve(mockResponse({
+      const runtimeStatus = options.runtimeStatus ?? {
         version: "test",
         build_id: "test",
         provider: "test",
         model: "test",
         model_label: "test",
-      }));
+      };
+      return Promise.resolve(options.runtimeStatusFailure
+        ? mockResponse(runtimeStatus, false, options.runtimeStatusFailure)
+        : mockResponse(runtimeStatus));
     }
     if (url.includes("/api/observer/state")) return Promise.resolve(mockResponse({}));
     if (url.includes("/api/audit/events")) return Promise.resolve(mockResponse([]));
@@ -95,6 +101,9 @@ function mockCockpitBaselineFetch(
         ...(options.browserProviders ?? { providers: [] }),
         ...(options.browserSessions ?? { sessions: [] }),
       }));
+    }
+    if (url.includes("/api/operator/control-plane")) {
+      return Promise.resolve(mockResponse(options.operatorControlPlane ?? {}));
     }
     if (url.includes("/api/browser/sessions")) {
       return Promise.resolve(mockResponse(options.browserSessions ?? { sessions: [] }));
@@ -173,6 +182,11 @@ describe("CockpitView", () => {
       goalTree: [],
       dashboard: { domains: {}, active_count: 0, completed_count: 0, total_count: 0 },
       loading: false,
+      goalLoop: null,
+      goalLoopGoalId: null,
+      goalLoopLoading: false,
+      goalLoopError: null,
+      goalLoopAction: null,
     });
     useCockpitLayoutStore.setState({
       activeLayoutId: "default",
@@ -193,6 +207,201 @@ describe("CockpitView", () => {
     vi.useRealTimers();
     vi.unstubAllGlobals();
     vi.restoreAllMocks();
+  });
+
+  async function loadAllDeepPanes() {
+    await screen.findByRole("button", { name: "load activity ledger" });
+    const loaderNames = [
+      "load activity ledger",
+      "load workflow runs",
+      "load presence continuity",
+      "load control plane",
+      "load workflow orchestration",
+      "load background continuity",
+      "load M7 cockpit",
+      "load benchmark proof",
+      "load M8 guardian brain",
+      "load guardian memory controls",
+      "load M6 memory",
+      "load M5 operating layer",
+    ];
+    loaderNames.forEach((name) => {
+      const button = screen.queryAllByRole("button", { name })[0];
+      if (button) fireEvent.click(button);
+    });
+    await waitFor(() => {
+      expect(screen.queryByRole("button", { name: /^loading /i })).not.toBeInTheDocument();
+    });
+  }
+
+  it("keeps deep operator endpoints out of the baseline cockpit refresh", async () => {
+    mockCockpitBaselineFetch(fetchMock, {});
+
+    render(<CockpitView onSend={() => {}} />);
+
+    await waitFor(() => {
+      expect(fetchMock.mock.calls.some(([input]) => String(input).includes("/api/runtime/status"))).toBe(true);
+    });
+
+    const baselineUrls = fetchMock.mock.calls.map(([input]) => String(input));
+    const deniedDeepEndpoints = [
+      "/api/observer/continuity",
+      "/api/activity/ledger",
+      "/api/operator/control-plane",
+      "/api/operator/benchmark-proof",
+      "/api/operator/guardian-state",
+      "/api/operator/workflow-orchestration",
+      "/api/operator/background-sessions",
+      "/api/operator/m5-operating-layer",
+      "/api/operator/guardian-memory-live-control",
+      "/api/operator/m6-memory-superiority",
+      "/api/operator/m7-cockpit",
+      "/api/operator/m8-guardian-brain",
+      "/api/operator/engineering-memory",
+      "/api/operator/continuity-graph",
+      "/api/workflows/runs",
+    ];
+    expect(baselineUrls.some((url) => deniedDeepEndpoints.some((endpoint) => url.includes(endpoint)))).toBe(false);
+  });
+
+  it("binds the current goal to persisted loop outcome data while keeping an unavailable route explicit", async () => {
+    mockCockpitBaselineFetch(fetchMock, {
+      runtimeStatus: {
+        version: "test",
+        build_id: "test",
+        provider: "openrouter",
+        model: "openrouter/unknown",
+        model_label: "OpenRouter unavailable",
+        effective_runtime: {
+          provider: "openrouter",
+          model: "openrouter/unknown",
+          route_label: "OpenRouter",
+          inference_ready: false,
+          inference_readiness: {
+            status: "configuration_required",
+            reasons: ["missing_openrouter_key"],
+            cloud_egress: "blocked",
+          },
+        },
+      },
+    });
+    const baselineImplementation = fetchMock.getMockImplementation();
+    const goal = {
+      id: "g1",
+      parent_id: null,
+      path: "/g1",
+      level: "weekly",
+      title: "Ship guardian slice",
+      description: "Produce one locally verified artifact",
+      status: "active",
+      domain: "productivity",
+      start_date: null,
+      due_date: null,
+      sort_order: 0,
+      revision: 4,
+      progress: 50,
+      success_criterion: {
+        criterion_id: "artifact",
+        description: "A verified artifact exists",
+        verifier_kind: "artifact_readback",
+        target: { file_path: "artifacts/guardian.md" },
+        evidence_refs: ["artifact:guardian"],
+      },
+    };
+    fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes("/api/goals/tree")) return Promise.resolve(mockResponse([goal]));
+      if (url.includes("/api/goals/dashboard")) {
+        return Promise.resolve(mockResponse({ domains: { productivity: { active: 1, completed: 0, total: 1, progress: 50 } }, active_count: 1, completed_count: 0, total_count: 1 }));
+      }
+      if (url.includes("/api/goals/g1/loop")) {
+        return Promise.resolve(mockResponse({
+          goal: { id: "g1", title: goal.title, status: "active", revision: 4 },
+          criterion: goal.success_criterion,
+          receipts: [{
+            audit_event_id: "audit-outcome",
+            event_type: "goal_loop_outcome",
+            receipt_version: "goal_conditioned_loop_v1",
+            receipt_type: "outcome",
+            outcome_id: "outcome-1",
+            candidate_id: "candidate-1",
+            dedupe_key: "gcl:test",
+            goal_id: "g1",
+            goal_revision: 4,
+            criterion_id: "artifact",
+            execution_status: "succeeded",
+            verification: "passed",
+            usefulness: "helpful",
+            learning: "no_learning",
+            artifact_ref: "artifacts/guardian.md",
+            evidence_refs: ["artifact:guardian"],
+            reason: "local artifact read back",
+            content_redacted: true,
+          }],
+          strategy_deltas: [],
+        }));
+      }
+      return baselineImplementation?.(input, init) ?? Promise.resolve(mockResponse({}));
+    });
+
+    render(<CockpitView onSend={() => {}} />);
+
+    const panel = await screen.findByTestId("outcome-cockpit-panel");
+    await waitFor(() => {
+      expect(within(panel).getByText("Ship guardian slice")).toBeInTheDocument();
+      expect(within(panel).getByTestId("outcome-result-card")).toHaveAttribute("data-state", "recovered");
+    });
+    expect(within(panel).getByText("A verified artifact exists")).toBeInTheDocument();
+    expect(within(panel).getByTestId("outcome-route-card")).toHaveAttribute("data-state", "blocked");
+    expect(within(panel).getByRole("button", { name: "Open priorities" })).toBeEnabled();
+    expect(fetchMock.mock.calls.some(([input]) => String(input).includes("/api/goals/g1/loop"))).toBe(true);
+  });
+
+  it("loads deep cockpit panes only through their explicit endpoint groups", async () => {
+    mockCockpitBaselineFetch(fetchMock, {});
+
+    render(<CockpitView onSend={() => {}} />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "load activity ledger" })).toBeInTheDocument();
+    });
+    const baselineCallCount = fetchMock.mock.calls.length;
+
+    fireEvent.click(screen.getByRole("button", { name: "load activity ledger" }));
+    await waitFor(() => {
+      expect(
+        fetchMock.mock.calls.slice(baselineCallCount).some(([input]) => String(input).includes("/api/activity/ledger")),
+      ).toBe(true);
+    });
+    let explicitUrls = fetchMock.mock.calls.slice(baselineCallCount).map(([input]) => String(input));
+    expect(explicitUrls.every((url) => url.includes("/api/activity/ledger"))).toBe(true);
+
+    const afterActivityCallCount = fetchMock.mock.calls.length;
+    fireEvent.click(screen.getAllByRole("button", { name: "load control plane" })[0]);
+    await waitFor(() => {
+      expect(
+        fetchMock.mock.calls.slice(afterActivityCallCount).some(([input]) => String(input).includes("/api/operator/control-plane")),
+      ).toBe(true);
+    });
+    explicitUrls = fetchMock.mock.calls.slice(afterActivityCallCount).map(([input]) => String(input));
+    expect(explicitUrls.every((url) => url.includes("/api/operator/control-plane"))).toBe(true);
+
+    const afterControlCallCount = fetchMock.mock.calls.length;
+    fireEvent.click(screen.getAllByRole("button", { name: "load background continuity" })[0]);
+    await waitFor(() => {
+      expect(fetchMock.mock.calls.length).toBeGreaterThanOrEqual(afterControlCallCount + 3);
+    });
+    explicitUrls = fetchMock.mock.calls.slice(afterControlCallCount).map(([input]) => String(input));
+    expect(explicitUrls).toEqual(expect.arrayContaining([
+      expect.stringContaining("/api/operator/background-sessions"),
+      expect.stringContaining("/api/operator/engineering-memory"),
+      expect.stringContaining("/api/operator/continuity-graph"),
+    ]));
+    expect(explicitUrls.every((url) => (
+      url.includes("/api/operator/background-sessions")
+      || url.includes("/api/operator/engineering-memory")
+      || url.includes("/api/operator/continuity-graph")
+    ))).toBe(true);
   });
 
   it("renders a governed marketplace extension row with action readiness", async () => {
@@ -261,6 +470,97 @@ describe("CockpitView", () => {
     expect(consoleRegion).toHaveTextContent(/compatible · Seraph >=0.9.0 · current 0.9.1/i);
     expect(consoleRegion).toHaveTextContent(/toolset presets · messaging connectors · install ready · rollback unavailable/i);
     expect(within(consoleRegion).getByRole("button", { name: "install" })).toBeEnabled();
+  });
+
+  it("opens extension diagnostics drill-down from the governed extension console", async () => {
+    const diagnosticsPayload = {
+      extension: {
+        id: "seraph.test-installable",
+        display_name: "Test Installable",
+        status: "ready",
+        version_line: "2026.4",
+      },
+      lifecycle: {
+        rollback: {
+          available: true,
+          snapshots: [{ id: "snapshot-1", version: "2026.3.21", path_digest: "abc123" }],
+        },
+      },
+      recommended_actions: [
+        { type: "rollback", label: "Rollback to previous snapshot", reason: "Bad update suspected." },
+      ],
+      claim_boundary: "metadata_only_extension_diagnostics_no_source_secret_config_or_private_paths",
+      blocked_claims: ["production_secure_marketplace"],
+      redaction: { metadata_only: true, private_paths_exposed: false },
+    };
+    mockCockpitBaselineFetch(fetchMock, {
+      extensions: {
+        extensions: [
+          {
+            id: "seraph.test-installable",
+            display_name: "Test Installable",
+            status: "ready",
+            source: "manifest",
+            location: "workspace",
+            trust: "local",
+            version: "2026.4.01",
+            version_line: "2026.4",
+            kind: "capability-pack",
+            publisher: { name: "Seraph" },
+            compatibility: { seraph: ">=2026.4.11", current_version: "2026.7.4", compatible: true },
+            diagnostics_summary: {
+              issue_count: 0,
+              error_issue_count: 0,
+              warning_issue_count: 0,
+              load_error_count: 0,
+              degraded_contribution_count: 0,
+              degraded_connector_count: 0,
+              highlighted_messages: [],
+            },
+            permission_summary: { status: "granted", ok: true, required: {}, missing: {}, risk_level: "low" },
+            approval_profile: { requires_lifecycle_approval: false, requires_runtime_approval: false },
+            connector_summary: { ready: 0, total: 0 },
+            issues: [],
+            load_errors: [],
+            contributions: [{ type: "skills", status: "ready", loaded: true }],
+            disable_supported: true,
+            removable: true,
+            rollback_ready: true,
+            lifecycle: {
+              rollback_snapshots: [{ id: "snapshot-1", version: "2026.3.21" }],
+            },
+          },
+        ],
+        summary: { total: 1 },
+      },
+    });
+    const baselineFetch = fetchMock.getMockImplementation();
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/extensions/seraph.test-installable/diagnostics")) {
+        return Promise.resolve(mockResponse(diagnosticsPayload));
+      }
+      return baselineFetch
+        ? baselineFetch(input)
+        : Promise.resolve(mockResponse({}));
+    });
+
+    render(<CockpitView onSend={() => {}} />);
+
+    const consoleRegion = await screen.findByRole("region", { name: "M9 governed extension console" });
+    fireEvent.click(within(consoleRegion).getByRole("button", { name: "diagnostics" }));
+
+    await waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith(
+        expect.stringContaining("/api/extensions/seraph.test-installable/diagnostics"),
+      ),
+    );
+    await waitFor(() =>
+      expect(
+        screen.getByText("Diagnostics ready: Rollback to previous snapshot"),
+      ).toBeInTheDocument(),
+    );
+    expect(screen.getAllByText(/metadata_only_extension_diagnostics/i).length).toBeGreaterThan(0);
   });
 
   it("renders live browser session controls with degraded fallback and redacted provenance", async () => {
@@ -350,7 +650,13 @@ describe("CockpitView", () => {
     render(<CockpitView onSend={() => {}} />);
 
     const browserControls = await screen.findByRole("region", { name: "Browser computer-use live controls" });
-    expect(browserControls).toHaveTextContent(/1 providers · 1 sessions · 1 journaled · 1 degraded · no quarantine/i);
+    await waitFor(() =>
+      expect(browserControls).toHaveTextContent(/1 providers · 1 sessions · 1 journaled · 1 degraded · no quarantine/i),
+    );
+    expect(fetchMock).toHaveBeenCalledWith(
+      expect.stringContaining("/api/browser/providers?owner_session_id=session-1"),
+      expect.anything(),
+    );
     expect(browserControls).toHaveTextContent(/remote-cdp · remote cdp · staged local fallback · local fallback/i);
     expect(browserControls).toHaveTextContent(/degraded fallback labeled · silent fallback blocked/i);
     expect(browserControls).toHaveTextContent(/boundaries: profile · cookie · credential · download · upload · network/i);
@@ -490,6 +796,338 @@ describe("CockpitView", () => {
     expect(screen.queryByText("UNKNOWN · UNKNOWN")).not.toBeInTheDocument();
   });
 
+  it("surfaces backend OpenRouter configuration readiness as blocked", async () => {
+    mockCockpitBaselineFetch(fetchMock, {
+      runtimeStatus: {
+        version: "test",
+        build_id: "SERAPH_TEST",
+        provider: "openrouter",
+        model: "x-ai/grok-4.1-fast",
+        model_label: "grok-4.1-fast",
+        effective_runtime: {
+          runtime_path: "chat_agent",
+          active_profile: "openrouter",
+          provider: "openrouter",
+          provider_label: "openrouter",
+          model: "x-ai/grok-4.1-fast",
+          model_label: "grok-4.1-fast",
+          mode: "remote_provider",
+          route_label: "openrouter",
+          inference_ready: false,
+          inference_readiness: {
+            status: "configuration_required",
+            reasons: ["openrouter_api_key_missing"],
+          },
+        },
+      },
+    });
+
+    render(<CockpitView onSend={vi.fn()} />);
+
+    expect(await screen.findByText("OPENROUTER BLOCKED · GROK 4.1 FAST")).toBeInTheDocument();
+    expect(screen.queryByText("OPENROUTER · GROK 4.1 FAST")).not.toBeInTheDocument();
+  });
+
+  it("retains blocked readiness when control-plane posture omits readiness fields", async () => {
+    mockCockpitBaselineFetch(fetchMock, {
+      runtimeStatus: {
+        version: "test",
+        build_id: "SERAPH_TEST",
+        provider: "openrouter",
+        model: "x-ai/grok-4.1-fast",
+        model_label: "grok-4.1-fast",
+        effective_runtime: {
+          provider: "openrouter",
+          provider_label: "openrouter",
+          model: "x-ai/grok-4.1-fast",
+          model_label: "grok-4.1-fast",
+          route_label: "openrouter",
+          inference_ready: false,
+          inference_readiness: {
+            status: "configuration_required",
+            reasons: ["openrouter_api_key_missing"],
+          },
+        },
+      },
+      operatorControlPlane: mockOperatorControlPlaneRuntime({
+        version: "test",
+        build_id: "SERAPH_TEST_POSTURE",
+        provider: "openrouter",
+        model: "x-ai/grok-4.2",
+        model_label: "grok-4.2",
+      }),
+    });
+
+    render(<CockpitView onSend={vi.fn()} />);
+
+    expect(await screen.findByText("OPENROUTER BLOCKED · GROK 4.1 FAST")).toBeInTheDocument();
+    fireEvent.click(screen.getAllByRole("button", { name: "load control plane" })[0]);
+
+    await waitFor(() => {
+      expect(fetchMock.mock.calls.some(([input]) => String(input).includes("/api/operator/control-plane"))).toBe(true);
+      expect(screen.getByText("OPENROUTER BLOCKED · GROK 4.2")).toBeInTheDocument();
+    });
+    expect(screen.queryByText("OPENROUTER · GROK 4.2")).not.toBeInTheDocument();
+    expect(screen.queryByText("openrouter_api_key_missing")).not.toBeInTheDocument();
+  });
+
+  it("retains stale provenance and readiness when control-plane posture follows retained runtime", async () => {
+    const retainedRuntime = {
+      version: "test",
+      build_id: "SERAPH_RETAINED",
+      provider: "openrouter",
+      model: "x-ai/grok-4.1-fast",
+      model_label: "grok-4.1-fast",
+      effective_runtime: {
+        provider: "openrouter",
+        provider_label: "openrouter",
+        model: "x-ai/grok-4.1-fast",
+        model_label: "grok-4.1-fast",
+        route_label: "openrouter",
+        inference_ready: false,
+        inference_readiness: {
+          status: "degraded",
+          reasons: ["openrouter_api_key_missing"],
+        },
+      },
+    };
+    vi.stubGlobal("localStorage", {
+      getItem: vi.fn((key: string) => key === "seraph.cockpit.runtimeReceipt.v1" ? JSON.stringify(retainedRuntime) : null),
+      setItem: vi.fn(),
+      removeItem: vi.fn(),
+    });
+    mockCockpitBaselineFetch(fetchMock, {
+      runtimeStatusFailure: 503,
+      operatorControlPlane: mockOperatorControlPlaneRuntime({
+        version: "test",
+        build_id: "SERAPH_POSTURE",
+        provider: "openrouter",
+        model: "x-ai/grok-4.2",
+        model_label: "grok-4.2",
+      }),
+    });
+
+    render(<CockpitView onSend={vi.fn()} />);
+
+    expect(await screen.findByText("OPENROUTER BLOCKED DEGRADED STALE · GROK 4.1 FAST")).toBeInTheDocument();
+    fireEvent.click(screen.getAllByRole("button", { name: "load control plane" })[0]);
+
+    await waitFor(() => {
+      expect(fetchMock.mock.calls.some(([input]) => String(input).includes("/api/operator/control-plane"))).toBe(true);
+      expect(screen.getByText("OPENROUTER BLOCKED DEGRADED STALE · GROK 4.2")).toBeInTheDocument();
+    });
+    expect(screen.queryByText("OPENROUTER BLOCKED DEGRADED · GROK 4.2")).not.toBeInTheDocument();
+  });
+
+  it("keeps BLOCKED and DEGRADED telemetry tokens independent", async () => {
+    mockCockpitBaselineFetch(fetchMock, {
+      runtimeStatus: {
+        version: "test",
+        build_id: "SERAPH_TEST",
+        provider: "openrouter",
+        model: "x-ai/grok-4.1-fast",
+        model_label: "grok-4.1-fast",
+        effective_runtime: {
+          provider: "openrouter",
+          provider_label: "openrouter",
+          model: "x-ai/grok-4.1-fast",
+          model_label: "grok-4.1-fast",
+          route_label: "openrouter",
+          inference_ready: false,
+          inference_readiness: {
+            status: "configuration_required",
+            reasons: ["openrouter_api_key_missing"],
+          },
+        },
+        model_fabric: { status: "degraded" },
+      },
+    });
+
+    render(<CockpitView onSend={vi.fn()} />);
+
+    expect(await screen.findByText("OPENROUTER BLOCKED DEGRADED · GROK 4.1 FAST")).toBeInTheDocument();
+  });
+
+  it("preserves legacy runtime labels when readiness fields are absent", async () => {
+    mockCockpitBaselineFetch(fetchMock, {
+      runtimeStatus: {
+        version: "test",
+        build_id: "SERAPH_TEST",
+        provider: "legacy-provider",
+        model: "legacy-model",
+        model_label: "legacy-model",
+      },
+    });
+
+    render(<CockpitView onSend={vi.fn()} />);
+
+    expect(await screen.findByText("LEGACY PROVIDER · LEGACY MODEL")).toBeInTheDocument();
+    expect(screen.queryByText(/LEGACY PROVIDER (BLOCKED|DEGRADED)/)).not.toBeInTheDocument();
+  });
+
+  it("renders GPU VLM route labels from effective runtime status", async () => {
+    mockCockpitBaselineFetch(fetchMock, {
+      runtimeStatus: {
+        version: "test",
+        build_id: "SERAPH_TEST",
+        provider: "local-gemma",
+        model: "openai/unsloth/gemma-4-26B-A4B-it-qat-GGUF",
+        model_label: "gemma-4-26B-A4B-it-qat-GGUF",
+        effective_runtime: {
+          runtime_path: "chat_agent",
+          active_profile: "local-gemma-chat-thinking",
+          provider: "local-gemma",
+          provider_label: "local-gemma/gpu-vlm",
+          model: "openai/unsloth/gemma-4-26B-A4B-it-qat-GGUF",
+          model_label: "gemma-4-26B-A4B-it-qat-GGUF",
+          mode: "gpu-server",
+          route_label: "GPU VLM",
+          summary_label: "GPU VLM · gemma-4-26B-A4B-it-qat-GGUF",
+          api_base: "http://192.168.1.26:8001/v1",
+          vlm_base_url: "http://192.168.1.26:8001",
+          vlm_backend_url: "http://192.168.1.26:8000/v1",
+          vlm_configured: true,
+          queue_status_endpoint: "http://192.168.1.26:8001/queue/status",
+          health_endpoint: "http://192.168.1.26:8001/health",
+          backend_health_endpoint: "http://192.168.1.26:8001/health/backend",
+        },
+      },
+    });
+
+    render(<CockpitView onSend={vi.fn()} />);
+
+    await waitFor(() => {
+      expect(screen.getByText("GPU VLM · GEMMA 4 26B A4B IT QAT GGUF")).toBeInTheDocument();
+    });
+    expect(screen.queryByText("LOCAL GEMMA · GEMMA 4 26B A4B IT QAT GGUF")).not.toBeInTheDocument();
+  });
+
+  it("renders the last actual text route and marks a degraded fallback attempt", async () => {
+    mockCockpitBaselineFetch(fetchMock, {
+      runtimeStatus: {
+        version: "test",
+        build_id: "SERAPH_TEST",
+        provider: "configured-provider",
+        model: "configured-model",
+        model_label: "configured-model",
+        model_fabric: {
+          status: "degraded",
+          configuration_status: "ready",
+          configuration_error: null,
+          configured_chat_profile: "configured-primary",
+          profiles: [],
+          topology: { text: ["interactive", "background", "report"], vlm: ["vision"] },
+          workloads: {
+            interactive: {
+              selected: { profile_id: "configured-primary", model: "primary-model", adapter: "litellm", destination_class: "remote", outcome: "selected", latency_ms: 0 },
+              attempted: { profile_id: "fallback-attempt", model: "fallback-model", adapter: "litellm", destination_class: "remote", outcome: "timeout", latency_ms: 5000 },
+              attempt_count: 2,
+              last_outcome: "failed",
+              fallback_used: true,
+              fallback_reason_code: "primary_timeout",
+              degradation_codes: ["receipt_persistence_failed"],
+              succeeded: { profile_id: "last-actual", model: "actual-model", adapter: "litellm", receipt_id: "receipt-actual", finished_at: "2026-07-10T12:00:00Z" },
+              persistence: "degraded",
+              receipt_persistence_degraded: true,
+            },
+          },
+        },
+      },
+    });
+
+    render(<CockpitView onSend={vi.fn()} />);
+
+    await waitFor(() => {
+      expect(screen.getByText("TEXT LAST ACTUAL FALLBACK DEGRADED · ACTUAL MODEL")).toBeInTheDocument();
+    });
+    expect(screen.queryByText(/CONFIGURED PRIMARY/)).not.toBeInTheDocument();
+  });
+
+  it("does not mark a persisted succeeded text route degraded", async () => {
+    mockCockpitBaselineFetch(fetchMock, {
+      runtimeStatus: {
+        version: "test",
+        build_id: "SERAPH_TEST",
+        provider: "configured-provider",
+        model: "configured-model",
+        model_label: "configured-model",
+        model_fabric: {
+          status: "ready",
+          configuration_status: "ready",
+          configuration_error: null,
+          configured_chat_profile: "local-text",
+          profiles: [],
+          proofs: [],
+          topology: { text: ["interactive"], vlm: ["vision"] },
+          workloads: {
+            interactive: {
+              selected: { profile_id: "local-text", model: "gemma-text", adapter: "litellm", destination_class: "trusted_lan", outcome: "selected", latency_ms: 0 },
+              attempted: { profile_id: "local-text", model: "gemma-text", adapter: "litellm", destination_class: "trusted_lan", outcome: "succeeded", latency_ms: 22 },
+              attempt_count: 1,
+              last_outcome: "succeeded",
+              fallback_used: false,
+              fallback_reason_code: null,
+              degradation_codes: [],
+              succeeded: { profile_id: "local-text", model: "gemma-text", adapter: "litellm", receipt_id: "receipt-ok", finished_at: "2026-07-10T12:00:00Z" },
+              persistence: "persisted",
+              persistence_error_code: null,
+              receipt_persistence_degraded: false,
+            },
+          },
+        },
+      },
+    });
+
+    render(<CockpitView onSend={vi.fn()} />);
+
+    await waitFor(() => {
+      expect(screen.getByText("TEXT LOCAL TEXT · GEMMA TEXT")).toBeInTheDocument();
+    });
+    expect(screen.queryByText(/TEXT LOCAL TEXT DEGRADED/)).not.toBeInTheDocument();
+  });
+
+  it("labels a failed-only route as attempted instead of actual text", async () => {
+    mockCockpitBaselineFetch(fetchMock, {
+      runtimeStatus: {
+        version: "test",
+        build_id: "SERAPH_TEST",
+        provider: "configured-provider",
+        model: "configured-model",
+        model_fabric: {
+          status: "degraded",
+          configuration_status: "ready",
+          configuration_error: null,
+          configured_chat_profile: "local-text",
+          profiles: [],
+          proofs: [],
+          topology: { text: ["chat_agent"], vlm: ["screenshot_image_analysis"] },
+          workloads: {
+            interactive: {
+              selected: { profile_id: "local-text", model: "gemma-text", adapter: "litellm_chat", destination_class: "trusted_lan", outcome: "selected", latency_ms: 0 },
+              attempted: { profile_id: "local-text", model: "gemma-text", adapter: "litellm_chat", destination_class: "trusted_lan", outcome: "failed", latency_ms: 22 },
+              attempt_count: 1,
+              last_outcome: "failed",
+              fallback_used: false,
+              fallback_reason_code: null,
+              degradation_codes: [],
+              succeeded: null,
+              persistence: "persisted",
+              persistence_error_code: null,
+              receipt_persistence_degraded: false,
+            },
+          },
+        },
+      },
+    });
+
+    render(<CockpitView onSend={vi.fn()} />);
+
+    await waitFor(() => {
+      expect(screen.getByText("ATTEMPTED LOCAL TEXT FAILED DEGRADED · GEMMA TEXT")).toBeInTheDocument();
+    });
+    expect(screen.queryByText(/TEXT LOCAL TEXT/)).not.toBeInTheDocument();
+  });
+
   it("uses operator runtime posture when runtime status is temporarily unavailable", async () => {
     fetchMock.mockImplementation((input: RequestInfo | URL) => {
       const url = String(input);
@@ -536,18 +1174,32 @@ describe("CockpitView", () => {
 
     render(<CockpitView onSend={vi.fn()} />);
 
+    await loadAllDeepPanes();
+
     expect(await screen.findByText("LOCAL GEMMA · GEMMA 4 26B A4B IT QAT GGUF")).toBeInTheDocument();
     expect(screen.queryByText("UNKNOWN · UNKNOWN")).not.toBeInTheDocument();
     expect(screen.queryByText("MODEL UNAVAILABLE")).not.toBeInTheDocument();
   });
 
-  it("does not queue stale workflow fallback drafts when live recovery control is refused", async () => {
+  it("keeps recovery controls disabled when the workflow session is not the operator session", async () => {
     fetchMock.mockImplementation((input: RequestInfo | URL) => {
       const url = String(input);
       if (url.includes("/api/workflows/runs/") && url.includes("/control")) {
-        return Promise.resolve(mockResponse({ detail: "approval_context_changed" }, false, 409));
+        return Promise.resolve(mockResponse(
+          { detail: { code: "session_revoked", message: "Operator session was revoked during workflow control." } },
+          false,
+          401,
+        ));
       }
       if (url.includes("/api/sessions")) return Promise.resolve(mockResponse([{ id: "session-2", title: "Atlas thread" }]));
+      if (url.includes("/api/auth/session")) {
+        return Promise.resolve(mockResponse({
+          authenticated: true,
+          principal_id: "operator:test",
+          session_id: "operator-session-1",
+          absolute_expires_at: "2099-01-01T00:00:00Z",
+        }));
+      }
       if (url.includes("/api/goals/tree")) return Promise.resolve(mockResponse([]));
       if (url.includes("/api/goals/dashboard")) {
         return Promise.resolve(mockResponse({ domains: {}, active_count: 0, completed_count: 0, total_count: 0 }));
@@ -610,9 +1262,16 @@ describe("CockpitView", () => {
               thread_label: "Atlas thread",
               replay_allowed: true,
               retry_from_step_draft: 'Retry step "write_file" for workflow "web-brief-to-file".',
-              run_identity: "root-1",
               root_run_identity: "root-1",
               checkpoint_context_available: true,
+              action_handle: {
+                kind: "workflow_control",
+                action: "retry",
+                run_identity: "root-1",
+                step_id: "redacted_workflow_step_1234567890abcdef",
+                thread_id: "session-2",
+                requires_live_control: true,
+              },
             },
           ],
         }));
@@ -638,6 +1297,8 @@ describe("CockpitView", () => {
 
     render(<CockpitView onSend={() => {}} />);
 
+    await loadAllDeepPanes();
+
     const timelineTitle = await screen.findByText("Workflow timeline");
     const timeline = timelineTitle.closest(".cockpit-window");
     expect(timeline).not.toBeNull();
@@ -645,20 +1306,11 @@ describe("CockpitView", () => {
     const row = workflowRow.closest(".cockpit-row");
     expect(row).not.toBeNull();
 
-    fireEvent.click(within(row as HTMLElement).getByRole("button", { name: "Retry step" }));
+    const retryButton = within(row as HTMLElement).getByRole("button", { name: "Retry step" });
+    expect(retryButton).toBeDisabled();
+    fireEvent.click(retryButton);
 
-    await waitFor(() =>
-      expect(fetchMock).toHaveBeenCalledWith(
-        expect.stringContaining("/api/workflows/runs/root-1/control"),
-        expect.objectContaining({
-          method: "POST",
-          body: expect.stringContaining('"action":"retry"'),
-        }),
-      ),
-    );
-    await waitFor(() =>
-      expect(screen.getByText("Live recovery control refused web-brief-to-file: approval_context_changed")).toBeInTheDocument(),
-    );
+    expect(fetchMock.mock.calls.some(([input]) => String(input).includes("/api/workflows/runs/") && String(input).includes("/control"))).toBe(false);
     expect(screen.queryByDisplayValue('Retry step "write_file" for workflow "web-brief-to-file".')).not.toBeInTheDocument();
   });
 
@@ -1309,6 +1961,8 @@ describe("CockpitView", () => {
 
     render(<CockpitView onSend={() => {}} />);
 
+    await loadAllDeepPanes();
+
     await waitFor(() => expect(screen.getByText("Workflow timeline")).toBeInTheDocument());
     expect(screen.getByText("Activity ledger")).toBeInTheDocument();
     expect(screen.queryByText("Desktop shell")).not.toBeInTheDocument();
@@ -1411,6 +2065,14 @@ describe("CockpitView", () => {
       if (url.includes("/api/goals/dashboard")) {
         return Promise.resolve(mockResponse({ domains: {}, active_count: 0, completed_count: 0, total_count: 0 }));
       }
+      if (url.includes("/api/auth/session")) {
+        return Promise.resolve(mockResponse({
+          authenticated: true,
+          principal_id: "operator:test",
+          session_id: "operator-session-1",
+          absolute_expires_at: "2099-01-01T00:00:00Z",
+        }));
+      }
       if (url.includes("/api/observer/state")) return Promise.resolve(mockResponse({}));
       if (url.includes("/api/audit/events")) return Promise.resolve(mockResponse([]));
       if (url.includes("/api/approvals/approval-run/approve")) return Promise.resolve(mockResponse({ status: "approved" }));
@@ -1427,6 +2089,10 @@ describe("CockpitView", () => {
             summary: "Approve Atlas shell command",
             created_at: "2026-03-18T12:03:00Z",
             resume_message: "Continue Atlas shell approval",
+            owner_principal_id: "operator:test",
+            operator_session_id: "operator-session-1",
+            expires_at: "2099-01-01T00:00:00Z",
+            approval_scope: { action: "shell_execute", target: { type: "session", reference: "session-2" } },
           },
         ]));
       }
@@ -2069,6 +2735,8 @@ describe("CockpitView", () => {
     });
 
     render(<CockpitView onSend={() => {}} />);
+
+    await loadAllDeepPanes();
 
     const m7Board = await screen.findByLabelText("M7 command board");
     await waitFor(() => {
@@ -2815,6 +3483,8 @@ describe("CockpitView", () => {
 
     render(<CockpitView onSend={() => {}} />);
 
+    await loadAllDeepPanes();
+
     const orchestration = await screen.findByLabelText("Workflow orchestration");
     await waitFor(() => {
       expect(orchestration).toHaveTextContent(/2 workflows · 1 sessions · 1 compacted/i);
@@ -3203,6 +3873,8 @@ describe("CockpitView", () => {
 
     render(<CockpitView onSend={() => {}} />);
 
+    await loadAllDeepPanes();
+
     const continuity = await screen.findByRole("region", { name: /background continuity/i });
     await waitFor(() => expect(continuity).toHaveTextContent(/1 sessions · 1\/1 running procs · 1 bundles · 4 edges/i));
     expect(continuity).toHaveTextContent(/1 handoff-ready · 1 active sessions · 0 repos · 1 prs · 0 work items · focus Atlas background thread/i);
@@ -3459,6 +4131,8 @@ describe("CockpitView", () => {
 
     render(<CockpitView onSend={() => {}} />);
 
+    await loadAllDeepPanes();
+
     const memorySurface = await screen.findByLabelText("Guardian memory controls");
     await waitFor(() => {
       expect(memorySurface).toHaveTextContent(/guardian memory controls live · 2 memories · 1 providers · 0 quarantined · 1 rollback-ready · 1 delete\/export pending/i);
@@ -3506,6 +4180,14 @@ describe("CockpitView", () => {
           { id: "session-2", title: "Atlas thread", created_at: "", updated_at: "", last_message: null, last_message_role: null },
         ]));
       }
+      if (url.includes("/api/auth/session")) {
+        return Promise.resolve(mockResponse({
+          authenticated: true,
+          principal_id: "operator:test",
+          session_id: "operator-session-1",
+          absolute_expires_at: "2099-01-01T00:00:00Z",
+        }));
+      }
       if (url.includes("/api/goals/tree")) return Promise.resolve(mockResponse([]));
       if (url.includes("/api/goals/dashboard")) {
         return Promise.resolve(mockResponse({ domains: {}, active_count: 0, completed_count: 0, total_count: 0 }));
@@ -3544,6 +4226,10 @@ describe("CockpitView", () => {
             summary: "Approve Atlas shell command",
             created_at: "2026-03-18T12:03:00Z",
             resume_message: "Continue Atlas shell approval",
+            owner_principal_id: "operator:test",
+            operator_session_id: "operator-session-1",
+            expires_at: "2099-01-01T00:00:00Z",
+            approval_scope: { action: "shell_execute", target: { type: "session", reference: "session-2" } },
           },
         ]));
       }
@@ -3656,6 +4342,8 @@ describe("CockpitView", () => {
     });
 
     render(<CockpitView onSend={() => {}} />);
+
+    await loadAllDeepPanes();
 
     const evidence = await screen.findByLabelText("Evidence shortcuts");
     expect(await within(evidence).findByText("artifact: notes/brief.md")).toBeInTheDocument();
@@ -4004,6 +4692,8 @@ describe("CockpitView", () => {
 
     render(<CockpitView onSend={() => {}} />);
 
+    await loadAllDeepPanes();
+
     await waitFor(() => expect(screen.getByText("Operator terminal")).toBeInTheDocument());
     fireEvent.click(await screen.findByRole("button", { name: "save macro" }, { timeout: 5000 }));
     await waitFor(() => expect(screen.getByText("1 saved")).toBeInTheDocument());
@@ -4210,6 +4900,8 @@ describe("CockpitView", () => {
     });
 
     render(<CockpitView onSend={() => {}} />);
+
+    await loadAllDeepPanes();
 
     const orchestration = await screen.findByLabelText("Workflow orchestration");
     const row = (await within(orchestration).findByText("Release thread")).closest(".cockpit-operator-row--entry");
@@ -4926,6 +5618,8 @@ describe("CockpitView", () => {
 
     render(<CockpitView onSend={() => {}} />);
 
+    await loadAllDeepPanes();
+
     await waitFor(() => expect(screen.getByText("workflow_web_brief_to_file failed at write_file")).toBeInTheDocument());
     fireEvent.click(screen.getByText("workflow_web_brief_to_file failed at write_file"));
     expect(screen.getByRole("button", { name: "Repair step" })).toBeInTheDocument();
@@ -5022,6 +5716,8 @@ describe("CockpitView", () => {
     });
 
     render(<CockpitView onSend={() => {}} />);
+
+    await loadAllDeepPanes();
 
     await waitFor(() => expect(screen.getByText("Selected openai/gpt-4o-mini for chat_agent")).toBeInTheDocument());
     expect(screen.getByText(/model openai\/gpt-4o-mini · fallback_chain · policy_guardrails · budget standard · task interactive/)).toBeInTheDocument();
@@ -5152,6 +5848,8 @@ describe("CockpitView", () => {
     });
 
     render(<CockpitView onSend={() => {}} />);
+
+    await loadAllDeepPanes();
 
     await waitFor(() => expect(screen.getByText("Conversation reasoning for Session 1 using claude-sonnet-4")).toBeInTheDocument());
     expect(
@@ -5302,6 +6000,8 @@ describe("CockpitView", () => {
     });
 
     render(<CockpitView onSend={() => {}} />);
+
+    await loadAllDeepPanes();
 
     await waitFor(() => expect(screen.getByText("Activity ledger")).toBeInTheDocument());
     expect(await screen.findByText(/spend \$0\.012/)).toBeInTheDocument();
@@ -5597,6 +6297,8 @@ describe("CockpitView", () => {
 
     render(<CockpitView onSend={() => {}} />);
 
+    await loadAllDeepPanes();
+
     await waitFor(() => expect(screen.getByText("Activity ledger")).toBeInTheDocument());
     expect(await screen.findByText(/spend \$0\.013/)).toBeInTheDocument();
     expect(screen.getByText("1 user llm")).toBeInTheDocument();
@@ -5700,6 +6402,8 @@ describe("CockpitView", () => {
 
     render(<CockpitView onSend={() => {}} />);
 
+    await loadAllDeepPanes();
+
     await waitFor(() => expect(screen.getByText("Conversation reasoning for Session 1 using claude-sonnet-4")).toBeInTheDocument());
 
     act(() => {
@@ -5711,6 +6415,8 @@ describe("CockpitView", () => {
         ],
       });
     });
+
+    fireEvent.click(screen.getByRole("button", { name: "refresh activity ledger" }));
 
     await waitFor(() => {
       expect(screen.queryByText("Conversation reasoning for Session 1 using claude-sonnet-4")).not.toBeInTheDocument();
@@ -5794,6 +6500,8 @@ describe("CockpitView", () => {
     });
 
     render(<CockpitView onSend={() => {}} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "load activity ledger" }));
 
     const row = await screen.findByText("Selected openai/gpt-4o-mini for chat_agent");
     fireEvent.click(row);
@@ -5930,6 +6638,8 @@ describe("CockpitView", () => {
 
     render(<CockpitView onSend={() => {}} />);
 
+    await loadAllDeepPanes();
+
     fireEvent.click(screen.getByRole("button", { name: "Windows" }));
     const menu = await screen.findByText("Desktop Shell");
     fireEvent.click(menu.closest("button") as HTMLButtonElement);
@@ -5942,13 +6652,21 @@ describe("CockpitView", () => {
     expect(useChatStore.getState().sessionId).toBe("session-1");
   }, 15000);
 
-  it("uses workflow-attached approvals when the pending sidebar is capped away", async () => {
+  it("keeps workflow-attached approvals visible but locked without goal binding", async () => {
     fetchMock.mockImplementation((input: RequestInfo | URL) => {
       const url = String(input);
       if (url.includes("/api/sessions/session-2/messages")) {
         return Promise.resolve(mockResponse([]));
       }
       if (url.includes("/api/sessions")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/auth/session")) {
+        return Promise.resolve(mockResponse({
+          authenticated: true,
+          principal_id: "operator:test",
+          session_id: "operator-session-1",
+          absolute_expires_at: "2099-01-01T00:00:00Z",
+        }));
+      }
       if (url.includes("/api/goals/tree")) return Promise.resolve(mockResponse([]));
       if (url.includes("/api/goals/dashboard")) {
         return Promise.resolve(mockResponse({ domains: {}, active_count: 0, completed_count: 0, total_count: 0 }));
@@ -5985,8 +6703,13 @@ describe("CockpitView", () => {
         return Promise.resolve(mockResponse({
           runs: [{
             id: "workflow-run-1",
+            run_identity: "workflow-run-1",
             tool_name: "workflow_web_brief_to_file",
             workflow_name: "web-brief-to-file",
+            goal_id: "goal-1",
+            goal_revision: 1,
+            criterion_id: "criterion-1",
+            plan_revision: 1,
             session_id: "session-2",
             status: "awaiting_approval",
             started_at: "2026-03-18T12:01:00Z",
@@ -6003,12 +6726,21 @@ describe("CockpitView", () => {
             pending_approval_ids: ["approval-run-1"],
             pending_approvals: [{
               id: "approval-run-1",
+              workflow_id: "workflow-run-1",
+              goal_id: "goal-1",
+              goal_revision: 1,
+              criterion_id: "criterion-1",
+              plan_revision: 1,
               summary: "Approve write_file for web brief",
               risk_level: "medium",
               created_at: "2026-03-18T12:01:30Z",
               thread_id: "session-2",
               thread_label: "Approval thread",
               resume_message: "Continue workflow after approval.",
+              owner_principal_id: "operator:test",
+              operator_session_id: "operator-session-1",
+              expires_at: "2099-01-01T00:00:00Z",
+              approval_scope: { action: "write_file", target: { type: "workspace", reference: "notes/brief.md" } },
             }],
             thread_id: "session-2",
             thread_label: "Approval thread",
@@ -6031,14 +6763,16 @@ describe("CockpitView", () => {
 
     render(<CockpitView onSend={() => {}} />);
 
-    expect(await screen.findByRole("button", { name: "Approve" }, { timeout: 5000 })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Deny" })).toBeInTheDocument();
-    fireEvent.click(await screen.findByRole("button", { name: "Continue" }, { timeout: 5000 }));
+    await loadAllDeepPanes();
 
-    await waitFor(() => expect(useChatStore.getState().sessionId).toBe("session-2"), { timeout: 5000 });
-    expect(
-      await screen.findByDisplayValue("Continue workflow after approval.", {}, { timeout: 5000 }),
-    ).toBeInTheDocument();
+    const outcomePanel = await screen.findByTestId("outcome-cockpit-panel", {}, { timeout: 5000 });
+    expect(within(outcomePanel).getByRole("button", { name: "Approve" })).toBeDisabled();
+    expect(within(outcomePanel).getByRole("button", { name: "Deny" })).toBeDisabled();
+    expect(within(outcomePanel).getByTestId("outcome-approval-card")).toHaveAttribute("data-state", "partial_metadata");
+    expect(within(outcomePanel).queryByText("notes/brief.md")).not.toBeInTheDocument();
+    expect(within(outcomePanel).getByText(/target reference digest:/)).toBeInTheDocument();
+    expect(useChatStore.getState().sessionId).toBe("session-1");
+    expect(fetchMock.mock.calls.some(([input]) => String(input).includes("/api/workflows/runs/") && String(input).includes("/control"))).toBe(false);
   }, 15000);
 
   it("shows a visible pending state and fresh-thread guidance while the agent is working", async () => {
@@ -7042,6 +7776,8 @@ describe("CockpitView", () => {
 
     render(<CockpitView onSend={vi.fn()} />);
 
+    await loadAllDeepPanes();
+
     const guardianTitle = await screen.findByText("Guardian state", { selector: ".cockpit-window-title" });
     const guardianWindow = guardianTitle.closest(".cockpit-window") as HTMLElement;
     const operatorTitle = await screen.findByText("Operator terminal", { selector: ".cockpit-window-title" });
@@ -7437,6 +8173,8 @@ describe("CockpitView", () => {
 
     render(<CockpitView onSend={() => {}} />);
 
+    await loadAllDeepPanes();
+
     const workflowLabel = await screen.findByText("resume-review");
     const workflowRow = workflowLabel.closest(".cockpit-row");
     expect(workflowRow).not.toBeNull();
@@ -7661,6 +8399,8 @@ describe("CockpitView", () => {
     });
 
     render(<CockpitView onSend={() => {}} />);
+
+    await loadAllDeepPanes();
 
     const rootSummary = await screen.findByText("root review workflow completed");
     const rootRow = rootSummary.closest(".cockpit-row");
@@ -7996,6 +8736,8 @@ describe("CockpitView", () => {
 
     render(<CockpitView onSend={() => {}} />);
 
+    await loadAllDeepPanes();
+
     const rootSummary = await screen.findByText("root review workflow completed");
     fireEvent.click(rootSummary);
 
@@ -8149,6 +8891,8 @@ describe("CockpitView", () => {
     });
 
     render(<CockpitView onSend={() => {}} />);
+
+    await loadAllDeepPanes();
 
     const rootSummary = await screen.findByText("root review workflow completed");
     fireEvent.click(rootSummary);
@@ -8435,6 +9179,8 @@ describe("CockpitView", () => {
 
     render(<CockpitView onSend={() => {}} />);
 
+    await loadAllDeepPanes();
+
     const evidence = await screen.findByLabelText("Evidence shortcuts");
     const draftArtifactButton = await within(evidence).findByRole("button", {
       name: "Draft next step for artifact: notes/branch-review.md",
@@ -8620,6 +9366,8 @@ describe("CockpitView", () => {
 
     render(<CockpitView onSend={() => {}} />);
 
+    await loadAllDeepPanes();
+
     const evidence = await screen.findByLabelText("Evidence shortcuts");
     expect(await within(evidence).findByText("artifact: notes/shared-brief.md")).toBeInTheDocument();
     expect(within(evidence).getByText(/research-brief · succeeded/)).toBeInTheDocument();
@@ -8766,6 +9514,8 @@ describe("CockpitView", () => {
 
     render(<CockpitView onSend={() => {}} />);
 
+    await loadAllDeepPanes();
+
     const evidence = await screen.findByLabelText("Evidence shortcuts");
     expect(await within(evidence).findByText("artifact: notes/shared.md")).toBeInTheDocument();
     expect(within(evidence).getAllByText(/source ambiguous/).length).toBeGreaterThan(0);
@@ -8792,6 +9542,14 @@ describe("CockpitView", () => {
       const url = String(input);
       if (url.includes("/api/sessions")) {
         return Promise.resolve(mockResponse([{ id: "session-1", title: "Atlas thread" }]));
+      }
+      if (url.includes("/api/auth/session")) {
+        return Promise.resolve(mockResponse({
+          authenticated: true,
+          principal_id: "operator:test",
+          session_id: "operator-session-1",
+          absolute_expires_at: "2099-01-01T00:00:00Z",
+        }));
       }
       if (url.includes("/api/goals/tree")) return Promise.resolve(mockResponse([]));
       if (url.includes("/api/goals/dashboard")) {
@@ -8838,6 +9596,10 @@ describe("CockpitView", () => {
             summary: "Approve write_file for Atlas brief",
             created_at: "2026-03-26T09:02:00Z",
             resume_message: "Continue Atlas brief approval",
+            owner_principal_id: "operator:test",
+            operator_session_id: "operator-session-1",
+            expires_at: "2099-01-01T00:00:00Z",
+            approval_scope: { action: "write_file", target: { type: "workspace", reference: "notes/brief.md" } },
           },
         ]));
       }
@@ -8924,6 +9686,7 @@ describe("CockpitView", () => {
         return Promise.resolve(mockResponse({
           runs: [{
             id: "run-1",
+            run_identity: "run-1",
             tool_name: "workflow_atlas_brief",
             workflow_name: "atlas-brief",
             session_id: "session-1",
@@ -8984,6 +9747,8 @@ describe("CockpitView", () => {
 
     render(<CockpitView onSend={() => {}} />);
 
+    await loadAllDeepPanes();
+
     const workflowSummary = await screen.findByText("atlas-brief waiting on write_file approval");
     fireEvent.click(workflowSummary);
 
@@ -9017,8 +9782,9 @@ describe("CockpitView", () => {
     expect(traceRow).not.toBeNull();
     fireEvent.click(traceRetryButton);
     await waitFor(() =>
-      expect(screen.getByDisplayValue('Run workflow "atlas-brief" with file_path="notes/brief.md", _seraph_resume_from_step="write_file".')).toBeInTheDocument(),
+      expect(screen.getByText("Live recovery control blocked atlas-brief: approval authority is unavailable or stale.")).toBeInTheDocument(),
     );
+    expect(screen.queryByDisplayValue('Run workflow "atlas-brief" with file_path="notes/brief.md", _seraph_resume_from_step="write_file".')).not.toBeInTheDocument();
 
     const stepRow = within(inspectorWindow as HTMLElement).getByText(/write_file · write_file failed · write_file blocked by approval/i).closest(".cockpit-inspector-stack-row");
     expect(stepRow).not.toBeNull();
@@ -12219,11 +12985,13 @@ describe("CockpitView", () => {
 
     render(<CockpitView onSend={vi.fn()} />);
 
+    await loadAllDeepPanes();
+
     await waitFor(() => expect(screen.getByText("Daily operator rhythm")).toBeInTheDocument());
     expect(await screen.findByText(/spend \$0\.015/)).toBeInTheDocument();
     expect(screen.getByText(/conversation \$0\.015/)).toBeInTheDocument();
 
-    fireEvent.click(screen.getAllByRole("button", { name: "reload" })[0]);
+    fireEvent.click(screen.getByRole("button", { name: "refresh activity ledger" }));
 
     await waitFor(() => expect(activityLedgerCalls).toBeGreaterThan(1));
     expect(screen.getByText(/spend \$0\.015/)).toBeInTheDocument();
@@ -12627,6 +13395,8 @@ describe("CockpitView", () => {
 
     render(<CockpitView onSend={vi.fn()} />);
 
+    await loadAllDeepPanes();
+
     const controlPlane = await screen.findByRole("region", { name: /team control plane/i });
     await waitFor(() => expect(controlPlane).toHaveTextContent(/single operator guarded workspace/i));
     expect(screen.getByText(/7 llm/i)).toBeInTheDocument();
@@ -12801,6 +13571,8 @@ describe("CockpitView", () => {
     });
 
     render(<CockpitView onSend={vi.fn()} />);
+
+    await loadAllDeepPanes();
 
     const operatingLayer = await screen.findByRole("region", { name: /m5 operating layer/i });
     await waitFor(() => expect(operatingLayer).toHaveTextContent(/3 work items · 1 jobs · 1 delegations/i));

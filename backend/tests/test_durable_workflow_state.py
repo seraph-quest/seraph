@@ -14,6 +14,7 @@ from src.workflows.durable_state import (
     durable_workflow_snapshot_dict,
     workflow_state_repository,
 )
+from src.workflows.job_runtime import DurableJobIdentity, DurableJobSpec, durable_job_repository
 
 
 def test_durable_workflow_snapshot_is_deterministic_from_projection_dicts():
@@ -293,6 +294,96 @@ async def test_workflow_state_repository_persists_run_steps_and_checkpoint(async
 
 
 @pytest.mark.asyncio
+async def test_legacy_projection_cannot_mutate_typed_durable_job(async_db):
+    typed = await durable_job_repository.admit_job(
+        DurableJobSpec(
+            identity=DurableJobIdentity(
+                job_id="typed-legacy-guard",
+                owner_kind="service",
+                owner_principal_id="service:test",
+                job_kind="test_job",
+                capability_version="1",
+                idempotency_scope="test",
+                idempotency_key="typed-legacy-guard",
+            ),
+            inputs={"test": True},
+            declared_authority={"principal": "service:test", "service_id": "service:test"},
+            service_id="service:test",
+        )
+    )
+
+    with pytest.raises(RuntimeError, match="DurableJobRepository"):
+        await workflow_state_repository.create_run(
+            run_identity=typed["job_id"],
+            workflow_name="legacy",
+            tool_name="legacy",
+            session_id=None,
+            run_fingerprint="legacy",
+            arguments={},
+            approval_context={},
+        )
+    with pytest.raises(RuntimeError, match="DurableJobRepository"):
+        await workflow_state_repository.record_step_started(
+            run_identity=typed["job_id"],
+            workflow_name="legacy",
+            step_id="step",
+            step_index=0,
+            tool_name="legacy",
+            arguments={},
+        )
+    with pytest.raises(RuntimeError, match="DurableJobRepository"):
+        await workflow_state_repository.record_step_completed(
+            run_identity=typed["job_id"],
+            step_id="step",
+            status="succeeded",
+        )
+    with pytest.raises(RuntimeError, match="DurableJobRepository"):
+        await workflow_state_repository.finish_run(run_identity=typed["job_id"], status="succeeded")
+    with pytest.raises(RuntimeError, match="DurableJobRepository"):
+        await workflow_state_repository.mark_heartbeat(typed["job_id"])
+    with pytest.raises(RuntimeError, match="DurableJobRepository"):
+        await workflow_state_repository.acquire_or_renew_v2_lease(
+            run_identity=typed["job_id"],
+            owner="legacy-v2-worker",
+            lease_id="legacy-v2-lease",
+        )
+    with pytest.raises(RuntimeError, match="DurableJobRepository"):
+        await workflow_state_repository.build_v2_recovery_plan(
+            run_identity=typed["job_id"],
+            owner="legacy-recovery-worker",
+        )
+
+
+@pytest.mark.asyncio
+async def test_legacy_stale_recovery_skips_typed_jobs(async_db):
+    typed = await durable_job_repository.admit_job(
+        DurableJobSpec(
+            identity=DurableJobIdentity(
+                job_id="typed-stale-recovery-guard",
+                owner_kind="service",
+                owner_principal_id="service:test",
+                job_kind="test_job",
+                capability_version="1",
+                idempotency_scope="test",
+                idempotency_key="typed-stale-recovery-guard",
+            ),
+            inputs={"test": True},
+            declared_authority={"principal": "service:test", "service_id": "service:test"},
+            service_id="service:test",
+        )
+    )
+    await durable_job_repository.queue_job(typed["job_id"])
+    await durable_job_repository.claim_job(typed["job_id"], owner="typed-runner", lease_seconds=1)
+
+    interrupted = await workflow_state_repository.mark_stale_runs_interrupted(older_than_seconds=-1)
+    current = await durable_job_repository.get_job(typed["job_id"])
+
+    assert all(item["run_identity"] != typed["job_id"] for item in interrupted)
+    assert current is not None
+    assert current["status"] == "running"
+
+
+@pytest.mark.asyncio
 async def test_workflow_state_repository_marks_stale_runs_interrupted(async_db):
     await workflow_state_repository.create_run(
         run_identity="session-2:workflow_watch:abc",
@@ -487,6 +578,68 @@ async def test_workflow_state_repository_v2_rejects_stale_owner_before_transitio
     assert stale_owner["receipt"]["status"] == "blocked"
     assert stale_owner["receipt"]["blocked_reason"] == "active_owner_lease_required"
     assert stale_owner["orchestration_v2"]["transition_block_receipts"][-1]["owner"] == "worker-b"
+
+
+@pytest.mark.asyncio
+async def test_workflow_state_repository_control_binds_transition_and_keeps_lease_fence(async_db):
+    run_identity = "session-v2:workflow_control_fence:abc"
+    await workflow_state_repository.create_run(
+        run_identity=run_identity,
+        workflow_name="control-fence-v2",
+        tool_name="workflow_control_fence_v2",
+        session_id="session-v2",
+        run_fingerprint="control-fence",
+        arguments={},
+        approval_context={"risk_level": "medium", "execution_boundaries": ["workspace_filesystem"]},
+    )
+    lease = await workflow_state_repository.acquire_or_renew_v2_lease(
+        run_identity=run_identity,
+        owner="worker-a",
+        lease_id="lease-a",
+    )
+    assert lease is not None
+    transition = await workflow_state_repository.record_v2_transition(
+        run_identity=run_identity,
+        transition_key="operator:retry:redacted-step",
+        transition_type="retry",
+        owner="worker-a",
+        step_id="private/raw-step-id",
+        expected_revision=lease["orchestration_v2"]["revision"],
+    )
+    assert transition is not None
+    transition_revision = transition["orchestration_v2"]["revision"]
+    assert transition["receipt"]["step_id"] == "private/raw-step-id"
+    assert transition["orchestration_v2"]["lease"]["revision"] == transition_revision
+
+    control = await workflow_state_repository.record_v2_operator_recovery_control(
+        run_identity=run_identity,
+        action="retry",
+        target="private/raw-target",
+        owner="worker-a",
+        lease_id="lease-a",
+        expected_revision=transition_revision,
+        transition_key="operator:retry:redacted-step",
+        operator_context={"source": "test"},
+    )
+    assert control is not None
+    assert control["receipt"]["status"] == "recorded"
+    assert control["receipt"]["owner"] == "worker-a"
+    assert control["receipt"]["transition_key"] == "operator:retry:redacted-step"
+    assert control["orchestration_v2"]["lease"]["revision"] == control["orchestration_v2"]["revision"]
+
+    stale_control = await workflow_state_repository.record_v2_operator_recovery_control(
+        run_identity=run_identity,
+        action="retry",
+        target="private/raw-target",
+        owner="worker-a",
+        lease_id="lease-a",
+        expected_revision=transition_revision,
+        transition_key="operator:retry:redacted-step",
+        operator_context={"source": "stale-test"},
+    )
+    assert stale_control is not None
+    assert stale_control["receipt"]["status"] == "blocked"
+    assert stale_control["receipt"]["blocked_reason"] == "revision_mismatch"
 
 
 @pytest.mark.asyncio

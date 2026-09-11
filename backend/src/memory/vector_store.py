@@ -10,14 +10,16 @@ import pyarrow as pa
 
 from config.settings import settings
 from src.audit.runtime import log_integration_event_sync
-from src.memory.embedder import embed
+from src.memory.embedder import EmbeddingMetadata, EmbeddingUnavailableError, embed, embedding_metadata
+from src.workspace import WorkspaceStateClass, canonical_workspace_registry, canonical_workspace_root
 
 logger = logging.getLogger(__name__)
 
-_LANCE_DIR = os.path.join(settings.workspace_dir, "lance")
 _TABLE_NAME = "memories"
+_TABLE_NAME_PREFIX = f"{_TABLE_NAME}__"
 
-# Schema: 384 dimensions for all-MiniLM-L6-v2
+# Historical schema retained only for explicitly non-OpenRouter compatibility
+# tests and old data reads. Active vectors use a model/dimension namespace.
 _SCHEMA = pa.schema([
     pa.field("id", pa.string()),
     pa.field("text", pa.string()),
@@ -27,8 +29,62 @@ _SCHEMA = pa.schema([
     pa.field("created_at", pa.string()),
 ])
 
+
+def _schema_for_embedding(metadata: EmbeddingMetadata | None) -> pa.Schema:
+    """Build a schema whose vector width is tied to one embedding namespace.
+
+    Historical ``memories`` data is not selected by active paths. New
+    OpenRouter vectors are written to a model/dimension-qualified table so a
+    model switch cannot mix incompatible vector spaces.
+    """
+    if metadata is None:
+        raise EmbeddingUnavailableError(
+            "embedding_metadata_required",
+            stage="metadata",
+        )
+    return pa.schema([
+        pa.field("id", pa.string()),
+        pa.field("text", pa.string()),
+        pa.field("category", pa.string()),
+        pa.field("source_session_id", pa.string()),
+        pa.field("vector", pa.list_(pa.float32(), metadata.dimension)),
+        pa.field("created_at", pa.string()),
+        pa.field("embedding_namespace", pa.string()),
+        pa.field("embedding_model", pa.string()),
+        pa.field("embedding_schema_version", pa.string()),
+        pa.field("embedding_dimension", pa.int32()),
+    ])
+
+
+def _table_name(metadata: EmbeddingMetadata | None) -> str:
+    if metadata is None:
+        raise EmbeddingUnavailableError(
+            "embedding_metadata_required",
+            stage="metadata",
+        )
+    return f"{_TABLE_NAME_PREFIX}{metadata.namespace}"
+
+
+def _active_embedding_metadata() -> EmbeddingMetadata | None:
+    metadata = embedding_metadata()
+    if metadata is None:
+        raise EmbeddingUnavailableError(
+            "embedding_metadata_required",
+            stage="metadata",
+        )
+    return metadata
+
 _db: Optional[lancedb.DBConnection] = None
 _db_lock = threading.Lock()
+
+
+def _lance_dir() -> str:
+    """Resolve the derived vector store below the canonical workspace root."""
+    workspace_root = canonical_workspace_root(settings.workspace_dir)
+    registry = canonical_workspace_registry(workspace_root)
+    if registry.classify_path("lance") is not WorkspaceStateClass.DERIVED:
+        raise RuntimeError("vector store path is not owned by derived workspace state")
+    return str(workspace_root / "lance")
 
 
 def _log_vector_store_event(outcome: str, details: dict | None = None) -> None:
@@ -53,18 +109,22 @@ def _get_db() -> lancedb.DBConnection:
     if _db is None:
         with _db_lock:
             if _db is None:
-                os.makedirs(_LANCE_DIR, exist_ok=True)
-                _db = lancedb.connect(_LANCE_DIR)
-                logger.info("LanceDB connected at %s", _LANCE_DIR)
+                lance_dir = _lance_dir()
+                os.makedirs(lance_dir, exist_ok=True)
+                _db = lancedb.connect(lance_dir)
+                logger.info("LanceDB connected at %s", lance_dir)
     return _db
 
 
-def _get_or_create_table():
-    """Get the memories table, creating it if it doesn't exist."""
+def _get_or_create_table(*, metadata: EmbeddingMetadata | None = None):
+    """Get the active embedding namespace table, creating it if necessary."""
+    if metadata is None:
+        metadata = _active_embedding_metadata()
     db = _get_db()
-    if _TABLE_NAME in db.table_names():
-        return db.open_table(_TABLE_NAME)
-    return db.create_table(_TABLE_NAME, schema=_SCHEMA)
+    table_name = _table_name(metadata)
+    if table_name in db.table_names():
+        return db.open_table(table_name)
+    return db.create_table(table_name, schema=_schema_for_embedding(metadata))
 
 
 def add_memory(
@@ -74,8 +134,9 @@ def add_memory(
 ) -> str:
     """Embed text and store as a memory. Returns the memory ID or empty string on failure."""
     try:
-        table = _get_or_create_table()
         vector = embed(text)
+        metadata = _active_embedding_metadata()
+        table = _get_or_create_table(metadata=metadata)
 
         # Dedup: skip if a very similar memory already exists
         try:
@@ -102,14 +163,24 @@ def add_memory(
 
         memory_id = uuid.uuid4().hex
 
-        table.add([{
+        row = {
             "id": memory_id,
             "text": text,
             "category": category,
             "source_session_id": source_session_id,
             "vector": vector,
             "created_at": datetime.now(timezone.utc).isoformat(),
-        }])
+        }
+        if metadata is not None:
+            row.update(
+                {
+                    "embedding_namespace": metadata.namespace,
+                    "embedding_model": metadata.model,
+                    "embedding_schema_version": metadata.schema_version,
+                    "embedding_dimension": metadata.dimension,
+                }
+            )
+        table.add([row])
 
         logger.info("Added memory %s (category=%s)", memory_id[:8], category)
         _log_vector_store_event(
@@ -150,7 +221,22 @@ def search_with_status(
         if top_k <= 0:
             top_k = settings.memory_search_top_k
 
-        table = _get_or_create_table()
+        if not isinstance(query, str):
+            _log_vector_store_event(
+                "empty_result",
+                details={
+                    "operation": "search",
+                    "reason": "invalid_query",
+                    "query_length": None,
+                    "category_filter": category_filter,
+                    "top_k": top_k,
+                },
+            )
+            return [], False
+
+        query_vector = embed(query)
+        metadata = _active_embedding_metadata()
+        table = _get_or_create_table(metadata=metadata)
 
         if table.count_rows() == 0:
             _log_vector_store_event(
@@ -164,8 +250,6 @@ def search_with_status(
                 },
             )
             return [], False
-
-        query_vector = embed(query)
 
         results = table.search(query_vector).limit(top_k)
 

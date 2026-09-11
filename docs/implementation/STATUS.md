@@ -7,9 +7,67 @@ title: Seraph Development Status
 
 Seraph is an AI guardian that remembers, watches, and acts. This page is the fastest answer to what is real on `develop` right now.
 
+**Document class:** Shipped and Partial implementation inventory.
+**Target authority:** [Project Constitution](./00-project-constitution.md).
+
+The detailed inventory below records the large existing baseline. Some shipped
+surfaces remain transitional, including the Mac-hosted core, and Epic #736
+tracks their replacement. New target capabilities remain **Planned** until
+merged to `develop` with the required validation receipts.
+
 For a shorter reader-facing overview of the current app, start with
 [Current App Guide](./12-current-app-guide.md). This status page remains the
 dense shipped-state record.
+
+## Epic #736/#775 OpenRouter inference phase
+
+This section records the accepted OpenRouter-only inference phase and its
+provider-free implementation contract. The active route is the governed
+OpenRouter gateway; CPU-local canonical state, storage, tools, and operator UI
+remain usable without a local model server, CUDA, downloaded weights, or the VLM
+wrapper. Missing key, consent, approved upstream, model-fabric bounds/proofs,
+or budget is reported as blocked or configuration-required.
+
+The implementation merge gate is local provider-free validation: deterministic
+tests, intercepted transport tests, static/configuration checks, and negative
+boundary receipts. No paid OpenRouter/provider/GPU/VLM/Telegram/live-canary call
+is required for implementation, local tests, health collection, or merge. Live
+provider quality, embedding, and edge/media receipts remain optional operational
+evidence and are explicitly unverified until an operator-authorised canary
+provides them. On an open integration branch, the reviewed Epic PR remains the
+path to shipped `develop` truth; after that merge, this section describes the
+shipped route. GPU/VLM entries below remain historical baseline evidence unless
+they are explicitly marked as historical migration behavior.
+
+The final integration branch also provides the managed, keyless health receipt
+command `./manage.sh -e prod health --format json`. It writes only redacted
+logical receipts under `operator-receipts/epic-736-health/`, makes no provider,
+GPU/VLM, speech, or connector calls, and records unprobed live evidence as
+`skipped`/`degraded` with recovery guidance. The writer uses #742's canonical
+production workspace resolver and rejects symlink or ambiguous roots. Source-
+contract checks are evidence of the checked revision, not claims of live
+execution or competitive superiority. Receipt schema v2 labels each check as
+static, configuration, integration, external-unverified, or excluded; the
+stable #771 evolution IDs and #754 comparator coverage remain explicit excluded
+checks outside Epic #736 closure.
+Required child criteria map #750 conversation identity/outbox, #748 native
+software, #749 paired edge, #751 audio capture/decode/persistence, #752
+Telegram transport, and #755 capability-pack lifecycle. Static source checks
+are informational; each behavioral gate requires one current schema-v1,
+ownership- and revision-bound child receipt under the server-resolved,
+server-owned `operator-receipts/epic-736-child-evidence` directory. Receipt
+files and directories must be private to the health process user; caller-
+selected `--child-evidence` paths are rejected. Missing, malformed, stale,
+tampered, wrong-revision, or ambiguous evidence is visibly `unknown`/`degraded`
+with exit 2, and a child-reported non-pass result, including `failed`, is
+visibly `degraded` with exit 2; hard configuration or static failures remain
+`failed` with exit 4. Source presence cannot satisfy behavior.
+
+Branch-local #753 adds authenticated local canonical-memory export, deterministic
+rebuild, tombstone-aware additive restore, and operator-visible recovery status;
+the owning guide records its bounded SQLite proof and remaining StrategyDelta,
+multi-process, production-restore, and semantic-quality limits. It is not
+Shipped `develop` truth until the reviewed milestone change lands.
 
 ## Legend
 
@@ -77,6 +135,21 @@ High-risk strategic wording in this status page remains governed by [19. Strateg
 - [x] Seraph now also has a one-channel reach canary: native notifications are the selected canary channel, with deterministic receipts for pairing, revocation, health, bounded retry/fallback, same-thread continuity, memory/context continuity, approval handoff, audit trail, degraded-state UI, and explicit no-sprawl boundaries for Slack, Discord, Telegram, mobile, voice, and other future channels.
 - [x] Backend CI now also weights historically slow backend suites, runs ten isolated backend shards in GitHub Actions, and pins the real shard-runner executable contract instead of letting runner skew and stale local assumptions dominate the current backend matrix.
 - [x] Runtime routing now also exposes richer provider-planning comparison details, including capability-gap penalties, live-feedback penalties, retained-primary-versus-planning-winner summaries, best-alternate route margins, and the same comparison contract across runtime audit, operator, and activity surfaces.
+- [x] Runtime status retains the legacy route-aware `effective_runtime` metadata for compatibility, including wrapper/backend/queue endpoints and active profile.
+- [x] Model-fabric runtime and settings truth distinguish configured profiles,
+  selected and attempted routes, last actual success, runtime-path-specific
+  text/VLM topology, fallback, degradation, receipt persistence, and capability
+  proof. The active OpenRouter phase reports configuration-required or degraded
+  state when a key, consent, budget, or capability proof is absent; a configured
+  key or model is not a live-route receipt.
+- [x] Model-fabric interactive REST/WebSocket ingress is deliberately
+  fail-closed with zero transport when no authenticated principal is bound. The
+  fabric does not synthesize identity to make chat appear functional.
+- [x] The production compose and managed local launcher keep the authenticated
+  core and canonical workspace independent of CUDA, model weights, local model
+  servers, and the VLM wrapper. The offline preflight reports core/auth/
+  workspace state separately from OpenRouter configuration and does not claim
+  live provider or host proof.
 - [x] The extension platform now also exposes package version lines, compatibility truth, publisher metadata, and diagnostics summaries consistently across lifecycle, catalog, and capability surfaces, while the cockpit operator surface summarizes extension health plus update/studio actions instead of leaving package triage buried in separate inventories.
 - [x] M9 governed ecosystem foundations now have deterministic local proof: `m9_governed_ecosystem` plus `/api/operator/m9-governed-ecosystem-benchmark` cover manifest governance, lifecycle review gates, managed-connector degradation truth, marketplace governance flow, diagnostics/update triage, benchmark-proof posture, and the claim boundary that this is not competitor superiority or production marketplace security proof.
 - [x] Backend CI now also applies per-file watchdog timeouts for the heaviest backend suites, so hung `test_workflows.py` or `test_eval_harness.py` files stop consuming an entire shard budget on hosted runners.
@@ -87,10 +160,10 @@ High-risk strategic wording in this status page remains governed by [19. Strateg
 - [x] Onboarding can now inspect an explicitly user-linked webpage during the current onboarding turn, so Seraph can derive profile or workspace context from a real source without widening onboarding into general browsing.
 - [x] The workspace window system now uses flatter terminal-style chrome with close controls, a Windows visibility menu, and per-pane hide/show state instead of only static rounded dashboard cards.
 - [x] The capability import program is now complete through all five waves, including Hermes-style runtime primitives, packaged reach surfaces, selective OpenClaw imports, operator-surface visibility, and deterministic proof for the imported capability families.
-- [x] The agent-parity strategy artifact is complete as a target, proof-gate, and claim-boundary map.
+- [x] The former agent-parity strategy artifact is preserved as closed historical #475 context, not as the accepted target.
 - [x] The aggregate agent-parity proof train landed on `develop` through merged PR [#473](https://github.com/seraph-quest/seraph/pull/473), completing deterministic proof-floor coverage for replay, cockpit efficiency, memory-provider quality, workflow endurance, durable workflow state v1, one reach canary, guardian arbitration, governed capability-pack hardening, and guardian-safe multimodal/voice.
 - [x] The named parity proof floors are reached as deterministic receipts, not as broad production parity or superiority claims.
-- [x] The production-grade parity execution roadmap is now board-backed through parent issue [#475](https://github.com/seraph-quest/seraph/issues/475), original huge batch issues [#476](https://github.com/seraph-quest/seraph/issues/476)-[#482](https://github.com/seraph-quest/seraph/issues/482), follow-on huge batch issues [#491](https://github.com/seraph-quest/seraph/issues/491)-[#497](https://github.com/seraph-quest/seraph/issues/497), full-completion batch issues [#505](https://github.com/seraph-quest/seraph/issues/505)-[#512](https://github.com/seraph-quest/seraph/issues/512), post-CQ production-evidence batch issues [#522](https://github.com/seraph-quest/seraph/issues/522)-[#530](https://github.com/seraph-quest/seraph/issues/530), completed DI-DP bounded evidence and DP release-gate batches [#557](https://github.com/seraph-quest/seraph/issues/557)-[#564](https://github.com/seraph-quest/seraph/issues/564), and active post-DP implementation gap-closure batches [#573](https://github.com/seraph-quest/seraph/issues/573)-[#580](https://github.com/seraph-quest/seraph/issues/580).
+- [x] Closed parent [#475](https://github.com/seraph-quest/seraph/issues/475) and its linked batch history preserve the former parity execution program; they are not active roadmap authority.
 - [x] The production-grade parity train now has a named readiness proof gate: `production_parity_readiness` plus `/api/operator/production-parity-readiness` expose batch proof paths, Project-field contract requirements, duplicate-scope guardrails, negative-case requirements, receipt-schema fields, current-source gating for competitor-dependent claims, validation classes, and blocked claim boundaries before later batches claim implementation readiness.
 - [x] Batch BW now adds a named secure-host hardening proof gate: `production_secure_host_hardening`, `secure_capability_host_live_isolation_v2`, and `/api/operator/secure-capability-host-hardening` expose privileged-path receipt schema, secret replay and redaction checks, browser recovery partitioning, private-network egress denial, extension revocation cutoff, workflow/provider replay trust-drift receipts, blocked claims, and recovery actions. This remains hardening proof, not secure/private-by-default, production-ready, IronClaw-class secure execution, or full parity wording.
 - [x] Batch BX now adds named durable-orchestration v2 receipts: `production_durable_orchestration`, `durable_workflow_engine_v2`, and `/api/operator/durable-workflow-engine-v2` expose lease ownership, idempotent transitions, trigger dedupe, unsafe-resume blocking, delegated-artifact adoption gates, blocked claims, and recovery actions. This remains production-oriented orchestration proof, not LangGraph-class durability, exactly-once scheduling, crash-proof orchestration, or solved workflow parity.
@@ -147,23 +220,22 @@ High-risk strategic wording in this status page remains governed by [19. Strateg
 - [x] Batch EE now adds bounded browser/computer-use live reliability and recovery controls: `/api/browser/sessions`, `/api/browser/sessions/{session_id}/snapshot`, `/api/browser/sessions/{session_id}/control`, `/api/operator/browser-computer-use-control`, and the cockpit expose owner-scoped browser sessions, explicit provider degradation, no-silent-fallback replay acknowledgement, partition revision and reset controls, boundary-decision visibility, redacted artifact provenance, and quarantine/recover/reset/replay/close actions. This remains bounded live control, not safe browser automation, safe autonomous computer use, OpenClaw-class browser reach, full browser parity, arbitrary credentialed browsing safety, production readiness, full parity, or exceeded-reference-system wording.
 - [x] Batch EG now adds browser workbench and durable session-journal capability: `/api/browser/sessions`, `/api/browser/sessions/{session_id}/snapshot`, `/api/browser/sessions/{session_id}/journal`, `/api/operator/browser-computer-use-control`, and the cockpit can open URL/provider/capture-scoped browser sessions, snapshot existing owner-scoped sessions, show journal receipts, and reload metadata-first session history from `artifacts/browser-session-journal/session-journal.jsonl` without storing raw DOM, screenshots, secrets, credentials, profile paths, or private page content in operator summaries. This remains bounded browser workbench capability, not safe browser automation, safe autonomous browser/computer use, OpenClaw-class browser reach, full browser parity, arbitrary credentialed browsing safety, production readiness, full parity, or exceeded-reference-system wording.
 - [x] Batch EF now adds the bounded post-DX final parity and exceedance claim-lift gate: `post_dx_final_board_pr_issue_reconciliation_v1`, `post_dx_final_claim_ledger_reconciliation_v1`, `reference_system_source_refresh_v6`, `false_completion_scan_v6`, `post_dx_final_critic_contrarian_no_block_v1`, and `/api/operator/post-dx-final-parity-claim-lift` reconcile DY-EE feature-control batches, issue [#594](https://github.com/seraph-quest/seraph/issues/594), SCL-067 through SCL-072, June 18, 2026 Hermes/OpenClaw/IronClaw source pressure, X article access caveat, false-completion scans, Critic/Contrarian receipts, aggregate benchmark-proof visibility, and blocked claims. This permits only exact SCL-072 bounded final-gate wording, not production readiness, full parity, reference-system exceedance, secure/private-by-default, safe browser automation, full browser parity, solved operator-control, solved learning, production-secure marketplace, or broad superiority wording.
-- [x] Post-DX stronger-proof/control roadmap issues [#590](https://github.com/seraph-quest/seraph/issues/590)-[#597](https://github.com/seraph-quest/seraph/issues/597) extend parent [#475](https://github.com/seraph-quest/seraph/issues/475) without creating a duplicate parent. DY, DZ, EA, EB, EC, ED, EE, and EF are represented as huge PR-sized batches for live durable orchestration, formal secure runtime isolation, always-available reach/voice-media, guardian learning and memory live controls, dense operator control, marketplace package-security and lifecycle controls, browser/computer-use safety/parity controls, and the final post-DX claim-lift gate. These issues are roadmap execution anchors only; broad full-parity, production-ready, secure/private-by-default, safe-browser, marketplace, operator-control, learning, memory, and superiority wording remains blocked unless claim-ledger rows permit exact wording.
+- [x] The closed post-DX stronger-proof/control issues [#590](https://github.com/seraph-quest/seraph/issues/590)-[#597](https://github.com/seraph-quest/seraph/issues/597) historically extended the now-closed parent [#475](https://github.com/seraph-quest/seraph/issues/475). DY, DZ, EA, EB, EC, ED, EE, and EF landed as large PR-sized batches covering live durable orchestration, formal secure runtime isolation, reach/voice-media evidence, guardian learning and memory controls, operator control, marketplace security/lifecycle controls, browser/computer-use controls, and the final claim-lift gate. These records are shipped evidence, not current roadmap or execution anchors; broad full-parity, production-ready, secure/private-by-default, safe-browser, marketplace, operator-control, learning, memory, and superiority wording remains blocked unless claim-ledger rows permit exact wording.
 - [x] Batch DP now adds bounded post-DI-DO release-gate receipts: `full_parity_claim_lift_audit_v1`, `production_readiness_reconciliation_v2`, `reference_system_source_refresh_v4`, `post_di_do_board_pr_issue_reconciliation_v1`, `false_completion_scan_v4`, `final_critic_contrarian_no_block_v1`, and `/api/operator/full-parity-release-gate` expose current 2026-06-11 Hermes/OpenClaw/IronClaw pressure-only source receipts, DI-DO issue/PR/Project reconciliation, stale issue-body caveats, seven-area production-readiness reconciliation receipts, exact SCL-051 through SCL-058 claim decisions, false-completion scans, Critic/Contrarian no-block receipts, and aggregate benchmark-proof visibility. This remains a bounded release-gate audit, not production readiness, product-wide full parity, reference-system exceedance, secure/private-by-default, safe autonomous browser/computer-use, solved operator-control, guardian-superiority, memory-superiority, or ecosystem-superiority wording.
 - [x] Batch DQ now adds bounded post-DP durable-orchestration gap-closure receipts: `post_dp_durable_orchestration_v1`, `multi_agent_handoff_recovery_v1`, `scheduler_crash_restart_recovery_v1`, `side_effect_reconciliation_v5`, `orchestration_false_claim_scan_v2`, and `/api/operator/post-dp-durable-orchestration` expose persisted recovery packets, restart metadata preservation, lease-guarded recovery authority, multi-agent handoff blocking, trigger record-only semantics, side-effect reconciliation, guardian restraint, safe redacted operator projections, false-claim scans, and aggregate benchmark-proof visibility. Workflow runtime writes now fail closed before tool side effects when required durable state cannot be recorded. This remains bounded orchestration recovery evidence, not exactly-once scheduling, crash-proof orchestration, solved durable workflows, LangGraph-class parity, production readiness, full parity, or exceeded-reference-system wording.
 - [x] Batch DR now adds bounded post-DP secure capability-host gap-closure receipts: `post_dp_secure_capability_host_gap_closure_v1`, `runtime_profile_selection_v2`, `deny_default_credential_egress_v2`, `hostile_capability_chain_quarantine_v2`, `secure_host_recovery_authority_v2`, `secure_host_false_claim_scan_v2`, and `/api/operator/post-dp-secure-capability-host` expose explicit runtime profile selection, deny-by-default egress, scoped credential refs, hostile cross-surface quarantine, operator-owned recovery authority, safe redacted receipts, false-claim scans, blocked claims, and aggregate benchmark-proof visibility. This remains bounded gap-closure evidence, not secure/private-by-default execution, production security solved, IronClaw-class secure execution, hardware-backed isolation, TEE/CVM/Wasm/container runtime-isolation, formal security certification, production readiness, full parity, or exceeded-reference-system wording.
 - [ ] Full parity and targeted exceedance are not complete; after Batches DQ-EF, every stronger public claim still requires exact claim-ledger permission plus stronger underlying evidence. Full always-available reach and full voice/media parity, generalized outcome superiority and memory superiority, best/world-class cockpit and solved operator-control claims, production-secure marketplace and solved third-party package-security claims, blanket safe browser automation and full browser parity, production readiness, full parity, security superiority, OpenClaw-class reach, exactly-once/crash-proof orchestration, LangGraph-class parity, solved learning, full memory-provider parity, and broad superiority evidence remain blocked except for exact SCL-067/SCL-068/SCL-069/SCL-070/SCL-071/SCL-072 bounded wording.
 - [ ] No workstream is complete yet.
-- [ ] Seraph is not yet the finished guardian product described in the research docs.
+- [ ] Seraph is not yet the complete guardian product defined as Planned by the [Project Constitution](./00-project-constitution.md).
 
 ## Docs Contract
 
-- [x] `docs/research/00-synthesis.md` defines what Seraph is trying to become.
+- [x] the Project Constitution and ADRs solely define the accepted target.
 - [x] `docs/research/10-competitive-benchmark.md` owns the comparative judgment.
 - [x] `docs/research/11-superiority-program.md` owns the design-level superiority program.
 - [x] this file owns the fastest shipped snapshot on `develop`.
-- [x] `docs/implementation/00-master-roadmap.md` owns the strategic implementation program and completed-program record.
-- [x] `docs/implementation/08-docs-contract.md`, `docs/implementation/09-benchmark-status.md`, `docs/implementation/10-superiority-delivery.md`, `docs/implementation/11-world-class-strategy-delivery.md`, and `docs/implementation/16-agent-parity-execution-roadmap.md` are the implementation-side mirrors of the research evidence, benchmark, program, cross-cutting strategy, and agent parity goal layers.
-- [x] `docs/implementation/01` through `07` remain the workstream docs; `08` through `11` and `16` are meta mirrors, not extra workstreams.
+- [x] historical roadmap/parity files are non-operational stubs; Git history preserves their detail.
+- [x] `docs/implementation/08-docs-contract.md` owns documentation classification and validation rules.
 - [x] the GitHub Project, issues, and PRs own active execution and review state.
 
 ## Current Focus On `develop`
@@ -186,8 +258,11 @@ High-risk strategic wording in this status page remains governed by [19. Strateg
 - [x] The cockpit desktop shell, presence pane, and active triage now also surface degraded typed source adapters and imported capability-family attention from the observer continuity contract, so broader reach issues are actionable from the same operator flow as route failures and queued follow-through.
 - [x] The cockpit desktop shell, presence pane, and active triage now also surface explicit presence-surface ready/attention summaries plus direct repair/follow-up drafts for messaging, adapter, and observer surfaces, so broader non-browser reach no longer hides behind route-only health or catalog inventory views.
 - [x] Runtime Reliability now has deterministic proof for activity-ledger attribution, imported capability surfaces, and simulation-grade route-planning visibility in addition to the earlier guardian/runtime contracts.
-- [x] Runtime Reliability now keeps cockpit and settings metadata refreshes fast by separating configured/effective VLM runtime metadata from live GPU route probes; runtime status and artifact-storage return `deferred_fast_metadata` live-probe placeholders, and the cockpit resolves runtime labels from live runtime status, fresh operator posture, or explicitly `STALE` retained metadata through transient refresh failures.
-- [x] The repo-wide strategic program is tracked in `docs/implementation/00-master-roadmap.md`, while active execution is tracked in the GitHub Project, issues, and PRs.
+- [x] Runtime Reliability now rate-limits repeated browser and sandbox timeout audit receipts, preserving a grouped degraded provider signal without flooding operator/status surfaces during local chat or VLM backlog work.
+- [x] **Historical develop baseline:** Runtime Reliability kept cockpit and settings metadata refreshes fast by separating configured/effective VLM runtime metadata from live GPU route probes; the accepted #775 phase replaces that readiness contract with governed OpenRouter status and explicit blocked/degraded receipts.
+- [x] **Historical develop baseline:** Settings opened and reopened on the Screenshot/VLM section without eager-loading unrelated panels; the accepted #775 phase retains the bounded operator surface while removing local VLM inference as an active dependency.
+- [x] **Historical develop baseline:** Runtime Reliability kept health, session, and artifact-storage status responsive while screenshot/VLM backlog metadata was slow; the accepted #775 phase preserves bounded metadata and reports OpenRouter policy/admission state instead of requiring GPU/VLM readiness.
+- [x] The Project Constitution owns accepted direction; active execution is tracked in the GitHub Project, issues, and PRs, while the historical roadmap points to Git history.
 - [x] The cross-cutting world-class strategy translation is tracked in `docs/implementation/11-world-class-strategy-delivery.md`.
 - [x] The board-backed full-completion train has completed bounded CJ-CQ implementation and audit receipts, and PR #521 permits only the exact bounded proof-train wording. This does not ship broad parity/exceedance permission; it records exact bounded proof-train wording and continued blocked claims.
 
@@ -217,7 +292,7 @@ High-risk strategic wording in this status page remains governed by [19. Strateg
 - [x] browser-based guardian workspace as the only supported browser shell
 - [x] FastAPI backend with chat, WebSocket, goals, tools, observer, settings, audit, approvals, vault, skills, and MCP APIs
 - [x] native macOS observer daemon for screen/window ingest
-- [x] screen analysis provider choice now includes local Apple Vision, local Codex CLI parsing, and explicit OpenRouter cloud OCR, with local Codex temp-image cleanup documented and optional durable local image/output/analysis artifacts available through localhost-only observer inspection endpoints
+- [x] **Historical develop baseline:** screen analysis supported configured local or remote inference routes, with optional durable local image/provider-output/analysis artifacts through localhost-only observer inspection endpoints; in the accepted #775 phase, screenshot understanding uses the governed OpenRouter route and records blocked status when policy or proof is missing. Legacy stored `codex_output_path` metadata and the deprecated `/codex-output` route remain read-compatible while new links use `/provider-output`.
 - [x] persistent guardian record, vector memory, sessions, and goal storage
 
 ### Trust and control
@@ -270,6 +345,8 @@ High-risk strategic wording in this status page remains governed by [19. Strateg
 - [x] runtime-path-specific primary model overrides
 - [x] runtime-path-specific fallback-chain overrides
 - [x] first-class local runtime routing for helper, all current scheduled completion jobs, core agent, delegation, and connected MCP-specialist paths
+- [x] managed local lifecycle status now treats PID-plus-owned-listener agreement as the readiness contract; PID-only and listener-only drift are degraded, and `local up` rechecks the whole local stack before reporting the frontend/backend URLs.
+- [x] operator database doctor now checks required live operator tables, including `guardian_interventions`, and the guardian-state, M8 guardian-brain, and timeline endpoints degrade with `missing_tables` plus `./manage.sh -e dev local run` repair guidance instead of leaking raw SQLite missing-table errors.
 - [x] strict runtime-path provider safeguards for required capability intents plus cost, latency, task-class, and budget guardrails, with explicit degrade-open audit semantics when no compliant target exists
 - [x] first simulation-grade provider planning pass that scores candidate routes before execution, makes budget steering explicit, carries per-target live feedback plus production-readiness state into route choice, and surfaces route scores plus simulated-route explanations through runtime audit, operator timeline, and activity-ledger views
 - [x] runtime audit visibility across chat, WebSocket, session-bound helper LLM traces, scheduler including daily-briefing, activity-digest, and evening-review degraded-input fallback paths, strategist, proactive delivery transport, MCP lifecycle and manual test API flows, skills toggle/reload flows, observer plus screen observation summary/cleanup boundaries, embedding, vector store, guardian-record file, vault repository, filesystem, browser, sandbox, and web search flows
@@ -327,6 +404,7 @@ High-risk strategic wording in this status page remains governed by [19. Strateg
 - [x] the operator terminal now also surfaces a dedicated workflow-supervision lane with history, lineage, branch-debug, and recovery summaries plus direct continue/use-output/failure/retry/repair/best-continuation actions, and keyboard-first top-supervision inspect control
 - [x] the operator terminal now also surfaces a workspace-level workflow-orchestration lane that groups long-running work by session, keeps ambient workflows visible, and lets operators jump back into the correct thread or next-step draft without first opening a specific workflow inspector
 - [x] the operator terminal now also surfaces a dedicated team control-plane lane with governance, role, usage, runtime-posture, review-receipt, and approval/workflow handoff summaries so team operations stay inspectable without leaving the cockpit
+- [x] the cockpit baseline heartbeat now avoids deep operator fanout; continuity, activity-ledger, workflow-run, control-plane, orchestration, background, M5/M6/M7/M8, guardian-memory, benchmark-proof, engineering-memory, and continuity-graph data load from explicit pane refresh controls with stale/unavailable state visible to the operator
 - [x] the tools metadata surface now lists delegation specialists through lightweight descriptors instead of instantiating full specialist agents/models, and tools-policy source-context walks now follow only explicit wrapper attributes so metadata inspection and tests fail closed instead of synthesizing unbounded mock wrapper chains
 - [x] the cockpit now restores the last active session on reload, preserves explicit fresh-thread semantics, and marks background thread activity instead of silently resetting to an empty conversation
 - [x] larger more readable settings and priorities overlays now support the guardian workspace directly
@@ -379,7 +457,7 @@ The remaining parity work is feature-first. Do not treat this section as a reque
 - [x] Batch DU adds bounded post-DP operator debugging and recovery-control receipts with `post_dp_operator_debugging_recovery_control_v1`, `dense_long_work_debugging_v2`, `operator_recovery_slo_v3`, `operator_effort_reduction_v2`, `authority_transfer_integrity_v2`, `operator_audit_accessibility_v2`, `operator_control_false_claim_scan_v2`, and `/api/operator/post-dp-operator-debugging-recovery-control`, while solved operator-control, best/world-class cockpit, approval-transfer solved, tamper-proof audit, formal-certification, production-ready, full-parity, and exceeded-reference-system wording remain blocked.
 - [x] Batch DV adds bounded post-DP capability marketplace lifecycle gap-closure receipts with `post_dp_capability_marketplace_lifecycle_gap_closure_v1`, `marketplace_lifecycle_operations_v3`, `package_review_waiver_policy_v2`, `marketplace_vulnerability_monitoring_v2`, `hostile_package_lifecycle_gauntlet_v3`, `marketplace_rollback_quarantine_diagnostics_v2`, `marketplace_secure_host_audit_integration_v1`, `marketplace_lifecycle_false_claim_scan_v2`, and `/api/operator/post-dp-marketplace-lifecycle-gap-closure`, while production-secure marketplace, solved third-party package security, formal package-security certification, full marketplace parity, ecosystem superiority, production-ready, full-parity, and exceeded-reference-system wording remain blocked.
 - [ ] The biggest gaps against the reference systems are now missing or immature user-facing capabilities, not another proof layer. Durable orchestration still needs calmer multi-session resume/recovery behavior. Secure capability-host isolation still needs stronger usable boundary controls and recovery. Reach and voice/media still need selected daily-use channel flows that survive outage, consent, abuse, and continuity pressure. Guardian learning and memory still need visible behavior improvement, correction, rollback, and provider-conflict handling. Operator debugging and recovery still need cockpit controls that feel like a real mission-control surface. Marketplace lifecycle still needs understandable install/update/rollback/quarantine/diagnostics flows. Browser/computer-use still needs a stronger workbench, session journal, credential/session boundaries, and site-drift recovery behavior. Broad parity, production-ready, superiority, safe browser automation, full browser parity, solved operator-control, secure/private-by-default, memory-superiority, and reference-system-exceedance wording remains blocked until those feature batches ship and a later claim-readiness phase permits exact wording.
-- [ ] The board-backed post-DP and post-DX trains through EF are closed bounded history under parent [#475](https://github.com/seraph-quest/seraph/issues/475). Post-EF work must be a feature-first parity train, not a stronger-proof/control train, until the user-facing parity gaps above are materially implemented.
+- [x] The post-DP/post-DX trains through EF are closed bounded history under parent [#475](https://github.com/seraph-quest/seraph/issues/475); Epic #736 now owns tracked product-reset work.
 
 ## Workstream View
 

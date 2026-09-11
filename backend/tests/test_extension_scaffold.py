@@ -99,6 +99,20 @@ def test_validate_extension_package_rejects_non_package_directory(tmp_path: Path
     assert "no extension manifest found" in str(exc_info.value)
 
 
+def test_validate_extension_package_rejects_unlisted_symlink_before_doctor(tmp_path: Path):
+    package = scaffold_extension_package(
+        tmp_path / "symlink-pack",
+        extension_id="seraph.symlink-pack",
+        display_name="Symlink Pack",
+    )
+    host_file = tmp_path / "host-secret.txt"
+    host_file.write_text("host secret", encoding="utf-8")
+    (package.package_root / "unlisted-link.txt").symlink_to(host_file)
+
+    with pytest.raises(ValueError, match="symlink"):
+        validate_extension_package(package.package_root)
+
+
 def test_scaffold_rejects_existing_manifest(tmp_path: Path):
     package_dir = tmp_path / "existing-pack"
     package_dir.mkdir()

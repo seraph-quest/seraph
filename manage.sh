@@ -15,7 +15,8 @@
 #   ./manage.sh -e [dev|prod] down      - Stop Docker services + daemon.
 #   ./manage.sh -e [dev|prod] logs      - View Docker logs.
 #   ./manage.sh -e [dev|prod] build     - Build or rebuild Docker services.
-#   ./manage.sh -e [dev|prod] local up|down|status|logs|run - Manage the direct local frontend/backend stack.
+#   ./manage.sh -e dev local up|down|status|logs|run - Manage the direct local frontend/backend stack.
+#   ./manage.sh -e prod health --format json - Emit a redacted Epic #736 health receipt.
 #   ./manage.sh -e [dev|prod] daemon start|stop|status|logs - Manage screen daemon.
 #   ./manage.sh -e [dev|prod] proxy start|stop|status|logs  - Manage stdio MCP proxy.
 #
@@ -26,6 +27,11 @@
 #   ./manage.sh -e dev proxy start      - Start stdio-to-HTTP MCP proxy.
 #   ./manage.sh -e dev proxy logs       - Tail proxy log file.
 #   ./manage.sh -e prod down            - Stop everything.
+#   ./manage.sh -e prod backup          - Create a verified workspace archive.
+#   ./manage.sh -e prod restore --archive <archive> --confirm
+#   ./manage.sh -e prod status          - Show the durable lifecycle result.
+#   ./manage.sh -e prod identity        - Print the redacted host bind identity.
+#   ./manage.sh -e prod rollback --restore-id <id> --confirm
 #
 # ==============================================================================
 
@@ -63,7 +69,8 @@ function display_help() {
     echo "          Also stops daemon if running."
     echo "  logs    Follow log output (e.g., 'logs -f backend')."
     echo "  build   Build or rebuild services."
-    echo "  local   Manage the direct local frontend/backend stack: up, down, status, logs, run."
+    echo "  local   Manage the direct local frontend/backend stack (dev only): up, down, status, logs, run."
+    echo "  health  Emit the redacted Epic #736 health receipt (prod only)."
     echo "  daemon  Manage screen daemon: start, stop, status, logs."
     echo "  proxy   Manage stdio-to-HTTP MCP proxy: start, stop, status, logs."
     echo
@@ -80,6 +87,11 @@ function display_help() {
     echo "  $PROG_NAME -e dev proxy start"
     echo "  $PROG_NAME -e dev proxy status"
     echo "  $PROG_NAME -e dev proxy logs"
+    echo "  $PROG_NAME -e prod backup"
+    echo "  $PROG_NAME -e prod restore --archive <archive> --confirm"
+    echo "  $PROG_NAME -e prod status"
+    echo "  $PROG_NAME -e prod identity"
+    echo "  $PROG_NAME -e prod rollback --restore-id <id> --confirm"
 }
 
 function error_exit() {
@@ -343,6 +355,80 @@ function wait_for_pid_and_port() {
     return 1
 }
 
+function service_readiness() {
+    local pid_file="$1"
+    local port="$2"
+    local service="$3"
+    local marker="${4:-}"
+
+    local pid_ready=false
+    local port_ready=false
+    local supervisor_pid=""
+    if pid_is_running "$pid_file" "$marker"; then
+        pid_ready=true
+        supervisor_pid=$(cat "$pid_file")
+    fi
+
+    local listener_pid listener_pids
+    listener_pids=$(pids_listening_on_port "$port")
+    for listener_pid in $listener_pids; do
+        if { [ -n "$supervisor_pid" ] && pid_is_descendant_of "$listener_pid" "$supervisor_pid"; } || seraph_local_port_owner "$listener_pid" "$service"; then
+            port_ready=true
+            break
+        fi
+    done
+
+    if [ "$pid_ready" = true ] && [ "$port_ready" = true ]; then
+        echo "ready"
+    elif [ "$pid_ready" = true ]; then
+        echo "pid_only"
+    elif [ "$port_ready" = true ]; then
+        echo "listener_only"
+    else
+        echo "stopped"
+    fi
+}
+
+function print_local_service_status() {
+    local label="$1"
+    local pid_file="$2"
+    local port="$3"
+    local service="$4"
+    local readiness
+    readiness=$(service_readiness "$pid_file" "$port" "$service")
+
+    case "$readiness" in
+        ready)
+            echo "$label: running (PID $(cat "$pid_file")) -> http://127.0.0.1:$port"
+            ;;
+        pid_only)
+            echo "$label: degraded (PID $(cat "$pid_file"), port $port not listening)"
+            ;;
+        listener_only)
+            echo "$label: degraded (port $port has Seraph listener, PID file missing/stale)"
+            ;;
+        *)
+            echo "$label: stopped"
+            ;;
+    esac
+}
+
+function verify_local_stack_ready() {
+    local backend_ready frontend_ready
+    backend_ready=$(service_readiness "$LOCAL_BACKEND_PID_FILE" "$LOCAL_BACKEND_PORT" backend)
+    frontend_ready=$(service_readiness "$LOCAL_FRONTEND_PID_FILE" "$LOCAL_FRONTEND_PORT" frontend)
+
+    if [ "$backend_ready" = ready ] && [ "$frontend_ready" = ready ]; then
+        return 0
+    fi
+
+    echo "Local stack readiness check failed after startup:" >&2
+    echo "  backend=$backend_ready (pid_file=$LOCAL_BACKEND_PID_FILE, port=$LOCAL_BACKEND_PORT)" >&2
+    echo "  frontend=$frontend_ready (pid_file=$LOCAL_FRONTEND_PID_FILE, port=$LOCAL_FRONTEND_PORT)" >&2
+    echo "Use './manage.sh -e $ENV local run' for managed-shell live observation." >&2
+    return 1
+}
+
 # --- Daemon Functions ---
 function daemon_is_running() {
     if [ -f "$DAEMON_PID_FILE" ]; then
@@ -528,6 +614,48 @@ function proxy_logs() {
     tail -f "$PROXY_LOG_FILE"
 }
 
+# --- Production workspace lifecycle ---
+function production_workspace_lifecycle() {
+    local lifecycle_command="$1"
+    shift
+    if [ "$ENV" != "prod" ]; then
+        echo "Error: production workspace lifecycle commands are production-only." >&2
+        return 1
+    fi
+
+    # The dependency-free CLI resolves BACKEND_DATA_PATH_PROD on the host,
+    # verifies the one canonical owner, and keeps backup/restore sidecars next
+    # to that bind. It deliberately does not start Docker or contact a
+    # provider.
+    PYTHONPATH="$SCRIPT_DIR/backend${PYTHONPATH:+:$PYTHONPATH}" \
+        python3 "$SCRIPT_DIR/backend/workspace_cli.py" \
+        --base-dir "$SCRIPT_DIR" "$lifecycle_command" "$@"
+}
+
+function refresh_production_bind_identity() {
+    # A restore or rollback atomically replaces the workspace directory and
+    # therefore changes its inode. Derive the current redacted identity on
+    # every managed production start so the container check remains strict
+    # without leaving operators to edit a stale env value by hand.
+    local identity_json identity
+    if ! identity_json=$(
+        PYTHONPATH="$SCRIPT_DIR/backend${PYTHONPATH:+:$PYTHONPATH}" \
+            python3 "$SCRIPT_DIR/backend/workspace_cli.py" \
+            --base-dir "$SCRIPT_DIR" identity
+    ); then
+        echo "Error: unable to derive the production bind identity; workspace startup is blocked." >&2
+        return 1
+    fi
+    identity=$(printf '%s' "$identity_json" | python3 -c \
+        'import json, sys; print(json.load(sys.stdin).get("bind_identity", ""))')
+    if [[ ! "$identity" =~ ^[0-9a-f]{24}$ ]]; then
+        echo "Error: production bind identity receipt is invalid; workspace startup is blocked." >&2
+        return 1
+    fi
+    export SERAPH_PRODUCTION_BIND_IDENTITY="$identity"
+    echo "Production bind identity refreshed for managed startup."
+}
+
 # --- Local Stack Functions ---
 function local_backend_is_running() {
     pid_is_running "$LOCAL_BACKEND_PID_FILE"
@@ -535,6 +663,15 @@ function local_backend_is_running() {
 
 function local_frontend_is_running() {
     pid_is_running "$LOCAL_FRONTEND_PID_FILE"
+}
+
+function reject_prod_local_stack() {
+    if [ "$ENV" = "prod" ]; then
+        echo "Error: '$PROG_NAME -e prod local' is unsupported: production authentication requires HTTPS, while the managed local stack is plain HTTP." >&2
+        echo "Use '$PROG_NAME -e prod up -d' behind a configured HTTPS ingress after the production preflight passes." >&2
+        return 1
+    fi
+    return 0
 }
 
 function start_local_backend() {
@@ -551,7 +688,7 @@ function start_local_backend() {
     nohup /bin/bash -c '
         cd "$1" || exit 1
         export WORKSPACE_DIR="$2" LLM_LOG_DIR="$3" UV_CACHE_DIR="$4" DEFAULT_MODEL="$5" SERAPH_LOCAL_SERVICE=backend
-        exec uv run uvicorn src.app:create_app --factory --host 0.0.0.0 --port "$6"
+        exec uv run uvicorn src.app:create_app --factory --host 127.0.0.1 --port "$6"
     ' seraph-local-backend "$SCRIPT_DIR/backend" "$LOCAL_WORKSPACE_DIR" "$LOCAL_LLM_LOG_DIR" "$LOCAL_UV_CACHE_DIR" "$LOCAL_DEFAULT_MODEL" "$LOCAL_BACKEND_PORT" </dev/null >> "$LOCAL_BACKEND_LOG_FILE" 2>&1 &
     local pid=$!
     echo "$pid" > "$LOCAL_BACKEND_PID_FILE"
@@ -578,9 +715,9 @@ function start_local_frontend() {
         cd "$1" || exit 1
         export VITE_API_URL="$2" VITE_WS_URL="$3" SERAPH_LOCAL_SERVICE=frontend
         if [ -x ./node_modules/.bin/vite ]; then
-            exec ./node_modules/.bin/vite --host 0.0.0.0 --port "$4"
+            exec ./node_modules/.bin/vite --host 127.0.0.1 --port "$4"
         fi
-        exec npm run dev -- --host 0.0.0.0 --port "$4"
+        exec npm run dev -- --host 127.0.0.1 --port "$4"
     ' seraph-local-frontend "$SCRIPT_DIR/frontend" "/api" "ws://127.0.0.1:$LOCAL_BACKEND_PORT/ws/chat" "$LOCAL_FRONTEND_PORT" </dev/null >> "$LOCAL_FRONTEND_LOG_FILE" 2>&1 &
     local pid=$!
     echo "$pid" > "$LOCAL_FRONTEND_PID_FILE"
@@ -594,6 +731,9 @@ function start_local_frontend() {
 }
 
 function local_up() {
+    if ! reject_prod_local_stack; then
+        return 1
+    fi
     ensure_runtime_dirs
     if ! start_local_backend; then
         echo "Local stack failed: backend did not start cleanly." >&2
@@ -603,6 +743,9 @@ function local_up() {
         echo "Local stack failed: frontend did not start cleanly; stopping backend." >&2
         stop_pid "$LOCAL_BACKEND_PID_FILE" "Local backend"
         stop_port_listeners "$LOCAL_BACKEND_PORT" "Local backend" backend || true
+        return 1
+    fi
+    if ! verify_local_stack_ready; then
         return 1
     fi
     echo "Local stack is running: frontend http://127.0.0.1:$LOCAL_FRONTEND_PORT, backend http://127.0.0.1:$LOCAL_BACKEND_PORT"
@@ -624,21 +767,16 @@ function local_down() {
 }
 
 function local_status() {
+    if ! reject_prod_local_stack; then
+        return 1
+    fi
     echo "Environment: $ENV"
     echo "Env file: $ENV_FILE"
     echo "Default model: ${DEFAULT_MODEL:-openrouter/anthropic/claude-sonnet-4}"
     echo "Workspace dir: $LOCAL_WORKSPACE_DIR"
     echo "LLM log dir: $LOCAL_LLM_LOG_DIR"
-    if local_backend_is_running; then
-        echo "Local backend: running (PID $(cat "$LOCAL_BACKEND_PID_FILE")) -> http://127.0.0.1:$LOCAL_BACKEND_PORT"
-    else
-        echo "Local backend: stopped"
-    fi
-    if local_frontend_is_running; then
-        echo "Local frontend: running (PID $(cat "$LOCAL_FRONTEND_PID_FILE")) -> http://127.0.0.1:$LOCAL_FRONTEND_PORT"
-    else
-        echo "Local frontend: stopped"
-    fi
+    print_local_service_status "Local backend" "$LOCAL_BACKEND_PID_FILE" "$LOCAL_BACKEND_PORT" backend
+    print_local_service_status "Local frontend" "$LOCAL_FRONTEND_PID_FILE" "$LOCAL_FRONTEND_PORT" frontend
     if daemon_is_running; then
         echo "Screen daemon: running (PID $(cat "$DAEMON_PID_FILE"))"
     else
@@ -678,6 +816,10 @@ function local_run() {
     fi
     local_logs all
 }
+
+if [ "${SERAPH_MANAGE_SOURCE_ONLY:-false}" = "true" ]; then
+    return 0 2>/dev/null || exit 0
+fi
 
 # --- Main Script Logic ---
 
@@ -758,7 +900,7 @@ if [[ "$LOCAL_WORKSPACE_DIR" != /* ]]; then
 fi
 LOCAL_LLM_LOG_DIR="${LOCAL_LLM_LOG_DIR:-/tmp/seraph-dev-logs}"
 LOCAL_UV_CACHE_DIR="${LOCAL_UV_CACHE_DIR:-/tmp/uv-cache}"
-LOCAL_DEFAULT_MODEL="${LOCAL_DEFAULT_MODEL:-${DEFAULT_MODEL:-codex-local}}"
+LOCAL_DEFAULT_MODEL="${LOCAL_DEFAULT_MODEL:-${DEFAULT_MODEL:-openrouter/anthropic/claude-sonnet-4}}"
 SCREEN_CAPTURE_ARCHIVE_DIR="${SCREEN_CAPTURE_ARCHIVE_DIR:-$LOCAL_WORKSPACE_DIR/artifacts/screen-captures}"
 SERAPH_SCREEN_CAPTURE_ARCHIVE_DIR="${SERAPH_SCREEN_CAPTURE_ARCHIVE_DIR:-$SCREEN_CAPTURE_ARCHIVE_DIR}"
 SERAPH_DAEMON_STATUS_FILE="${SERAPH_DAEMON_STATUS_FILE:-$LOCAL_WORKSPACE_DIR/daemon-status.json}"
@@ -768,32 +910,53 @@ if [ "$COMMAND" = "local" ]; then
     DEFAULT_MODEL="$LOCAL_DEFAULT_MODEL"
 fi
 
+# The health collector is intentionally outside Docker Compose.  It reads
+# deployment configuration/source contracts and writes through the canonical
+# production workspace resolver; it never contacts OpenRouter, the GPU/VLM
+# edge, or a connector.
+if [ "$COMMAND" = "health" ]; then
+    if [ "$ENV" != "prod" ]; then
+        error_exit "'health' is supported only with '-e prod'."
+    fi
+    exec python3 "$SCRIPT_DIR/scripts/epic_736_health.py" "$@"
+fi
+
 # --- Execution ---
 
 if [ "$COMMAND" = "local" ]; then
     LOCAL_SUB="${1:-}"
+    LOCAL_EXIT_STATUS=0
     case "$LOCAL_SUB" in
         up)
-            local_up
+            local_up || LOCAL_EXIT_STATUS=$?
             ;;
         run)
-            local_run
+            local_run || LOCAL_EXIT_STATUS=$?
             ;;
         down)
-            local_down
+            local_down || LOCAL_EXIT_STATUS=$?
             ;;
         status)
-            local_status
+            local_status || LOCAL_EXIT_STATUS=$?
             ;;
         logs)
             shift || true
-            local_logs "${1:-all}"
+            local_logs "${1:-all}" || LOCAL_EXIT_STATUS=$?
             ;;
         *)
             error_exit "Unknown local subcommand '$LOCAL_SUB'. Use: up, down, status, logs, run"
             ;;
     esac
-    exit 0
+    exit "$LOCAL_EXIT_STATUS"
+fi
+
+if [ "$ENV" = "prod" ] && [ "$COMMAND" = "up" ]; then
+    refresh_production_bind_identity || exit $?
+fi
+
+if [ "$COMMAND" = "backup" ] || [ "$COMMAND" = "restore" ] || [ "$COMMAND" = "status" ] || [ "$COMMAND" = "identity" ] || [ "$COMMAND" = "rollback" ]; then
+    production_workspace_lifecycle "$COMMAND" "$@"
+    exit $?
 fi
 
 # Handle proxy subcommand

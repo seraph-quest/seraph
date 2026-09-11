@@ -4,7 +4,9 @@ from typing import Optional
 
 from smolagents import tool
 
-from src.goals.repository import goal_repository
+from src.approval.runtime import get_current_session_id, get_current_trust_principal
+from src.goals.repository import GoalOwnershipConflict, goal_repository
+from src.security.trust_contract import AuthorityGrant, PrincipalType
 
 
 def _run(coro):
@@ -15,6 +17,42 @@ def _run(coro):
     """
     with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
         return pool.submit(asyncio.run, coro).result()
+
+
+def _authenticated_goal_owner() -> tuple[str, str]:
+    """Resolve the canonical owner from the current agent execution context."""
+
+    principal = get_current_trust_principal()
+    principal_type = getattr(principal, "principal_type", None)
+    if isinstance(principal_type, PrincipalType):
+        is_operator = principal_type is PrincipalType.OPERATOR
+    else:
+        is_operator = str(principal_type or "").lower() == PrincipalType.OPERATOR.value
+    principal_id = str(getattr(principal, "principal_id", "") or "").strip()
+    conversation_session = str(get_current_session_id() or "").strip()
+    principal_session = str(getattr(principal, "session_id", "") or "").strip()
+    owner_session = str(
+        getattr(principal, "operator_session_id", "")
+        or principal_session
+        or conversation_session
+    ).strip()
+    grants = set(getattr(principal, "grants", ()) or ())
+    grants = {str(getattr(grant, "value", grant)) for grant in grants}
+    if not (
+        principal is not None
+        and is_operator
+        and bool(getattr(principal, "authenticated", False))
+        and not bool(getattr(principal, "revoked", False))
+        and principal_id
+        and owner_session
+        and AuthorityGrant.CAPABILITY_EXECUTE.value in grants
+    ):
+        raise PermissionError(
+            "goal tools require an authenticated operator execution context"
+        )
+    if principal_session and conversation_session and principal_session != conversation_session:
+        raise PermissionError("goal tools runtime session is not bound to the authenticated principal")
+    return principal_id, owner_session
 
 
 @tool
@@ -44,37 +82,71 @@ def create_goal(
     """
     from datetime import datetime
 
+    owner_principal_id, owner_session_id = _authenticated_goal_owner()
     due = datetime.fromisoformat(due_date) if due_date else None
     pid = parent_id if parent_id else None
 
-    goal = _run(goal_repository.create(
-        title=title,
-        level=level,
-        domain=domain,
-        parent_id=pid,
-        description=description or None,
-        due_date=due,
-    ))
+    try:
+        goal = _run(goal_repository.create(
+            title=title,
+            level=level,
+            domain=domain,
+            parent_id=pid,
+            description=description or None,
+            due_date=due,
+            owner_principal_id=owner_principal_id,
+            owner_session_id=owner_session_id,
+        ))
+    except GoalOwnershipConflict as exc:
+        raise PermissionError(str(exc)) from exc
     return f"Goal created: '{goal.title}' (id={goal.id}, level={goal.level}, domain={goal.domain})"
 
 
 @tool
-def update_goal(goal_id: str, status: str = "", title: str = "") -> str:
+def update_goal(
+    goal_id: str,
+    status: str = "",
+    title: str = "",
+    expected_revision: int = 0,
+    parent_id: str = "",
+) -> str:
     """Update a goal's status or title.
 
     Args:
         goal_id: The ID of the goal to update.
         status: New status — one of: active, completed, paused, abandoned. Leave empty to keep current.
         title: New title. Leave empty to keep current.
+        expected_revision: Current goal revision required for the compare-and-swap update.
+        parent_id: Optional new parent goal ID. Leave empty to keep the current parent.
 
     Returns:
         Confirmation message.
     """
-    goal = _run(goal_repository.update(
-        goal_id=goal_id,
-        status=status or None,
-        title=title or None,
-    ))
+    owner_principal_id, owner_session_id = _authenticated_goal_owner()
+    if isinstance(expected_revision, bool) or int(expected_revision or 0) < 1:
+        raise ValueError("expected_revision is required for goal updates")
+    current = _run(goal_repository.get(goal_id))
+    if not current:
+        return f"Goal '{goal_id}' not found."
+    if (
+        str(getattr(current, "owner_principal_id", "") or "").strip() != owner_principal_id
+        or str(getattr(current, "owner_session_id", "") or "").strip() != owner_session_id
+    ):
+        raise PermissionError("goal owner/session does not match the authenticated operator")
+    update_kwargs = {
+        "goal_id": goal_id,
+        "status": status or None,
+        "title": title or None,
+        "expected_revision": int(expected_revision),
+        "expected_owner_principal_id": owner_principal_id,
+        "expected_owner_session_id": owner_session_id,
+    }
+    if parent_id:
+        update_kwargs["parent_id"] = parent_id
+    try:
+        goal = _run(goal_repository.update(**update_kwargs))
+    except GoalOwnershipConflict as exc:
+        raise PermissionError(str(exc)) from exc
     if not goal:
         return f"Goal '{goal_id}' not found."
     return f"Goal updated: '{goal.title}' is now {goal.status}."
@@ -92,10 +164,13 @@ def get_goals(level: str = "", domain: str = "", status: str = "active") -> str:
     Returns:
         Formatted list of goals.
     """
+    owner_principal_id, owner_session_id = _authenticated_goal_owner()
     goals = _run(goal_repository.list_goals(
         level=level or None,
         domain=domain or None,
         status=status or None,
+        owner_principal_id=owner_principal_id,
+        owner_session_id=owner_session_id,
     ))
     if not goals:
         return "No goals found matching the criteria."
@@ -114,7 +189,11 @@ def get_goal_progress() -> str:
     Returns:
         Dashboard summary with progress per domain and overall stats.
     """
-    dashboard = _run(goal_repository.get_dashboard())
+    owner_principal_id, owner_session_id = _authenticated_goal_owner()
+    dashboard = _run(goal_repository.get_dashboard(
+        owner_principal_id=owner_principal_id,
+        owner_session_id=owner_session_id,
+    ))
 
     if dashboard["total_count"] == 0:
         return "No goals set yet. Let's define some goals together!"

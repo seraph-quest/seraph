@@ -683,7 +683,9 @@ Rule of thumb:
 
 ## Recommended Execution Plan
 
-Canonical slice ownership lives in `docs/implementation/00-master-roadmap.md`.
+Historical slice ownership is preserved in Git history. Current product
+direction belongs to the Project Constitution; execution ownership belongs to
+the GitHub Project and tracked issues.
 This section groups the same transition into phases so the architectural logic
 stays readable without duplicating a competing queue.
 

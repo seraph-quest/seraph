@@ -1,5 +1,6 @@
 import { useState, useEffect } from "react";
 import { API_URL } from "../../config/constants";
+import { apiFetch } from "../../lib/api";
 import { useChatStore } from "../../stores/chatStore";
 
 type ToolPolicyMode = "safe" | "balanced" | "full";
@@ -15,7 +16,7 @@ export function ToolPolicyModeToggle() {
   const [loading, setLoading] = useState(false);
 
   useEffect(() => {
-    fetch(`${API_URL}/api/settings/tool-policy-mode`)
+    apiFetch(`${API_URL}/api/settings/tool-policy-mode`)
       .then((r) => r.ok ? r.json() : null)
       .then((data) => {
         if (data?.mode) setMode(data.mode);
@@ -27,7 +28,7 @@ export function ToolPolicyModeToggle() {
     if (m === mode || loading) return;
     setLoading(true);
     try {
-      const res = await fetch(`${API_URL}/api/settings/tool-policy-mode`, {
+      const res = await apiFetch(`${API_URL}/api/settings/tool-policy-mode`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ mode: m }),

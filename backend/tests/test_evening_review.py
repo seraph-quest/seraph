@@ -5,6 +5,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+pytestmark = pytest.mark.usefixtures("mocked_canonical_inference_context")
+
 from src.audit.repository import audit_repository
 from src.observer.context import CurrentContext
 from src.scheduler.jobs.evening_review import (

@@ -4,16 +4,20 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import urlparse
 
-from src.approval.runtime import get_current_session_id
+from src.approval.runtime import get_current_session_id, get_current_trust_principal
+from src.auth.cancellation import assert_runtime_not_revoked
 from src.browser.sessions import browser_session_runtime
 from src.extensions.source_capabilities import list_source_capability_inventory
 from src.audit.runtime import log_integration_event_sync
 from src.tools.browser_tool import browse_webpage
 from src.tools.mcp_manager import mcp_manager
+from src.tools.approval import require_capability_authority
 from src.tools.web_search_tool import search_web_records
+from src.security.site_policy import evaluate_site_access
+from config.settings import settings
 
 
 def _utc_now() -> str:
@@ -41,6 +45,17 @@ def _is_error_result(value: object) -> bool:
 def _parse_hostname(url: str) -> str:
     parsed = urlparse(url)
     return parsed.hostname or ""
+
+
+def _test_destination_granted(url: str, grant: str | None) -> bool:
+    """Allow one exact loopback destination only for injected test transport."""
+
+    return (
+        settings.deployment_environment == "test"
+        and isinstance(grant, str)
+        and grant == f"goal-local-source:{url}"
+        and _parse_hostname(url) in {"127.0.0.1", "::1", "localhost"}
+    )
 
 
 @dataclass(frozen=True)
@@ -1866,7 +1881,29 @@ def collect_source_evidence_bundle(
     session_id: str = "",
     owner_session_id: str = "",
     max_results: int = 5,
+    transport: Callable[[str], object] | None = None,
+    test_destination_grant: str | None = None,
 ) -> dict[str, Any]:
+    # This adapter is also called directly by the public capabilities API, so
+    # the factory's AuthorityTool wrapper cannot be its only trust boundary.
+    # Check the authenticated runtime principal before inventory lookup or any
+    # provider/MCP dispatch.  The shared helper keeps denial content-free.
+    require_capability_authority(
+        session_id=get_current_session_id(),
+        principal=get_current_trust_principal(),
+        tool_name="collect_source_evidence",
+        arguments={
+            "contract": contract,
+            "source": source,
+            "query": query,
+            "url": url,
+            "ref": ref,
+            "session_id": session_id,
+            "owner_session_id": owner_session_id,
+            "max_results": max_results,
+            "transport_injected": transport is not None,
+        },
+    )
     inventory = list_source_capability_inventory()
     adapter_inventory = list_source_adapter_inventory(inventory)
     adapters = adapter_inventory["adapters"]
@@ -1921,6 +1958,12 @@ def collect_source_evidence_bundle(
         response["next_best_sources"] = list(selected_adapter.get("next_best_sources") or [])
         return response
 
+    if bool(selected_operation.get("mutating")) or _is_mutating_contract(contract):
+        response["status"] = "failed"
+        response["warnings"].append("Source evidence collection does not execute mutating contracts.")
+        response["next_best_sources"] = list(selected_adapter.get("next_best_sources") or [])
+        return response
+
     if not bool(selected_operation.get("executable")):
         reason = str(selected_operation.get("reason") or selected_adapter.get("degraded_reason") or "unavailable")
         response["warnings"].append(
@@ -1935,6 +1978,7 @@ def collect_source_evidence_bundle(
             response["status"] = "failed"
             response["warnings"].append("web_search evidence collection requires a non-empty query.")
             return response
+        assert_runtime_not_revoked()
         records, blocked = search_web_records(query.strip(), max_results=max_results)
         response["items"] = [_build_search_item(record, source_name) for record in records]
         if blocked:
@@ -1947,12 +1991,43 @@ def collect_source_evidence_bundle(
             response["status"] = "failed"
             response["warnings"].append("browse_webpage evidence collection requires an explicit URL.")
             return response
-        content = browse_webpage(url.strip(), action="extract")
+        assert_runtime_not_revoked()
+        requested_url = url.strip()
+        if transport is None:
+            content = browse_webpage(requested_url, action="extract")
+        else:
+            # The production adapter and site policy still own source
+            # selection and destination checks.  Tests may inject only the
+            # HTTP transport, and only with a grant bound to this exact URL;
+            # production callers cannot use this loopback exception.
+            site_decision = evaluate_site_access(requested_url, resolve_dns=True)
+            exact_test_grant = _test_destination_granted(
+                requested_url,
+                test_destination_grant,
+            )
+            if (
+                not site_decision.allowed
+                and not (
+                    exact_test_grant
+                    and site_decision.reason == "internal_private"
+                )
+            ):
+                response["status"] = "failed"
+                response["warnings"].append(
+                    f"Source destination denied by site policy ({site_decision.reason or 'unknown'})."
+                )
+                return response
+            try:
+                content = transport(requested_url)
+            except Exception as exc:
+                response["status"] = "failed"
+                response["warnings"].append(f"Injected source transport failed: {type(exc).__name__}")
+                return response
         if _is_error_result(content):
             response["status"] = "failed"
             response["warnings"].append(str(content))
             return response
-        response["items"] = [_build_page_item(url.strip(), str(content), source_name)]
+        response["items"] = [_build_page_item(requested_url, str(content), source_name)]
         response["status"] = "ok"
     elif source_name == "browser_session":
         runtime_owner_session_id = get_current_session_id()
@@ -1976,6 +2051,7 @@ def collect_source_evidence_bundle(
             response["status"] = "failed"
             response["warnings"].append("The requested browser session ref or session_id was not found.")
             return response
+        assert_runtime_not_revoked()
         response["items"] = [_build_browser_item(payload, source_name)]
         response["status"] = "ok"
     elif selected_adapter["source_kind"] == "managed_connector":
@@ -1995,6 +2071,7 @@ def collect_source_evidence_bundle(
             )
             response["next_best_sources"] = list(selected_adapter.get("next_best_sources") or [])
             return response
+        assert_runtime_not_revoked()
         try:
             raw_result = _invoke_mcp_query(
                 tool,

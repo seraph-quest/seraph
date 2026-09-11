@@ -14,7 +14,7 @@ M0 claim gate:
 
 ## Paired Research
 
-- design source of truth: [11. Superiority Program](/research/superiority-program)
+- historical design evidence: [11. Superiority Program](/research/superiority-program)
 - benchmark input: [10. Competitive Benchmark](/research/competitive-benchmark)
 - M0 competitor truth: [18. Agent Competition Truth Table](/research/agent-competition-truth-table)
 - M0 claim and wording gate: [19. Strategy Claim Ledger](/research/strategy-claim-ledger)
@@ -37,11 +37,11 @@ This file explains:
 
 ## Docs Contract
 
-- [x] `docs/research/00-synthesis.md` defines the target product shape.
+- [x] the Project Constitution and ADRs solely define the accepted target; research supplies evidence only.
 - [x] `docs/research/10-competitive-benchmark.md` owns the evidence-backed comparison.
 - [x] `docs/research/11-superiority-program.md` owns the design-level program of work.
 - [x] `docs/implementation/STATUS.md` owns the fastest shipped snapshot.
-- [x] `docs/implementation/00-master-roadmap.md` owns the strategic implementation program and completed-program record.
+- [x] `docs/implementation/00-master-roadmap.md` is a historical summary; GitHub owns execution state.
 - [x] the GitHub Project, issues, and PRs own live execution, review, and merge state.
 - [x] This file owns the translation from benchmark/program gaps into implementation workstreams and delivery ownership.
 

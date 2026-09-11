@@ -27,6 +27,65 @@ class TestFilesystemTool:
         with pytest.raises(ValueError, match="Path traversal blocked"):
             _safe_resolve("../../etc/passwd")
 
+    @pytest.mark.parametrize(
+        ("operation", "file_path"),
+        (
+            ("read", "alias.txt"),
+            ("write", "alias.txt"),
+            ("preview", "alias.txt"),
+            ("apply", "alias.txt"),
+            ("read", "alias-dir/file.txt"),
+            ("write", "alias-dir/file.txt"),
+            ("preview", "alias-dir/file.txt"),
+            ("apply", "alias-dir/file.txt"),
+        ),
+    )
+    def test_filesystem_operations_reject_workspace_symlinks(
+        self, tmp_path, monkeypatch, operation, file_path
+    ):
+        monkeypatch.setattr("src.tools.filesystem_tool.settings.workspace_dir", str(tmp_path))
+        target = tmp_path / "target.txt"
+        target.write_text("before\n", encoding="utf-8")
+        (tmp_path / "alias.txt").symlink_to(target)
+        target_dir = tmp_path / "target-dir"
+        target_dir.mkdir()
+        (target_dir / "file.txt").write_text("before\n", encoding="utf-8")
+        (tmp_path / "alias-dir").symlink_to(target_dir, target_is_directory=True)
+
+        with pytest.raises(ValueError, match="Symlink traversal blocked"):
+            if operation == "read":
+                read_file.forward(file_path)
+            elif operation == "write":
+                write_file.forward(file_path, "after\n")
+            elif operation == "preview":
+                preview_workspace_patch.forward(file_path, "before", "after")
+            else:
+                apply_workspace_patch.forward(file_path, "before", "after")
+
+        assert target.read_text(encoding="utf-8") == "before\n"
+        assert (target_dir / "file.txt").read_text(encoding="utf-8") == "before\n"
+
+    def test_read_file_symlink_block_emits_blocked_receipt(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("src.tools.filesystem_tool.settings.workspace_dir", str(tmp_path))
+        target = tmp_path / "target.txt"
+        target.write_text("safe\n", encoding="utf-8")
+        (tmp_path / "alias.txt").symlink_to(target)
+
+        with patch("src.tools.filesystem_tool.log_integration_event_sync") as log_event:
+            with pytest.raises(ValueError, match="Symlink traversal blocked"):
+                read_file.forward("alias.txt")
+
+        log_event.assert_called_once_with(
+            integration_type="filesystem",
+            name="workspace",
+            outcome="blocked",
+            details={
+                "file_path": "alias.txt",
+                "operation": "read",
+                "error": "Symlink traversal blocked: alias.txt",
+            },
+        )
+
     def test_read_file_not_found(self, tmp_path, monkeypatch):
         monkeypatch.setattr("src.tools.filesystem_tool.settings.workspace_dir", str(tmp_path))
         result = read_file.forward("nonexistent.txt")
@@ -95,6 +154,27 @@ class TestFilesystemTool:
         write_file.forward("sub/dir/file.txt", "nested content")
         assert (tmp_path / "sub" / "dir" / "file.txt").read_text() == "nested content"
 
+    def test_write_rejects_oversized_input_before_open(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("src.tools.filesystem_tool.settings.workspace_dir", str(tmp_path))
+
+        with pytest.raises(ValueError, match="file content exceeds"):
+            write_file.forward("too-large.txt", "x" * (1 * 1024 * 1024 + 1))
+
+        assert not (tmp_path / "too-large.txt").exists()
+
+    def test_write_fails_closed_when_final_target_is_replaced_by_symlink(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("src.tools.filesystem_tool.settings.workspace_dir", str(tmp_path))
+        outside = tmp_path / "outside.txt"
+        outside.write_text("must remain unchanged", encoding="utf-8")
+        swapped = tmp_path / "swapped.txt"
+        swapped.symlink_to(outside)
+
+        with patch("src.tools.filesystem_tool._safe_resolve", return_value=swapped):
+            result = write_file.forward("swapped.txt", "attacker content")
+
+        assert "Failed to write file" in result
+        assert outside.read_text(encoding="utf-8") == "must remain unchanged"
+
     def test_preview_workspace_patch_returns_diff_without_writing(self, tmp_path, monkeypatch):
         monkeypatch.setattr("src.tools.filesystem_tool.settings.workspace_dir", str(tmp_path))
         (tmp_path / "notes.md").write_text("alpha\nbeta\n", encoding="utf-8")
@@ -109,6 +189,19 @@ class TestFilesystemTool:
         assert receipt["artifact"]["content_sha256"] == receipt["after_sha256"]
         assert "+gamma" in receipt["diff"]
         assert (tmp_path / "notes.md").read_text(encoding="utf-8") == "alpha\nbeta\n"
+
+    def test_patch_rejects_oversized_input_before_read_or_write(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("src.tools.filesystem_tool.settings.workspace_dir", str(tmp_path))
+        (tmp_path / "notes.md").write_text("alpha\n", encoding="utf-8")
+
+        with pytest.raises(ValueError, match="new_text exceeds"):
+            preview_workspace_patch.forward(
+                "notes.md",
+                "alpha",
+                "x" * (1 * 1024 * 1024 + 1),
+            )
+
+        assert (tmp_path / "notes.md").read_text(encoding="utf-8") == "alpha\n"
 
     def test_apply_workspace_patch_writes_and_logs_receipt(self, tmp_path, monkeypatch, async_db):
         monkeypatch.setattr("src.tools.filesystem_tool.settings.workspace_dir", str(tmp_path))
@@ -217,7 +310,7 @@ class TestFilesystemTool:
 
     def test_write_file_failure_logs_runtime_audit(self, tmp_path, monkeypatch, async_db):
         monkeypatch.setattr("src.tools.filesystem_tool.settings.workspace_dir", str(tmp_path))
-        with patch("pathlib.Path.write_text", side_effect=PermissionError("denied")):
+        with patch("src.tools.filesystem_tool._open_workspace_text", side_effect=PermissionError("denied")):
             result = write_file.forward("blocked.txt", "secret")
 
         assert "Failed to write file" in result
@@ -235,7 +328,7 @@ class TestFilesystemTool:
         monkeypatch.setattr("src.tools.filesystem_tool.settings.workspace_dir", str(tmp_path))
         (tmp_path / "broken.txt").write_text("hello", encoding="utf-8")
 
-        with patch("pathlib.Path.read_text", side_effect=OSError("boom")):
+        with patch("src.tools.filesystem_tool._read_workspace_text_bounded", side_effect=OSError("boom")):
             result = read_file.forward("broken.txt")
 
         assert "Failed to read file" in result

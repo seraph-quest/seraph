@@ -274,7 +274,7 @@ class TestMcpSpecialist:
 
     @patch("src.agent.specialists.ToolCallingAgent")
     @patch("src.agent.specialists.LiteLLMModel")
-    def test_uses_local_profile_for_dynamic_runtime_path(self, mock_model_cls, mock_agent_cls):
+    def test_uses_openrouter_profile_for_dynamic_runtime_path(self, mock_model_cls, mock_agent_cls):
         mock_model_cls.return_value = MagicMock()
         mock_agent_cls.return_value = MagicMock()
         tool = MagicMock()
@@ -284,6 +284,7 @@ class TestMcpSpecialist:
             patch.object(settings, "default_model", "openrouter/anthropic/claude-sonnet-4"),
             patch.object(settings, "llm_api_key", "primary-key"),
             patch.object(settings, "llm_api_base", "https://openrouter.ai/api/v1"),
+            patch.object(settings, "openrouter_api_key", "openrouter-key"),
             patch.object(settings, "local_model", "ollama/llama3.2"),
             patch.object(settings, "local_llm_api_key", ""),
             patch.object(settings, "local_llm_api_base", "http://localhost:11434/v1"),
@@ -292,8 +293,9 @@ class TestMcpSpecialist:
             create_mcp_specialist("things3", [tool], description="Task manager")
 
         call_kwargs = mock_model_cls.call_args[1]
-        assert call_kwargs["model_id"] == "ollama/llama3.2"
-        assert call_kwargs["api_base"] == "http://localhost:11434/v1"
+        assert call_kwargs["model_id"] == "openrouter/anthropic/claude-sonnet-4"
+        assert call_kwargs["api_base"] == "https://openrouter.ai/api/v1"
+        assert call_kwargs["api_key"] == "openrouter-key"
 
 
 class TestBuildAllSpecialists:

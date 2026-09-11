@@ -1,7 +1,12 @@
-# ------------------------------------------------------------------
-#         Infrastructure Services (Third-Party)
-# ------------------------------------------------------------------
-# Defines the core third-party services like databases and message queues.
+# CPU-host production core.
+#
+# The browser-facing local stack is managed by ``manage.sh ... local``.  This
+# compose file keeps the backend on the private Docker network; an ingress or
+# deployment-specific frontend may consume it without publishing the API to
+# the host.  OpenRouter is configured through ``.env.prod`` and is not probed
+# during container startup.
+
+name: seraph-prod
 
 services:
   backend-prod:
@@ -9,16 +14,52 @@ services:
     build:
       context: ./backend
       dockerfile: ./Dockerfile
+    command:
+      - sh
+      - -c
+      - >-
+        python production_preflight.py --format json &&
+        exec uv run uvicorn src.app:create_app --factory --host 0.0.0.0
+        --port 8003 --workers 1 --no-server-header
     volumes:
-      - ${BACKEND_DATA_PATH_PROD}:/app/data
-      - ${BACKEND_LOGS_PATH_PROD}:/app/logs
-      - ./shared:/app/shared
+      - ${BACKEND_DATA_PATH_PROD:-./docker-data/prod/backend/data}:/app/data
+      - ${BACKEND_LOGS_PATH_PROD:-./docker-data/prod/backend/logs}:/app/logs
+      - ./shared:/app/shared:ro
     env_file:
       - .env.prod
+    environment:
+      DEPLOYMENT_ENVIRONMENT: production
+      WORKSPACE_DIR: /app/data
+      SERAPH_PRODUCTION_MOUNT_CHECK: "true"
+      # Set this to the mount source shown by the host/container's
+      # /proc/self/mountinfo for /app/data.  Preflight fails closed when the
+      # configured identity is missing or does not match.
+      SERAPH_PRODUCTION_MOUNT_SOURCE: ${SERAPH_PRODUCTION_MOUNT_SOURCE:-}
+      # Generated on the host from the resolved BACKEND_DATA_PATH_PROD path
+      # plus its device/inode identity; the container compares it with
+      # /app/data before starting the backend.
+      SERAPH_PRODUCTION_BIND_IDENTITY: ${SERAPH_PRODUCTION_BIND_IDENTITY:-}
+      LLM_LOG_DIR: /app/logs
+      LLM_API_BASE: https://openrouter.ai/api/v1
+      OPENROUTER_PROVIDER_ONLY: "true"
+      OPENROUTER_ALLOW_FALLBACKS: "false"
+      LOCAL_LLM_API_BASE: ""
+      SERAPH_VLM_BASE_URL: ""
+      SERAPH_VLM_BACKEND_URL: ""
+      SERAPH_VLM_MODE: ""
     networks:
       - seraph-network-prod
-    ports:
-      - "8003:8003"
+    # ``expose`` documents the service-to-service port without publishing it
+    # on any host interface.  Local operators use the loopback-bound managed
+    # stack, while a deployment ingress can reach this service by name.
+    expose:
+      - "8003"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:8003/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
     restart: unless-stopped
 
 networks:

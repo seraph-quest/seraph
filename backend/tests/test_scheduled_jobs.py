@@ -5,11 +5,12 @@ from smolagents import Tool
 
 from config.settings import settings
 from src.approval.exceptions import ApprovalRequired
-from src.approval.runtime import get_current_session_id
+from src.approval.runtime import get_current_session_id, get_current_trust_principal
 from src.audit.repository import audit_repository
 from src.observer.intervention_policy import DeliveryDecision, InterventionAction, InterventionDecision
 from src.scheduler.scheduled_jobs import execute_scheduled_job, scheduled_job_repository
 from src.db.models import ScheduledJob, Session
+from src.security.trust_contract import AuthorityGrant, PrincipalType
 
 
 class DummyWorkflowTool(Tool):
@@ -21,9 +22,11 @@ class DummyWorkflowTool(Tool):
     def __init__(self):
         super().__init__()
         self.seen_session_id = None
+        self.seen_principal = None
 
     def forward(self, topic: str) -> str:
         self.seen_session_id = get_current_session_id()
+        self.seen_principal = get_current_trust_principal()
         return f"done:{topic}"
 
 
@@ -212,6 +215,14 @@ async def test_execute_scheduled_job_runs_wrapped_workflow_with_session_context(
     assert stored is not None
     assert stored["last_outcome"] == "succeeded"
     assert tool.seen_session_id == "s1"
+    assert tool.seen_principal is not None
+    assert tool.seen_principal.principal_id == "service:scheduled-workflow"
+    assert tool.seen_principal.principal_type is PrincipalType.SERVICE
+    assert tool.seen_principal.grants == (AuthorityGrant.CAPABILITY_EXECUTE,)
+    assert tool.seen_principal.session_id == "s1"
+    assert tool.seen_principal.job_id.startswith("scheduled-job:")
+    assert get_current_session_id() is None
+    assert get_current_trust_principal() is None
 
 
 @pytest.mark.asyncio

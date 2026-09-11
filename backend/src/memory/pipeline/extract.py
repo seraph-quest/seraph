@@ -4,9 +4,9 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from config.settings import settings
-from src.approval.runtime import reset_runtime_context, set_runtime_context
-from src.llm_runtime import prefers_local_runtime_path
+from src.approval.runtime import get_current_trust_principal, reset_runtime_context, set_runtime_context
 from src.memory.types import ConsolidatedMemoryItem, parse_consolidated_memories
+from src.model_fabric.caller_context import build_canonical_inference_context
 
 
 _CONSOLIDATION_PROMPT = """Analyze this conversation and extract key information to remember long-term.
@@ -55,14 +55,26 @@ async def extract_session_memories(
     prompt = _CONSOLIDATION_PROMPT.format(conversation=history_text, soul=soul_context)
     runtime_tokens = None
     try:
-        runtime_tokens = set_runtime_context(session_id, "high_risk")
+        runtime_tokens = set_runtime_context(
+            session_id,
+            "high_risk",
+            trust_principal=get_current_trust_principal(),
+        )
+        transport_messages = [{"role": "user", "content": prompt}]
         response = await completion_fn(
-            messages=[{"role": "user", "content": prompt}],
+            messages=transport_messages,
             temperature=0.3,
             max_tokens=1024,
             timeout=settings.consolidation_llm_timeout,
             runtime_path="session_consolidation",
-            local_runtime_only=prefers_local_runtime_path("session_consolidation"),
+            # Canonical memory synthesis uses the governed OpenRouter route.
+            local_runtime_only=False,
+            request_context=build_canonical_inference_context(
+                "session_consolidation",
+                payload=transport_messages,
+                output_tokens=1024,
+                timeout_seconds=settings.consolidation_llm_timeout,
+            ),
         )
     finally:
         if runtime_tokens is not None:

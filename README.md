@@ -1,263 +1,173 @@
-<h1 align="center">Seraph</h1>
+# Seraph
 
-<p align="center">
-  <strong>An AI guardian that remembers, watches, and acts</strong>
-</p>
+> **Active Epic #736/#775 phase:** Seraph's inference gateway is OpenRouter
+> only. The canonical workspace, API, storage, tools, and UI run on a CPU
+> host; a local model server, CUDA, model weights, and a VLM wrapper are not
+> active prerequisites. This branch remains a migration target until its
+> reviewed PR merges to `develop`; see the [Current App Guide](docs/implementation/12-current-app-guide.md)
+> and [ADR-006](docs/implementation/decisions/006-openrouter-only-inference-phase.md).
 
-<p align="center">
-  <a href="https://github.com/seraph-quest/seraph/actions"><img src="https://github.com/seraph-quest/seraph/actions/workflows/test.yml/badge.svg" alt="Tests" /></a>
-  <img src="https://img.shields.io/badge/python-3.12-blue" alt="Python 3.12" />
-  <img src="https://img.shields.io/badge/react-19-61dafb" alt="React 19" />
-  <img src="https://img.shields.io/badge/license-MIT-green" alt="MIT License" />
-</p>
+Seraph is a local-first proactive guardian: an operator-controlled system that
+understands your goals, observes permitted context, proposes and executes useful
+work, remembers outcomes, and explains what it is doing.
 
-<p align="center">
-  Seraph is a proactive AI system for people who want an agent that can keep state, watch what is happening on the desktop, use tools, run workflows, and surface useful actions instead of waiting for one-off prompts.
-</p>
+Seraph is not the operator's goal. It adapts its behavior and capabilities to
+help with the operator's goals. The canonical product and architecture contract
+is the [Project Constitution](docs/implementation/00-project-constitution.md).
 
-<div align="center">
-  <video src="https://github.com/user-attachments/assets/b4624170-0982-475e-b1ad-709a92a21f24" width="900" controls></video>
-</div>
+## Status
 
-<p align="center">
-  <a href="https://github.com/user-attachments/assets/b4624170-0982-475e-b1ad-709a92a21f24"><strong>Watch the 20-second workspace demo</strong></a>
-</p>
+**Partial:** the current `develop` baseline includes a FastAPI backend, React
+cockpit and settings UI, goals and memory foundations, scheduler jobs, tools and
+workflows, screen observation storage, reports, model routing, approvals, audit
+surfaces, and extension adapters.
 
----
+The accepted target decision and [Epic #736](https://github.com/seraph-quest/seraph/issues/736)
+remain the long-term guardian roadmap. The active #775 migration phase keeps
+the authenticated Seraph core and canonical state on a CPU host and routes
+approved text, vision, and embedding inference through OpenRouter. The older
+GPU-core topology is retained below only as historical evidence until its
+replacement milestones are accepted on `develop`.
 
-## What Seraph Is
+Use these sources in order:
 
-Seraph is a workspace-first AI agent with:
+1. [Project Constitution](docs/implementation/00-project-constitution.md) — what Seraph is and the locked target architecture
+2. [Current App Guide](docs/implementation/12-current-app-guide.md) — how to run the current baseline
+3. [Development Status](docs/implementation/STATUS.md) — detailed shipped and partial capability truth
+4. [Documentation Contract](docs/implementation/08-docs-contract.md) — ownership and status rules
+5. [Research Synthesis](docs/research/00-synthesis.md) — evidence and options, not shipped claims
 
-- persistent identity and long-term memory
-- proactive scheduling, briefings, reviews, and intervention policy
-- tool use, reusable workflows, and plug-and-play MCP server integration
-- a browser cockpit for live operation and inspection
-- an optional macOS daemon for window tracking and OCR-backed screen awareness
+## What Seraph Is For
 
-This repository is for builders and power users who want to run, inspect, and extend a serious guardian prototype rather than a chat-only assistant shell.
+<!-- outcome-use-cases:start -->
+- Turn goals into prioritized plans, scheduled work, and evidence-backed progress reviews.
+- Monitor consented desktop context and produce searchable summaries that help the operator reflect and recover focus.
+- Continuously research operator-selected topics and connect material findings to active goals and decisions.
+- Execute bounded software-engineering and knowledge workflows with approvals, artifacts, checkpoints, and audit receipts.
+- Continue one trusted conversation across the cockpit, paired voice, and paired messaging surfaces.
+<!-- outcome-use-cases:end -->
 
-## Current State
-
-Shipped today on `develop`:
-
-- browser workspace UI, backend APIs, observer daemon, memory, goals, and proactive scheduler foundations
-- 17 built-in tool capabilities plus workflow, starter-pack, skill, and MCP integration surfaces
-- runtime routing, fallback, approval, audit, and policy foundations
-- a dense operator cockpit with activity history, approvals, interventions, and workflow inspection
-
-Still in progress:
-
-- broader native reach beyond the current browser + macOS path
-- stronger long-horizon guardian intelligence and intervention learning
-- deeper execution hardening and richer extension ergonomics
-- a fully complete end-state product; Seraph is usable now, but still under active development
-
-Start with:
-
-- [docs/implementation/STATUS.md](docs/implementation/STATUS.md)
-- [docs/implementation/00-master-roadmap.md](docs/implementation/00-master-roadmap.md)
-- [docs/research/00-synthesis.md](docs/research/00-synthesis.md)
-
-## Quick Start
-
-### Recommended: Local Direct Dev Stack
-
-```bash
-# 1. Configure
-cp env.dev.example .env.dev
-# Edit .env.dev and choose a provider profile.
-# OpenRouter is the default example:
-#   OPENROUTER_API_KEY=your-key-here
-#   DEFAULT_MODEL=openrouter/anthropic/claude-sonnet-4
-
-# 2. Launch
-./manage.sh -e dev local up
-
-# 3. Open
-open http://localhost:3001        # Current shipped browser UI
-open http://localhost:8004/docs   # Swagger API docs
-
-# 4. Inspect / stop
-./manage.sh -e dev local status
-./manage.sh -e dev local logs backend
-./manage.sh -e dev local down
-
-# 5. (Optional) Screen awareness daemon
-./daemon/run.sh                   # Window tracking
-./daemon/run.sh --ocr             # + OCR via Apple Vision
-```
-
-`./manage.sh -e dev local up` is the canonical direct browser-development path. It explicitly loads the repo-root `.env.dev`, starts the backend on `8004`, starts the frontend on `3001`, and avoids the cwd-sensitive env drift that can otherwise change the active model/provider.
-
-When running Seraph from a managed Codex/Desktop shell and watching a live chat session, use `./manage.sh -e dev local run` instead of fire-and-forget `local up`. The managed shell can clean up background children after a command exits even when `manage.sh` briefly reports successful PIDs, which shows up as empty `pids/`, `local status` reporting stopped, and immediate `curl` connection refused on `8004` or `3001`. Keep the `local run` session open while observing, verify with `./manage.sh -e dev local status` plus `curl -sS http://127.0.0.1:8004/health`, and stop with `./manage.sh -e dev local down` when finished.
-
-For local Gemma/VLM screenshot analysis, Seraph expects the VLM wrapper to run
-through Docker Compose on the GPU server. The concrete path is
-`Seraph frontend 127.0.0.1:3001 -> Seraph backend 127.0.0.1:8004 -> GPU VLM wrapper 192.168.1.26:8001 -> GPU model server 192.168.1.26:8000/v1`.
-Administer the wrapper over `ssh jupyter` from
-`/home/pawel/repos/vlm-screenshot-server`, but keep Seraph runtime traffic on
-direct HTTP APIs. Verify the product route with
-`curl http://192.168.1.26:8001/health`,
-`curl http://192.168.1.26:8001/health/backend`, and
-`curl http://192.168.1.26:8001/queue/status`.
-
-Seraph's provider setup is intentionally routing-oriented rather than provider-locked. The examples support:
-
-- **Local Ollama** through `local-ollama` when `LOCAL_MODEL` and `LOCAL_LLM_API_BASE=http://localhost:11434/v1` are configured
-- **OpenRouter** through the `openrouter` built-in profile and `OPENROUTER_API_KEY`
-- **Remote OpenAI API operator profiles** through `codex-openai` or `gpt-5.5-low`, using the LiteLLM-routable `openai/gpt-5.5` model id plus `reasoning_effort=low` as a request option. These profile names select cloud API routing for Seraph and are distinct from any local Codex command/operator process.
-- **Local Codex operator** through the command-backed `codex-local` operator adapter, which invokes the installed `codex exec` command on this machine and does not require `OPENAI_API_KEY`
-- **Anthropic/Claude-oriented operator routes** through `claude-anthropic` and `ANTHROPIC_API_KEY`
-- **Generic OpenAI-compatible endpoints** through `openai-compatible` or custom `LLM_PROVIDER_PROFILES` entries backed by `LLM_API_BASE`, `LLM_API_KEY`, and compatible model IDs
-
-Provider profiles only configure LLM routing, fallback, capability tags, and audit visibility. Local operators such as `codex-local` are separate executable adapters with their own readiness, audit, timeout, and failure surfaces. Neither surface claims provider parity or that one provider reproduces another provider's behavior.
-
-### Docker Dev Stack
-
-```bash
-./manage.sh -e dev up -d
-open http://localhost:3000
-open http://localhost:8004/docs
-```
-
----
+Each surface must show what is active, what model route is effective, what is
+queued, what requires approval, and what is degraded.
 
 ## Architecture
 
-| Layer | Stack |
-|-------|-------|
-| **Frontend** | React 19, Vite 6, TypeScript, Tailwind CSS, Zustand |
-| **Backend** | Python 3.12, FastAPI, uvicorn, smolagents, LiteLLM-compatible provider routing |
-| **Database** | SQLite (aiosqlite) + LanceDB (vector memory) |
-| **Tools** | 17 built-in tool capabilities (auto-discovered) + reusable workflows + plug-and-play MCP servers |
-| **Scheduler** | APScheduler — 9 jobs across briefings, reviews, strategist, observer cleanup, and memory/goal maintenance |
-| **Daemon** | Native macOS — window tracking, optional OCR (Apple Vision / OpenRouter) |
-| **Infra** | Docker Compose (backend + frontend + snekbox sandbox + http-mcp), uv |
+Seraph has four product layers:
 
----
+| Layer | Owns |
+| --- | --- |
+| Guardian kernel | Goals, policy, planning, priority, intervention, memory coordination, and audit |
+| Capability runtime | Typed execution, durable jobs, artifacts, checkpoints, approvals, and scheduling |
+| Model fabric | Governed OpenRouter inference with explicit cloud consent and bounded remote admission |
+| Interfaces and edges | Browser cockpit, API, paired Mac edge, voice, and paired messaging |
 
-## Project Structure
+Models provide inference; they do not become the agent runtime. Seraph owns its
+capabilities and does not depend on Codex CLI, Claude Code, or another coding
+agent to operate. See the constitution's five
+[architecture decisions](docs/implementation/00-project-constitution.md#locked-decisions).
 
-```
-frontend/src/
-  components/cockpit/ Guardian workspace operator surface, state rails, intervention feed
-  components/        React overlays — chat, priorities panel, settings
-  hooks/             useWebSocket, keyboard and operator interaction hooks
-  stores/            Zustand stores — chat, priorities
-  lib/               Tool parser and workspace helpers
-  config/            Frontend constants
+## Historical Development Topology
 
-backend/src/
-  api/               REST + WebSocket endpoints (chat, sessions, goals, tools, workflows, mcp)
-  agent/             smolagents factory, onboarding, strategist, session manager
-  tools/             @tool implementations + MCP manager
-  workflows/         Reusable multi-step workflow loader, runtime, and gating
-  memory/            Guardian record, LanceDB vector store, embedder, consolidator
-  goals/             Hierarchical goal CRUD
-  plugins/           Tool auto-discovery + registry
-  scheduler/         APScheduler engine, connection manager, 9 background jobs
-  observer/          Context manager, data sources, user state machine, delivery engine
+The following topology describes the pre-#775 `develop` baseline. It is kept
+for diagnosis and rollback evidence and is not an active prerequisite for the
+OpenRouter-only phase:
 
-daemon/              Native macOS screen daemon (window tracking + OCR)
-docs/                Docusaurus docs site
+```text
+Seraph frontend       http://127.0.0.1:3001
+  -> Seraph backend   http://127.0.0.1:8004
+  -> GPU VLM wrapper  http://192.168.1.26:8001
+  -> GPU model server http://192.168.1.26:8000/v1
 ```
 
----
+Runtime traffic uses HTTP APIs. `ssh jupyter` is only an administrator route for
+GPU inventory and maintenance; it is not a Seraph runtime requirement or tunnel.
 
-## Retired Surfaces
-
-The retired village/editor line has been removed from the active repo path. Seraph is being built as a workspace-first guardian system, not a game-shell assistant.
-
----
-
-## MCP Servers
-
-Add external tool servers with zero code changes:
+## Quick Start
 
 ```bash
-./mcp.sh add things3 http://host.docker.internal:9100/mcp \
-  --desc "Things3 task manager"
+cp env.dev.example .env.dev
+# Configure OPENROUTER_API_KEY, approved upstreams, cloud consent, and a
+# finite workload budget through the authenticated settings surface.
 
-./mcp.sh list              # View configured servers
-./mcp.sh test things3      # Test connection
-./mcp.sh disable things3   # Toggle without removing
-./mcp.sh remove things3    # Remove entirely
-```
-
-Also available via the **Settings UI** in the browser or the **REST API** (`/api/mcp/servers`).
-
-Config: `data/mcp-servers.json` | Example: `data/mcp-servers.example.json`
-
----
-
-## Docker Management
-
-```bash
-./manage.sh -e dev up -d       # Start
-./manage.sh -e dev down         # Stop
-./manage.sh -e dev logs -f      # Tail logs
-./manage.sh -e dev build        # Rebuild
-```
-
-## Local Direct Runtime
-
-```bash
 ./manage.sh -e dev local up
 ./manage.sh -e dev local status
-./manage.sh -e dev local logs frontend
-./manage.sh -e dev local logs backend
+```
+
+Open `http://127.0.0.1:3001` for the cockpit and
+`http://127.0.0.1:8004/docs` for the API.
+
+For a foreground session, especially from a managed development shell:
+
+```bash
+./manage.sh -e dev local run
+```
+
+Stop with:
+
+```bash
 ./manage.sh -e dev local down
 ```
 
-Defaults for the local runtime:
+Do not start the backend or frontend directly for normal development; the
+managed launcher loads the expected environment and reports owned process state.
+See the [Current App Guide](docs/implementation/12-current-app-guide.md) for
+OpenRouter readiness, runtime status, managed lifecycle, and historical route
+diagnostics.
 
-- frontend: `http://localhost:3001`
-- backend: `http://localhost:8004`
-- workspace dir: `/tmp/seraph-dev-data`
-- llm logs: `/tmp/seraph-dev-logs`
+## Repository Map
 
-Override ports or local paths with env vars before launch if needed:
-
-```bash
-LOCAL_FRONTEND_PORT=3100 LOCAL_BACKEND_PORT=8100 ./manage.sh -e dev local up
+```text
+backend/               FastAPI APIs, guardian/agent runtime, tools, memory,
+                       scheduler, observer, workflows, and tests
+frontend/              React cockpit, settings, chat, and operator state
+daemon/                Current macOS observation daemon
+docs/implementation/   Constitution, ADRs, shipped truth, and operator contracts
+docs/research/         Evidence, alternatives, and dated comparisons
+docs/docs/             Historical archive; may contradict the current contract
+scripts/               Validation and maintenance tools
 ```
 
----
+## Development Contract
 
-## Development Status
+Read [AGENTS.md](AGENTS.md) before changing the repository. In particular:
 
-Seraph no longer uses the old phase model as the live planning surface.
+- track non-trivial work in GitHub before completion;
+- branch from the required integration base and never commit directly to
+  `develop` or `main`;
+- keep runtime truth operator-visible and preserve bounded remote-inference
+  priority;
+- use focused tests and operational receipts appropriate to the change;
+- require independent Critic/Contrarian review for PR-sized work; and
+- update `docs/implementation/` when shipped behavior or durable contracts change.
 
-Canonical docs now live in:
+## Contributing And Getting Help
 
-- `docs/implementation/` — shipped state, workstreams, and current status
-- `docs/research/` — product thesis and design target
+Use the [documentation site](https://docs.seraph.quest),
+[Contributing guide](CONTRIBUTING.md), [Support guide](SUPPORT.md), and
+[Security policy](SECURITY.md). Ask product and usage questions in
+[GitHub Discussions](https://github.com/seraph-quest/seraph/discussions); use
+[issues](https://github.com/seraph-quest/seraph/issues) for tracked bugs and
+work. Epic #736 is the current product-reset program.
 
-Current truth:
+The current published release is available from
+[GitHub Releases](https://github.com/seraph-quest/seraph/releases/latest), with
+[release notes](docs/implementation/21-release-2026-07-04.md). The repository
+also has an uploaded social-preview asset used by the docs site. The
+[workspace demo](https://github.com/user-attachments/assets/b4624170-0982-475e-b1ad-709a92a21f24)
+shows an earlier cockpit build; use the Current App Guide for current UI truth.
 
-- [x] browser UI, backend APIs, observer daemon, memory, goals, and proactive scheduler foundations are shipped
-- [x] Trust Boundaries, Execution Plane, and Runtime Reliability have strong foundations on `develop`
-- [x] the source-of-truth docs now target a power-user guardian workspace and the browser app now defaults to that shell
-- [ ] no workstream is complete yet
-- [ ] Seraph still has substantial work left in presence, guardian intelligence, embodied UX, and ecosystem leverage
+## Documentation Classes
 
-Start with:
+- **Shipped/Partial:** verified behavior on `develop`, owned by
+  `docs/implementation/`.
+- **Target (decision/document state):** accepted architecture intent, owned by
+  the constitution and ADRs; it is not a capability lifecycle state.
+- **Research:** evidence or options under evaluation in `docs/research/`.
+- **Archived:** historical context under `docs/docs/`.
 
-- [docs/implementation/00-master-roadmap.md](docs/implementation/00-master-roadmap.md)
-- [docs/implementation/STATUS.md](docs/implementation/STATUS.md)
-- [docs/implementation/08-docs-contract.md](docs/implementation/08-docs-contract.md)
-- [docs/implementation/09-benchmark-status.md](docs/implementation/09-benchmark-status.md)
-- [docs/implementation/10-superiority-delivery.md](docs/implementation/10-superiority-delivery.md)
-- [docs/research/00-synthesis.md](docs/research/00-synthesis.md)
-- [docs/research/10-competitive-benchmark.md](docs/research/10-competitive-benchmark.md)
-- [docs/research/11-superiority-program.md](docs/research/11-superiority-program.md)
+The GitHub Project, issues, and pull requests own live execution state. Docs do
+not mirror the queue.
 
----
+## License
 
-## Get Involved
-
-- Read [CONTRIBUTING.md](CONTRIBUTING.md) before opening a PR
-- Use [SUPPORT.md](SUPPORT.md) for questions, setup help, and roadmap pointers
-- Join [GitHub Discussions](https://github.com/seraph-quest/seraph/discussions) for setup help, product feedback, and demos
-- Report security issues through [SECURITY.md](SECURITY.md)
+MIT

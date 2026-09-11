@@ -5,7 +5,7 @@ import logging
 import httpx
 
 from config.settings import settings
-from src.audit.runtime import log_integration_event_sync
+from src.audit.runtime import log_integration_event_sync, log_integration_timeout_event_sync
 
 logger = logging.getLogger(__name__)
 
@@ -74,10 +74,9 @@ def run_sandboxed_code(code: str, language: str = "python") -> str:
         return stdout if stdout else "(no output)"
 
     except httpx.TimeoutException:
-        log_integration_event_sync(
+        log_integration_timeout_event_sync(
             integration_type="sandbox",
             name="snekbox",
-            outcome="timed_out",
             details={"timeout_seconds": settings.sandbox_timeout},
         )
         return f"Error: Code execution timed out after {settings.sandbox_timeout}s."

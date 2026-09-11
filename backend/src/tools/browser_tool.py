@@ -2,15 +2,51 @@
 
 import asyncio
 import logging
-from urllib.parse import urlparse
+import re
+from urllib.parse import urlparse, urlunparse
 
 from smolagents import tool
 
 from config.settings import settings
-from src.audit.runtime import log_integration_event_sync
+from src.audit.runtime import log_integration_event_sync, log_integration_timeout_event_sync
 from src.security.site_policy import SiteAccessDecision, evaluate_site_access
 
 logger = logging.getLogger(__name__)
+
+
+def _safe_url_for_error(url: str) -> str:
+    """Keep browser errors useful without returning URL credentials or queries."""
+    try:
+        parsed = urlparse(url)
+        hostname = parsed.hostname
+        if not parsed.scheme or not hostname:
+            return "the requested URL"
+        netloc = hostname
+        try:
+            port = parsed.port
+        except ValueError:
+            return "the requested URL"
+        if ":" in hostname and not hostname.startswith("["):
+            netloc = f"[{hostname}]"
+        if port is not None:
+            netloc = f"{netloc}:{port}"
+        query = "redacted" if parsed.query else ""
+        return urlunparse((parsed.scheme, netloc, parsed.path or "", "", query, ""))
+    except ValueError:
+        return "the requested URL"
+
+
+def redact_browser_error(content: object) -> str:
+    """Redact URL credentials/query values in provider-generated error text."""
+    text = str(content or "")
+    if not text.startswith("Error:"):
+        return text
+    return re.sub(
+        r"https?://[^\s'\"<>]+",
+        lambda match: _safe_url_for_error(match.group(0)),
+        text,
+    )
+
 
 def _browser_details(url: str, action: str, decision: SiteAccessDecision | None = None) -> dict[str, object]:
     parsed = urlparse(url)
@@ -42,7 +78,7 @@ async def _route_guarded_browser_request(route, request) -> None:
     if not decision.allowed:
         logger.warning(
             "Blocked browser request by site policy: url=%s reason=%s resolved=%s",
-            request.url,
+            _safe_url_for_error(request.url),
             decision.reason,
             decision.resolved_addresses,
         )
@@ -162,28 +198,27 @@ def browse_webpage(url: str, action: str = "extract") -> str:
             details=_browser_details(url, action, decision),
         )
         return result
-    except (TimeoutError, PlaywrightTimeoutError) as e:
-        log_integration_event_sync(
+    except (TimeoutError, PlaywrightTimeoutError):
+        log_integration_timeout_event_sync(
             integration_type="browser",
             name="playwright",
-            outcome="timed_out",
             details={
                 **_browser_details(url, action, decision),
                 "timeout_seconds": settings.browser_timeout,
-                "error": str(e),
+                "error": "browser_timeout",
             },
         )
-        logger.exception("Browser automation timed out")
-        return f"Error: browsing {url} timed out after {settings.browser_timeout}s"
-    except Exception as e:
+        logger.exception("Browser automation timed out for %s", _safe_url_for_error(url))
+        return f"Error: browsing {_safe_url_for_error(url)} timed out after {settings.browser_timeout}s"
+    except Exception:
         log_integration_event_sync(
             integration_type="browser",
             name="playwright",
             outcome="failed",
             details={
                 **_browser_details(url, action, decision),
-                "error": str(e),
+                "error": "browser_request_failed",
             },
         )
-        logger.exception("Browser automation failed")
-        return f"Error: browsing {url} failed: {e}"
+        logger.exception("Browser automation failed for %s", _safe_url_for_error(url))
+        return f"Error: browsing {_safe_url_for_error(url)} failed."

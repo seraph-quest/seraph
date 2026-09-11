@@ -20,7 +20,7 @@ async def test_screen_artifacts_are_persisted_listed_and_served(async_db, client
     monkeypatch.setattr("src.api.observer.settings.workspace_dir", str(tmp_path / "workspace"))
     monkeypatch.setattr("src.api.observer.settings.screen_capture_archive_dir", str(tmp_path))
     image_path = tmp_path / "capture.png"
-    output_path = tmp_path / "capture.codex.txt"
+    output_path = tmp_path / "capture.provider.txt"
     analysis_path = tmp_path / "capture.analysis.json"
     image_path.write_bytes(b"png bytes")
     output_path.write_text('{"summary":"Codex saw the editor"}', encoding="utf-8")
@@ -32,7 +32,7 @@ async def test_screen_artifacts_are_persisted_listed_and_served(async_db, client
     artifacts = {
         "id": "artifact-1",
         "image_path": str(image_path),
-        "codex_output_path": str(output_path),
+        "provider_output_path": str(output_path),
         "analysis_path": str(analysis_path),
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
@@ -68,21 +68,50 @@ async def test_screen_artifacts_are_persisted_listed_and_served(async_db, client
     item = list_resp.json()["items"][0]
     assert item["observation_id"] == observation.id
     assert item["artifacts"]["image_url"].endswith(f"/{observation.id}/image")
-    assert item["artifacts"]["codex_output_url"].endswith(f"/{observation.id}/codex-output")
-    assert item["artifacts"]["provider_output_url"].endswith(f"/{observation.id}/codex-output")
+    assert "codex_output_url" not in item["artifacts"]
+    assert item["artifacts"]["provider_output_url"].endswith(f"/{observation.id}/provider-output")
 
     image_resp = await client.get(f"/api/observer/screen-artifacts/{observation.id}/image")
     assert image_resp.status_code == 200
     assert image_resp.content == b"png bytes"
     assert image_resp.headers["content-type"] == "image/png"
 
-    output_resp = await client.get(f"/api/observer/screen-artifacts/{observation.id}/codex-output")
+    output_resp = await client.get(f"/api/observer/screen-artifacts/{observation.id}/provider-output")
     assert output_resp.status_code == 200
     assert output_resp.text == '{"summary":"Codex saw the editor"}'
+
+    legacy_output_resp = await client.get(f"/api/observer/screen-artifacts/{observation.id}/codex-output")
+    assert legacy_output_resp.status_code == 200
+    assert legacy_output_resp.text == output_resp.text
 
     analysis_resp = await client.get(f"/api/observer/screen-artifacts/{observation.id}/analysis")
     assert analysis_resp.status_code == 200
     assert analysis_resp.json()["summary"] == "Codex saw the editor"
+
+
+@pytest.mark.asyncio
+async def test_legacy_codex_output_path_remains_readable(async_db, client, tmp_path, monkeypatch):
+    monkeypatch.setattr("src.api.observer.settings.screen_capture_archive_dir", str(tmp_path))
+    output_path = tmp_path / "legacy.codex.txt"
+    output_path.write_text("legacy provider output", encoding="utf-8")
+    artifacts = {
+        "id": "legacy-artifact",
+        "image_path": str(tmp_path / "missing.png"),
+        "codex_output_path": str(output_path),
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    async with async_db() as db:
+        observation = ScreenObservation(
+            app_name="Legacy capture",
+            summary="Legacy output metadata",
+            details_json=json.dumps(["capture_artifacts:" + json.dumps(artifacts)]),
+        )
+        db.add(observation)
+
+    response = await client.get(f"/api/observer/screen-artifacts/{observation.id}/provider-output")
+
+    assert response.status_code == 200
+    assert response.text == "legacy provider output"
 
 
 @pytest.mark.asyncio
@@ -185,9 +214,15 @@ async def test_screen_artifact_root_prefers_screen_analysis_settings(tmp_path, m
 
 
 @pytest.mark.asyncio
-async def test_screenshot_folder_scan_persists_observation_and_serves_image(async_db, client, tmp_path):
+async def test_screenshot_folder_scan_persists_observation_and_serves_image(
+    async_db, client, tmp_path, monkeypatch
+):
     root = tmp_path / "screenshots"
     image = _write_screenshot(root, name="capture-valid.png")
+    monkeypatch.setattr(
+        "src.observer.screenshot_folder_source.screenshot_semantic_analysis_enabled",
+        lambda: False,
+    )
 
     resp = await client.post(
         "/api/observer/screenshot-folder/scan",
@@ -248,15 +283,18 @@ async def test_screenshot_folder_scan_persists_observation_and_serves_image(asyn
     assert analysis["provider"] == "screenshot_folder"
     assert analysis["analysis"]["analysis_owner"] == "seraph"
     assert analysis["analysis"]["source"] == "local_screenshot_folder"
-    assert analysis["analysis"]["semantic_status"] == "pending"
-    assert analysis["analysis"]["semantic_status_detail"]["status"] == "pending"
+    assert analysis["analysis"]["semantic_status"] == "blocked"
+    assert analysis["analysis"]["semantic_status_detail"]["status"] == "blocked"
+    assert analysis["analysis"]["semantic_status_detail"]["reason"] == (
+        "remote_inference_blocked:configuration_required"
+    )
     assert analysis["analysis"]["image_sha256"] == image_sha256
     assert analysis["analysis"]["image_bytes"] == len(image.read_bytes())
     assert analysis["analysis"]["file_format"] == "png"
     assert analysis["analysis"]["report_ready"] is True
     assert analysis["image_sha256"] == image_sha256
 
-    output_resp = await client.get(f"/api/observer/screen-artifacts/{observation.id}/codex-output")
+    output_resp = await client.get(f"/api/observer/screen-artifacts/{observation.id}/provider-output")
     assert output_resp.status_code == 200
     assert "screenshot folder source only provided the image file" in output_resp.text
 
@@ -372,6 +410,10 @@ async def test_screenshot_folder_scan_serializes_concurrent_duplicate_checks(
         "src.observer.screenshot_folder_source.settings.local_vlm_base_url",
         "http://gpu:8088",
     )
+    monkeypatch.setattr(
+        "src.observer.screenshot_folder_source.screenshot_semantic_analysis_enabled",
+        lambda: True,
+    )
 
     first = asyncio.create_task(
         client.post(
@@ -447,6 +489,10 @@ async def test_screenshot_folder_scan_persists_local_vlm_semantic_analysis(
         "src.observer.screenshot_folder_source.settings.local_vlm_base_url",
         "http://gpu:8088",
     )
+    monkeypatch.setattr(
+        "src.observer.screenshot_folder_source.screenshot_semantic_analysis_enabled",
+        lambda: True,
+    )
 
     scan_resp = await client.post(
         "/api/observer/screenshot-folder/scan",
@@ -513,6 +559,10 @@ async def test_screenshot_folder_scan_keeps_metadata_when_local_vlm_fails(
         "src.observer.screenshot_folder_source.settings.local_vlm_base_url",
         "http://gpu:8088",
     )
+    monkeypatch.setattr(
+        "src.observer.screenshot_folder_source.screenshot_semantic_analysis_enabled",
+        lambda: True,
+    )
 
     first = await client.post(
         "/api/observer/screenshot-folder/scan",
@@ -577,6 +627,10 @@ async def test_screenshot_folder_analysis_marks_missing_file_source_missing(
     monkeypatch.setattr(
         "src.observer.screenshot_folder_source.settings.local_vlm_base_url",
         "http://gpu:8088",
+    )
+    monkeypatch.setattr(
+        "src.observer.screenshot_folder_source.screenshot_semantic_analysis_enabled",
+        lambda: True,
     )
 
     scan_resp = await client.post(
@@ -674,6 +728,10 @@ async def test_screenshot_folder_reanalysis_replaces_failed_status_without_dupli
     monkeypatch.setattr("src.observer.screenshot_semantic_analysis.analyze_screenshot_image", analyzer)
     monkeypatch.setattr("src.observer.screenshot_semantic_analysis.settings.screen_analysis_provider", "local-vlm")
     monkeypatch.setattr("src.observer.screenshot_semantic_analysis.settings.local_vlm_base_url", "http://gpu:8088")
+    monkeypatch.setattr(
+        "src.observer.screenshot_folder_source.screenshot_semantic_analysis_enabled",
+        lambda: True,
+    )
 
     scan = await client.post(
         "/api/observer/screenshot-folder/scan",
@@ -950,6 +1008,10 @@ async def test_screenshot_folder_scan_suppresses_visually_identical_byte_variant
     monkeypatch.setattr(
         "src.observer.screenshot_folder_source.settings.local_vlm_base_url",
         "http://gpu:8088",
+    )
+    monkeypatch.setattr(
+        "src.observer.screenshot_folder_source.screenshot_semantic_analysis_enabled",
+        lambda: True,
     )
 
     resp = await client.post(

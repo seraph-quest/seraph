@@ -372,6 +372,7 @@ async def _ensure_legacy_columns(conn) -> None:
         "native_notification_outbox",
         {
             "goal_id": "VARCHAR",
+            "goal_revision": "INTEGER",
             "budget_period_key": "VARCHAR",
             "budget_limit": "INTEGER",
             "operator_session_id": "VARCHAR",
@@ -387,6 +388,7 @@ async def _ensure_legacy_columns(conn) -> None:
     )
     for column in (
         "goal_id",
+        "goal_revision",
         "budget_period_key",
         "budget_limit",
         "operator_session_id",

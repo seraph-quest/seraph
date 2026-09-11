@@ -66,6 +66,7 @@ def _notification_budget_binding(goal: Goal, budget: object) -> dict[str, object
         period_key = datetime.now(timezone.utc).date().isoformat()
     return {
         "goal_id": str(goal.id),
+        "goal_revision": max(int(getattr(goal, "revision", 1) or 1), 1),
         "budget_period_key": period_key,
         "budget_limit": limit,
     }
@@ -286,6 +287,7 @@ def _goal_work_must_not_continue(details: dict[str, object]) -> bool:
 
     goal_id = str(details.get("goal_id") or "").strip()
     status = str(details.get("status") or "").strip()
+    verification = str(details.get("verification") or "").strip()
     if status in {
         "blocked",
         "deferred",
@@ -293,7 +295,24 @@ def _goal_work_must_not_continue(details: dict[str, object]) -> bool:
         "exhausted",
     }:
         return True
+    # A service result that reports execution success without a passed
+    # readback is not a successful goal outcome. Keep this guard here as a
+    # second fence even when the adapter has normalized its receipt below.
+    if status == "succeeded" and verification != "passed":
+        return True
     return bool(goal_id) and status == "skipped"
+
+
+def _goal_result_status(*, execution_status: object, verification: object) -> str:
+    """Normalize adapter results before they reach the parent delivery fence."""
+
+    normalized_execution = str(execution_status or "").strip()
+    normalized_verification = str(verification or "").strip()
+    if normalized_execution == "blocked":
+        return "blocked"
+    if normalized_execution == "succeeded" and normalized_verification == "passed":
+        return "succeeded"
+    return "failed"
 
 
 def _reasoning_digest(reasoning: object) -> str:
@@ -705,12 +724,9 @@ async def _run_opted_in_goal_web_brief(
                 error=TypeError("web brief service returned an invalid result"),
                 budget=budget,
             )
-        effect_status = (
-            "succeeded"
-            if result.execution_status == "succeeded" and result.verification == "passed"
-            else "blocked"
-            if result.execution_status == "blocked"
-            else "failed"
+        effect_status = _goal_result_status(
+            execution_status=result.execution_status,
+            verification=result.verification,
         )
         result_strategy_delta_id = (
             result.strategy_delta_id
@@ -721,7 +737,10 @@ async def _run_opted_in_goal_web_brief(
         if result_strategy_delta_provenance == "verified" and not result_strategy_delta_id:
             result_strategy_delta_provenance = "unresolved"
         details = {
-            "status": result.execution_status,
+            # Persist the normalized status. The raw adapter status is kept
+            # separately for diagnostics, but cannot authorize delivery.
+            "status": effect_status,
+            "execution_status": result.execution_status,
             "verification": result.verification,
             "learning": result.learning,
             "goal_id": result.goal_id,
@@ -915,15 +934,15 @@ async def _run_opted_in_goal_snapshot(
             error=TypeError("goal snapshot service returned an invalid result"),
             budget=budget,
         )
-    effect_status = (
-        "succeeded"
-        if result.execution_status == "succeeded" and result.verification == "passed"
-        else "blocked"
-        if result.execution_status == "blocked"
-        else "failed"
+    effect_status = _goal_result_status(
+        execution_status=result.execution_status,
+        verification=result.verification,
     )
     details = {
-        "status": result.execution_status,
+        # Persist the normalized status. The raw adapter status is kept
+        # separately for diagnostics, but cannot authorize delivery.
+        "status": effect_status,
+        "execution_status": result.execution_status,
         "verification": result.verification,
         "learning": result.learning,
         "goal_id": result.goal_id,
@@ -968,6 +987,7 @@ async def run_strategist_tick() -> None:
         guardian_state = await build_guardian_state(
             refresh_observer=True,
             memory_query="current priorities, commitments, and recent intervention patterns",
+            service_id=_STRATEGIST_SERVICE_ID,
         )
         await durable_job_repository.record_checkpoint(
             durable_job_id,

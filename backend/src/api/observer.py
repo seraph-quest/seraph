@@ -92,6 +92,8 @@ class NativeNotificationResponse(BaseModel):
     attempt_count: int = 0
     fencing_token: int = 0
     degraded_state: str | None = None
+    goal_id: str | None = None
+    goal_revision: int | None = None
 
 
 class NativeNotificationPollResponse(BaseModel):
@@ -447,9 +449,13 @@ class InterventionFeedbackResponse(BaseModel):
 
 
 @router.get("/observer/state")
-async def get_observer_state():
-    """Return the current context snapshot."""
-    return context_manager.get_context().to_dict()
+async def get_observer_state(request: Request):
+    """Return the authenticated operator's context snapshot."""
+    owner_principal_id, operator_session_id = _require_authenticated_operator_binding(request)
+    return context_manager.get_context(
+        owner_principal_id=owner_principal_id,
+        owner_session_id=operator_session_id,
+    ).to_dict()
 
 
 @router.post("/observer/context")
@@ -969,10 +975,16 @@ async def _daemon_status_payload(
     owner_principal_id: str | None = None,
     operator_session_id: str | None = None,
 ) -> dict[str, str | int | float | bool | None]:
-    ctx = context_manager.get_context()
+    ctx = context_manager.get_context(
+        owner_principal_id=owner_principal_id,
+        owner_session_id=operator_session_id,
+    )
     daemon_status = _read_daemon_status_file()
     classified = _classify_daemon_status(daemon_status)
-    connected = context_manager.is_daemon_connected()
+    connected = context_manager.is_daemon_connected(
+        owner_principal_id=owner_principal_id,
+        owner_session_id=operator_session_id,
+    )
     pending_notification_count = await native_notification_queue.count(
         owner_principal_id=owner_principal_id,
         operator_session_id=operator_session_id,
@@ -2945,7 +2957,11 @@ async def get_activity_today():
 
 
 @router.post("/observer/refresh")
-async def post_refresh():
-    """Debug endpoint — trigger a full context refresh."""
-    ctx = await context_manager.refresh()
+async def post_refresh(request: Request):
+    """Debug endpoint — refresh the authenticated operator's context."""
+    owner_principal_id, operator_session_id = _require_authenticated_operator_binding(request)
+    ctx = await context_manager.refresh(
+        owner_principal_id=owner_principal_id,
+        owner_session_id=operator_session_id,
+    )
     return ctx.to_dict()

@@ -499,7 +499,7 @@ def _has_notification_budget(notification_budget: dict[str, object] | None) -> b
         return False
     return any(
         notification_budget.get(key) is not None
-        for key in ("goal_id", "budget_period_key", "budget_limit")
+        for key in ("goal_id", "goal_revision", "budget_period_key", "budget_limit")
     )
 
 
@@ -518,12 +518,21 @@ def _validate_goal_notification_binding(
     goal_id = str(notification_budget.get("goal_id") or "").strip()
     period_key = str(notification_budget.get("budget_period_key") or "").strip()
     limit = notification_budget.get("budget_limit")
+    revision = notification_budget.get("goal_revision")
     if (
         not goal_id
         or not period_key
         or isinstance(limit, bool)
         or not isinstance(limit, int)
         or limit < 0
+        or (
+            revision is not None
+            and (
+                isinstance(revision, bool)
+                or not isinstance(revision, int)
+                or revision < 1
+            )
+        )
         or not str(owner_principal_id or "").strip()
         or not str(operator_session_id or "").strip()
     ):
@@ -1052,6 +1061,7 @@ async def deliver_or_queue(
                                 causation_id=message.causation_id,
                                 attachment_refs=delivery_message.attachment_refs,
                                 goal_id=(notification_budget or {}).get("goal_id"),
+                                goal_revision=(notification_budget or {}).get("goal_revision"),
                                 budget_period_key=(notification_budget or {}).get("budget_period_key"),
                                 budget_limit=(notification_budget or {}).get("budget_limit"),
                             )

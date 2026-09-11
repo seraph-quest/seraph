@@ -232,6 +232,53 @@ async def test_proactive_goal_snapshot_runs_one_enabled_goal_through_existing_se
 
 
 @pytest.mark.asyncio
+async def test_snapshot_unverified_execution_is_failed_and_delivery_fenced():
+    criterion = GoalSuccessCriterion(
+        description="Create a verified snapshot",
+        verifier_kind=CriterionVerifierKind.artifact_readback,
+        evidence_refs=["goal:operator-consent"],
+    )
+    goal = SimpleNamespace(
+        id="goal-unverified-snapshot",
+        revision=3,
+        proactive_enabled=True,
+        success_criterion_json=criterion.model_dump_json(),
+        due_date=datetime.now(timezone.utc),
+        sort_order=0,
+    )
+    jobs = _RecordingDurableJobs()
+    service = MagicMock()
+    service.run = AsyncMock(
+        return_value=GoalSnapshotToFileResult(
+            goal_id=goal.id,
+            goal_revision=goal.revision,
+            file_path="goal-snapshots/goal-unverified-snapshot.md",
+            execution_status="succeeded",
+            verification="failed",
+            learning="no_learning",
+            job_id="child-unverified-snapshot",
+            artifact_ref="artifact-unverified-snapshot",
+            reason="artifact_readback_failed",
+        )
+    )
+    with (
+        patch("src.scheduler.jobs.strategist_tick.goal_repository.list_goals", new=AsyncMock(return_value=[goal])),
+        patch("src.scheduler.jobs.strategist_tick.durable_job_repository", jobs),
+        patch("src.scheduler.jobs.strategist_tick.GoalSnapshotToFileService", return_value=service),
+    ):
+        receipt = await _run_opted_in_goal_snapshot(
+            parent_job_id="parent-unverified-snapshot",
+            parent_fencing_token=2,
+        )
+
+    assert receipt["execution_status"] == "succeeded"
+    assert receipt["verification"] == "failed"
+    assert receipt["status"] == "failed"
+    assert _goal_work_must_not_continue(receipt) is True
+    assert jobs.effects[0][1]["status"] == "failed"
+
+
+@pytest.mark.asyncio
 async def test_proactive_web_brief_requires_explicit_target_and_reuses_existing_service():
     criterion = GoalSuccessCriterion(
         description="Create a source-backed brief",
@@ -286,6 +333,57 @@ async def test_proactive_web_brief_requires_explicit_target_and_reuses_existing_
     assert request.parent_job_id == "parent-brief-1"
     assert request.parent_fencing_token == 5
     assert request.session_id == "web-brief:scheduler:goal-1:4"
+
+
+@pytest.mark.asyncio
+async def test_web_brief_unverified_execution_is_failed_and_delivery_fenced():
+    criterion = GoalSuccessCriterion(
+        description="Create a source-backed brief",
+        verifier_kind=CriterionVerifierKind.artifact_readback,
+        evidence_refs=["operator:source-consent"],
+        target={"query": "Seraph project", "file_path": "briefs/goal-unverified-brief.md"},
+    )
+    goal = SimpleNamespace(
+        id="goal-unverified-brief",
+        revision=4,
+        proactive_enabled=True,
+        success_criterion_json=criterion.model_dump_json(),
+        due_date=datetime.now(timezone.utc),
+        sort_order=0,
+    )
+    jobs = _RecordingDurableJobs()
+    service = MagicMock()
+    service.run = AsyncMock(
+        return_value=WebBriefToFileResult(
+            goal_id=goal.id,
+            goal_revision=goal.revision,
+            query="Seraph project",
+            file_path="briefs/goal-unverified-brief.md",
+            execution_status="succeeded",
+            verification="failed",
+            learning="no_learning",
+            source_read=True,
+            query_read_back=True,
+            job_id="child-unverified-brief",
+            artifact_ref="artifact-unverified-brief",
+            reason="source_readback_failed",
+        )
+    )
+    with (
+        patch("src.scheduler.jobs.strategist_tick.goal_repository.list_goals", new=AsyncMock(return_value=[goal])),
+        patch("src.scheduler.jobs.strategist_tick.durable_job_repository", jobs),
+        patch("src.scheduler.jobs.strategist_tick.WebBriefToFileService", return_value=service),
+    ):
+        receipt = await _run_opted_in_goal_web_brief(
+            parent_job_id="parent-unverified-brief",
+            parent_fencing_token=5,
+        )
+
+    assert receipt["execution_status"] == "succeeded"
+    assert receipt["verification"] == "failed"
+    assert receipt["status"] == "failed"
+    assert _goal_work_must_not_continue(receipt) is True
+    assert jobs.effects[0][1]["status"] == "failed"
 
 
 @pytest.mark.asyncio

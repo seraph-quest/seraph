@@ -7,7 +7,7 @@ import pytest
 from sqlmodel import select
 
 from src.conversation.identity import ConversationIdentityError
-from src.db.models import Goal, NativeNotificationOutbox, QueuedInsight
+from src.db.models import Goal, NativeNotificationOutbox, OperatorSession, QueuedInsight
 from src.observer.native_notification_queue import (
     MAX_BODY_CHARS,
     NativeNotificationConflictError,
@@ -271,6 +271,132 @@ async def test_failure_becomes_unknown_without_automatic_replay(async_db):
 
     attempts = await queue.get_attempts(notification.id)
     assert [item["status"] for item in attempts] == ["unknown"]
+
+
+@pytest.mark.asyncio
+async def test_unknown_goal_notification_is_cancelled_after_goal_deletion(async_db):
+    owner = {"owner_principal_id": "operator:unknown", "operator_session_id": "session:unknown"}
+    async with async_db() as db:
+        now = datetime.now(timezone.utc)
+        db.add(
+            Goal(
+                id="goal-unknown-delete",
+                title="Unknown deleted goal",
+                owner_principal_id=owner["owner_principal_id"],
+                owner_session_id=owner["operator_session_id"],
+            )
+        )
+        db.add(
+            OperatorSession(
+                id=owner["operator_session_id"],
+                token_hash="token-hash-unknown-goal",
+                idle_expires_at=now + timedelta(hours=1),
+                absolute_expires_at=now + timedelta(hours=1),
+            )
+        )
+
+    queue = NativeNotificationQueue(max_attempts=2, lease_seconds=60, ttl_seconds=300)
+    notification = await queue.enqueue(
+        **_enqueue_kwargs(),
+        goal_id="goal-unknown-delete",
+        budget_period_key="2026-09-11",
+        budget_limit=1,
+        owner_principal_id=owner["owner_principal_id"],
+        operator_session_id=owner["operator_session_id"],
+        idempotency_key="native:unknown-deleted-goal",
+    )
+    claimed = await queue.claim_next(worker_id="daemon")
+    assert claimed is not None
+    assert await queue.mark_display_attempted(
+        notification.id,
+        fencing_token=claimed.fencing_token,
+        worker_id="daemon",
+    ) is True
+    assert await queue.fail(
+        notification.id,
+        reason="ambiguous display",
+        fencing_token=claimed.fencing_token,
+        worker_id="daemon",
+    ) is True
+
+    async with async_db() as db:
+        goal = await db.get(Goal, "goal-unknown-delete")
+        await db.delete(goal)
+
+    assert await queue.reconcile_unknown(
+        notification.id,
+        retry=True,
+        owner_principal_id=owner["owner_principal_id"],
+        operator_session_id=owner["operator_session_id"],
+    ) is False
+    cancelled = await queue.get(notification.id)
+    assert cancelled is not None
+    assert cancelled.delivery_status == "cancelled"
+    assert cancelled.goal_revision == 1
+    assert (await queue.get_attempts(notification.id))[0]["status"] == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_unknown_goal_notification_cannot_requeue_after_revision_change(async_db):
+    owner = {"owner_principal_id": "operator:revision", "operator_session_id": "session:revision"}
+    async with async_db() as db:
+        now = datetime.now(timezone.utc)
+        db.add(
+            Goal(
+                id="goal-unknown-revision",
+                title="Unknown stale goal",
+                owner_principal_id=owner["owner_principal_id"],
+                owner_session_id=owner["operator_session_id"],
+            )
+        )
+        db.add(
+            OperatorSession(
+                id=owner["operator_session_id"],
+                token_hash="token-hash-unknown-revision",
+                idle_expires_at=now + timedelta(hours=1),
+                absolute_expires_at=now + timedelta(hours=1),
+            )
+        )
+
+    queue = NativeNotificationQueue(max_attempts=2, lease_seconds=60, ttl_seconds=300)
+    notification = await queue.enqueue(
+        **_enqueue_kwargs(),
+        goal_id="goal-unknown-revision",
+        budget_period_key="2026-09-11",
+        budget_limit=1,
+        owner_principal_id=owner["owner_principal_id"],
+        operator_session_id=owner["operator_session_id"],
+        idempotency_key="native:unknown-stale-revision",
+    )
+    claimed = await queue.claim_next(worker_id="daemon")
+    assert claimed is not None
+    assert await queue.mark_display_attempted(
+        notification.id,
+        fencing_token=claimed.fencing_token,
+        worker_id="daemon",
+    ) is True
+    assert await queue.fail(
+        notification.id,
+        reason="ambiguous display",
+        fencing_token=claimed.fencing_token,
+        worker_id="daemon",
+    ) is True
+
+    async with async_db() as db:
+        goal = await db.get(Goal, "goal-unknown-revision")
+        goal.revision = 2
+
+    assert await queue.reconcile_unknown(
+        notification.id,
+        retry=True,
+        owner_principal_id=owner["owner_principal_id"],
+        operator_session_id=owner["operator_session_id"],
+    ) is False
+    stale = await queue.get(notification.id)
+    assert stale is not None
+    assert stale.delivery_status == "cancelled"
+    assert stale.goal_revision == 1
+    assert stale.to_dict()["delivery_status"] == "cancelled"
 
 
 @pytest.mark.asyncio

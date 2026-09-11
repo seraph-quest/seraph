@@ -672,6 +672,9 @@ class NativeNotificationOutbox(SQLModel, table=True):
     # notifications leave these fields null and retain their existing queue
     # semantics.
     goal_id: Optional[str] = Field(default=None, index=True)
+    # Revision fence for goal-bound effects.  A notification may only be
+    # recovered while its canonical goal still has this revision.
+    goal_revision: Optional[int] = Field(default=None, index=True)
     budget_period_key: Optional[str] = Field(default=None, index=True)
     budget_limit: Optional[int] = Field(default=None, index=True)
     operator_session_id: Optional[str] = Field(default=None, index=True)

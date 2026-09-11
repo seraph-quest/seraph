@@ -74,6 +74,30 @@ class CapabilityPackApprovalRequest(BaseModel):
     authority_digest: str | None = Field(default=None, min_length=64, max_length=64)
 
 
+class CapabilityPackApprovalPrepareRequest(BaseModel):
+    """Exact reviewed request an authenticated operator is asked to decide."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    action: str = Field(pattern=r"^(activate|update|pause|revoke|uninstall|rollback)$")
+    goal_id: str = Field(min_length=1, max_length=256)
+    digest: str | None = Field(default=None, min_length=64, max_length=64)
+    version: str | None = Field(default=None, min_length=1, max_length=128)
+    current_digest: str | None = Field(default=None, min_length=64, max_length=64)
+    content_digest: str | None = Field(default=None, min_length=64, max_length=64)
+    authority_digest: str | None = Field(default=None, min_length=64, max_length=64)
+    authority_delta: dict[str, Any] | None = None
+
+
+def _approval_response(payload: dict[str, Any]) -> dict[str, Any]:
+    approval = payload.get("approval")
+    return {
+        "status": str(approval.get("status") if isinstance(approval, dict) else payload.get("status") or "unknown"),
+        "approval": approval,
+        "receipt": payload.get("receipt"),
+    }
+
+
 class CapabilityPackRollbackRequest(CapabilityPackApprovalRequest):
     goal_id: str | None = Field(default=None, min_length=1, max_length=256)
 
@@ -96,7 +120,12 @@ def _lifecycle_http_error(exc: Exception) -> HTTPException:
     """Return a redacted error; paths and approval internals never cross API."""
 
     message = str(exc).lower()
-    if any(token in message for token in ("owner", "session", "identity", "approval", "authority")):
+    # Expiry and CAS races are retryable state conflicts even though their
+    # internal messages contain the word approval. Keep binding details redacted.
+    if any(token in message for token in ("stale", "expired", "already resolved")):
+        status_code = 409
+        code = "capability_pack_invalid_state"
+    elif any(token in message for token in ("owner", "session", "identity", "approval", "authority")):
         status_code = 403
         code = "capability_pack_authority_denied"
     elif any(token in message for token in ("requires an active", "has no active", "no rollback", "already")):
@@ -159,6 +188,116 @@ async def capability_pack_readback(pack_id: str, request: Request) -> dict[str, 
         return _store().status(pack_id, owner_principal_id=principal_id, session_id=operator.session_id)
     except (CapabilityPackLifecycleError, ValueError) as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.post("/capability-packs/{pack_id}/approvals")
+async def capability_pack_prepare_approval(
+    pack_id: str,
+    req: CapabilityPackApprovalPrepareRequest,
+    request: Request,
+) -> dict[str, Any]:
+    """Prepare one owner-bound JSON approval for a lifecycle transition."""
+
+    _operator, principal_id, session_id = _operator_identity(request)
+    try:
+        return _approval_response(
+            _store().prepare_operator_approval(
+                pack_id,
+                action=req.action,
+                goal_id=req.goal_id,
+                digest=req.digest,
+                version=req.version,
+                current_digest=req.current_digest,
+                authority_delta_payload=req.authority_delta,
+                owner_principal_id=principal_id,
+                session_id=session_id,
+                content_digest=req.content_digest,
+                authority_digest=req.authority_digest,
+            )
+        )
+    except (CapabilityPackLifecycleError, ValueError) as exc:
+        raise _lifecycle_http_error(exc) from exc
+
+
+@router.get("/capability-packs/{pack_id}/approvals")
+async def capability_pack_list_approvals(pack_id: str, request: Request) -> list[dict[str, Any]]:
+    _operator, principal_id, session_id = _operator_identity(request)
+    try:
+        return _store().list_operator_approvals(
+            pack_id,
+            owner_principal_id=principal_id,
+            session_id=session_id,
+        )
+    except (CapabilityPackLifecycleError, ValueError) as exc:
+        raise _lifecycle_http_error(exc) from exc
+
+
+@router.get("/capability-packs/{pack_id}/approvals/{approval_id}")
+async def capability_pack_get_approval(
+    pack_id: str,
+    approval_id: str,
+    request: Request,
+) -> dict[str, Any]:
+    _operator, principal_id, session_id = _operator_identity(request)
+    try:
+        return _store().get_operator_approval(
+            pack_id,
+            approval_id,
+            owner_principal_id=principal_id,
+            session_id=session_id,
+        )
+    except (CapabilityPackLifecycleError, ValueError) as exc:
+        raise _lifecycle_http_error(exc) from exc
+
+
+async def _resolve_capability_pack_approval(
+    pack_id: str,
+    approval_id: str,
+    request: Request,
+    *,
+    decision: str,
+) -> dict[str, Any]:
+    _operator, principal_id, session_id = _operator_identity(request)
+    try:
+        return _approval_response(
+            _store().resolve_operator_approval(
+                pack_id,
+                approval_id,
+                decision=decision,
+                owner_principal_id=principal_id,
+                session_id=session_id,
+            )
+        )
+    except (CapabilityPackLifecycleError, ValueError) as exc:
+        raise _lifecycle_http_error(exc) from exc
+
+
+@router.post("/capability-packs/{pack_id}/approvals/{approval_id}/approve")
+async def capability_pack_approve_approval(
+    pack_id: str,
+    approval_id: str,
+    request: Request,
+) -> dict[str, Any]:
+    return await _resolve_capability_pack_approval(
+        pack_id,
+        approval_id,
+        request,
+        decision="approved",
+    )
+
+
+@router.post("/capability-packs/{pack_id}/approvals/{approval_id}/deny")
+async def capability_pack_deny_approval(
+    pack_id: str,
+    approval_id: str,
+    request: Request,
+) -> dict[str, Any]:
+    return await _resolve_capability_pack_approval(
+        pack_id,
+        approval_id,
+        request,
+        decision="denied",
+    )
 
 
 @router.post(
@@ -413,6 +552,7 @@ async def capability_pack_resolve_reconciliation(
 
 __all__ = [
     "CapabilityPackApprovalRequest",
+    "CapabilityPackApprovalPrepareRequest",
     "CapabilityPackLifecycleResponse",
     "CapabilityPackRevokeRequest",
     "CapabilityPackRollbackRequest",

@@ -727,11 +727,13 @@ def _spec(*, job_id: str = "job-743-1", dedupe_key: str = "candidate-1") -> Dura
             idempotency_scope="goal-candidate",
             idempotency_key=dedupe_key,
         ),
-        inputs={"goal_id": "goal-1", "secret_token": "do-not-persist"},
+        # These lifecycle tests exercise generic durable jobs. Goal-bound
+        # tests create and bind a canonical Goal explicitly below.
+        inputs={"task": "candidate-1", "secret_token": "do-not-persist"},
         session_id="job-session",
-        goal_id="goal-1",
-        goal_revision=4,
-        plan_revision=2,
+        goal_id=None,
+        goal_revision=None,
+        plan_revision=None,
         candidate_id="candidate-1",
         priority=90,
         resource_claims=("cpu",),

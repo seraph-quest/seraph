@@ -95,6 +95,20 @@ def _typed_goal():
     )
 
 
+def _typed_candidate_events():
+    return [
+        {
+            "event_type": "goal_loop_candidate",
+            "details": {
+                "candidate_id": "candidate-typed",
+                "goal_id": "goal-typed",
+                "goal_revision": 2,
+                "criterion_id": "criterion-typed",
+            },
+        }
+    ]
+
+
 class _RecordingRepository:
     def __init__(self, *, status: str = "running", fail_checkpoint: bool = False):
         self.job = _canonical_job(status=status)
@@ -237,6 +251,8 @@ def test_authenticated_workflow_owner_requires_current_matching_session():
         assert _workflow_durable_owner_fields() == {
             "owner_kind": "user",
             "owner_principal_id": "operator:durable-test",
+            "conversation_id": "session-durable",
+            "operator_session_id": "",
         }
     finally:
         reset_runtime_context(tokens)
@@ -288,6 +304,8 @@ def _typed_api_job(*, status: str = "running", lease_owner: str | None = None) -
         "workflow_name": "typed-workflow",
         "tool_name": "workflow_typed",
         "session_id": "session-durable",
+        "conversation_id": "session-durable",
+        "operator_session_id": "session-durable",
         "status": status,
         "owner": {"kind": "user", "principal_id": "operator:durable-test", "service_id": None},
         "declared_authority": {
@@ -436,6 +454,7 @@ async def test_typed_control_uses_canonical_fence_and_rejects_stale_owner():
         patch("src.api.workflows.durable_job_repository.get_job", new_callable=AsyncMock, return_value=typed),
         patch("src.api.workflows.durable_job_repository.pause_job", new_callable=AsyncMock, return_value=transitioned) as pause,
         patch("src.api.workflows.goal_repository.get", new_callable=AsyncMock, return_value=_typed_goal()),
+        patch("src.api.workflows.audit_repository.list_events", new_callable=AsyncMock, return_value=_typed_candidate_events()),
     ):
         result = await _control_typed_workflow_run(
             run_identity=typed["run_identity"],
@@ -460,6 +479,7 @@ async def test_typed_control_uses_canonical_fence_and_rejects_stale_owner():
     with (
         patch("src.api.workflows.durable_job_repository.get_job", new_callable=AsyncMock, return_value=stale),
         patch("src.api.workflows.goal_repository.get", new_callable=AsyncMock, return_value=_typed_goal()),
+        patch("src.api.workflows.audit_repository.list_events", new_callable=AsyncMock, return_value=_typed_candidate_events()),
     ):
         with pytest.raises(HTTPException) as error:
             await _control_typed_workflow_run(
@@ -497,6 +517,7 @@ async def test_control_route_never_sends_schema_v2_row_to_legacy_repository():
         patch("src.api.workflows.durable_job_repository.get_job", new_callable=AsyncMock, return_value=typed),
         patch("src.api.workflows.durable_job_repository.pause_job", new_callable=AsyncMock, return_value=transitioned) as pause,
         patch("src.api.workflows.goal_repository.get", new_callable=AsyncMock, return_value=_typed_goal()),
+        patch("src.api.workflows.audit_repository.list_events", new_callable=AsyncMock, return_value=_typed_candidate_events()),
         patch("src.api.workflows.workflow_state_repository.acquire_or_renew_v2_lease", new_callable=AsyncMock) as legacy_lease,
         patch("src.api.workflows.workflow_state_repository.record_v2_transition", new_callable=AsyncMock) as legacy_transition,
         patch("src.api.workflows.workflow_state_repository.record_v2_operator_recovery_control", new_callable=AsyncMock) as legacy_control,

@@ -154,11 +154,7 @@ def test_local_two_domain_execution_is_real_and_intercepted(tmp_path: Path):
     owner = "operator:local-proof"
     session = "session-local-proof"
     review = _activate(store, root, pack, owner=owner, session=session)
-    calls: list[str] = []
-
-    def transport(url: str, **_: object) -> dict[str, str]:
-        calls.append(url)
-        return {"title": "Controlled source", "content": "Evidence from the intercepted source."}
+    source_payload = {"title": "Controlled source", "content": "Evidence from the intercepted source."}
 
     primary = store.execute_local(
         pack.id,
@@ -171,7 +167,7 @@ def test_local_two_domain_execution_is_real_and_intercepted(tmp_path: Path):
         session_id=session,
         source_url="http://controlled.test/source",
         query="local proof",
-        intercepted_transport=transport,
+        source_payload=source_payload,
     )
     secondary = store.execute_local(
         pack.id,
@@ -185,7 +181,6 @@ def test_local_two_domain_execution_is_real_and_intercepted(tmp_path: Path):
         goal_snapshot=_goal_snapshot(owner, session, revision=2, title="Keep proof bounded"),
     )
 
-    assert calls == ["http://controlled.test/source"]
     assert primary["execution"]["transport"] == "intercepted"
     assert primary["execution"]["live_network_calls"] == 0
     assert primary["execution"]["governed_workflow"]["executor"] == "capability_pack_internal_governed_host_v1"
@@ -211,10 +206,9 @@ def test_local_two_domain_execution_is_real_and_intercepted(tmp_path: Path):
         session_id=session,
         source_url="http://controlled.test/source",
         query="local proof",
-        intercepted_transport=transport,
+        source_payload=source_payload,
     )
     assert deduped["status"] == "deduped"
-    assert calls == ["http://controlled.test/source"]
 
 
 def test_local_execution_accepts_only_a_value_for_the_production_source_boundary(tmp_path: Path):
@@ -332,6 +326,60 @@ def test_workflow_allowlist_rejects_executable_steps_and_revoke_cancels_pinned_j
     assert store.status(pack.id)["jobs"][0]["status"] == "cancelled"
 
 
+def test_local_host_honors_templates_and_rejects_argument_mismatch(tmp_path: Path):
+    root, pack = _package(tmp_path)
+    workflow = load_capability_pack_workflows(root, pack)[0]
+    store = CapabilityPackLifecycle(tmp_path / "lifecycle.json")
+    owner = "operator:template-proof"
+    session = "session-template-proof"
+    _activate(store, root, pack, owner=owner, session=session)
+
+    result = store.execute_local(
+        pack.id,
+        goal_id="goal-local",
+        job_id="job-template-proof",
+        domain="primary",
+        artifact_root=tmp_path / "artifacts",
+        artifact_path="brief.md",
+        owner_principal_id=owner,
+        session_id=session,
+        source_url="http://controlled.test/source",
+        query="local proof",
+        source_payload={"content": "templated evidence"},
+    )
+    governed = result["execution"]["governed_workflow"]
+    assert governed["result_template"] == "Local artifact written."
+    assert governed["result"] == "Local artifact written."
+    assert all(step["arguments_digest"] for step in governed["steps"])
+    assert Path(result["execution"]["artifact"]["path"]).read_text(encoding="utf-8").find(
+        "templated evidence"
+    ) >= 0
+
+    bad_root, bad_pack = _package(tmp_path / "mismatch")
+    bad_workflow = _workflow("local-research-brief", "web_search").replace(
+        "arguments: {}", "arguments:\n      query: different query", 1
+    )
+    (bad_root / "workflows" / "local-research.md").write_text(bad_workflow, encoding="utf-8")
+    bad_store = CapabilityPackLifecycle(tmp_path / "mismatch-state.json")
+    bad_owner = "operator:template-mismatch"
+    bad_session = "session-template-mismatch"
+    _activate(bad_store, bad_root, bad_pack, owner=bad_owner, session=bad_session)
+    with pytest.raises(CapabilityPackLifecycleError, match="query does not match"):
+        bad_store.execute_local(
+            bad_pack.id,
+            goal_id="goal-local",
+            job_id="job-template-mismatch",
+            domain="primary",
+            artifact_root=tmp_path / "mismatch-artifacts",
+            artifact_path="brief.md",
+            owner_principal_id=bad_owner,
+            session_id=bad_session,
+            source_url="http://controlled.test/source",
+            query="local proof",
+            source_payload={"content": "evidence"},
+        )
+
+
 def test_operator_api_routes_are_registered_for_readback_and_local_controls():
     from src.api.router import api_router
 
@@ -421,6 +469,90 @@ async def test_lifecycle_api_routes_bind_authenticated_owner_and_approval(monkey
         assert kwargs["owner_principal_id"] == "operator:api"
         assert kwargs["session_id"] == "session:api"
         assert kwargs["approval_id"] == "approval:one"
+
+
+@pytest.mark.asyncio
+async def test_capability_pack_http_approval_prepare_decide_consume_and_deny(
+    client,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+):
+    import src.api.capability_packs as capability_packs_api
+
+    root, pack = _package(tmp_path / "http-pack")
+    store = CapabilityPackLifecycle(tmp_path / "http-lifecycle.json")
+    _activate(store, root, pack, owner="operator:test-bypass", session="test-auth-bypass")
+    monkeypatch.setattr(capability_packs_api, "_store", lambda: store)
+
+    prepared = await client.post(
+        f"/api/capability-packs/{pack.id}/approvals",
+        json={"action": "pause", "goal_id": "goal-local"},
+    )
+    assert prepared.status_code == 200, prepared.text
+    approval = prepared.json()["approval"]
+    approval_id = approval["approval_id"]
+    assert approval["status"] == "pending"
+    assert approval["owner_principal_id"] == "operator:test-bypass"
+    assert approval["session_id"] == "test-auth-bypass"
+
+    listed = await client.get(f"/api/capability-packs/{pack.id}/approvals")
+    read = await client.get(f"/api/capability-packs/{pack.id}/approvals/{approval_id}")
+    assert listed.status_code == 200 and any(item["approval_id"] == approval_id for item in listed.json())
+    assert read.status_code == 200 and read.json()["status"] == "pending"
+
+    from src.auth.service import test_bypass_operator
+    from src.security.trust_contract import PrincipalType, TrustPrincipal
+    from dataclasses import replace
+
+    original = test_bypass_operator()
+    foreign = replace(
+        original,
+        session_id="foreign-auth-session",
+        principal=replace(
+            original.principal,
+            principal_id="operator:foreign",
+            session_id="foreign-auth-session",
+            operator_session_id="foreign-auth-session",
+            principal_type=PrincipalType.OPERATOR,
+        ),
+    )
+    with monkeypatch.context() as patch:
+        patch.setattr(capability_packs_api, "_require_authenticated_capability_operator", lambda _request: foreign)
+        cross_owner = await client.post(
+            f"/api/capability-packs/{pack.id}/approvals/{approval_id}/approve"
+        )
+    assert cross_owner.status_code == 403
+    assert (await client.get(f"/api/capability-packs/{pack.id}/approvals/{approval_id}")).json()["status"] == "pending"
+
+    approved = await client.post(
+        f"/api/capability-packs/{pack.id}/approvals/{approval_id}/approve"
+    )
+    assert approved.status_code == 200 and approved.json()["status"] == "approved"
+    paused = await client.post(
+        f"/api/capability-packs/{pack.id}/pause",
+        json={"approval_id": approval_id},
+    )
+    assert paused.status_code == 200 and paused.json()["status"] == "paused"
+    replay = await client.post(
+        f"/api/capability-packs/{pack.id}/pause",
+        json={"approval_id": approval_id},
+    )
+    assert replay.status_code == 409
+
+    denied_prepare = await client.post(
+        f"/api/capability-packs/{pack.id}/approvals",
+        json={"action": "uninstall", "goal_id": "goal-local"},
+    )
+    denied_id = denied_prepare.json()["approval"]["approval_id"]
+    denied = await client.post(
+        f"/api/capability-packs/{pack.id}/approvals/{denied_id}/deny"
+    )
+    assert denied.status_code == 200 and denied.json()["status"] == "denied"
+    denied_mutation = await client.post(
+        f"/api/capability-packs/{pack.id}/uninstall",
+        json={"approval_id": denied_id},
+    )
+    assert denied_mutation.status_code == 403
 
 
 def test_local_execution_fails_closed_for_empty_authority_and_unsafe_artifact_paths(tmp_path: Path):
@@ -627,7 +759,6 @@ def test_succeeded_job_without_execution_receipt_cannot_replay_transport(tmp_pat
     owner = "operator:atomic"
     session = "session-atomic"
     _activate(store, root, pack, owner=owner, session=session)
-    calls: list[str] = []
 
     first = store.execute_local(
         pack.id,
@@ -639,7 +770,7 @@ def test_succeeded_job_without_execution_receipt_cannot_replay_transport(tmp_pat
         owner_principal_id=owner,
         session_id=session,
         source_url="http://controlled.test/source",
-        intercepted_transport=lambda url, **_: {"url": url, "content": "once"},
+        source_payload={"url": "http://controlled.test/source", "content": "once"},
     )
     state = json.loads((tmp_path / "lifecycle.json").read_text(encoding="utf-8"))
     del state["local_executions"][first["job"]["job_id"]]
@@ -657,9 +788,8 @@ def test_succeeded_job_without_execution_receipt_cannot_replay_transport(tmp_pat
             owner_principal_id=owner,
             session_id=session,
             source_url="http://controlled.test/source",
-            intercepted_transport=lambda url, **_: calls.append(url),
+            source_payload={"url": "http://controlled.test/source", "content": "once"},
         )
-    assert calls == []
 
 
 def test_goal_snapshot_binding_rejects_mismatch_and_noncanonical_rows(tmp_path: Path):
@@ -901,7 +1031,7 @@ def test_local_artifact_write_and_receipt_commit_are_exclusive_against_revoke(
         owner_principal_id=owner,
         session_id=session,
         source_url="http://controlled.test/source",
-        intercepted_transport=lambda _url, **_: {"content": "bounded"},
+        source_payload={"content": "bounded"},
     )
     revoke_thread.join(timeout=2)
     assert not revoke_thread.is_alive()

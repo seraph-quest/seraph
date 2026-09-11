@@ -65,6 +65,7 @@ MAX_ARTIFACT_BYTES = 100 * 1024 * 1024
 MAX_INFERENCE_COST_MICROUSD = 1_000_000_000
 MAX_PACK_JOBS = 256
 MAX_LOCAL_SOURCE_BYTES = 2 * 1024 * 1024
+CAPABILITY_PACK_APPROVAL_TTL_SECONDS = 5 * 60
 
 _PACK_ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,127}$")
 _REFERENCE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:/@+\-]{0,255}$")
@@ -1213,12 +1214,10 @@ def validate_capability_pack_package(
 
 _LOCAL_WORKFLOW_TOOLS = {
     "get_goals",
-    "read_file",
     "write_file",
     "local_source",
-    # The existing web-brief workflow is parsed for its step contract, but
-    # this local executor routes its source step through the injected
-    # intercepted transport and never invokes the network tool.
+    # Source values are injected by the governed local boundary; these
+    # declarative names never invoke a provider or network client.
     "web_search",
     "render_markdown",
 }
@@ -1592,9 +1591,9 @@ class CapabilityPackExecutionContract:
 class CapabilityPackLocalExecutionRequest:
     """Inputs for one bounded, provider-free capability-pack execution.
 
-    ``transport`` is deliberately not part of this serializable request.  A
-    caller must inject a test/local transport for the research domain; this
-    keeps the lifecycle module from ever reaching the network itself.
+    ``source_payload`` is deliberately not part of this serializable request.
+    The lifecycle receives an already admitted source value at the execution
+    boundary and never accepts a caller-supplied runner or transport callback.
     """
 
     pack_id: str
@@ -1661,6 +1660,8 @@ class CapabilityPackGovernedWorkflowResult:
 
     content: str
     steps: tuple[dict[str, Any], ...]
+    result: str = ""
+    result_template: str = ""
     executor: str = "capability_pack_internal_governed_host_v1"
     provider_calls: int = 0
     live_network_calls: int = 0
@@ -1673,6 +1674,8 @@ class CapabilityPackGovernedWorkflowResult:
             "live_network_calls": self.live_network_calls,
             "steps": [deepcopy(step) for step in self.steps],
             "content_digest": canonical_digest(self.content),
+            "result": self.result,
+            "result_template": self.result_template,
         }
 
 
@@ -1692,6 +1695,7 @@ class _CapabilityPackLocalWorkflowHost:
     _SOURCE_TOOLS = {"get_goals", "local_source", "web_search"}
     _OUTPUT_TOOLS = {"render_markdown", "write_file"}
     _ALLOWED_TOOLS = _SOURCE_TOOLS | _OUTPUT_TOOLS
+    _TEMPLATE_RE = re.compile(r"{{\s*([^{}]+?)\s*}}")
 
     @staticmethod
     def _bounded_text(value: Any) -> str:
@@ -1700,6 +1704,63 @@ class _CapabilityPackLocalWorkflowHost:
         if isinstance(value, (dict, list)):
             return json.dumps(value, sort_keys=True, ensure_ascii=True)
         return str(value or "").strip()
+
+    @classmethod
+    def _render_template(cls, value: Any, context: Mapping[str, Any]) -> Any:
+        """Render only reviewed scalar templates and reject unknown paths."""
+        if not isinstance(value, str):
+            if isinstance(value, (dict, list)):
+                return json.loads(json.dumps(value, sort_keys=True, default=str))
+            return value
+
+        def lookup(path: str) -> Any:
+            current: Any = context
+            for part in path.strip().split("."):
+                if isinstance(current, Mapping) and part in current:
+                    current = current[part]
+                else:
+                    raise CapabilityPackLifecycleError(
+                        f"local workflow template references unavailable value: {path.strip()}"
+                    )
+            return current
+
+        matches = list(cls._TEMPLATE_RE.finditer(value))
+        if not matches:
+            return value
+        if len(matches) == 1 and matches[0].span() == (0, len(value)):
+            return lookup(matches[0].group(1))
+        rendered = value
+        for match in reversed(matches):
+            replacement = cls._bounded_text(lookup(match.group(1)))
+            rendered = rendered[: match.start()] + replacement + rendered[match.end() :]
+        return rendered
+
+    @classmethod
+    def _render_arguments(
+        cls,
+        arguments: Mapping[str, Any],
+        context: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        if not isinstance(arguments, Mapping):
+            raise CapabilityPackLifecycleError("local workflow step arguments must be a mapping")
+        return {
+            str(key): cls._render_template(value, context)
+            for key, value in arguments.items()
+        }
+
+    @staticmethod
+    def _require_keys(
+        tool_name: str,
+        arguments: Mapping[str, Any],
+        *,
+        allowed: set[str],
+        required: set[str] | frozenset[str] = frozenset(),
+    ) -> None:
+        keys = set(arguments)
+        if not keys.issubset(allowed) or not set(required).issubset(keys):
+            raise CapabilityPackLifecycleError(
+                f"local workflow {tool_name} arguments are outside the admitted schema"
+            )
 
     def execute(
         self,
@@ -1723,17 +1784,27 @@ class _CapabilityPackLocalWorkflowHost:
         if len((source_text or snapshot_text).encode("utf-8")) > MAX_LOCAL_SOURCE_BYTES:
             raise CapabilityPackLifecycleError("governed local input exceeds the source limit")
 
+        canonical_content = (
+            f"# Local research brief\n\nGoal: {request.goal_id}\n"
+            f"Query: {request.query or request.goal_id}\n"
+            f"Source: {request.source_url}\n\n{source_text}\n"
+            if request.domain == "primary"
+            else f"# Goal snapshot\n\nGoal: {request.goal_id}\n\n{snapshot_text}\n"
+        )
         if request.domain == "primary":
-            content = (
-                f"# Local research brief\n\nGoal: {request.goal_id}\n"
-                f"Query: {request.query or request.goal_id}\n"
-                f"Source: {request.source_url}\n\n{source_text}\n"
-            )
             expected_source_tools = {"web_search", "local_source"}
         else:
-            content = f"# Goal snapshot\n\nGoal: {request.goal_id}\n\n{snapshot_text}\n"
             expected_source_tools = {"get_goals"}
-
+        context: dict[str, Any] = {
+            "goal_id": request.goal_id,
+            "query": request.query or request.goal_id,
+            "source_url": request.source_url or "",
+            "artifact_path": request.artifact_path,
+            "file_path": request.artifact_path,
+            "steps": {},
+        }
+        content = canonical_content
+        result_text = ""
         step_receipts: list[dict[str, Any]] = []
         source_seen = False
         output_seen = False
@@ -1743,35 +1814,65 @@ class _CapabilityPackLocalWorkflowHost:
                 raise CapabilityPackLifecycleError(
                     f"reviewed local workflow requests unsupported tool: {tool_name}"
                 )
+            arguments = self._render_arguments(step.arguments, context)
             if tool_name in self._SOURCE_TOOLS:
+                self._require_keys(
+                    tool_name,
+                    arguments,
+                    allowed={"query", "url", "source_url"},
+                )
                 if tool_name not in expected_source_tools:
                     raise CapabilityPackLifecycleError(
                         f"governed local workflow source tool does not match {request.domain} domain"
                     )
+                if "query" in arguments and str(arguments["query"]) != str(request.query or request.goal_id):
+                    raise CapabilityPackLifecycleError("local workflow source query does not match the request")
+                if any(
+                    key in arguments
+                    and str(arguments[key]) != str(request.source_url or "")
+                    for key in ("url", "source_url")
+                ):
+                    raise CapabilityPackLifecycleError("local workflow source URL does not match the request")
                 result = source_text if request.domain == "primary" else snapshot_text
                 source_seen = True
                 effect = "intercepted_input"
             elif tool_name == "render_markdown":
-                result = content
+                self._require_keys(tool_name, arguments, allowed={"content"})
+                result = arguments.get("content", canonical_content)
+                result = self._bounded_text(result)
                 effect = "staged_output"
                 output_seen = True
             else:
-                # ``write_file`` is intentionally staged.  The lifecycle
-                # transaction owns the sole filesystem effect after its final
-                # authority and cancellation check.
-                result = content
+                self._require_keys(
+                    tool_name,
+                    arguments,
+                    allowed={"file_path", "content"},
+                )
+                if "file_path" in arguments and str(arguments["file_path"]) != str(request.artifact_path):
+                    raise CapabilityPackLifecycleError("local workflow artifact path does not match the request")
+                result = self._bounded_text(arguments.get("content", content))
                 effect = "staged_artifact_write"
                 output_seen = True
+            context["steps"][step.step_id] = {"result": result}
+            if tool_name in self._OUTPUT_TOOLS:
+                content = self._bounded_text(result)
+                result_text = content
             step_receipts.append(
                 {
                     "step_id": step.step_id,
                     "tool": tool_name,
+                    "arguments_digest": canonical_digest(arguments),
                     "status": "succeeded",
                     "effect": effect,
                     "result_digest": canonical_digest(result),
                 }
             )
-
+        if workflow.result_template:
+            result_text = self._bounded_text(
+                self._render_template(workflow.result_template, context)
+            )
+        if not result_text:
+            result_text = content
         if not source_seen:
             raise CapabilityPackLifecycleError(
                 "reviewed local workflow must contain one admitted source step"
@@ -1781,9 +1882,10 @@ class _CapabilityPackLocalWorkflowHost:
                 "reviewed local workflow must contain one staged output step"
             )
         if f"Goal: {request.goal_id}" not in content.splitlines():
-            raise CapabilityPackLifecycleError(
-                "governed local workflow output is missing the canonical goal identity"
-            )
+            # The goal identity is a host-owned effect invariant.  A reviewed
+            # template may omit the marker, but the artifact cannot omit the
+            # canonical binding that the lifecycle readback verifies.
+            content = f"Goal: {request.goal_id}\n\n{content}"
         if len(content.encode("utf-8")) > max_artifact_bytes:
             raise CapabilityPackLifecycleError(
                 "governed local workflow output exceeds the reviewed artifact limit"
@@ -1791,6 +1893,8 @@ class _CapabilityPackLocalWorkflowHost:
         return CapabilityPackGovernedWorkflowResult(
             content=content,
             steps=tuple(step_receipts),
+            result=result_text,
+            result_template=workflow.result_template,
         )
 
 
@@ -2324,6 +2428,7 @@ class CapabilityPackLifecycle:
         current_digest: str | None,
         authority_delta_payload: Mapping[str, Any],
         approved_by: str,
+        status: str = "approved",
         owner_principal_id: str | None = None,
         session_id: str | None = None,
         content_digest: str | None = None,
@@ -2347,9 +2452,13 @@ class CapabilityPackLifecycle:
             authority_digest=authority_digest,
         )
         approval_id = f"capability-pack-approval:{approval_digest[:24]}"
+        if status not in {"pending", "approved"}:
+            raise CapabilityPackLifecycleError("unsupported capability-pack approval status")
+        now = _utc_now()
+        expires_at = (datetime.now(timezone.utc).timestamp() + CAPABILITY_PACK_APPROVAL_TTL_SECONDS)
         approval = {
             "approval_id": approval_id,
-            "status": "approved",
+            "status": status,
             "action": action,
             "pack_id": pack_id,
             "version": version,
@@ -2359,12 +2468,16 @@ class CapabilityPackLifecycle:
             "authority_delta": deepcopy(dict(authority_delta_payload)),
             "authority_delta_digest": canonical_digest(authority_delta_payload),
             "approval_digest": approval_digest,
-            "approved_by": approved_by,
+            "approved_by": approved_by if status == "approved" else None,
             "owner_principal_id": owner_principal_id,
             "session_id": session_id,
             "content_digest": content_digest,
             "authority_digest": authority_digest,
-            "approved_at": _utc_now(),
+            "created_at": now,
+            "expires_at": datetime.fromtimestamp(expires_at, timezone.utc).isoformat(),
+            "approved_at": now if status == "approved" else None,
+            "resolved_at": now if status == "approved" else None,
+            "consumed_at": None,
         }
         existing = state.setdefault("approvals", {}).get(approval_id)
         if isinstance(existing, Mapping) and any(existing.get(key) != approval.get(key) for key in (
@@ -2372,12 +2485,14 @@ class CapabilityPackLifecycle:
             "owner_principal_id", "session_id", "content_digest", "authority_digest",
         )):
             raise CapabilityPackLifecycleError("approval identity is already bound to a different action")
+        if isinstance(existing, Mapping) and existing.get("status") not in {None, "pending"}:
+            raise CapabilityPackLifecycleError("capability-pack approval has already been resolved")
         state["approvals"][approval_id] = approval
         return approval
 
-    @staticmethod
     def _require_approval(
-        state: Mapping[str, Any],
+        self,
+        state: dict[str, Any],
         *,
         approval_id: str | None,
         action: str,
@@ -2437,7 +2552,23 @@ class CapabilityPackLifecycle:
             raise CapabilityPackLifecycleError(
                 f"durable operator approval is required for {action} with the exact goal/digest/authority delta"
             )
-        return approval
+        try:
+            expires_at = datetime.fromisoformat(str(approval.get("expires_at") or "").replace("Z", "+00:00"))
+        except (TypeError, ValueError):
+            expires_at = None
+        if expires_at is None or expires_at <= datetime.now(timezone.utc):
+            raise CapabilityPackLifecycleError("capability-pack approval is stale or expired")
+        if not approval.get("owner_principal_id") or not approval.get("session_id"):
+            raise CapabilityPackLifecycleError("capability-pack approval owner binding is unavailable")
+        # This mutation is committed together with the lifecycle transition.
+        # Every lifecycle effect therefore consumes exactly one approved JSON
+        # row, while a replay sees status=consumed and fails the check above.
+        consumed = dict(approval)
+        consumed["status"] = "consumed"
+        consumed["consumed_at"] = _utc_now()
+        consumed["resolved_at"] = consumed.get("resolved_at") or consumed["consumed_at"]
+        state.setdefault("approvals", {})[str(approval_id)] = consumed
+        return consumed
 
     def create_operator_approval(
         self,
@@ -2457,8 +2588,14 @@ class CapabilityPackLifecycle:
         content_digest: str | None = None,
         approval_content_digest: str | None = None,
         authority_digest: str | None = None,
+        status: str = "approved",
     ) -> dict[str, Any]:
-        """Persist one exact action/goal/digest/authority operator approval."""
+        """Persist one exact action/goal/digest/authority approval.
+
+        The legacy Python helper defaults to an already approved row for
+        compatibility with offline callers.  The authenticated HTTP surface
+        uses ``prepare_operator_approval`` followed by an explicit decision.
+        """
 
         pack_id = _validate_pack_id(pack_id)
         goal_id = _validate_goal_id(goal_id)
@@ -2531,6 +2668,7 @@ class CapabilityPackLifecycle:
                 current_digest=current_digest,
                 authority_delta_payload=delta,
                 approved_by=approved_by,
+                status=status,
                 owner_principal_id=owner_principal_id,
                 session_id=session_id,
                 content_digest=expected_content_digest,
@@ -2539,12 +2677,193 @@ class CapabilityPackLifecycle:
             receipt = self._record_receipt(
                 state,
                 action=f"approval:{action}",
-                status="approved",
+                status=status,
                 pack_id=pack_id,
                 details={"approval_id": approval["approval_id"], "version": version, "digest": digest, "goal_id": goal_id, "authority_delta_digest": approval["authority_delta_digest"]},
             )
             self._commit(state)
         return {"approval": deepcopy(approval), "receipt": receipt}
+
+    def prepare_operator_approval(
+        self,
+        pack_id: str,
+        *,
+        action: str,
+        goal_id: str,
+        digest: str | None = None,
+        version: str | None = None,
+        current_digest: str | None = None,
+        authority_delta_payload: Mapping[str, Any] | None = None,
+        owner_principal_id: str,
+        session_id: str,
+        content_digest: str | None = None,
+        authority_digest: str | None = None,
+    ) -> dict[str, Any]:
+        """Create one pending, owner-bound lifecycle approval request."""
+
+        owner_principal_id = _validate_goal_id(owner_principal_id)
+        session_id = _validate_goal_id(session_id)
+        if owner_principal_id == session_id:
+            raise CapabilityPackLifecycleError("approval owner principal and session must be distinct identities")
+        return self.create_operator_approval(
+            pack_id,
+            action=action,
+            goal_id=goal_id,
+            digest=digest,
+            version=version,
+            current_digest=current_digest,
+            authority_delta_payload=authority_delta_payload,
+            approved_by=owner_principal_id,
+            owner_principal_id=owner_principal_id,
+            session_id=session_id,
+            content_digest=content_digest,
+            authority_digest=authority_digest,
+            status="pending",
+        )
+
+    @staticmethod
+    def _public_approval(approval: Mapping[str, Any]) -> dict[str, Any]:
+        """Return a JSON-safe approval projection without package paths."""
+
+        allowed = {
+            "approval_id",
+            "status",
+            "action",
+            "pack_id",
+            "version",
+            "digest",
+            "goal_id",
+            "current_digest",
+            "authority_delta",
+            "authority_delta_digest",
+            "approval_digest",
+            "owner_principal_id",
+            "session_id",
+            "content_digest",
+            "authority_digest",
+            "approved_by",
+            "created_at",
+            "approved_at",
+            "resolved_at",
+            "consumed_at",
+            "expires_at",
+        }
+        return {key: deepcopy(approval[key]) for key in allowed if key in approval}
+
+    def list_operator_approvals(
+        self,
+        pack_id: str,
+        *,
+        owner_principal_id: str,
+        session_id: str,
+    ) -> list[dict[str, Any]]:
+        """List only approvals bound to the exact authenticated owner."""
+
+        pack_id = _validate_pack_id(pack_id)
+        owner_principal_id = _validate_goal_id(owner_principal_id)
+        session_id = _validate_goal_id(session_id)
+        with self._state_lock(shared=True):
+            state = self._load()
+            approvals = state.get("approvals", {})
+            if not isinstance(approvals, Mapping):
+                return []
+            return [
+                self._public_approval(item)
+                for item in approvals.values()
+                if isinstance(item, Mapping)
+                and item.get("pack_id") == pack_id
+                and item.get("owner_principal_id") == owner_principal_id
+                and item.get("session_id") == session_id
+            ]
+
+    def get_operator_approval(
+        self,
+        pack_id: str,
+        approval_id: str,
+        *,
+        owner_principal_id: str,
+        session_id: str,
+    ) -> dict[str, Any]:
+        """Read one approval only when its immutable owner binding matches."""
+
+        pack_id = _validate_pack_id(pack_id)
+        approval_id = _validate_goal_id(approval_id)
+        owner_principal_id = _validate_goal_id(owner_principal_id)
+        session_id = _validate_goal_id(session_id)
+        with self._state_lock(shared=True):
+            state = self._load()
+            approval = state.get("approvals", {}).get(approval_id)
+            if (
+                not isinstance(approval, Mapping)
+                or approval.get("pack_id") != pack_id
+                or approval.get("owner_principal_id") != owner_principal_id
+                or approval.get("session_id") != session_id
+            ):
+                raise CapabilityPackLifecycleError("capability-pack approval owner or session identity conflicts")
+            return self._public_approval(approval)
+
+    def resolve_operator_approval(
+        self,
+        pack_id: str,
+        approval_id: str,
+        *,
+        decision: str,
+        owner_principal_id: str,
+        session_id: str,
+    ) -> dict[str, Any]:
+        """CAS-resolve one pending approval through an authenticated owner."""
+
+        if decision not in {"approved", "denied"}:
+            raise CapabilityPackLifecycleError("capability-pack approval decision is invalid")
+        pack_id = _validate_pack_id(pack_id)
+        approval_id = _validate_goal_id(approval_id)
+        owner_principal_id = _validate_goal_id(owner_principal_id)
+        session_id = _validate_goal_id(session_id)
+        with self._state_lock():
+            state = self._load()
+            approval = state.get("approvals", {}).get(approval_id)
+            if (
+                not isinstance(approval, Mapping)
+                or approval.get("pack_id") != pack_id
+                or approval.get("owner_principal_id") != owner_principal_id
+                or approval.get("session_id") != session_id
+            ):
+                raise CapabilityPackLifecycleError("capability-pack approval owner or session identity conflicts")
+            if approval.get("status") != "pending":
+                raise CapabilityPackLifecycleError("capability-pack approval is stale or already resolved")
+            expires_at = approval.get("expires_at")
+            if expires_at:
+                try:
+                    expiry = datetime.fromisoformat(str(expires_at).replace("Z", "+00:00"))
+                except (TypeError, ValueError):
+                    expiry = None
+                if expiry is None or expiry <= datetime.now(timezone.utc):
+                    mutable = dict(approval)
+                    mutable["status"] = "expired"
+                    mutable["resolved_at"] = _utc_now()
+                    state["approvals"][approval_id] = mutable
+                    self._commit(state)
+                    raise CapabilityPackLifecycleError("capability-pack approval is stale or expired")
+            mutable = dict(approval)
+            now = _utc_now()
+            mutable.update(
+                {
+                    "status": decision,
+                    "approved_by": owner_principal_id if decision == "approved" else None,
+                    "approved_at": now if decision == "approved" else None,
+                    "resolved_at": now,
+                }
+            )
+            state["approvals"][approval_id] = mutable
+            receipt = self._record_receipt(
+                state,
+                action=f"approval:{decision}",
+                status=decision,
+                pack_id=pack_id,
+                details={"approval_id": approval_id, "owner_principal_id": owner_principal_id},
+            )
+            self._commit(state)
+            return {"approval": self._public_approval(mutable), "receipt": receipt}
 
     @staticmethod
     def _execution_contract_from_state(
@@ -3721,14 +4040,12 @@ class CapabilityPackLifecycle:
         goal_snapshot: Mapping[str, Any] | str | None = None,
         source_payload: Any = None,
         source_payload_digest: str | None = None,
-        intercepted_transport: Callable[..., Any] | None = None,
-        transport: Callable[..., Any] | None = None,
     ) -> dict[str, Any]:
         """Execute one real local workflow through the internal governed host.
 
-        The primary domain accepts either an already intercepted source value
-        or the legacy test-only ``intercepted_transport`` seam; no HTTP client
-        or provider path exists in this method.  The secondary domain consumes
+        The primary domain accepts an already intercepted source value; no HTTP
+        client, provider path, or caller-supplied runner callback exists in
+        this method.  The secondary domain consumes
         a caller-provided canonical goal snapshot.  Both paths traverse the
         reviewed declarative workflow through ``_CapabilityPackLocalWorkflowHost``,
         write and read back a bounded artifact, and persist a pinned
@@ -3756,14 +4073,8 @@ class CapabilityPackLifecycle:
         domain = domain_aliases.get(str(domain).strip().lower(), str(domain).strip().lower())
         if domain not in {"primary", "secondary"}:
             raise CapabilityPackLifecycleError("local execution domain must be primary or secondary")
-        if domain == "primary" and intercepted_transport is None:
-            intercepted_transport = transport
-        if domain == "primary" and source_payload is not None and intercepted_transport is not None:
-            raise CapabilityPackLifecycleError(
-                "provide source_payload or an intercepted transport, not both"
-            )
-        if domain == "primary" and source_payload is None and not callable(intercepted_transport):
-            raise CapabilityPackLifecycleError("primary local execution requires an intercepted transport")
+        if domain == "primary" and source_payload is None:
+            raise CapabilityPackLifecycleError("primary local execution requires an intercepted source value")
         if domain == "secondary" and goal_snapshot is None:
             raise CapabilityPackLifecycleError("secondary local execution requires a goal snapshot")
         canonical_goal_snapshot: dict[str, Any] | None = None
@@ -3919,11 +4230,7 @@ class CapabilityPackLifecycle:
                 if not source_url:
                     raise CapabilityPackLifecycleError("primary local execution requires a controlled source URL")
                 if resolved_source_payload is None:
-                    assert intercepted_transport is not None
-                    try:
-                        resolved_source_payload = intercepted_transport(source_url, query=query)
-                    except TypeError:
-                        resolved_source_payload = intercepted_transport(source_url)
+                    raise CapabilityPackLifecycleError("primary local execution requires an intercepted source value")
                 outcome = "local_research_brief_verified"
                 source_refs = [f"intercepted:{canonical_digest(source_url, resolved_source_payload)}"]
             else:

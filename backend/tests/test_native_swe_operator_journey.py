@@ -20,6 +20,7 @@ from src.workflows.native_software_engineering import (
     build_native_software_engineering_plan,
     native_software_engineering_fixture_root,
     preflight_native_software_engineering_fixture,
+    resume_native_software_engineering_fixture,
     run_native_software_engineering_fixture,
 )
 
@@ -66,6 +67,8 @@ async def _approved_request(
         job_id=job_id,
         session_id=session_id,
         patch_approval="required",
+        approval_operator_principal_id="operator:test-bypass",
+        approval_operator_session_id="test-auth-bypass",
         expected_source_digest=source_digest,
         test_timeout_seconds=test_timeout_seconds,
     )
@@ -92,21 +95,21 @@ async def _approved_request(
         relative_bug_path=relative_bug_path,
         preview_payload=preview_payload,
     )
-    approval_operator_session = native_swe._native_approval_owner_session(
-        native_swe.get_current_trust_principal(),
-        session_id=session_id,
-    )
+    approval_operator_session = request.approval_operator_session_id
     expires_at = time.time() + 300
     pending = await native_swe.approval_repository.get_or_create_pending(
-        session_id=session_id,
+        session_id=approval_operator_session,
         tool_name=native_swe._NATIVE_PATCH_CAPABILITY_ID,
         risk_level=native_swe._NATIVE_APPROVAL_RISK,
         summary="test native SWE approval",
         fingerprint=native_swe._native_approval_fingerprint(approval_context),
         details={
-            "approval_conversation_id": session_id,
-            "approval_owner_principal_id": request.owner_principal_id,
+            "approval_conversation_id": approval_operator_session,
+            "approval_owner_principal_id": request.approval_operator_principal_id,
             "approval_owner_operator_session_id": approval_operator_session,
+            "approval_operator_principal_id": request.approval_operator_principal_id,
+            "approval_execution_owner_principal_id": request.owner_principal_id,
+            "approval_execution_session_id": request.session_id,
             "approval_context": approval_context,
             "approval_expires_at": expires_at,
             "expires_at": expires_at,
@@ -114,9 +117,9 @@ async def _approved_request(
             "capability_id": native_swe._NATIVE_PATCH_CAPABILITY_ID,
         },
     )
-    assert pending.owner_principal_id == request.owner_principal_id
+    assert pending.owner_principal_id == request.approval_operator_principal_id
     persisted_details = json.loads(pending.details_json or "{}")
-    assert persisted_details["approval_owner_principal_id"] == request.owner_principal_id
+    assert persisted_details["approval_owner_principal_id"] == request.approval_operator_principal_id
     resolved = await native_swe.approval_repository.resolve(pending.id, "approved")
     assert resolved is not None and resolved.status == "approved"
     return replace(request, patch_approval="approved", approval_id=pending.id)
@@ -128,6 +131,8 @@ def _inspection_request(source: Path, *, job_id: str, session_id: str) -> Native
         job_id=job_id,
         session_id=session_id,
         patch_approval="required",
+        approval_operator_principal_id="operator:test-bypass",
+        approval_operator_session_id="test-auth-bypass",
     )
 
 
@@ -215,6 +220,70 @@ async def test_operator_journey_executes_real_fixture_and_dedupes_restart(
         if effect.get("effect_type") == "workspace_patch"
     ]
     assert len(patch_effects) == 1
+
+
+@pytest.mark.asyncio
+async def test_native_swe_pending_is_approved_over_http_then_consumed(
+    async_db,
+    client,
+    tmp_path,
+    monkeypatch,
+    native_context,
+):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.setattr(settings, "workspace_dir", str(workspace))
+    source = _copy_fixture(workspace / "http-operator-repository")
+    request = _inspection_request(
+        source,
+        job_id="native-swe-http-approval",
+        session_id=native_context,
+    )
+
+    pending = await run_native_software_engineering_fixture(request)
+    assert pending["status"] == "awaiting_approval", pending
+    approval_id = pending["approval_id"]
+    listed = await client.get("/api/approvals/pending")
+    assert listed.status_code == 200, listed.text
+    row = next(item for item in listed.json() if item["id"] == approval_id)
+    assert row["owner_principal_id"] == "operator:test-bypass"
+    assert row["operator_session_id"] == "test-auth-bypass"
+
+    from src.auth.service import test_bypass_operator
+    from dataclasses import replace
+
+    foreign = replace(
+        test_bypass_operator(),
+        session_id="foreign-auth-session",
+        principal=replace(
+            test_bypass_operator().principal,
+            principal_id="operator:foreign",
+            session_id="foreign-auth-session",
+            operator_session_id="foreign-auth-session",
+        ),
+    )
+    import src.api.approvals as approvals_api
+
+    with monkeypatch.context() as patch:
+        patch.setattr(approvals_api, "_require_approval_operator", lambda _request: foreign)
+        cross_owner = await client.post(f"/api/approvals/{approval_id}/approve")
+    assert cross_owner.status_code == 403
+
+    approved = await client.post(f"/api/approvals/{approval_id}/approve")
+    assert approved.status_code == 200, approved.text
+    assert approved.json()["status"] == "approved"
+    completed = await resume_native_software_engineering_fixture(
+        request,
+        approval_id=approval_id,
+    )
+    assert completed["status"] == "succeeded", completed
+    persisted = await native_swe.approval_repository.get(approval_id)
+    assert persisted is not None and persisted.status == "consumed"
+    replay = await resume_native_software_engineering_fixture(
+        request,
+        approval_id=approval_id,
+    )
+    assert replay["reason_code"] == "job_idempotency_deduped"
 
 
 @pytest.mark.asyncio

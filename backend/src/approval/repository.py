@@ -451,6 +451,47 @@ class ApprovalRepository:
                 db.expunge(request)
             return request
 
+    async def update_pending_details(
+        self,
+        approval_id: str,
+        *,
+        owner_principal_id: str,
+        operator_session_id: str,
+        updates: Mapping[str, Any],
+    ) -> ApprovalRequest | None:
+        """Add server-derived binding fields to one still-pending approval.
+
+        Native workflows create their durable job before the approval row so
+        the inspected workspace is part of the request.  Once the row id is
+        known, this owner-bound update records the exact job/authority digest
+        that the durable resume CAS will require.
+        """
+        if not approval_id or not owner_principal_id or not operator_session_id:
+            return None
+        async with get_session() as db:
+            result = await db.execute(
+                select(ApprovalRequest).where(
+                    ApprovalRequest.id == approval_id,
+                    ApprovalRequest.status == "pending",
+                    ApprovalRequest.owner_principal_id == owner_principal_id,
+                    ApprovalRequest.operator_session_id == operator_session_id,
+                )
+            )
+            request = result.scalars().first()
+            if request is None:
+                return None
+            try:
+                parsed = json.loads(request.details_json) if request.details_json else {}
+            except (TypeError, ValueError):
+                parsed = {}
+            details = dict(parsed) if isinstance(parsed, Mapping) else {}
+            details.update({str(key): value for key, value in dict(updates).items()})
+            request.details_json = json.dumps(details, sort_keys=True)
+            db.add(request)
+            await db.flush()
+            db.expunge(request)
+            return request
+
     async def get_or_create_pending(
         self,
         *,
@@ -594,6 +635,13 @@ class ApprovalRepository:
                 summary=summary,
                 details_json=json.dumps(details) if details else None,
             )
+            # The row id is part of the durable approval binding.  Persist it
+            # in the server-owned details so a later resume can compare the
+            # selected row with the job authority instead of trusting a
+            # caller-supplied id alone.
+            details["approval_id"] = str(request.id)
+            details["durable_approval_id"] = str(request.id)
+            request.details_json = json.dumps(details, sort_keys=True)
             await ensure_sessions_exist(db, [canonical_session_id])
             if canonical_session_id and supplied_owner:
                 session_result = await db.execute(
@@ -799,6 +847,26 @@ class ApprovalRepository:
                 "approval_id": str(request.id),
                 "status": "consumed",
                 "session_id": str(request.session_id or ""),
+                # Native service jobs use the authenticated operator's
+                # session as the approval row's conversation/session, while
+                # the effect still executes under the service job session.
+                # Keep both identities in the signed binding so the host can
+                # verify the split instead of treating the approver as the
+                # effect owner.
+                "execution_session_id": str(
+                    details.get("approval_execution_session_id")
+                    or request.session_id
+                    or ""
+                ),
+                "execution_owner_principal_id": str(
+                    details.get("approval_execution_owner_principal_id")
+                    or ""
+                ),
+                "approval_operator_principal_id": str(
+                    details.get("approval_operator_principal_id")
+                    or owner_principal_id
+                    or ""
+                ),
                 "tool_name": str(request.tool_name),
                 "fingerprint": str(request.fingerprint),
                 "owner_operator_session_id": str(owner_operator_session_id or ""),
@@ -832,6 +900,7 @@ class ApprovalRepository:
         owner_kind: str,
         owner_principal_id: str,
         service_id: str | None,
+        approval_owner_principal_id: str | None = None,
         authority_digest: str,
         goal_id: str | None,
         goal_revision: int | None,
@@ -866,6 +935,7 @@ class ApprovalRepository:
                     owner_kind=owner_kind,
                     owner_principal_id=owner_principal_id,
                     service_id=service_id,
+                    approval_owner_principal_id=approval_owner_principal_id,
                     authority_digest=authority_digest,
                     goal_id=goal_id,
                     goal_revision=goal_revision,
@@ -888,6 +958,7 @@ class ApprovalRepository:
             owner_kind=owner_kind,
             owner_principal_id=owner_principal_id,
             service_id=service_id,
+            approval_owner_principal_id=approval_owner_principal_id,
             authority_digest=authority_digest,
             goal_id=goal_id,
             goal_revision=goal_revision,
@@ -913,6 +984,7 @@ class ApprovalRepository:
         owner_kind: str,
         owner_principal_id: str,
         service_id: str | None,
+        approval_owner_principal_id: str | None,
         authority_digest: str,
         goal_id: str | None,
         goal_revision: int | None,
@@ -934,11 +1006,15 @@ class ApprovalRepository:
         expected_owner_operator_session = str(owner_operator_session_id or "").strip()
         expected_operator_principal = str(operator_principal_id or "").strip()
         expected_owner_principal = str(owner_principal_id or "").strip()
+        expected_approval_owner_principal = str(
+            approval_owner_principal_id or owner_principal_id or ""
+        ).strip()
         if (
             not approval_id
             or not expected_owner_operator_session
             or not expected_operator_principal
             or not expected_owner_principal
+            or not expected_approval_owner_principal
         ):
             return None
         result = await db.execute(
@@ -975,7 +1051,8 @@ class ApprovalRepository:
                 or ""
             ).strip() != expected_conversation
             or str(getattr(request, "operator_session_id", None) or "").strip() != expected_owner_operator_session
-            or str(getattr(request, "owner_principal_id", None) or "").strip() != expected_owner_principal
+            or str(getattr(request, "owner_principal_id", None) or "").strip()
+            != expected_approval_owner_principal
         ):
             return None
         now = datetime.now(timezone.utc)
@@ -1070,9 +1147,9 @@ class ApprovalRepository:
         ):
             return None
         if not exact_optional_identity(
-            expected_owner_principal,
-            "owner_principal_id",
+            expected_approval_owner_principal,
             "approval_owner_principal_id",
+            "owner_principal_id",
             "durable_owner_principal_id",
             allow_missing=True,
         ):
@@ -1098,6 +1175,10 @@ class ApprovalRepository:
         )
         for _field_name, expected, names in required_bindings:
             observed = detail(*names)
+            if _field_name in {"goal_id", "goal_revision", "plan_revision"} and expected is None:
+                if observed not in (None, ""):
+                    return None
+                continue
             if observed is None:
                 return None
             if _field_name in {"goal_revision", "plan_revision"}:
@@ -1134,14 +1215,48 @@ class ApprovalRepository:
         )
         if getattr(consumed, "rowcount", None) != 1:
             return None
-        return {
-            "approval_id": request.id,
+        binding_payload = {
+            "approval_id": str(request.id),
             "status": "consumed",
-            "session_id": request.session_id,
-            "tool_name": request.tool_name,
-            "fingerprint": request.fingerprint,
-            "details": dict(details),
+            "session_id": str(request.session_id or ""),
+            "execution_session_id": str(
+                detail("approval_execution_session_id", "execution_session_id")
+                or request.session_id
+                or ""
+            ),
+            "execution_owner_principal_id": str(
+                detail(
+                    "approval_execution_owner_principal_id",
+                    "execution_owner_principal_id",
+                )
+                or ""
+            ),
+            "approval_operator_principal_id": str(
+                detail("approval_operator_principal_id", "operator_principal_id")
+                or operator_principal_id
+                or ""
+            ),
+            "tool_name": str(request.tool_name),
+            "fingerprint": str(request.fingerprint),
+            "owner_operator_session_id": str(owner_operator_session_id or ""),
+            "approval_expires_at": detail("approval_expires_at", "expires_at"),
+            "approval_context": (
+                dict(details["approval_context"])
+                if isinstance(details.get("approval_context"), Mapping)
+                else None
+            ),
+            "approval_resolved_at": now.isoformat(),
+            "consumed_at": now.isoformat(),
         }
+        repository_proof = hmac.new(
+            _CAPABILITY_APPROVAL_KEY,
+            _approval_repository_proof_bytes(binding_payload),
+            hashlib.sha256,
+        ).hexdigest()
+        return _seal_capability_approval(
+            binding_payload,
+            repository_proof=repository_proof,
+        )
 
     async def has_approved(
         self,

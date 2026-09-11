@@ -109,7 +109,13 @@ def _copy_fixture(destination: Path) -> Path:
 
 
 async def _issue_repository_approval(request: NativeSoftwareEngineeringRequest):
-    inspection_request = replace(request, patch_approval="required", approval_id=None)
+    inspection_request = replace(
+        request,
+        patch_approval="required",
+        approval_id=None,
+        approval_operator_principal_id="operator:test-bypass",
+        approval_operator_session_id="test-auth-bypass",
+    )
     prepared = native_swe._prepare_fixture(inspection_request)
     job_workspace = native_swe._job_workspace(request)
     relative_bug_path = native_swe._relative_workspace_path(job_workspace.root / native_swe.FIXTURE_BUG_FILE)
@@ -134,21 +140,21 @@ async def _issue_repository_approval(request: NativeSoftwareEngineeringRequest):
         relative_bug_path=relative_bug_path,
         preview_payload=preview_payload,
     )
-    operator_session = native_swe._native_approval_owner_session(
-        native_swe.get_current_trust_principal(),
-        session_id=request.session_id,
-    )
+    operator_session = inspection_request.approval_operator_session_id
     expires_at = time.time() + 300
     pending = await native_swe.approval_repository.get_or_create_pending(
-        session_id=request.session_id,
+        session_id=operator_session,
         tool_name=native_swe._NATIVE_PATCH_CAPABILITY_ID,
         risk_level=native_swe._NATIVE_APPROVAL_RISK,
         summary="test native SWE approval",
         fingerprint=native_swe._native_approval_fingerprint(context),
         details={
-            "approval_conversation_id": request.session_id,
-            "approval_owner_principal_id": request.owner_principal_id,
+            "approval_conversation_id": operator_session,
+            "approval_owner_principal_id": inspection_request.approval_operator_principal_id,
             "approval_owner_operator_session_id": operator_session,
+            "approval_operator_principal_id": inspection_request.approval_operator_principal_id,
+            "approval_execution_owner_principal_id": request.owner_principal_id,
+            "approval_execution_session_id": request.session_id,
             "approval_context": context,
             "approval_expires_at": expires_at,
             "expires_at": expires_at,
@@ -156,12 +162,17 @@ async def _issue_repository_approval(request: NativeSoftwareEngineeringRequest):
             "capability_id": native_swe._NATIVE_PATCH_CAPABILITY_ID,
         },
     )
-    assert pending.owner_principal_id == request.owner_principal_id
+    assert pending.owner_principal_id == inspection_request.approval_operator_principal_id
     persisted_details = json.loads(pending.details_json or "{}")
-    assert persisted_details["approval_owner_principal_id"] == request.owner_principal_id
+    assert persisted_details["approval_owner_principal_id"] == inspection_request.approval_operator_principal_id
     resolved = await native_swe.approval_repository.resolve(pending.id, "approved")
     assert resolved is not None and resolved.status == "approved"
-    return replace(request, patch_approval="approved", approval_receipt=None, approval_id=pending.id)
+    return replace(
+        inspection_request,
+        patch_approval="approved",
+        approval_receipt=None,
+        approval_id=pending.id,
+    )
 
 
 @pytest.mark.asyncio
@@ -202,7 +213,7 @@ def _native_service_principal(monkeypatch):
         reset_runtime_context(tokens)
 
 
-def test_native_service_approval_uses_explicit_session_without_operator_binding():
+def test_native_service_cannot_supply_its_own_approval_identity():
     principal = TrustPrincipal(
         principal_id="service:native-software-engineering",
         principal_type=PrincipalType.SERVICE,
@@ -210,19 +221,20 @@ def test_native_service_approval_uses_explicit_session_without_operator_binding(
         session_id="native-swe-service-run",
     )
 
-    assert native_swe._native_approval_owner_session(
-        principal,
-        session_id=principal.session_id,
-    ) == native_swe._NATIVE_SERVICE_APPROVAL_OWNER_SESSION_ID
-    assert native_swe._native_approval_owner_session(
-        replace(principal, operator_session_id="caller-supplied-session"),
-        session_id=principal.session_id,
-    ) == native_swe._NATIVE_SERVICE_APPROVAL_OWNER_SESSION_ID
-
+    with pytest.raises(native_swe.NativeSoftwareEngineeringError, match="approval_operator_session_missing"):
+        native_swe._native_approval_owner_session(principal, session_id=principal.session_id)
     with pytest.raises(native_swe.NativeSoftwareEngineeringError, match="approval_operator_session_missing"):
         native_swe._native_approval_owner_session(
-            replace(principal, principal_id="service:other"),
+            replace(principal, operator_session_id="caller-supplied-session"),
             session_id=principal.session_id,
+        )
+    with pytest.raises(native_swe.NativeSoftwareEngineeringError, match="service_cannot_self_approve"):
+        native_swe._native_approval_operator_identity(
+            NativeSoftwareEngineeringRequest(
+                job_id="service-self-approval",
+                approval_operator_principal_id=principal.principal_id,
+                approval_operator_session_id="operator-session",
+            )
         )
 
 
@@ -612,6 +624,8 @@ async def test_runner_required_approval_stops_before_apply(async_db, tmp_path, m
         # admission.
         session_id="native-swe-fixture-session",
         patch_approval="required",
+        approval_operator_principal_id="operator:test-bypass",
+        approval_operator_session_id="test-auth-bypass",
     )
 
     assert result["status"] == "awaiting_approval"

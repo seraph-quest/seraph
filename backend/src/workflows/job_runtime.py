@@ -1405,7 +1405,9 @@ def _validate_approval_resume_receipt(
         raise DurableJobTransitionError("approval resume binding does not match the durable authority")
     if _text(raw.get("authority_digest")) != _text(getattr(run, "authority_digest", None)):
         raise DurableJobTransitionError("approval resume authority has changed")
-    required_fields = ("goal_id", "goal_revision", "plan_revision", "capability_version", "budget_microusd")
+    required_fields = ["capability_version", "budget_microusd"]
+    if getattr(run, "goal_id", None) is not None:
+        required_fields.extend(("goal_id", "goal_revision", "plan_revision"))
     missing = [field_name for field_name in required_fields if field_name not in raw]
     if missing:
         raise DurableJobTransitionError(
@@ -1414,6 +1416,10 @@ def _validate_approval_resume_receipt(
     for field_name in ("goal_id", "goal_revision", "plan_revision", "capability_version"):
         expected = getattr(run, field_name, None)
         actual = raw.get(field_name)
+        if field_name in {"goal_id", "goal_revision", "plan_revision"} and expected is None:
+            if actual not in (None, ""):
+                raise DurableJobTransitionError(f"approval resume {field_name} is stale")
+            continue
         if field_name in {"goal_revision", "plan_revision"}:
             expected_revision = _positive_revision(expected)
             actual_revision = _positive_revision(actual)
@@ -1894,6 +1900,99 @@ class DurableJobRepository:
             db.expunge(run)
             return _serialize(run)
 
+    async def bind_approval_id(
+        self,
+        job_id: str,
+        approval_id: str,
+        *,
+        owner: str,
+        fencing_token: int,
+        expected_revision: int | None = None,
+    ) -> dict[str, Any]:
+        """Bind the durable approval row to a leased job exactly once.
+
+        Approval requests are created after a worker has inspected the local
+        workspace, so their database id is not known at initial job admission.
+        This narrow CAS fills that one field before the job enters
+        ``awaiting_approval``.  It cannot replace an existing binding or be
+        called without the current execution lease.
+        """
+        approval_id = _bounded_identifier(approval_id, field_name="approval_id")
+        if not approval_id:
+            raise DurableJobTransitionError("approval id is required")
+        owner = _text(owner)
+        if not owner or fencing_token is None:
+            raise DurableJobLeaseError("approval binding requires owner and fencing token")
+        async with self._session() as db:
+            run = await self._fetch(db, job_id)
+            current = _json_load(getattr(run, "declared_authority_json", None), {})
+            if not isinstance(current, Mapping):
+                raise DurableJobTransitionError("durable authority metadata is malformed")
+            existing_id = _authority_approval_id(current)
+            if existing_id:
+                if existing_id == approval_id:
+                    db.expunge(run)
+                    return _serialize(
+                        run,
+                        receipt={
+                            "kind": "approval_binding",
+                            "status": "deduped",
+                            "approval_id": approval_id,
+                            "revision": _revision(run),
+                            "operator_visible": True,
+                        },
+                    )
+                raise DurableJobIdempotencyConflict(
+                    "durable job already has a different approval binding"
+                )
+            if str(run.status) != "running":
+                raise DurableJobTransitionError(
+                    f"approval binding requires a running job (current={run.status})"
+                )
+            current_revision = _revision(run)
+            if expected_revision is not None and int(expected_revision) != current_revision:
+                raise DurableJobLeaseError("durable job revision is stale")
+            now = _utc_now()
+            self._assert_lease(run, owner=owner, fencing_token=fencing_token)
+            bound_authority = dict(current)
+            bound_authority["approval_id"] = approval_id
+            conditions = [
+                WorkflowRunState.run_identity == job_id,
+                WorkflowRunState.status == "running",
+                WorkflowRunState.revision == current_revision,
+                WorkflowRunState.lease_owner == owner,
+                WorkflowRunState.fencing_token == fencing_token,
+                WorkflowRunState.lease_expires_at > now,
+            ]
+            _append_parent_fence_condition(conditions, run, now=now)
+            updated = await db.execute(
+                update(WorkflowRunState)
+                .execution_options(synchronize_session=False)
+                .where(*conditions)
+                .values(
+                    declared_authority_json=_canonical(_safe_structure(bound_authority)),
+                    approval_context_json=_canonical(_safe_structure(bound_authority)),
+                    authority_digest=_digest(bound_authority),
+                    updated_at=now,
+                    heartbeat_at=now,
+                    revision=WorkflowRunState.revision + 1,
+                )
+            )
+            if not _rowcount_is_one(updated):
+                raise DurableJobLeaseError("durable job changed before approval binding")
+            refreshed = await self._fetch(db, job_id)
+            receipt = {
+                "kind": "approval_binding",
+                "status": "recorded",
+                "approval_id": approval_id,
+                "authority_digest": refreshed.authority_digest,
+                "revision": _revision(refreshed),
+                "fencing_token": refreshed.fencing_token,
+                "operator_visible": True,
+            }
+            db.expunge(refreshed)
+            return _serialize(refreshed, receipt=receipt)
+
     async def list_jobs(
         self,
         *,
@@ -2032,6 +2131,7 @@ class DurableJobRepository:
                     owner_kind=approval_resume_record["owner_kind"],
                     owner_principal_id=approval_resume_record["owner_principal_id"],
                     service_id=approval_resume_record["service_id"],
+                    approval_owner_principal_id=approval_resume_record["operator_principal_id"],
                     authority_digest=approval_resume_record["authority_digest"],
                     goal_id=approval_resume_record["goal_id"],
                     goal_revision=approval_resume_record["goal_revision"],
@@ -2039,11 +2139,52 @@ class DurableJobRepository:
                     capability_version=approval_resume_record["capability_version"],
                     budget_digest=approval_resume_record["budget_digest"],
                     expires_at=approval_resume_record["expires_at"],
-                    session_id=run.session_id,
-                    conversation_id=getattr(run, "conversation_id", None) or run.session_id,
+                    # The approval row is owned by the authenticated
+                    # operator's conversation.  Service-owned runs carry a
+                    # different execution session, so lookup must use the
+                    # explicit approval owner session while the immutable
+                    # execution binding remains in the row details.
+                    session_id=approval_resume_record["operator_session_id"],
+                    conversation_id=approval_resume_record["operator_session_id"],
                     criterion_id=durable_criterion_id,
                     candidate_id=getattr(run, "candidate_id", None),
                 )
+                if approval_request_record is None and _text(getattr(run, "session_id", None)) != _text(
+                    approval_resume_record["operator_session_id"]
+                ):
+                    # Generic durable workflows historically stored the
+                    # approval row under the execution session while keeping
+                    # the authenticated approver in ``operator_session_id``.
+                    # Native service-owned workflows use the approver's
+                    # session for the row itself. Preserve both layouts while
+                    # requiring the same owner, operator, authority, and
+                    # durable binding checks in either path.
+                    approval_request_record = await approval_repository.consume_approved_for_resume(
+                        db=db,
+                        approval_id=approval_resume_record["approval_id"],
+                        owner_operator_session_id=approval_resume_record["operator_session_id"],
+                        operator_principal_id=approval_resume_record["operator_principal_id"],
+                        job_id=job_id,
+                        owner_kind=approval_resume_record["owner_kind"],
+                        owner_principal_id=approval_resume_record["owner_principal_id"],
+                        service_id=approval_resume_record["service_id"],
+                        # Legacy generic rows use the durable service owner in
+                        # the ApprovalRequest owner column; the interactive
+                        # operator remains bound by its dedicated detail and
+                        # operator-session fields.
+                        approval_owner_principal_id=None,
+                        authority_digest=approval_resume_record["authority_digest"],
+                        goal_id=approval_resume_record["goal_id"],
+                        goal_revision=approval_resume_record["goal_revision"],
+                        plan_revision=approval_resume_record["plan_revision"],
+                        capability_version=approval_resume_record["capability_version"],
+                        budget_digest=approval_resume_record["budget_digest"],
+                        expires_at=approval_resume_record["expires_at"],
+                        session_id=run.session_id,
+                        conversation_id=getattr(run, "conversation_id", None) or run.session_id,
+                        criterion_id=durable_criterion_id,
+                        candidate_id=getattr(run, "candidate_id", None),
+                    )
                 if approval_request_record is None:
                     raise DurableJobTransitionError(
                         "approval resume requires the current authenticated ApprovalRequest"
@@ -2191,6 +2332,12 @@ class DurableJobRepository:
                 "revision": _revision(refreshed),
                 "operator_visible": True,
             }
+            if approval_request_record is not None:
+                # The native bounded runner needs the short-lived repository
+                # binding issued by the same approval CAS.  Keep it in the
+                # in-process transition receipt; the durable effect ledger
+                # stores only the redacted approval-resume record.
+                receipt["approval_binding"] = approval_request_record
             db.expunge(refreshed)
             return _serialize(refreshed, receipt=receipt)
 

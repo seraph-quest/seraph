@@ -72,7 +72,7 @@ container can read `/proc/self/mountinfo`. Compose sets the mount-check flag,
 and the container preflight fails closed before startup when the bind evidence
 is missing.
 
-### Configure the OpenRouter route (branch-local #741)
+### Configure the OpenRouter route (Epic #736/#775)
 
 Open the Settings panel's **OpenRouter setup** section to save the fixed
 `https://openrouter.ai/api/v1` route without editing an environment file. Enter
@@ -319,11 +319,11 @@ Capability canaries are intended to run only from an explicit authenticated oper
 capability, endpoint/model/adapter binding with a bounded deadline and no
 fallback. Status and settings reads never launch inference.
 
-**Integration dependency:** the fabric does not synthesize operator identity.
-On the #740 epic branch, REST/WebSocket chat remains fail-closed with zero model
-transport when ingress has not bound an authenticated principal. Issue #741
-owns binding LAN/operator identity and making that interactive path functional;
-#740 supplies the governed inference route but does not weaken identity checks.
+**Identity dependency:** the fabric does not synthesize operator identity.
+REST/WebSocket chat remains fail-closed with zero model transport when ingress
+has not bound an authenticated principal. The completed model-fabric and
+authenticated-ingress milestones preserve that boundary; governed inference
+does not weaken identity checks.
 
 Named profiles such as `codex-openai` and `claude-anthropic` are API model-route
 names only. They do not invoke Codex CLI, Claude Code, or another external agent
@@ -384,7 +384,7 @@ not current setup guidance.
 
 ## Remote inference admission
 
-The branch-local #775 target uses one shared bounded `remote_inference`
+The accepted #775 phase uses one shared bounded `remote_inference`
 admission lane: the active request finishes, then the highest-priority ready
 request runs. Interactive work outranks scheduled and background work. Queue,
 consent, cancellation, and uncertain remote outcomes remain operator-visible.
@@ -405,8 +405,11 @@ reconciliation path, while deadline-expired or attempt-exhausted retries are
 rejected. Corrupt or missing effect history on an effect-bound failure blocks
 retry. A concurrent duplicate admission returns the original durable row after
 the unique idempotency fence, and the legacy projection cannot reset or
-finalize a typed job. This branch-local slice remains Partial until its tracked
-review and integration receipts land on `develop`.
+finalize a typed job. This bounded slice remains Partial because durable queue
+restart adoption and automatic provider-cost reservation/reconciliation are
+outside the current process-local contract. Those limits remain
+operator-visible and must not be described as exactly-once or crash-proof
+execution.
 
 ## Failure And Recovery
 

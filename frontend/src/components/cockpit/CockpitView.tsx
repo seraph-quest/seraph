@@ -131,6 +131,23 @@ interface RuntimeReceipt {
   source: RuntimeReceiptSource;
 }
 
+interface CapabilityPackReadback {
+  pack_id?: string;
+  active?: {
+    version?: string;
+    digest?: string;
+    goal_id?: string;
+    authority_digest?: string;
+    owner_principal_id?: string;
+    session_id?: string;
+    status?: string;
+  } | null;
+  jobs?: Array<{ job_id?: string; status?: string; domain?: string; readback_ok?: boolean; reconciliation_required?: boolean }>;
+  local_executions?: Array<{ job_id?: string; domain?: string; outcome?: string; artifact?: { readback_ok?: boolean } }>;
+  reconciliation?: { status?: string; changes?: Array<{ job_id?: string; status?: string; reason?: string }>; resolved_job_id?: string; resolution_action?: string };
+  generation?: number;
+}
+
 interface OperatorControlPlaneRole {
   id: string;
   label: string;
@@ -7165,6 +7182,8 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   const [runbooks, setRunbooks] = useState<RunbookInfo[]>([]);
   const [marketplaceFlows, setMarketplaceFlows] = useState<MarketplaceFlowInfo[]>([]);
   const [extensionPackages, setExtensionPackages] = useState<ExtensionPackageInfo[]>([]);
+  const [capabilityPackReadback, setCapabilityPackReadback] = useState<CapabilityPackReadback | null>(null);
+  const [capabilityPackReadbackError, setCapabilityPackReadbackError] = useState<string | null>(null);
   const [savedRunbooks, setSavedRunbooks] = useState<RunbookInfo[]>(() => readRunbookMacros());
   const [activityLedger, setActivityLedger] = useState<ActivityLedgerEntry[]>([]);
   const [activitySummary, setActivitySummary] = useState<ActivityLedgerSummary | null>(null);
@@ -7516,9 +7535,29 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       );
     }
     if (extensionsResult.ok) {
-      setExtensionPackages(normalizeExtensionPackagesPayload(extensionsResult.payload));
+      const normalizedExtensions = normalizeExtensionPackagesPayload(extensionsResult.payload);
+      setExtensionPackages(normalizedExtensions);
+      const capabilityPack = normalizedExtensions.find((item) => item.kind === "capability-pack");
+      if (capabilityPack?.id) {
+        const readbackResult = await fetchCockpitJson(
+          `${API_URL}/api/capability-packs/${encodeURIComponent(capabilityPack.id)}`,
+          5000,
+          isCancelled,
+        );
+        if (!isCancelled() && readbackResult.ok && readbackResult.payload && typeof readbackResult.payload === "object") {
+          setCapabilityPackReadback(readbackResult.payload as CapabilityPackReadback);
+          setCapabilityPackReadbackError(null);
+        } else if (!isCancelled()) {
+          setCapabilityPackReadbackError("Capability-pack lifecycle readback is unavailable; recovery state is unverified.");
+        }
+      } else {
+        setCapabilityPackReadback(null);
+        setCapabilityPackReadbackError(null);
+      }
     } else {
-      setExtensionPackages([]);
+      // Keep the last-known package/readback controls visible while metadata
+      // is temporarily unavailable; recovery actions must remain reviewable.
+      setCapabilityPackReadbackError("Capability-pack metadata is unavailable; showing the last known lifecycle state.");
     }
     setBrowserProviders(normalizeBrowserProviders(browserProvidersResult.payload));
     setBrowserSessions(normalizeBrowserSessions(browserSessionsResult.payload));
@@ -11796,6 +11835,33 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     } catch {
       setOperatorStatus(`Failed to ${actionLabel} ${label}`);
       appendOperatorFeed(`Failed to ${actionLabel} ${label}`, "failed");
+    }
+  }
+
+  async function resolveCapabilityPackRecovery(readback: CapabilityPackReadback) {
+    const job = readback.jobs?.find((item) => item.status === "blocked" || item.reconciliation_required);
+    if (!readback.pack_id || !job?.job_id) {
+      setOperatorStatus("No blocked capability-pack job is available for recovery.");
+      return;
+    }
+    setOperatorStatus(`Resolving capability-pack job ${job.job_id}...`);
+    try {
+      const response = await apiFetch(
+        `${API_URL}/api/capability-packs/${encodeURIComponent(readback.pack_id)}/reconcile/resolve`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ job_id: job.job_id, action: "cancel" }),
+        },
+      );
+      if (!response.ok) {
+        setOperatorStatus("Capability-pack recovery was rejected; inspect the durable receipt.");
+        return;
+      }
+      await refreshCockpit();
+      setOperatorStatus(`Capability-pack job ${job.job_id} resolved.`);
+    } catch {
+      setOperatorStatus("Capability-pack recovery failed; lifecycle state remains guarded.");
     }
   }
 
@@ -16584,6 +16650,52 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                       <div className="cockpit-empty">No governed extension payloads loaded.</div>
                     ) : null}
                   </section>
+
+                  {capabilityPackReadbackError && (
+                    <section className="cockpit-operator-section" aria-label="Capability pack lifecycle degraded state">
+                      <div className="cockpit-operator-row">
+                        <span className="cockpit-key">Capability pack lifecycle</span>
+                        <span className="cockpit-operator-link">degraded</span>
+                      </div>
+                      <div className="cockpit-sublist-item">{capabilityPackReadbackError}</div>
+                    </section>
+                  )}
+                  {capabilityPackReadback && (
+                    <section className="cockpit-operator-section" aria-label="Capability pack lifecycle readback">
+                      <div className="cockpit-operator-row">
+                        <span className="cockpit-key">Capability pack lifecycle</span>
+                        <span className="cockpit-operator-link">
+                          {capabilityPackReadback.active?.status ?? "inactive"}
+                          {capabilityPackReadback.reconciliation?.status === "blocked" ? " · recovery required" : ""}
+                        </span>
+                      </div>
+                      <div className="cockpit-sublist-item">
+                        {[
+                          capabilityPackReadback.pack_id,
+                          capabilityPackReadback.active?.version ? `v${capabilityPackReadback.active.version}` : null,
+                          capabilityPackReadback.active?.goal_id ? `goal ${capabilityPackReadback.active.goal_id}` : null,
+                          capabilityPackReadback.active?.digest ? `digest ${capabilityPackReadback.active.digest.slice(0, 12)}` : null,
+                          `${capabilityPackReadback.jobs?.length ?? 0} pinned jobs`,
+                          `${capabilityPackReadback.local_executions?.length ?? 0} local outcomes`,
+                        ].filter(Boolean).join(" · ")}
+                      </div>
+                      {capabilityPackReadback.reconciliation?.status === "blocked" && (
+                        <>
+                          <div className="cockpit-sublist-item">
+                            Reconcile interrupted work before retrying; canonical artifacts and outcome receipts remain available.
+                          </div>
+                          <button
+                            type="button"
+                            className="cockpit-operator-button"
+                            disabled={!capabilityPackReadback.jobs?.some((job) => job.status === "blocked" || job.reconciliation_required)}
+                            onClick={() => void resolveCapabilityPackRecovery(capabilityPackReadback)}
+                          >
+                            resolve recovery
+                          </button>
+                        </>
+                      )}
+                    </section>
+                  )}
 
                   <section className="cockpit-operator-section cockpit-m7-board" aria-label="M7 command board">
                     <div className="cockpit-operator-row">

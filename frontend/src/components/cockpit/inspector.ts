@@ -85,6 +85,18 @@ export interface WorkflowRunRecord {
     threadId?: string | null;
     threadLabel?: string | null;
     resumeMessage?: string | null;
+    approvalConversationId?: string | null;
+    approvalOwnerPrincipalId?: string | null;
+    approvalOwnerOperatorSessionId?: string | null;
+    approvalOwnerSource?: string | null;
+    approvalOwnerExpiresAt?: string | number | null;
+    approvalExpiresAt?: string | number | null;
+    decisionExpiresAt?: string | number | null;
+    expiresAt?: string | number | null;
+    approvalScope?: Record<string, unknown> | null;
+    approvalContext?: Record<string, unknown> | null;
+    goalRevision?: number | null;
+    planRevision?: number | null;
   }>;
   threadId?: string | null;
   threadLabel?: string | null;

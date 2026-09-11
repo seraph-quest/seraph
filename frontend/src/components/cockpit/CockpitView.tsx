@@ -13,7 +13,7 @@ import { useChatStore } from "../../stores/chatStore";
 import { useQuestStore } from "../../stores/questStore";
 import { useCockpitLayoutStore } from "../../stores/cockpitLayoutStore";
 import { PANEL_MIN_SIZES, usePanelLayoutStore } from "../../stores/panelLayoutStore";
-import type { ChatMessage, ConnectionStatus, GoalInfo } from "../../types";
+import type { ChatMessage, ConnectionStatus, GoalInfo, GoalLoopReceipt } from "../../types";
 import {
   buildWorkflowDraft,
   workflowAcceptsArtifact,
@@ -39,6 +39,23 @@ import {
   getDefaultPaneVisibility,
   type CockpitPaneId,
 } from "./layouts";
+import {
+  OutcomeCockpitPanel,
+  type OutcomeCockpitState,
+  type OutcomeEvidenceSummary,
+  type OutcomeGoalSummary,
+  type OutcomeResultSummary,
+  type OutcomeRouteSummary,
+  type OutcomeWorkSummary,
+  type OutcomeApprovalSummary,
+} from "./OutcomeCockpitPanel";
+import {
+  displayApprovalOwnerMetadata,
+  isApprovalAuthorityReady,
+  redactIdentifier,
+  selectApprovalForWorkflow,
+  type ApprovalLoadState,
+} from "./cockpitAuthority";
 import { SeraphPresencePane } from "./SeraphPresencePane";
 
 interface CockpitViewProps {
@@ -1294,6 +1311,19 @@ interface PendingApproval {
   id: string;
   session_id?: string | null;
   thread_id?: string | null;
+  approval_conversation_id?: string | null;
+  approval_owner_principal_id?: string | null;
+  approval_owner_operator_session_id?: string | null;
+  approval_owner_source?: string | null;
+  approval_source?: string | null;
+  approval_owner_expires_at?: string | number | null;
+  approval_expires_at?: string | number | null;
+  decision_expires_at?: string | number | null;
+  expires_at?: string | number | null;
+  approval_scope?: Record<string, unknown> | null;
+  approval_context?: Record<string, unknown> | null;
+  goal_revision?: number | null;
+  plan_revision?: number | null;
   thread_label?: string | null;
   tool_name: string;
   risk_level: string;
@@ -1307,6 +1337,69 @@ interface PendingApproval {
   package_path?: string | null;
   lifecycle_boundaries?: string[] | null;
   permissions?: Record<string, unknown> | null;
+}
+
+function normalizePendingApprovals(value: unknown): PendingApproval[] {
+  if (!Array.isArray(value)) return [];
+  return value.reduce<PendingApproval[]>((items, candidate) => {
+    if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) return items;
+    const record = candidate as Record<string, unknown>;
+    if (
+      typeof record.id !== "string"
+      || typeof record.tool_name !== "string"
+      || typeof record.risk_level !== "string"
+      || typeof record.status !== "string"
+      || typeof record.summary !== "string"
+      || typeof record.created_at !== "string"
+    ) return items;
+    const optionalString = (value: unknown): string | null => typeof value === "string" ? value : null;
+    const optionalTime = (value: unknown): string | number | null => (
+      typeof value === "string" || (typeof value === "number" && Number.isFinite(value)) ? value : null
+    );
+    const permissions = record.permissions && typeof record.permissions === "object" && !Array.isArray(record.permissions)
+      ? record.permissions as Record<string, unknown>
+      : null;
+    const approvalScope = record.approval_scope && typeof record.approval_scope === "object" && !Array.isArray(record.approval_scope)
+      ? record.approval_scope as Record<string, unknown>
+      : null;
+    const approvalContext = record.approval_context && typeof record.approval_context === "object" && !Array.isArray(record.approval_context)
+      ? record.approval_context as Record<string, unknown>
+      : null;
+    items.push({
+      id: record.id,
+      session_id: optionalString(record.session_id),
+      thread_id: optionalString(record.thread_id),
+      approval_conversation_id: optionalString(record.approval_conversation_id ?? record.conversation_id),
+      approval_owner_principal_id: optionalString(record.approval_owner_principal_id ?? record.owner_principal_id),
+      approval_owner_operator_session_id: optionalString(record.approval_owner_operator_session_id ?? record.operator_session_id),
+      approval_owner_source: optionalString(record.approval_owner_source),
+      approval_source: optionalString(record.approval_source),
+      approval_owner_expires_at: optionalTime(record.approval_owner_expires_at),
+      approval_expires_at: optionalTime(record.approval_expires_at),
+      decision_expires_at: optionalTime(record.decision_expires_at),
+      expires_at: optionalTime(record.expires_at),
+      approval_scope: approvalScope,
+      approval_context: approvalContext,
+      goal_revision: typeof record.goal_revision === "number" && Number.isInteger(record.goal_revision) ? record.goal_revision : null,
+      plan_revision: typeof record.plan_revision === "number" && Number.isInteger(record.plan_revision) ? record.plan_revision : null,
+      thread_label: optionalString(record.thread_label),
+      tool_name: record.tool_name,
+      risk_level: record.risk_level,
+      status: record.status,
+      summary: record.summary,
+      created_at: record.created_at,
+      resume_message: optionalString(record.resume_message),
+      extension_id: optionalString(record.extension_id),
+      extension_display_name: optionalString(record.extension_display_name),
+      extension_action: optionalString(record.extension_action ?? record.action),
+      package_path: optionalString(record.package_path),
+      lifecycle_boundaries: Array.isArray(record.lifecycle_boundaries)
+        ? record.lifecycle_boundaries.filter((item): item is string => typeof item === "string")
+        : null,
+      permissions,
+    });
+    return items;
+  }, []);
 }
 
 interface DaemonPresenceState {
@@ -5893,6 +5986,42 @@ function normalizeWorkflowRun(value: Record<string, unknown>): WorkflowRunRecord
             threadId: typeof record.thread_id === "string" ? record.thread_id : null,
             threadLabel: typeof record.thread_label === "string" ? record.thread_label : null,
             resumeMessage: typeof record.resume_message === "string" ? record.resume_message : null,
+            approvalConversationId: typeof (record.approval_conversation_id ?? record.conversation_id) === "string"
+              ? String(record.approval_conversation_id ?? record.conversation_id)
+              : null,
+            approvalOwnerPrincipalId: typeof (record.approval_owner_principal_id ?? record.owner_principal_id) === "string"
+              ? String(record.approval_owner_principal_id ?? record.owner_principal_id)
+              : null,
+            approvalOwnerOperatorSessionId: typeof (record.approval_owner_operator_session_id ?? record.operator_session_id) === "string"
+              ? String(record.approval_owner_operator_session_id ?? record.operator_session_id)
+              : null,
+            approvalOwnerSource: typeof (record.approval_owner_source ?? record.approval_source) === "string"
+              ? String(record.approval_owner_source ?? record.approval_source)
+              : null,
+            approvalOwnerExpiresAt: typeof record.approval_owner_expires_at === "string"
+              || (typeof record.approval_owner_expires_at === "number" && Number.isFinite(record.approval_owner_expires_at))
+              ? record.approval_owner_expires_at
+              : null,
+            approvalExpiresAt: typeof record.approval_expires_at === "string"
+              || (typeof record.approval_expires_at === "number" && Number.isFinite(record.approval_expires_at))
+              ? record.approval_expires_at
+              : null,
+            decisionExpiresAt: typeof record.decision_expires_at === "string"
+              || (typeof record.decision_expires_at === "number" && Number.isFinite(record.decision_expires_at))
+              ? record.decision_expires_at
+              : null,
+            expiresAt: typeof record.expires_at === "string"
+              || (typeof record.expires_at === "number" && Number.isFinite(record.expires_at))
+              ? record.expires_at
+              : null,
+            approvalScope: record.approval_scope && typeof record.approval_scope === "object" && !Array.isArray(record.approval_scope)
+              ? record.approval_scope as Record<string, unknown>
+              : null,
+            approvalContext: record.approval_context && typeof record.approval_context === "object" && !Array.isArray(record.approval_context)
+              ? record.approval_context as Record<string, unknown>
+              : null,
+            goalRevision: typeof record.goal_revision === "number" && Number.isInteger(record.goal_revision) ? record.goal_revision : null,
+            planRevision: typeof record.plan_revision === "number" && Number.isInteger(record.plan_revision) ? record.plan_revision : null,
           });
           return entries;
         }, [])
@@ -5968,6 +6097,74 @@ function collectGoalTitles(goals: GoalInfo[], limit: number): string[] {
 
   visit(goals);
   return titles;
+}
+
+/** Select the most actionable goal from the server-owned tree for the cockpit. */
+function findCurrentGoal(goals: GoalInfo[]): GoalInfo | null {
+  const candidates: GoalInfo[] = [];
+  const visit = (items: GoalInfo[]) => {
+    items.forEach((item) => {
+      candidates.push(item);
+      if (item.children?.length) visit(item.children);
+    });
+  };
+  visit(goals);
+  const activeStatuses = new Set([
+    "active",
+    "in_progress",
+    "in-progress",
+    "running",
+    "paused",
+    "blocked",
+    "awaiting_approval",
+    "awaiting-approval",
+  ]);
+  const terminalStatuses = new Set([
+    "completed",
+    "complete",
+    "done",
+    "retired",
+    "archived",
+    "cancelled",
+    "canceled",
+  ]);
+  const rank = (goal: GoalInfo) => {
+    const status = goal.status.trim().toLowerCase();
+    if (activeStatuses.has(status)) return 0;
+    if (terminalStatuses.has(status)) return 2;
+    return 1;
+  };
+  return [...candidates]
+    .sort((left, right) => (
+      rank(left) - rank(right)
+      || left.level.localeCompare(right.level)
+      || left.sort_order - right.sort_order
+    ))
+    .find((goal) => rank(goal) < 2) ?? null;
+}
+
+function outcomeStateForReceipt(
+  receipt: GoalLoopReceipt | null,
+  criterionReady: boolean,
+  goalStatus?: string | null,
+): OutcomeCockpitState {
+  if (!receipt) {
+    const status = goalStatus?.trim().toLowerCase();
+    return status && ["completed", "complete", "done"].includes(status)
+      ? "partial_metadata"
+      : criterionReady ? "active" : "partial_metadata";
+  }
+  const execution = receipt.execution_status?.trim().toLowerCase() ?? "unknown";
+  const verification = receipt.verification?.trim().toLowerCase() ?? "unknown";
+  if (execution === "failed" || verification === "failed") return "failed";
+  if (execution === "blocked") return "blocked";
+  if (["awaiting_approval", "pending_approval", "approval_required"].includes(execution)) {
+    return "awaiting_approval";
+  }
+  if (["succeeded", "success", "completed", "complete"].includes(execution)) {
+    return verification === "passed" && criterionReady ? "recovered" : "partial_metadata";
+  }
+  return execution === "running" || execution === "pending" ? "active" : "partial_metadata";
 }
 
 function buildWorkflowReplayDraft(workflow: WorkflowRunRecord): string {
@@ -6806,7 +7003,13 @@ function storeRuntimeReceipt(status: RuntimeStatus) {
   }
 }
 
-type CockpitFetchResult = { ok: boolean; payload: unknown | null };
+type CockpitFetchResult = { ok: boolean; payload: unknown | null; status?: number };
+type OperatorAuthState = {
+  status: "loading" | "authenticated" | "unauthorized" | "degraded";
+  principalId: string | null;
+  sessionId: string | null;
+  expiresAt: string | null;
+};
 type DeepPaneLoadState = "idle" | "loading" | "loaded" | "stale" | "failed";
 type DeepPaneKey =
   | "presence"
@@ -6829,6 +7032,13 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   const [observerState, setObserverState] = useState<ObserverState | null>(null);
   const [auditEvents, setAuditEvents] = useState<CockpitAuditEvent[]>([]);
   const [pendingApprovals, setPendingApprovals] = useState<PendingApproval[]>([]);
+  const [approvalLoadState, setApprovalLoadState] = useState<ApprovalLoadState>("loading");
+  const [operatorAuth, setOperatorAuth] = useState<OperatorAuthState>({
+    status: "loading",
+    principalId: null,
+    sessionId: null,
+    expiresAt: null,
+  });
   const [feedbackState, setFeedbackState] = useState<Record<string, string>>({});
   const [approvalState, setApprovalState] = useState<Record<string, string>>({});
   const [selectedInspector, setSelectedInspector] = useState<InspectorSelection | null>(null);
@@ -6880,6 +7090,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   const [activityFilter, setActivityFilter] = useState<ActivityLedgerFilter>("all");
   const activityLedgerScopeRef = useRef<string>("");
   const cockpitRefreshInFlightRef = useRef(false);
+  const goalLoopRequestKeyRef = useRef<string | null>(null);
   const [toolPolicyMode, setToolPolicyMode] = useState<ToolPolicyMode | "unknown">("unknown");
   const [mcpPolicyMode, setMcpPolicyMode] = useState<McpPolicyMode | "unknown">("unknown");
   const [approvalMode, setApprovalMode] = useState<ApprovalMode | "unknown">("unknown");
@@ -6963,7 +7174,13 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   const dashboard = useQuestStore((s) => s.dashboard);
   const goalTree = useQuestStore((s) => s.goalTree);
   const loadingGoals = useQuestStore((s) => s.loading);
+  const goalLoop = useQuestStore((s) => s.goalLoop);
+  const goalLoopGoalId = useQuestStore((s) => s.goalLoopGoalId);
+  const goalLoopLoading = useQuestStore((s) => s.goalLoopLoading);
+  const goalLoopError = useQuestStore((s) => s.goalLoopError);
+  const loadGoalLoop = useQuestStore((s) => s.loadGoalLoop);
   const refreshGoals = useQuestStore((s) => s.refresh);
+  const currentGoal = useMemo(() => findCurrentGoal(goalTree), [goalTree]);
 
   const handleResetWorkspace = useCallback(() => {
     resetCockpitLayout(activeLayoutId, paneVisibility);
@@ -7028,6 +7245,19 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   }, [refreshGoals, restoreLastSession]);
 
   useEffect(() => {
+    const goalId = currentGoal?.id ?? null;
+    const goalRevision = currentGoal?.revision ?? null;
+    if (!goalId) {
+      goalLoopRequestKeyRef.current = null;
+      return;
+    }
+    const requestKey = `${goalId}:${goalRevision ?? "unknown"}`;
+    if (goalLoopRequestKeyRef.current === requestKey) return;
+    goalLoopRequestKeyRef.current = requestKey;
+    void loadGoalLoop(goalId);
+  }, [currentGoal?.id, currentGoal?.revision, loadGoalLoop]);
+
+  useEffect(() => {
     writeRunbookMacros(savedRunbooks);
   }, [savedRunbooks]);
 
@@ -7050,15 +7280,15 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     try {
       const response = await apiFetch(url, { signal: controller.signal });
       if (isCancelled() || !response.ok) {
-        return { ok: false, payload: null };
+        return { ok: false, payload: null, status: response.status };
       }
       const payload = await response.json().catch(() => null);
       if (isCancelled()) {
         return { ok: false, payload: null };
       }
-      return { ok: true, payload };
+      return { ok: true, payload, status: response.status };
     } catch {
-      return { ok: false, payload: null };
+      return { ok: false, payload: null, status: 0 };
     } finally {
       window.clearTimeout(timeout);
     }
@@ -7085,6 +7315,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
 
   const refreshCockpit = useCallback(async (isCancelled: () => boolean = () => false) => {
     const [
+      authResult,
       runtimeStatusResult,
       observerResult,
       auditResult,
@@ -7097,6 +7328,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       mcpModeResult,
       approvalModeResult,
     ] = await fetchCockpitBatch([
+      () => fetchCockpitJson(`${API_URL}/api/auth/session`, 5000, isCancelled),
       () => fetchCockpitJson(`${API_URL}/api/runtime/status`, 5000, isCancelled),
       () => fetchCockpitJson(`${API_URL}/api/observer/state`, 5000, isCancelled),
       () => fetchCockpitJson(`${API_URL}/api/audit/events?limit=12`, 5000, isCancelled),
@@ -7115,6 +7347,35 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     ], isCancelled);
 
     if (isCancelled()) return;
+    const authPayload = authResult.ok && authResult.payload && typeof authResult.payload === "object"
+      ? authResult.payload as {
+        authenticated?: unknown;
+        principal_id?: unknown;
+        session_id?: unknown;
+        absolute_expires_at?: unknown;
+        idle_expires_at?: unknown;
+      }
+      : null;
+    if (
+      authPayload?.authenticated === true
+      && typeof authPayload.principal_id === "string"
+      && authPayload.principal_id.trim()
+      && typeof authPayload.session_id === "string"
+      && authPayload.session_id.trim()
+    ) {
+      setOperatorAuth({
+        status: "authenticated",
+        principalId: authPayload.principal_id.trim(),
+        sessionId: authPayload.session_id.trim(),
+        expiresAt: typeof authPayload.absolute_expires_at === "string"
+          ? authPayload.absolute_expires_at
+          : typeof authPayload.idle_expires_at === "string" ? authPayload.idle_expires_at : null,
+      });
+    } else if (authResult.status === 401 || authResult.status === 403) {
+      setOperatorAuth({ status: "unauthorized", principalId: null, sessionId: null, expiresAt: null });
+    } else {
+      setOperatorAuth({ status: "degraded", principalId: null, sessionId: null, expiresAt: null });
+    }
     const runtimeStatusPayload = runtimeStatusResult.ok
       ? normalizeRuntimeStatus(runtimeStatusResult.payload)
       : null;
@@ -7130,8 +7391,13 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     if (auditResult.ok) {
       setAuditEvents(Array.isArray(auditResult.payload) ? auditResult.payload : []);
     }
-    if (approvalsResult.ok) {
-      setPendingApprovals(Array.isArray(approvalsResult.payload) ? approvalsResult.payload : []);
+    if (approvalsResult.ok && Array.isArray(approvalsResult.payload)) {
+      setPendingApprovals(normalizePendingApprovals(approvalsResult.payload));
+      setApprovalLoadState("ready");
+    } else {
+      // A failed approval read must not leave stale effect buttons actionable.
+      setPendingApprovals([]);
+      setApprovalLoadState("stale");
     }
     if (capabilitiesResult.ok && capabilitiesResult.payload) {
       const capabilityPayload = capabilitiesResult.payload as CapabilityOverview;
@@ -9337,6 +9603,246 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     { label: "artifacts", value: `${m7ArtifactCount} files · ${m7PrimaryOutputPath ?? "no primary output"}` },
     { label: "next action", value: m7NextActionLabel },
   ];
+  const currentGoalLoop = currentGoal && goalLoopGoalId === currentGoal.id ? goalLoop : null;
+  const latestGoalReceipt = currentGoalLoop?.receipts?.[0] ?? null;
+  const goalOutcomeState: OutcomeCockpitState = (() => {
+    if (!currentGoal) return goalTree.length === 0 && loadingGoals ? "loading" : "empty";
+    if (loadingGoals || goalLoopLoading) return "loading";
+    if (goalLoopError) {
+      if (goalLoopError.code === "stale_goal_revision") return "stale";
+      if (goalLoopError.status === 401 || goalLoopError.status === 403 || goalLoopError.code === "authentication_required") return "unauthorized";
+      if (goalLoopError.status === 503 || goalLoopError.status === 0) return "degraded";
+      return goalLoopError.status === 502 ? "partial_metadata" : "failed";
+    }
+    if (!currentGoalLoop || currentGoalLoop.goal.revision !== (currentGoal.revision ?? currentGoalLoop.goal.revision)) return "partial_metadata";
+    if (
+      latestGoalReceipt?.goal_revision != null
+      && latestGoalReceipt.goal_revision !== currentGoalLoop.goal.revision
+    ) return "stale";
+    if (!currentGoalLoop.criterion) return "partial_metadata";
+    return outcomeStateForReceipt(latestGoalReceipt, true, currentGoal.status);
+  })();
+  const workflowLoadState = deepPaneLoadState.workflows;
+  const outcomeWorkflow = m7PrimaryWorkflow;
+  const workOutcomeState: OutcomeCockpitState = (() => {
+    if (workflowLoadState === "loading") return "loading";
+    if (workflowLoadState === "stale") return "stale";
+    if (workflowLoadState === "failed") return "degraded";
+    if (workflowLoadState === "idle") return "partial_metadata";
+    if (!outcomeWorkflow) return "empty";
+    if (outcomeWorkflow.status === "awaiting_approval") return "awaiting_approval";
+    if (outcomeWorkflow.status === "failed") return "failed";
+    if (outcomeWorkflow.status === "degraded") return "degraded";
+    if (outcomeWorkflow.status === "denied") return "blocked";
+    if (outcomeWorkflow.status === "succeeded" || outcomeWorkflow.status === "approved") return "recovered";
+    return "active";
+  })();
+  const outcomeFailedStep = outcomeWorkflow ? failedWorkflowStep(outcomeWorkflow) : null;
+  const outcomeCheckpoint = outcomeWorkflow
+    ? workflowCheckpointActions(outcomeWorkflow).find((action) => action.kind !== "retry_failed_step") ?? null
+    : null;
+  const outcomeApproval = outcomeWorkflow ? approvalForWorkflow(outcomeWorkflow) : null;
+  const outcomeApprovalActionState = outcomeApproval ? approvalState[outcomeApproval.id] ?? null : null;
+  const approvalAuthorityReady = isApprovalAuthorityReady(
+    outcomeApproval,
+    operatorAuth,
+    approvalLoadState,
+  );
+  const approvalOutcomeState: OutcomeCockpitState = (() => {
+    if (!outcomeApproval) {
+      return approvalLoadState === "loading"
+        ? "loading"
+        : approvalLoadState === "stale" ? "stale" : "empty";
+    }
+    if (approvalLoadState !== "ready") return approvalLoadState;
+    const status = outcomeApproval.status.toLowerCase();
+    if (!approvalAuthorityReady || status === "unauthorized" || status === "forbidden") return "unauthorized";
+    if (["expired", "stale", "revoked"].includes(status)) return "stale";
+    if (status === "blocked") return "blocked";
+    if (outcomeApprovalActionState?.toLowerCase().includes("fail")) return "failed";
+    return "awaiting_approval";
+  })();
+  const routeReadiness = runtimeStatus?.effective_runtime?.inference_readiness;
+  const routeOutcomeState: OutcomeCockpitState = !runtimeAvailable
+    ? "partial_metadata"
+    : runtimeReceipt?.source === "retained"
+      ? "stale"
+      : runtimeBlocked
+        ? "blocked"
+        : runtimeDegraded || runtimeReadinessDegraded
+          ? "degraded"
+          : runtimeStatus?.effective_runtime ? "active" : "partial_metadata";
+  const outcomeRoute: OutcomeRouteSummary = {
+    state: routeOutcomeState,
+    provider: runtimeStatus?.effective_runtime?.provider_label ?? runtimeStatus?.provider ?? "unknown",
+    model: runtimeModelLabel,
+    route: runtimeStatus?.effective_runtime?.route_label ?? runtimeRouteLabel,
+    upstream: actualFabricRoute
+      ? `${actualFabricRoute.profile_id} · receipt persisted`
+      : attemptedFabricRoute
+        ? `${attemptedFabricRoute.profile_id} · ${attemptedFabricRoute.outcome}`
+        : selectedFabricRoute?.profile_id ?? runtimeStatus?.effective_runtime?.active_profile ?? null,
+    egress: routeReadiness?.cloud_egress ?? "unknown",
+    budget: typeof routeReadiness?.cost_ceiling_microusd === "number"
+      ? `${routeReadiness.cost_ceiling_microusd} µUSD ceiling`
+      : "cost ceiling unknown",
+    queue: runtimeStatus?.effective_runtime?.queue_status_endpoint ? "status endpoint advertised" : "queue status unavailable",
+    detail: runtimeBlocked
+      ? [
+        "Runtime readiness is blocked by the backend; unrelated cockpit controls remain available.",
+        routeReadiness?.reasons?.length ? `reason ${routeReadiness.reasons.join(", ")}` : null,
+      ].filter(Boolean).join(" ")
+      : routeReadiness?.status && routeReadiness.status !== "ready"
+        ? `Runtime readiness: ${routeReadiness.status.replace(/_/g, " ")}`
+        : runtimeStatus?.effective_runtime?.summary_label ?? null,
+  };
+  const outcomeGoal: OutcomeGoalSummary | null = currentGoal
+    ? {
+      id: currentGoal.id,
+      title: currentGoal.title,
+      status: currentGoal.status,
+      state: goalOutcomeState,
+      revision: currentGoal.revision ?? currentGoalLoop?.goal.revision ?? null,
+      progress: currentGoal.progress ?? null,
+      criterionId: currentGoalLoop?.criterion?.criterion_id ?? currentGoal.success_criterion?.criterion_id ?? null,
+      criterionSummary: currentGoalLoop?.criterion?.description ?? currentGoal.success_criterion?.description ?? null,
+      latestExecution: latestGoalReceipt?.execution_status ?? null,
+      latestVerification: latestGoalReceipt?.verification ?? null,
+      latestUsefulness: latestGoalReceipt?.usefulness ?? null,
+      latestLearning: latestGoalReceipt?.learning ?? null,
+    }
+    : null;
+  const outcomeWork: OutcomeWorkSummary | null = outcomeWorkflow
+    ? {
+      id: outcomeWorkflow.id,
+      label: outcomeWorkflow.workflowName,
+      status: outcomeWorkflow.status,
+      state: workOutcomeState,
+      summary: outcomeWorkflow.summary,
+      updatedAt: outcomeWorkflow.updatedAt,
+      stepLabel: outcomeWorkflow.resumeFromStep
+        ?? outcomeWorkflow.stepRecords?.find((step) => step.status !== "succeeded")?.id
+        ?? outcomeWorkflow.resumeCheckpointLabel
+        ?? null,
+      artifactLabel: outcomeWorkflow.artifacts[0]?.filePath ?? outcomeWorkflow.artifactPaths[0] ?? null,
+      threadLabel: outcomeWorkflow.threadLabel ?? outcomeWorkflow.threadId ?? outcomeWorkflow.sessionId ?? null,
+      nextAction: outcomeApproval
+        ? `Review approval for ${outcomeApproval.tool_name}`
+        : outcomeFailedStep
+          ? `Inspect failed step ${outcomeFailedStep.id}`
+          : outcomeWorkflow.status === "running"
+            ? "Monitor backend run"
+            : workflowCanContinue(outcomeWorkflow)
+              ? `Continue ${outcomeWorkflow.resumeCheckpointLabel ?? "from the recorded checkpoint"}`
+              : "Inspect backend receipt",
+      recoveryHint: outcomeWorkflow.approvalRecoveryMessage
+        ?? outcomeFailedStep?.recoveryHint
+        ?? outcomeWorkflow.resumeCheckpointLabel
+        ?? null,
+      canInspect: true,
+      canContinue: workflowCanContinue(outcomeWorkflow),
+      canRetry: Boolean(outcomeWorkflow.retryFromStepDraft),
+      canBranch: Boolean(outcomeCheckpoint),
+    }
+    : null;
+  const approvalScopeRecord = outcomeApproval?.approval_scope && typeof outcomeApproval.approval_scope === "object"
+    ? outcomeApproval.approval_scope
+    : outcomeApproval?.approval_context && typeof outcomeApproval.approval_context === "object"
+      ? outcomeApproval.approval_context
+      : null;
+  const approvalTarget = approvalScopeRecord?.target && typeof approvalScopeRecord.target === "object"
+    ? approvalScopeRecord.target as Record<string, unknown>
+    : null;
+  const approvalScopeLabels = outcomeApproval
+    ? [
+      ...(outcomeApproval.lifecycle_boundaries ?? []),
+      typeof approvalTarget?.type === "string" ? `target ${approvalTarget.type}` : null,
+      typeof approvalTarget?.reference === "string" ? `ref ${approvalTarget.reference}` : null,
+      typeof outcomeApproval.goal_revision === "number" ? `goal revision ${outcomeApproval.goal_revision}` : null,
+      typeof outcomeApproval.plan_revision === "number" ? `plan revision ${outcomeApproval.plan_revision}` : null,
+    ].filter((value): value is string => Boolean(value))
+    : [];
+  const approvalBoundRevision = typeof outcomeApproval?.goal_revision === "number"
+    ? `goal ${outcomeApproval.goal_revision}`
+    : typeof outcomeApproval?.plan_revision === "number"
+      ? `plan ${outcomeApproval.plan_revision}`
+      : typeof approvalScopeRecord?.goal_revision === "number"
+        ? `goal ${approvalScopeRecord.goal_revision}`
+        : typeof approvalScopeRecord?.plan_revision === "number" ? `plan ${approvalScopeRecord.plan_revision}` : null;
+  const outcomeApprovalSummary: OutcomeApprovalSummary | null = outcomeApproval
+    ? {
+      id: outcomeApproval.id,
+      toolLabel: [outcomeApproval.extension_display_name, outcomeApproval.extension_action].filter(Boolean).join(" · ") || outcomeApproval.tool_name,
+      summary: outcomeApproval.summary,
+      riskLevel: outcomeApproval.risk_level,
+      state: approvalOutcomeState,
+      createdAt: outcomeApproval.created_at,
+      actionStatus: outcomeApprovalActionState,
+      scope: approvalScopeLabels,
+      permissions: outcomeApproval.permissions ? Object.keys(outcomeApproval.permissions) : [],
+      threadLabel: outcomeApproval.thread_label ?? outcomeApproval.thread_id ?? outcomeApproval.session_id ?? null,
+      authorized: approvalAuthorityReady,
+      ownerPrincipal: redactIdentifier(outcomeApproval.approval_owner_principal_id),
+      ownerSession: redactIdentifier(outcomeApproval.approval_owner_operator_session_id),
+      ownerSource: outcomeApproval.approval_owner_source ?? outcomeApproval.approval_source ?? "unavailable",
+      ownerExpiry: String(
+        outcomeApproval.approval_owner_expires_at
+          ?? outcomeApproval.expires_at
+          ?? outcomeApproval.approval_expires_at
+          ?? outcomeApproval.decision_expires_at
+          ?? "",
+      ) || null,
+      approvalExpiry: String(
+        outcomeApproval.expires_at
+          ?? outcomeApproval.approval_expires_at
+          ?? outcomeApproval.decision_expires_at
+          ?? outcomeApproval.approval_owner_expires_at
+          ?? "",
+      ) || null,
+      boundRevision: approvalBoundRevision,
+    }
+    : null;
+  const latestArtifact = [...artifacts]
+    .sort((left, right) => new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime())[0] ?? null;
+  const artifactEvidenceEntry = operatorEvidenceEntries.find((entry) => entry.artifact) ?? null;
+  const outcomeEvidence: OutcomeEvidenceSummary = latestArtifact
+    ? {
+      state: "active",
+      label: latestArtifact.filePath,
+      summary: latestArtifact.summary,
+      source: latestArtifact.source,
+      createdAt: latestArtifact.createdAt,
+      provenance: artifactEvidenceEntry?.detail ?? latestArtifact.source,
+      handle: latestArtifact.id,
+    }
+    : {
+      state: auditEvents.length ? "partial_metadata" : "empty",
+      label: "No artifact receipt",
+      summary: auditEvents.length ? "Audit events are present, but no file artifact receipt is linked." : "No artifact receipt is available in the current audit window.",
+      source: "audit endpoint",
+      provenance: null,
+      handle: null,
+    };
+  const outcomeExecution = latestGoalReceipt?.execution_status ?? "unknown";
+  const outcomeResult: OutcomeResultSummary = {
+    state: outcomeStateForReceipt(latestGoalReceipt, Boolean(currentGoalLoop?.criterion), currentGoal?.status),
+    label: latestGoalReceipt?.receipt_type ?? latestGoalReceipt?.event_type ?? "No outcome receipt",
+    summary: latestGoalReceipt
+      ? [latestGoalReceipt.reason, latestGoalReceipt.artifact_ref ? `artifact ${latestGoalReceipt.artifact_ref}` : null].filter(Boolean).join(" · ") || "Receipt fields are available; inspect verification before deciding success."
+      : "The goal loop endpoint has not supplied a backend outcome receipt.",
+    source: "goal loop endpoint",
+    execution: outcomeExecution,
+    verification: latestGoalReceipt?.verification ?? "unknown",
+    usefulness: latestGoalReceipt?.usefulness ?? "unknown",
+    learning: latestGoalReceipt?.learning ?? "unknown",
+    createdAt: latestGoalReceipt?.created_at ?? null,
+    receiptType: latestGoalReceipt?.receipt_type ?? null,
+    candidateId: latestGoalReceipt?.candidate_id ?? null,
+    outcomeId: latestGoalReceipt?.outcome_id ?? null,
+    criterionId: latestGoalReceipt?.criterion_id ?? null,
+    artifactRef: latestGoalReceipt?.artifact_ref ?? null,
+    learningRecordId: latestGoalReceipt?.learning_record_id ?? null,
+  };
   const m7ControlByAction = new Map(
     (operatorM7Cockpit?.fast_controls ?? []).map((control) => [control.action, control]),
   );
@@ -9346,6 +9852,12 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   const m7ControlModeLabel = (action: string, fallback: string) => (
     m7ControlByAction.get(action)?.control_mode ?? fallback
   ).replace(/_/g, " ");
+  const approvalActionAllowed = (approval: PendingApproval | null | undefined): boolean => (
+    isApprovalAuthorityReady(approval, operatorAuth, approvalLoadState)
+  );
+  const approvalActionDisabled = (approval: PendingApproval | null | undefined): boolean => (
+    !approvalActionAllowed(approval) || approvalState[approval?.id ?? ""] === "saving"
+  );
   function inspectOperatorTriageEntry(entry: OperatorTriageEntry | null | undefined) {
     if (!entry) return;
     if (entry.approval) {
@@ -10229,16 +10741,12 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   }, [governedExtensionRows]);
 
   function approvalForWorkflow(workflow: WorkflowRunRecord): PendingApproval | null {
-    if (workflow.pendingApprovalIds?.length) {
-      const byId = pendingApprovals.find((approval) => workflow.pendingApprovalIds?.includes(approval.id));
-      if (byId) return byId;
-    }
-    const fromSidebar = pendingApprovals.find((approval) =>
-      approval.tool_name === workflow.toolName
-      && approval.session_id === workflow.sessionId,
-    );
-    if (fromSidebar) return fromSidebar;
-
+    const selected = selectApprovalForWorkflow(pendingApprovals, {
+      toolName: workflow.toolName,
+      sessionId: workflow.sessionId,
+      pendingApprovalIds: workflow.pendingApprovalIds,
+    });
+    if (selected) return selected;
     const attached = workflow.pendingApprovals?.[0];
     if (!attached) return null;
     return {
@@ -10252,6 +10760,18 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       summary: attached.summary,
       created_at: attached.createdAt,
       resume_message: attached.resumeMessage ?? workflow.approvalRecoveryMessage ?? null,
+      approval_conversation_id: attached.approvalConversationId ?? workflow.sessionId ?? null,
+      approval_owner_principal_id: attached.approvalOwnerPrincipalId,
+      approval_owner_operator_session_id: attached.approvalOwnerOperatorSessionId,
+      approval_owner_source: attached.approvalOwnerSource,
+      approval_owner_expires_at: attached.approvalOwnerExpiresAt,
+      approval_expires_at: attached.approvalExpiresAt,
+      decision_expires_at: attached.decisionExpiresAt,
+      expires_at: attached.expiresAt,
+      approval_scope: attached.approvalScope,
+      approval_context: attached.approvalContext,
+      goal_revision: attached.goalRevision,
+      plan_revision: attached.planRevision,
     };
   }
 
@@ -11069,6 +11589,14 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
 
   async function handleApprovalDecision(approval: PendingApproval, decision: "approve" | "deny") {
     if (approvalState[approval.id] === "saving") return;
+    if (!approvalActionAllowed(approval)) {
+      setApprovalState((current) => ({
+        ...current,
+        [approval.id]: "locked: approval owner, scope, or expiry is unavailable",
+      }));
+      setOperatorStatus("Approval decision locked until the backend owner, scope, and expiry are current.");
+      return;
+    }
     setApprovalState((current) => ({ ...current, [approval.id]: "saving" }));
 
     try {
@@ -12120,6 +12648,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
 
     if (selectedInspector.kind === "approval") {
       const approval = selectedInspector.approval;
+      const owner = displayApprovalOwnerMetadata(approval);
       title = approval.tool_name;
       meta = `${approval.risk_level} approval`;
       body = `approval request · ${approval.summary}`;
@@ -12136,6 +12665,15 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
         package_path: approval.package_path ?? "n/a",
         lifecycle_boundaries: approval.lifecycle_boundaries ?? [],
         permissions: approval.permissions ?? {},
+        approval_scope: approval.approval_scope ?? "unavailable",
+        bound_revision: approval.goal_revision ?? approval.plan_revision ?? "unavailable",
+        authority: approvalActionAllowed(approval) ? "ready" : "locked",
+        owner_principal: owner.principal,
+        owner_session: owner.session,
+        owner_source: owner.source,
+        approval_expiry: owner.expiry,
+        current_operator_session: redactIdentifier(operatorAuth.sessionId),
+        current_operator_expiry: operatorAuth.expiresAt ?? "unavailable",
       };
     } else if (selectedInspector.kind === "workflow") {
       const workflow = selectedWorkflow!;
@@ -12324,12 +12862,14 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
               <>
                 <button
                   className="cockpit-feedback-button"
+                  disabled={approvalActionDisabled(selectedWorkflowApproval)}
                   onClick={() => void handleApprovalDecision(selectedWorkflowApproval, "approve")}
                 >
                   Approve
                 </button>
                 <button
                   className="cockpit-feedback-button"
+                  disabled={approvalActionDisabled(selectedWorkflowApproval)}
                   onClick={() => void handleApprovalDecision(selectedWorkflowApproval, "deny")}
                 >
                   Deny
@@ -12484,6 +13024,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
               <button
                 className="cockpit-feedback-button"
                 aria-label={`Approve approval context for ${selectedWorkflowName}`}
+                disabled={approvalActionDisabled(selectedWorkflowApproval)}
                 onClick={() => void handleApprovalDecision(selectedWorkflowApproval, "approve")}
               >
                 Approve
@@ -12491,6 +13032,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
               <button
                 className="cockpit-feedback-button"
                 aria-label={`Deny approval context for ${selectedWorkflowName}`}
+                disabled={approvalActionDisabled(selectedWorkflowApproval)}
                 onClick={() => void handleApprovalDecision(selectedWorkflowApproval, "deny")}
               >
                 Deny
@@ -14057,12 +14599,14 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                         )}
                         <button
                           className="cockpit-feedback-button"
+                          disabled={approvalActionDisabled(approval)}
                           onClick={() => void handleApprovalDecision(approval, "approve")}
                         >
                           Approve
                         </button>
                         <button
                           className="cockpit-feedback-button"
+                          disabled={approvalActionDisabled(approval)}
                           onClick={() => void handleApprovalDecision(approval, "deny")}
                         >
                           Deny
@@ -14142,6 +14686,64 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
             onClose={() => closeWindowPane("guardian_state_pane")}
           >
             <section className="cockpit-panel cockpit-panel--embedded">
+              <OutcomeCockpitPanel
+                goal={outcomeGoal}
+                work={outcomeWork}
+                approval={outcomeApprovalSummary}
+                route={outcomeRoute}
+                evidence={outcomeEvidence}
+                result={outcomeResult}
+                workLoadState={workflowLoadState === "failed"
+                  ? "degraded"
+                  : workflowLoadState === "idle"
+                    ? "partial_metadata"
+                    : workflowLoadState === "loaded"
+                      ? "active"
+                      : workflowLoadState}
+                approvalLoadState={approvalLoadState}
+                onOpenPriorities={() => setQuestPanelOpen(true)}
+                onLoadWork={() => void loadWorkflowRuns()}
+                onInspectWork={() => inspectWorkflowRun(outcomeWorkflow)}
+                onOpenThread={() => {
+                  const threadId = outcomeApproval?.thread_id
+                    ?? outcomeApproval?.session_id
+                    ?? outcomeWorkflow?.threadId
+                    ?? outcomeWorkflow?.sessionId;
+                  if (threadId) void openThread(threadId);
+                }}
+                onApprove={() => {
+                  if (outcomeApproval && approvalAuthorityReady) void handleApprovalDecision(outcomeApproval, "approve");
+                }}
+                onDeny={() => {
+                  if (outcomeApproval && approvalAuthorityReady) void handleApprovalDecision(outcomeApproval, "deny");
+                }}
+                onInspectEvidence={() => {
+                  if (latestArtifact) setSelectedInspector({ kind: "artifact", artifact: latestArtifact });
+                }}
+                onInspectOutcome={() => setQuestPanelOpen(true)}
+                onContinue={() => continueWorkflowRun(outcomeWorkflow)}
+                onRetry={() => {
+                  if (outcomeWorkflow?.retryFromStepDraft) {
+                    void queueLiveWorkflowResumePlan(outcomeWorkflow, {
+                      action: "retry",
+                      stepId: outcomeFailedStep?.id ?? outcomeWorkflow.resumeFromStep,
+                      fallbackDraft: outcomeWorkflow.retryFromStepDraft,
+                      label: outcomeWorkflow.workflowName,
+                    });
+                  }
+                }}
+                onBranch={() => {
+                  if (outcomeWorkflow && outcomeCheckpoint) {
+                    void queueLiveWorkflowResumePlan(outcomeWorkflow, {
+                      action: "branch",
+                      stepId: outcomeCheckpoint.stepId,
+                      actionHandle: outcomeCheckpoint.actionHandle,
+                      fallbackDraft: outcomeCheckpoint.draft,
+                      label: outcomeWorkflow.workflowName,
+                    });
+                  }
+                }}
+              />
               <div className="cockpit-operator-row">
                 <span className="cockpit-key">proof controls</span>
                 <span className="cockpit-operator-link">{renderDeepLoadState("benchmark")} · {renderDeepLoadState("m8")}</span>
@@ -14675,12 +15277,14 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                           <>
                             <button
                               className="cockpit-feedback-button"
+                              disabled={approvalActionDisabled(approval)}
                               onClick={() => void handleApprovalDecision(approval, "approve")}
                             >
                               Approve
                             </button>
                             <button
                               className="cockpit-feedback-button"
+                              disabled={approvalActionDisabled(approval)}
                               onClick={() => void handleApprovalDecision(approval, "deny")}
                             >
                               Deny
@@ -15651,7 +16255,11 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                         type="button"
                         className="cockpit-operator-button"
                         aria-label="Approve top M7 approval"
-                        disabled={!primaryApprovalTriageEntry || !m7ControlEnabled("approve", Boolean(primaryApprovalTriageEntry))}
+                        disabled={
+                          !primaryApprovalTriageEntry?.approval
+                          || !m7ControlEnabled("approve", Boolean(primaryApprovalTriageEntry?.approval))
+                          || approvalActionDisabled(primaryApprovalTriageEntry.approval)
+                        }
                         onClick={() => approveOperatorTriageEntry(primaryApprovalTriageEntry)}
                       >
                         approve
@@ -15660,7 +16268,11 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                         type="button"
                         className="cockpit-operator-button"
                         aria-label="Deny top M7 approval"
-                        disabled={!primaryApprovalTriageEntry?.approval || !m7ControlEnabled("deny", Boolean(primaryApprovalTriageEntry?.approval))}
+                        disabled={
+                          !primaryApprovalTriageEntry?.approval
+                          || !m7ControlEnabled("deny", Boolean(primaryApprovalTriageEntry?.approval))
+                          || approvalActionDisabled(primaryApprovalTriageEntry?.approval)
+                        }
                         onClick={() => {
                           if (primaryApprovalTriageEntry?.approval) {
                             void handleApprovalDecision(primaryApprovalTriageEntry.approval, "deny");
@@ -16884,6 +17496,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                                 type="button"
                                 className="cockpit-operator-button"
                                 aria-label={`Deny ${entry.label}`}
+                                disabled={approvalActionDisabled(entry.approval)}
                                 onClick={() => void handleApprovalDecision(entry.approval!, "deny")}
                               >
                                 deny
@@ -17769,6 +18382,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                               type="button"
                               className="cockpit-operator-button"
                               aria-label={`Approve ${entry.label}`}
+                              disabled={approvalActionDisabled(entry.approval)}
                               onClick={() => void handleApprovalDecision(entry.approval!, "approve")}
                             >
                               approve

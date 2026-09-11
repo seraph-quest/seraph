@@ -182,6 +182,11 @@ describe("CockpitView", () => {
       goalTree: [],
       dashboard: { domains: {}, active_count: 0, completed_count: 0, total_count: 0 },
       loading: false,
+      goalLoop: null,
+      goalLoopGoalId: null,
+      goalLoopLoading: false,
+      goalLoopError: null,
+      goalLoopAction: null,
     });
     useCockpitLayoutStore.setState({
       activeLayoutId: "default",
@@ -257,6 +262,99 @@ describe("CockpitView", () => {
       "/api/workflows/runs",
     ];
     expect(baselineUrls.some((url) => deniedDeepEndpoints.some((endpoint) => url.includes(endpoint)))).toBe(false);
+  });
+
+  it("binds the current goal to persisted loop outcome data while keeping an unavailable route explicit", async () => {
+    mockCockpitBaselineFetch(fetchMock, {
+      runtimeStatus: {
+        version: "test",
+        build_id: "test",
+        provider: "openrouter",
+        model: "openrouter/unknown",
+        model_label: "OpenRouter unavailable",
+        effective_runtime: {
+          provider: "openrouter",
+          model: "openrouter/unknown",
+          route_label: "OpenRouter",
+          inference_ready: false,
+          inference_readiness: {
+            status: "configuration_required",
+            reasons: ["missing_openrouter_key"],
+            cloud_egress: "blocked",
+          },
+        },
+      },
+    });
+    const baselineImplementation = fetchMock.getMockImplementation();
+    const goal = {
+      id: "g1",
+      parent_id: null,
+      path: "/g1",
+      level: "weekly",
+      title: "Ship guardian slice",
+      description: "Produce one locally verified artifact",
+      status: "active",
+      domain: "productivity",
+      start_date: null,
+      due_date: null,
+      sort_order: 0,
+      revision: 4,
+      progress: 50,
+      success_criterion: {
+        criterion_id: "artifact",
+        description: "A verified artifact exists",
+        verifier_kind: "artifact_readback",
+        target: { file_path: "artifacts/guardian.md" },
+        evidence_refs: ["artifact:guardian"],
+      },
+    };
+    fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes("/api/goals/tree")) return Promise.resolve(mockResponse([goal]));
+      if (url.includes("/api/goals/dashboard")) {
+        return Promise.resolve(mockResponse({ domains: { productivity: { active: 1, completed: 0, total: 1, progress: 50 } }, active_count: 1, completed_count: 0, total_count: 1 }));
+      }
+      if (url.includes("/api/goals/g1/loop")) {
+        return Promise.resolve(mockResponse({
+          goal: { id: "g1", title: goal.title, status: "active", revision: 4 },
+          criterion: goal.success_criterion,
+          receipts: [{
+            audit_event_id: "audit-outcome",
+            event_type: "goal_loop_outcome",
+            receipt_version: "goal_conditioned_loop_v1",
+            receipt_type: "outcome",
+            outcome_id: "outcome-1",
+            candidate_id: "candidate-1",
+            dedupe_key: "gcl:test",
+            goal_id: "g1",
+            goal_revision: 4,
+            criterion_id: "artifact",
+            execution_status: "succeeded",
+            verification: "passed",
+            usefulness: "helpful",
+            learning: "no_learning",
+            artifact_ref: "artifacts/guardian.md",
+            evidence_refs: ["artifact:guardian"],
+            reason: "local artifact read back",
+            content_redacted: true,
+          }],
+          strategy_deltas: [],
+        }));
+      }
+      return baselineImplementation?.(input, init) ?? Promise.resolve(mockResponse({}));
+    });
+
+    render(<CockpitView onSend={() => {}} />);
+
+    const panel = await screen.findByTestId("outcome-cockpit-panel");
+    await waitFor(() => {
+      expect(within(panel).getByText("Ship guardian slice")).toBeInTheDocument();
+      expect(within(panel).getByTestId("outcome-result-card")).toHaveAttribute("data-state", "recovered");
+    });
+    expect(within(panel).getByText("A verified artifact exists")).toBeInTheDocument();
+    expect(within(panel).getByTestId("outcome-route-card")).toHaveAttribute("data-state", "blocked");
+    expect(within(panel).getByRole("button", { name: "Open priorities" })).toBeEnabled();
+    expect(fetchMock.mock.calls.some(([input]) => String(input).includes("/api/goals/g1/loop"))).toBe(true);
   });
 
   it("loads deep cockpit panes only through their explicit endpoint groups", async () => {
@@ -1969,6 +2067,14 @@ describe("CockpitView", () => {
       if (url.includes("/api/goals/dashboard")) {
         return Promise.resolve(mockResponse({ domains: {}, active_count: 0, completed_count: 0, total_count: 0 }));
       }
+      if (url.includes("/api/auth/session")) {
+        return Promise.resolve(mockResponse({
+          authenticated: true,
+          principal_id: "operator:test",
+          session_id: "operator-session-1",
+          absolute_expires_at: "2099-01-01T00:00:00Z",
+        }));
+      }
       if (url.includes("/api/observer/state")) return Promise.resolve(mockResponse({}));
       if (url.includes("/api/audit/events")) return Promise.resolve(mockResponse([]));
       if (url.includes("/api/approvals/approval-run/approve")) return Promise.resolve(mockResponse({ status: "approved" }));
@@ -1985,6 +2091,10 @@ describe("CockpitView", () => {
             summary: "Approve Atlas shell command",
             created_at: "2026-03-18T12:03:00Z",
             resume_message: "Continue Atlas shell approval",
+            owner_principal_id: "operator:test",
+            operator_session_id: "operator-session-1",
+            expires_at: "2099-01-01T00:00:00Z",
+            approval_scope: { action: "shell_execute", target: { type: "session", reference: "session-2" } },
           },
         ]));
       }
@@ -4072,6 +4182,14 @@ describe("CockpitView", () => {
           { id: "session-2", title: "Atlas thread", created_at: "", updated_at: "", last_message: null, last_message_role: null },
         ]));
       }
+      if (url.includes("/api/auth/session")) {
+        return Promise.resolve(mockResponse({
+          authenticated: true,
+          principal_id: "operator:test",
+          session_id: "operator-session-1",
+          absolute_expires_at: "2099-01-01T00:00:00Z",
+        }));
+      }
       if (url.includes("/api/goals/tree")) return Promise.resolve(mockResponse([]));
       if (url.includes("/api/goals/dashboard")) {
         return Promise.resolve(mockResponse({ domains: {}, active_count: 0, completed_count: 0, total_count: 0 }));
@@ -4110,6 +4228,10 @@ describe("CockpitView", () => {
             summary: "Approve Atlas shell command",
             created_at: "2026-03-18T12:03:00Z",
             resume_message: "Continue Atlas shell approval",
+            owner_principal_id: "operator:test",
+            operator_session_id: "operator-session-1",
+            expires_at: "2099-01-01T00:00:00Z",
+            approval_scope: { action: "shell_execute", target: { type: "session", reference: "session-2" } },
           },
         ]));
       }
@@ -6539,6 +6661,14 @@ describe("CockpitView", () => {
         return Promise.resolve(mockResponse([]));
       }
       if (url.includes("/api/sessions")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/auth/session")) {
+        return Promise.resolve(mockResponse({
+          authenticated: true,
+          principal_id: "operator:test",
+          session_id: "operator-session-1",
+          absolute_expires_at: "2099-01-01T00:00:00Z",
+        }));
+      }
       if (url.includes("/api/goals/tree")) return Promise.resolve(mockResponse([]));
       if (url.includes("/api/goals/dashboard")) {
         return Promise.resolve(mockResponse({ domains: {}, active_count: 0, completed_count: 0, total_count: 0 }));
@@ -6599,6 +6729,10 @@ describe("CockpitView", () => {
               thread_id: "session-2",
               thread_label: "Approval thread",
               resume_message: "Continue workflow after approval.",
+              owner_principal_id: "operator:test",
+              operator_session_id: "operator-session-1",
+              expires_at: "2099-01-01T00:00:00Z",
+              approval_scope: { action: "write_file", target: { type: "workspace", reference: "notes/brief.md" } },
             }],
             thread_id: "session-2",
             thread_label: "Approval thread",
@@ -6623,8 +6757,9 @@ describe("CockpitView", () => {
 
     await loadAllDeepPanes();
 
-    expect(await screen.findByRole("button", { name: "Approve" }, { timeout: 5000 })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Deny" })).toBeInTheDocument();
+    const outcomePanel = await screen.findByTestId("outcome-cockpit-panel", {}, { timeout: 5000 });
+    expect(within(outcomePanel).getByRole("button", { name: "Approve" })).toBeEnabled();
+    expect(within(outcomePanel).getByRole("button", { name: "Deny" })).toBeEnabled();
     fireEvent.click(await screen.findByRole("button", { name: "Continue" }, { timeout: 5000 }));
 
     await waitFor(() => expect(useChatStore.getState().sessionId).toBe("session-2"), { timeout: 5000 });
@@ -9401,6 +9536,14 @@ describe("CockpitView", () => {
       if (url.includes("/api/sessions")) {
         return Promise.resolve(mockResponse([{ id: "session-1", title: "Atlas thread" }]));
       }
+      if (url.includes("/api/auth/session")) {
+        return Promise.resolve(mockResponse({
+          authenticated: true,
+          principal_id: "operator:test",
+          session_id: "operator-session-1",
+          absolute_expires_at: "2099-01-01T00:00:00Z",
+        }));
+      }
       if (url.includes("/api/goals/tree")) return Promise.resolve(mockResponse([]));
       if (url.includes("/api/goals/dashboard")) {
         return Promise.resolve(mockResponse({ domains: {}, active_count: 0, completed_count: 0, total_count: 0 }));
@@ -9446,6 +9589,10 @@ describe("CockpitView", () => {
             summary: "Approve write_file for Atlas brief",
             created_at: "2026-03-26T09:02:00Z",
             resume_message: "Continue Atlas brief approval",
+            owner_principal_id: "operator:test",
+            operator_session_id: "operator-session-1",
+            expires_at: "2099-01-01T00:00:00Z",
+            approval_scope: { action: "write_file", target: { type: "workspace", reference: "notes/brief.md" } },
           },
         ]));
       }

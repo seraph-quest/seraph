@@ -30,7 +30,9 @@ from src.extensions.telegram_ingress import (
 from src.guardian.audio_ingress import AudioProviderStatus
 
 
-NOW = datetime(2026, 9, 10, 12, 0, 0, tzinfo=timezone.utc)
+# Keep consent and pairing fixtures current so receipt serialization exercises
+# the intended provenance checks instead of aging out during a later test run.
+NOW = datetime.now(timezone.utc)
 
 
 def _consent(

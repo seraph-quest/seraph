@@ -745,6 +745,124 @@ class NativeNotificationDeliveryAttempt(SQLModel, table=True):
     finished_at: Optional[datetime] = Field(default=None, index=True)
 
 
+# ─── Telegram transport ─────────────────────────────────
+
+class TelegramTransportState(SQLModel, table=True):
+    """Durable, server-owned state for the provider-free Telegram adapter.
+
+    The token itself lives in the encrypted vault.  This projection only
+    stores its fingerprint and the pairing/consent/cursor facts needed to
+    reject stale or cross-operator updates after a restart.
+    """
+
+    __tablename__ = "telegram_transport_states"
+
+    id: str = Field(default="telegram", primary_key=True)
+    owner_principal_id: Optional[str] = Field(default=None, index=True)
+    operator_session_id: Optional[str] = Field(default=None, index=True)
+    operator_id: Optional[int] = Field(default=None, index=True)
+    chat_id: Optional[int] = Field(default=None, index=True)
+    pairing_id: Optional[str] = Field(default=None, index=True)
+    pairing_state: str = Field(default="unpaired", index=True)
+    pairing_expires_at: Optional[datetime] = Field(default=None, index=True)
+    token_secret_ref: Optional[str] = Field(default=None, index=True)
+    token_fingerprint: Optional[str] = Field(default=None, index=True)
+    transit_consent_reference: Optional[str] = Field(default=None, index=True)
+    transit_consent_expires_at: Optional[datetime] = Field(default=None, index=True)
+    model_consent_reference: Optional[str] = Field(default=None, index=True)
+    model_consent_expires_at: Optional[datetime] = Field(default=None, index=True)
+    cursor: int = Field(default=0, index=True)
+    sequence: int = Field(default=0, index=True)
+    rate_events_json: str = Field(default="[]")
+    revoked_at: Optional[datetime] = Field(default=None, index=True)
+    updated_at: datetime = Field(default_factory=_now, index=True)
+
+
+class TelegramInboundUpdate(SQLModel, table=True):
+    """Replay ledger and bounded ingress receipt for one Telegram update."""
+
+    __tablename__ = "telegram_inbound_updates"
+
+    id: str = Field(default_factory=_uuid, primary_key=True)
+    idempotency_key: str = Field(unique=True, index=True)
+    request_digest: str = Field(index=True)
+    owner_principal_id: str = Field(index=True)
+    operator_session_id: str = Field(index=True)
+    operator_id: int = Field(index=True)
+    chat_id: int = Field(index=True)
+    update_id: int = Field(index=True)
+    message_id: int = Field(index=True)
+    sequence: int = Field(index=True)
+    session_id: Optional[str] = Field(default=None, index=True)
+    canonical_message_id: Optional[str] = Field(default=None, index=True)
+    content_digest: Optional[str] = Field(default=None, index=True)
+    attachment_id: Optional[str] = Field(default=None, index=True)
+    attachment_hash: Optional[str] = Field(default=None, index=True)
+    attachment_media_type: Optional[str] = Field(default=None)
+    attachment_size_bytes: Optional[int] = Field(default=None)
+    attachment_duration_seconds: Optional[float] = Field(default=None)
+    attachment_quarantine_receipt_digest: Optional[str] = Field(default=None, index=True)
+    status: str = Field(default="accepted", index=True)
+    reason_code: str = Field(default="", index=True)
+    receipt_json: str = Field(default="{}")
+    created_at: datetime = Field(default_factory=_now, index=True)
+
+
+class TelegramTransportOutbox(SQLModel, table=True):
+    """Canonical Telegram delivery intent with bounded retry state."""
+
+    __tablename__ = "telegram_transport_outbox"
+
+    id: str = Field(default_factory=_uuid, primary_key=True)
+    idempotency_key: str = Field(unique=True, index=True)
+    payload_digest: str = Field(index=True)
+    owner_principal_id: str = Field(index=True)
+    operator_session_id: str = Field(index=True)
+    chat_id: int = Field(index=True)
+    session_id: Optional[str] = Field(default=None, index=True)
+    conversation_id: Optional[str] = Field(default=None, index=True)
+    thread_id: Optional[str] = Field(default=None, index=True)
+    message_id: Optional[str] = Field(default=None, index=True)
+    correlation_id: Optional[str] = Field(default=None, index=True)
+    content: str = Field(default="")
+    content_digest: str = Field(index=True)
+    kind: str = Field(default="text", index=True)
+    attachment_refs_json: str = Field(default="[]")
+    status: str = Field(default="queued", index=True)
+    attempt_count: int = Field(default=0, index=True)
+    max_attempts: int = Field(default=3, index=True)
+    next_attempt_at: datetime = Field(default_factory=_now, index=True)
+    last_error: Optional[str] = Field(default=None, index=True)
+    response_code: Optional[int] = Field(default=None, index=True)
+    external_message_id: Optional[str] = Field(default=None, index=True)
+    created_at: datetime = Field(default_factory=_now, index=True)
+    updated_at: datetime = Field(default_factory=_now, index=True)
+    delivered_at: Optional[datetime] = Field(default=None, index=True)
+
+
+class TelegramDeliveryAttempt(SQLModel, table=True):
+    """Durable bounded delivery attempt receipt for injected transport calls."""
+
+    __tablename__ = "telegram_delivery_attempts"
+    __table_args__ = (
+        Index(
+            "ux_telegram_delivery_attempt_order",
+            "outbox_id",
+            "attempt_index",
+            unique=True,
+        ),
+    )
+
+    id: str = Field(default_factory=_uuid, primary_key=True)
+    outbox_id: str = Field(index=True)
+    attempt_index: int = Field(index=True)
+    status: str = Field(default="started", index=True)
+    response_code: Optional[int] = Field(default=None, index=True)
+    error_code: Optional[str] = Field(default=None, index=True)
+    started_at: datetime = Field(default_factory=_now, index=True)
+    finished_at: Optional[datetime] = Field(default=None, index=True)
+
+
 # ─── ScreenObservation ─────────────────────────────────
 
 class ScreenObservation(SQLModel, table=True):

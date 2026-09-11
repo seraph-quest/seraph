@@ -24,6 +24,7 @@ from src.api.observer import router as observer_router
 from src.api.settings import router as settings_router
 from src.api.skills import router as skills_router
 from src.api.tools import router as tools_router
+from src.api.telegram import router as telegram_router
 from src.api.vault import router as vault_router
 from src.api.workflows import router as workflows_router
 from src.api.ws import router as ws_router
@@ -47,6 +48,7 @@ api_router.include_router(sessions_router, prefix="/api", tags=["sessions"])
 api_router.include_router(goals_router, prefix="/api", tags=["goals"])
 api_router.include_router(profile_router, prefix="/api", tags=["profile"])
 api_router.include_router(tools_router, prefix="/api", tags=["tools"])
+api_router.include_router(telegram_router, prefix="/api", tags=["telegram"])
 api_router.include_router(mcp_router, prefix="/api", tags=["mcp"])
 api_router.include_router(memory_router, prefix="/api", tags=["memory"])
 api_router.include_router(model_fabric_settings_router, prefix="/api", tags=["settings"])

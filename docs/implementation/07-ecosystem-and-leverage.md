@@ -176,13 +176,17 @@ with `governed_runtime_adapter_unavailable`; they are provider-facing canary
 names and still have no remote adapter on this branch.  #755 now adds a
 separate `execute_local` path for the bounded local proof: it parses declared
 workflow markdown with the existing loader, admits an immutable digest/version/
-goal/owner/session job pin, runs a primary research brief through an injected
-intercepted transport or a secondary goal snapshot, writes and reads back the
-artifact, and records a no-learning outcome.  The local path reports zero
-provider and live-network calls and never creates an HTTP client.  It also
-reconciles interrupted running jobs to an operator-visible blocked state before
-new work is admitted.  This local proof remains branch-local until the Epic
-review and merge receipts land on `develop`.
+goal/owner/session job pin, traverses the reviewed steps through an internal
+provider-free governed workflow host, runs a primary research brief from an
+already intercepted source value or a secondary goal snapshot, writes and reads
+back the artifact, and records a no-learning outcome.  The local path reports
+zero provider and live-network calls and never creates an HTTP client.  The
+filesystem effect is staged by the host and committed only by the lifecycle
+transaction after its final authority and cancellation check; there is no
+caller-supplied workflow callback.  It also reconciles interrupted running jobs
+to an operator-visible blocked state before new work is admitted.  This local
+proof remains branch-local until the Epic review and merge receipts land on
+`develop`.
 
 The lifecycle rechecks every declared dependency against the durable reviewed
 version and revocation ledger, so caller-supplied availability cannot create a
@@ -195,12 +199,19 @@ lifecycle transaction.  The execute-local API uses only the persisted goal row
 for snapshot content; request data can assert identity and revision but cannot
 replace title, description, criterion, or scheduling fields.
 
+Authenticated lifecycle controls are available at `POST
+/api/capability-packs/{pack_id}/activate`, `/update`, `/pause`, `/rollback`,
+`/revoke`, and `/uninstall`.  Activation and update require the reviewed
+manifest/root/review binding; every route requires a durable action-scoped
+approval ID and the middleware-bound owner/session.  Responses contain only
+typed status, public pointer, and redacted durable receipt fields.  Cross-owner,
+stale-approval, invalid-state, and malformed-binding requests fail closed.
 Operator readback is available at `GET /api/capability-packs/{pack_id}` and
-reconciliation at `POST /api/capability-packs/{pack_id}/reconcile`; both are
+reconciliation at `POST /api/capability-packs/{pack_id}/reconcile`; all are
 authenticated.  The cockpit operator surface shows the active digest/version,
 goal, pinned jobs, local outcomes, and recovery state.  The local execution
-control accepts only in-process source fixtures and goal snapshots, so it does
-not widen the #775 OpenRouter-only runtime boundary.
+control accepts only in-process source values and goal snapshots, so it does not
+widen the #775 OpenRouter-only runtime boundary.
 
 Validate the v2 example with:
 

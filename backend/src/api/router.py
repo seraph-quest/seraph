@@ -9,6 +9,7 @@ from src.api.browser import router as browser_router
 from src.api.canvas import router as canvas_router
 from src.api.catalog import router as catalog_router
 from src.api.capabilities import router as capabilities_router
+from src.api.capability_packs import router as capability_packs_router
 from src.api.chat import router as chat_router
 from src.api.extensions import router as extensions_router
 from src.api.evolution import router as evolution_router
@@ -40,6 +41,7 @@ api_router.include_router(browser_router, prefix="/api", tags=["browser"])
 api_router.include_router(canvas_router, prefix="/api", tags=["canvas"])
 api_router.include_router(catalog_router, prefix="/api", tags=["catalog"])
 api_router.include_router(capabilities_router, prefix="/api", tags=["capabilities"])
+api_router.include_router(capability_packs_router, prefix="/api", tags=["capability-packs"])
 api_router.include_router(chat_router, prefix="/api", tags=["chat"])
 api_router.include_router(extensions_router, prefix="/api", tags=["extensions"])
 api_router.include_router(evolution_router, prefix="/api", tags=["evolution"])

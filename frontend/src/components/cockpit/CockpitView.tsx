@@ -111,6 +111,21 @@ interface RuntimeReceipt {
   source: RuntimeReceiptSource;
 }
 
+interface CapabilityPackReadback {
+  pack_id?: string;
+  active?: {
+    version?: string;
+    digest?: string;
+    goal_id?: string;
+    authority_digest?: string;
+    status?: string;
+  } | null;
+  jobs?: Array<{ job_id?: string; status?: string; domain?: string; readback_ok?: boolean }>;
+  local_executions?: Array<{ job_id?: string; domain?: string; outcome?: string; artifact?: { readback_ok?: boolean } }>;
+  reconciliation?: { status?: string; changes?: Array<{ job_id?: string; reason?: string }> };
+  generation?: number;
+}
+
 interface OperatorControlPlaneRole {
   id: string;
   label: string;
@@ -6856,6 +6871,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   const [runbooks, setRunbooks] = useState<RunbookInfo[]>([]);
   const [marketplaceFlows, setMarketplaceFlows] = useState<MarketplaceFlowInfo[]>([]);
   const [extensionPackages, setExtensionPackages] = useState<ExtensionPackageInfo[]>([]);
+  const [capabilityPackReadback, setCapabilityPackReadback] = useState<CapabilityPackReadback | null>(null);
   const [savedRunbooks, setSavedRunbooks] = useState<RunbookInfo[]>(() => readRunbookMacros());
   const [activityLedger, setActivityLedger] = useState<ActivityLedgerEntry[]>([]);
   const [activitySummary, setActivitySummary] = useState<ActivityLedgerSummary | null>(null);
@@ -7150,9 +7166,24 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       );
     }
     if (extensionsResult.ok) {
-      setExtensionPackages(normalizeExtensionPackagesPayload(extensionsResult.payload));
+      const normalizedExtensions = normalizeExtensionPackagesPayload(extensionsResult.payload);
+      setExtensionPackages(normalizedExtensions);
+      const capabilityPack = normalizedExtensions.find((item) => item.kind === "capability-pack");
+      if (capabilityPack?.id) {
+        const readbackResult = await fetchCockpitJson(
+          `${API_URL}/api/capability-packs/${encodeURIComponent(capabilityPack.id)}`,
+          5000,
+          isCancelled,
+        );
+        if (!isCancelled() && readbackResult.ok && readbackResult.payload && typeof readbackResult.payload === "object") {
+          setCapabilityPackReadback(readbackResult.payload as CapabilityPackReadback);
+        }
+      } else {
+        setCapabilityPackReadback(null);
+      }
     } else {
       setExtensionPackages([]);
+      setCapabilityPackReadback(null);
     }
     setBrowserProviders(normalizeBrowserProviders(browserProvidersResult.payload));
     setBrowserSessions(normalizeBrowserSessions(browserSessionsResult.payload));
@@ -15625,6 +15656,33 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                       <div className="cockpit-empty">No governed extension payloads loaded.</div>
                     ) : null}
                   </section>
+
+                  {capabilityPackReadback && (
+                    <section className="cockpit-operator-section" aria-label="Capability pack lifecycle readback">
+                      <div className="cockpit-operator-row">
+                        <span className="cockpit-key">Capability pack lifecycle</span>
+                        <span className="cockpit-operator-link">
+                          {capabilityPackReadback.active?.status ?? "inactive"}
+                          {capabilityPackReadback.reconciliation?.status === "blocked" ? " · recovery required" : ""}
+                        </span>
+                      </div>
+                      <div className="cockpit-sublist-item">
+                        {[
+                          capabilityPackReadback.pack_id,
+                          capabilityPackReadback.active?.version ? `v${capabilityPackReadback.active.version}` : null,
+                          capabilityPackReadback.active?.goal_id ? `goal ${capabilityPackReadback.active.goal_id}` : null,
+                          capabilityPackReadback.active?.digest ? `digest ${capabilityPackReadback.active.digest.slice(0, 12)}` : null,
+                          `${capabilityPackReadback.jobs?.length ?? 0} pinned jobs`,
+                          `${capabilityPackReadback.local_executions?.length ?? 0} local outcomes`,
+                        ].filter(Boolean).join(" · ")}
+                      </div>
+                      {capabilityPackReadback.reconciliation?.status === "blocked" && (
+                        <div className="cockpit-sublist-item">
+                          Reconcile interrupted work before retrying; canonical artifacts and outcome receipts remain available.
+                        </div>
+                      )}
+                    </section>
+                  )}
 
                   <section className="cockpit-operator-section cockpit-m7-board" aria-label="M7 command board">
                     <div className="cockpit-operator-row">

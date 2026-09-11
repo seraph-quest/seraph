@@ -91,7 +91,28 @@ def canonical_edge_scope(
     )
 
 
-def _credential_key(extension_id: str, reference: str, pairing_id: str) -> str:
+def _credential_key(
+    extension_id: str,
+    reference: str,
+    pairing_id: str,
+    credential: str,
+) -> str:
+    """Return a vault key unique to one credential generation.
+
+    Pairing mutations use an optimistic state CAS. A pairing-only key would
+    let a losing concurrent mutation overwrite the winner's secret before its
+    state write fails, leaving the active state unusable. Binding the key to
+    the raw credential keeps generations isolated; only the generation whose
+    state CAS succeeds is referenced by ``credential_ref``.
+    """
+    digest = hashlib.sha256(
+        f"{extension_id}\x00{reference}\x00{pairing_id}\x00{credential}".encode("utf-8")
+    ).hexdigest()[:40]
+    return f"seraph-node-pairing-{digest}"
+
+
+def _legacy_credential_key(extension_id: str, reference: str, pairing_id: str) -> str:
+    """Key format used before credential generations were isolated."""
     digest = hashlib.sha256(
         f"{extension_id}\x00{reference}\x00{pairing_id}".encode("utf-8")
     ).hexdigest()[:40]
@@ -302,15 +323,19 @@ async def verify_pairing_credential(
     credential_ref = entry.get("credential_ref")
     if not isinstance(credential_ref, str) or not credential_ref.startswith(PAIRING_CREDENTIAL_PREFIX):
         raise ValueError("credential_not_configured")
-    key = _credential_key(extension_id, reference, state.pairing_id)
+    if not isinstance(presented_credential, str) or not presented_credential:
+        raise ValueError("authentication_required")
+    key = _credential_key(extension_id, reference, state.pairing_id, presented_credential)
     expected_ref = f"{PAIRING_CREDENTIAL_PREFIX}{hashlib.sha256(key.encode()).hexdigest()[:24]}"
     if not hmac.compare_digest(credential_ref, expected_ref):
-        raise ValueError("credential_ref_invalid")
+        legacy_key = _legacy_credential_key(extension_id, reference, state.pairing_id)
+        legacy_ref = f"{PAIRING_CREDENTIAL_PREFIX}{hashlib.sha256(legacy_key.encode()).hexdigest()[:24]}"
+        if not hmac.compare_digest(credential_ref, legacy_ref):
+            raise ValueError("credential_ref_invalid")
+        key = legacy_key
     stored = await vault_repository.get(key)
     if stored is None:
         raise ValueError("credential_unavailable")
-    if not isinstance(presented_credential, str) or not presented_credential:
-        raise ValueError("authentication_required")
     if not hmac.compare_digest(stored, presented_credential):
         raise ValueError("authentication_failed")
     return entry, state
@@ -356,7 +381,7 @@ async def create_pairing(
     )
     if not transition.accepted:
         raise ValueError(transition.reason_code)
-    key = _credential_key(extension_id, reference, pairing_id)
+    key = _credential_key(extension_id, reference, pairing_id, raw_credential)
     await vault_repository.store(key, raw_credential, description="paired edge credential")
     credential_ref = f"{PAIRING_CREDENTIAL_PREFIX}{hashlib.sha256(key.encode()).hexdigest()[:24]}"
     entry = pairing_entry_from_state(
@@ -396,12 +421,16 @@ async def rotate_pairing(
     stored_ref = entry.get("credential_ref")
     if not isinstance(stored_ref, str) or not stored_ref.startswith(PAIRING_CREDENTIAL_PREFIX):
         raise ValueError("credential_ref_missing")
-    key_digest = stored_ref.removeprefix(PAIRING_CREDENTIAL_PREFIX)
-    # The vault key is deterministic but deliberately not exposed in state.
-    key = _credential_key(extension_id, reference, current.pairing_id)
+    # The vault key is deterministic from the presented generation but is
+    # deliberately not exposed in state.
+    key = _credential_key(extension_id, reference, current.pairing_id, current_credential)
     expected_ref = f"{PAIRING_CREDENTIAL_PREFIX}{hashlib.sha256(key.encode()).hexdigest()[:24]}"
     if not hmac.compare_digest(stored_ref, expected_ref):
-        raise ValueError("credential_ref_invalid")
+        legacy_key = _legacy_credential_key(extension_id, reference, current.pairing_id)
+        legacy_ref = f"{PAIRING_CREDENTIAL_PREFIX}{hashlib.sha256(legacy_key.encode()).hexdigest()[:24]}"
+        if not hmac.compare_digest(stored_ref, legacy_ref):
+            raise ValueError("credential_ref_invalid")
+        key = legacy_key
     stored = await vault_repository.get(key)
     if stored is None or not hmac.compare_digest(stored, current_credential):
         raise ValueError("current_credential_invalid")
@@ -417,11 +446,14 @@ async def rotate_pairing(
     )
     if not transition.accepted:
         raise ValueError(transition.reason_code)
-    await vault_repository.store(key, raw_credential, description="paired edge credential")
+    new_key = _credential_key(extension_id, reference, current.pairing_id, raw_credential)
+    await vault_repository.store(new_key, raw_credential, description="paired edge credential")
     entry = pairing_entry_from_state(
         transition.state,
         base_entry=entry,
-        credential_ref=stored_ref,
+        credential_ref=(
+            f"{PAIRING_CREDENTIAL_PREFIX}{hashlib.sha256(new_key.encode()).hexdigest()[:24]}"
+        ),
         credential_scope=scope,
         owner_principal_id=str(entry.get("owner_principal_id") or ""),
         policy=_policy_from_entry(entry),
@@ -475,10 +507,16 @@ async def authenticate_edge_request(
     credential_ref = entry.get("credential_ref")
     if not isinstance(credential_scope, str) or not isinstance(credential_ref, str):
         raise ValueError("credential_not_configured")
-    key = _credential_key(extension_id, reference, state.pairing_id)
+    if not isinstance(presented_credential, str) or not presented_credential:
+        raise ValueError("authentication_required")
+    key = _credential_key(extension_id, reference, state.pairing_id, presented_credential)
     expected_ref = f"{PAIRING_CREDENTIAL_PREFIX}{hashlib.sha256(key.encode()).hexdigest()[:24]}"
     if not hmac.compare_digest(credential_ref, expected_ref):
-        raise ValueError("credential_ref_invalid")
+        legacy_key = _legacy_credential_key(extension_id, reference, state.pairing_id)
+        legacy_ref = f"{PAIRING_CREDENTIAL_PREFIX}{hashlib.sha256(legacy_key.encode()).hexdigest()[:24]}"
+        if not hmac.compare_digest(credential_ref, legacy_ref):
+            raise ValueError("credential_ref_invalid")
+        key = legacy_key
     stored = await vault_repository.get(key)
     if stored is None or not isinstance(presented_credential, str) or not presented_credential:
         raise ValueError("authentication_required")

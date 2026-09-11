@@ -1049,6 +1049,7 @@ def serialize_telegram_receipt(
         }
         handoff = (
             {
+                "status": "quarantined",
                 "audio_schema_version": safe_result.voice_handoff.audio_schema_version,
                 "attachment_id": safe_result.voice_handoff.attachment_id,
                 "content_hash": safe_result.voice_handoff.content_hash,

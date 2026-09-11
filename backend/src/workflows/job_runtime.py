@@ -624,6 +624,113 @@ def _validate_admission_authority(spec: "DurableJobSpec") -> None:
         raise ValueError("user authority cannot declare service_id")
 
 
+def _goal_revision(value: Any, *, field_name: str = "goal_revision") -> int:
+    """Return a strict positive goal revision for a durable fence."""
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise DurableJobTransitionError(f"{field_name} must be a positive integer")
+    return value
+
+
+def _goal_owner_binding(goal: Goal) -> tuple[str, str]:
+    """Return the complete canonical owner/session pair or fail closed."""
+    owner = _text(getattr(goal, "owner_principal_id", None))
+    session = _text(getattr(goal, "owner_session_id", None))
+    if not owner or not session:
+        raise DurableJobTransitionError("canonical goal owner/session binding is missing")
+    return owner, session
+
+
+def _goal_authority_binding(value: Any) -> tuple[str, str]:
+    """Read the delegated target owner binding from a service authority."""
+    authority = value if isinstance(value, Mapping) else _json_load(value, {})
+    if not isinstance(authority, Mapping):
+        authority = {}
+    owner = _text(authority.get("goal_owner_principal_id"))
+    session = _text(authority.get("goal_owner_session_id"))
+    delegated = authority.get("goal_owner")
+    if isinstance(delegated, Mapping):
+        owner = owner or _text(delegated.get("principal_id") or delegated.get("owner_principal_id"))
+        session = session or _text(delegated.get("session_id") or delegated.get("owner_session_id"))
+    if not owner or not session:
+        raise DurableJobTransitionError("service goal authority owner/session binding is missing")
+    return owner, session
+
+
+async def _assert_canonical_goal_fence(
+    db: Any,
+    *,
+    goal_id: str | None,
+    goal_revision: int | None,
+    owner_kind: str,
+    owner_principal_id: str | None,
+    session_id: str | None,
+    authority: Any = None,
+) -> Goal | None:
+    """Check the canonical goal before a durable job can execute or mutate.
+
+    User jobs are directly bound to the goal owner/session. Service jobs use an
+    explicit delegated authority binding because their worker session is not
+    the user's operator session. The SQL predicate added by
+    ``_append_goal_fence_condition`` repeats existence, active status, and
+    revision at the final CAS boundary, closing the read/check/write race.
+    """
+    if goal_id is None or not _text(goal_id):
+        if goal_revision is not None:
+            raise DurableJobTransitionError("goal_revision requires a canonical goal")
+        return None
+    revision = _goal_revision(goal_revision)
+    result = await db.execute(select(Goal).where(Goal.id == str(goal_id)))
+    goal = result.scalars().first()
+    if goal is None:
+        raise DurableJobTransitionError("canonical goal does not exist")
+    canonical_revision = _goal_revision(
+        max(int(getattr(goal, "revision", 1) or 1), 1),
+        field_name="canonical goal revision",
+    )
+    if canonical_revision != revision:
+        raise DurableJobTransitionError("durable job goal revision is stale")
+    goal_status = getattr(getattr(goal, "status", None), "value", getattr(goal, "status", None))
+    if _text(goal_status) != "active":
+        raise DurableJobTransitionError("canonical goal is not active")
+    canonical_owner, canonical_session = _goal_owner_binding(goal)
+    if owner_kind == "user":
+        if _text(owner_principal_id) != canonical_owner:
+            raise DurableJobTransitionError("durable job goal owner is stale")
+        if _text(session_id) != canonical_session:
+            raise DurableJobTransitionError("durable job goal session is stale")
+    elif owner_kind == "service":
+        delegated_owner, delegated_session = _goal_authority_binding(authority)
+        if (delegated_owner, delegated_session) != (canonical_owner, canonical_session):
+            raise DurableJobTransitionError("service goal authority owner/session is stale")
+    else:
+        raise DurableJobTransitionError("durable job owner kind is invalid")
+    return goal
+
+
+def _append_goal_fence_condition(conditions: list[Any], run: WorkflowRunState) -> None:
+    """Repeat the canonical goal fence in the final durable row CAS."""
+    goal_id = _text(getattr(run, "goal_id", None))
+    if not goal_id:
+        if getattr(run, "goal_revision", None) is not None:
+            conditions.append(false())
+        return
+    try:
+        revision = _goal_revision(getattr(run, "goal_revision", None))
+    except DurableJobTransitionError:
+        conditions.append(false())
+        return
+    goal = aliased(Goal)
+    conditions.append(
+        select(goal.id)
+        .where(
+            goal.id == goal_id,
+            goal.revision == revision,
+            goal.status == "active",
+        )
+        .exists()
+    )
+
+
 def _deadline_identity(value: datetime | str | None) -> str | None:
     parsed = _as_utc(value)
     return parsed.isoformat() if parsed else None
@@ -651,7 +758,8 @@ def _bounded_identifier(value: Any, *, field_name: str, limit: int = 512) -> str
 def _append_parent_fence_condition(
     conditions: list[Any], run: WorkflowRunState, *, now: datetime
 ) -> None:
-    """Require a child to execute under the exact live parent fence."""
+    """Require canonical goal identity and, for children, the live parent fence."""
+    _append_goal_fence_condition(conditions, run)
     parent_job_id = _text(getattr(run, "parent_job_id", None))
     if not parent_job_id:
         return
@@ -1397,10 +1505,10 @@ class DurableJobRepository:
         )
         authority_digest = _digest(spec.declared_authority)
         async with self._session() as db:
-            if spec.goal_id is not None and spec.max_outstanding_jobs is not None:
+            if spec.goal_id is not None:
                 # The local-first runtime uses SQLite.  Start one immediate
-                # write transaction before the count so concurrent distinct
-                # candidates cannot both pass the budget fence.  A row-locking
+                # write transaction before reading the canonical goal so a
+                # goal update/delete cannot race admission. A row-locking
                 # backend serializes on the canonical goal row instead.
                 bind = db.get_bind()
                 dialect_name = getattr(getattr(bind, "dialect", None), "name", "")
@@ -1412,6 +1520,15 @@ class DurableJobRepository:
                         .where(Goal.id == spec.goal_id)
                         .with_for_update()
                     )
+                await _assert_canonical_goal_fence(
+                    db,
+                    goal_id=spec.goal_id,
+                    goal_revision=spec.goal_revision,
+                    owner_kind=identity.owner_kind,
+                    owner_principal_id=identity.owner_principal_id,
+                    session_id=spec.session_id,
+                    authority=spec.declared_authority,
+                )
             if spec.parent_job_id is not None:
                 if spec.parent_fencing_token is None:
                     raise DurableJobLeaseError("parent fencing token is required for child admission")
@@ -1660,6 +1777,16 @@ class DurableJobRepository:
             raise DurableJobTransitionError(f"unknown durable job status: {to_status}")
         async with self._session() as db:
             run = await self._fetch(db, job_id)
+            if to_status not in {"failed", "cancelled"}:
+                await _assert_canonical_goal_fence(
+                    db,
+                    goal_id=getattr(run, "goal_id", None),
+                    goal_revision=getattr(run, "goal_revision", None),
+                    owner_kind=_text(getattr(run, "owner_kind", None)),
+                    owner_principal_id=getattr(run, "owner_principal_id", None),
+                    session_id=getattr(run, "session_id", None),
+                    authority=getattr(run, "declared_authority_json", None),
+                )
             current = str(run.status)
             if current in DURABLE_JOB_TERMINAL_STATUSES:
                 if current == to_status:
@@ -2186,6 +2313,15 @@ class DurableJobRepository:
             raise DurableJobTransitionError("durable job claims require the queued state")
         async with self._session() as db:
             run = await self._fetch(db, job_id)
+            await _assert_canonical_goal_fence(
+                db,
+                goal_id=getattr(run, "goal_id", None),
+                goal_revision=getattr(run, "goal_revision", None),
+                owner_kind=_text(getattr(run, "owner_kind", None)),
+                owner_principal_id=getattr(run, "owner_principal_id", None),
+                session_id=getattr(run, "session_id", None),
+                authority=getattr(run, "declared_authority_json", None),
+            )
             if run.status in DURABLE_JOB_TERMINAL_STATUSES:
                 db.expunge(run)
                 return _serialize(run, receipt={"kind": "claim", "status": "terminal_noop"})
@@ -2724,6 +2860,15 @@ class DurableJobRepository:
             raise ValueError("checkpoint_id is required")
         async with self._session() as db:
             run = await self._fetch(db, job_id)
+            await _assert_canonical_goal_fence(
+                db,
+                goal_id=getattr(run, "goal_id", None),
+                goal_revision=getattr(run, "goal_revision", None),
+                owner_kind=_text(getattr(run, "owner_kind", None)),
+                owner_principal_id=getattr(run, "owner_principal_id", None),
+                session_id=getattr(run, "session_id", None),
+                authority=getattr(run, "declared_authority_json", None),
+            )
             if _deadline_expired(run):
                 raise DurableJobTransitionError("job deadline has expired")
             if owner is None or fencing_token is None:
@@ -2932,9 +3077,18 @@ class DurableJobRepository:
             })[:24]
         async with self._session() as db:
             run = await self._fetch(db, job_id)
+            await _assert_canonical_goal_fence(
+                db,
+                goal_id=getattr(run, "goal_id", None),
+                goal_revision=getattr(run, "goal_revision", None),
+                owner_kind=_text(getattr(run, "owner_kind", None)),
+                owner_principal_id=getattr(run, "owner_principal_id", None),
+                session_id=getattr(run, "session_id", None),
+                authority=getattr(run, "declared_authority_json", None),
+            )
             if _deadline_expired(run):
                 raise DurableJobTransitionError("job deadline has expired")
-            if run.status in DURABLE_JOB_TERMINAL_STATUSES:
+            if run.status in DURABLE_JOB_TERMINAL_STATUSES or run.status in {"failed", "cancelled"}:
                 raise DurableJobTransitionError(f"terminal job cannot record effects ({run.status})")
             lease_present = bool(run.lease_owner or run.lease_expires_at)
             if run.status == "running" and (owner is None or fencing_token is None):

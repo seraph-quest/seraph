@@ -596,6 +596,9 @@ class QueuedInsight(SQLModel, table=True):
     session_id: Optional[str] = Field(default=None, foreign_key="sessions.id", index=True)
     owner_principal_id: Optional[str] = Field(default=None, index=True)
     operator_session_id: Optional[str] = Field(default=None, index=True)
+    goal_id: Optional[str] = Field(default=None, index=True)
+    budget_period_key: Optional[str] = Field(default=None, index=True)
+    budget_limit: Optional[int] = Field(default=None, index=True)
     content: str
     intervention_type: str = Field(default="advisory")
     urgency: int = Field(default=3)
@@ -665,6 +668,12 @@ class NativeNotificationOutbox(SQLModel, table=True):
     payload_digest: str = Field(index=True)
     intervention_id: Optional[str] = Field(default=None, index=True)
     owner_principal_id: Optional[str] = Field(default=None, index=True)
+    # Optional standing-goal budget reservation binding. Legacy/manual
+    # notifications leave these fields null and retain their existing queue
+    # semantics.
+    goal_id: Optional[str] = Field(default=None, index=True)
+    budget_period_key: Optional[str] = Field(default=None, index=True)
+    budget_limit: Optional[int] = Field(default=None, index=True)
     operator_session_id: Optional[str] = Field(default=None, index=True)
     device_id: Optional[str] = Field(default=None, index=True)
     channel: str = Field(default="native_notification", index=True)

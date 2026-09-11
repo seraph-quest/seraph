@@ -54,6 +54,23 @@ _STRATEGIST_CAPABILITY_VERSION = "strategist-tick-v1"
 _WEB_BRIEF_CORRECTION_FALLBACK_MAX_CANDIDATES = 2
 
 
+def _notification_budget_binding(goal: Goal, budget: object) -> dict[str, object] | None:
+    """Build the stable reservation identity used by the native outbox."""
+    limit = getattr(budget, "notifications_per_day", None)
+    if not isinstance(limit, int):
+        return None
+    period_started_at = getattr(budget, "period_started_at", None)
+    if isinstance(period_started_at, datetime):
+        period_key = period_started_at.astimezone(timezone.utc).isoformat()
+    else:
+        period_key = datetime.now(timezone.utc).date().isoformat()
+    return {
+        "goal_id": str(goal.id),
+        "budget_period_key": period_key,
+        "budget_limit": limit,
+    }
+
+
 async def _goal_notifications_used(goal: Goal, *, period_started_at: datetime | None) -> int | None:
     """Count persisted notification intents for the goal owner in this budget period."""
 
@@ -70,6 +87,7 @@ async def _goal_notifications_used(goal: Goal, *, period_started_at: datetime | 
         async with get_session() as db:
             result = await db.execute(
                 select(func.count(NativeNotificationOutbox.id)).where(
+                    NativeNotificationOutbox.goal_id == str(goal.id),
                     NativeNotificationOutbox.owner_principal_id == owner_principal_id,
                     NativeNotificationOutbox.created_at >= started,
                 )
@@ -593,6 +611,7 @@ async def _run_opted_in_goal_web_brief(
             "workspace_contained": result.workspace_contained,
             "goal_id_read_back": result.goal_id_read_back,
             "evidence_refs": list(result.evidence_refs),
+            "notification_budget": _notification_budget_binding(goal, budget),
         }
         await durable_job_repository.record_effect(
             parent_job_id,
@@ -739,6 +758,7 @@ async def _run_opted_in_goal_snapshot(
         "workspace_contained": result.workspace_contained,
         "goal_id_read_back": result.goal_id_read_back,
         "evidence_refs": list(result.evidence_refs),
+        "notification_budget": _notification_budget_binding(goal, budget),
     }
     await durable_job_repository.record_effect(
         parent_job_id,
@@ -937,6 +957,11 @@ async def run_strategist_tick() -> None:
         result = await deliver_or_queue(
             message,
             guardian_confidence=guardian_state.confidence.overall,
+            notification_budget=(
+                proactive_work.get("notification_budget")
+                if isinstance(proactive_work.get("notification_budget"), dict)
+                else None
+            ),
         )
         delivery_value = _delivery_value(result)
         policy_action_value = _policy_action_value(result)

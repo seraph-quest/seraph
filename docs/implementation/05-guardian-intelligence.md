@@ -129,6 +129,16 @@ budget carries the outstanding-job, attempt, runtime, notification, period,
 and quiet-hour limits used by the strategist admission gate. This remains a
 bounded canary; it does not claim broad autonomous planning.
 
+Notification reservations are durable and scoped to the goal and budget
+period. The native outbox reserves a notification under an immediate SQLite
+transaction before inserting a distinct idempotency key; retries return the
+existing row and do not consume another reservation. Deferred bundle items
+carry the same goal/period binding through restart and are grouped before
+delivery, so a later native handoff cannot bypass the reviewed notification
+limit. A full reservation records an operator-visible denial and leaves the
+deferred item recoverable; it does not silently fall through to an ungoverned
+native send.
+
 The branch-local correction slice adds an authenticated
 `POST /api/goals/{goal_id}/strategy-corrections` boundary for the explicit
 web-brief target. An operator can revise only the bounded query, workspace

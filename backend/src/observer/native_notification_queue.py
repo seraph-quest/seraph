@@ -33,7 +33,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 from uuid import uuid4
 
-from sqlalchemy import and_, delete, or_, select, update
+from sqlalchemy import and_, delete, func, or_, select, text, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import OperationalError
 
@@ -75,6 +75,16 @@ class NativeNotificationConflictError(ValueError):
     """Raised when one idempotency key is reused with another payload."""
 
 
+class NativeNotificationBudgetDenied(ValueError):
+    """Raised when a durable standing-goal notification reservation is full."""
+
+    def __init__(self, *, goal_id: str, budget_period_key: str, budget_limit: int) -> None:
+        self.goal_id = goal_id
+        self.budget_period_key = budget_period_key
+        self.budget_limit = budget_limit
+        super().__init__("goal_budget_notification_limit")
+
+
 class NativeNotificationLeaseError(ValueError):
     """Raised for malformed or stale daemon lease state."""
 
@@ -109,6 +119,9 @@ class NativeNotification:
     causation_id: str | None = None
     attachment_refs: list[dict[str, Any]] | None = None
     degraded_state: str | None = None
+    goal_id: str | None = None
+    budget_period_key: str | None = None
+    budget_limit: int | None = None
 
     def to_dict(self) -> dict[str, str | int | None]:
         return asdict(self)
@@ -189,6 +202,9 @@ def _row_to_notification(row: NativeNotificationOutbox) -> NativeNotification:
             owner_principal_id=row.owner_principal_id,
         ),
         degraded_state=row.degraded_state,
+        goal_id=row.goal_id,
+        budget_period_key=row.budget_period_key,
+        budget_limit=row.budget_limit,
     )
 
 
@@ -341,6 +357,9 @@ async def _ensure_outbox_tables(db) -> None:
         )
         columns = {row[1] for row in result.fetchall()}
         definitions = {
+            "goal_id": "VARCHAR",
+            "budget_period_key": "VARCHAR",
+            "budget_limit": "INTEGER",
             "operator_session_id": "VARCHAR",
             "device_id": "VARCHAR",
             "channel": "VARCHAR DEFAULT 'native_notification'",
@@ -412,6 +431,9 @@ class NativeNotificationQueue:
         causation_id: str | None = None,
         attachment_refs: object = None,
         source_insight_ids: list[str] | None = None,
+        goal_id: str | None = None,
+        budget_period_key: str | None = None,
+        budget_limit: int | None = None,
     ) -> NativeNotification:
         """Persist one notification or return the matching idempotent row.
 
@@ -422,6 +444,13 @@ class NativeNotificationQueue:
         silently replacing an already-authorized delivery intent.
         """
         intervention_id = _validate_identifier(intervention_id, field="intervention_id")
+        goal_id = _validate_identifier(goal_id, field="goal_id")
+        budget_period_key = _validate_identifier(budget_period_key, field="budget_period_key")
+        if budget_limit is not None:
+            if isinstance(budget_limit, bool) or not isinstance(budget_limit, int) or budget_limit < 0:
+                raise ValueError("native notification budget_limit must be a nonnegative integer")
+        if (goal_id is None) != (budget_period_key is None) or (goal_id is None) != (budget_limit is None):
+            raise ValueError("native notification budget binding requires goal_id, budget_period_key, and budget_limit")
         owner_principal_id = _validate_identifier(owner_principal_id, field="owner_principal_id")
         operator_session_id = _validate_identifier(operator_session_id, field="operator_session_id")
         device_id = _validate_identifier(device_id, field="device_id")
@@ -553,6 +582,9 @@ class NativeNotificationQueue:
             "correlation_id": identity.correlation_id,
             "causation_id": identity.causation_id,
             "attachment_refs": safe_attachment_refs,
+            "goal_id": goal_id,
+            "budget_period_key": budget_period_key,
+            "budget_limit": budget_limit,
         }
         digest = _payload_digest(payload)
         now = _utc_now()
@@ -579,6 +611,17 @@ class NativeNotificationQueue:
 
         async with self._lock:
             async with self._session() as db:
+                # A goal notification budget is a durable reservation, not an
+                # advisory count. SQLite's immediate transaction serializes
+                # distinct idempotency keys across queue instances/processes;
+                # the normal outer session commit persists the reservation.
+                if budget_limit is not None:
+                    if db.in_transaction():
+                        await db.commit()
+                    bind = db.get_bind()
+                    dialect_name = getattr(getattr(bind, "dialect", None), "name", "")
+                    if dialect_name == "sqlite":
+                        await db.execute(text("BEGIN IMMEDIATE"))
                 if session_id is not None:
                     session_result = await db.execute(
                         select(Session).where(Session.id == session_id)
@@ -615,6 +658,20 @@ class NativeNotificationQueue:
                     await delete_source_rows(db)
                     return _row_to_notification(existing)
 
+                if budget_limit is not None:
+                    used_result = await db.execute(
+                        select(func.count(NativeNotificationOutbox.id)).where(
+                            NativeNotificationOutbox.goal_id == goal_id,
+                            NativeNotificationOutbox.budget_period_key == budget_period_key,
+                        )
+                    )
+                    if int(used_result.scalar_one() or 0) >= budget_limit:
+                        raise NativeNotificationBudgetDenied(
+                            goal_id=str(goal_id),
+                            budget_period_key=str(budget_period_key),
+                            budget_limit=budget_limit,
+                        )
+
                 # SQLite's conflict-aware insert is the cross-process CAS.
                 # It avoids a SELECT-then-INSERT uniqueness exception and
                 # lets a losing writer read the committed canonical row.
@@ -625,6 +682,9 @@ class NativeNotificationQueue:
                         idempotency_key=key,
                         payload_digest=digest,
                         intervention_id=intervention_id,
+                        goal_id=goal_id,
+                        budget_period_key=budget_period_key,
+                        budget_limit=budget_limit,
                         owner_principal_id=owner_principal_id,
                         operator_session_id=operator_session_id,
                         device_id=identity.device_id,

@@ -18,13 +18,13 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable
 
-from sqlalchemy import false, func, or_, update
+from sqlalchemy import false, func, or_, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import aliased
 from sqlmodel import select
 
 from src.artifacts.registry import build_artifact_record
-from src.db.models import WorkflowRunState
+from src.db.models import Goal, WorkflowRunState
 from src.db.session_refs import ensure_sessions_exist
 
 
@@ -1397,6 +1397,21 @@ class DurableJobRepository:
         )
         authority_digest = _digest(spec.declared_authority)
         async with self._session() as db:
+            if spec.goal_id is not None and spec.max_outstanding_jobs is not None:
+                # The local-first runtime uses SQLite.  Start one immediate
+                # write transaction before the count so concurrent distinct
+                # candidates cannot both pass the budget fence.  A row-locking
+                # backend serializes on the canonical goal row instead.
+                bind = db.get_bind()
+                dialect_name = getattr(getattr(bind, "dialect", None), "name", "")
+                if dialect_name == "sqlite":
+                    await db.execute(text("BEGIN IMMEDIATE"))
+                else:
+                    await db.execute(
+                        select(Goal.id)
+                        .where(Goal.id == spec.goal_id)
+                        .with_for_update()
+                    )
             if spec.parent_job_id is not None:
                 if spec.parent_fencing_token is None:
                     raise DurableJobLeaseError("parent fencing token is required for child admission")
@@ -1459,13 +1474,14 @@ class DurableJobRepository:
                 # transaction.  Unlike the scheduler's advisory listing,
                 # this canonical admission fence cannot be bypassed by the
                 # list limit or by a second scheduler occurrence.
-                terminal_statuses = tuple(
-                    set(DURABLE_JOB_TERMINAL_STATUSES) | {"blocked", "failed"}
-                )
                 outstanding = await db.execute(
                     select(func.count(WorkflowRunState.run_identity)).where(
                         WorkflowRunState.goal_id == spec.goal_id,
-                        WorkflowRunState.status.not_in(terminal_statuses),
+                        # Failed/blocked rows can be explicitly resumed back
+                        # to queued, so they remain outstanding until the
+                        # run reaches a terminal succeeded/degraded/cancelled
+                        # state.
+                        WorkflowRunState.status.not_in(tuple(DURABLE_JOB_TERMINAL_STATUSES)),
                         WorkflowRunState.record_schema_version
                         >= DURABLE_JOB_RECORD_SCHEMA_VERSION,
                     )

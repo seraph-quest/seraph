@@ -12,7 +12,10 @@ from src.conversation.identity import (
 )
 from src.models.schemas import WSResponse
 from src.observer.intervention_policy import InterventionDecision, decide_intervention
-from src.observer.native_notification_queue import native_notification_queue
+from src.observer.native_notification_queue import (
+    NativeNotificationBudgetDenied,
+    native_notification_queue,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -193,15 +196,22 @@ def _bundle_content(items: list[object]) -> str:
 
 
 def _group_native_bundle_items(items: list[object]) -> list[list[object]]:
-    session_groups: dict[str, list[object]] = {}
+    session_groups: dict[tuple[str, str, str, int | None], list[object]] = {}
     ambient_items: list[object] = []
     for item in items:
         raw_session_id = getattr(item, "session_id", None)
         session_id = str(raw_session_id).strip() if isinstance(raw_session_id, str) else ""
+        budget_goal_id = str(getattr(item, "goal_id", "") or "").strip()
+        budget_period_key = str(getattr(item, "budget_period_key", "") or "").strip()
+        budget_limit = getattr(item, "budget_limit", None)
+        group_key = (session_id, budget_goal_id, budget_period_key, budget_limit)
         if session_id:
-            session_groups.setdefault(session_id, []).append(item)
+            session_groups.setdefault(group_key, []).append(item)
             continue
-        ambient_items.append(item)
+        if budget_goal_id:
+            session_groups.setdefault(group_key, []).append(item)
+        else:
+            ambient_items.append(item)
 
     if len(session_groups) <= 1 and not ambient_items:
         return [items]
@@ -505,6 +515,7 @@ async def deliver_or_queue(
     *,
     guardian_confidence: str | None = None,
     session_id: str | None = None,
+    notification_budget: dict[str, object] | None = None,
 ) -> InterventionDecision:
     """Route a proactive message through the delivery gate.
 
@@ -799,32 +810,47 @@ async def deliver_or_queue(
                     if not context_manager.is_daemon_connected():
                         last_error = _prefer_delivery_error(last_error, "daemon_unavailable")
                         continue
-                    notification = await native_notification_queue.enqueue(
-                        intervention_id=intervention_id,
-                        title=_native_notification_title(message, is_scheduled=is_scheduled),
-                        body=message.content,
-                        intervention_type=intervention_type,
-                        urgency=urgency,
-                        surface=(
-                            "action_card"
-                            if effective_learning_signal.escalation_bias == "prefer_async_native"
-                            else "notification"
-                        ),
-                        session_id=session_id,
-                        thread_id=session_id,
-                        thread_source="session" if session_id else "ambient",
-                        continuation_mode="resume_thread" if session_id else "open_thread",
-                        resume_message=f"Continue from this guardian intervention: {message.content}",
-                        owner_principal_id=owner_principal_id,
-                        operator_session_id=operator_session_id,
-                        device_id=message.device_id,
-                        channel="native_notification",
-                        transport="native_notification",
-                        conversation_id=identity.conversation_id if identity is not None else None,
-                        correlation_id=message.correlation_id,
-                        causation_id=message.causation_id,
-                        attachment_refs=delivery_message.attachment_refs,
-                    )
+                    try:
+                        notification = await native_notification_queue.enqueue(
+                            intervention_id=intervention_id,
+                            title=_native_notification_title(message, is_scheduled=is_scheduled),
+                            body=message.content,
+                            intervention_type=intervention_type,
+                            urgency=urgency,
+                            surface=(
+                                "action_card"
+                                if effective_learning_signal.escalation_bias == "prefer_async_native"
+                                else "notification"
+                            ),
+                            session_id=session_id,
+                            thread_id=session_id,
+                            thread_source="session" if session_id else "ambient",
+                            continuation_mode="resume_thread" if session_id else "open_thread",
+                            resume_message=f"Continue from this guardian intervention: {message.content}",
+                            owner_principal_id=owner_principal_id,
+                            operator_session_id=operator_session_id,
+                            device_id=message.device_id,
+                            channel="native_notification",
+                            transport="native_notification",
+                            conversation_id=identity.conversation_id if identity is not None else None,
+                            correlation_id=message.correlation_id,
+                            causation_id=message.causation_id,
+                            attachment_refs=delivery_message.attachment_refs,
+                            goal_id=(notification_budget or {}).get("goal_id"),
+                            budget_period_key=(notification_budget or {}).get("budget_period_key"),
+                            budget_limit=(notification_budget or {}).get("budget_limit"),
+                        )
+                    except NativeNotificationBudgetDenied as exc:
+                        last_error = _prefer_delivery_error(last_error, str(exc))
+                        event_details.update(
+                            {
+                                "notification_budget_denied": True,
+                                "notification_budget_goal_id": exc.goal_id,
+                                "notification_budget_period_key": exc.budget_period_key,
+                                "notification_budget_limit": exc.budget_limit,
+                            }
+                        )
+                        continue
                     context_manager.record_native_notification(
                         title=notification.title,
                         outcome="queued",
@@ -905,6 +931,8 @@ async def deliver_or_queue(
             if session_id is not None:
                 insight_kwargs["owner_principal_id"] = owner_principal_id
                 insight_kwargs["operator_session_id"] = operator_session_id
+            if notification_budget:
+                insight_kwargs.update(notification_budget)
             await insight_queue.enqueue(
                 **insight_kwargs,
             )
@@ -1041,23 +1069,31 @@ async def deliver_queued_bundle() -> int:
                     for item in group_items
                     if getattr(item, "id", None)
                 ]
-                notification = await native_notification_queue.enqueue(
-                    intervention_id=None,
-                    title="Seraph update",
-                    body=group_content,
-                    intervention_type="proactive_bundle",
-                    urgency=3,
-                    surface="action_card",
-                    session_id=group_continuation["session_id"],
-                    thread_id=group_continuation["thread_id"],
-                    thread_source=str(group_continuation["thread_source"] or "ambient"),
-                    continuation_mode=str(group_continuation["continuation_mode"] or "open_thread"),
-                    resume_message=group_continuation["resume_message"],
-                    idempotency_key=_bundle_idempotency_key(group_items),
-                    owner_principal_id=group_owner_principal_id,
-                    operator_session_id=group_operator_session_id,
-                    source_insight_ids=source_insight_ids,
-                )
+                first_item = group_items[0] if group_items else None
+                try:
+                    notification = await native_notification_queue.enqueue(
+                        intervention_id=None,
+                        title="Seraph update",
+                        body=group_content,
+                        intervention_type="proactive_bundle",
+                        urgency=3,
+                        surface="action_card",
+                        session_id=group_continuation["session_id"],
+                        thread_id=group_continuation["thread_id"],
+                        thread_source=str(group_continuation["thread_source"] or "ambient"),
+                        continuation_mode=str(group_continuation["continuation_mode"] or "open_thread"),
+                        resume_message=group_continuation["resume_message"],
+                        idempotency_key=_bundle_idempotency_key(group_items),
+                        owner_principal_id=group_owner_principal_id,
+                        operator_session_id=group_operator_session_id,
+                        source_insight_ids=source_insight_ids,
+                        goal_id=getattr(first_item, "goal_id", None),
+                        budget_period_key=getattr(first_item, "budget_period_key", None),
+                        budget_limit=getattr(first_item, "budget_limit", None),
+                    )
+                except NativeNotificationBudgetDenied as exc:
+                    last_error = _prefer_delivery_error(last_error, str(exc))
+                    continue
                 context_manager.record_native_notification(
                     title=notification.title,
                     outcome="queued",

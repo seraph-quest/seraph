@@ -40,6 +40,9 @@ class InsightQueue:
         session_id: str | None = None,
         owner_principal_id: str | None = None,
         operator_session_id: str | None = None,
+        goal_id: str | None = None,
+        budget_period_key: str | None = None,
+        budget_limit: int | None = None,
     ) -> QueuedInsight:
         """Add an insight to the queue."""
         insight = QueuedInsight(
@@ -47,6 +50,9 @@ class InsightQueue:
             session_id=session_id,
             owner_principal_id=owner_principal_id,
             operator_session_id=operator_session_id,
+            goal_id=goal_id,
+            budget_period_key=budget_period_key,
+            budget_limit=budget_limit,
             content=content,
             intervention_type=intervention_type,
             urgency=urgency,

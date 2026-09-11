@@ -371,6 +371,9 @@ async def _ensure_legacy_columns(conn) -> None:
     outbox_lineage_columns = await _add_missing_columns(
         "native_notification_outbox",
         {
+            "goal_id": "VARCHAR",
+            "budget_period_key": "VARCHAR",
+            "budget_limit": "INTEGER",
             "operator_session_id": "VARCHAR",
             "device_id": "VARCHAR",
             "channel": "VARCHAR DEFAULT 'native_notification'",
@@ -383,6 +386,9 @@ async def _ensure_legacy_columns(conn) -> None:
         },
     )
     for column in (
+        "goal_id",
+        "budget_period_key",
+        "budget_limit",
         "operator_session_id",
         "device_id",
         "channel",
@@ -396,6 +402,21 @@ async def _ensure_legacy_columns(conn) -> None:
             await conn.exec_driver_sql(
                 f"CREATE INDEX IF NOT EXISTS ix_native_notification_outbox_{column} "
                 f"ON native_notification_outbox ({column})"
+            )
+
+    insight_budget_columns = await _add_missing_columns(
+        "queued_insights",
+        {
+            "goal_id": "VARCHAR",
+            "budget_period_key": "VARCHAR",
+            "budget_limit": "INTEGER",
+        },
+    )
+    for column in ("goal_id", "budget_period_key", "budget_limit"):
+        if column in insight_budget_columns:
+            await conn.exec_driver_sql(
+                f"CREATE INDEX IF NOT EXISTS ix_queued_insights_{column} "
+                f"ON queued_insights ({column})"
             )
 
     proof_columns = await _add_missing_columns(

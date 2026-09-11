@@ -2197,10 +2197,14 @@ class GoalSnapshotToFileAdapter:
         # stale or cross-job projection to be paired with a matching file.
         expected_job_id = self._job_identifier(candidate)
         idempotency = projection.get("idempotency") if isinstance(projection.get("idempotency"), dict) else {}
+        try:
+            observed_goal_revision = int(projection.get("goal_revision"))
+        except (TypeError, ValueError, OverflowError):
+            observed_goal_revision = None
         binding_mismatch = (
             job_id != expected_job_id
             or _text(projection.get("goal_id")) != candidate.goal_id
-            or int(projection.get("goal_revision") or 0) != int(candidate.goal_revision)
+            or observed_goal_revision != int(candidate.goal_revision)
             or _text(projection.get("candidate_id")) != candidate.candidate_id
             or _text(projection.get("job_kind")) != self._capability_identifier()
             or _text(projection.get("capability_version")) != self.request.capability_version

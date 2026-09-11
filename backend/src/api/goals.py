@@ -1067,6 +1067,7 @@ async def run_goal_snapshot(goal_id: str, body: GoalSnapshotRunRequest, request:
     goal = await goal_repository.get(goal_id)
     if goal is None:
         raise HTTPException(status_code=404, detail="Goal not found")
+    _require_goal_owner(goal, operator)
     current_revision = max(int(goal.revision or 1), 1)
     if body.expected_revision != current_revision:
         raise HTTPException(

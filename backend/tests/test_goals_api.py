@@ -148,7 +148,7 @@ def _operator(principal_id: str, session_id: str) -> AuthenticatedOperator:
 
 class TestGoalSnapshot:
     async def test_missing_authenticated_operator_fails_closed(self, client, async_db, repo, monkeypatch):
-        goal = await repo.create("Snapshot goal")
+        goal = await _owned_goal(repo)
         monkeypatch.setattr(
             "src.api.goals._require_authenticated_operator",
             lambda _request: (_ for _ in ()).throw(
@@ -168,7 +168,7 @@ class TestGoalSnapshot:
         assert response.json()["detail"]["code"] == "authentication_required"
 
     async def test_body_cannot_supply_actor_identity(self, client, async_db, repo):
-        goal = await repo.create("Snapshot goal")
+        goal = await _owned_goal(repo)
 
         response = await client.post(
             f"/api/goals/{goal.id}/snapshot",
@@ -178,7 +178,7 @@ class TestGoalSnapshot:
         assert response.status_code == 422
 
     async def test_stale_revision_is_rejected_before_service(self, client, async_db, repo):
-        goal = await repo.create("Snapshot goal")
+        goal = await _owned_goal(repo)
         await repo.update(goal.id, title="Changed", expected_revision=1)
 
         with patch("src.api.goals.GoalSnapshotToFileService") as service_cls:
@@ -192,7 +192,7 @@ class TestGoalSnapshot:
         service_cls.assert_not_called()
 
     async def test_unsafe_output_path_is_rejected_before_service(self, client, async_db, repo):
-        goal = await repo.create("Snapshot goal")
+        goal = await _owned_goal(repo)
 
         with patch("src.api.goals.GoalSnapshotToFileService") as service_cls:
             response = await client.post(
@@ -207,7 +207,7 @@ class TestGoalSnapshot:
     async def test_successful_run_returns_separate_receipts_and_fixed_service_identity(
         self, client, async_db, repo
     ):
-        goal = await repo.create("Snapshot goal")
+        goal = await _owned_goal(repo)
         result = GoalSnapshotToFileResult(
             goal_id=goal.id,
             goal_revision=1,
@@ -247,7 +247,7 @@ class TestGoalSnapshot:
     async def test_blocked_result_stays_visible_and_does_not_claim_verification(
         self, client, async_db, repo
     ):
-        goal = await repo.create("Snapshot goal")
+        goal = await _owned_goal(repo)
         result = GoalSnapshotToFileResult(
             goal_id=goal.id,
             goal_revision=1,
@@ -275,7 +275,7 @@ class TestGoalSnapshot:
         assert payload["reason"] == "workflow_unavailable"
 
     async def test_audit_persistence_failure_is_visible_as_degraded(self, client, async_db, repo):
-        goal = await repo.create("Snapshot goal")
+        goal = await _owned_goal(repo)
         result = GoalSnapshotToFileResult(
             goal_id=goal.id,
             goal_revision=1,
@@ -307,3 +307,28 @@ class TestGoalSnapshot:
             "status": "degraded",
             "reason": "audit_persistence_failed",
         }
+
+    async def test_wrong_owner_is_rejected_before_snapshot_service(
+        self, client, async_db, repo, monkeypatch
+    ):
+        goal = await _owned_goal(repo)
+        monkeypatch.setattr(
+            "src.api.goals._require_authenticated_operator",
+            lambda _request: _operator("operator:other", "session-other"),
+        )
+        with patch("src.api.goals.GoalSnapshotToFileService") as service_cls:
+            response = await client.post(
+                f"/api/goals/{goal.id}/snapshot",
+                json={"expected_revision": 1},
+            )
+        assert response.status_code == 403
+        assert response.json()["detail"]["code"] == "goal_owner_mismatch"
+        service_cls.assert_not_called()
+
+
+async def _owned_goal(repo: GoalRepository):
+    return await repo.create(
+        "Snapshot goal",
+        owner_principal_id="operator:test-bypass",
+        owner_session_id="test-auth-bypass",
+    )

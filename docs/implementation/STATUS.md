@@ -19,16 +19,24 @@ For a shorter reader-facing overview of the current app, start with
 [Current App Guide](./12-current-app-guide.md). This status page remains the
 dense shipped-state record.
 
-## Active Epic #736/#775 migration branch
+## Epic #736/#775 OpenRouter inference phase
 
-This branch implements the accepted OpenRouter-only inference phase. The
-active route is the governed OpenRouter gateway; CPU-local canonical state,
-storage, tools, and operator UI remain usable without a local model server,
-CUDA, downloaded weights, or the VLM wrapper. Missing key, consent, approved
-upstream, model-fabric bounds/proofs, or budget is reported as blocked or
-configuration-required. The migration is not shipped `develop` truth until its
-reviewed PR merges and its required live text, vision, and embedding receipts
-are recorded. GPU/VLM entries below remain historical baseline evidence unless
+This section records the accepted OpenRouter-only inference phase and its
+provider-free implementation contract. The active route is the governed
+OpenRouter gateway; CPU-local canonical state, storage, tools, and operator UI
+remain usable without a local model server, CUDA, downloaded weights, or the VLM
+wrapper. Missing key, consent, approved upstream, model-fabric bounds/proofs,
+or budget is reported as blocked or configuration-required.
+
+The implementation merge gate is local provider-free validation: deterministic
+tests, intercepted transport tests, static/configuration checks, and negative
+boundary receipts. No paid OpenRouter/provider/GPU/VLM/Telegram/live-canary call
+is required for implementation, local tests, health collection, or merge. Live
+provider quality, embedding, and edge/media receipts remain optional operational
+evidence and are explicitly unverified until an operator-authorised canary
+provides them. On an open integration branch, the reviewed Epic PR remains the
+path to shipped `develop` truth; after that merge, this section describes the
+shipped route. GPU/VLM entries below remain historical baseline evidence unless
 they are explicitly marked as branch-local migration behavior.
 
 The final integration branch also provides the managed, keyless health receipt

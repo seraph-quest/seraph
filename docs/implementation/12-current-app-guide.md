@@ -6,20 +6,24 @@ title: Current App Guide
 # Current App Guide
 
 **Status:** Partial
-**Scope:** current `develop` baseline; target changes in Epic #736 are not yet shipped
+**Scope:** current `develop` baseline plus the accepted Epic #736/#775 target;
+open integration branches describe intended post-merge truth and label any
+remaining partial boundaries inline
 
-> **Branch-local Epic #736/#775 target:** the implementation branch narrows
-> active inference to OpenRouter and removes the GPU/model-server/VLM wrapper
-> prerequisite. The sections describing the current GPU topology below remain
-> historical `develop` baseline until the reviewed migration PR lands. The
-> target contract is defined by [ADR-006](./decisions/006-openrouter-only-inference-phase.md).
+> **Epic #736/#775 OpenRouter phase:** the accepted active inference contract
+> routes text, vision, and embedding work through the governed OpenRouter path
+> and removes the GPU/model-server/VLM wrapper prerequisite. The historical GPU
+> topology below remains documented as pre-#775 `develop` evidence and rollback
+> diagnostics. On an open integration branch, the final reviewed Epic PR is the
+> merge gate; after it lands, the active sections are shipped `develop` truth.
+> The target contract is defined by [ADR-006](./decisions/006-openrouter-only-inference-phase.md).
 
 This is the short operator-facing description of the current application. For
 the target product and locked decisions, read the
 [Project Constitution](./00-project-constitution.md). For exhaustive shipped
 detail, read [Development Status](./STATUS.md).
 
-## Active branch topology (Epic #736/#775)
+## OpenRouter topology (Epic #736/#775)
 
 ```text
 Seraph frontend       http://127.0.0.1:3001
@@ -34,6 +38,13 @@ consent, absent budget, or unverified capability blocks the request and is
 reported as configuration-required or degraded. Local model servers and the
 VLM wrapper are retained only for historical diagnostics; they are not active
 runtime prerequisites.
+
+The keyless implementation and health paths do not call OpenRouter or any local
+GPU/VLM service. Deterministic tests, intercepted transport tests, static
+configuration checks, and negative boundary checks are sufficient for the Epic
+merge gate. Live provider quality, embedding, edge, voice, and Telegram
+receipts are optional operator evidence and remain explicitly unverified until
+a separately authorised canary supplies them.
 
 The production compose path keeps the backend on a private Docker network and
 does not publish its API port. The managed direct local stack is a development
@@ -277,16 +288,17 @@ make those product capabilities complete.
 
 ## Models And Runtime
 
-The branch-local #775 target changes the active contract to OpenRouter-only
+The accepted #775 phase changes the active contract to OpenRouter-only
 inference. The UI and `/api/runtime/status` report the effective gateway,
 model, verified-or-unknown upstream, consent, budget, and degraded state; a
-configured key or model is not proof of a live route.
+configured key or model is not proof of a live route. Model-fabric settings,
+canaries, proof, receipt, and runtime-path status surfaces are explicit
+operator controls. Their local deterministic and intercepted-transport checks
+do not require a provider key or network call; a live canary remains an
+operator-authorised optional check.
 
-> **Branch-local #740 target, not shipped `develop` truth:** the model-fabric
-> settings, canary, proof, receipt, and runtime-path status surfaces below remain
-> intended behavior until the reviewed epic integration PR lands.
-
-The pre-#775 GPU topology had three distinct inference transports:
+The transport detail below documents the pre-#775 GPU topology for historical
+evidence and rollback diagnosis. It is not an active setup path:
 
 - `LOCAL_LLM_API_BASE=http://192.168.1.26:8000/v1` is the chosen direct GPU text
   endpoint for Seraph text workloads;
@@ -343,6 +355,10 @@ clearly labelled lexical/degraded path; it must not recreate the historical
 local 384-dimensional index or silently fall back to another provider. Existing
 un-namespaced local vectors are retained as migration evidence and require a
 tracked rebuild from canonical memory before they can be used again.
+
+Those proofs are runtime prerequisites for enabling remote vector operations,
+not merge prerequisites. Keyless tests and health checks cover the blocked and
+lexical/degraded paths without making a provider call.
 
 The accepted memory-boundary decision requires goals, approved facts, jobs, artifacts, checkpoints,
 approvals, and audit records stay canonical in Seraph-owned storage. Graph or

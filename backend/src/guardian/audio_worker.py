@@ -2187,10 +2187,43 @@ class AudioIngressWorker:
         self._assert_operator_session(row_for_identity, owner_principal_id, operator_session_id)
         # Expiry/cleanup is side-effecting.  Authenticate the durable owner and
         # operator session before allowing a direct worker caller to reach it.
-        await self._require_current_operator_authority(
-            owner_principal_id=owner_principal_id,
-            operator_session_id=operator_session_id,
-        )
+        try:
+            await self._require_current_operator_authority(
+                owner_principal_id=owner_principal_id,
+                operator_session_id=operator_session_id,
+            )
+        except AudioWorkerError as exc:
+            # A queued/processing job can outlive the request that admitted it.
+            # Preserve the established typed denial receipt when the durable
+            # session has since been revoked or expired, while keeping the
+            # owner/session identity assertion above fail-closed.  Do not
+            # rewrite a terminal or transporting row from this preflight path:
+            # those states require their own reconciliation boundary.
+            # An API route carries the request-time principal as an explicit
+            # context object.  If that already-admitted request discovers a
+            # durable revocation at this boundary, retain the established
+            # blocked receipt.  A bare internal/direct call has no such
+            # admission context and continues to receive the auth failure
+            # without mutating the job.
+            if authority_principal is None or row_for_identity.status not in {"queued", "processing"}:
+                raise
+            denial_code = (
+                "model_inference_grant_revoked"
+                if exc.code in {"audio_operator_session_invalid", "audio_operator_authority_required"}
+                else exc.code
+            )
+            return await self._update_if_status(
+                row_for_identity.id,
+                {row_for_identity.status},
+                status="blocked",
+                error_code=denial_code,
+                provider_status="unavailable",
+                transport_status="blocked",
+                raw_path=None,
+                normalized_path=None,
+                transcript=None,
+                transcript_digest=None,
+            )
         await self._expire_if_needed(request_id)
         current_task = asyncio.current_task()
         wait_for: asyncio.Task[AudioJobSnapshot] | None = None

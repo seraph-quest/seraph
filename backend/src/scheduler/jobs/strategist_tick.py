@@ -11,7 +11,7 @@ from config.settings import settings
 from src.approval.runtime import get_current_trust_principal
 from src.agent.strategist import parse_strategist_response, run_strategist_decision_completion
 from src.audit.runtime import log_scheduler_job_event
-from src.db.models import Goal
+from src.db.models import Goal, NativeNotificationOutbox
 from src.goals.contracts import GoalCandidateRequest
 from src.goals.repository import deserialize_admission_budget, deserialize_success_criterion, goal_repository
 from src.guardian.goal_conditioned_loop import propose_goal_candidate
@@ -43,6 +43,8 @@ from src.workflows.job_runtime import (
     durable_job_repository,
 )
 from src.security.trust_contract import AuthorityGrant, PrincipalType, TrustPrincipal
+from sqlalchemy import func
+from sqlmodel import select
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +52,32 @@ _STRATEGIST_SERVICE_ID = "service:strategist"
 _STRATEGIST_RUNNER_ID = "scheduler:strategist_tick"
 _STRATEGIST_CAPABILITY_VERSION = "strategist-tick-v1"
 _WEB_BRIEF_CORRECTION_FALLBACK_MAX_CANDIDATES = 2
+
+
+async def _goal_notifications_used(goal: Goal, *, period_started_at: datetime | None) -> int | None:
+    """Count persisted notification intents for the goal owner in this budget period."""
+
+    owner_principal_id = str(getattr(goal, "owner_principal_id", "") or "").strip()
+    if not owner_principal_id:
+        # Legacy scheduler-only rows have no operator owner and therefore no
+        # notification scope. Report a real zero; owner binding remains the
+        # public route's fail-closed requirement.
+        return 0
+    from src.workflows.job_runtime import get_session
+
+    started = period_started_at or (datetime.now(timezone.utc) - timedelta(days=1))
+    try:
+        async with get_session() as db:
+            result = await db.execute(
+                select(func.count(NativeNotificationOutbox.id)).where(
+                    NativeNotificationOutbox.owner_principal_id == owner_principal_id,
+                    NativeNotificationOutbox.created_at >= started,
+                )
+            )
+            return int(result.scalar_one() or 0)
+    except Exception:
+        logger.exception("strategist_tick: notification budget state unavailable for %s", goal.id)
+        return None
 
 
 async def _goal_budget_admission(goal: Goal, *, capability_id: str) -> dict[str, object] | None:
@@ -98,28 +126,16 @@ async def _goal_budget_admission(goal: Goal, *, capability_id: str) -> dict[str,
             quiet = local_hour >= start or local_hour < end if start > end else start <= local_hour < end
             if quiet:
                 reason = "goal_quiet_hours"
+    notifications_used = None
     if not reason:
-        try:
-            jobs = await durable_job_repository.list_jobs(limit=100)
-        except Exception:
-            return {
-                "status": "deferred",
-                "reason": "goal_budget_state_unavailable",
-                "goal_id": goal.id,
-                "capability_id": capability_id,
-                "proposal_only": True,
-                "operator_visible": True,
-            }
-        terminal = {"succeeded", "failed", "blocked", "cancelled", "canceled"}
-        outstanding = sum(
-            1
-            for job in jobs
-            if isinstance(job, dict)
-            and job.get("goal_id") == goal.id
-            and str(job.get("status") or "") not in terminal
+        notifications_used = await _goal_notifications_used(
+            goal,
+            period_started_at=budget.period_started_at,
         )
-        if outstanding >= budget.max_outstanding_jobs:
-            reason = "goal_budget_outstanding_limit"
+        if notifications_used is None:
+            reason = "goal_budget_state_unavailable"
+        elif notifications_used >= budget.notifications_per_day:
+            reason = "goal_budget_notification_limit"
     if reason:
         return {
             "status": "deferred",
@@ -133,12 +149,13 @@ async def _goal_budget_admission(goal: Goal, *, capability_id: str) -> dict[str,
                 "max_attempts": budget.max_attempts,
                 "max_runtime_seconds": budget.max_runtime_seconds,
                 "notifications_per_day": budget.notifications_per_day,
+                "notifications_used": notifications_used,
             },
         }
     return {
         "status": "admitted",
         "budget": budget,
-        "notifications_used": 0,
+        "notifications_used": notifications_used if notifications_used is not None else 0,
     }
 
 
@@ -508,6 +525,7 @@ async def _run_opted_in_goal_web_brief(
             expected_outcome=criterion.description,
             priority=priority,
             max_attempts=budget.max_attempts if budget is not None else 1,
+            max_outstanding_jobs=budget.max_outstanding_jobs if budget is not None else None,
             deadline_at=(
                 datetime.now(timezone.utc) + timedelta(seconds=budget.max_runtime_seconds)
                 if budget is not None else datetime.now(timezone.utc) + timedelta(seconds=300)
@@ -678,6 +696,7 @@ async def _run_opted_in_goal_snapshot(
         reason="scheduled_proactive_goal_snapshot",
         expected_outcome=criterion.description,
         max_attempts=budget.max_attempts if budget is not None else 1,
+        max_outstanding_jobs=budget.max_outstanding_jobs if budget is not None else None,
         deadline_at=(
             datetime.now(timezone.utc) + timedelta(seconds=budget.max_runtime_seconds)
             if budget is not None else datetime.now(timezone.utc) + timedelta(seconds=300)

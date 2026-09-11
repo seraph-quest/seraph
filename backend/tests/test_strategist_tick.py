@@ -76,6 +76,7 @@ async def test_goal_budget_missing_expired_and_valid_admission_are_visible():
             period_expires_at=now + timedelta(hours=1),
             max_attempts=2,
             max_runtime_seconds=45,
+            notifications_per_day=1,
         ).model_dump_json(),
     )
     with patch.object(

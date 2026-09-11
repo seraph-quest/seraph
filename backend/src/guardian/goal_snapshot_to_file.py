@@ -21,6 +21,7 @@ from typing import Any, Callable, Literal, Protocol
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from config.settings import settings
+from src.artifacts.registry import artifact_id_for
 from src.approval.runtime import (
     get_current_approval_mode,
     get_current_trust_principal,
@@ -64,6 +65,7 @@ from src.security.trust_contract import (
     TrustPrincipal,
 )
 from src.workflows.job_runtime import (
+    DurableJobAdmissionDenied,
     DurableJobIdempotencyConflict,
     DurableJobIdentity,
     DurableJobSpec,
@@ -178,6 +180,7 @@ class GoalSnapshotToFileRequest(BaseModel):
     expected_outcome: str = Field(default="", max_length=1_000)
     priority: int = Field(default=DEFAULT_PRIORITY, ge=0, le=MAX_PRIORITY)
     max_attempts: int = Field(default=1, ge=1, le=3)
+    max_outstanding_jobs: int | None = Field(default=None, ge=1, le=16)
     deadline_at: datetime = Field(
         default_factory=lambda: _now() + timedelta(seconds=DEFAULT_DEADLINE_SECONDS)
     )
@@ -1294,6 +1297,7 @@ class GoalSnapshotToFileAdapter:
             declared_authority=declared_authority,
             deadline_at=self.request.deadline_at,
             max_attempts=self.request.max_attempts,
+            max_outstanding_jobs=self.request.max_outstanding_jobs,
             service_id=self.request.service_id,
         )
         try:
@@ -1310,6 +1314,15 @@ class GoalSnapshotToFileAdapter:
                     fallback_reason=f"authority_denied:{authority_reason}",
                 )
             return self._blocked("idempotency_conflict", job_id=job_id)
+        except DurableJobAdmissionDenied as exc:
+            self.last_receipt = {
+                **(self.last_receipt or {}),
+                "job_id": job_id,
+                "durable_status": "blocked",
+                "budget_reason": exc.reason,
+                "operator_visible": True,
+            }
+            return self._blocked(exc.reason, job_id=job_id, durable_status="blocked")
         except Exception as exc:
             if authority_decision is None or not authority_decision.allowed:
                 self._mark_durable_failure(
@@ -2179,12 +2192,67 @@ class GoalSnapshotToFileAdapter:
     async def _replay_admission(self, projection: dict[str, Any], candidate: GoalCandidateDecision, path: str) -> GoalExecutionResult:
         job_id = _text(projection.get("job_id")) or self._job_identifier(candidate)
         status = _status(projection)
+        # A positive replay is only valid for the exact durable invocation that
+        # produced this candidate.  Checking the goal id alone would allow a
+        # stale or cross-job projection to be paired with a matching file.
+        expected_job_id = self._job_identifier(candidate)
+        idempotency = projection.get("idempotency") if isinstance(projection.get("idempotency"), dict) else {}
+        binding_mismatch = (
+            job_id != expected_job_id
+            or _text(projection.get("goal_id")) != candidate.goal_id
+            or int(projection.get("goal_revision") or 0) != int(candidate.goal_revision)
+            or _text(projection.get("candidate_id")) != candidate.candidate_id
+            or _text(projection.get("job_kind")) != self._capability_identifier()
+            or _text(projection.get("capability_version")) != self.request.capability_version
+            or _text(idempotency.get("scope")) != self._idempotency_scope()
+            or _text(idempotency.get("key")) != candidate.dedupe_key
+        )
+        if binding_mismatch:
+            self.last_receipt = {
+                **(self.last_receipt or {}),
+                "job_id": job_id,
+                "durable_status": status,
+                "idempotent_replay": True,
+                "replay_binding_verified": False,
+            }
+            return self._blocked(
+                "idempotent_replay_binding_mismatch",
+                job_id=job_id,
+                durable_status=status or "accepted",
+            )
         if status == "succeeded":
             artifact = _artifact_from_projection(projection)
             readback = self._readback(path, candidate.goal_id)
-            if artifact and readback.output_exists and readback.workspace_contained and readback.goal_id_read_back:
+            artifact_digest = _text(artifact.get("content_sha256")) if artifact else ""
+            artifact_path = _text(artifact.get("file_path")) if artifact else ""
+            expected_artifact_id = (
+                artifact_id_for(
+                    file_path=path,
+                    artifact_type=self._artifact_type(),
+                    producer=self._capability_identifier(),
+                    run_id=job_id,
+                    content_sha256=readback.content_sha256,
+                )
+                if readback.content_sha256
+                else ""
+            )
+            artifact_binding_ok = bool(
+                artifact
+                and artifact_path == path
+                and _text(artifact.get("artifact_type")) == self._artifact_type()
+                and _text(artifact.get("producer")) == self._capability_identifier()
+                and artifact_digest
+                and artifact_digest == readback.content_sha256
+                and _text(artifact.get("artifact_id")) == expected_artifact_id
+            )
+            if (
+                artifact_binding_ok
+                and readback.output_exists
+                and readback.workspace_contained
+                and readback.goal_id_read_back
+            ):
                 artifact_id = _text(artifact.get("artifact_id")) or None
-                digest = readback.content_sha256 or _text(artifact.get("content_sha256")) or None
+                digest = readback.content_sha256
                 self.last_receipt = {
                     "job_id": job_id,
                     "durable_status": "succeeded",
@@ -2199,6 +2267,7 @@ class GoalSnapshotToFileAdapter:
                         *self._extra_evidence_refs(readback),
                     ],
                     "idempotent_replay": True,
+                    "replay_binding_verified": True,
                 }
                 return GoalExecutionResult(
                     execution_status="succeeded",
@@ -2221,6 +2290,7 @@ class GoalSnapshotToFileAdapter:
                 "goal_id_read_back": readback.goal_id_read_back,
                 "content_sha256": readback.content_sha256,
                 "idempotent_replay": True,
+                "replay_binding_verified": bool(binding_mismatch is False and artifact_binding_ok),
             }
             return self._blocked(
                 "idempotent_terminal_artifact_readback_failed",

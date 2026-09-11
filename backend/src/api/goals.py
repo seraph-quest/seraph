@@ -573,6 +573,7 @@ async def apply_goal_strategy_correction(
     goal = await goal_repository.get(goal_id)
     if goal is None:
         raise HTTPException(status_code=404, detail="Goal not found")
+    _require_goal_owner(goal, operator)
     current_revision = max(int(goal.revision or 1), 1)
     delta_id = _strategy_delta_id(goal_id, body.correction_id)
     try:
@@ -837,6 +838,7 @@ async def rollback_goal_strategy_correction(
     goal = await goal_repository.get(goal_id)
     if goal is None:
         raise HTTPException(status_code=404, detail="Goal not found")
+    _require_goal_owner(goal, operator)
     try:
         delta = await get_strategy_delta(delta_id)
     except SQLAlchemyError as exc:

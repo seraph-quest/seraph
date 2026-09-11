@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable
 
-from sqlalchemy import false, or_, update
+from sqlalchemy import false, func, or_, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import aliased
 from sqlmodel import select
@@ -226,6 +226,15 @@ class DurableJobTransitionError(DurableJobError, ValueError):
 
 class DurableJobIdempotencyConflict(DurableJobError, ValueError):
     pass
+
+
+class DurableJobAdmissionDenied(DurableJobError, ValueError):
+    """Raised when a persisted bounded admission budget is exhausted."""
+
+    def __init__(self, reason: str, *, goal_id: str | None = None) -> None:
+        self.reason = str(reason)
+        self.goal_id = goal_id
+        super().__init__(self.reason)
 
 
 class DurableJobLeaseError(DurableJobError):
@@ -1324,6 +1333,7 @@ class DurableJobSpec:
     declared_authority: dict[str, Any] = field(default_factory=dict)
     deadline_at: datetime | str | None = None
     max_attempts: int = 1
+    max_outstanding_jobs: int | None = None
     service_id: str | None = None
     # ``run_fingerprint`` is the caller's complete immutable execution
     # contract fingerprint.  Older callers omit it and retain the input
@@ -1345,6 +1355,9 @@ class DurableJobRepository:
             raise ValueError("priority must be between 0 and 100")
         if int(spec.max_attempts) < 1:
             raise ValueError("max_attempts must be at least 1")
+        if spec.max_outstanding_jobs is not None:
+            if isinstance(spec.max_outstanding_jobs, bool) or not 1 <= int(spec.max_outstanding_jobs) <= 16:
+                raise ValueError("max_outstanding_jobs must be between 1 and 16")
         if identity.job_id in _string_list(spec.dependencies):
             raise DurableJobTransitionError("a durable job cannot depend on itself")
         deadline = _as_utc(spec.deadline_at)
@@ -1440,6 +1453,28 @@ class DurableJobRepository:
                     )
                 db.expunge(existing)
                 return _deduped_admission(existing, binding=binding)
+
+            if spec.goal_id is not None and spec.max_outstanding_jobs is not None:
+                # This count and the child insert share the same durable
+                # transaction.  Unlike the scheduler's advisory listing,
+                # this canonical admission fence cannot be bypassed by the
+                # list limit or by a second scheduler occurrence.
+                terminal_statuses = tuple(
+                    set(DURABLE_JOB_TERMINAL_STATUSES) | {"blocked", "failed"}
+                )
+                outstanding = await db.execute(
+                    select(func.count(WorkflowRunState.run_identity)).where(
+                        WorkflowRunState.goal_id == spec.goal_id,
+                        WorkflowRunState.status.not_in(terminal_statuses),
+                        WorkflowRunState.record_schema_version
+                        >= DURABLE_JOB_RECORD_SCHEMA_VERSION,
+                    )
+                )
+                if int(outstanding.scalar_one() or 0) >= int(spec.max_outstanding_jobs):
+                    raise DurableJobAdmissionDenied(
+                        "goal_budget_outstanding_limit",
+                        goal_id=spec.goal_id,
+                    )
 
             by_id = (
                 await db.execute(select(WorkflowRunState).where(WorkflowRunState.run_identity == identity.job_id))

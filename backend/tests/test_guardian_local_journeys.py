@@ -217,7 +217,7 @@ def _journey_budget() -> GoalAdmissionBudget:
         max_outstanding_jobs=1,
         max_attempts=1,
         max_runtime_seconds=120,
-        notifications_per_day=0,
+        notifications_per_day=1,
         period_started_at=now - timedelta(minutes=1),
         period_expires_at=now + timedelta(hours=1),
     )
@@ -253,6 +253,8 @@ async def test_file_backed_goal_journey_survives_restart_and_reversible_correcti
             "Keep the local goal snapshot current",
             success_criterion=_criterion(description="A readable snapshot exists"),
             proactive_enabled=True,
+            owner_principal_id="operator:test-bypass",
+            owner_session_id="test-auth-bypass",
             admission_budget=_journey_budget(),
         )
         brief = await goal_repository.create(
@@ -266,6 +268,8 @@ async def test_file_backed_goal_journey_survives_restart_and_reversible_correcti
                 },
             ),
             proactive_enabled=True,
+            owner_principal_id="operator:test-bypass",
+            owner_session_id="test-auth-bypass",
             admission_budget=_journey_budget(),
         )
 

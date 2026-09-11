@@ -61,15 +61,18 @@ has no transport and cannot make a provider call. A server-owned transport lease
 is claimed only after a same-transaction consent check, and consent revocation
 invalidates pending claims; a callback that races a committed revocation is
 reported as an unknown outcome. Confirmation reserves the canonical message and
-job fence atomically and restart recovery reconciles the pair. The focused
-browser seam in
+job fence atomically, rechecks the durable owner and operator-session lifetime
+inside that reservation transaction, and restart recovery reconciles the pair.
+The focused browser seam in
 `frontend/src/components/chat/PttAudioControl.tsx` requires a deliberate
 microphone grant, keeps model consent separate, prefers WebM/Opus then MP4,
 and confirms operator-supplied text by the returned digest without receiving
-unconfirmed transcript text from the API. This slice makes no speech-quality,
-live-provider, GPU, VLM, or live-microphone claim. The input shape remains
-compatible with the existing audio ingress contract and the documented
-OpenRouter audio shape for a future separately governed adapter.
+unconfirmed transcript text from the API. Delayed recorder-stop callbacks are
+discarded when capture generation, session, or the browser capture gate is no
+longer current. This slice makes no speech-quality, live-provider, GPU, VLM, or
+live-microphone claim. The input shape remains compatible with the existing
+audio ingress contract and the documented OpenRouter audio shape for a future
+separately governed adapter.
 
 ## Shipped On `develop`
 

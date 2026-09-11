@@ -25,6 +25,7 @@ from src.db.models import (
     MemoryEpisodeType,
     Message,
     NativeNotificationOutbox,
+    OperatorSession,
     QueuedInsight,
     ScheduledJob,
     Session,
@@ -867,6 +868,7 @@ class SessionManager:
         attachment_refs: object = None,
         confirmation_job_id: str | None = None,
         confirmation_digest: str | None = None,
+        confirmation_owner_principal_id: str | None = None,
         confirmation_operator_session_id: str | None = None,
     ) -> tuple[Message, bool]:
         """Persist one user ingress before dispatch and detect safe retries.
@@ -880,6 +882,7 @@ class SessionManager:
             for value in (
                 confirmation_job_id,
                 confirmation_digest,
+                confirmation_owner_principal_id,
                 confirmation_operator_session_id,
             )
         )
@@ -888,6 +891,7 @@ class SessionManager:
             for value in (
                 confirmation_job_id,
                 confirmation_digest,
+                confirmation_owner_principal_id,
                 confirmation_operator_session_id,
             )
         ):
@@ -895,17 +899,43 @@ class SessionManager:
         if confirmation_mode:
             assert confirmation_job_id is not None
             assert confirmation_digest is not None
+            assert confirmation_owner_principal_id is not None
             assert confirmation_operator_session_id is not None
             # Claim the durable job fence and insert the canonical message in
             # the same transaction.  Cancellation can win before this update;
             # once it does, no message reservation is possible.
             async with get_session() as db:
+                # The worker's request-time re-authentication closes the
+                # normal path, but session revocation can race that check.  A
+                # A row lock makes this transaction the linearization point on
+                # databases that support ``FOR UPDATE``.  SQLite's serialized
+                # write transaction provides the same fail-closed ordering for
+                # the local-first runtime: a revoked or expired operator
+                # session cannot reserve a canonical message after this check.
+                authority_result = await db.execute(
+                    select(OperatorSession)
+                    .where(OperatorSession.id == confirmation_operator_session_id)
+                    .with_for_update()
+                )
+                authority = authority_result.scalars().first()
+                now = datetime.now(timezone.utc)
+                if authority is None or authority.revoked_at is not None:
+                    raise MessageIngressConflictError(message_id)
+                idle_expires_at = authority.idle_expires_at
+                absolute_expires_at = authority.absolute_expires_at
+                if idle_expires_at.tzinfo is None:
+                    idle_expires_at = idle_expires_at.replace(tzinfo=timezone.utc)
+                if absolute_expires_at.tzinfo is None:
+                    absolute_expires_at = absolute_expires_at.replace(tzinfo=timezone.utc)
+                if now >= idle_expires_at or now >= absolute_expires_at:
+                    raise MessageIngressConflictError(message_id)
                 claimed = await db.execute(
                     update(AudioIngressJob)
                     .where(
                         AudioIngressJob.id == confirmation_job_id,
                         AudioIngressJob.status == "confirming",
                         AudioIngressJob.confirmed_transcript_digest == confirmation_digest,
+                        AudioIngressJob.owner_principal_id == confirmation_owner_principal_id,
                         AudioIngressJob.operator_session_id == confirmation_operator_session_id,
                     )
                     .values(status="confirming_reserved", updated_at=datetime.now(timezone.utc))

@@ -65,6 +65,14 @@ export function PttAudioControl({ sessionId, disabled = false, endpoint = "/api/
   const actionSequenceRef = useRef(0);
   const actionRef = useRef<{ sequence: number; controller: AbortController } | null>(null);
   const mountedSessionRef = useRef(sessionId);
+  const currentSessionRef = useRef(sessionId);
+  const controlDisabledRef = useRef(controlDisabled);
+  // Keep event callbacks created by an earlier render from uploading bytes
+  // after the conversation or browser capture gate has changed.  React runs
+  // effects after commit, while MediaRecorder may invoke ``onstop`` in that
+  // interval, so these two refs are updated during render as well.
+  currentSessionRef.current = sessionId;
+  controlDisabledRef.current = controlDisabled;
 
   const beginAction = () => {
     actionRef.current?.controller.abort();
@@ -184,6 +192,10 @@ export function PttAudioControl({ sessionId, disabled = false, endpoint = "/api/
       // Busy/disabled is a browser capture gate, not a server-job revocation.
       // Keep the active request and durable snapshot available for recovery.
       stopCaptureResources(false);
+      if (state === "capturing" || state === "requesting_capture") {
+        setState("idle");
+        setError(null);
+      }
     }
   }, [controlDisabled, sessionId]);
 
@@ -255,7 +267,14 @@ export function PttAudioControl({ sessionId, disabled = false, endpoint = "/api/
       };
       recorder.onstop = () => {
         stopStream();
-        void uploadCapture(new Blob(chunksRef.current, { type: mimeType }));
+        // ``endCapture`` advances this generation before stopping the
+        // recorder.  The upload is therefore accepted only for that exact
+        // capture and session; a disable/session switch invalidates it before
+        // the browser's asynchronous ``onstop`` callback can submit bytes.
+        void uploadCapture(new Blob(chunksRef.current, { type: mimeType }), {
+          generation: captureGeneration + 1,
+          sessionId,
+        });
       };
       streamRef.current = stream;
       recorderRef.current = recorder;
@@ -272,6 +291,10 @@ export function PttAudioControl({ sessionId, disabled = false, endpoint = "/api/
 
   const endCapture = () => {
     if (!captureActiveRef.current && state !== "capturing") return;
+    // ``stop`` may deliver ``onstop`` on a later task.  Ignore duplicate
+    // pointer/key release events while that first stop is still pending; a
+    // second generation would otherwise invalidate the legitimate upload.
+    if (!captureActiveRef.current && state === "capturing") return;
     captureActiveRef.current = false;
     captureGenerationRef.current += 1;
     const recorder = recorderRef.current;
@@ -307,7 +330,18 @@ export function PttAudioControl({ sessionId, disabled = false, endpoint = "/api/
     applySnapshot(payload);
   };
 
-  const uploadCapture = async (blob: Blob) => {
+  const uploadCapture = async (
+    blob: Blob,
+    captureFence?: { generation: number; sessionId: string | null },
+  ) => {
+    const canUploadCapture = () =>
+      !controlDisabledRef.current &&
+      captureFence !== undefined &&
+      captureGenerationRef.current === captureFence.generation &&
+      currentSessionRef.current === captureFence.sessionId;
+    // MediaRecorder callbacks can arrive after the browser capture gate or
+    // active conversation changed.  Do not even read or encode stale bytes.
+    if (!canUploadCapture()) return;
     const action = beginAction();
     setState("uploading");
     try {
@@ -318,10 +352,10 @@ export function PttAudioControl({ sessionId, disabled = false, endpoint = "/api/
         reader.onload = () => resolve(String(reader.result).split(",", 2)[1] || "");
         reader.readAsDataURL(blob);
       });
-      if (!isCurrentAction(action.sequence)) return;
+      if (!isCurrentAction(action.sequence) || !canUploadCapture()) return;
       const capturedAt = new Date();
       const body = {
-        session_id: sessionId ?? "",
+        session_id: captureFence?.sessionId ?? "",
         audio_base64: encoded,
         captured_at: capturedAt.toISOString(),
         capture_consent_reference: captureConsentReference,
@@ -370,7 +404,12 @@ export function PttAudioControl({ sessionId, disabled = false, endpoint = "/api/
         setError("Transcript changed before confirmation.");
         return;
       }
-      applySnapshot((await response.json()) as AudioSnapshot);
+      const payload = (await response.json()) as AudioSnapshot;
+      // Parsing the response yields to the event loop.  A reload/cancel
+      // started during that yield owns the UI and the confirmation result is
+      // stale even though the request was current immediately beforehand.
+      if (!isCurrentAction(action.sequence)) return;
+      applySnapshot(payload);
     } catch (cause) {
       if (!isCurrentAction(action.sequence)) return;
       setState("review");

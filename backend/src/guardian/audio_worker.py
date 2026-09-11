@@ -2976,6 +2976,7 @@ class AudioIngressWorker:
                     attachment_refs=[attachment_ref],
                     confirmation_job_id=row.id,
                     confirmation_digest=digest,
+                    confirmation_owner_principal_id=row.owner_principal_id,
                     confirmation_operator_session_id=row.operator_session_id or "",
                 )
             if duplicate and (

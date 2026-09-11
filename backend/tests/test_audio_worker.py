@@ -665,6 +665,105 @@ async def test_audio_worker_confirmation_keeps_message_job_pair_after_reauth_los
 
 
 @pytest.mark.asyncio
+async def test_audio_worker_confirmation_session_revoke_is_atomic_with_message_reservation(
+    async_db,
+    tmp_path: Path,
+    monkeypatch,
+):
+    """A revoke racing the final auth check cannot create a canonical message."""
+    session = await session_manager.get_or_create(
+        "audio-session-confirm-revoke-fence",
+        owner_principal_id=OPERATOR_OWNER,
+    )
+    worker = AudioIngressWorker(
+        transport=InterceptedAudioTransport({"transcript": "generated"}),
+        admission_broker=RemoteInferenceAdmissionBroker(),
+        quarantine_root=tmp_path,
+    )
+    original_authority = worker._require_current_operator_authority
+    revoke_on_next_check = False
+
+    async def revoke_after_last_check(**kwargs):
+        nonlocal revoke_on_next_check
+        principal = await original_authority(**kwargs)
+        if revoke_on_next_check:
+            revoke_on_next_check = False
+            # The reserve transaction must re-read this durable row rather
+            # than trusting the worker's earlier successful check.
+            await revoke_session(OPERATOR_SESSION)
+        return principal
+
+    monkeypatch.setattr(worker, "_require_current_operator_authority", revoke_after_last_check)
+    with patch.object(settings, "operator_auth_secret", "test-audio-secret"):
+        ready = await worker.submit(
+            _request(session.id, request_id="audio-confirm-revoke-fence"),
+            process=True,
+        )
+        revoke_on_next_check = True
+        with pytest.raises(AudioConfirmationConflict) as exc_info:
+            await worker.confirm_transcript(
+                ready.request_id,
+                "operator confirmed",
+                expected_transcript_digest=ready.transcript_digest,
+                owner_principal_id=OPERATOR_OWNER,
+                operator_session_id=OPERATOR_SESSION,
+            )
+
+    assert exc_info.value.code == "canonical_message_identity_conflict"
+    final = await worker._snapshot_by_request(ready.request_id)
+    assert final.status == "transcript_ready"
+    assert await session_manager.get_message(ready.message_id) is None
+
+
+@pytest.mark.asyncio
+async def test_audio_worker_confirmation_cleanup_failure_keeps_recoverable_pair(
+    async_db,
+    tmp_path: Path,
+    monkeypatch,
+):
+    """A committed canonical message remains paired until quarantine cleanup succeeds."""
+    session = await session_manager.get_or_create(
+        "audio-session-confirm-cleanup-fence",
+        owner_principal_id=OPERATOR_OWNER,
+    )
+    worker = AudioIngressWorker(
+        transport=InterceptedAudioTransport({"transcript": "generated"}),
+        admission_broker=RemoteInferenceAdmissionBroker(),
+        quarantine_root=tmp_path,
+    )
+    with patch.object(settings, "operator_auth_secret", "test-audio-secret"):
+        ready = await worker.submit(
+            _request(session.id, request_id="audio-confirm-cleanup-fence"),
+            process=True,
+        )
+
+    original_cleanup = worker._cleanup_job_paths
+    monkeypatch.setattr(worker, "_cleanup_job_paths", lambda _raw, _normalized: False)
+    with patch.object(settings, "operator_auth_secret", "test-audio-secret"):
+        with pytest.raises(AudioConfirmationConflict) as exc_info:
+            await worker.confirm_transcript(
+                ready.request_id,
+                "operator confirmed",
+                expected_transcript_digest=ready.transcript_digest,
+                owner_principal_id=OPERATOR_OWNER,
+                operator_session_id=OPERATOR_SESSION,
+            )
+    assert exc_info.value.code == "confirmation_cancelled"
+    degraded = await worker._snapshot_by_request(ready.request_id)
+    assert degraded.status == "degraded"
+    assert degraded.error_code == "audio_cleanup_failed"
+    assert degraded.confirmed_transcript_digest == hashlib.sha256(b"operator confirmed").hexdigest()
+    assert await session_manager.get_message(ready.message_id) is not None
+
+    monkeypatch.setattr(worker, "_cleanup_job_paths", original_cleanup)
+    recovered = await worker.cleanup_after_restart()
+    assert recovered == 1
+    confirmed = await worker._snapshot_by_request(ready.request_id)
+    assert confirmed.status == "confirmed"
+    assert not list(tmp_path.iterdir())
+
+
+@pytest.mark.asyncio
 async def test_audio_worker_cleanup_failure_is_degraded_and_retryable(async_db, tmp_path: Path, monkeypatch):
     session = await session_manager.get_or_create("audio-session-cleanup-retry", owner_principal_id=OPERATOR_OWNER)
     worker = AudioIngressWorker(

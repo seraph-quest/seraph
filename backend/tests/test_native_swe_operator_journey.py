@@ -73,8 +73,18 @@ async def _approved_request(
     job_workspace = native_swe._job_workspace(request)
     relative_bug_path = native_swe._relative_workspace_path(job_workspace.root / native_swe.FIXTURE_BUG_FILE)
     preview_payload = {
-        "before_sha256": native_swe._digest_text(native_swe.FIXTURE_BEFORE_TEXT),
-        "after_sha256": native_swe._digest_text(native_swe.FIXTURE_AFTER_TEXT),
+        # Match the real preview receipt's whole-file hashes; the approval is
+        # invalid if the inspected source changes before apply.
+        "before_sha256": native_swe._digest_text(
+            prepared.bug_path.read_text(encoding="utf-8")
+        ),
+        "after_sha256": native_swe._digest_text(
+            prepared.bug_path.read_text(encoding="utf-8").replace(
+                native_swe.FIXTURE_BEFORE_TEXT,
+                native_swe.FIXTURE_AFTER_TEXT,
+                1,
+            )
+        ),
     }
     approval_context = native_swe._native_approval_context(
         request,

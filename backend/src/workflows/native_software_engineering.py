@@ -1490,8 +1490,21 @@ async def run_native_software_engineering_fixture(
         fencing_token = int(claimed["lease"]["fencing_token"])
         job_context_token = _NATIVE_JOB_ID.set(request.job_id)
         fencing_context_token = _NATIVE_FENCING_TOKEN.set(str(fencing_token))
+        # Service approvals have a durable owner session even though the
+        # service principal is not backed by an interactive browser session.
+        # Carry that same identity through the governed capability host so its
+        # final authority check cannot mistake a valid service approval for a
+        # caller-owned approval.
+        runtime_operator_session = _native_approval_owner_session(
+            runtime_principal,
+            session_id=request.session_id,
+        )
         runtime_principal_token = set_runtime_trust_principal(
-            replace(runtime_principal, job_id=request.job_id)
+            replace(
+                runtime_principal,
+                job_id=request.job_id,
+                operator_session_id=runtime_operator_session,
+            )
         )
         runtime_fencing_token = set_runtime_fencing_token(str(fencing_token))
         execution_control = _NativeExecutionControl(

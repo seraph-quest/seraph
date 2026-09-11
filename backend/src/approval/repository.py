@@ -725,8 +725,9 @@ class ApprovalRepository:
             else:
                 query = query.order_by(col(ApprovalRequest.created_at).desc())
             result = await db.execute(query)
+            raw_requests = _approval_rows(result)
             requests = _select_exact_approval_rows(
-                _approval_rows(result),
+                raw_requests,
                 session_id=session_id,
                 owner_operator_session_id=owner_operator_session_id,
                 owner_principal_id=owner_principal_id,
@@ -814,10 +815,11 @@ class ApprovalRepository:
                 _approval_repository_proof_bytes(binding_payload),
                 hashlib.sha256,
             ).hexdigest()
-            return _seal_capability_approval(
+            sealed = _seal_capability_approval(
                 binding_payload,
                 repository_proof=repository_proof,
             )
+            return sealed
 
     async def consume_approved_for_resume(
         self,

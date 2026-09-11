@@ -26,7 +26,7 @@ def repo():
 
 
 class TestCreateGoal:
-    async def test_success(self, client, async_db):
+    async def test_success(self, client, async_db, repo):
         res = await client.post("/api/goals", json={
             "title": "Learn Python",
             "level": "daily",
@@ -36,6 +36,11 @@ class TestCreateGoal:
         data = res.json()
         assert data["title"] == "Learn Python"
         assert "id" in data
+        assert data["owner_principal_id"] == "operator:test-bypass"
+        assert data["owner_session_id"] == "test-auth-bypass"
+        persisted = await repo.get(data["id"])
+        assert persisted.owner_principal_id == "operator:test-bypass"
+        assert persisted.owner_session_id == "test-auth-bypass"
 
     async def test_missing_title(self, client):
         res = await client.post("/api/goals", json={
@@ -84,9 +89,63 @@ class TestGetDashboard:
 
 class TestUpdateGoal:
     async def test_success(self, client, async_db, repo):
-        goal = await repo.create("Test")
+        goal = await _owned_goal(repo)
         res = await client.patch(f"/api/goals/{goal.id}", json={"title": "Updated"})
         assert res.status_code == 200
+        updated = await repo.get(goal.id)
+        assert updated.title == "Updated"
+
+    async def test_wrong_owner_is_rejected_before_update(self, client, async_db, repo, monkeypatch):
+        goal = await _owned_goal(repo)
+        monkeypatch.setattr(
+            "src.api.goals._require_authenticated_operator",
+            lambda _request: _operator("operator:other", "session-other"),
+        )
+        with patch.object(
+            repo,
+            "update",
+            new=AsyncMock(side_effect=AssertionError("update bypassed")),
+        ):
+            res = await client.patch(f"/api/goals/{goal.id}", json={"title": "Hijacked"})
+        assert res.status_code == 403
+        assert res.json()["detail"]["code"] == "goal_owner_mismatch"
+        assert (await repo.get(goal.id)).title == "Snapshot goal"
+
+    async def test_ownerless_legacy_goal_is_rejected_before_update(self, client, async_db, repo):
+        goal = await repo.create("Legacy goal")
+        with patch.object(
+            repo,
+            "update",
+            new=AsyncMock(side_effect=AssertionError("legacy goal claimed")),
+        ):
+            res = await client.patch(
+                f"/api/goals/{goal.id}",
+                json={"title": "Claimed", "proactive_enabled": True},
+            )
+        assert res.status_code == 403
+        assert res.json()["detail"]["code"] == "goal_owner_unbound"
+        current = await repo.get(goal.id)
+        assert current.title == "Legacy goal"
+        assert current.owner_principal_id is None
+        assert current.owner_session_id is None
+
+    async def test_missing_operator_is_rejected_before_update(
+        self, client, async_db, repo, monkeypatch
+    ):
+        goal = await _owned_goal(repo)
+
+        def reject(_request):
+            raise HTTPException(status_code=401, detail={"code": "authentication_required"})
+
+        monkeypatch.setattr("src.api.goals._require_authenticated_operator", reject)
+        with patch.object(
+            repo,
+            "update",
+            new=AsyncMock(side_effect=AssertionError("unauthenticated update")),
+        ):
+            res = await client.patch(f"/api/goals/{goal.id}", json={"title": "Nope"})
+        assert res.status_code == 401
+        assert res.json()["detail"]["code"] == "authentication_required"
 
     async def test_not_found(self, client):
         res = await client.patch("/api/goals/nope", json={"title": "X"})
@@ -95,9 +154,64 @@ class TestUpdateGoal:
 
 class TestDeleteGoal:
     async def test_success(self, client, async_db, repo):
-        goal = await repo.create("Test")
+        goal = await _owned_goal(repo)
+        child = await repo.create(
+            "Child",
+            parent_id=goal.id,
+            owner_principal_id=goal.owner_principal_id,
+            owner_session_id=goal.owner_session_id,
+        )
         res = await client.delete(f"/api/goals/{goal.id}")
         assert res.status_code == 200
+        assert await repo.get(goal.id) is None
+        assert await repo.get(child.id) is None
+
+    async def test_wrong_owner_is_rejected_before_delete(self, client, async_db, repo, monkeypatch):
+        goal = await _owned_goal(repo)
+        monkeypatch.setattr(
+            "src.api.goals._require_authenticated_operator",
+            lambda _request: _operator("operator:other", "session-other"),
+        )
+        with patch.object(
+            repo,
+            "delete",
+            new=AsyncMock(side_effect=AssertionError("delete bypassed")),
+        ):
+            res = await client.delete(f"/api/goals/{goal.id}")
+        assert res.status_code == 403
+        assert res.json()["detail"]["code"] == "goal_owner_mismatch"
+        assert await repo.get(goal.id) is not None
+
+    async def test_ownerless_legacy_goal_is_rejected_before_delete(self, client, async_db, repo):
+        goal = await repo.create("Legacy goal")
+        with patch.object(
+            repo,
+            "delete",
+            new=AsyncMock(side_effect=AssertionError("legacy goal deleted")),
+        ):
+            res = await client.delete(f"/api/goals/{goal.id}")
+        assert res.status_code == 403
+        assert res.json()["detail"]["code"] == "goal_owner_unbound"
+        assert await repo.get(goal.id) is not None
+
+    async def test_missing_operator_is_rejected_before_delete(
+        self, client, async_db, repo, monkeypatch
+    ):
+        goal = await _owned_goal(repo)
+
+        def reject(_request):
+            raise HTTPException(status_code=401, detail={"code": "authentication_required"})
+
+        monkeypatch.setattr("src.api.goals._require_authenticated_operator", reject)
+        with patch.object(
+            repo,
+            "delete",
+            new=AsyncMock(side_effect=AssertionError("unauthenticated delete")),
+        ):
+            res = await client.delete(f"/api/goals/{goal.id}")
+        assert res.status_code == 401
+        assert res.json()["detail"]["code"] == "authentication_required"
+        assert await repo.get(goal.id) is not None
 
     async def test_not_found(self, client):
         res = await client.delete("/api/goals/nope")

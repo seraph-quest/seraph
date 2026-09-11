@@ -424,8 +424,8 @@ async def get_goal_dashboard():
 @router.post("/goals")
 async def create_goal(body: GoalCreate, request: Request):
     """Create a new goal."""
+    operator = _require_authenticated_operator(request)
     due = datetime.fromisoformat(body.due_date) if body.due_date else None
-    operator = _require_authenticated_operator(request) if body.proactive_enabled else None
     goal = await goal_repository.create(
         title=body.title,
         level=body.level,
@@ -473,43 +473,35 @@ async def create_goal(body: GoalCreate, request: Request):
 @router.patch("/goals/{goal_id}")
 async def update_goal(goal_id: str, body: GoalUpdate, request: Request):
     """Update a goal."""
-    due = datetime.fromisoformat(body.due_date) if body.due_date else None
-    needs_owner = body.proactive_enabled is not None or body.admission_budget is not None
-    operator = _require_authenticated_operator(request) if needs_owner else None
-    current = await goal_repository.get(goal_id) if needs_owner else None
-    ownerless_enable = False
-    if body.proactive_enabled is not None and current is None:
+    operator = _require_authenticated_operator(request)
+    current = await goal_repository.get(goal_id)
+    if current is None:
         raise HTTPException(status_code=404, detail="Goal not found")
-    if needs_owner and current is None:
-        raise HTTPException(status_code=404, detail="Goal not found")
-    if needs_owner:
-        ownerless_enable = (
-            body.proactive_enabled is True
-            and not getattr(current, "owner_principal_id", None)
-            and not getattr(current, "owner_session_id", None)
+    # Legacy rows without both owner fields have no trustworthy public-session
+    # binding.  They must be migrated through an explicit trusted path rather
+    # than claimed by whichever authenticated session submits this request.
+    _require_goal_owner(current, operator)
+    current_revision = max(int(current.revision or 1), 1)
+    if body.expected_revision is not None and body.expected_revision != current_revision:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "stale_goal_revision",
+                "goal_id": goal_id,
+                "expected_revision": body.expected_revision,
+                "current_revision": current_revision,
+                "recovery": "Refresh the goal and resubmit against the current revision.",
+            },
         )
-        if not ownerless_enable:
-            _require_goal_owner(current, operator)
-        current_revision = max(int(current.revision or 1), 1)
-        if body.expected_revision is not None and body.expected_revision != current_revision:
-            raise HTTPException(
-                status_code=409,
-                detail={
-                    "code": "stale_goal_revision",
-                    "goal_id": goal_id,
-                    "expected_revision": body.expected_revision,
-                    "current_revision": current_revision,
-                    "recovery": "Refresh the goal and resubmit against the current revision.",
-                },
-            )
-        if body.proactive_enabled:
-            await _record_proactive_permission(
-                operator,
-                goal_id=goal_id,
-                enabled=True,
-                revision=current_revision,
-                phase="before_enable",
-            )
+    due = datetime.fromisoformat(body.due_date) if body.due_date else None
+    if body.proactive_enabled:
+        await _record_proactive_permission(
+            operator,
+            goal_id=goal_id,
+            enabled=True,
+            revision=current_revision,
+            phase="before_enable",
+        )
     try:
         goal = await goal_repository.update(
             goal_id=goal_id,
@@ -522,8 +514,6 @@ async def update_goal(goal_id: str, body: GoalUpdate, request: Request):
             success_criterion=body.success_criterion,
             proactive_enabled=body.proactive_enabled,
             admission_budget=body.admission_budget,
-            owner_principal_id=(operator.principal.principal_id if ownerless_enable else None),
-            owner_session_id=(operator.session_id if ownerless_enable else None),
             expected_revision=body.expected_revision,
         )
     except GoalRevisionConflict as exc:
@@ -1004,8 +994,15 @@ async def rollback_goal_strategy_correction(
 
 
 @router.delete("/goals/{goal_id}")
-async def delete_goal(goal_id: str):
+async def delete_goal(goal_id: str, request: Request):
     """Delete a goal and its descendants."""
+    operator = _require_authenticated_operator(request)
+    goal = await goal_repository.get(goal_id)
+    if goal is None:
+        raise HTTPException(status_code=404, detail="Goal not found")
+    # Preserve the repository's descendant deletion/tombstone behavior only
+    # after the canonical public owner/session binding has been verified.
+    _require_goal_owner(goal, operator)
     success = await goal_repository.delete(goal_id)
     if not success:
         raise HTTPException(status_code=404, detail="Goal not found")

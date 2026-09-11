@@ -6,11 +6,12 @@ slice.  It intentionally has no model/provider dependency and does not expose
 an arbitrary shell or repository mutation surface.
 
 The fixture is copied into a job-owned workspace before any patch is applied.
-Caller supplied trees are inspected as untrusted input but are never executed;
-execution is restricted to this bundled deterministic fixture because this
-slice does not claim a general sandbox or network isolation boundary. Planner,
-worker, and critic labels are metadata only; the durable job owner remains the
-sole authority identity.
+Caller-supplied trees may be used when they are already inside the configured
+workspace, pass the untrusted-input scan, and match the documented fixture
+shape; sources outside that boundary remain inspection-only. This slice does
+not claim a general sandbox or network isolation boundary. Planner, worker,
+and critic labels are metadata only; the durable job owner remains the sole
+authority identity.
 """
 
 from __future__ import annotations
@@ -28,9 +29,11 @@ import time
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, Mapping
 
 from config.settings import settings
+from src.approval.identity import approval_owner_operator_session_id
+from src.approval.repository import approval_repository, fingerprint_tool_call
 from src.approval.runtime import (
     get_current_session_id,
     get_current_trust_principal,
@@ -38,6 +41,7 @@ from src.approval.runtime import (
     reset_runtime_trust_principal,
     set_runtime_fencing_token,
     set_runtime_trust_principal,
+    verify_capability_approval,
 )
 from src.artifacts.registry import build_artifact_record
 from src.extensions.capability_execution import (
@@ -50,6 +54,7 @@ from src.security.trust_contract import AuthorityGrant, PrincipalType
 from src.tools.filesystem_tool import _safe_resolve, _write_workspace_text_bounded
 from src.workflows.job_runtime import (
     DurableJobIdentity,
+    DurableJobLeaseError,
     DurableJobSpec,
     durable_job_repository,
 )
@@ -68,15 +73,22 @@ FIXTURE_AFTER_TEXT = "return left + right"
 FIXTURE_TEST_COMMAND = "pytest"
 FIXTURE_TEST_ARGS = ("-q", FIXTURE_TEST_FILE)
 _PATCH_APPROVAL_STATES = frozenset({"approved", "required", "denied"})
+_NATIVE_PATCH_CAPABILITY_ID = "apply_workspace_patch"
+_NATIVE_APPROVAL_RISK = "high"
+_NATIVE_APPROVAL_TTL_SECONDS = 5 * 60.0
 
 _MAX_FIXTURE_FILES = 200
 _MAX_FIXTURE_FILE_BYTES = 1_000_000
 _MAX_FIXTURE_TOTAL_BYTES = 8_000_000
 _MAX_FIXTURE_DEPTH = 16
 _MAX_FIXTURE_DIRECTORIES = 200
-_MAX_TEST_TIMEOUT_SECONDS = 120
+_MAX_TEST_TIMEOUT_SECONDS = 300
+_MAX_NATIVE_ATTEMPTS = 2
 _MAX_ARTIFACT_BYTES = 1 * 1024 * 1024
 _GENERATED_FIXTURE_DIRS = frozenset({".git", "__pycache__", ".pytest_cache"})
+_NATIVE_CANCEL_SETTLE_SECONDS = 1.0
+_NATIVE_CANCEL_POLL_SECONDS = 0.02
+_NATIVE_CANCEL_CAS_ATTEMPTS = 6
 _SAFE_JOB_ID = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
 _SHELL_META_CHARS = set("|&;<>()`$\\\n\r\t")
 _ROLE_IDENTITIES = frozenset(
@@ -152,7 +164,11 @@ class NativeSoftwareEngineeringError(ValueError):
 
 @dataclass(frozen=True, slots=True)
 class NativeSoftwareEngineeringApprovalReceipt:
-    """Immutable, single-job approval evidence for the deterministic apply."""
+    """Legacy caller-shaped evidence retained only for read compatibility.
+
+    This value is never an authority source. Apply authority comes from a
+    consumed row in :mod:`src.approval.repository` and its runtime binding.
+    """
 
     receipt_id: str
     owner_principal_id: str
@@ -188,10 +204,22 @@ class NativeSoftwareEngineeringRequest:
     test_command: str = FIXTURE_TEST_COMMAND
     test_args: tuple[str, ...] = field(default_factory=lambda: FIXTURE_TEST_ARGS)
     test_timeout_seconds: int = 30
+    max_attempts: int = 2
+    # A caller that separates inspect/approval/apply can bind the later run to
+    # the exact source tree it inspected.  Omitting this remains valid for the
+    # one-shot local fixture path, which computes and checks its own digest.
+    expected_source_digest: str | None = None
     # Approval is required by default. A caller must provide an explicit
     # bounded approval decision before the patch can be applied.
     patch_approval: str = "required"
     approval_receipt: NativeSoftwareEngineeringApprovalReceipt | None = None
+    # ``approval_id`` identifies the durable ApprovalRequest selected by an
+    # authenticated operator. The row and its signed runtime binding are
+    # checked again immediately before the patch effect.
+    approval_id: str | None = None
+    # A stable attempt label is included in the approval context. It is
+    # derived when omitted and therefore cannot grant authority by itself.
+    attempt_id: str | None = None
     instruction_text: str = ""
     cancel_before_test: bool = False
 
@@ -213,16 +241,20 @@ class _JobWorkspace:
     relative_artifact_dir: str
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(slots=True)
 class _NativeExecutionControl:
     owner: str
     fencing_token: int
     cancel_event: threading.Event
+    cleanup_requested: bool = False
+    cleanup_status: str = "not_requested"
+    remaining_descendants: int | None = None
+    worker_root: str | None = None
 
 
 def native_software_engineering_fixture_root() -> Path:
     """Return the bundled source tree used by deterministic proof tests."""
-    return Path(__file__).resolve().parents[2] / "tests" / "fixtures" / "native_software_engineering" / "repository"
+    return Path(__file__).resolve().parents[2] / "tests" / "fixtures" / "native_swe_repo"
 
 
 def _workspace_root() -> Path:
@@ -251,8 +283,107 @@ def _preview_scope_digest(request: NativeSoftwareEngineeringRequest) -> str:
             "file_path": FIXTURE_BUG_FILE,
             "before_sha256": _digest_text(FIXTURE_BEFORE_TEXT),
             "after_sha256": _digest_text(FIXTURE_AFTER_TEXT),
+            "expected_source_digest": request.expected_source_digest or "",
         }
     )
+
+
+def _native_attempt_id(request: NativeSoftwareEngineeringRequest) -> str:
+    """Return the stable attempt binding used by approval and effect records."""
+    candidate = str(request.attempt_id or f"native-swe-attempt:{_job_token(request.job_id)}").strip()
+    if not _SAFE_JOB_ID.fullmatch(candidate):
+        raise NativeSoftwareEngineeringError("attempt_identity_invalid")
+    return candidate
+
+
+def _native_patch_arguments(
+    relative_bug_path: str,
+    *,
+    preview_payload: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Build the exact immutable arguments sent to the patch capability."""
+    before_sha256 = str(preview_payload.get("before_sha256") or "")
+    if not before_sha256:
+        raise NativeSoftwareEngineeringError("patch_preview_digest_missing")
+    return {
+        "file_path": relative_bug_path,
+        "old_text": FIXTURE_BEFORE_TEXT,
+        "new_text": FIXTURE_AFTER_TEXT,
+        "expected_occurrences": 1,
+        "expected_before_sha256": before_sha256,
+    }
+
+
+def _native_approval_context(
+    request: NativeSoftwareEngineeringRequest,
+    prepared: _PreparedFixture,
+    *,
+    relative_bug_path: str,
+    preview_payload: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Describe every mutable input that an operator is approving.
+
+    The context is persisted inside the ApprovalRequest and included in its
+    fingerprint. It is deliberately structural and provider-free so the same
+    row can be checked by the approval repository and the capability host.
+    """
+    patch_arguments = _native_patch_arguments(relative_bug_path, preview_payload=preview_payload)
+    return {
+        "schema_version": "seraph.native-software-engineering.approval-context.v2",
+        "owner": {
+            "kind": request.owner_kind,
+            "principal_id": request.owner_principal_id,
+            "service_id": request.service_id or "",
+        },
+        "session_id": request.session_id,
+        "job_id": request.job_id,
+        "attempt_id": _native_attempt_id(request),
+        "source_digest": prepared.source_digest,
+        "patch": {
+            "capability_id": _NATIVE_PATCH_CAPABILITY_ID,
+            "destination": f"workspace:{relative_bug_path}",
+            "arguments": patch_arguments,
+            "file_path": relative_bug_path,
+            "before_sha256": str(preview_payload.get("before_sha256") or ""),
+            "after_sha256": str(preview_payload.get("after_sha256") or ""),
+        },
+        "verification": {
+            "command": request.test_command,
+            "args": list(request.test_args),
+            "timeout_seconds": int(request.test_timeout_seconds),
+            "max_attempts": int(request.max_attempts),
+        },
+        "resources": {
+            "priority": int(request.priority),
+            "claims": ["cpu", "workspace"],
+        },
+    }
+
+
+def _native_approval_fingerprint(
+    approval_context: Mapping[str, Any],
+) -> str:
+    patch = approval_context.get("patch")
+    if not isinstance(patch, Mapping):
+        raise NativeSoftwareEngineeringError("approval_context_invalid")
+    arguments = patch.get("arguments")
+    if not isinstance(arguments, Mapping):
+        raise NativeSoftwareEngineeringError("approval_context_invalid")
+    return fingerprint_tool_call(
+        _NATIVE_PATCH_CAPABILITY_ID,
+        dict(arguments),
+        approval_context=dict(approval_context),
+    )
+
+
+def _native_approval_owner_session(runtime_principal: Any, *, session_id: str) -> str:
+    owner_session = approval_owner_operator_session_id(
+        session_id=session_id,
+        principal=runtime_principal,
+    )
+    if not owner_session:
+        raise NativeSoftwareEngineeringError("approval_operator_session_missing")
+    return owner_session
 
 
 def build_native_software_engineering_approval_receipt(
@@ -261,23 +392,15 @@ def build_native_software_engineering_approval_receipt(
     receipt_id: str | None = None,
     expires_at: float | None = None,
 ) -> NativeSoftwareEngineeringApprovalReceipt:
-    """Create bounded approval evidence for a separately authorized caller.
+    """Reject the historical caller-fabricated approval helper.
 
-    This helper only creates immutable scope evidence; it is not an approval
-    endpoint. An authenticated operator/API must issue the corresponding
-    approval record before this evidence can be trusted in a production route.
+    Kept as a compatibility symbol so old integrations fail explicitly at the
+    boundary instead of silently manufacturing authority. Use the approval
+    API/repository to create and resolve an ``ApprovalRequest`` row, then pass
+    its ``approval_id`` to the native runner.
     """
-    _validate_request_identity(request)
-    if expires_at is None:
-        expires_at = time.time() + 300
-    return NativeSoftwareEngineeringApprovalReceipt(
-        receipt_id=receipt_id or f"native-swe-approval:{request.job_id}",
-        owner_principal_id=request.owner_principal_id,
-        session_id=request.session_id,
-        job_id=request.job_id,
-        preview_digest=_preview_scope_digest(request),
-        expires_at=float(expires_at),
-    )
+    del request, receipt_id, expires_at
+    raise NativeSoftwareEngineeringError("approval_repository_required")
 
 
 def _safe_relative(path: Path, root: Path, *, reason_code: str) -> str:
@@ -423,6 +546,7 @@ def _validate_request_identity(request: NativeSoftwareEngineeringRequest) -> Non
     for label in (request.planner_id, request.worker_id, request.critic_id):
         if not str(label or "").strip() or any(char in str(label) for char in _SHELL_META_CHARS):
             raise NativeSoftwareEngineeringError("actor_identity_invalid")
+    _native_attempt_id(request)
 
     current_principal = get_current_trust_principal()
     if current_principal is None:
@@ -447,6 +571,8 @@ def _validate_test_command(request: NativeSoftwareEngineeringRequest) -> None:
         raise NativeSoftwareEngineeringError("test_command_not_allowlisted")
     if not 1 <= int(request.test_timeout_seconds) <= _MAX_TEST_TIMEOUT_SECONDS:
         raise NativeSoftwareEngineeringError("test_timeout_out_of_bounds")
+    if not 1 <= int(request.max_attempts) <= _MAX_NATIVE_ATTEMPTS:
+        raise NativeSoftwareEngineeringError("attempt_limit_out_of_bounds")
     if not request.test_args:
         raise NativeSoftwareEngineeringError("test_arguments_missing")
     if tuple(request.test_args) != FIXTURE_TEST_ARGS:
@@ -465,27 +591,18 @@ def _validate_patch_approval(request: NativeSoftwareEngineeringRequest) -> None:
         raise NativeSoftwareEngineeringError("patch_approval_state_invalid")
     receipt = request.approval_receipt
     if request.patch_approval != "approved":
-        if receipt is not None:
-            raise NativeSoftwareEngineeringError("approval_receipt_state_mismatch")
+        if receipt is not None or request.approval_id is not None:
+            raise NativeSoftwareEngineeringError("approval_binding_state_mismatch")
         return
-    if not isinstance(receipt, NativeSoftwareEngineeringApprovalReceipt):
-        raise NativeSoftwareEngineeringError("approval_receipt_required")
-    if receipt.consumed:
-        raise NativeSoftwareEngineeringError("approval_receipt_replayed")
-    if receipt.decision != "approved" or receipt.action != "apply":
-        raise NativeSoftwareEngineeringError("approval_receipt_scope_invalid")
-    if receipt.owner_principal_id != request.owner_principal_id:
-        raise NativeSoftwareEngineeringError("approval_receipt_owner_mismatch")
-    if receipt.session_id != request.session_id or receipt.job_id != request.job_id:
-        raise NativeSoftwareEngineeringError("approval_receipt_binding_mismatch")
-    if receipt.preview_digest != _preview_scope_digest(request):
-        raise NativeSoftwareEngineeringError("approval_receipt_preview_mismatch")
-    try:
-        receipt_expires_at = float(receipt.expires_at)
-    except (TypeError, ValueError, OverflowError) as exc:
-        raise NativeSoftwareEngineeringError("approval_receipt_expiry_invalid") from exc
-    if receipt_expires_at <= time.time():
-        raise NativeSoftwareEngineeringError("approval_receipt_expired")
+    if receipt is not None:
+        # The old dataclass is intentionally not accepted as authority. It is
+        # caller-controlled data and has no repository CAS or runtime MAC.
+        raise NativeSoftwareEngineeringError("approval_receipt_unsupported")
+    approval_id = str(request.approval_id or "").strip()
+    if not approval_id:
+        raise NativeSoftwareEngineeringError("approval_id_required")
+    if not _SAFE_JOB_ID.fullmatch(approval_id):
+        raise NativeSoftwareEngineeringError("approval_id_invalid")
 
 
 def _prepare_fixture(request: NativeSoftwareEngineeringRequest, *, executable: bool = False) -> _PreparedFixture:
@@ -503,10 +620,10 @@ def _prepare_fixture(request: NativeSoftwareEngineeringRequest, *, executable: b
             raise NativeSoftwareEngineeringError("fixture_outside_workspace")
     if not source.is_dir() or source.is_symlink():
         raise NativeSoftwareEngineeringError("fixture_root_invalid")
-    if executable and source != bundled:
-        raise NativeSoftwareEngineeringError("fixture_execution_source_not_allowlisted")
     _scan_untrusted_fixture(source, instruction_text=request.instruction_text)
     source_digest = _fixture_tree_digest(source)
+    if request.expected_source_digest and source_digest != request.expected_source_digest:
+        raise NativeSoftwareEngineeringError("fixture_source_digest_mismatch")
     bug_path = _validate_relative_fixture_file(source, FIXTURE_BUG_FILE, reason_code="fixture_bug_file_invalid")
     test_path = _validate_relative_fixture_file(source, FIXTURE_TEST_FILE, reason_code="fixture_test_file_invalid")
     body = bug_path.read_text(encoding="utf-8")
@@ -578,19 +695,24 @@ def build_native_software_engineering_plan(
             "command": request.test_command,
             "argument_count": len(request.test_args),
             "timeout_seconds": request.test_timeout_seconds,
+            "max_attempts": request.max_attempts,
         },
         "approval": {
             "required": True,
             "state": request.patch_approval,
             "boundary": "preview_then_approval_then_apply",
             "source": (
-                "bound_immutable_approval_receipt"
+                "repository_approval_binding"
                 if request.patch_approval == "approved"
-                else "deterministic_fixture_policy"
+                else "approval_request_repository"
             ),
         },
         "authority": {
             "owner_principal_id": request.owner_principal_id,
+            "session_id": request.session_id,
+            "job_id": request.job_id,
+            "attempt_id": _native_attempt_id(request),
+            "approval_id": request.approval_id,
             "planner_id": request.planner_id,
             "worker_id": request.worker_id,
             "critic_id": request.critic_id,
@@ -638,6 +760,44 @@ def _unregister_native_execution(job_id: str, control: _NativeExecutionControl |
 def _native_execution_for_job(job_id: str) -> _NativeExecutionControl | None:
     with _NATIVE_EXECUTION_LOCK:
         return _NATIVE_EXECUTIONS.get(job_id)
+
+
+def _mark_native_cleanup_requested(
+    job_id: str,
+    control: _NativeExecutionControl | None = None,
+) -> None:
+    """Record cancellation intent before the process result is available."""
+    with _NATIVE_EXECUTION_LOCK:
+        current = control or _NATIVE_EXECUTIONS.get(job_id)
+        if current is None or _NATIVE_EXECUTIONS.get(job_id) is not current:
+            return
+        current.cleanup_requested = True
+        # Until the process manager reports a terminal cleanup result, an
+        # absent receipt is unknown. Never project it as ``not_requested``.
+        if current.cleanup_status == "not_requested":
+            current.cleanup_status = "unknown"
+        current.cancel_event.set()
+
+
+def _remember_native_process_cleanup(result: dict[str, Any]) -> dict[str, Any]:
+    """Attach the latest process-manager cleanup evidence to the live job."""
+    job_id = _NATIVE_JOB_ID.get()
+    if not job_id:
+        return result
+    with _NATIVE_EXECUTION_LOCK:
+        control = _NATIVE_EXECUTIONS.get(job_id)
+        if control is None:
+            return result
+        status = str(result.get("cleanup_status") or "not_requested")
+        if control.cleanup_requested and status == "not_requested":
+            status = "unknown"
+            result["cleanup_status"] = status
+        control.cleanup_status = status
+        control.remaining_descendants = result.get("remaining_descendants")
+        control.worker_root = result.get("worker_root")
+        if result.get("cancelled") or control.cleanup_requested:
+            control.cleanup_requested = True
+    return result
 
 
 def _job_workspace(request: NativeSoftwareEngineeringRequest) -> _JobWorkspace:
@@ -724,6 +884,9 @@ def _execute_native_capability(
     arguments: dict[str, Any],
     *,
     destination: str,
+    approval_id: str = "",
+    approval_digest: str = "",
+    approval_binding: Mapping[str, Any] | None = None,
     _return_raw_result: bool = False,
 ) -> Any:
     """Route native SWE effects through the same fixed capability host."""
@@ -738,6 +901,9 @@ def _execute_native_capability(
         session_id=session_id,
         job_id=_NATIVE_JOB_ID.get() or principal.job_id,
         destination=destination,
+        approval_id=approval_id,
+        approval_digest=approval_digest,
+        approval_binding=approval_binding,
     )
     try:
         host = current_capability_execution_host()
@@ -779,7 +945,7 @@ def _process_result(
             _return_raw_result=True,
         )
     except ValueError as exc:
-        return {
+        return _remember_native_process_cleanup({
             "ok": False,
             "blocked": True,
             "cancelled": False,
@@ -793,9 +959,9 @@ def _process_result(
             "cleanup_status": "not_requested",
             "remaining_descendants": None,
             "worker_root": None,
-        }
+        })
     except (OSError, RuntimeError):
-        return {
+        return _remember_native_process_cleanup({
             "ok": False,
             "blocked": False,
             "cancelled": False,
@@ -809,7 +975,7 @@ def _process_result(
             "cleanup_status": "not_requested",
             "remaining_descendants": None,
             "worker_root": None,
-        }
+        })
     payload = {
         "ok": bool(result.get("ok")),
         "blocked": False,
@@ -832,7 +998,7 @@ def _process_result(
     if include_output:
         payload["_stdout"] = str(result.get("stdout") or "")
         payload["_stderr"] = str(result.get("stderr") or "")
-    return payload
+    return _remember_native_process_cleanup(payload)
 
 
 def _workspace_receipt(job_workspace: _JobWorkspace) -> dict[str, Any]:
@@ -845,37 +1011,67 @@ def _workspace_receipt(job_workspace: _JobWorkspace) -> dict[str, Any]:
     }
 
 
-def _process_cleanup_receipt(result: dict[str, Any] | None) -> dict[str, Any]:
+def _process_cleanup_receipt(
+    result: dict[str, Any] | None,
+    *,
+    job_id: str | None = None,
+) -> dict[str, Any]:
     """Carry bounded process-cleanup truth into higher-level workflow receipts."""
+    if result is not None:
+        control = _native_execution_for_job(str(job_id or "")) if job_id else None
+        cleanup_status = str(result.get("cleanup_status") or "not_requested")
+        if control is not None and control.cleanup_requested and cleanup_status == "not_requested":
+            # A cancellation request may race a wrapper that returned an
+            # incomplete result. Preserve the live cancellation evidence
+            # instead of publishing the misleading default state.
+            cleanup_status = control.cleanup_status if control.cleanup_status != "not_requested" else "unknown"
+        return {
+            "cleanup_status": cleanup_status,
+            "remaining_descendants": (
+                result.get("remaining_descendants")
+                if result.get("remaining_descendants") is not None or control is None
+                else control.remaining_descendants
+            ),
+            "worker_root": (
+                result.get("worker_root")
+                if result.get("worker_root") is not None or control is None
+                else control.worker_root
+            ),
+        }
+    control = _native_execution_for_job(str(job_id or "")) if job_id else None
+    if control is None:
+        return {
+            "cleanup_status": "unknown",
+            "remaining_descendants": None,
+            "worker_root": None,
+            "cleanup_requested": True,
+        }
     return {
-        "cleanup_status": result.get("cleanup_status", "not_requested") if result else "not_requested",
-        "remaining_descendants": result.get("remaining_descendants") if result else None,
-        "worker_root": result.get("worker_root") if result else None,
+        "cleanup_status": (
+            control.cleanup_status
+            if control.cleanup_status != "not_requested"
+            else "unknown"
+        ),
+        "remaining_descendants": control.remaining_descendants,
+        "worker_root": control.worker_root,
+        "cleanup_requested": control.cleanup_requested,
     }
 
 
 def _changed_workspace_paths(status_output: str) -> set[str]:
-    """Return meaningful fixture changes while ignoring disposable test caches.
-
-    The bundled test command is allowed to create interpreter caches such as
-    ``__pycache__`` and ``.pytest_cache``.  They are excluded from fixture
-    inspection and are not part of the requested patch scope, so treating them
-    as a product change would turn a valid patch into a false readback failure.
-    Every other untracked or modified path remains part of the exact-scope
-    check.
-    """
-    changed: set[str] = set()
+    """Return meaningful fixture changes while ignoring disposable test caches."""
+    changed_paths: set[str] = set()
     for line in status_output.splitlines():
         if len(line) < 4 or "->" in line:
             continue
-        relative = line[3:].strip()
-        if not relative:
+        path = line[3:].strip()
+        if not path:
             continue
-        parts = Path(relative.rstrip("/")).parts
-        if any(part in _GENERATED_FIXTURE_DIRS for part in parts):
+        path_parts = Path(path.rstrip("/")).parts
+        if any(part in _GENERATED_FIXTURE_DIRS for part in path_parts):
             continue
-        changed.add(relative)
-    return changed
+        changed_paths.add(path)
+    return changed_paths
 
 
 async def _record_artifact(
@@ -975,7 +1171,7 @@ def _cancellation_result(
         "reason_code": reason_code,
         "phase": "test" if test_result is not None else "apply",
         "test": test_result or None,
-        "process_cleanup": _process_cleanup_receipt(test_result),
+        "process_cleanup": _process_cleanup_receipt(test_result, job_id=request.job_id),
         "success_eligible": False,
         "workspace_recoverable": True,
     }
@@ -995,7 +1191,7 @@ def _cancellation_result(
         "workspace": _workspace_receipt(job_workspace),
         "durable_job": durable_job,
         "cancellation": cancellation_payload,
-        "process_cleanup": _process_cleanup_receipt(test_result),
+        "process_cleanup": _process_cleanup_receipt(test_result, job_id=request.job_id),
         "original_fixture_immutable": _fixture_tree_digest(prepared.source) == prepared.source_digest,
         "operator_visible": True,
     }
@@ -1134,7 +1330,7 @@ async def run_native_software_engineering_fixture(
     request: NativeSoftwareEngineeringRequest | None = None,
     **overrides: Any,
 ) -> dict[str, Any]:
-    """Run inspect -> plan -> patch -> test -> readback for the bundled fixture.
+    """Run inspect -> plan -> patch -> test -> readback for a bounded fixture.
 
     Expected policy rejections return an operator-safe ``blocked`` receipt.  A
     failed or timed-out test returns ``failed`` and keeps the job workspace for
@@ -1179,6 +1375,8 @@ async def run_native_software_engineering_fixture(
         "service_id": request.service_id,
         "capability_id": NATIVE_SOFTWARE_ENGINEERING_CAPABILITY_ID,
         "capability_version": NATIVE_SOFTWARE_ENGINEERING_CAPABILITY_VERSION,
+        "approval_id": request.approval_id,
+        "attempt_id": _native_attempt_id(request),
         "actor_roles_are_metadata_only": True,
     }
     identity = DurableJobIdentity(
@@ -1203,7 +1401,7 @@ async def run_native_software_engineering_fixture(
         resource_claims=("cpu", "workspace"),
         declared_authority=declared_authority,
         deadline_at=request.deadline_at,
-        max_attempts=1,
+        max_attempts=request.max_attempts,
         service_id=request.service_id,
     )
     try:
@@ -1371,6 +1569,78 @@ async def run_native_software_engineering_fixture(
         preview_payload = json.loads(preview_raw)
         if not isinstance(preview_payload, dict) or preview_payload.get("applied"):
             raise NativeSoftwareEngineeringError("patch_preview_invalid")
+        patch_arguments = _native_patch_arguments(
+            relative_bug_path,
+            preview_payload=preview_payload,
+        )
+        approval_context = _native_approval_context(
+            request,
+            prepared,
+            relative_bug_path=relative_bug_path,
+            preview_payload=preview_payload,
+        )
+        approval_fingerprint = _native_approval_fingerprint(approval_context)
+        approval_operator_session: str | None = None
+        approval_binding: dict[str, Any] | None = None
+        pending_approval_id: str | None = None
+        if request.patch_approval in {"required", "approved"}:
+            approval_operator_session = _native_approval_owner_session(
+                runtime_principal,
+                session_id=request.session_id,
+            )
+        if request.patch_approval == "required":
+            approval_expires_at = time.time() + _NATIVE_APPROVAL_TTL_SECONDS
+            try:
+                pending_request = await approval_repository.get_or_create_pending(
+                    session_id=request.session_id,
+                    tool_name=_NATIVE_PATCH_CAPABILITY_ID,
+                    risk_level=_NATIVE_APPROVAL_RISK,
+                    summary=(
+                        f"Approve bounded native SWE patch for {FIXTURE_BUG_FILE} "
+                        f"in job {request.job_id}"
+                    ),
+                    fingerprint=approval_fingerprint,
+                    details={
+                        "approval_conversation_id": request.session_id,
+                        "approval_owner_operator_session_id": approval_operator_session,
+                        "approval_context": approval_context,
+                        "approval_expires_at": approval_expires_at,
+                        "expires_at": approval_expires_at,
+                        "action": "apply",
+                        "capability_id": _NATIVE_PATCH_CAPABILITY_ID,
+                    },
+                )
+            except Exception as exc:
+                raise NativeSoftwareEngineeringError("approval_request_creation_failed") from exc
+            pending_approval_id = str(getattr(pending_request, "id", "") or "") or None
+        elif request.patch_approval == "approved":
+            try:
+                consumed = await approval_repository.consume_approved(
+                    session_id=request.session_id,
+                    tool_name=_NATIVE_PATCH_CAPABILITY_ID,
+                    fingerprint=approval_fingerprint,
+                    owner_operator_session_id=approval_operator_session,
+                    approval_id=request.approval_id,
+                )
+            except Exception as exc:
+                raise NativeSoftwareEngineeringError("approval_request_consume_failed") from exc
+            if not isinstance(consumed, dict):
+                raise NativeSoftwareEngineeringError("approval_not_current")
+            approval_binding = consumed
+            if not verify_capability_approval(approval_binding):
+                raise NativeSoftwareEngineeringError("approval_binding_invalid")
+            binding_context = approval_binding.get("approval_context")
+            if (
+                str(approval_binding.get("approval_id") or "") != str(request.approval_id or "")
+                or str(approval_binding.get("status") or "") != "consumed"
+                or str(approval_binding.get("session_id") or "") != request.session_id
+                or str(approval_binding.get("tool_name") or "") != _NATIVE_PATCH_CAPABILITY_ID
+                or str(approval_binding.get("fingerprint") or "") != approval_fingerprint
+                or str(approval_binding.get("owner_operator_session_id") or "") != approval_operator_session
+                or not isinstance(binding_context, Mapping)
+                or dict(binding_context) != approval_context
+            ):
+                raise NativeSoftwareEngineeringError("approval_binding_mismatch")
         await _record_artifact(
             request.job_id,
             job_workspace,
@@ -1386,33 +1656,26 @@ async def run_native_software_engineering_fixture(
             "state": request.patch_approval,
             "required": True,
             "source": (
-                "bound_immutable_approval_receipt"
+                "repository_approval_binding"
                 if request.patch_approval == "approved"
-                else "deterministic_fixture_policy"
+                else "approval_request_repository"
             ),
-            "authority_source": "durable_job_owner",
+            "authority_source": "authenticated_operator_approval",
             "owner_principal_id": request.owner_principal_id,
             "actor_roles_are_metadata_only": True,
-            "approval_receipt": (
-                {
-                    "receipt_id": request.approval_receipt.receipt_id,
-                    "owner_principal_id": request.approval_receipt.owner_principal_id,
-                    "session_id": request.approval_receipt.session_id,
-                    "job_id": request.approval_receipt.job_id,
-                    "preview_digest": request.approval_receipt.preview_digest,
-                    "expires_at": request.approval_receipt.expires_at,
-                    "action": request.approval_receipt.action,
-                    "decision": request.approval_receipt.decision,
-                }
-                if request.approval_receipt is not None
-                else None
+            "approval_id": (
+                str(approval_binding.get("approval_id"))
+                if approval_binding is not None
+                else pending_approval_id
             ),
+            "approval_fingerprint": approval_fingerprint,
+            "approval_context_digest": _digest(approval_context),
             "scope": {
                 "file_path": FIXTURE_BUG_FILE,
                 "before_sha256": preview_payload["before_sha256"],
                 "after_sha256": preview_payload["after_sha256"],
                 "preview_artifact": _relative_workspace_path(job_workspace.artifact_dir / "patch.preview.json"),
-                "preview_digest": _preview_scope_digest(request),
+                "preview_digest": _digest(approval_context["patch"]),
             },
         }
         await _record_artifact(
@@ -1433,10 +1696,17 @@ async def run_native_software_engineering_fixture(
                 "approval_artifact": _relative_workspace_path(job_workspace.artifact_dir / "approval.json"),
                 "state": request.patch_approval,
                 "source": (
-                    "bound_immutable_approval_receipt"
+                    "repository_approval_binding"
                     if request.patch_approval == "approved"
-                    else "deterministic_fixture_policy"
+                    else "approval_request_repository"
                 ),
+                "approval_id": (
+                    str(approval_binding.get("approval_id"))
+                    if approval_binding is not None
+                    else pending_approval_id
+                ),
+                "approval_fingerprint": approval_fingerprint,
+                "approval_context_digest": _digest(approval_context),
             },
             owner=worker_owner,
             fencing_token=fencing_token,
@@ -1465,6 +1735,8 @@ async def run_native_software_engineering_fixture(
                     "provider": None,
                     "workspace": _workspace_receipt(job_workspace),
                     "durable_job": durable_job,
+                    "approval_id": pending_approval_id,
+                    "approval_fingerprint": approval_fingerprint,
                     "original_fixture_immutable": _fixture_tree_digest(prepared.source) == prepared.source_digest,
                     "operator_visible": True,
                 }
@@ -1508,8 +1780,8 @@ async def run_native_software_engineering_fixture(
             }
         )[:24]
         patch_approval_id = (
-            request.approval_receipt.receipt_id
-            if request.approval_receipt is not None
+            str(approval_binding.get("approval_id"))
+            if approval_binding is not None
             else None
         )
         patch_adapter_key = f"native-swe:workspace-patch:{request.job_id}:{patch_target_digest}"
@@ -1621,14 +1893,11 @@ async def run_native_software_engineering_fixture(
         )
         applied_raw = _execute_native_capability(
             "apply_workspace_patch",
-            {
-                "file_path": relative_bug_path,
-                "old_text": FIXTURE_BEFORE_TEXT,
-                "new_text": FIXTURE_AFTER_TEXT,
-                "expected_occurrences": 1,
-                "expected_before_sha256": preview_payload["before_sha256"],
-            },
+            patch_arguments,
             destination=f"workspace:{relative_bug_path}",
+            approval_id=patch_approval_id or "",
+            approval_digest=approval_fingerprint if approval_binding is not None else "",
+            approval_binding=approval_binding,
         )
         applied_payload = json.loads(applied_raw)
         if not isinstance(applied_payload, dict) or applied_payload.get("applied") is not True:
@@ -1682,6 +1951,7 @@ async def run_native_software_engineering_fixture(
         )
 
         if request.cancel_before_test:
+            _mark_native_cleanup_requested(request.job_id, execution_control)
             durable_job = await _cancel_claimed_job(
                 request.job_id,
                 owner=worker_owner,
@@ -1854,7 +2124,11 @@ async def run_native_software_engineering_fixture(
             "original_fixture_immutable": source_immutable,
             "changed_paths": sorted(changed_paths),
             "exact_workspace_scope": exact_scope,
-            "processes": {"git_diff_check": readback_process, "git_status": status_process},
+            "processes": {
+                "test": test_result,
+                "git_diff_check": readback_process,
+                "git_status": status_process,
+            },
             "verified": readback_ok,
         }
         await _record_artifact(
@@ -1931,7 +2205,7 @@ async def run_native_software_engineering_fixture(
         }
     except asyncio.CancelledError:
         if execution_control is not None:
-            execution_control.cancel_event.set()
+            _mark_native_cleanup_requested(request.job_id, execution_control)
         if fencing_token is not None:
             durable_job = await _cancel_claimed_job(
                 request.job_id,
@@ -2011,17 +2285,31 @@ async def run_native_software_engineering_fixture(
 
 async def resume_native_software_engineering_fixture(
     request: NativeSoftwareEngineeringRequest,
-    approval_receipt: NativeSoftwareEngineeringApprovalReceipt,
+    approval_receipt: NativeSoftwareEngineeringApprovalReceipt | None = None,
+    *,
+    approval_id: str | None = None,
 ) -> dict[str, Any]:
-    """Validate a bound approval before any future durable resume integration.
+    """Resume through the repository approval id, never a caller receipt.
 
-    The current fixture runner has no authenticated operator resume endpoint
-    that can atomically consume an existing ApprovalRequest. Consequently this
-    operation deliberately remains blocked after validating the immutable
-    receipt; it cannot turn a caller supplied ``approved`` flag into authority
-    or replay an awaiting job.
+    ``run_native_software_engineering_fixture`` performs the atomic
+    approved-row consumption and host binding immediately before apply. The
+    legacy positional receipt is rejected explicitly so it cannot become an
+    alternate authority path.
     """
-    candidate = replace(request, patch_approval="approved", approval_receipt=approval_receipt)
+    if approval_receipt is not None:
+        return {
+            "status": "blocked",
+            "reason_code": "approval_receipt_unsupported",
+            "evidence_mode": NATIVE_SOFTWARE_ENGINEERING_EVIDENCE_MODE,
+            "provider": None,
+            "operator_visible": True,
+        }
+    candidate = replace(
+        request,
+        patch_approval="approved",
+        approval_receipt=None,
+        approval_id=approval_id or request.approval_id,
+    )
     try:
         _validate_request_identity(candidate)
         _validate_patch_approval(candidate)
@@ -2033,15 +2321,91 @@ async def resume_native_software_engineering_fixture(
             "provider": None,
             "operator_visible": True,
         }
-    return {
-        "status": "blocked",
-        "reason_code": "approval_resume_requires_operator_route",
-        "evidence_mode": NATIVE_SOFTWARE_ENGINEERING_EVIDENCE_MODE,
-        "provider": None,
-        "approval_resume_supported": False,
-        "follow_up": "bind resume to an authenticated ApprovalRequest and atomic durable checkpoint transition",
-        "operator_visible": True,
+    return await run_native_software_engineering_fixture(candidate)
+
+
+def _native_effect_is_unresolved(effect: Any) -> bool:
+    """Mirror the durable unresolved-effect shape for cancellation gating."""
+    if not isinstance(effect, dict):
+        return False
+    if effect.get("reconciled") is True or effect.get("reconciliation_status") in {
+        "reconciled",
+        "resolved",
+    }:
+        return False
+    if str(effect.get("status") or "") in {"unknown", "intent", "dispatched"}:
+        return True
+    details = effect.get("details")
+    if isinstance(details, dict):
+        if details.get("reconciliation_required") or details.get("unknown_cost_outstanding"):
+            return True
+        nested = details.get("receipt")
+        if isinstance(nested, dict) and (
+            nested.get("reconciliation_required") or nested.get("unknown_cost_outstanding")
+        ):
+            return True
+    return False
+
+
+def _native_local_patch_effect(effect: Any, *, job_id: str) -> bool:
+    """Recognize only this job's workspace patch as locally reconcilable."""
+    if not isinstance(effect, dict) or str(effect.get("effect_type") or "") != "workspace_patch":
+        return False
+    token = _job_token(job_id)
+    prefix = f".seraph/native-software-engineering/jobs/{token}/workspace/"
+    target_path = str(effect.get("target_path") or "")
+    if not target_path.startswith(prefix) or target_path == prefix:
+        return False
+    details = effect.get("details")
+    return not isinstance(details, dict) or details.get("effect_boundary") in {
+        None,
+        "apply_workspace_patch",
     }
+
+
+def _native_only_local_patch_pending(job: dict[str, Any] | None) -> bool:
+    """Return true only while the native job's local patch readback is pending.
+
+    Cancellation must continue to preserve ``unknown_external_effect`` for a
+    job with any other unresolved receipt.  The native patch is the one
+    bounded, in-workspace effect whose runner can finish an exact readback
+    without contacting an external system.
+    """
+    if not isinstance(job, dict) or job.get("job_kind") != NATIVE_SOFTWARE_ENGINEERING_JOB_KIND:
+        return False
+    effects = job.get("effects")
+    if not isinstance(effects, list):
+        return False
+    unresolved = [item for item in effects if _native_effect_is_unresolved(item)]
+    return bool(unresolved) and all(
+        _native_local_patch_effect(item, job_id=str(job.get("job_id") or ""))
+        for item in unresolved
+    )
+
+
+async def _wait_for_native_local_patch_readback(
+    job_id: str,
+    current: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Let the in-flight local patch settle before fencing cancellation.
+
+    ``patch.json`` is intentionally written before its durable readback, so a
+    caller can observe the artifact while that readback CAS is still queued.
+    A short bounded wait closes that harmless local race.  If the readback
+    does not settle, the normal durable transition remains fail-closed.
+    """
+    if not _native_only_local_patch_pending(current):
+        return current
+    deadline = asyncio.get_running_loop().time() + _NATIVE_CANCEL_SETTLE_SECONDS
+    while _native_only_local_patch_pending(current):
+        remaining = deadline - asyncio.get_running_loop().time()
+        if remaining <= 0:
+            break
+        await asyncio.sleep(min(_NATIVE_CANCEL_POLL_SECONDS, remaining))
+        current = await durable_job_repository.get_job(job_id)
+        if current is None:
+            break
+    return current
 
 
 async def cancel_native_software_engineering_job(
@@ -2058,19 +2422,50 @@ async def cancel_native_software_engineering_job(
     caller cannot kill another job's test process; a runner that observes the
     event cannot produce a success receipt.
     """
-    current = await durable_job_repository.get_job(job_id)
-    expected_revision = current.get("revision") if isinstance(current, dict) else None
-    result = await durable_job_repository.cancel_job(
-        job_id,
-        owner=owner,
-        fencing_token=fencing_token,
-        expected_revision=(int(expected_revision) if expected_revision is not None else None),
-        reason=reason,
-    )
+    last_lease_error: DurableJobLeaseError | None = None
+    result: dict[str, Any] | None = None
+    for _attempt in range(_NATIVE_CANCEL_CAS_ATTEMPTS):
+        current = await durable_job_repository.get_job(job_id)
+        current = await _wait_for_native_local_patch_readback(job_id, current)
+        expected_revision = current.get("revision") if isinstance(current, dict) else None
+        try:
+            result = await durable_job_repository.cancel_job(
+                job_id,
+                owner=owner,
+                fencing_token=fencing_token,
+                expected_revision=(int(expected_revision) if expected_revision is not None else None),
+                reason=reason,
+            )
+            break
+        except DurableJobLeaseError as exc:
+            last_lease_error = exc
+            latest = await durable_job_repository.get_job(job_id)
+            if not isinstance(latest, dict):
+                raise
+            latest_status = str(latest.get("status") or "")
+            if latest_status in {"cancelled", "unknown_external_effect", "cost_liability", "blocked"}:
+                result = latest
+                break
+            lease = latest.get("lease")
+            if (
+                latest_status != "running"
+                or not isinstance(lease, dict)
+                or lease.get("owner") != owner
+                or int(lease.get("fencing_token") or 0) != int(fencing_token)
+            ):
+                raise
+            # A runner checkpoint may have advanced only the revision. Retry
+            # against the freshly read fenced row; owner and fence never
+            # change as part of this retry.
+            await asyncio.sleep(0)
+    if result is None:
+        if last_lease_error is not None:
+            raise last_lease_error
+        raise DurableJobLeaseError("native cancellation did not produce a durable result")
     if result.get("status") in {"cancelled", "unknown_external_effect", "cost_liability", "blocked"}:
         control = _native_execution_for_job(job_id)
         if control is not None and control.owner == owner and control.fencing_token == fencing_token:
-            control.cancel_event.set()
+            _mark_native_cleanup_requested(job_id, control)
     return result
 
 

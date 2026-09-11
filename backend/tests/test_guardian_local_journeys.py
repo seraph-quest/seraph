@@ -149,8 +149,18 @@ class _LocalWorkflow:
             else ["web_search", "write_file"],
         }
 
-    def __call__(self, *, file_path: str, query: str = "", sanitize_inputs_outputs: bool = False):
+    def __call__(
+        self,
+        *,
+        file_path: str,
+        query: str = "",
+        goal_id: str | None = None,
+        sanitize_inputs_outputs: bool = False,
+        **_kwargs: Any,
+    ):
         del sanitize_inputs_outputs
+        if goal_id is not None:
+            assert goal_id == self.goal_id
         self.calls += 1
         target = self.root / file_path
         target.parent.mkdir(parents=True, exist_ok=True)

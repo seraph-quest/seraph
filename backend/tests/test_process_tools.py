@@ -102,6 +102,113 @@ def test_process_runtime_allows_git_identity_config_but_not_arbitrary_config(tmp
         )
 
 
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["diff", "--no-index", "/etc/hostname", "/etc/hosts"],
+        ["diff", "--no-index", "../outside", "inside"],
+        ["diff", "--no-index", "--", "/etc/hosts", "inside"],
+        ["-C/", "status"],
+    ],
+)
+def test_process_runtime_rejects_git_external_path_operands_before_child(
+    tmp_path,
+    monkeypatch,
+    args,
+):
+    monkeypatch.setattr(settings, "workspace_dir", str(tmp_path))
+    monkeypatch.setattr(
+        process_tools_module.subprocess,
+        "Popen",
+        lambda *args, **kwargs: pytest.fail("external Git path reached child process"),
+    )
+
+    with pytest.raises(ValueError, match="git path argument"):
+        process_runtime_manager.run_command(command="git", args_json=json.dumps(args))
+
+
+def test_process_runtime_allows_git_relative_no_index_paths(tmp_path, monkeypatch):
+    monkeypatch.setattr(settings, "workspace_dir", str(tmp_path))
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    (repository / "left.txt").write_text("left\n", encoding="utf-8")
+    (repository / "right.txt").write_text("right\n", encoding="utf-8")
+
+    result = process_runtime_manager.run_command(
+        command="git",
+        args_json=json.dumps(["diff", "--no-index", "left.txt", "right.txt"]),
+        cwd="repository",
+    )
+
+    assert result["exit_code"] == 1
+    assert "left.txt" in result["stdout"]
+    assert "right.txt" in result["stdout"]
+
+
+@pytest.mark.parametrize(
+    ("contents", "nul_mode"),
+    [(b"safe.txt\n", False), (b"safe.txt\x00", True)],
+)
+def test_process_runtime_validates_git_pathspec_file_entries_and_preserves_safe_paths(
+    tmp_path,
+    monkeypatch,
+    contents,
+    nul_mode,
+):
+    monkeypatch.setattr(settings, "workspace_dir", str(tmp_path))
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    (repository / "safe.txt").write_text("safe\n", encoding="utf-8")
+    (repository / "pathspecs").write_bytes(contents)
+    process_tools_module.subprocess.run(
+        ["git", "init", "--initial-branch", "main"],
+        cwd=repository,
+        check=True,
+        capture_output=True,
+    )
+
+    args = ["add", "--pathspec-from-file", "pathspecs"]
+    if nul_mode:
+        args.append("--pathspec-file-nul")
+    result = process_runtime_manager.run_command(
+        command="git",
+        args_json=json.dumps(args),
+        cwd="repository",
+    )
+
+    assert result["exit_code"] == 0
+    assert (repository / ".git" / "index").is_file()
+
+
+@pytest.mark.parametrize(
+    "entry",
+    ["../../outside.txt", "/etc/hosts", ".env"],
+)
+def test_process_runtime_rejects_git_pathspec_file_traversal_absolute_and_secret_entries(
+    tmp_path,
+    monkeypatch,
+    entry,
+):
+    monkeypatch.setattr(settings, "workspace_dir", str(tmp_path))
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    (repository / "pathspecs").write_text(entry + "\n", encoding="utf-8")
+    if entry == ".env":
+        (repository / entry).write_text("SERAPH_SECRET=blocked\n", encoding="utf-8")
+
+    monkeypatch.setattr(
+        process_tools_module.subprocess,
+        "Popen",
+        lambda *args, **kwargs: pytest.fail("pathspec file policy reached child process"),
+    )
+    with pytest.raises(ValueError, match="pathspec"):
+        process_runtime_manager.run_command(
+            command="git",
+            args_json=json.dumps(["add", "--pathspec-from-file", "pathspecs"]),
+            cwd="repository",
+        )
+
+
 def test_read_file_bounds_bytes_before_decoding(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "workspace_dir", str(tmp_path))
     path = tmp_path / "large-output.txt"

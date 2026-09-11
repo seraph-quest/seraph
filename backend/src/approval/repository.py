@@ -710,15 +710,21 @@ class ApprovalRepository:
         owner_operator_session_id: str | None = None,
         owner_principal_id: str | None = None,
         approval_binding: Mapping[str, Any] | None = None,
+        approval_id: str | None = None,
     ) -> dict[str, Any] | bool | None:
         async with get_session() as db:
-            result = await db.execute(
+            query = (
                 select(ApprovalRequest)
                 .where(ApprovalRequest.session_id == session_id)
                 .where(ApprovalRequest.tool_name == tool_name)
                 .where(ApprovalRequest.fingerprint == fingerprint)
                 .where(ApprovalRequest.status == "approved")
             )
+            if approval_id is not None:
+                query = query.where(ApprovalRequest.id == approval_id)
+            else:
+                query = query.order_by(col(ApprovalRequest.created_at).desc())
+            result = await db.execute(query)
             requests = _select_exact_approval_rows(
                 _approval_rows(result),
                 session_id=session_id,

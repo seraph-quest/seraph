@@ -143,6 +143,8 @@ def _goal(goal_id: str, revision: int, target: dict) -> Goal:
         title="Research goal",
         revision=revision,
         proactive_enabled=True,
+        owner_principal_id="operator:test-bypass",
+        owner_session_id="test-auth-bypass",
         success_criterion_json=_criterion(target).model_dump_json(),
         created_at=datetime.now(timezone.utc),
         updated_at=datetime.now(timezone.utc),

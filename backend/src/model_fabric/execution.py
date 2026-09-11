@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 from collections.abc import AsyncIterator, Awaitable, Callable
 from threading import Thread
 from typing import Any, Protocol, TypeVar
@@ -21,7 +22,9 @@ from .remote_inference_admission import (
     RemoteInferenceAdmissionError as GpuAdmissionError,
     RemoteInferenceAdmissionRequest as GpuAdmissionRequest,
     current_remote_inference_receipt_binding,
+    prepare_bound_remote_inference,
     remote_inference_admission_broker as gpu_admission_broker,
+    stable_remote_inference_operation_id,
 )
 from .selector import select_route
 
@@ -77,10 +80,11 @@ def _run_awaitable_sync(awaitable: Awaitable[_SyncResult]) -> _SyncResult:
 
     result: list[_SyncResult] = []
     error: list[BaseException] = []
+    caller_context = contextvars.copy_context()
 
     def runner() -> None:
         try:
-            result.append(asyncio.run(awaitable))
+            result.append(caller_context.run(asyncio.run, awaitable))
         except BaseException as exc:  # pragma: no cover - defensive thread bridge
             error.append(exc)
 
@@ -174,8 +178,16 @@ async def execute_streaming(
         emitted = False
         admission_request = GpuAdmissionRequest.from_inference_context(
             attempt_context,
-            operation_id=decision.attempt_id or f"{attempt_context.request_id}:{candidate.profile.id}",
+            operation_id=stable_remote_inference_operation_id(
+                attempt_context,
+                profile_id=candidate.profile.id,
+                fallback=decision.attempt_id or f"{attempt_context.request_id}:{candidate.profile.id}",
+            ),
             uncertain_on_error=(candidate.profile.provider_kind == "openrouter"),
+        )
+        await prepare_bound_remote_inference(
+            admission_request,
+            profile_id=decision.selected.profile.id,
         )
         admission_callback_started = False
 
@@ -340,8 +352,16 @@ async def run_preflighted_adapter(
         raise NoCompliantModelRouteError()
     admission_request = GpuAdmissionRequest.from_inference_context(
         context,
-        operation_id=decision.attempt_id or f"{context.request_id}:{decision.selected.profile.id}",
+        operation_id=stable_remote_inference_operation_id(
+            context,
+            profile_id=decision.selected.profile.id,
+            fallback=decision.attempt_id or f"{context.request_id}:{decision.selected.profile.id}",
+        ),
         uncertain_on_error=(decision.selected.profile.provider_kind == "openrouter"),
+    )
+    await prepare_bound_remote_inference(
+        admission_request,
+        profile_id=decision.selected.profile.id,
     )
     admission_callback_started = False
 
@@ -440,8 +460,12 @@ def execute_sync_adapter(
     )
     admission_request = GpuAdmissionRequest.from_inference_context(
         context,
-        operation_id=decision.attempt_id
-        or f"{context.request_id}:{decision.selected.profile.id}",
+        operation_id=stable_remote_inference_operation_id(
+            context,
+            profile_id=decision.selected.profile.id,
+            fallback=decision.attempt_id
+            or f"{context.request_id}:{decision.selected.profile.id}",
+        ),
         uncertain_on_error=(decision.selected.profile.provider_kind == "openrouter"),
     )
     callback_started = False
@@ -461,6 +485,13 @@ def execute_sync_adapter(
                 readback=readback,
             )
         )
+
+    _run_awaitable_sync(
+        prepare_bound_remote_inference(
+            admission_request,
+            profile_id=decision.selected.profile.id,
+        )
+    )
 
     def admitted_adapter() -> _SyncResult:
         nonlocal callback_started, attempt_completed
@@ -490,6 +521,11 @@ def execute_sync_adapter(
     try:
         result = gpu_admission_broker.execute_sync(admission_request, admitted_adapter, now=now)
     except GpuAdmissionError as error:
+        # Persist the broker's terminal/uncertain result while the durable
+        # intent is still the authoritative operation record. Route-receipt
+        # storage is a separate projection and may degrade; it must not leave
+        # a successfully admitted remote operation without a durable outcome.
+        persist_admission_receipt(getattr(error, "receipt", None), readback=True)
         if not callback_started:
             persistence = _run_awaitable_sync(
                 session.finalize_denied(
@@ -511,9 +547,12 @@ def execute_sync_adapter(
                 )
             )
             _require_persisted_receipt(persistence)
-        persist_admission_receipt(getattr(error, "receipt", None), readback=True)
         raise
     except BaseException:
+        # The provider callback may have crossed the remote boundary before a
+        # non-admission exception escaped. Record that broker outcome before
+        # attempting the route projection, which can independently degrade.
+        persist_admission_receipt(readback=True)
         if callback_started and attempt_completed:
             persistence = _run_awaitable_sync(session.finalize(outcome="failed"))
             _require_persisted_receipt(persistence)
@@ -525,10 +564,12 @@ def execute_sync_adapter(
                 )
             )
             _require_persisted_receipt(persistence)
-        persist_admission_receipt(readback=True)
         raise
 
+    # The remote terminal settlement is the durable source of truth for the
+    # admitted provider call. Finalizing the model-fabric route receipt after
+    # it prevents a degraded route projection from stranding the intent.
+    persist_admission_receipt(readback=True)
     persistence = _run_awaitable_sync(session.finalize(outcome="succeeded"))
     _require_persisted_receipt(persistence)
-    persist_admission_receipt(readback=True)
     return result

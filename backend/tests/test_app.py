@@ -181,6 +181,15 @@ async def test_runtime_status_exposes_release_and_model(client):
     assert "local_operators" not in payload
     assert any(item["id"] == "openrouter" for item in payload["provider_profiles"])
     assert all("api_key" not in item for item in payload["provider_profiles"])
+    admission = payload["remote_inference_admission"]
+    assert admission["verification"] == {
+        "contract": "contract_tested",
+        "configuration": "configuration_required",
+        "provider": "live_unverified",
+    }
+    assert admission["serial_remote_inference"] is True
+    assert admission["max_active"] == 1
+    assert admission["capacity"]["max_queued"] == 64
 
 
 @pytest.mark.asyncio

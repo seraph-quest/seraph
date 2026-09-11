@@ -2,6 +2,7 @@ from dataclasses import replace
 from copy import deepcopy
 from pathlib import Path
 import shutil
+import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -742,6 +743,8 @@ async def test_extension_lifecycle_approval_and_failure_receipts_redact_private_
     assert private_path not in repr(pending_payload)
     assert "package_path" not in pending_payload["details"]
     assert pending_payload["details"]["package_path_hash"] == _content_hash(private_path)
+    assert pending_payload["details"]["approval_expires_at"] == pending_payload["details"]["expires_at"]
+    assert 0 < pending_payload["details"]["expires_at"] - time.time() <= 5 * 60
     assert private_path not in repr(approval_error.value.detail)
 
     with patch("src.api.extensions.log_integration_event", new_callable=AsyncMock) as audit:

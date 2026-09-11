@@ -51,7 +51,7 @@ CANONICAL_WORKFLOW_STEPS = (
         "tool": "write_file",
         "arguments": {
             "file_path": "{{ file_path }}",
-            "content": 'Web brief for "{{ query }}"\n\n{{ steps.search.result }}\n',
+            "content": 'Goal ID: {{ goal_id }}\n\nWeb brief for "{{ query }}"\n\n{{ steps.search.result }}\n',
         },
     },
 )
@@ -194,7 +194,13 @@ class WebBriefToFileAdapter(GoalSnapshotToFileAdapter):
         return ARTIFACT_TYPE
 
     def _workflow_inputs(self, path: str) -> dict[str, Any]:
-        return {"query": self.request.query, "file_path": path}
+        return {
+            "query": self.request.query,
+            "file_path": path,
+            # The workflow writer must persist this identity so the shared
+            # readback verifier can prove the artifact belongs to this goal.
+            "goal_id": self.request.goal_id,
+        }
 
     def _job_identifier(self, candidate: GoalCandidateDecision) -> str:
         return "job_web_brief_" + _safe_digest(
@@ -212,8 +218,11 @@ class WebBriefToFileAdapter(GoalSnapshotToFileAdapter):
     def _success_reason(self) -> str:
         return "web_brief_workflow_executed_and_source_readback_verified"
 
-    def _readback(self, path: str, _goal_id: str) -> _Readback:
-        readback = super()._readback(path, self.request.query)
+    def _readback(self, path: str, goal_id: str) -> _Readback:
+        # The base verifier's identity argument is the canonical goal ID.  The
+        # query remains an input/source predicate and must never stand in for
+        # the goal fence.
+        readback = super()._readback(path, goal_id)
         if not readback.goal_id_read_back or readback.content is None:
             return readback
         text = readback.content.decode("utf-8", errors="replace")

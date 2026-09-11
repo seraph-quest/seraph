@@ -79,14 +79,26 @@ async def login(payload: LoginRequest, response: Response, request: Request):
         raise HTTPException(status_code=401, detail={"code": "invalid_credentials"})
     token, operator = await create_session()
     _set_cookie(response, token)
-    return {"authenticated": True, "principal_id": operator.principal.principal_id, "idle_expires_at": operator.idle_expires_at, "absolute_expires_at": operator.absolute_expires_at}
+    return {
+        "authenticated": True,
+        "principal_id": operator.principal.principal_id,
+        "session_id": operator.session_id,
+        "idle_expires_at": operator.idle_expires_at,
+        "absolute_expires_at": operator.absolute_expires_at,
+    }
 
 
 @router.get("/session")
 async def session(request: Request):
     _require_configured()
     operator = request.state.operator
-    return {"authenticated": True, "principal_id": operator.principal.principal_id, "idle_expires_at": operator.idle_expires_at, "absolute_expires_at": operator.absolute_expires_at}
+    return {
+        "authenticated": True,
+        "principal_id": operator.principal.principal_id,
+        "session_id": operator.session_id,
+        "idle_expires_at": operator.idle_expires_at,
+        "absolute_expires_at": operator.absolute_expires_at,
+    }
 
 
 @router.post("/refresh")
@@ -95,7 +107,13 @@ async def refresh(request: Request, response: Response):
     operator = request.state.operator
     token, replacement = await create_session(replace_session_id=operator.session_id)
     _set_cookie(response, token)
-    return {"authenticated": True, "principal_id": replacement.principal.principal_id, "idle_expires_at": replacement.idle_expires_at, "absolute_expires_at": replacement.absolute_expires_at}
+    return {
+        "authenticated": True,
+        "principal_id": replacement.principal.principal_id,
+        "session_id": replacement.session_id,
+        "idle_expires_at": replacement.idle_expires_at,
+        "absolute_expires_at": replacement.absolute_expires_at,
+    }
 
 
 @router.post("/logout", status_code=204)

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
+from dataclasses import replace
 from datetime import datetime, timezone
 import hashlib
 import json
@@ -17,7 +19,12 @@ from smolagents import Tool
 from sqlmodel import col, select
 
 from src.audit.formatting import format_tool_call_summary, redact_for_audit
-from src.approval.runtime import get_current_session_id, get_current_trust_principal
+from src.approval.runtime import (
+    get_current_session_id,
+    get_current_trust_principal,
+    reset_runtime_trust_principal,
+    set_runtime_trust_principal,
+)
 from src.db.engine import get_session
 from src.db.models import AuditEvent
 from src.extensions.governance import build_governance_status
@@ -29,7 +36,14 @@ from src.approval.repository import fingerprint_tool_call
 from src.native_tools.registry import TOOL_METADATA, canonical_tool_name
 from src.tools.policy import get_tool_source_context, tool_accepts_secret_refs
 from src.workflows.loader import Workflow, scan_workflow_paths
-from src.workflows.durable_state import workflow_state_repository
+from src.workflows.durable_state import WorkflowStateRepository, workflow_state_repository
+from src.workflows.job_runtime import (
+    DurableJobIdentity,
+    DurableJobRepository,
+    DurableJobSpec,
+    durable_job_repository,
+    durable_lease_id,
+)
 from src.workflows.run_identity import build_workflow_run_identity, parse_workflow_run_identity
 
 logger = logging.getLogger(__name__)
@@ -71,6 +85,11 @@ _WORKFLOW_CONTROL_INPUTS: dict[str, dict[str, Any]] = {
         "description": "Durable lease id expected for the parent workflow checkpoint.",
         "nullable": True,
     },
+    "_seraph_parent_fencing_token": {
+        "type": "integer",
+        "description": "Durable fencing token expected for the parent workflow checkpoint.",
+        "nullable": True,
+    },
 }
 _WORKFLOW_CONTROL_FIELD_NAMES = set(_WORKFLOW_CONTROL_INPUTS)
 
@@ -82,16 +101,22 @@ def _run_async(coro):
         return asyncio.run(coro)
 
     result: dict[str, Any] = {}
+    caller_context = contextvars.copy_context()
 
     def runner() -> None:
         try:
-            result["value"] = asyncio.run(coro)
+            result["value"] = caller_context.run(asyncio.run, coro)
         except BaseException as exc:
             result["error"] = exc
 
     thread = threading.Thread(target=runner, daemon=True)
     thread.start()
-    thread.join()
+    # A synchronous tool can be called from an async request loop.  Keep the
+    # compatibility bridge bounded so a stuck DB operation cannot pin the
+    # request thread forever or silently leave a second event loop behind.
+    thread.join(timeout=30.0)
+    if thread.is_alive():
+        raise RuntimeError("durable workflow async bridge timed out after 30 seconds")
     if "error" in result:
         raise result["error"]
     if "value" in result:
@@ -102,24 +127,74 @@ def _run_async(coro):
 def _workflow_durable_owner_fields() -> dict[str, str]:
     """Carry the authenticated execution principal into durable workflow state."""
     principal = get_current_trust_principal()
-    if principal is None or not principal.authenticated or principal.revoked:
+    if principal is None:
         return {}
+    current_session_id = str(get_current_session_id() or "").strip()
+    principal_session_id = str(getattr(principal, "session_id", "") or "").strip()
+    if (
+        not principal.authenticated
+        or principal.revoked
+        or not current_session_id
+        or not principal_session_id
+        or principal_session_id != current_session_id
+    ):
+        raise DurableWorkflowStateUnavailable(
+            "canonical workflow admission requires a current session-bound principal"
+        )
     principal_id = str(principal.principal_id or "").strip()
     principal_type = getattr(principal.principal_type, "value", principal.principal_type)
     if not principal_id:
-        return {}
+        raise DurableWorkflowStateUnavailable(
+            "canonical workflow admission requires a non-empty principal identity"
+        )
     if str(principal_type or "").strip().lower() == "operator":
         return {
             "owner_kind": "user",
             "owner_principal_id": principal_id,
+            "conversation_id": current_session_id,
+            "operator_session_id": str(
+                getattr(principal, "operator_session_id", "") or ""
+            ).strip(),
         }
     if str(principal_type or "").strip().lower() == "service":
         return {
             "owner_kind": "service",
             "owner_principal_id": principal_id,
             "service_id": principal_id,
+            "conversation_id": current_session_id,
+            "operator_session_id": str(
+                getattr(principal, "operator_session_id", "") or ""
+            ).strip(),
         }
-    return {}
+    raise DurableWorkflowStateUnavailable(
+        "canonical workflow admission principal type is unsupported"
+    )
+
+
+def _bind_workflow_step_trust_principal(run_identity: str):
+    """Bind the current durable run only while a workflow step executes.
+
+    Approval-bearing step tools read the runtime principal, so their approval
+    request must carry the exact run identity that will consume the decision.
+    A pre-existing different job identity indicates a nested or stale runtime
+    scope and must fail closed rather than being overwritten.
+    """
+    canonical_run_identity = str(run_identity or "").strip()
+    if not canonical_run_identity:
+        raise DurableWorkflowStateUnavailable(
+            "workflow step authority requires a non-empty durable run identity"
+        )
+    principal = get_current_trust_principal()
+    if principal is None:
+        return None
+    existing_job_id = str(getattr(principal, "job_id", "") or "").strip()
+    if existing_job_id and existing_job_id != canonical_run_identity:
+        raise DurableWorkflowStateUnavailable(
+            "workflow step authority job identity conflicts with the durable run"
+        )
+    return set_runtime_trust_principal(
+        replace(principal, job_id=canonical_run_identity)
+    )
 
 
 def _workflow_recovery_owner(principal_id: str, session_id: str) -> str:
@@ -127,6 +202,17 @@ def _workflow_recovery_owner(principal_id: str, session_id: str) -> str:
     principal_digest = hashlib.sha256(principal_id.encode("utf-8", errors="replace")).hexdigest()[:16]
     session_digest = hashlib.sha256(session_id.encode("utf-8", errors="replace")).hexdigest()[:16]
     return f"operator:{principal_digest}:{session_digest}"
+
+
+def _workflow_canonical_lease_owner(run_identity: str) -> str:
+    """Return the stable runner lease owner for a typed workflow row.
+
+    The API recovery path reads the same canonical row as the workflow runner.
+    Keeping this derivation in one helper prevents recovery from accidentally
+    substituting its legacy operator lease label for the runner fence.
+    """
+    digest = hashlib.sha256(str(run_identity).encode("utf-8", errors="replace")).hexdigest()[:20]
+    return f"workflow-runner:{digest}"
 
 
 def _workflow_parent_v2_state(details: dict[str, Any]) -> tuple[int | None, dict[str, Any]]:
@@ -220,7 +306,17 @@ def _assert_workflow_parent_recovery_authority(
         expires = expires.replace(tzinfo=timezone.utc)
     if not lease_id or expires <= datetime.now(timezone.utc):
         raise RuntimeError("Workflow checkpoint recovery parent lease is unavailable")
-    if lease_owner != _workflow_recovery_owner(str(principal.principal_id), str(current_session_id)):
+    record_schema_version = 0
+    try:
+        record_schema_version = int(details.get("record_schema_version") or 0)
+    except (TypeError, ValueError):
+        raise RuntimeError("Workflow checkpoint recovery schema version is invalid")
+    expected_lease_owner = (
+        _workflow_canonical_lease_owner(parent_run_identity)
+        if record_schema_version >= 2
+        else _workflow_recovery_owner(str(principal.principal_id), str(current_session_id))
+    )
+    if lease_owner != expected_lease_owner:
         raise RuntimeError("Workflow checkpoint recovery parent lease owner is invalid")
     if not expected_lease_id or expected_lease_id != lease_id:
         raise RuntimeError("Workflow checkpoint recovery parent lease does not match the requested lease")
@@ -232,6 +328,25 @@ def _assert_workflow_parent_recovery_authority(
         raise RuntimeError("Workflow checkpoint recovery parent lease revision is invalid") from exc
     if lease_revision != revision:
         raise RuntimeError("Workflow checkpoint recovery parent lease revision is stale")
+    if record_schema_version >= 2:
+        try:
+            persisted_fence = int(lease.get("fencing_token"))
+        except (TypeError, ValueError):
+            persisted_fence = None
+        if persisted_fence is None or persisted_fence <= 0:
+            raise RuntimeError("Workflow checkpoint recovery parent fence is invalid")
+        try:
+            expected_fence = int(control_inputs["_seraph_parent_fencing_token"])
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError("Workflow checkpoint recovery parent fence is required") from exc
+        if expected_fence != persisted_fence:
+            raise RuntimeError("Workflow checkpoint recovery parent fence is stale")
+        try:
+            derived_lease_id = durable_lease_id(parent_run_identity, persisted_fence)
+        except ValueError as exc:
+            raise RuntimeError("Workflow checkpoint recovery parent lease identity is invalid") from exc
+        if lease_id != derived_lease_id or expected_lease_id != derived_lease_id:
+            raise RuntimeError("Workflow checkpoint recovery parent lease identity is invalid")
 
 
 def _run_durable_state_write(coro) -> Any | None:
@@ -253,17 +368,32 @@ def _is_missing_durable_state_schema_error(exc: Exception) -> bool:
 class DurableWorkflowStateUnavailable(RuntimeError):
     """Raised when a workflow cannot safely continue without durable state."""
 
+    def __init__(self, message: str, *, phase: str | None = None) -> None:
+        super().__init__(message)
+        self.phase = phase
+        # A write failure after an effect boundary is an uncertain execution,
+        # while a pre-admission failure is simply unavailable.  Callers use
+        # these stable fields for operator receipts without parsing text.
+        self.workflow_status = "degraded"
+        self.external_effect_status = "unknown_external_effect"
 
-def _run_required_durable_state_write(coro, *, phase: str) -> Any:
+
+def _run_required_durable_state_write(
+    coro,
+    *,
+    phase: str,
+    allow_missing_schema: bool = False,
+) -> Any:
     try:
         return _run_async(coro)
     except Exception as exc:
-        if _is_missing_durable_state_schema_error(exc):
+        if allow_missing_schema and _is_missing_durable_state_schema_error(exc):
             logger.warning("Durable workflow state required write skipped during %s: %s", phase, exc)
             return None
         logger.warning("Durable workflow state required write failed during %s: %s", phase, exc)
         raise DurableWorkflowStateUnavailable(
-            f"Durable workflow state unavailable before {phase}; refusing unsafe workflow continuation."
+            f"Durable workflow state unavailable before {phase}; refusing unsafe workflow continuation.",
+            phase=phase,
         ) from exc
 
 
@@ -788,6 +918,7 @@ def _record_delegated_artifact_reviews(
     approval_context: dict[str, Any],
     artifact_paths: list[str],
     durable_audit_receipt_id: str,
+    state_repository: Any | None = None,
 ) -> None:
     delegated_specialists = [
         str(item)
@@ -801,7 +932,8 @@ def _record_delegated_artifact_reviews(
     ]
     if not artifact_paths or not (delegated_specialists or delegated_tool_names):
         return
-    if not hasattr(workflow_state_repository, "record_artifact_review"):
+    state_repository = state_repository or workflow_state_repository
+    if not hasattr(state_repository, "record_artifact_review"):
         return
     reviewer = delegated_specialists[0] if delegated_specialists else None
     metadata = _delegated_artifact_review_metadata(
@@ -809,7 +941,7 @@ def _record_delegated_artifact_reviews(
         durable_audit_receipt_id=durable_audit_receipt_id,
     )
     for artifact_path in sorted({path for path in artifact_paths if isinstance(path, str) and path.strip()}):
-        _run_durable_state_write(workflow_state_repository.record_artifact_review(
+        review_result = _run_workflow_state_write(state_repository, state_repository.record_artifact_review(
             run_identity=run_identity,
             root_run_identity=root_run_identity or run_identity,
             parent_run_identity=parent_run_identity,
@@ -819,7 +951,676 @@ def _record_delegated_artifact_reviews(
             review_state="pending_operator_review",
             reviewer=reviewer,
             metadata=metadata,
-        ))
+        ), phase="artifact_review")
+        receipt = review_result.get("receipt") if isinstance(review_result, dict) else None
+        if isinstance(receipt, dict) and receipt.get("status") == "rejected":
+            logger.warning(
+                "Delegated artifact review was explicitly rejected: %s",
+                receipt.get("reason") or "unknown_reason",
+            )
+
+
+def _workflow_payload_digest(value: Any) -> str:
+    """Return a stable digest for a workflow step or output target."""
+    encoded = json.dumps(value, ensure_ascii=True, sort_keys=True, default=str)
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def _workflow_contract_fields(
+    audit_arguments: dict[str, Any],
+    approval_context: dict[str, Any],
+) -> dict[str, Any]:
+    """Project optional goal/plan and execution budget fields into admission."""
+    def pick(name: str) -> Any:
+        value = audit_arguments.get(name)
+        return value if value is not None else approval_context.get(name)
+
+    def optional_text(name: str) -> str | None:
+        value = pick(name)
+        if value is None or not str(value).strip():
+            return None
+        normalized = str(value).strip()
+        if len(normalized) > 512 or any(ord(char) < 32 for char in normalized):
+            raise DurableWorkflowStateUnavailable(f"durable workflow {name} is malformed")
+        return normalized
+
+    def optional_int(name: str, default: int | None = None) -> int | None:
+        value = pick(name)
+        if value is None or value == "":
+            return default
+        if isinstance(value, bool):
+            raise DurableWorkflowStateUnavailable(f"durable workflow {name} is malformed")
+        try:
+            normalized = int(value)
+        except (TypeError, ValueError) as exc:
+            raise DurableWorkflowStateUnavailable(f"durable workflow {name} is malformed") from exc
+        if normalized < 0:
+            raise DurableWorkflowStateUnavailable(f"durable workflow {name} is malformed")
+        return normalized
+
+    def identity_revision(name: str) -> int | None:
+        value = pick(name)
+        if value is None or value == "":
+            return None
+        if type(value) is not int or value <= 0:
+            raise DurableWorkflowStateUnavailable(f"durable workflow {name} is malformed")
+        return value
+
+    raw_dependencies = pick("dependencies")
+    if raw_dependencies is None:
+        dependencies: tuple[str, ...] = ()
+    elif isinstance(raw_dependencies, str):
+        dependencies = (optional_text("dependencies") or "",)
+    elif isinstance(raw_dependencies, (list, tuple, set)):
+        dependencies = tuple(
+            sorted(
+                {
+                    normalized
+                    for item in raw_dependencies
+                    if (normalized := str(item).strip())
+                }
+            )
+        )
+    else:
+        raise DurableWorkflowStateUnavailable("durable workflow dependencies are malformed")
+    goal_id = optional_text("goal_id")
+    criterion_id = optional_text("criterion_id")
+    goal_revision = identity_revision("goal_revision")
+    plan_revision = identity_revision("plan_revision")
+    if goal_id is not None and (
+        criterion_id is None
+        or goal_revision is None
+        or plan_revision is None
+    ):
+        raise DurableWorkflowStateUnavailable(
+            "durable workflow canonical goal identity is incomplete"
+        )
+    if goal_id is None and any(
+        value is not None for value in (criterion_id, goal_revision, plan_revision)
+    ):
+        raise DurableWorkflowStateUnavailable(
+            "durable workflow canonical goal identity is incomplete"
+        )
+    return {
+        "goal_id": goal_id,
+        "criterion_id": criterion_id,
+        "goal_revision": goal_revision,
+        "plan_revision": plan_revision,
+        "candidate_id": optional_text("candidate_id"),
+        "dependencies": dependencies,
+        "deadline_at": pick("deadline_at"),
+        "priority": optional_int("priority", 50),
+        "max_attempts": optional_int("max_attempts", 1),
+        "budget_microusd": optional_int("budget_microusd"),
+    }
+
+
+class _CanonicalWorkflowStateWriter:
+    """Adapt the workflow manager's evidence calls to the typed job record.
+
+    ``WorkflowStateRepository`` remains available for historical, untyped
+    projections and test doubles. Once a workflow has an authenticated owner,
+    this adapter is the only writer used by the manager. It records step
+    intent/readback and checkpoint evidence through ``DurableJobRepository``;
+    it does not create a second lifecycle or queue.
+    """
+
+    def __init__(
+        self,
+        repository: DurableJobRepository,
+        *,
+        job: dict[str, Any],
+        owner: str,
+        fencing_token: int,
+        checkpoint_context_allowed: bool,
+    ) -> None:
+        self.repository = repository
+        self.job_id = str(job["job_id"])
+        self.owner = owner
+        self.fencing_token = int(fencing_token)
+        self.revision = int(job.get("revision") or 0)
+        self.checkpoint_context_allowed = checkpoint_context_allowed
+        persisted_owner = job.get("owner") if isinstance(job.get("owner"), dict) else {}
+        self.owner_kind = str(persisted_owner.get("kind") or "")
+        self.owner_principal_id = str(persisted_owner.get("principal_id") or "")
+        self.service_id = str(persisted_owner.get("service_id") or "") or None
+        self.session_id = str(job.get("session_id") or "") or None
+
+    def _assert_runtime_owner(self) -> None:
+        """Recheck the ambient principal before every canonical write."""
+        fields = _workflow_durable_owner_fields()
+        if (
+            fields.get("owner_kind") != self.owner_kind
+            or fields.get("owner_principal_id") != self.owner_principal_id
+            or (fields.get("service_id") or None) != self.service_id
+            or str(get_current_session_id() or "") != str(self.session_id or "")
+        ):
+            raise DurableWorkflowStateUnavailable(
+                "canonical workflow write requires the admitted authenticated owner and session"
+            )
+
+    def _sync(self, result: dict[str, Any]) -> dict[str, Any]:
+        lease = result.get("lease") if isinstance(result, dict) else None
+        if isinstance(lease, dict) and lease.get("fencing_token") is not None:
+            self.fencing_token = int(lease["fencing_token"])
+        if isinstance(result, dict) and result.get("revision") is not None:
+            self.revision = int(result["revision"])
+        return result
+
+    async def create_run(self, **_kwargs: Any) -> dict[str, Any]:
+        """Return the already-admitted row without a legacy write."""
+        self._assert_runtime_owner()
+        current = await self.repository.get_job(self.job_id)
+        if current is None:
+            raise RuntimeError("canonical workflow durable job disappeared before execution")
+        return self._sync(current)
+
+    async def get_checkpoint_payload(self, run_identity: str) -> dict[str, Any] | None:
+        self._assert_runtime_owner()
+        current = await self.repository.get_job(run_identity)
+        if current is None:
+            return None
+        checkpoint_context: dict[str, Any] = {}
+        step_records: list[dict[str, Any]] = []
+        for receipt in current.get("checkpoints", []):
+            if not isinstance(receipt, dict):
+                continue
+            payload = receipt.get("payload")
+            if not isinstance(payload, dict):
+                continue
+            step_id = str(payload.get("step_id") or "").strip()
+            state = payload.get("state")
+            if not step_id or not isinstance(state, dict):
+                continue
+            checkpoint_context[step_id] = state
+            step_records.append({
+                "id": step_id,
+                "index": int(payload.get("step_index") or len(step_records) + 1),
+                "tool": str(payload.get("tool") or "unknown"),
+                "status": str(payload.get("status") or "unknown"),
+                "arguments": state.get("arguments", {}),
+                "result": state.get("result"),
+                "artifact_paths": list(payload.get("artifact_paths") or []),
+                "result_summary": payload.get("result_summary"),
+                "error_kind": payload.get("error_kind"),
+                "error_summary": payload.get("error_summary"),
+            })
+        if not checkpoint_context:
+            return None
+        owner = current.get("owner") if isinstance(current.get("owner"), dict) else {}
+        authority = current.get("declared_authority")
+        lease = current.get("lease") if isinstance(current.get("lease"), dict) else {}
+        try:
+            current_fence = int(lease.get("fencing_token") or 0)
+            lease = {
+                **lease,
+                "lease_id": durable_lease_id(run_identity, current_fence),
+                "revision": int(current.get("revision") or 0),
+            }
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise RuntimeError("canonical workflow checkpoint lease metadata is malformed") from exc
+        return {
+            "record_schema_version": int(current.get("record_schema_version") or 0),
+            "job_id": current.get("job_id") or run_identity,
+            "workflow_name": current.get("workflow_name"),
+            "session_id": current.get("session_id"),
+            "owner_kind": owner.get("kind"),
+            "owner_principal_id": owner.get("principal_id"),
+            "service_id": owner.get("service_id"),
+            "parent_job_id": current.get("parent_job_id"),
+            "parent_fencing_token": current.get("parent_fencing_token"),
+            "revision": current.get("revision"),
+            "lease": lease,
+            "durable_run_identity": run_identity,
+            "state_source": "durable_workflow_state",
+            "approval_context": authority if isinstance(authority, dict) else {},
+            "checkpoint_context": checkpoint_context,
+            "step_records": step_records,
+            "artifact_paths": [
+                item.get("file_path")
+                for item in current.get("artifacts", [])
+                if isinstance(item, dict) and isinstance(item.get("file_path"), str)
+            ],
+        }
+
+    async def _record_checkpoint(
+        self,
+        *,
+        checkpoint_id: str,
+        state: Any,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        self._assert_runtime_owner()
+        result = await self.repository.record_checkpoint(
+            self.job_id,
+            checkpoint_id=checkpoint_id,
+            state=state,
+            checkpoint_payload=payload if self.checkpoint_context_allowed else None,
+            owner=self.owner,
+            fencing_token=self.fencing_token,
+            expected_revision=self.revision,
+        )
+        return self._sync(result)
+
+    async def record_step_started(self, **kwargs: Any) -> dict[str, Any]:
+        self._assert_runtime_owner()
+        step_id = str(kwargs.get("step_id") or "").strip()
+        tool_name = str(kwargs.get("tool_name") or "unknown")
+        arguments = kwargs.get("arguments") if isinstance(kwargs.get("arguments"), dict) else {}
+        effect_id = f"workflow-step:{step_id}"
+        target_path = f"workflow-step:{self.job_id}:{step_id}"
+        target_digest = _workflow_payload_digest(arguments)
+        result = await self.repository.record_effect(
+            self.job_id,
+            effect_type="workflow_step",
+            effect_id=effect_id,
+            target_path=target_path,
+            target_digest=target_digest,
+            status="intent",
+            details={"step_id": step_id, "tool": tool_name},
+            owner=self.owner,
+            fencing_token=self.fencing_token,
+            expected_revision=self.revision,
+        )
+        self._sync(result)
+        state = {
+            "tool": tool_name,
+            "arguments": arguments,
+            "result": None,
+        }
+        return await self._record_checkpoint(
+            checkpoint_id=f"step:{step_id}",
+            state=state,
+            payload={
+                "step_id": step_id,
+                "step_index": int(kwargs.get("step_index") or 0),
+                "tool": tool_name,
+                "status": "started",
+                "state": state,
+                "artifact_paths": [],
+            },
+        )
+
+    async def record_step_completed(self, **kwargs: Any) -> dict[str, Any]:
+        self._assert_runtime_owner()
+        step_id = str(kwargs.get("step_id") or "").strip()
+        checkpoint = kwargs.get("checkpoint") if isinstance(kwargs.get("checkpoint"), dict) else {}
+        result_value = kwargs.get("result")
+        target_path = f"workflow-step:{self.job_id}:{step_id}"
+        target_digest = _workflow_payload_digest(
+            checkpoint if checkpoint else {"result": _summarize_value_shape(result_value)}
+        )
+        # The original intent digest is authoritative. Read it back before
+        # changing the checkpoint so an input/result representation cannot
+        # silently become a different external target.
+        current = await self.repository.get_job(self.job_id)
+        prior = next(
+            (
+                item
+                for item in (current or {}).get("effects", [])
+                if isinstance(item, dict) and item.get("effect_id") == f"workflow-step:{step_id}"
+            ),
+            None,
+        )
+        if isinstance(prior, dict) and prior.get("target_digest"):
+            target_digest = str(prior["target_digest"])
+        step_status = str(kwargs.get("status") or "succeeded")
+        readback = await self.repository.record_readback(
+            self.job_id,
+            target_path=target_path,
+            target_digest=target_digest,
+            effect_id=f"workflow-step:{step_id}",
+            status="failed" if step_status == "continued_error" else "succeeded",
+            content_sha256=_workflow_payload_digest(result_value),
+            details={"verified": step_status != "continued_error", "step_id": step_id},
+            owner=self.owner,
+            fencing_token=self.fencing_token,
+            expected_revision=self.revision,
+        )
+        self._sync(readback)
+        artifact_paths = [
+            str(path)
+            for path in kwargs.get("artifact_paths", [])
+            if isinstance(path, str) and path.strip()
+        ]
+        for path in artifact_paths:
+            artifact = await self.repository.record_artifact(
+                self.job_id,
+                file_path=path,
+                owner=self.owner,
+                fencing_token=self.fencing_token,
+                expected_revision=self.revision,
+            )
+            self._sync(artifact)
+        state = checkpoint or {"result": result_value}
+        return await self._record_checkpoint(
+            checkpoint_id=f"step:{step_id}",
+            state=state,
+            payload={
+                "step_id": step_id,
+                "step_index": int(kwargs.get("step_index") or 0),
+                "tool": str(kwargs.get("tool_name") or "unknown"),
+                "status": str(kwargs.get("status") or "succeeded"),
+                "state": state,
+                "artifact_paths": artifact_paths,
+                "result_summary": kwargs.get("result_summary"),
+                "error_kind": kwargs.get("error_kind"),
+                "error_summary": kwargs.get("error_summary"),
+            },
+        )
+
+    async def record_step_failed(self, **kwargs: Any) -> dict[str, Any]:
+        self._assert_runtime_owner()
+        step_id = str(kwargs.get("step_id") or "").strip()
+        target_path = f"workflow-step:{self.job_id}:{step_id}"
+        current = await self.repository.get_job(self.job_id)
+        prior = next(
+            (
+                item
+                for item in (current or {}).get("effects", [])
+                if isinstance(item, dict) and item.get("effect_id") == f"workflow-step:{step_id}"
+            ),
+            None,
+        )
+        target_digest = str(prior.get("target_digest")) if isinstance(prior, dict) and prior.get("target_digest") else _workflow_payload_digest(step_id)
+        readback = await self.repository.record_readback(
+            self.job_id,
+            target_path=target_path,
+            target_digest=target_digest,
+            effect_id=f"workflow-step:{step_id}",
+            status="failed",
+            details={"verified": False, "step_id": step_id},
+            owner=self.owner,
+            fencing_token=self.fencing_token,
+            expected_revision=self.revision,
+        )
+        self._sync(readback)
+        artifact_paths = [
+            str(path)
+            for path in kwargs.get("artifact_paths", [])
+            if isinstance(path, str) and path.strip()
+        ]
+        state = {"result": None, "arguments": {}, "tool": str(kwargs.get("step_id") or "")}
+        return await self._record_checkpoint(
+            checkpoint_id=f"step:{step_id}",
+            state=state,
+            payload={
+                "step_id": step_id,
+                "step_index": 0,
+                "tool": str(kwargs.get("step_id") or "unknown"),
+                "status": "failed",
+                "state": state,
+                "artifact_paths": artifact_paths,
+                "error_kind": kwargs.get("error_kind"),
+                "error_summary": kwargs.get("error_summary"),
+            },
+        )
+
+    async def adopt_restored_steps(
+        self,
+        *,
+        step_records: list[dict[str, Any]],
+        context: dict[str, dict[str, Any]],
+    ) -> dict[str, Any]:
+        self._assert_runtime_owner()
+        for record in step_records:
+            step_id = str(record.get("id") or "").strip()
+            state = context.get(step_id)
+            if not step_id or not isinstance(state, dict):
+                continue
+            result = await self._record_checkpoint(
+                checkpoint_id=f"step:{step_id}",
+                state=state,
+                payload={
+                    "step_id": step_id,
+                    "step_index": int(record.get("index") or 0),
+                    "tool": str(record.get("tool") or "unknown"),
+                    "status": "checkpoint_reused",
+                    "state": state,
+                    "artifact_paths": list(record.get("artifact_paths") or []),
+                    "result_summary": record.get("result_summary"),
+                },
+            )
+        current = await self.repository.get_job(self.job_id)
+        return self._sync(current or {})
+
+    async def finish_run(self, **kwargs: Any) -> dict[str, Any]:
+        self._assert_runtime_owner()
+        status = str(kwargs.get("status") or "failed")
+        metadata = kwargs.get("metadata") if isinstance(kwargs.get("metadata"), dict) else {}
+        summary = str(metadata.get("summary") or kwargs.get("error") or status)
+        if status in {"succeeded", "completed", "degraded"}:
+            output_digest = _workflow_payload_digest(summary)
+            readback = await self.repository.record_effect(
+                self.job_id,
+                effect_type="workflow_output",
+                effect_id=f"workflow-output:{self.job_id}",
+                receipt_kind="readback",
+                target_path=f"workflow-output:{self.job_id}",
+                target_digest=output_digest,
+                status="succeeded",
+                content_sha256=output_digest,
+                details={
+                    "verified": True,
+                    "goal_completion": status in {"succeeded", "completed"},
+                    "artifact_delivery": bool(kwargs.get("artifact_paths")),
+                    "execution_status": status,
+                },
+                owner=self.owner,
+                fencing_token=self.fencing_token,
+                expected_revision=self.revision,
+            )
+            self._sync(readback)
+            completed = await self.repository.transition_job(
+                self.job_id,
+                "degraded" if status == "degraded" else "succeeded",
+                owner=self.owner,
+                fencing_token=self.fencing_token,
+                expected_revision=self.revision,
+                result_summary=summary,
+                reason="workflow_completed",
+            )
+            return self._sync(completed)
+        failed = await self.repository.transition_job(
+            self.job_id,
+            "failed",
+            owner=self.owner,
+            fencing_token=self.fencing_token,
+            expected_revision=self.revision,
+            reason=str(kwargs.get("error") or "workflow_failed"),
+            result_summary=summary,
+        )
+        return self._sync(failed)
+
+    async def record_artifact_review(self, **kwargs: Any) -> dict[str, Any]:
+        self._assert_runtime_owner()
+        path = str(kwargs.get("artifact_path") or "").strip()
+        if not path:
+            return await self.repository.get_job(self.job_id) or {}
+        current = await self.repository.get_job(self.job_id)
+        if isinstance(current, dict) and current.get("status") in {"succeeded", "degraded", "cancelled"}:
+            return {
+                **current,
+                "receipt": {
+                    "kind": "artifact_review",
+                    "status": "rejected",
+                    "reason": "terminal_run_review_window_closed",
+                    "artifact_path": path,
+                    "operator_visible": True,
+                },
+            }
+        review_state = str(kwargs.get("review_state") or "pending_operator_review")
+        reviewer = str(kwargs.get("reviewer") or "") or None
+        metadata = kwargs.get("metadata") if isinstance(kwargs.get("metadata"), dict) else {}
+        result = await self.repository.record_effect(
+            self.job_id,
+            effect_type="artifact_review",
+            effect_id=f"artifact-review:{_workflow_payload_digest(path)[:24]}",
+            target_path=path,
+            target_digest=_workflow_payload_digest(path),
+            status="succeeded",
+            details={
+                "review_state": review_state,
+                "reviewer": reviewer,
+                "metadata": metadata,
+                "operator_visible": True,
+            },
+            owner=self.owner,
+            fencing_token=self.fencing_token,
+            expected_revision=self.revision,
+        )
+        return self._sync(result)
+
+    async def mark_uncertain(self, *, phase: str) -> dict[str, Any] | None:
+        """Leave an operator-visible uncertainty when a required write fails."""
+        self._assert_runtime_owner()
+        result = await self.repository.transition_job(
+            self.job_id,
+            "unknown_external_effect",
+            owner=self.owner,
+            fencing_token=self.fencing_token,
+            expected_revision=self.revision,
+            reason=f"durable_write_failed:{phase}",
+            result_summary="required durable workflow write failed; reconcile before retry",
+        )
+        return self._sync(result)
+
+
+def _run_workflow_state_write(state_repository: Any, coro, *, phase: str) -> Any:
+    """Run one workflow write with strict semantics for typed durable jobs.
+
+    Legacy projections retain their partial-migration compatibility behavior.
+    Once the manager has admitted a typed job, every checkpoint/effect/final
+    write is required; on a failure we best-effort fence the row into the
+    explicit unknown-external-effect state before surfacing the error.
+    """
+    canonical = isinstance(state_repository, _CanonicalWorkflowStateWriter)
+    try:
+        return _run_required_durable_state_write(
+            coro,
+            phase=phase,
+            allow_missing_schema=not canonical,
+        )
+    except DurableWorkflowStateUnavailable:
+        if canonical:
+            try:
+                _run_async(state_repository.mark_uncertain(phase=phase))
+            except Exception as uncertainty_error:  # pragma: no cover - the original failure is authoritative.
+                logger.error(
+                    "Unable to persist durable uncertainty after %s failure: %s",
+                    phase,
+                    uncertainty_error,
+                )
+        raise
+
+
+def _admit_canonical_workflow_job(
+    *,
+    repository: DurableJobRepository,
+    run_identity: str,
+    workflow: Workflow,
+    tool_name: str,
+    session_id: str | None,
+    run_fingerprint: str,
+    audit_arguments: dict[str, Any],
+    approval_context: dict[str, Any],
+    checkpoint_context_allowed: bool,
+    owner_fields: dict[str, str],
+    parent_job_id: str | None = None,
+    parent_fencing_token: int | None = None,
+) -> _CanonicalWorkflowStateWriter:
+    owner_kind = str(owner_fields["owner_kind"])
+    owner_principal_id = str(owner_fields["owner_principal_id"])
+    service_id = owner_fields.get("service_id")
+    runtime_owner = _workflow_durable_owner_fields()
+    if (
+        runtime_owner.get("owner_kind") != owner_kind
+        or runtime_owner.get("owner_principal_id") != owner_principal_id
+        or (runtime_owner.get("service_id") or None) != (str(service_id).strip() if service_id else None)
+    ):
+        raise DurableWorkflowStateUnavailable(
+            "canonical workflow admission owner does not match the current principal"
+        )
+    contract = _workflow_contract_fields(audit_arguments, approval_context)
+    authority = {
+        **approval_context,
+        "principal": owner_principal_id,
+        "owner_kind": owner_kind,
+        "capability": tool_name,
+        "session_id": session_id,
+        "conversation_id": owner_fields.get("conversation_id") or session_id,
+        "operator_session_id": owner_fields.get("operator_session_id") or None,
+    }
+    for field_name in (
+        "goal_id",
+        "criterion_id",
+        "goal_revision",
+        "plan_revision",
+        "candidate_id",
+        "deadline_at",
+        "priority",
+        "max_attempts",
+        "budget_microusd",
+    ):
+        if contract[field_name] is not None:
+            authority[field_name] = contract[field_name]
+    authority["dependencies"] = list(contract["dependencies"])
+    if service_id:
+        authority["service_id"] = service_id
+    identity = DurableJobIdentity(
+        job_id=run_identity,
+        owner_kind=owner_kind,
+        owner_principal_id=owner_principal_id,
+        job_kind=workflow.name,
+        capability_version="workflow-v2",
+        idempotency_scope=f"workflow:{workflow.name}",
+        idempotency_key=run_identity,
+    )
+    admitted = _run_async(repository.admit_job(DurableJobSpec(
+        identity=identity,
+        inputs=_durable_arguments(audit_arguments, checkpoint_context_allowed=checkpoint_context_allowed),
+        session_id=session_id,
+        conversation_id=owner_fields.get("conversation_id") or session_id,
+        operator_session_id=owner_fields.get("operator_session_id") or None,
+        parent_job_id=parent_job_id,
+        parent_fencing_token=parent_fencing_token,
+        run_fingerprint=run_fingerprint,
+        goal_id=contract["goal_id"],
+        goal_revision=contract["goal_revision"],
+        plan_revision=contract["plan_revision"],
+        candidate_id=contract["candidate_id"],
+        dependencies=contract["dependencies"],
+        deadline_at=contract["deadline_at"],
+        budget_microusd=contract["budget_microusd"],
+        declared_authority=authority,
+        priority=int(contract["priority"] or 50),
+        resource_claims=("cpu",),
+        max_attempts=int(contract["max_attempts"] or 1),
+        service_id=service_id,
+    )))
+    if admitted.get("status") == "accepted":
+        admitted = _run_async(repository.queue_job(run_identity))
+    if admitted.get("status") != "queued":
+        raise DurableWorkflowStateUnavailable(
+            f"canonical workflow job was not queued (status={admitted.get('status')})"
+        )
+    runner = _workflow_canonical_lease_owner(run_identity)
+    claimed = _run_async(repository.claim_job(run_identity, owner=runner, lease_seconds=300))
+    if claimed.get("status") != "running":
+        raise DurableWorkflowStateUnavailable(
+            f"canonical workflow job was not claimed (status={claimed.get('status')})"
+        )
+    lease = claimed.get("lease") if isinstance(claimed.get("lease"), dict) else {}
+    token = lease.get("fencing_token")
+    if token is None:
+        raise DurableWorkflowStateUnavailable("canonical workflow claim returned no fencing token")
+    return _CanonicalWorkflowStateWriter(
+        repository,
+        job=claimed,
+        owner=runner,
+        fencing_token=int(token),
+        checkpoint_context_allowed=checkpoint_context_allowed,
+    )
 
 
 def _verified_extension_runtime_block(extension: Any, state_entry: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -836,9 +1637,14 @@ def _verified_extension_runtime_block(extension: Any, state_entry: dict[str, Any
     return governance
 
 
-async def _load_workflow_checkpoint_payload(run_identity: str) -> dict[str, Any] | None:
+async def _load_workflow_checkpoint_payload(
+    run_identity: str,
+    *,
+    state_repository: Any | None = None,
+) -> dict[str, Any] | None:
+    state_repository = state_repository or workflow_state_repository
     try:
-        durable_payload = await workflow_state_repository.get_checkpoint_payload(run_identity)
+        durable_payload = await state_repository.get_checkpoint_payload(run_identity)
     except Exception as exc:  # pragma: no cover - defensive fail-soft path for partially migrated/local DBs.
         logger.warning("Durable workflow checkpoint lookup skipped: %s", exc)
         durable_payload = None
@@ -1040,6 +1846,7 @@ class WorkflowTool(Tool):
         )
         parent_run_identity = control_inputs.get("_seraph_parent_run_identity")
         root_run_identity = control_inputs.get("_seraph_root_run_identity") or durable_run_identity
+        parent_fencing_token = control_inputs.get("_seraph_parent_fencing_token")
         context: dict[str, Any] = {
             "inputs": workflow_inputs,
             "steps": {},
@@ -1053,7 +1860,27 @@ class WorkflowTool(Tool):
         checkpoint_context: dict[str, dict[str, Any]] = {}
         start_index = 0
         durable_owner_fields = _workflow_durable_owner_fields()
-        _run_required_durable_state_write(workflow_state_repository.create_run(
+        state_repository: Any = workflow_state_repository
+        if durable_owner_fields and isinstance(workflow_state_repository, WorkflowStateRepository):
+            state_repository = _admit_canonical_workflow_job(
+                repository=durable_job_repository,
+                run_identity=durable_run_identity,
+                workflow=self.workflow,
+                tool_name=self.name,
+                session_id=current_session_id,
+                run_fingerprint=run_fingerprint,
+                audit_arguments=audit_arguments,
+                approval_context=approval_context,
+                checkpoint_context_allowed=checkpoint_context_allowed,
+                owner_fields=durable_owner_fields,
+                parent_job_id=(str(parent_run_identity).strip() if parent_run_identity else None),
+                parent_fencing_token=(
+                    int(parent_fencing_token)
+                    if parent_fencing_token is not None
+                    else None
+                ),
+            )
+        _run_workflow_state_write(state_repository, state_repository.create_run(
             run_identity=durable_run_identity,
             workflow_name=self.workflow.name,
             tool_name=self.name,
@@ -1073,6 +1900,7 @@ class WorkflowTool(Tool):
                     control_inputs=control_inputs,
                     canonical_step_tools=canonical_step_tools,
                     approval_context=approval_context,
+                    state_repository=state_repository,
                 )
             except Exception as exc:
                 safe_error_summary = _safe_workflow_error_summary(exc)
@@ -1092,7 +1920,7 @@ class WorkflowTool(Tool):
                     durable_run_identity=durable_run_identity,
                 )
                 durable_audit_receipt_id = _durable_audit_receipt_id(durable_run_identity, "failed")
-                _run_durable_state_write(workflow_state_repository.finish_run(
+                _run_workflow_state_write(state_repository, state_repository.finish_run(
                     run_identity=durable_run_identity,
                     status="failed",
                     checkpoint_context=checkpoint_context if checkpoint_context_allowed else {},
@@ -1105,7 +1933,7 @@ class WorkflowTool(Tool):
                         "durable_audit_receipt_id": durable_audit_receipt_id,
                         "content_redacted": True,
                     },
-                ))
+                ), phase="checkpoint_resume_failure")
                 raise
             for step_id, state in restored_context.items():
                 context["steps"][step_id] = state
@@ -1115,6 +1943,15 @@ class WorkflowTool(Tool):
             for path in restored_artifact_paths:
                 if path not in artifact_paths:
                     artifact_paths.append(path)
+            if isinstance(state_repository, _CanonicalWorkflowStateWriter):
+                _run_workflow_state_write(
+                    state_repository,
+                    state_repository.adopt_restored_steps(
+                        step_records=restored_step_records,
+                        context=restored_context,
+                    ),
+                    phase="checkpoint_resume",
+                )
 
         for index, (step, canonical_step_tool) in enumerate(zip(self.workflow.steps, canonical_step_tools, strict=False)):
             if index < start_index:
@@ -1127,7 +1964,7 @@ class WorkflowTool(Tool):
                     f"Workflow '{self.workflow.name}' requires unavailable tool '{step.tool}'"
                 )
             rendered_arguments = _render_value(step.arguments, context)
-            _run_required_durable_state_write(workflow_state_repository.record_step_started(
+            _run_workflow_state_write(state_repository, state_repository.record_step_started(
                 run_identity=durable_run_identity,
                 workflow_name=self.workflow.name,
                 step_id=step.id,
@@ -1142,10 +1979,17 @@ class WorkflowTool(Tool):
             step_started_at = _utc_now_iso()
             started = time.perf_counter()
             try:
-                result = tool(
-                    **rendered_arguments,
-                    sanitize_inputs_outputs=sanitize_inputs_outputs,
+                step_principal_token = _bind_workflow_step_trust_principal(
+                    durable_run_identity
                 )
+                try:
+                    result = tool(
+                        **rendered_arguments,
+                        sanitize_inputs_outputs=sanitize_inputs_outputs,
+                    )
+                finally:
+                    if step_principal_token is not None:
+                        reset_runtime_trust_principal(step_principal_token)
             except Exception as exc:
                 safe_error_summary = _safe_workflow_error_summary(exc)
                 step_completed_at = _utc_now_iso()
@@ -1169,7 +2013,7 @@ class WorkflowTool(Tool):
                         "completed_at": step_completed_at,
                         "duration_ms": duration_ms,
                     })
-                    _run_durable_state_write(workflow_state_repository.record_step_failed(
+                    _run_workflow_state_write(state_repository, state_repository.record_step_failed(
                         run_identity=durable_run_identity,
                         step_id=step.id,
                         status="failed",
@@ -1179,7 +2023,7 @@ class WorkflowTool(Tool):
                         checkpoint=None,
                         error_kind=type(exc).__name__,
                         error_summary=safe_error_summary,
-                    ))
+                    ), phase=f"step_failed:{step.id}")
                     self._last_audit_failure_payload = self._build_audit_payload(
                         status="failed",
                         run_fingerprint=run_fingerprint,
@@ -1196,7 +2040,17 @@ class WorkflowTool(Tool):
                         durable_run_identity=durable_run_identity,
                     )
                     durable_audit_receipt_id = _durable_audit_receipt_id(durable_run_identity, "failed")
-                    _run_durable_state_write(workflow_state_repository.finish_run(
+                    _record_delegated_artifact_reviews(
+                        run_identity=durable_run_identity,
+                        root_run_identity=root_run_identity,
+                        parent_run_identity=parent_run_identity,
+                        workflow_name=self.workflow.name,
+                        approval_context=approval_context,
+                        artifact_paths=artifact_paths,
+                        durable_audit_receipt_id=durable_audit_receipt_id,
+                        state_repository=state_repository,
+                    )
+                    _run_workflow_state_write(state_repository, state_repository.finish_run(
                         run_identity=durable_run_identity,
                         status="failed",
                         checkpoint_context=checkpoint_context if checkpoint_context_allowed else {},
@@ -1216,16 +2070,7 @@ class WorkflowTool(Tool):
                             "durable_audit_receipt_id": durable_audit_receipt_id,
                             "content_redacted": True,
                         },
-                    ))
-                    _record_delegated_artifact_reviews(
-                        run_identity=durable_run_identity,
-                        root_run_identity=root_run_identity,
-                        parent_run_identity=parent_run_identity,
-                        workflow_name=self.workflow.name,
-                        approval_context=approval_context,
-                        artifact_paths=artifact_paths,
-                        durable_audit_receipt_id=durable_audit_receipt_id,
-                    )
+                    ), phase="workflow_failed")
                     raise
                 result = f"Error: {safe_error_summary}"
                 continued_error_steps.append(step.id)
@@ -1265,7 +2110,7 @@ class WorkflowTool(Tool):
                 "completed_at": step_completed_at,
                 "duration_ms": duration_ms,
             })
-            _run_durable_state_write(workflow_state_repository.record_step_completed(
+            _run_workflow_state_write(state_repository, state_repository.record_step_completed(
                 run_identity=durable_run_identity,
                 step_id=step.id,
                 status=step_status,
@@ -1278,7 +2123,7 @@ class WorkflowTool(Tool):
                 ),
                 error_kind=error_kind,
                 error_summary=error_summary,
-            ))
+            ), phase=f"step_completed:{step.id}")
 
         result_text = ""
         if self.workflow.result_template:
@@ -1315,7 +2160,17 @@ class WorkflowTool(Tool):
             durable_run_identity=durable_run_identity,
         )
         durable_audit_receipt_id = _durable_audit_receipt_id(durable_run_identity, status)
-        _run_durable_state_write(workflow_state_repository.finish_run(
+        _record_delegated_artifact_reviews(
+            run_identity=durable_run_identity,
+            root_run_identity=root_run_identity,
+            parent_run_identity=parent_run_identity,
+            workflow_name=self.workflow.name,
+            approval_context=approval_context,
+            artifact_paths=artifact_paths,
+            durable_audit_receipt_id=durable_audit_receipt_id,
+            state_repository=state_repository,
+        )
+        _run_workflow_state_write(state_repository, state_repository.finish_run(
             run_identity=durable_run_identity,
             status=status,
             checkpoint_context=checkpoint_context if checkpoint_context_allowed else {},
@@ -1335,16 +2190,7 @@ class WorkflowTool(Tool):
                 "content_redacted": True,
                 "durable_audit_receipt_id": durable_audit_receipt_id,
             },
-        ))
-        _record_delegated_artifact_reviews(
-            run_identity=durable_run_identity,
-            root_run_identity=root_run_identity,
-            parent_run_identity=parent_run_identity,
-            workflow_name=self.workflow.name,
-            approval_context=approval_context,
-            artifact_paths=artifact_paths,
-            durable_audit_receipt_id=durable_audit_receipt_id,
-        )
+        ), phase="workflow_finish")
         if current_session_id:
             flush_session_memory_sync(
                 session_id=current_session_id,
@@ -1404,6 +2250,8 @@ class WorkflowTool(Tool):
             details["resume_from_step"] = control_inputs["_seraph_resume_from_step"]
         if isinstance(control_inputs.get("_seraph_branch_depth"), int):
             details["branch_depth"] = control_inputs["_seraph_branch_depth"]
+        if isinstance(control_inputs.get("_seraph_parent_fencing_token"), int):
+            details["parent_fencing_token"] = control_inputs["_seraph_parent_fencing_token"]
         return details
 
     def _build_audit_payload(
@@ -1470,6 +2318,7 @@ class WorkflowTool(Tool):
         control_inputs: dict[str, Any],
         canonical_step_tools: list[str],
         approval_context: dict[str, Any],
+        state_repository: Any | None = None,
     ) -> tuple[int, list[dict[str, Any]], list[str], dict[str, dict[str, Any]]]:
         requested_step_id = str(control_inputs.get("_seraph_resume_from_step") or "").strip()
         if not requested_step_id:
@@ -1487,7 +2336,12 @@ class WorkflowTool(Tool):
             raise RuntimeError(
                 f"Workflow '{self.workflow.name}' requires a parent run identity to resume from step '{requested_step_id}'"
             )
-        details = _run_async(_load_workflow_checkpoint_payload(parent_run_identity))
+        details = _run_async(
+            _load_workflow_checkpoint_payload(
+                parent_run_identity,
+                state_repository=state_repository,
+            )
+        )
         if not isinstance(details, dict):
             raise RuntimeError(
                 f"Workflow '{self.workflow.name}' could not load checkpoint state from '{parent_run_identity}'"
@@ -1602,7 +2456,7 @@ class WorkflowTool(Tool):
             value = provided[key]
             if value is None or value == "":
                 continue
-            if key == "_seraph_branch_depth":
+            if key in {"_seraph_branch_depth", "_seraph_parent_revision", "_seraph_parent_fencing_token"}:
                 try:
                     control_inputs[key] = int(value)
                 except (TypeError, ValueError):

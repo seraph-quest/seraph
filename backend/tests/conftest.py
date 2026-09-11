@@ -16,6 +16,7 @@ from sqlmodel import SQLModel
 
 os.environ.setdefault("OPENROUTER_API_KEY", "test-key")
 os.environ.setdefault("WORKSPACE_DIR", "/tmp/seraph-test")
+os.environ.setdefault("CAPABILITY_JOURNAL_SECRET", "test-capability-journal-secret")
 
 from config.settings import settings
 from src.app import create_app
@@ -37,6 +38,7 @@ _PATCH_TARGETS = [
     "src.model_fabric.repository.get_session",
     "src.profile.service.get_db",
     "src.api.settings.get_db",  # aliased: `import get_session as get_db`
+    "src.api.nodes.get_session",
     "src.api.observer.get_session",
     "src.scheduler.jobs.memory_consolidation.get_session",
     "src.scheduler.jobs.screenshot_observation_digest.get_session",
@@ -44,6 +46,7 @@ _PATCH_TARGETS = [
     "src.observer.insight_queue.get_session",
     "src.observer.screenshot_folder_source.get_session",
     "src.guardian.feedback.get_session",
+    "src.guardian.audio_worker.get_session",
     "src.vault.repository.get_session",
     "src.observer.screen_repository.get_session",
     "src.memory.repository.get_session",
@@ -52,6 +55,7 @@ _PATCH_TARGETS = [
     "src.memory.flush.get_session",
     "src.memory.hybrid_retrieval.get_session",
     "src.workflows.durable_state.get_session",
+    "src.workflows.job_runtime.get_session",
     "src.workflows.production_workflow_guarantees.get_session",
 ]
 

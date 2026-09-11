@@ -1,7 +1,7 @@
 import json
 import time
 import types
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import patch, AsyncMock, MagicMock
 
@@ -15,6 +15,7 @@ from src.observer.context import CurrentContext
 from src.observer.manager import ContextManager
 from src.observer.native_notification_queue import native_notification_queue
 from src.observer.screen_repository import ScreenObservationRepository
+from src.db.models import OperatorSession, Session
 
 
 _DAEMON_HEADERS = {"X-Seraph-Daemon-Id": "test-daemon"}
@@ -461,6 +462,22 @@ class TestObserverAPI:
         mgr.update_screen_context("Arc — Guardian Cockpit", "Reviewing cross-surface continuity.")
         mgr.update_capture_mode("balanced")
         mgr.record_native_notification(title="Seraph alert", outcome="queued")
+        owner = "operator:test-bypass"
+        operator_session_id = "test-auth-bypass"
+        now = datetime.now(timezone.utc)
+        async with async_db() as db:
+            db.add_all(
+                [
+                    Session(id="session-1", owner_principal_id=owner, title="Native thread"),
+                    Session(id="session-2", owner_principal_id=owner, title="Bundle thread"),
+                    OperatorSession(
+                        id=operator_session_id,
+                        token_hash="continuity-token-hash",
+                        idle_expires_at=now + timedelta(hours=1),
+                        absolute_expires_at=now + timedelta(hours=1),
+                    ),
+                ]
+            )
 
         native_intervention = await guardian_feedback_repository.create_intervention(
             session_id="session-1",
@@ -504,6 +521,8 @@ class TestObserverAPI:
             intervention_type="alert",
             urgency=5,
             session_id="session-1",
+            owner_principal_id=owner,
+            operator_session_id=operator_session_id,
             thread_id="session-1",
             thread_source="session",
             continuation_mode="resume_thread",

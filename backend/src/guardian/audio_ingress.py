@@ -42,10 +42,11 @@ _CONTAINER_RE: Final = re.compile(r"^[a-z0-9][a-z0-9._-]{0,31}$")
 _CODEC_RE: Final = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
 _DIGEST_RE: Final = re.compile(r"^[0-9a-f]{64}$")
 _TRUSTED_RESULT_TOKEN: Final = object()
+_TRUSTED_CONSENT_TOKEN: Final = object()
 _CONSENT_REASON_CODES: Final = frozenset(
     f"{boundary}_consent_{suffix}"
     for boundary in ("capture", "cloud_upload")
-    for suffix in ("missing", "invalid", "reference_invalid", "revoked", "stale", "not_current")
+    for suffix in ("missing", "invalid", "reference_invalid", "untrusted", "revoked", "stale", "not_current")
 )
 _ALLOWED_REASON_CODES: Final = frozenset(
     {
@@ -178,6 +179,39 @@ class AudioConsent:
     state: AudioConsentState
     granted_at: datetime
     expires_at: datetime
+    # Only a server readback from the durable consent registry may attach this
+    # provenance marker.  A caller-provided reference/timestamp tuple remains
+    # untrusted even when its shape is otherwise valid.
+    # Keep this field replaceable so immutable request copies retain the
+    # registry readback marker; the marker value itself remains private.
+    _provenance: object | None = field(default=None, repr=False, compare=False)
+
+
+def _build_server_owned_audio_consent(
+    reference: str,
+    state: AudioConsentState,
+    granted_at: datetime,
+    expires_at: datetime,
+) -> AudioConsent:
+    """Build consent evidence after a server-owned registry readback.
+
+    This is deliberately private.  The only runtime caller is the worker after
+    it has read a matching durable ``AudioConsentGrant`` row.  Request and
+    transport data cannot reach the provenance marker used here.
+    """
+
+    consent = AudioConsent(
+        reference=reference,
+        state=state,
+        granted_at=granted_at,
+        expires_at=expires_at,
+    )
+    object.__setattr__(consent, "_provenance", _TRUSTED_CONSENT_TOKEN)
+    return consent
+
+
+def is_server_owned_audio_consent(value: object) -> bool:
+    return isinstance(value, AudioConsent) and value._provenance is _TRUSTED_CONSENT_TOKEN
 
 
 @dataclass(frozen=True, slots=True)
@@ -701,6 +735,8 @@ def _consent_reason(
         return f"{boundary}_consent_missing"
     if not isinstance(consent, AudioConsent):
         return f"{boundary}_consent_invalid"
+    if not is_server_owned_audio_consent(consent):
+        return f"{boundary}_consent_untrusted"
     if not _valid_consent_ref(consent.reference):
         return f"{boundary}_consent_reference_invalid"
     if not isinstance(consent.state, AudioConsentState):
@@ -1115,5 +1151,6 @@ __all__ = [
     "build_openrouter_input_audio",
     "canonical_audio_request_digest",
     "serialize_audio_ingress_receipt",
+    "is_server_owned_audio_consent",
     "validate_audio_ingress",
 ]

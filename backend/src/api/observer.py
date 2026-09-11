@@ -8,7 +8,7 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
 
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, HTTPException, Query, Request, Response
 from fastapi.responses import FileResponse, PlainTextResponse
 from pydantic import BaseModel, ConfigDict, Field
 from sqlmodel import col, select
@@ -16,8 +16,9 @@ from sqlmodel import col, select
 from config.settings import settings
 from src.audit.runtime import log_integration_event
 from src.agent.session import session_manager
+from src.auth.service import AuthenticatedOperator
 from src.db.engine import get_session
-from src.db.models import ScreenObservation
+from src.db.models import PairedEdgeArtifact, ScreenObservation
 from src.observer.image_metadata import local_image_metadata
 from src.observer.manager import context_manager
 from src.observer.native_notification_queue import native_notification_queue
@@ -73,7 +74,16 @@ class NativeNotificationResponse(BaseModel):
     urgency: int | None = None
     surface: str = "notification"
     session_id: str | None = None
+    conversation_id: str | None = None
     thread_id: str | None = None
+    owner_principal_id: str | None = None
+    operator_session_id: str | None = None
+    device_id: str | None = None
+    channel: str = "native_notification"
+    transport: str = "native_notification"
+    correlation_id: str | None = None
+    causation_id: str | None = None
+    attachment_refs: list[dict[str, Any]] = Field(default_factory=list)
     thread_label: str | None = None
     thread_source: str = "ambient"
     continuation_mode: str = "open_thread"
@@ -82,6 +92,9 @@ class NativeNotificationResponse(BaseModel):
     delivery_status: str = "queued"
     attempt_count: int = 0
     fencing_token: int = 0
+    degraded_state: str | None = None
+    goal_id: str | None = None
+    goal_revision: int | None = None
 
 
 class NativeNotificationPollResponse(BaseModel):
@@ -200,6 +213,26 @@ def _require_authenticated_daemon(request: Request, worker_id: str) -> None:
         raise HTTPException(status_code=401, detail="daemon identity header is required")
     if presented != worker_id:
         raise HTTPException(status_code=401, detail="daemon identity does not match worker_id")
+
+
+def _require_authenticated_operator_binding(request: Request) -> tuple[str, str]:
+    """Resolve the authenticated browser principal and operator session."""
+    operator = getattr(request.state, "operator", None)
+    principal = getattr(operator, "principal", None)
+    principal_id = getattr(principal, "principal_id", None)
+    operator_session_id = str(getattr(operator, "session_id", "") or "")
+    principal_type = getattr(getattr(principal, "principal_type", None), "value", getattr(principal, "principal_type", None))
+    if (
+        not isinstance(operator, AuthenticatedOperator)
+        or not principal_id
+        or not operator_session_id
+        or principal_type != "operator"
+        or not bool(getattr(principal, "authenticated", False))
+        or bool(getattr(principal, "revoked", False))
+        or str(getattr(principal, "operator_session_id", "") or "") != operator_session_id
+    ):
+        raise HTTPException(status_code=401, detail={"code": "authenticated_operator_required"})
+    return str(principal_id), operator_session_id
 
 
 class QueuedInsightResponse(BaseModel):
@@ -325,6 +358,16 @@ class ObserverPresenceSurfaceResponse(BaseModel):
     requires_pairing: bool = False
     device_reach_allowed: bool | None = None
     blocked_reason: str | None = None
+    last_seen_at: str | None = None
+    last_ingest_at: str | None = None
+    last_capture_at: str | None = None
+    last_transport_status: str | None = None
+    spool_count: int = 0
+    spool_bytes: int = 0
+    spool_oldest_at: str | None = None
+    recovery_state: str | None = None
+    degraded_state: str | None = None
+    revision: int = 0
 
 
 class ObserverPresenceSummaryResponse(BaseModel):
@@ -427,9 +470,13 @@ class InterventionFeedbackResponse(BaseModel):
 
 
 @router.get("/observer/state")
-async def get_observer_state():
-    """Return the current context snapshot."""
-    return context_manager.get_context().to_dict()
+async def get_observer_state(request: Request):
+    """Return the authenticated operator's context snapshot."""
+    owner_principal_id, operator_session_id = _require_authenticated_operator_binding(request)
+    return context_manager.get_context(
+        owner_principal_id=owner_principal_id,
+        owner_session_id=operator_session_id,
+    ).to_dict()
 
 
 @router.post("/observer/context")
@@ -525,10 +572,12 @@ def _screen_artifact_root() -> Path:
     return Path("~/Library/Application Support/Seraph/artifacts/screen-captures").expanduser().resolve()
 
 
-def _require_local_artifact_request(request: Request) -> None:
+def _require_local_artifact_request(request: Request) -> tuple[str, str]:
+    owner_principal_id, operator_session_id = _require_authenticated_operator_binding(request)
     client_host = request.client.host if request.client is not None else ""
     if client_host not in {"127.0.0.1", "::1", "localhost", "testclient"}:
         raise HTTPException(status_code=403, detail="Screen artifacts are only available from localhost")
+    return owner_principal_id, operator_session_id
 
 
 def _screen_artifact_path(raw_path: str | None) -> Path:
@@ -574,7 +623,7 @@ def _screen_capture_artifacts(observation: ScreenObservation) -> dict[str, Any] 
             if not isinstance(payload, dict):
                 return None
             provider = str(payload.get("provider") or "").strip()
-            if provider and provider != "screenshot_folder":
+            if provider and provider not in {"screenshot_folder", "paired_edge"}:
                 return None
             return payload
     return None
@@ -595,7 +644,7 @@ def _screen_artifact_response(observation: ScreenObservation) -> dict[str, Any] 
     if artifacts is None:
         return None
     artifact_links = {
-        "id": artifacts.get("id"),
+        "id": artifacts.get("id") or artifacts.get("artifact_id") or artifacts.get("readback_id"),
         "created_at": artifacts.get("created_at"),
         "provider": artifacts.get("provider"),
         "image_url": f"/api/observer/screen-artifacts/{observation.id}/image",
@@ -652,11 +701,23 @@ async def list_screen_artifacts(request: Request, limit: int = 20) -> dict[str, 
 
 
 @router.get("/observer/screen-artifacts/{observation_id}/image")
-async def get_screen_artifact_image(observation_id: str, request: Request) -> FileResponse:
+async def get_screen_artifact_image(observation_id: str, request: Request) -> Response:
     """Return a preserved screenshot image for local operator inspection."""
-    _require_local_artifact_request(request)
+    owner_principal_id, _ = _require_local_artifact_request(request)
     observation = await _screen_artifact_observation(observation_id)
     artifacts = _screen_capture_artifacts(observation) or {}
+    if artifacts.get("provider") == "paired_edge":
+        artifact_id = str(artifacts.get("artifact_id") or artifacts.get("readback_id") or "")
+        async with get_session() as db:
+            result = await db.execute(
+                select(PairedEdgeArtifact)
+                .where(col(PairedEdgeArtifact.artifact_id) == artifact_id)
+                .where(col(PairedEdgeArtifact.owner_principal_id) == owner_principal_id)
+            )
+            artifact = result.scalar_one_or_none()
+        if artifact is None:
+            raise HTTPException(status_code=404, detail="Paired edge artifact not found")
+        return Response(content=artifact.content, media_type=artifact.media_type)
     path = _artifact_path(str(artifacts.get("image_path") or ""), allowed_roots=_artifact_allowed_roots(artifacts))
     return FileResponse(path, media_type=_image_media_type(path))
 
@@ -668,6 +729,10 @@ async def _get_screen_artifact_provider_output(
     _require_local_artifact_request(request)
     observation = await _screen_artifact_observation(observation_id)
     artifacts = _screen_capture_artifacts(observation) or {}
+    if artifacts.get("provider") == "paired_edge":
+        return PlainTextResponse(
+            "Paired edge capture is stored as a server-owned artifact; no provider or model output was requested."
+        )
     if artifacts.get("provider") == "screenshot_folder" and not (
         artifacts.get("provider_output_path") or artifacts.get("codex_output_path")
     ):
@@ -699,6 +764,14 @@ async def get_screen_artifact_analysis(observation_id: str, request: Request) ->
     _require_local_artifact_request(request)
     observation = await _screen_artifact_observation(observation_id)
     artifacts = _screen_capture_artifacts(observation) or {}
+    if artifacts.get("provider") == "paired_edge":
+        return {
+            "provider": "paired_edge",
+            "artifact_id": artifacts.get("artifact_id") or artifacts.get("readback_id"),
+            "server_owned": True,
+            "summary": observation.summary,
+            "analysis": None,
+        }
     if artifacts.get("provider") == "screenshot_folder" and not artifacts.get("analysis_path"):
         image_path = _artifact_path(
             str(artifacts.get("image_path") or ""),
@@ -862,9 +935,13 @@ def _screenshot_folder_image_analysis(
 
 
 @router.get("/observer/daemon-status", response_model=DaemonStatusResponse)
-async def daemon_status():
+async def daemon_status(request: Request):
     """Return daemon connectivity status based on heartbeat timestamp."""
-    return await _daemon_status_payload()
+    owner_principal_id, operator_session_id = _require_authenticated_operator_binding(request)
+    return await _daemon_status_payload(
+        owner_principal_id=owner_principal_id,
+        operator_session_id=operator_session_id,
+    )
 
 
 def _continuity_surface(
@@ -940,13 +1017,30 @@ def _classify_daemon_status(
     }
 
 
-async def _daemon_status_payload() -> dict[str, str | int | float | bool | None]:
-    ctx = context_manager.get_context()
+async def _daemon_status_payload(
+    *,
+    owner_principal_id: str | None = None,
+    operator_session_id: str | None = None,
+) -> dict[str, str | int | float | bool | None]:
+    ctx = context_manager.get_context(
+        owner_principal_id=owner_principal_id,
+        owner_session_id=operator_session_id,
+    )
     daemon_status = _read_daemon_status_file()
     classified = _classify_daemon_status(daemon_status)
-    connected = context_manager.is_daemon_connected()
-    pending_notification_count = await native_notification_queue.count()
-    recoveries = await native_notification_queue.recovery(limit=100)
+    connected = context_manager.is_daemon_connected(
+        owner_principal_id=owner_principal_id,
+        owner_session_id=operator_session_id,
+    )
+    pending_notification_count = await native_notification_queue.count(
+        owner_principal_id=owner_principal_id,
+        operator_session_id=operator_session_id,
+    )
+    recoveries = await native_notification_queue.recovery(
+        limit=100,
+        owner_principal_id=owner_principal_id,
+        operator_session_id=operator_session_id,
+    )
     unknown_notification_count = sum(
         1
         for item in recoveries
@@ -1522,7 +1616,18 @@ def _node_adapter_surface_detail(item: Any, *, package_label: str) -> str:
     name = str(getattr(item, "name", "") or "node adapter")
     adapter_kind = str(getattr(item, "adapter_kind", "") or "companion").replace("_", " ")
     runtime_state = str(getattr(item, "runtime_state", "") or "unknown").replace("_", " ")
-    return f"{package_label} adds {name} for {adapter_kind} device or companion reach ({runtime_state})."
+    pairing = getattr(item, "pairing", {})
+    if not isinstance(pairing, dict):
+        pairing = {}
+    last_seen = pairing.get("last_seen_at") or "never"
+    spool_count = pairing.get("spool_count") or 0
+    recovery = pairing.get("recovery_state") or "idle"
+    degraded = pairing.get("degraded_state")
+    detail = (
+        f"{package_label} adds {name} for {adapter_kind} device or companion reach "
+        f"({runtime_state}; last seen {last_seen}; spool {spool_count}; recovery {recovery})."
+    )
+    return f"{detail} Degraded: {degraded}." if degraded else detail
 
 
 def _node_adapter_surface_repair_hint(item: Any) -> str | None:
@@ -1738,6 +1843,7 @@ def _observer_presence_surface_payload() -> dict[str, Any]:
         if not (bool(getattr(item, "enabled", False)) or attention or follow_up_prompt):
             continue
         surface_id = f"node_adapters:{package_id}:{item.reference}"
+        pairing = _record_mapping(item, "pairing", "device_pairing")
         surfaces_by_id[surface_id] = {
             "id": surface_id,
             "kind": "node_adapter",
@@ -1765,6 +1871,16 @@ def _observer_presence_surface_payload() -> dict[str, Any]:
             "requires_network": bool(getattr(item, "requires_network", False)),
             "requires_daemon": bool(getattr(item, "requires_daemon", False)),
             **boundary_pairing,
+            "last_seen_at": pairing.get("last_seen_at"),
+            "last_ingest_at": pairing.get("last_ingest_at"),
+            "last_capture_at": pairing.get("last_capture_at"),
+            "last_transport_status": pairing.get("last_transport_status"),
+            "spool_count": pairing.get("spool_count", 0),
+            "spool_bytes": pairing.get("spool_bytes", 0),
+            "spool_oldest_at": pairing.get("spool_oldest_at"),
+            "recovery_state": pairing.get("recovery_state"),
+            "degraded_state": pairing.get("degraded_state"),
+            "revision": pairing.get("revision", 0),
         }
 
     surfaces = sorted(
@@ -2308,20 +2424,59 @@ def _observer_reach_payload() -> dict[str, list[dict[str, Any]]]:
     }
 
 
-@router.get("/observer/continuity", response_model=ObserverContinuityResponse)
-async def build_observer_continuity_snapshot() -> dict[str, Any]:
+async def build_observer_continuity_snapshot(
+    *,
+    owner_principal_id: str | None = None,
+    operator_session_id: str | None = None,
+) -> dict[str, Any]:
     """Build a single live continuity snapshot for browser and daemon surfaces."""
     from src.guardian.feedback import guardian_feedback_repository
     from src.observer.insight_queue import insight_queue
 
-    notifications = [_notification_payload(item) for item in await native_notification_queue.list()]
+    notifications = [
+        _notification_payload(item)
+        for item in await native_notification_queue.list(
+            owner_principal_id=owner_principal_id,
+            operator_session_id=operator_session_id,
+        )
+    ]
     queued_insights = await insight_queue.peek_all()
     recent_interventions = await guardian_feedback_repository.list_recent(limit=8)
     session_titles = {
         str(session["id"]): str(session.get("title") or "Untitled session")
-        for session in await session_manager.list_sessions()
+        for session in await session_manager.list_sessions(
+            owner_principal_id=owner_principal_id,
+        )
         if isinstance(session, dict) and session.get("id")
     }
+    if owner_principal_id is not None:
+        owned_session_ids = set(session_titles)
+        queued_insights = [
+            item
+            for item in queued_insights
+            if (
+                not getattr(item, "session_id", None)
+                and not getattr(item, "owner_principal_id", None)
+                and not getattr(item, "operator_session_id", None)
+            )
+            or (
+                getattr(item, "owner_principal_id", None) == owner_principal_id
+                and (
+                    not getattr(item, "operator_session_id", None)
+                    or getattr(item, "operator_session_id", None) == operator_session_id
+                )
+            )
+            or (
+                getattr(item, "session_id", None) in owned_session_ids
+                and not getattr(item, "owner_principal_id", None)
+            )
+        ]
+        recent_interventions = [
+            item
+            for item in recent_interventions
+            if not getattr(item, "session_id", None)
+            or getattr(item, "session_id", None) in owned_session_ids
+        ]
     intervention_thread_map: dict[str, tuple[str | None, str | None]] = {}
     for item in recent_interventions:
         thread_id = getattr(item, "session_id", None)
@@ -2469,7 +2624,10 @@ async def build_observer_continuity_snapshot() -> dict[str, Any]:
     )
 
     return {
-        "daemon": await _daemon_status_payload(),
+        "daemon": await _daemon_status_payload(
+            owner_principal_id=owner_principal_id,
+            operator_session_id=operator_session_id,
+        ),
         "notifications": notifications_payload,
         "queued_insights": queued_insights_payload,
         "queued_insight_count": len(queued_insights),
@@ -2485,16 +2643,31 @@ async def build_observer_continuity_snapshot() -> dict[str, Any]:
 
 
 @router.get("/observer/continuity", response_model=ObserverContinuityResponse)
-async def get_observer_continuity():
+async def get_observer_continuity(request: Request):
     """Return a single continuity snapshot for browser and daemon surfaces."""
-    return await build_observer_continuity_snapshot()
+    owner_principal_id, operator_session_id = _require_authenticated_operator_binding(request)
+    return await build_observer_continuity_snapshot(
+        owner_principal_id=owner_principal_id,
+        operator_session_id=operator_session_id,
+    )
 
 
 @router.get("/observer/notifications", response_model=NativeNotificationListResponse)
-async def list_native_notifications():
+async def list_native_notifications(request: Request):
     """Return pending native notifications for browser-side continuity controls."""
-    notifications = [item.to_dict() for item in await native_notification_queue.list()]
-    recoveries = await native_notification_queue.recovery(limit=100)
+    owner_principal_id, operator_session_id = _require_authenticated_operator_binding(request)
+    notifications = [
+        item.to_dict()
+        for item in await native_notification_queue.list(
+            owner_principal_id=owner_principal_id,
+            operator_session_id=operator_session_id,
+        )
+    ]
+    recoveries = await native_notification_queue.recovery(
+        limit=100,
+        owner_principal_id=owner_principal_id,
+        operator_session_id=operator_session_id,
+    )
     return {
         "notifications": notifications,
         "pending_count": len(notifications),
@@ -2506,9 +2679,17 @@ async def list_native_notifications():
     "/observer/notifications/recovery",
     response_model=NativeNotificationRecoveryResponse,
 )
-async def list_native_notification_recovery(limit: int = Query(default=100, ge=1, le=100)):
+async def list_native_notification_recovery(
+    request: Request,
+    limit: int = Query(default=100, ge=1, le=100),
+):
     """Expose failed/ambiguous delivery attempts and required recovery state."""
-    recoveries = await native_notification_queue.recovery(limit=limit)
+    owner_principal_id, operator_session_id = _require_authenticated_operator_binding(request)
+    recoveries = await native_notification_queue.recovery(
+        limit=limit,
+        owner_principal_id=owner_principal_id,
+        operator_session_id=operator_session_id,
+    )
     return {"recoveries": recoveries, "recovery_count": len(recoveries)}
 
 
@@ -2654,11 +2835,15 @@ async def mark_native_notification_display_attempted(
 async def reconcile_native_notification(
     notification_id: str,
     body: NotificationRecoveryRequest,
+    request: Request,
 ):
     """Requeue one unknown notification only after explicit operator review."""
+    owner_principal_id, operator_session_id = _require_authenticated_operator_binding(request)
     reconciled = await native_notification_queue.reconcile_unknown(
         notification_id,
         retry=body.action == "retry",
+        owner_principal_id=owner_principal_id,
+        operator_session_id=operator_session_id,
     )
     await log_integration_event(
         integration_type="observer_daemon",
@@ -2673,11 +2858,16 @@ async def reconcile_native_notification(
 
 
 @router.post("/observer/notifications/{notification_id}/dismiss", response_model=NotificationDismissResponse)
-async def dismiss_native_notification(notification_id: str):
+async def dismiss_native_notification(notification_id: str, request: Request):
     """Dismiss a pending native notification from the browser control surface."""
     from src.guardian.feedback import guardian_feedback_repository
 
-    notification = await native_notification_queue.dismiss(notification_id)
+    owner_principal_id, operator_session_id = _require_authenticated_operator_binding(request)
+    notification = await native_notification_queue.dismiss(
+        notification_id,
+        owner_principal_id=owner_principal_id,
+        operator_session_id=operator_session_id,
+    )
     if notification is not None and notification.intervention_id:
         try:
             await guardian_feedback_repository.update_outcome(
@@ -2715,11 +2905,15 @@ async def dismiss_native_notification(notification_id: str):
 
 
 @router.post("/observer/notifications/dismiss-all", response_model=NotificationDismissAllResponse)
-async def dismiss_all_native_notifications():
+async def dismiss_all_native_notifications(request: Request):
     """Dismiss all pending native notifications from the browser control surface."""
     from src.guardian.feedback import guardian_feedback_repository
 
-    notifications = await native_notification_queue.dismiss_all()
+    owner_principal_id, operator_session_id = _require_authenticated_operator_binding(request)
+    notifications = await native_notification_queue.dismiss_all(
+        owner_principal_id=owner_principal_id,
+        operator_session_id=operator_session_id,
+    )
     for notification in notifications:
         if notification.intervention_id:
             try:
@@ -2757,20 +2951,26 @@ async def dismiss_all_native_notifications():
 
 
 @router.post("/observer/notifications/test", response_model=NativeNotificationResponse)
-async def enqueue_test_native_notification():
+async def enqueue_test_native_notification(request: Request):
     """Queue a sample native notification so the operator can verify the desktop path."""
+    owner_principal_id, operator_session_id = _require_authenticated_operator_binding(request)
     notification = await native_notification_queue.enqueue(
         intervention_id=None,
         title="Seraph desktop shell",
         body="Native presence is connected. This is a test notification.",
         intervention_type="test",
         urgency=1,
+        owner_principal_id=owner_principal_id,
+        operator_session_id=operator_session_id,
     )
     context_manager.record_native_notification(
         title=notification.title,
         outcome="queued_test",
     )
-    pending_count = await native_notification_queue.count()
+    pending_count = await native_notification_queue.count(
+        owner_principal_id=owner_principal_id,
+        operator_session_id=operator_session_id,
+    )
     await log_integration_event(
         integration_type="observer_daemon",
         name="notifications",
@@ -2826,7 +3026,11 @@ async def get_activity_today():
 
 
 @router.post("/observer/refresh")
-async def post_refresh():
-    """Debug endpoint — trigger a full context refresh."""
-    ctx = await context_manager.refresh()
+async def post_refresh(request: Request):
+    """Debug endpoint — refresh the authenticated operator's context."""
+    owner_principal_id, operator_session_id = _require_authenticated_operator_binding(request)
+    ctx = await context_manager.refresh(
+        owner_principal_id=owner_principal_id,
+        owner_session_id=operator_session_id,
+    )
     return ctx.to_dict()

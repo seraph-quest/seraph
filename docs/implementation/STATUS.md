@@ -19,25 +19,55 @@ For a shorter reader-facing overview of the current app, start with
 [Current App Guide](./12-current-app-guide.md). This status page remains the
 dense shipped-state record.
 
-## Active Epic #736/#775 migration branch
+## Epic #736/#775 OpenRouter inference phase
 
-This branch implements the accepted OpenRouter-only inference phase. The
-active route is the governed OpenRouter gateway; CPU-local canonical state,
-storage, tools, and operator UI remain usable without a local model server,
-CUDA, downloaded weights, or the VLM wrapper. Missing key, consent, approved
-upstream, model-fabric bounds/proofs, or budget is reported as blocked or
-configuration-required. The migration is not shipped `develop` truth until its
-reviewed PR merges and its required live text, vision, and embedding receipts
-are recorded. GPU/VLM entries below remain historical baseline evidence unless
-they are explicitly marked as branch-local migration behavior.
+This section records the accepted OpenRouter-only inference phase and its
+provider-free implementation contract. The active route is the governed
+OpenRouter gateway; CPU-local canonical state, storage, tools, and operator UI
+remain usable without a local model server, CUDA, downloaded weights, or the VLM
+wrapper. Missing key, consent, approved upstream, model-fabric bounds/proofs,
+or budget is reported as blocked or configuration-required.
+
+The implementation merge gate is local provider-free validation: deterministic
+tests, intercepted transport tests, static/configuration checks, and negative
+boundary receipts. No paid OpenRouter/provider/GPU/VLM/Telegram/live-canary call
+is required for implementation, local tests, health collection, or merge. Live
+provider quality, embedding, and edge/media receipts remain optional operational
+evidence and are explicitly unverified until an operator-authorised canary
+provides them. On an open integration branch, the reviewed Epic PR remains the
+path to shipped `develop` truth; after that merge, this section describes the
+shipped route. GPU/VLM entries below remain historical baseline evidence unless
+they are explicitly marked as historical migration behavior.
 
 The final integration branch also provides the managed, keyless health receipt
 command `./manage.sh -e prod health --format json`. It writes only redacted
 logical receipts under `operator-receipts/epic-736-health/`, makes no provider,
 GPU/VLM, speech, or connector calls, and records unprobed live evidence as
-`skipped`/`degraded` with recovery guidance. Source-contract checks are evidence
-of the checked revision, not claims of live execution or competitive
-superiority.
+`skipped`/`degraded` with recovery guidance. The writer uses #742's canonical
+production workspace resolver and rejects symlink or ambiguous roots. Source-
+contract checks are evidence of the checked revision, not claims of live
+execution or competitive superiority. Receipt schema v2 labels each check as
+static, configuration, integration, external-unverified, or excluded; the
+stable #771 evolution IDs and #754 comparator coverage remain explicit excluded
+checks outside Epic #736 closure.
+Required child criteria map #750 conversation identity/outbox, #748 native
+software, #749 paired edge, #751 audio capture/decode/persistence, #752
+Telegram transport, and #755 capability-pack lifecycle. Static source checks
+are informational; each behavioral gate requires one current schema-v1,
+ownership- and revision-bound child receipt under the server-resolved,
+server-owned `operator-receipts/epic-736-child-evidence` directory. Receipt
+files and directories must be private to the health process user; caller-
+selected `--child-evidence` paths are rejected. Missing, malformed, stale,
+tampered, wrong-revision, or ambiguous evidence is visibly `unknown`/`degraded`
+with exit 2, and a child-reported non-pass result, including `failed`, is
+visibly `degraded` with exit 2; hard configuration or static failures remain
+`failed` with exit 4. Source presence cannot satisfy behavior.
+
+Branch-local #753 adds authenticated local canonical-memory export, deterministic
+rebuild, tombstone-aware additive restore, and operator-visible recovery status;
+the owning guide records its bounded SQLite proof and remaining StrategyDelta,
+multi-process, production-restore, and semantic-quality limits. It is not
+Shipped `develop` truth until the reviewed milestone change lands.
 
 ## Legend
 
@@ -106,13 +136,20 @@ High-risk strategic wording in this status page remains governed by [19. Strateg
 - [x] Backend CI now also weights historically slow backend suites, runs ten isolated backend shards in GitHub Actions, and pins the real shard-runner executable contract instead of letting runner skew and stale local assumptions dominate the current backend matrix.
 - [x] Runtime routing now also exposes richer provider-planning comparison details, including capability-gap penalties, live-feedback penalties, retained-primary-versus-planning-winner summaries, best-alternate route margins, and the same comparison contract across runtime audit, operator, and activity surfaces.
 - [x] Runtime status retains the legacy route-aware `effective_runtime` metadata for compatibility, including wrapper/backend/queue endpoints and active profile.
-- [ ] **Branch-local #740; intended until the epic integration PR lands:** model-fabric runtime and settings truth distinguish configured profiles, selected and attempted routes, last actual success, runtime-path-specific text/VLM topology, fallback, degradation, receipt persistence, and capability proof. This is not shipped `develop` truth yet.
-- [ ] Model-fabric interactive REST/WebSocket ingress is deliberately fail-closed with zero transport when no authenticated principal is bound. #741 owns LAN/operator identity binding; #740 does not synthesize identity to make chat appear functional.
-- [ ] **Branch-local #741 CPU-host continuation:** the production compose and
-  managed local launcher keep the authenticated core and canonical workspace
-  independent of CUDA, model weights, local model servers, and the VLM wrapper.
-  The offline preflight reports core/auth/workspace state separately from
-  OpenRouter configuration and does not claim live provider or host proof.
+- [x] Model-fabric runtime and settings truth distinguish configured profiles,
+  selected and attempted routes, last actual success, runtime-path-specific
+  text/VLM topology, fallback, degradation, receipt persistence, and capability
+  proof. The active OpenRouter phase reports configuration-required or degraded
+  state when a key, consent, budget, or capability proof is absent; a configured
+  key or model is not a live-route receipt.
+- [x] Model-fabric interactive REST/WebSocket ingress is deliberately
+  fail-closed with zero transport when no authenticated principal is bound. The
+  fabric does not synthesize identity to make chat appear functional.
+- [x] The production compose and managed local launcher keep the authenticated
+  core and canonical workspace independent of CUDA, model weights, local model
+  servers, and the VLM wrapper. The offline preflight reports core/auth/
+  workspace state separately from OpenRouter configuration and does not claim
+  live provider or host proof.
 - [x] The extension platform now also exposes package version lines, compatibility truth, publisher metadata, and diagnostics summaries consistently across lifecycle, catalog, and capability surfaces, while the cockpit operator surface summarizes extension health plus update/studio actions instead of leaving package triage buried in separate inventories.
 - [x] M9 governed ecosystem foundations now have deterministic local proof: `m9_governed_ecosystem` plus `/api/operator/m9-governed-ecosystem-benchmark` cover manifest governance, lifecycle review gates, managed-connector degradation truth, marketplace governance flow, diagnostics/update triage, benchmark-proof posture, and the claim boundary that this is not competitor superiority or production marketplace security proof.
 - [x] Backend CI now also applies per-file watchdog timeouts for the heaviest backend suites, so hung `test_workflows.py` or `test_eval_harness.py` files stop consuming an entire shard budget on hosted runners.
@@ -222,9 +259,9 @@ High-risk strategic wording in this status page remains governed by [19. Strateg
 - [x] The cockpit desktop shell, presence pane, and active triage now also surface explicit presence-surface ready/attention summaries plus direct repair/follow-up drafts for messaging, adapter, and observer surfaces, so broader non-browser reach no longer hides behind route-only health or catalog inventory views.
 - [x] Runtime Reliability now has deterministic proof for activity-ledger attribution, imported capability surfaces, and simulation-grade route-planning visibility in addition to the earlier guardian/runtime contracts.
 - [x] Runtime Reliability now rate-limits repeated browser and sandbox timeout audit receipts, preserving a grouped degraded provider signal without flooding operator/status surfaces during local chat or VLM backlog work.
-- [x] **Historical develop baseline:** Runtime Reliability kept cockpit and settings metadata refreshes fast by separating configured/effective VLM runtime metadata from live GPU route probes; the active #775 branch replaces that readiness contract with governed OpenRouter status and explicit blocked/degraded receipts.
-- [x] **Historical develop baseline:** Settings opened and reopened on the Screenshot/VLM section without eager-loading unrelated panels; the active #775 branch retains the bounded operator surface while removing local VLM inference as an active dependency.
-- [x] **Historical develop baseline:** Runtime Reliability kept health, session, and artifact-storage status responsive while screenshot/VLM backlog metadata was slow; the active #775 branch preserves bounded metadata and reports OpenRouter policy/admission state instead of requiring GPU/VLM readiness.
+- [x] **Historical develop baseline:** Runtime Reliability kept cockpit and settings metadata refreshes fast by separating configured/effective VLM runtime metadata from live GPU route probes; the accepted #775 phase replaces that readiness contract with governed OpenRouter status and explicit blocked/degraded receipts.
+- [x] **Historical develop baseline:** Settings opened and reopened on the Screenshot/VLM section without eager-loading unrelated panels; the accepted #775 phase retains the bounded operator surface while removing local VLM inference as an active dependency.
+- [x] **Historical develop baseline:** Runtime Reliability kept health, session, and artifact-storage status responsive while screenshot/VLM backlog metadata was slow; the accepted #775 phase preserves bounded metadata and reports OpenRouter policy/admission state instead of requiring GPU/VLM readiness.
 - [x] The Project Constitution owns accepted direction; active execution is tracked in the GitHub Project, issues, and PRs, while the historical roadmap points to Git history.
 - [x] The cross-cutting world-class strategy translation is tracked in `docs/implementation/11-world-class-strategy-delivery.md`.
 - [x] The board-backed full-completion train has completed bounded CJ-CQ implementation and audit receipts, and PR #521 permits only the exact bounded proof-train wording. This does not ship broad parity/exceedance permission; it records exact bounded proof-train wording and continued blocked claims.
@@ -255,7 +292,7 @@ High-risk strategic wording in this status page remains governed by [19. Strateg
 - [x] browser-based guardian workspace as the only supported browser shell
 - [x] FastAPI backend with chat, WebSocket, goals, tools, observer, settings, audit, approvals, vault, skills, and MCP APIs
 - [x] native macOS observer daemon for screen/window ingest
-- [x] **Historical develop baseline:** screen analysis supported configured local or remote inference routes, with optional durable local image/provider-output/analysis artifacts through localhost-only observer inspection endpoints; on the active #775 branch, screenshot understanding uses the governed OpenRouter route and records blocked status when policy or proof is missing. Legacy stored `codex_output_path` metadata and the deprecated `/codex-output` route remain read-compatible while new links use `/provider-output`.
+- [x] **Historical develop baseline:** screen analysis supported configured local or remote inference routes, with optional durable local image/provider-output/analysis artifacts through localhost-only observer inspection endpoints; in the accepted #775 phase, screenshot understanding uses the governed OpenRouter route and records blocked status when policy or proof is missing. Legacy stored `codex_output_path` metadata and the deprecated `/codex-output` route remain read-compatible while new links use `/provider-output`.
 - [x] persistent guardian record, vector memory, sessions, and goal storage
 
 ### Trust and control

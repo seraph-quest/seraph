@@ -21,6 +21,7 @@ from src.workflows.manager import (
     DurableWorkflowStateUnavailable,
     WorkflowManager,
     WorkflowTool,
+    _bind_workflow_step_trust_principal,
     _assert_workflow_parent_recovery_authority,
     _approval_context_for_workflow,
     _checkpoint_context_allowed,
@@ -676,7 +677,7 @@ class TestWorkflowManager:
         assert mgr.list_workflows()[0]["requires_tools"] == ["execute_code"]
         assert mgr.get_tool_metadata(workflow.tool_name)["requires_tools"] == ["execute_code"]
 
-    def test_workflow_tool_resumes_from_checkpoint_state(self):
+    def test_workflow_tool_resumes_from_checkpoint_state(self, async_db):
         workflow = Workflow(
             name="web-brief-to-file",
             description="Search the web and save a note",
@@ -784,7 +785,7 @@ class TestWorkflowManager:
         assert details["step_records"][0]["reused_from_run_identity"] == parent_run_identity
         assert details["step_records"][1]["status"] == "succeeded"
 
-    def test_workflow_tool_failure_payload_keeps_checkpoint_and_failed_step_context(self):
+    def test_workflow_tool_failure_payload_keeps_checkpoint_and_failed_step_context(self, async_db):
         workflow = Workflow(
             name="web-brief-to-file",
             description="Search the web and save a note",
@@ -927,6 +928,111 @@ def test_workflow_tool_uses_unique_durable_identity_for_repeated_identical_runs(
     assert identities[1].endswith(":run-202")
 
 
+def test_workflow_tool_binds_approval_identity_and_restores_context():
+    workflow = Workflow(
+        name="approval-workflow",
+        description="Run an approval-gated step",
+        inputs={},
+        steps=[
+            WorkflowStep(
+                id="execute",
+                tool="execute_code",
+                arguments={"code": "print('approved')"},
+            ),
+        ],
+        requires_tools=["execute_code"],
+    )
+    approval_tool = ApprovalTool(
+        DummyTool("execute_code", lambda **_kwargs: "executed"),
+        force_approval=True,
+    )
+    workflow_tool = WorkflowTool(workflow, {"execute_code": approval_tool})
+    principals_after_step: list[TrustPrincipal | None] = []
+
+    async def record_failed(**_kwargs):
+        principals_after_step.append(get_current_trust_principal())
+        return {}
+
+    state_repository = SimpleNamespace(
+        create_run=AsyncMock(return_value={}),
+        record_step_started=AsyncMock(return_value={}),
+        record_step_failed=AsyncMock(side_effect=record_failed),
+        record_step_completed=AsyncMock(return_value={}),
+        finish_run=AsyncMock(return_value={}),
+    )
+    principal = TrustPrincipal(
+        principal_id="operator:approval-workflow",
+        principal_type=PrincipalType.OPERATOR,
+        grants=(AuthorityGrant.CAPABILITY_EXECUTE,),
+        session_id="approval-session",
+        operator_session_id="operator-auth-session",
+    )
+    tokens = set_runtime_context(
+        "approval-session",
+        "high_risk",
+        trust_principal=principal,
+    )
+    try:
+        with (
+            patch("src.workflows.manager.workflow_state_repository", state_repository),
+            patch(
+                "src.tools.approval.approval_repository.consume_approved",
+                new_callable=AsyncMock,
+                return_value=None,
+            ) as consume_approved,
+            patch(
+                "src.tools.approval.approval_repository.get_or_create_pending",
+                new_callable=AsyncMock,
+                return_value=SimpleNamespace(id="approval-1", risk_level="high"),
+            ) as get_or_create_pending,
+            pytest.raises(ApprovalRequired),
+        ):
+            workflow_tool()
+    finally:
+        reset_runtime_context(tokens)
+
+    run_identity = state_repository.create_run.await_args.kwargs["run_identity"]
+    pending_details = get_or_create_pending.await_args.kwargs["details"]
+    assert pending_details["workflow_run_identity"] == run_identity
+    assert pending_details["approval_context"]["workflow_run_identity"] == run_identity
+    assert consume_approved.await_args.kwargs["approval_binding"]["workflow_run_identity"] == run_identity
+    assert principals_after_step == [principal]
+    assert get_current_trust_principal() is None
+
+
+def test_workflow_step_binding_rejects_conflicting_job_identity():
+    principal = TrustPrincipal(
+        principal_id="operator:conflicting-workflow",
+        principal_type=PrincipalType.OPERATOR,
+        grants=(AuthorityGrant.CAPABILITY_EXECUTE,),
+        session_id="conflicting-session",
+        job_id="stale-run",
+    )
+    tokens = set_runtime_context(
+        "conflicting-session",
+        "balanced",
+        trust_principal=principal,
+    )
+    try:
+        with pytest.raises(
+            DurableWorkflowStateUnavailable,
+            match="conflicts with the durable run",
+        ):
+            _bind_workflow_step_trust_principal("current-run")
+        assert get_current_trust_principal() == principal
+    finally:
+        reset_runtime_context(tokens)
+
+
+def test_workflow_step_binding_leaves_principal_less_context_unbound():
+    tokens = set_runtime_context("principal-less-session", "balanced")
+    try:
+        assert _bind_workflow_step_trust_principal("principal-less-run") is None
+        assert get_current_trust_principal() is None
+    finally:
+        reset_runtime_context(tokens)
+
+
 def test_workflow_tool_fails_closed_before_tool_call_when_required_durable_state_unavailable():
     workflow = Workflow(
         name="durable-required",
@@ -989,7 +1095,7 @@ def test_workflow_tool_allows_partial_migration_missing_durable_state_tables():
     assert durable_repository.record_step_started.await_count == 1
 
 
-def test_workflow_tool_resume_rejects_when_delegation_boundary_changes():
+def test_workflow_tool_resume_rejects_when_delegation_boundary_changes(async_db):
     workflow = Workflow(
         name="delegation-replay",
         description="Resume delegated work",
@@ -1047,27 +1153,56 @@ def test_workflow_tool_resume_rejects_when_delegation_boundary_changes():
         finish_run=AsyncMock(),
     )
 
-    with (
-        patch(
-            "src.workflows.manager._load_workflow_checkpoint_payload",
-            AsyncMock(return_value=checkpoint_payload),
-        ),
-        patch("src.workflows.manager.workflow_state_repository", durable_repository),
-        pytest.raises(RuntimeError, match="trust boundary"),
-    ):
-        workflow_tool(
-            topic="seraph",
-            _seraph_resume_from_step="delegate",
-            _seraph_parent_run_identity=parent_run_identity,
-            _seraph_root_run_identity=parent_run_identity,
-        )
+    operator = _test_bypass_operator()
+    checkpoint_payload.update(
+        {
+            "session_id": "session-1",
+            "owner_kind": "user",
+            "owner_principal_id": operator.principal.principal_id,
+            "durable_run_identity": parent_run_identity,
+            "state_source": "durable_workflow_state",
+            "orchestration_v2": {
+                "revision": 1,
+                "lease": {
+                    "owner": _workflow_recovery_owner(operator.principal.principal_id, "session-1"),
+                    "lease_id": "parent-lease",
+                    "expires_at": "2099-01-01T00:00:00+00:00",
+                    "revision": 1,
+                },
+            },
+        }
+    )
+    tokens = set_runtime_context(
+        "session-1",
+        "balanced",
+        trust_principal=replace(operator.principal, session_id="session-1"),
+    )
+    try:
+        with (
+            patch(
+                "src.workflows.manager._load_workflow_checkpoint_payload",
+                AsyncMock(return_value=checkpoint_payload),
+            ),
+            patch("src.workflows.manager.workflow_state_repository", durable_repository),
+            pytest.raises(RuntimeError, match="trust boundary"),
+        ):
+            workflow_tool(
+                topic="seraph",
+                _seraph_resume_from_step="delegate",
+                _seraph_parent_run_identity=parent_run_identity,
+                _seraph_root_run_identity=parent_run_identity,
+                _seraph_parent_revision=1,
+                _seraph_parent_lease_id="parent-lease",
+            )
+    finally:
+        reset_runtime_context(tokens)
     assert durable_repository.create_run.await_count == 1
     assert durable_repository.record_step_started.await_count == 0
     assert durable_repository.finish_run.await_args.kwargs["status"] == "failed"
     assert durable_repository.finish_run.await_args.kwargs["last_completed_step_id"] is None
 
 
-def test_workflow_tool_resume_rejects_legacy_checkpoint_for_authenticated_surface():
+def test_workflow_tool_resume_rejects_legacy_checkpoint_for_authenticated_surface(async_db):
     workflow = Workflow(
         name="authenticated-replay",
         description="Resume authenticated source work",
@@ -1114,20 +1249,49 @@ def test_workflow_tool_resume_rejects_legacy_checkpoint_for_authenticated_surfac
         finish_run=AsyncMock(),
     )
 
-    with (
-        patch(
-            "src.workflows.manager._load_workflow_checkpoint_payload",
-            AsyncMock(return_value=checkpoint_payload),
-        ),
-        patch("src.workflows.manager.workflow_state_repository", durable_repository),
-        pytest.raises(RuntimeError, match="predates trust-boundary tracking"),
-    ):
-        workflow_tool(
-            query="seraph",
-            _seraph_resume_from_step="save",
-            _seraph_parent_run_identity=parent_run_identity,
-            _seraph_root_run_identity=parent_run_identity,
-        )
+    operator = _test_bypass_operator()
+    checkpoint_payload.update(
+        {
+            "session_id": "session-1",
+            "owner_kind": "user",
+            "owner_principal_id": operator.principal.principal_id,
+            "durable_run_identity": parent_run_identity,
+            "state_source": "durable_workflow_state",
+            "orchestration_v2": {
+                "revision": 1,
+                "lease": {
+                    "owner": _workflow_recovery_owner(operator.principal.principal_id, "session-1"),
+                    "lease_id": "parent-lease",
+                    "expires_at": "2099-01-01T00:00:00+00:00",
+                    "revision": 1,
+                },
+            },
+        }
+    )
+    tokens = set_runtime_context(
+        "session-1",
+        "balanced",
+        trust_principal=replace(operator.principal, session_id="session-1"),
+    )
+    try:
+        with (
+            patch(
+                "src.workflows.manager._load_workflow_checkpoint_payload",
+                AsyncMock(return_value=checkpoint_payload),
+            ),
+            patch("src.workflows.manager.workflow_state_repository", durable_repository),
+            pytest.raises(RuntimeError, match="predates trust-boundary tracking"),
+        ):
+            workflow_tool(
+                query="seraph",
+                _seraph_resume_from_step="save",
+                _seraph_parent_run_identity=parent_run_identity,
+                _seraph_root_run_identity=parent_run_identity,
+                _seraph_parent_revision=1,
+                _seraph_parent_lease_id="parent-lease",
+            )
+    finally:
+        reset_runtime_context(tokens)
     assert durable_repository.create_run.await_count == 1
     assert durable_repository.record_step_started.await_count == 0
     assert durable_repository.finish_run.await_args.kwargs["status"] == "failed"
@@ -5079,6 +5243,9 @@ class TestWorkflowApi:
             "workflow_name": "example",
             "tool_name": "workflow_example",
             "session_id": "session-1",
+            "goal_id": "goal-1",
+            "criterion_id": "criterion-1",
+            "goal_revision": 1,
             "pending_approvals": [],
             "replay_allowed": True,
             "replay_block_reason": None,
@@ -5114,7 +5281,16 @@ class TestWorkflowApi:
             with pytest.raises(HTTPException) as raised:
                 await control_workflow_run(
                     run_identity,
-                    WorkflowRunControlRequest(action="retry", target="/tmp/private-output.txt"),
+                    WorkflowRunControlRequest(
+                        action="retry",
+                        target="/tmp/private-output.txt",
+                        operator_context={
+                            "workflow_run_identity": run_identity,
+                            "goal_id": "goal-1",
+                            "criterion_id": "criterion-1",
+                            "goal_revision": 1,
+                        },
+                    ),
                     _workflow_mutator_request(operator, "/api/workflows/runs/control"),
                 )
 
@@ -5141,6 +5317,9 @@ class TestWorkflowApi:
             "workflow_name": "example",
             "tool_name": "workflow_example",
             "session_id": "session-1",
+            "goal_id": "goal-1",
+            "criterion_id": "criterion-1",
+            "goal_revision": 1,
             "pending_approvals": [],
             "replay_allowed": True,
             "replay_block_reason": None,
@@ -5185,13 +5364,221 @@ class TestWorkflowApi:
         ):
             payload = await control_workflow_run(
                 run_identity,
-                WorkflowRunControlRequest(action="retry", step_id="checkpoint-1"),
+                WorkflowRunControlRequest(
+                    action="retry",
+                    step_id="checkpoint-1",
+                    operator_context={
+                        "workflow_run_identity": run_identity,
+                        "goal_id": "goal-1",
+                        "criterion_id": "criterion-1",
+                        "goal_revision": 1,
+                    },
+                ),
                 _workflow_mutator_request(operator, "/api/workflows/runs/control"),
             )
 
         assert payload["status"] == "recorded"
         assert transition.await_args.kwargs["expected_revision"] == 7
         assert events == ["transition", "control"]
+
+    @pytest.mark.asyncio
+    async def test_typed_pause_and_revoke_require_complete_identity_before_mutation(self):
+        from src.api.workflows import WorkflowRunControlRequest, control_workflow_run
+
+        operator = _test_bypass_operator()
+        run_identity = f"{operator.session_id}:workflow_example:typed-authority"
+        run = {
+            "record_schema_version": 2,
+            "run_identity": run_identity,
+            "workflow_name": "example",
+            "tool_name": "workflow_example",
+            "session_id": operator.session_id,
+            "goal_id": "goal-1",
+            "criterion_id": "criterion-1",
+            "goal_revision": 1,
+            "plan_revision": 2,
+            "candidate_id": "candidate-1",
+            "owner_kind": "user",
+            "owner_principal_id": operator.principal.principal_id,
+            "operator_session_id": operator.session_id,
+            "lease": {"owner": "worker", "fencing_token": 3},
+            "revision": 4,
+        }
+        with (
+            patch("src.api.workflows._begin_rest_revocation_watch", return_value=None),
+            patch("src.api.workflows._find_workflow_run_for_control", new_callable=AsyncMock, return_value=run),
+            patch("src.api.workflows.audit_repository.log_event", new_callable=AsyncMock) as audit,
+            patch("src.api.workflows.durable_job_repository.get_job", new_callable=AsyncMock) as get_job,
+            patch("src.api.workflows.durable_job_repository.pause_job", new_callable=AsyncMock) as pause,
+            patch("src.api.workflows.durable_job_repository.revoke_job", new_callable=AsyncMock) as revoke,
+        ):
+            for action in ("pause", "revoke"):
+                with pytest.raises(HTTPException) as raised:
+                    await control_workflow_run(
+                        run_identity,
+                        WorkflowRunControlRequest(action=action),
+                        _workflow_mutator_request(operator, "/api/workflows/runs/control"),
+                    )
+                assert raised.value.status_code == 409
+                assert raised.value.detail == "workflow_identity_binding_missing"
+
+        get_job.assert_not_awaited()
+        pause.assert_not_awaited()
+        revoke.assert_not_awaited()
+        assert audit.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_typed_recovery_rechecks_current_canonical_goal_before_transition(self):
+        from src.api.workflows import WorkflowRunControlRequest, control_workflow_run
+
+        operator = _test_bypass_operator()
+        run_identity = "session-1:workflow_example:typed-stale-goal"
+        run = {
+            "record_schema_version": 2,
+            "run_identity": run_identity,
+            "workflow_name": "example",
+            "tool_name": "workflow_example",
+            "session_id": operator.session_id,
+            "goal_id": "goal-1",
+            "criterion_id": "criterion-1",
+            "goal_revision": 1,
+            "plan_revision": 2,
+            "candidate_id": "candidate-1",
+            "owner_kind": "user",
+            "owner_principal_id": operator.principal.principal_id,
+            "lease": {"owner": "worker", "fencing_token": 3},
+            "revision": 4,
+        }
+        context = {
+            "workflow_run_identity": run_identity,
+            "goal_id": "goal-1",
+            "criterion_id": "criterion-1",
+            "goal_revision": 1,
+            "plan_revision": 2,
+            "candidate_id": "candidate-1",
+        }
+        current_goal = SimpleNamespace(
+            id="goal-1",
+            revision=2,
+            success_criterion_json=json.dumps({
+                "criterion_id": "criterion-1",
+                "description": "Current criterion",
+                "target": "done",
+            }),
+        )
+        with (
+            patch("src.api.workflows._begin_rest_revocation_watch", return_value=None),
+            patch("src.api.workflows._find_workflow_run_for_control", new_callable=AsyncMock, return_value=run),
+            patch("src.api.workflows.durable_job_repository.get_job", new_callable=AsyncMock, return_value=run),
+            patch("src.api.workflows.goal_repository.get", new_callable=AsyncMock, return_value=current_goal),
+            patch("src.api.workflows.audit_repository.log_event", new_callable=AsyncMock) as audit,
+            patch("src.api.workflows.durable_job_repository.pause_job", new_callable=AsyncMock) as pause,
+        ):
+            with pytest.raises(HTTPException) as raised:
+                await control_workflow_run(
+                    run_identity,
+                    WorkflowRunControlRequest(action="pause", operator_context=context),
+                    _workflow_mutator_request(operator, "/api/workflows/runs/control"),
+                )
+
+        assert raised.value.status_code == 409
+        assert raised.value.detail == "stale_goal_revision"
+        pause.assert_not_awaited()
+        assert audit.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_current_goal_binding_refuses_stale_candidate_receipt(self):
+        from src.api.workflows import _workflow_current_goal_binding_detail
+
+        run = {
+            "goal_id": "goal-candidate",
+            "criterion_id": "criterion-candidate",
+            "goal_revision": 3,
+            "plan_revision": 3,
+            "candidate_id": "candidate-current",
+        }
+        goal = SimpleNamespace(
+            id="goal-candidate",
+            revision=3,
+            success_criterion_json=json.dumps({
+                "criterion_id": "criterion-candidate",
+                "description": "Current criterion",
+                "target": "done",
+            }),
+        )
+        with (
+            patch("src.api.workflows.goal_repository.get", new_callable=AsyncMock, return_value=goal),
+            patch(
+                "src.api.workflows.audit_repository.list_events",
+                new_callable=AsyncMock,
+                return_value=[{
+                    "event_type": "goal_loop_candidate",
+                    "details": {
+                        "candidate_id": "candidate-stale",
+                        "goal_id": "goal-candidate",
+                        "goal_revision": 3,
+                        "criterion_id": "criterion-candidate",
+                    },
+                }],
+            ),
+        ):
+            assert await _workflow_current_goal_binding_detail(run) == "workflow_candidate_stale"
+
+    def test_workflow_approval_candidate_binding_is_symmetric(self):
+        from src.api.workflows import _workflow_approval_matches_identity
+
+        run = {
+            "run_identity": "run-candidate-symmetric",
+            "workflow_name": "example",
+            "tool_name": "workflow_example",
+            "session_id": "session-candidate-symmetric",
+            "conversation_id": "session-candidate-symmetric",
+            "operator_session_id": "operator-session-candidate-symmetric",
+            "owner_kind": "service",
+            "owner_principal_id": "service:example",
+            "goal_id": "goal-candidate-symmetric",
+            "criterion_id": "criterion-candidate-symmetric",
+            "goal_revision": 2,
+            "plan_revision": 3,
+            "candidate_id": None,
+            "pending_approval_ids": ["approval-candidate-symmetric"],
+        }
+        approval = {
+            "id": "approval-candidate-symmetric",
+            "status": "pending",
+            "expires_at": "2099-01-01T00:00:00+00:00",
+            "workflow_run_identity": run["run_identity"],
+            "workflow_name": run["workflow_name"],
+            "session_id": run["session_id"],
+            "conversation_id": run["conversation_id"],
+            "operator_session_id": run["operator_session_id"],
+            "owner_kind": run["owner_kind"],
+            "owner_principal_id": run["owner_principal_id"],
+            "goal_id": run["goal_id"],
+            "criterion_id": run["criterion_id"],
+            "goal_revision": run["goal_revision"],
+            "plan_revision": run["plan_revision"],
+            "candidate_id": "candidate-present",
+        }
+
+        assert not _workflow_approval_matches_identity(run, approval)
+        run["candidate_id"] = "candidate-present"
+        assert _workflow_approval_matches_identity(run, approval)
+
+        approval["conversation_id"] = "other-conversation"
+        assert not _workflow_approval_matches_identity(run, approval)
+        approval["conversation_id"] = run["conversation_id"]
+        approval["operator_session_id"] = "other-operator-session"
+        assert not _workflow_approval_matches_identity(run, approval)
+        approval["operator_session_id"] = run["operator_session_id"]
+        approval.pop("conversation_id")
+        assert not _workflow_approval_matches_identity(run, approval)
+        approval["conversation_id"] = run["conversation_id"]
+        approval["expires_at"] = "2020-01-01T00:00:00+00:00"
+        assert not _workflow_approval_matches_identity(run, approval)
+        approval["expires_at"] = "2099-01-01T00:00:00+00:00"
+        approval["status"] = "approved"
+        assert not _workflow_approval_matches_identity(run, approval)
 
     @pytest.mark.asyncio
     async def test_workflow_control_refuses_durable_owner_mismatch_before_lease(self):
@@ -5324,6 +5711,9 @@ class TestWorkflowApi:
             "workflow_name": "example",
             "tool_name": "workflow_example",
             "session_id": "session-1",
+            "goal_id": "goal-1",
+            "criterion_id": "criterion-1",
+            "goal_revision": 1,
             "pending_approvals": [],
             "replay_allowed": True,
             "replay_block_reason": None,
@@ -5364,7 +5754,16 @@ class TestWorkflowApi:
             for index, step_id in enumerate(step_ids):
                 await control_workflow_run(
                     f"session-1:workflow_example:redacted-{index}",
-                    WorkflowRunControlRequest(action="retry", step_id=step_id),
+                    WorkflowRunControlRequest(
+                        action="retry",
+                        step_id=step_id,
+                        operator_context={
+                            "workflow_run_identity": f"session-1:workflow_example:redacted-{index}",
+                            "goal_id": "goal-1",
+                            "criterion_id": "criterion-1",
+                            "goal_revision": 1,
+                        },
+                    ),
                     _workflow_mutator_request(operator, "/api/workflows/runs/control"),
                 )
 
@@ -5400,6 +5799,9 @@ class TestWorkflowApi:
                 "workflow_name": "example",
                 "tool_name": "workflow_example",
                 "session_id": "session-1",
+                "goal_id": "goal-1",
+                "criterion_id": "criterion-1",
+                "goal_revision": 1,
                 "pending_approvals": [],
                 "replay_allowed": False,
                 "replay_block_reason": reason,
@@ -5418,7 +5820,16 @@ class TestWorkflowApi:
                 with pytest.raises(HTTPException) as raised:
                     await control_workflow_run(
                         run_identity,
-                        WorkflowRunControlRequest(action="retry", target="/tmp/private-output.txt"),
+                        WorkflowRunControlRequest(
+                            action="retry",
+                            target="/tmp/private-output.txt",
+                            operator_context={
+                                "workflow_run_identity": run_identity,
+                                "goal_id": "goal-1",
+                                "criterion_id": "criterion-1",
+                                "goal_revision": 1,
+                            },
+                        ),
                         _workflow_mutator_request(operator, "/api/workflows/runs/control"),
                     )
 
@@ -5482,6 +5893,9 @@ class TestWorkflowApi:
                 "workflow_name": "example",
                 "tool_name": "workflow_example",
                 "session_id": "session-1",
+                "goal_id": "goal-1",
+                "criterion_id": "criterion-1",
+                "goal_revision": 1,
                 "pending_approvals": [],
                 "replay_allowed": True,
                 "replay_block_reason": None,
@@ -5502,7 +5916,16 @@ class TestWorkflowApi:
                 with pytest.raises(RuntimeError, match="provider failed"):
                     await control_workflow_run(
                         run["run_identity"],
-                        WorkflowRunControlRequest(action="retry", step_id="/tmp/private-step"),
+                        WorkflowRunControlRequest(
+                            action="retry",
+                            step_id="/tmp/private-step",
+                            operator_context={
+                                "workflow_run_identity": run["run_identity"],
+                                "goal_id": "goal-1",
+                                "criterion_id": "criterion-1",
+                                "goal_revision": 1,
+                            },
+                        ),
                         _workflow_mutator_request(operator, "/api/workflows/runs/control"),
                     )
             failure_details = audit_log.await_args.kwargs["details"]
@@ -6733,7 +7156,7 @@ async def test_workflow_resume_plan_resolves_redacted_step_handle_before_plannin
 
 
 @pytest.mark.asyncio
-async def test_workflow_control_uses_run_session_raw_step_and_post_transition_fence():
+async def test_workflow_control_uses_run_session_raw_step_and_post_transition_fence(async_db):
     """The route handle must be consumable by chat recovery under one fence."""
     from src.api.workflows import (
         WorkflowRunControlRequest,
@@ -6910,8 +7333,6 @@ async def test_workflow_control_uses_run_session_raw_step_and_post_transition_fe
     try:
         with (
             patch("src.workflows.manager._load_workflow_checkpoint_payload", AsyncMock(return_value=details)),
-            patch("src.workflows.manager._run_required_durable_state_write", return_value=None),
-            patch("src.workflows.manager._run_durable_state_write", return_value=None),
             patch("src.workflows.manager.flush_session_memory_sync"),
         ):
             workflow_tool(
@@ -7002,8 +7423,8 @@ async def test_branch_child_control_consumes_child_action_handle_identity():
     )
 
     operator = _test_bypass_operator()
-    parent_identity = "session-owner:workflow_example:parent"
-    child_identity = "session-owner:workflow_example:child"
+    parent_identity = "test-auth-bypass:workflow_example:parent"
+    child_identity = "test-auth-bypass:workflow_example:child"
     raw_step_id = "child/checkpoint"
     child_run = {
         "id": "child-run",
@@ -7014,8 +7435,8 @@ async def test_branch_child_control_consumes_child_action_handle_identity():
         "branch_depth": 1,
         "workflow_name": "example",
         "tool_name": "workflow_example",
-        "session_id": "session-owner",
-        "thread_id": "session-owner",
+        "session_id": operator.session_id,
+        "thread_id": operator.session_id,
         "status": "running",
         "availability": "ready",
         "pending_approvals": [],
@@ -7023,6 +7444,12 @@ async def test_branch_child_control_consumes_child_action_handle_identity():
         "replay_block_reason": None,
         "owner_kind": "user",
         "owner_principal_id": operator.principal.principal_id,
+        "operator_session_id": operator.session_id,
+        "goal_id": "goal-child",
+        "criterion_id": "criterion-child",
+        "goal_revision": 1,
+        "plan_revision": 1,
+        "candidate_id": "candidate-child",
         "checkpoint_candidates": [{
             "step_id": raw_step_id,
             "label": "child checkpoint",
@@ -7047,7 +7474,7 @@ async def test_branch_child_control_consumes_child_action_handle_identity():
     assert projection["artifact_registry"][0]["file_path"] == "notes/child-output.md"
     assert "/tmp/child-private.md" not in json.dumps(projection)
 
-    lease_owner = _workflow_operator_owner(operator.principal.principal_id, "session-owner")
+    lease_owner = _workflow_operator_owner(operator.principal.principal_id, operator.session_id)
     lease = {
         "owner": lease_owner,
         "lease_id": "child-lease",
@@ -7106,6 +7533,32 @@ async def test_branch_child_control_consumes_child_action_handle_identity():
         ),
         patch("src.api.workflows._workflow_resume_plan", return_value=raw_plan),
         patch(
+            "src.api.workflows.goal_repository.get",
+            new_callable=AsyncMock,
+            return_value=SimpleNamespace(
+                id="goal-child",
+                revision=1,
+                success_criterion_json=json.dumps({
+                    "criterion_id": "criterion-child",
+                    "description": "Current child criterion",
+                    "target": "done",
+                }),
+            ),
+        ),
+        patch(
+            "src.api.workflows.audit_repository.list_events",
+            new_callable=AsyncMock,
+            return_value=[{
+                "event_type": "goal_loop_candidate",
+                "details": {
+                    "candidate_id": "candidate-child",
+                    "goal_id": "goal-child",
+                    "goal_revision": 1,
+                    "criterion_id": "criterion-child",
+                },
+            }],
+        ),
+        patch(
             "src.api.workflows.workflow_state_repository.acquire_or_renew_v2_lease",
             new_callable=AsyncMock,
             return_value={
@@ -7136,6 +7589,14 @@ async def test_branch_child_control_consumes_child_action_handle_identity():
                 action="branch",
                 step_id=action_handle["step_id"],
                 action_handle=action_handle,
+                operator_context={
+                    "workflow_run_identity": child_identity,
+                    "goal_id": "goal-child",
+                    "criterion_id": "criterion-child",
+                    "goal_revision": 1,
+                    "plan_revision": 1,
+                    "candidate_id": "candidate-child",
+                },
             ),
             _workflow_mutator_request(operator, "/api/workflows/runs/control"),
         )

@@ -39,7 +39,7 @@ SOURCE_PROJECTION_CLAIM_BOUNDARY = (
     "audit_projected_workflow_receipt_not_durable_state_machine"
 )
 TRUST_BOUNDARY_BLOCK_REASONS = {"approval_context_changed", "approval_context_missing"}
-TERMINAL_STATUSES = {"completed", "succeeded", "failed", "cancelled"}
+TERMINAL_STATUSES = {"completed", "succeeded", "degraded", "failed", "cancelled"}
 DURABLE_WORKFLOW_ENGINE_BENCHMARK_SUITE_NAME = DURABLE_WORKFLOW_ENGINE_SUITE_NAME
 DURABLE_WORKFLOW_ENGINE_BENCHMARK_SCENARIO_NAMES = DURABLE_WORKFLOW_ENGINE_SCENARIO_NAMES
 PRODUCTION_DURABLE_ORCHESTRATION_SUITE_NAME = "production_durable_orchestration"
@@ -439,6 +439,8 @@ class WorkflowStateRepository:
             "workflow_name": run.workflow_name,
             "tool_name": run.tool_name,
             "session_id": run.session_id,
+            "conversation_id": getattr(run, "conversation_id", None) or run.session_id,
+            "operator_session_id": getattr(run, "operator_session_id", None),
             "status": run.status,
             "branch_kind": run.branch_kind,
             "branch_depth": run.branch_depth,
@@ -470,6 +472,7 @@ class WorkflowStateRepository:
             "capability_version": getattr(run, "capability_version", "workflow-v1"),
             "input_digest": getattr(run, "input_digest", None),
             "authority_digest": getattr(run, "authority_digest", None),
+            "budget_digest": getattr(run, "budget_digest", None),
             "idempotency_scope": getattr(run, "idempotency_scope", None),
             "idempotency_key": getattr(run, "idempotency_key", None),
             "idempotency_binding": getattr(run, "idempotency_binding", None),
@@ -535,6 +538,8 @@ class WorkflowStateRepository:
         workflow_name: str,
         tool_name: str,
         session_id: str | None,
+        conversation_id: str | None = None,
+        operator_session_id: str | None = None,
         run_fingerprint: str,
         arguments: dict[str, Any],
         approval_context: dict[str, Any],
@@ -561,12 +566,16 @@ class WorkflowStateRepository:
                 workflow_name=workflow_name,
                 tool_name=tool_name,
                 session_id=session_id,
+                conversation_id=conversation_id or session_id,
+                operator_session_id=operator_session_id,
                 run_fingerprint=run_fingerprint,
                 # Rows created through this compatibility projection remain
                 # legacy until explicitly admitted by DurableJobRepository.
                 record_schema_version=1,
             )
             run.status = "running"
+            run.conversation_id = conversation_id or session_id
+            run.operator_session_id = operator_session_id
             run.arguments_json = _dumps(arguments)
             run.approval_context_json = _dumps(approval_context)
             run.branch_kind = branch_kind
@@ -1588,6 +1597,8 @@ class WorkflowStateRepository:
                 "workflow_name": payload["workflow_name"],
                 "run_fingerprint": payload["run_fingerprint"],
                 "session_id": payload["session_id"],
+                "conversation_id": payload["conversation_id"],
+                "operator_session_id": payload["operator_session_id"],
                 "owner_kind": payload["owner_kind"],
                 "owner_principal_id": payload["owner_principal_id"],
                 "service_id": payload["service_id"],

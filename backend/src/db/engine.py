@@ -48,15 +48,22 @@ OPERATOR_REQUIRED_TABLES = (
     "queued_insights",
     "native_notification_outbox",
     "native_notification_delivery_attempts",
+    "telegram_transport_states",
+    "telegram_inbound_updates",
+    "telegram_transport_outbox",
+    "telegram_delivery_attempts",
     "guardian_interventions",
     "strategy_deltas",
     "memory_tombstones",
+    "audio_ingress_jobs",
+    "audio_consent_grants",
 )
 
 _LEGACY_WORKFLOW_STATUS_MAP = {
     "completed": "succeeded",
     "succeeded": "succeeded",
     "failed": "failed",
+    "degraded": "degraded",
     "cancelled": "cancelled",
     "canceled": "cancelled",
     "queued": "queued",
@@ -113,6 +120,27 @@ async def _ensure_legacy_columns(conn) -> None:
         await conn.exec_driver_sql(
             "CREATE INDEX IF NOT EXISTS ix_goals_proactive_enabled ON goals (proactive_enabled)"
         )
+    goal_columns = await _table_columns("goals")
+    if goal_columns and "owner_principal_id" not in goal_columns:
+        await conn.exec_driver_sql(
+            "ALTER TABLE goals ADD COLUMN owner_principal_id VARCHAR"
+        )
+    if goal_columns and "owner_session_id" not in goal_columns:
+        await conn.exec_driver_sql(
+            "ALTER TABLE goals ADD COLUMN owner_session_id VARCHAR"
+        )
+    if goal_columns and "admission_budget_json" not in goal_columns:
+        await conn.exec_driver_sql(
+            "ALTER TABLE goals ADD COLUMN admission_budget_json VARCHAR"
+        )
+    if goal_columns and "owner_principal_id" in await _table_columns("goals"):
+        await conn.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_goals_owner_principal_id ON goals (owner_principal_id)"
+        )
+    if goal_columns and "owner_session_id" in await _table_columns("goals"):
+        await conn.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_goals_owner_session_id ON goals (owner_session_id)"
+        )
 
     user_profile_columns = await _table_columns("user_profiles")
     if user_profile_columns and "tool_policy_mode" not in user_profile_columns:
@@ -136,6 +164,18 @@ async def _ensure_legacy_columns(conn) -> None:
     if queued_insight_columns and "session_id" not in queued_insight_columns:
         await conn.exec_driver_sql(
             "ALTER TABLE queued_insights ADD COLUMN session_id VARCHAR"
+        )
+    if queued_insight_columns and "owner_principal_id" not in queued_insight_columns:
+        await conn.exec_driver_sql(
+            "ALTER TABLE queued_insights ADD COLUMN owner_principal_id VARCHAR"
+        )
+    if queued_insight_columns and "operator_session_id" not in queued_insight_columns:
+        await conn.exec_driver_sql(
+            "ALTER TABLE queued_insights ADD COLUMN operator_session_id VARCHAR"
+        )
+    if queued_insight_columns and "goal_revision" not in queued_insight_columns:
+        await conn.exec_driver_sql(
+            "ALTER TABLE queued_insights ADD COLUMN goal_revision INTEGER"
         )
 
     guardian_intervention_columns = await _table_columns("guardian_interventions")
@@ -275,6 +315,123 @@ async def _ensure_legacy_columns(conn) -> None:
                 {"owner_principal_id": _SINGLE_OPERATOR_PRINCIPAL_ID},
             )
 
+    # #750 adds queryable lineage to the existing transcript and durable
+    # surfaces.  The session primary key remains the canonical conversation;
+    # these additive fields are receipts, never an alternate identity store.
+    message_lineage_columns = await _add_missing_columns(
+        "messages",
+        {
+            "conversation_id": "VARCHAR",
+            "thread_id": "VARCHAR",
+            "owner_principal_id": "VARCHAR",
+            "operator_session_id": "VARCHAR",
+            "device_id": "VARCHAR",
+            "channel": "VARCHAR",
+            "transport": "VARCHAR",
+            "correlation_id": "VARCHAR",
+            "causation_id": "VARCHAR",
+            "attachment_refs_json": "VARCHAR DEFAULT '[]'",
+        },
+    )
+    for column in (
+        "conversation_id",
+        "thread_id",
+        "owner_principal_id",
+        "operator_session_id",
+        "correlation_id",
+    ):
+        if column in message_lineage_columns:
+            await conn.exec_driver_sql(
+                f"CREATE INDEX IF NOT EXISTS ix_messages_{column} ON messages ({column})"
+            )
+
+    approval_lineage_columns = await _add_missing_columns(
+        "approval_requests",
+        {
+            "conversation_id": "VARCHAR",
+            "thread_id": "VARCHAR",
+            "owner_principal_id": "VARCHAR",
+            "operator_session_id": "VARCHAR",
+            "device_id": "VARCHAR",
+            "channel": "VARCHAR DEFAULT 'web'",
+            "transport": "VARCHAR DEFAULT 'rest'",
+            "correlation_id": "VARCHAR",
+            "causation_id": "VARCHAR",
+            "attachment_refs_json": "VARCHAR DEFAULT '[]'",
+            "challenge": "VARCHAR",
+            "action": "VARCHAR",
+            "expires_at": "DATETIME",
+        },
+    )
+    for column in (
+        "conversation_id",
+        "thread_id",
+        "owner_principal_id",
+        "operator_session_id",
+        "correlation_id",
+        "action",
+        "expires_at",
+    ):
+        if column in approval_lineage_columns:
+            await conn.exec_driver_sql(
+                f"CREATE INDEX IF NOT EXISTS ix_approval_requests_{column} "
+                f"ON approval_requests ({column})"
+            )
+
+    outbox_lineage_columns = await _add_missing_columns(
+        "native_notification_outbox",
+        {
+            "goal_id": "VARCHAR",
+            "goal_revision": "INTEGER",
+            "budget_period_key": "VARCHAR",
+            "budget_limit": "INTEGER",
+            "operator_session_id": "VARCHAR",
+            "device_id": "VARCHAR",
+            "channel": "VARCHAR DEFAULT 'native_notification'",
+            "transport": "VARCHAR DEFAULT 'native_notification'",
+            "conversation_id": "VARCHAR",
+            "correlation_id": "VARCHAR",
+            "causation_id": "VARCHAR",
+            "attachment_refs_json": "VARCHAR DEFAULT '[]'",
+            "degraded_state": "VARCHAR",
+        },
+    )
+    for column in (
+        "goal_id",
+        "goal_revision",
+        "budget_period_key",
+        "budget_limit",
+        "operator_session_id",
+        "device_id",
+        "channel",
+        "transport",
+        "conversation_id",
+        "correlation_id",
+        "causation_id",
+        "degraded_state",
+    ):
+        if column in outbox_lineage_columns:
+            await conn.exec_driver_sql(
+                f"CREATE INDEX IF NOT EXISTS ix_native_notification_outbox_{column} "
+                f"ON native_notification_outbox ({column})"
+            )
+
+    insight_budget_columns = await _add_missing_columns(
+        "queued_insights",
+        {
+            "goal_id": "VARCHAR",
+            "goal_revision": "INTEGER",
+            "budget_period_key": "VARCHAR",
+            "budget_limit": "INTEGER",
+        },
+    )
+    for column in ("goal_id", "goal_revision", "budget_period_key", "budget_limit"):
+        if column in insight_budget_columns:
+            await conn.exec_driver_sql(
+                f"CREATE INDEX IF NOT EXISTS ix_queued_insights_{column} "
+                f"ON queued_insights ({column})"
+            )
+
     proof_columns = await _add_missing_columns(
         "model_capability_proofs",
         {
@@ -292,6 +449,30 @@ async def _ensure_legacy_columns(conn) -> None:
             "CREATE INDEX IF NOT EXISTS ix_model_capability_proofs_receipt_id "
             "ON model_capability_proofs (receipt_id)"
         )
+
+    # #751 keeps the requested capability durable so restart/process recovery
+    # cannot silently reinterpret an audio request as chat.
+    audio_ingress_columns = await _add_missing_columns(
+        "audio_ingress_jobs",
+        {
+            "requested_capability": "VARCHAR DEFAULT 'chat'",
+            "provider_status": "VARCHAR DEFAULT 'unverified'",
+            "transport_status": "VARCHAR DEFAULT 'unknown'",
+            "transport_lease_id": "VARCHAR",
+            "cleanup_status": "VARCHAR DEFAULT 'complete'",
+        },
+    )
+    if "requested_capability" in audio_ingress_columns:
+        await conn.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_audio_ingress_jobs_requested_capability "
+            "ON audio_ingress_jobs (requested_capability)"
+        )
+    for column in ("provider_status", "transport_status", "transport_lease_id", "cleanup_status"):
+        if column in audio_ingress_columns:
+            await conn.exec_driver_sql(
+                f"CREATE INDEX IF NOT EXISTS ix_audio_ingress_jobs_{column} "
+                f"ON audio_ingress_jobs ({column})"
+            )
     if "receipt_hash" in proof_columns:
         await conn.exec_driver_sql(
             "CREATE INDEX IF NOT EXISTS ix_model_capability_proofs_receipt_hash "
@@ -351,6 +532,10 @@ async def _ensure_legacy_columns(conn) -> None:
             "owner_kind": "VARCHAR DEFAULT 'legacy'",
             "owner_principal_id": "VARCHAR",
             "service_id": "VARCHAR",
+            # Keep execution conversation and browser operator authentication
+            # as separate durable bindings for recovery authorization.
+            "conversation_id": "VARCHAR",
+            "operator_session_id": "VARCHAR",
             "goal_id": "VARCHAR",
             "goal_revision": "INTEGER",
             "plan_revision": "INTEGER",
@@ -358,6 +543,7 @@ async def _ensure_legacy_columns(conn) -> None:
             "capability_version": "VARCHAR DEFAULT 'workflow-v1'",
             "input_digest": "VARCHAR",
             "authority_digest": "VARCHAR",
+            "budget_digest": "VARCHAR",
             "idempotency_scope": "VARCHAR",
             "idempotency_key": "VARCHAR",
             "idempotency_binding": "VARCHAR",
@@ -380,6 +566,12 @@ async def _ensure_legacy_columns(conn) -> None:
             "result_summary": "VARCHAR",
         },
     )
+    for column in ("conversation_id", "operator_session_id"):
+        if column in workflow_job_columns:
+            await conn.exec_driver_sql(
+                f"CREATE INDEX IF NOT EXISTS ix_workflow_run_states_{column} "
+                f"ON workflow_run_states ({column})"
+            )
     if workflow_job_columns and "revision" in await _table_columns("workflow_run_states"):
         await conn.exec_driver_sql(
             "UPDATE workflow_run_states SET revision = 0 "
@@ -490,6 +682,43 @@ async def _ensure_legacy_columns(conn) -> None:
                     "id": row[0],
                 },
             )
+
+
+async def _ensure_telegram_transport_columns(conn) -> None:
+    """Add fields introduced after the initial #752 transport migration.
+
+    ``SQLModel.metadata.create_all`` creates new tables but does not alter an
+    existing SQLite table.  Keep this additive and idempotent so a workspace
+    that already exercised the provider-free transport can restart safely
+    after lease/readback hardening lands.
+    """
+    definitions = {
+        "telegram_transport_states": {
+            "last_update_at": "DATETIME",
+            "last_error": "VARCHAR",
+        },
+        "telegram_transport_outbox": {
+            "lease_owner": "VARCHAR",
+            "lease_expires_at": "DATETIME",
+            "fencing_token": "INTEGER DEFAULT 0",
+            "deadline_at": "DATETIME",
+            "cancelled_at": "DATETIME",
+        },
+        "telegram_delivery_attempts": {
+            "lease_owner": "VARCHAR",
+            "fencing_token": "INTEGER DEFAULT 0",
+        },
+    }
+    for table_name, columns_to_add in definitions.items():
+        result = await conn.exec_driver_sql(f"PRAGMA table_info({table_name})")
+        existing = {row[1] for row in result.fetchall()}
+        if not existing:
+            continue
+        for column, sql_type in columns_to_add.items():
+            if column not in existing:
+                await conn.exec_driver_sql(
+                    f"ALTER TABLE {table_name} ADD COLUMN {column} {sql_type}"
+                )
 
 
 async def _ensure_search_indexes(conn) -> None:
@@ -672,6 +901,7 @@ async def init_db() -> None:
         # make duplicate legacy bindings abort startup before the migration can
         # preserve and block those rows for operator reconciliation.
         await _ensure_legacy_columns(conn)
+        await _ensure_telegram_transport_columns(conn)
         await conn.run_sync(SQLModel.metadata.create_all)
         await _ensure_memory_indexes(conn)
         await _ensure_search_indexes(conn)

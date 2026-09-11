@@ -402,25 +402,41 @@ def _goal_payload(goal) -> dict:
 
 @router.get("/goals")
 async def list_goals(
+    request: Request,
     level: Optional[str] = None,
     domain: Optional[str] = None,
     status: Optional[str] = None,
 ):
-    """List goals, optionally filtered."""
-    goals = await goal_repository.list_goals(level=level, domain=domain, status=status)
+    """List the authenticated operator's goals, optionally filtered."""
+    operator = _require_authenticated_operator(request)
+    goals = await goal_repository.list_goals(
+        level=level,
+        domain=domain,
+        status=status,
+        owner_principal_id=operator.principal.principal_id,
+        owner_session_id=operator.session_id,
+    )
     return [_goal_payload(goal) for goal in goals]
 
 
 @router.get("/goals/tree")
-async def get_goal_tree():
-    """Get the full goal tree as nested structure."""
-    return await goal_repository.get_tree()
+async def get_goal_tree(request: Request):
+    """Get the authenticated operator's goal tree as nested structure."""
+    operator = _require_authenticated_operator(request)
+    return await goal_repository.get_tree(
+        owner_principal_id=operator.principal.principal_id,
+        owner_session_id=operator.session_id,
+    )
 
 
 @router.get("/goals/dashboard")
-async def get_goal_dashboard():
-    """Get summary stats for the goals UI."""
-    return await goal_repository.get_dashboard()
+async def get_goal_dashboard(request: Request):
+    """Get summary stats for the authenticated operator's goals."""
+    operator = _require_authenticated_operator(request)
+    return await goal_repository.get_dashboard(
+        owner_principal_id=operator.principal.principal_id,
+        owner_session_id=operator.session_id,
+    )
 
 
 @router.post("/goals")

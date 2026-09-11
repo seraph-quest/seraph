@@ -477,15 +477,33 @@ class GoalRepository:
             result = await db.execute(query)
             return list(result.scalars().all())
 
-    async def get_children(self, goal_id: str) -> list[Goal]:
-        return await self.list_goals(parent_id=goal_id)
+    async def get_children(
+        self,
+        goal_id: str,
+        *,
+        owner_principal_id: str | None = None,
+        owner_session_id: str | None = None,
+    ) -> list[Goal]:
+        return await self.list_goals(
+            parent_id=goal_id,
+            owner_principal_id=owner_principal_id,
+            owner_session_id=owner_session_id,
+        )
 
-    async def get_tree(self) -> list[dict]:
-        """Return the full goal tree as nested dicts."""
+    async def get_tree(
+        self,
+        *,
+        owner_principal_id: str | None = None,
+        owner_session_id: str | None = None,
+    ) -> list[dict]:
+        """Return a goal tree, optionally restricted to one canonical owner."""
         async with get_session() as db:
-            result = await db.execute(
-                select(Goal).order_by(Goal.sort_order, col(Goal.created_at).asc())
-            )
+            query = select(Goal)
+            if owner_principal_id is not None:
+                query = query.where(Goal.owner_principal_id == owner_principal_id)
+            if owner_session_id is not None:
+                query = query.where(Goal.owner_session_id == owner_session_id)
+            result = await db.execute(query.order_by(Goal.sort_order, col(Goal.created_at).asc()))
             all_goals = result.scalars().all()
 
         # Build tree structure

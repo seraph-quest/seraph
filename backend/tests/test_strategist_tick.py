@@ -496,3 +496,83 @@ async def test_strategist_tick_timeout_is_terminally_recorded(async_db):
     assert durable_job is not None
     assert durable_job["status"] == "failed"
     assert durable_job["failure_reason"] == "strategist_timeout"
+
+
+@pytest.mark.asyncio
+async def test_goal_candidate_failure_blocks_before_unbound_delivery(async_db):
+    criterion = GoalSuccessCriterion(
+        description="Create a verified snapshot",
+        verifier_kind=CriterionVerifierKind.artifact_readback,
+        evidence_refs=["goal:operator-consent"],
+    )
+    goal = Goal(
+        id="goal-candidate-failure",
+        title="Candidate failure goal",
+        proactive_enabled=True,
+        success_criterion_json=criterion.model_dump_json(),
+        owner_principal_id="operator:goal-owner",
+        owner_session_id="session:goal-owner",
+    )
+    budget = GoalAdmissionBudget(
+        reviewed_grant=True,
+        grant_id="goal-grant",
+        period_started_at=datetime.now(timezone.utc) - timedelta(minutes=1),
+        period_expires_at=datetime.now(timezone.utc) + timedelta(hours=1),
+    )
+    decision_completion = AsyncMock(
+        return_value=(
+            '{"should_intervene": true, "content": "Should not deliver", '
+            '"intervention_type": "advisory", "urgency": 3, "reasoning": "candidate failed"}'
+        )
+    )
+    deliver = AsyncMock()
+
+    with (
+        patch(
+            "src.scheduler.jobs.strategist_tick.goal_repository.list_goals",
+            new=AsyncMock(return_value=[goal]),
+        ),
+        patch(
+            "src.scheduler.jobs.strategist_tick._goal_budget_admission",
+            new=AsyncMock(
+                return_value={
+                    "status": "admitted",
+                    "goal_id": goal.id,
+                    "budget": budget,
+                    "notification_owner_principal_id": goal.owner_principal_id,
+                    "notification_operator_session_id": goal.owner_session_id,
+                }
+            ),
+        ),
+        patch(
+            "src.scheduler.jobs.strategist_tick._persist_scheduled_candidate",
+            new=AsyncMock(side_effect=RuntimeError("candidate persistence unavailable")),
+        ),
+        patch(
+            "src.scheduler.jobs.strategist_tick.run_strategist_decision_completion",
+            decision_completion,
+        ),
+        patch("src.observer.delivery.deliver_or_queue", deliver),
+    ):
+        await run_strategist_tick()
+
+    decision_completion.assert_not_awaited()
+    deliver.assert_not_awaited()
+    durable_job = await durable_job_repository.get_job(_occurrence_identity())
+    assert durable_job is not None
+    assert durable_job["status"] == "blocked"
+    failure_effect = next(
+        effect
+        for effect in durable_job["effects"]
+        if effect["effect_type"] == "goal_snapshot_admission"
+    )
+    assert failure_effect["status"] == "failed"
+    assert failure_effect["details"]["goal_id"] == goal.id
+    fence_effect = next(
+        effect
+        for effect in durable_job["effects"]
+        if effect["effect_type"] == "goal_work_delivery_fence"
+    )
+    assert fence_effect["details"]["owner_principal_id"] == goal.owner_principal_id
+    assert fence_effect["details"]["operator_session_id"] == goal.owner_session_id
+    assert not any(effect["effect_type"] == "proactive_delivery" for effect in durable_job["effects"])

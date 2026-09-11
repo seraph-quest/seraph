@@ -220,19 +220,80 @@ async def _record_budget_defer(parent_job_id: str, parent_fencing_token: int, de
     return details
 
 
+def _goal_work_failure_details(
+    goal: Goal,
+    *,
+    capability_id: str,
+    error: Exception,
+    budget: object | None = None,
+) -> dict[str, object]:
+    """Keep the selected goal identity on candidate persistence/service failure."""
+
+    if budget is None:
+        try:
+            budget = deserialize_admission_budget(goal)
+        except Exception:
+            budget = None
+    return {
+        "status": "failed",
+        "reason": f"goal_work_error:{type(error).__name__}",
+        "goal_id": str(getattr(goal, "id", "") or "").strip() or None,
+        "capability_id": capability_id,
+        "operator_visible": True,
+        "goal_work_failure": True,
+        "error_type": type(error).__name__,
+        "notification_budget": _notification_budget_binding(goal, budget),
+        **_notification_delivery_binding(goal),
+    }
+
+
+async def _record_goal_work_failure(
+    parent_job_id: str,
+    parent_fencing_token: int,
+    *,
+    goal: Goal,
+    capability_id: str,
+    effect_type: str,
+    error: Exception,
+    budget: object | None = None,
+) -> dict[str, object]:
+    """Persist a candidate failure before the parent delivery fence runs."""
+
+    details = _goal_work_failure_details(
+        goal,
+        capability_id=capability_id,
+        error=error,
+        budget=budget,
+    )
+    try:
+        await durable_job_repository.record_effect(
+            parent_job_id,
+            effect_type=effect_type,
+            status="failed",
+            details=details,
+            owner=_STRATEGIST_RUNNER_ID,
+            fencing_token=parent_fencing_token,
+        )
+    except Exception:
+        # The parent transition still fails closed even if this secondary
+        # receipt cannot be written.  Keep the error visible in the log.
+        logger.exception("strategist_tick: failed to persist goal work failure")
+    return details
+
+
 def _goal_work_must_not_continue(details: dict[str, object]) -> bool:
     """Keep deferred/failed goal work from falling through to ambient delivery."""
 
     goal_id = str(details.get("goal_id") or "").strip()
-    if not goal_id:
-        return False
-    return str(details.get("status") or "").strip() in {
+    status = str(details.get("status") or "").strip()
+    if status in {
         "blocked",
         "deferred",
         "failed",
-        "skipped",
         "exhausted",
-    }
+    }:
+        return True
+    return bool(goal_id) and status == "skipped"
 
 
 def _reasoning_digest(reasoning: object) -> str:
@@ -595,25 +656,55 @@ async def _run_opted_in_goal_web_brief(
                 if budget is not None else datetime.now(timezone.utc) + timedelta(seconds=300)
             ),
         )
-        await _persist_scheduled_candidate(
-            goal,
-            GoalCandidateRequest(
+        try:
+            await _persist_scheduled_candidate(
+                goal,
+                GoalCandidateRequest(
+                    capability_id="workflow.web-brief-to-file",
+                    capability_version=request.capability_version,
+                    inputs={
+                        "query": request.query,
+                        "file_path": request.file_path,
+                        "priority": request.priority,
+                    },
+                    evidence_refs=request.evidence_refs,
+                    reason=request.reason,
+                    expected_outcome=request.expected_outcome,
+                    expires_at=request.deadline_at,
+                ),
+            )
+        except Exception as exc:
+            return await _record_goal_work_failure(
+                parent_job_id,
+                parent_fencing_token,
+                goal=goal,
                 capability_id="workflow.web-brief-to-file",
-                capability_version=request.capability_version,
-                inputs={
-                    "query": request.query,
-                    "file_path": request.file_path,
-                    "priority": request.priority,
-                },
-                evidence_refs=request.evidence_refs,
-                reason=request.reason,
-                expected_outcome=request.expected_outcome,
-                expires_at=request.deadline_at,
-            ),
-        )
-        result = await WebBriefToFileService(authority_principal=principal).run(request)
+                effect_type="web_brief_admission",
+                error=exc,
+                budget=budget,
+            )
+        try:
+            result = await WebBriefToFileService(authority_principal=principal).run(request)
+        except Exception as exc:
+            return await _record_goal_work_failure(
+                parent_job_id,
+                parent_fencing_token,
+                goal=goal,
+                capability_id="workflow.web-brief-to-file",
+                effect_type="web_brief_admission",
+                error=exc,
+                budget=budget,
+            )
         if not isinstance(result, WebBriefToFileResult):
-            raise TypeError("web brief service returned an invalid result")
+            return await _record_goal_work_failure(
+                parent_job_id,
+                parent_fencing_token,
+                goal=goal,
+                capability_id="workflow.web-brief-to-file",
+                effect_type="web_brief_admission",
+                error=TypeError("web brief service returned an invalid result"),
+                budget=budget,
+            )
         effect_status = (
             "succeeded"
             if result.execution_status == "succeeded" and result.verification == "passed"
@@ -675,7 +766,18 @@ async def _run_opted_in_goal_web_brief(
         key=lambda item: _proactive_goal_sort_key(item[0], item[4]),
     )
     for candidate_index, selected in enumerate(ordered_candidates):
-        details = await _run_candidate(selected)
+        try:
+            details = await _run_candidate(selected)
+        except Exception as exc:
+            goal = selected[0]
+            details = await _record_goal_work_failure(
+                parent_job_id,
+                parent_fencing_token,
+                goal=goal,
+                capability_id="workflow.web-brief-to-file",
+                effect_type="web_brief_admission",
+                error=exc,
+            )
         # A correction gate is a candidate-local no-op. Keep the scheduler's
         # priority order but give one next valid goal a chance; all other
         # blocked/failed outcomes stop the bounded tick after their receipt.
@@ -768,21 +870,51 @@ async def _run_opted_in_goal_snapshot(
             if budget is not None else datetime.now(timezone.utc) + timedelta(seconds=300)
         ),
     )
-    await _persist_scheduled_candidate(
-        goal,
-        GoalCandidateRequest(
+    try:
+        await _persist_scheduled_candidate(
+            goal,
+            GoalCandidateRequest(
+                capability_id="workflow.goal-snapshot-to-file",
+                capability_version=request.capability_version,
+                inputs={"file_path": request.file_path},
+                evidence_refs=request.evidence_refs,
+                reason=request.reason,
+                expected_outcome=request.expected_outcome,
+                expires_at=request.deadline_at,
+            ),
+        )
+    except Exception as exc:
+        return await _record_goal_work_failure(
+            parent_job_id,
+            parent_fencing_token,
+            goal=goal,
             capability_id="workflow.goal-snapshot-to-file",
-            capability_version=request.capability_version,
-            inputs={"file_path": request.file_path},
-            evidence_refs=request.evidence_refs,
-            reason=request.reason,
-            expected_outcome=request.expected_outcome,
-            expires_at=request.deadline_at,
-        ),
-    )
-    result = await GoalSnapshotToFileService(authority_principal=principal).run(request)
+            effect_type="goal_snapshot_admission",
+            error=exc,
+            budget=budget,
+        )
+    try:
+        result = await GoalSnapshotToFileService(authority_principal=principal).run(request)
+    except Exception as exc:
+        return await _record_goal_work_failure(
+            parent_job_id,
+            parent_fencing_token,
+            goal=goal,
+            capability_id="workflow.goal-snapshot-to-file",
+            effect_type="goal_snapshot_admission",
+            error=exc,
+            budget=budget,
+        )
     if not isinstance(result, GoalSnapshotToFileResult):
-        raise TypeError("goal snapshot service returned an invalid result")
+        return await _record_goal_work_failure(
+            parent_job_id,
+            parent_fencing_token,
+            goal=goal,
+            capability_id="workflow.goal-snapshot-to-file",
+            effect_type="goal_snapshot_admission",
+            error=TypeError("goal snapshot service returned an invalid result"),
+            budget=budget,
+        )
     effect_status = (
         "succeeded"
         if result.execution_status == "succeeded" and result.verification == "passed"
@@ -862,6 +994,9 @@ async def run_strategist_tick() -> None:
             proactive_work = {
                 "status": "blocked",
                 "reason": f"goal_work_scheduler_error:{type(exc).__name__}",
+                "goal_id": None,
+                "capability_id": "goal_work",
+                "goal_work_failure": True,
                 "operator_visible": True,
             }
             try:

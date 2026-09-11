@@ -57,34 +57,132 @@ class TestListGoals:
         assert res.json() == []
 
     async def test_with_filter(self, client, async_db, repo):
-        await repo.create("A", level="daily", domain="health")
-        await repo.create("B", level="weekly", domain="growth")
+        owner = {"owner_principal_id": "operator:test-bypass", "owner_session_id": "test-auth-bypass"}
+        await repo.create("A", level="daily", domain="health", **owner)
+        await repo.create("B", level="weekly", domain="growth", **owner)
         res = await client.get("/api/goals?level=daily")
         assert res.status_code == 200
         goals = res.json()
         assert len(goals) == 1
         assert goals[0]["level"] == "daily"
 
+    async def test_only_returns_current_owner_and_excludes_legacy_rows(
+        self, client, async_db, repo, monkeypatch
+    ):
+        await repo.create(
+            "Mine",
+            owner_principal_id="operator:test-bypass",
+            owner_session_id="test-auth-bypass",
+        )
+        await repo.create(
+            "Other operator",
+            owner_principal_id="operator:other",
+            owner_session_id="session-other",
+        )
+        await repo.create("Legacy row")
+
+        response = await client.get("/api/goals")
+
+        assert response.status_code == 200
+        assert [goal["title"] for goal in response.json()] == ["Mine"]
+
+    async def test_requires_authenticated_operator(self, client, monkeypatch):
+        def reject(_request):
+            raise HTTPException(status_code=401, detail={"code": "authentication_required"})
+
+        monkeypatch.setattr("src.api.goals._require_authenticated_operator", reject)
+
+        response = await client.get("/api/goals")
+
+        assert response.status_code == 401
+        assert response.json()["detail"]["code"] == "authentication_required"
+
 
 class TestGetTree:
     async def test_returns_tree(self, client, async_db, repo):
-        parent = await repo.create("Vision", level="vision")
-        await repo.create("Annual", level="annual", parent_id=parent.id)
+        owner = {"owner_principal_id": "operator:test-bypass", "owner_session_id": "test-auth-bypass"}
+        parent = await repo.create("Vision", level="vision", **owner)
+        await repo.create("Annual", level="annual", parent_id=parent.id, **owner)
         res = await client.get("/api/goals/tree")
         assert res.status_code == 200
         tree = res.json()
         assert len(tree) == 1
         assert len(tree[0]["children"]) == 1
 
+    async def test_tree_is_owner_scoped_and_excludes_legacy_rows(self, client, async_db, repo):
+        owner = {"owner_principal_id": "operator:test-bypass", "owner_session_id": "test-auth-bypass"}
+        mine = await repo.create("Mine", **owner)
+        await repo.create("Mine child", parent_id=mine.id, **owner)
+        await repo.create(
+            "Other operator",
+            owner_principal_id="operator:other",
+            owner_session_id="session-other",
+        )
+        await repo.create("Legacy row")
+
+        response = await client.get("/api/goals/tree")
+
+        assert response.status_code == 200
+        assert [node["title"] for node in response.json()] == ["Mine"]
+        assert [node["title"] for node in response.json()[0]["children"]] == ["Mine child"]
+
+    async def test_requires_authenticated_operator(self, client, monkeypatch):
+        def reject(_request):
+            raise HTTPException(status_code=401, detail={"code": "authentication_required"})
+
+        monkeypatch.setattr("src.api.goals._require_authenticated_operator", reject)
+
+        response = await client.get("/api/goals/tree")
+
+        assert response.status_code == 401
+        assert response.json()["detail"]["code"] == "authentication_required"
+
 
 class TestGetDashboard:
     async def test_returns_dashboard(self, client, async_db, repo):
-        await repo.create("A", domain="health")
+        await repo.create(
+            "A",
+            domain="health",
+            owner_principal_id="operator:test-bypass",
+            owner_session_id="test-auth-bypass",
+        )
         res = await client.get("/api/goals/dashboard")
         assert res.status_code == 200
         data = res.json()
         assert data["total_count"] == 1
         assert "health" in data["domains"]
+
+    async def test_dashboard_is_owner_scoped_and_excludes_legacy_rows(self, client, async_db, repo):
+        await repo.create(
+            "Mine",
+            domain="health",
+            owner_principal_id="operator:test-bypass",
+            owner_session_id="test-auth-bypass",
+        )
+        await repo.create(
+            "Other operator",
+            domain="growth",
+            owner_principal_id="operator:other",
+            owner_session_id="session-other",
+        )
+        await repo.create("Legacy row", domain="productivity")
+
+        response = await client.get("/api/goals/dashboard")
+
+        assert response.status_code == 200
+        assert response.json()["total_count"] == 1
+        assert set(response.json()["domains"]) == {"health"}
+
+    async def test_requires_authenticated_operator(self, client, monkeypatch):
+        def reject(_request):
+            raise HTTPException(status_code=401, detail={"code": "authentication_required"})
+
+        monkeypatch.setattr("src.api.goals._require_authenticated_operator", reject)
+
+        response = await client.get("/api/goals/dashboard")
+
+        assert response.status_code == 401
+        assert response.json()["detail"]["code"] == "authentication_required"
 
 
 class TestUpdateGoal:

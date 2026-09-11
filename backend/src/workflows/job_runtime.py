@@ -794,6 +794,90 @@ def _append_goal_fence_condition(conditions: list[Any], run: WorkflowRunState) -
     )
 
 
+def _append_stale_goal_revision_condition(
+    conditions: list[Any],
+    run: WorkflowRunState,
+    *,
+    observed_at: datetime,
+) -> None:
+    """Fence one stale-revision cleanup to the exact expired durable row.
+
+    The normal goal predicate cannot match after the canonical goal advances.
+    Recovery still needs an atomic cleanup path, however, or an expired worker
+    lease can permanently occupy the outstanding-job budget. Keep the old
+    persisted owner/authority/goal identity in the CAS and require the current
+    goal to be a later revision with the same canonical owner/session. This
+    path only clears the lease and blocks the run; it never writes an effect.
+    """
+    goal_id = _text(getattr(run, "goal_id", None))
+    if not goal_id:
+        conditions.append(false())
+        return
+    try:
+        revision = _goal_revision(getattr(run, "goal_revision", None))
+    except DurableJobTransitionError:
+        conditions.append(false())
+        return
+
+    owner_kind = _text(getattr(run, "owner_kind", None))
+    if owner_kind == "user":
+        expected_owner = _text(getattr(run, "owner_principal_id", None))
+        expected_session = _text(getattr(run, "session_id", None))
+    elif owner_kind == "service":
+        try:
+            expected_owner, expected_session = _goal_authority_binding(
+                getattr(run, "declared_authority_json", None)
+            )
+        except DurableJobTransitionError:
+            conditions.append(false())
+            return
+    else:
+        conditions.append(false())
+        return
+    if not expected_owner or not expected_session:
+        conditions.append(false())
+        return
+
+    def _match(column: Any, value: Any) -> None:
+        conditions.append(column == value if value is not None else column.is_(None))
+
+    # Preserve every immutable identity field that could otherwise allow a
+    # stale recovery pass to settle a different row after a concurrent write.
+    for column, value in (
+        (WorkflowRunState.run_identity, getattr(run, "run_identity", None)),
+        (WorkflowRunState.owner_kind, getattr(run, "owner_kind", None)),
+        (WorkflowRunState.owner_principal_id, getattr(run, "owner_principal_id", None)),
+        (WorkflowRunState.service_id, getattr(run, "service_id", None)),
+        (WorkflowRunState.session_id, getattr(run, "session_id", None)),
+        (WorkflowRunState.goal_id, getattr(run, "goal_id", None)),
+        (WorkflowRunState.goal_revision, getattr(run, "goal_revision", None)),
+        (WorkflowRunState.parent_job_id, getattr(run, "parent_job_id", None)),
+        (WorkflowRunState.parent_fencing_token, getattr(run, "parent_fencing_token", None)),
+        (WorkflowRunState.authority_digest, getattr(run, "authority_digest", None)),
+        (WorkflowRunState.declared_authority_json, getattr(run, "declared_authority_json", None)),
+    ):
+        _match(column, value)
+    _match(WorkflowRunState.lease_owner, getattr(run, "lease_owner", None))
+    conditions.append(
+        or_(
+            WorkflowRunState.lease_expires_at.is_(None),
+            WorkflowRunState.lease_expires_at <= observed_at,
+        )
+    )
+
+    goal = aliased(Goal)
+    conditions.append(
+        select(goal.id)
+        .where(
+            goal.id == goal_id,
+            goal.revision > revision,
+            goal.owner_principal_id == expected_owner,
+            goal.owner_session_id == expected_session,
+        )
+        .exists()
+    )
+
+
 def _deadline_identity(value: datetime | str | None) -> str | None:
     parsed = _as_utc(value)
     return parsed.isoformat() if parsed else None
@@ -3947,11 +4031,66 @@ class DurableJobRepository:
                         session_id=getattr(run, "session_id", None),
                         authority=getattr(run, "declared_authority_json", None),
                     )
-                except DurableJobTransitionError:
-                    # A stale or unbound goal is not recoverable by a job-only
-                    # transition. Leave the row untouched for explicit owner
-                    # reconciliation; otherwise recovery could clear a lease
-                    # after the canonical authority was revoked.
+                except DurableJobTransitionError as exc:
+                    if str(exc) != "durable job goal revision is stale":
+                        # A missing, unbound, or revoked goal is not recoverable
+                        # by a job-only transition. Leave it for the canonical
+                        # owner/deletion path rather than clearing authority.
+                        continue
+
+                    # The canonical goal still exists but has advanced beyond
+                    # this run. Clear the expired lease through a dedicated
+                    # old-identity/current-later-revision CAS. No effect or
+                    # delivery receipt is synthesized on this path.
+                    recovery_conditions = [
+                        WorkflowRunState.run_identity == run.run_identity,
+                        WorkflowRunState.status == "running",
+                        WorkflowRunState.revision == expected_revision,
+                        WorkflowRunState.fencing_token == expected_token,
+                    ]
+                    _append_stale_goal_revision_condition(
+                        recovery_conditions,
+                        run,
+                        observed_at=observed_at,
+                    )
+                    updated = await db.execute(
+                        update(WorkflowRunState)
+                        .execution_options(synchronize_session=False)
+                        .where(*recovery_conditions)
+                        .values(
+                            status="blocked",
+                            failure_reason="stale_goal_revision",
+                            lease_owner=None,
+                            lease_expires_at=None,
+                            updated_at=observed_at,
+                            heartbeat_at=observed_at,
+                            revision=WorkflowRunState.revision + 1,
+                            fencing_token=WorkflowRunState.fencing_token + 1,
+                        )
+                    )
+                    if not _rowcount_is_one(updated):
+                        continue
+                    refreshed = await self._fetch(db, run.run_identity)
+                    db.expunge(refreshed)
+                    recovered.append(
+                        _serialize(
+                            refreshed,
+                            receipt={
+                                "kind": "restart_recovery",
+                                "status": "blocked",
+                                "reason": "stale_goal_revision",
+                                "recovery_state": "stale_goal_revision",
+                                "previous_owner": old_owner,
+                                "fencing_token": refreshed.fencing_token,
+                                "revision": _revision(refreshed),
+                                "operator_action": (
+                                    "discard_stale_goal_revision_before_new_admission"
+                                ),
+                                "stale_goal_revision": True,
+                                "operator_visible": True,
+                            },
+                        )
+                    )
                     continue
                 try:
                     persisted_deadline = _as_utc(run.deadline_at)

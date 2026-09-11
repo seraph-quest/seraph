@@ -12,7 +12,7 @@ import pytest
 from sqlalchemy import update
 from sqlmodel import select
 from src.db.engine import _ensure_legacy_columns, _map_legacy_workflow_status
-from src.db.models import ApprovalRequest, WorkflowRunState
+from src.db.models import ApprovalRequest, Goal, WorkflowRunState
 
 from src.workflows.job_runtime import (
     DURABLE_JOB_STATUSES,
@@ -1510,6 +1510,73 @@ async def test_illegal_transition_stale_lease_and_restart_recovery_are_fail_clos
             owner="runner-a",
             fencing_token=token,
         )
+
+
+@pytest.mark.asyncio
+async def test_stale_goal_revision_recovery_clears_expired_lease_without_effects(async_db):
+    goal = Goal(
+        id="goal-stale-recovery",
+        title="Stale recovery goal",
+        revision=5,
+        owner_principal_id="operator:goal-owner",
+        owner_session_id="goal-owner-session",
+    )
+    async with async_db() as db:
+        db.add(goal)
+        await db.flush()
+
+    spec = DurableJobSpec(
+        identity=DurableJobIdentity(
+            job_id="job-stale-goal-revision",
+            owner_kind="service",
+            owner_principal_id="service:strategist",
+            job_kind="goal-snapshot-to-file",
+            capability_version="1",
+            idempotency_scope="goal-snapshot-to-file-scheduler",
+            idempotency_key="stale-goal-revision",
+        ),
+        inputs={"goal_id": goal.id, "file_path": "goals/stale.md"},
+        session_id="service-goal-session",
+        goal_id=goal.id,
+        goal_revision=5,
+        declared_authority={
+            "principal": "service:strategist",
+            "owner_kind": "service",
+            "service_id": "service:strategist",
+            "session_id": "service-goal-session",
+            "goal_owner_principal_id": "operator:goal-owner",
+            "goal_owner_session_id": "goal-owner-session",
+        },
+        service_id="service:strategist",
+    )
+    admitted = await durable_job_repository.admit_job(spec)
+    await durable_job_repository.queue_job(admitted["job_id"])
+    claimed = await durable_job_repository.claim_job(
+        admitted["job_id"], owner="runner-stale-goal", lease_seconds=1
+    )
+
+    async with async_db() as db:
+        await db.execute(
+            update(Goal)
+            .where(Goal.id == goal.id)
+            .values(revision=6, updated_at=datetime.now(timezone.utc))
+        )
+
+    recovered = await durable_job_repository.recover_stale_jobs(
+        now=datetime.now(timezone.utc) + timedelta(seconds=5)
+    )
+    recovered_job = next(item for item in recovered if item["job_id"] == admitted["job_id"])
+
+    assert recovered_job["status"] == "blocked"
+    assert recovered_job["failure_reason"] == "stale_goal_revision"
+    assert recovered_job["lease"]["owner"] is None
+    assert recovered_job["lease"]["expires_at"] is None
+    assert recovered_job["effects"] == []
+    assert recovered_job["receipt"]["reason"] == "stale_goal_revision"
+    assert recovered_job["receipt"]["recovery_state"] == "stale_goal_revision"
+    assert recovered_job["receipt"]["stale_goal_revision"] is True
+    assert recovered_job["receipt"]["previous_owner"] == "runner-stale-goal"
+    assert recovered_job["lease"]["fencing_token"] == claimed["lease"]["fencing_token"] + 1
 
 
 @pytest.mark.asyncio

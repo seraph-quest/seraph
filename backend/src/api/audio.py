@@ -216,13 +216,18 @@ async def read_audio_consent(reference: str, request: Request) -> dict:
 async def revoke_audio_consent(reference: str, request: Request) -> dict:
     owner, operator_session_id, _ = _operator(request)
     try:
-        await default_audio_worker.revoke_consent_grant(
+        revoked = await default_audio_worker.revoke_consent_grant(
             reference,
             owner_principal_id=owner,
             operator_session_id=operator_session_id,
         )
     except AudioWorkerError as exc:
         raise HTTPException(status_code=404, detail={"code": exc.code}) from exc
+    if revoked is not True:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "audio_consent_revocation_unconfirmed"},
+        )
     return {"reference": reference, "state": "revoked"}
 
 
@@ -231,12 +236,23 @@ async def _owned_job(request_id: str, request: Request, *, require_model: bool =
     operator = getattr(request.state, "operator", None)
     if require_model and not _has_model_inference_grant(operator):
         raise HTTPException(status_code=403, detail={"code": "audio_model_inference_forbidden"})
+
+    # Read the durable identity row before invoking the worker snapshot path.
+    # ``_snapshot_by_request`` applies expiry/cleanup, so an owner mismatch must
+    # be rejected while the lookup is still read-only.
+    try:
+        row = await default_audio_worker._job(request_id)
+    except AudioWorkerError as exc:
+        raise HTTPException(status_code=404, detail={"code": exc.code}) from exc
+    if row is None:
+        raise HTTPException(status_code=404, detail={"code": "audio_job_not_found"})
+    if row.owner_principal_id != owner or row.operator_session_id != operator_session_id:
+        raise HTTPException(status_code=404, detail={"code": "audio_job_not_found"})
+
     try:
         snapshot = await default_audio_worker._snapshot_by_request(request_id)
     except AudioWorkerError as exc:
         raise HTTPException(status_code=404, detail={"code": exc.code}) from exc
-    if snapshot.owner_principal_id != owner or snapshot.operator_session_id != operator_session_id:
-        raise HTTPException(status_code=404, detail={"code": "audio_job_not_found"})
     return snapshot, owner, operator_session_id, operator
 
 

@@ -17,7 +17,6 @@ from src.security.trust_contract import AuthorityGrant, PrincipalType, TrustPrin
 import src.workflows.native_software_engineering as native_swe
 from src.workflows.native_software_engineering import (
     NativeSoftwareEngineeringRequest,
-    build_native_software_engineering_approval_receipt,
     build_native_software_engineering_plan,
     native_software_engineering_fixture_root,
     preflight_native_software_engineering_fixture,
@@ -37,6 +36,7 @@ def _principal(session_id: str, *, revoked: bool = False) -> TrustPrincipal:
         grants=(AuthorityGrant.CAPABILITY_EXECUTE,),
         session_id=session_id,
         revoked=revoked,
+        operator_session_id=session_id,
     )
 
 
@@ -54,7 +54,7 @@ def native_context():
         reset_runtime_context(tokens)
 
 
-def _approved_request(
+async def _approved_request(
     source: Path,
     *,
     job_id: str,
@@ -66,11 +66,47 @@ def _approved_request(
         fixture_root=source,
         job_id=job_id,
         session_id=session_id,
-        patch_approval="approved",
+        patch_approval="required",
         expected_source_digest=source_digest,
         test_timeout_seconds=test_timeout_seconds,
     )
-    return replace(request, approval_receipt=build_native_software_engineering_approval_receipt(request))
+    prepared = native_swe._prepare_fixture(request)
+    job_workspace = native_swe._job_workspace(request)
+    relative_bug_path = native_swe._relative_workspace_path(job_workspace.root / native_swe.FIXTURE_BUG_FILE)
+    preview_payload = {
+        "before_sha256": native_swe._digest_text(native_swe.FIXTURE_BEFORE_TEXT),
+        "after_sha256": native_swe._digest_text(native_swe.FIXTURE_AFTER_TEXT),
+    }
+    approval_context = native_swe._native_approval_context(
+        request,
+        prepared,
+        relative_bug_path=relative_bug_path,
+        preview_payload=preview_payload,
+    )
+    approval_operator_session = native_swe._native_approval_owner_session(
+        native_swe.get_current_trust_principal(),
+        session_id=session_id,
+    )
+    expires_at = time.time() + 300
+    pending = await native_swe.approval_repository.get_or_create_pending(
+        session_id=session_id,
+        tool_name=native_swe._NATIVE_PATCH_CAPABILITY_ID,
+        risk_level=native_swe._NATIVE_APPROVAL_RISK,
+        summary="test native SWE approval",
+        fingerprint=native_swe._native_approval_fingerprint(approval_context),
+        details={
+            "approval_conversation_id": session_id,
+            "approval_owner_operator_session_id": approval_operator_session,
+            "approval_context": approval_context,
+            "approval_expires_at": expires_at,
+            "expires_at": expires_at,
+            "action": "apply",
+            "capability_id": native_swe._NATIVE_PATCH_CAPABILITY_ID,
+        },
+    )
+    resolved = await native_swe.approval_repository.resolve(pending.id, "approved")
+    assert resolved is not None and resolved.status == "approved"
+    return replace(request, patch_approval="approved", approval_id=pending.id)
 
 
 def _inspection_request(source: Path, *, job_id: str, session_id: str) -> NativeSoftwareEngineeringRequest:
@@ -118,7 +154,7 @@ async def test_operator_journey_executes_real_fixture_and_dedupes_restart(
     assert plan["test"]["timeout_seconds"] == 30
     assert plan["test"]["max_attempts"] == 2
 
-    request = _approved_request(
+    request = await _approved_request(
         source,
         job_id=inspection_request.job_id,
         session_id=native_context,
@@ -189,7 +225,7 @@ async def test_operator_journey_records_failure_then_repair(
         _inspection_request(source, job_id="native-swe-operator-failure", session_id=native_context)
     )
     assert failed_inspection["status"] == "ready"
-    failed_request = _approved_request(
+    failed_request = await _approved_request(
         source,
         job_id="native-swe-operator-failure",
         session_id=native_context,
@@ -215,7 +251,7 @@ async def test_operator_journey_records_failure_then_repair(
     repaired_inspection = preflight_native_software_engineering_fixture(
         _inspection_request(source, job_id="native-swe-operator-repair", session_id=native_context)
     )
-    repaired_request = _approved_request(
+    repaired_request = await _approved_request(
         source,
         job_id="native-swe-operator-repair",
         session_id=native_context,
@@ -226,7 +262,8 @@ async def test_operator_journey_records_failure_then_repair(
     assert repaired["durable_job"]["status"] == "succeeded"
 
 
-def test_operator_journey_fails_closed_for_identity_approval_digest_and_egress(
+@pytest.mark.asyncio
+async def test_operator_journey_fails_closed_for_identity_approval_digest_and_egress(
     tmp_path,
     monkeypatch,
     native_context,
@@ -247,27 +284,25 @@ def test_operator_journey_fails_closed_for_identity_approval_digest_and_egress(
 
     inspection = preflight_native_software_engineering_fixture(base)
     assert inspection["status"] == "ready"
-    approved = _approved_request(
+    approved = await _approved_request(
         source,
         job_id=base.job_id,
         session_id=native_context,
         source_digest=inspection["source_digest"],
     )
-    stale = replace(
-        approved,
-        approval_receipt=replace(approved.approval_receipt, expires_at=time.time() - 1),
+    assert preflight_native_software_engineering_fixture(approved)["status"] == "ready"
+    forged_receipt = native_swe.NativeSoftwareEngineeringApprovalReceipt(
+        receipt_id="caller-forged",
+        owner_principal_id=approved.owner_principal_id,
+        session_id=approved.session_id,
+        job_id=approved.job_id,
+        preview_digest="changed",
+        expires_at=time.time() + 300,
     )
-    wrong = replace(
-        approved,
-        approval_receipt=replace(approved.approval_receipt, owner_principal_id="service:wrong"),
+    forged = preflight_native_software_engineering_fixture(
+        replace(approved, approval_id=None, approval_receipt=forged_receipt)
     )
-    changed_patch = replace(
-        approved,
-        approval_receipt=replace(approved.approval_receipt, preview_digest="changed"),
-    )
-    assert preflight_native_software_engineering_fixture(stale)["reason_code"] == "approval_receipt_expired"
-    assert preflight_native_software_engineering_fixture(wrong)["reason_code"] == "approval_receipt_owner_mismatch"
-    assert preflight_native_software_engineering_fixture(changed_patch)["reason_code"] == "approval_receipt_preview_mismatch"
+    assert forged["reason_code"] == "approval_receipt_unsupported"
 
     revoked_tokens = set_runtime_context(
         native_context,
@@ -341,7 +376,7 @@ async def test_operator_journey_timeout_and_cancellation_retain_cleanup_receipts
     timeout_inspection = preflight_native_software_engineering_fixture(
         _inspection_request(timeout_source, job_id="native-swe-operator-timeout", session_id=native_context)
     )
-    timeout_request = _approved_request(
+    timeout_request = await _approved_request(
         timeout_source,
         job_id="native-swe-operator-timeout",
         session_id=native_context,
@@ -364,7 +399,7 @@ async def test_operator_journey_timeout_and_cancellation_retain_cleanup_receipts
     cancel_inspection = preflight_native_software_engineering_fixture(
         _inspection_request(cancel_source, job_id=cancel_job_id, session_id=native_context)
     )
-    cancel_request = _approved_request(
+    cancel_request = await _approved_request(
         cancel_source,
         job_id=cancel_job_id,
         session_id=native_context,

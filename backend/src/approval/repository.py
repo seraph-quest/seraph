@@ -480,16 +480,27 @@ class ApprovalRepository:
         tool_name: str,
         fingerprint: str,
         owner_operator_session_id: str | None = None,
+        approval_id: str | None = None,
     ) -> dict[str, Any] | bool | None:
         async with get_session() as db:
-            result = await db.execute(
+            query = (
                 select(ApprovalRequest)
                 .where(ApprovalRequest.session_id == session_id)
                 .where(ApprovalRequest.tool_name == tool_name)
                 .where(ApprovalRequest.fingerprint == fingerprint)
                 .where(ApprovalRequest.status == "approved")
-                .order_by(col(ApprovalRequest.created_at).desc())
             )
+            # A caller-provided id is only a selector. The row still has to
+            # satisfy the complete session/tool/fingerprint/owner query and
+            # the conditional approved->consumed update below. This prevents
+            # consuming a different matching approval before detecting an id
+            # mismatch, while preserving the historical latest-row behavior
+            # for generic tool callers that do not supply an id.
+            if approval_id is not None:
+                query = query.where(ApprovalRequest.id == approval_id)
+            else:
+                query = query.order_by(col(ApprovalRequest.created_at).desc())
+            result = await db.execute(query)
             request = result.scalars().first()
             if request is None:
                 return False

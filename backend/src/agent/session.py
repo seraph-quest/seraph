@@ -24,6 +24,7 @@ from src.db.models import (
     MemoryEpisodeType,
     Message,
     NativeNotificationOutbox,
+    TelegramTransportOutbox,
     QueuedInsight,
     ScheduledJob,
     Session,
@@ -372,6 +373,21 @@ class SessionManager:
                     lease_owner=None,
                     lease_expires_at=None,
                     cancelled_at=datetime.now(timezone.utc),
+                    updated_at=datetime.now(timezone.utc),
+                )
+            )
+            # A deleted canonical conversation cannot resume a Telegram
+            # delivery after restart. Preserve the receipt but cancel any
+            # queued/claimed handoff under the same owner fence.
+            await db.execute(
+                update(TelegramTransportOutbox)
+                .where(
+                    TelegramTransportOutbox.session_id == session_id,
+                    TelegramTransportOutbox.status.in_({"queued", "sending", "unknown"}),
+                )
+                .values(
+                    status="cancelled",
+                    last_error="conversation_deleted",
                     updated_at=datetime.now(timezone.utc),
                 )
             )

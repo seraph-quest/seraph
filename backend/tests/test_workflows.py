@@ -5386,7 +5386,7 @@ class TestWorkflowApi:
         from src.api.workflows import WorkflowRunControlRequest, control_workflow_run
 
         operator = _test_bypass_operator()
-        run_identity = "session-1:workflow_example:typed-authority"
+        run_identity = f"{operator.session_id}:workflow_example:typed-authority"
         run = {
             "record_schema_version": 2,
             "run_identity": run_identity,
@@ -5400,6 +5400,7 @@ class TestWorkflowApi:
             "candidate_id": "candidate-1",
             "owner_kind": "user",
             "owner_principal_id": operator.principal.principal_id,
+            "operator_session_id": operator.session_id,
             "lease": {"owner": "worker", "fencing_token": 3},
             "revision": 4,
         }
@@ -7443,6 +7444,7 @@ async def test_branch_child_control_consumes_child_action_handle_identity():
         "replay_block_reason": None,
         "owner_kind": "user",
         "owner_principal_id": operator.principal.principal_id,
+        "operator_session_id": operator.session_id,
         "goal_id": "goal-child",
         "criterion_id": "criterion-child",
         "goal_revision": 1,

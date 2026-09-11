@@ -6,7 +6,8 @@ from datetime import datetime, timedelta, timezone
 import pytest
 from sqlmodel import select
 
-from src.db.models import NativeNotificationOutbox, QueuedInsight
+from src.conversation.identity import ConversationIdentityError
+from src.db.models import Goal, NativeNotificationOutbox, QueuedInsight
 from src.observer.native_notification_queue import (
     MAX_BODY_CHARS,
     NativeNotificationConflictError,
@@ -25,6 +26,76 @@ def _enqueue_kwargs(**overrides):
     }
     values.update(overrides)
     return values
+
+
+@pytest.mark.asyncio
+async def test_goal_bound_enqueue_requires_matching_canonical_owner(async_db):
+    async with async_db() as db:
+        db.add(
+            Goal(
+                id="goal-native-owner",
+                title="Native owner goal",
+                owner_principal_id="operator:a",
+                owner_session_id="session:a",
+            )
+        )
+
+    queue = NativeNotificationQueue()
+    with pytest.raises(ConversationIdentityError) as missing:
+        await queue.enqueue(
+            **_enqueue_kwargs(),
+            goal_id="goal-native-owner",
+            budget_period_key="2026-09-11",
+            budget_limit=1,
+            idempotency_key="native:missing-goal-owner",
+        )
+    assert missing.value.code == "goal_owner_binding_missing"
+
+    with pytest.raises(ConversationIdentityError) as mismatch:
+        await queue.enqueue(
+            **_enqueue_kwargs(),
+            goal_id="goal-native-owner",
+            budget_period_key="2026-09-11",
+            budget_limit=1,
+            owner_principal_id="operator:b",
+            operator_session_id="session:b",
+            idempotency_key="native:mismatched-goal-owner",
+        )
+    assert mismatch.value.code == "goal_owner_mismatch"
+
+
+@pytest.mark.asyncio
+async def test_goal_bound_outbox_is_cancelled_when_goal_is_deleted(async_db):
+    owner = {"owner_principal_id": "operator:a", "operator_session_id": "session:a"}
+    async with async_db() as db:
+        db.add(
+            Goal(
+                id="goal-native-delete",
+                title="Deleted goal",
+                owner_principal_id=owner["owner_principal_id"],
+                owner_session_id=owner["operator_session_id"],
+            )
+        )
+
+    queue = NativeNotificationQueue()
+    notification = await queue.enqueue(
+        **_enqueue_kwargs(),
+        goal_id="goal-native-delete",
+        budget_period_key="2026-09-11",
+        budget_limit=1,
+        owner_principal_id=owner["owner_principal_id"],
+        operator_session_id=owner["operator_session_id"],
+        idempotency_key="native:deleted-goal",
+    )
+    async with async_db() as db:
+        goal = await db.get(Goal, "goal-native-delete")
+        await db.delete(goal)
+
+    assert await queue.list() == []
+    async with async_db() as db:
+        row = await db.get(NativeNotificationOutbox, notification.id)
+    assert row.status == "cancelled"
+    assert row.last_error == "goal_deleted"
 
 
 @pytest.mark.asyncio

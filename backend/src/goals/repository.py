@@ -2,13 +2,22 @@ import logging
 import json
 import uuid
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Any, Optional
 
-from sqlalchemy import update
+from sqlalchemy import delete, update
 from sqlmodel import select, col
 
 from src.db.engine import get_session
-from src.db.models import Goal, GoalLevel, GoalDomain, GoalStatus
+from src.db.models import (
+    Goal,
+    GoalLevel,
+    GoalDomain,
+    GoalStatus,
+    NativeNotificationOutbox,
+    QueuedInsight,
+    StrategyDelta,
+    WorkflowRunState,
+)
 from src.goals.contracts import GoalAdmissionBudget, GoalSuccessCriterion
 
 logger = logging.getLogger(__name__)
@@ -16,6 +25,7 @@ logger = logging.getLogger(__name__)
 _VALID_LEVELS = {e.value for e in GoalLevel}
 _VALID_DOMAINS = {e.value for e in GoalDomain}
 _VALID_STATUSES = {e.value for e in GoalStatus}
+_UNSET = object()
 
 
 class GoalRevisionConflict(ValueError):
@@ -28,6 +38,56 @@ class GoalRevisionConflict(ValueError):
         super().__init__(
             f"Goal '{goal_id}' changed since revision {expected}; current revision is {current}"
         )
+
+
+class GoalOwnershipConflict(ValueError):
+    """Raised when a goal mutation crosses a canonical owner boundary."""
+
+    def __init__(self, code: str = "goal_owner_mismatch"):
+        self.code = code
+        super().__init__(code)
+
+
+def _normalized_owner(value: object) -> str | None:
+    return str(value or "").strip() or None
+
+
+def _owner_pair(goal: Goal | object) -> tuple[str | None, str | None]:
+    return (
+        _normalized_owner(getattr(goal, "owner_principal_id", None)),
+        _normalized_owner(getattr(goal, "owner_session_id", None)),
+    )
+
+
+def _validate_owner_pair(
+    owner_principal_id: str | None,
+    owner_session_id: str | None,
+) -> tuple[str | None, str | None]:
+    principal = _normalized_owner(owner_principal_id)
+    session = _normalized_owner(owner_session_id)
+    if (principal is None) != (session is None):
+        raise GoalOwnershipConflict("goal_owner_binding_incomplete")
+    return principal, session
+
+
+def _validate_parent_owner_binding(
+    parent: Goal,
+    *,
+    owner_principal_id: str | None,
+    owner_session_id: str | None,
+) -> None:
+    """Prevent a child from entering another owner's deletion tree.
+
+    Both fields may be absent for legacy repository-only trees. Once either
+    side is owner-bound, however, the parent and child must carry the same
+    complete pair. This keeps old read-only trees usable while making every
+    authenticated mutation fail closed.
+    """
+
+    child_owner = _validate_owner_pair(owner_principal_id, owner_session_id)
+    parent_owner = _validate_owner_pair(*_owner_pair(parent))
+    if child_owner != parent_owner and (child_owner != (None, None) or parent_owner != (None, None)):
+        raise GoalOwnershipConflict("goal_parent_owner_mismatch")
 
 
 def serialize_success_criterion(
@@ -96,6 +156,10 @@ class GoalRepository:
             raise ValueError(f"Invalid level '{level}'. Must be one of: {_VALID_LEVELS}")
         if domain not in _VALID_DOMAINS:
             raise ValueError(f"Invalid domain '{domain}'. Must be one of: {_VALID_DOMAINS}")
+        owner_principal_id, owner_session_id = _validate_owner_pair(
+            owner_principal_id,
+            owner_session_id,
+        )
         async with get_session() as db:
             goal_id = uuid.uuid4().hex[:8]
 
@@ -106,8 +170,14 @@ class GoalRepository:
                     select(Goal).where(Goal.id == parent_id)
                 )
                 parent = result.scalars().first()
-                if parent:
-                    path = f"{parent.path}{parent.id}/"
+                if parent is None:
+                    raise ValueError("goal_parent_not_found")
+                _validate_parent_owner_binding(
+                    parent,
+                    owner_principal_id=owner_principal_id,
+                    owner_session_id=owner_session_id,
+                )
+                path = f"{parent.path}{parent.id}/"
 
             # Get next sort_order for siblings
             siblings = await db.execute(
@@ -128,8 +198,8 @@ class GoalRepository:
                 revision=1,
                 success_criterion_json=serialize_success_criterion(success_criterion),
                 proactive_enabled=bool(proactive_enabled),
-                owner_principal_id=str(owner_principal_id or "").strip() or None,
-                owner_session_id=str(owner_session_id or "").strip() or None,
+                owner_principal_id=owner_principal_id,
+                owner_session_id=owner_session_id,
                 admission_budget_json=serialize_admission_budget(admission_budget),
             )
             db.add(goal)
@@ -155,6 +225,9 @@ class GoalRepository:
         admission_budget: GoalAdmissionBudget | dict | None = None,
         owner_principal_id: str | None = None,
         owner_session_id: str | None = None,
+        expected_owner_principal_id: str | None = None,
+        expected_owner_session_id: str | None = None,
+        parent_id: str | None | object = _UNSET,
         expected_revision: int | None = None,
     ) -> Optional[Goal]:
         if level is not None and level not in _VALID_LEVELS:
@@ -168,11 +241,56 @@ class GoalRepository:
             goal = result.scalars().first()
             if not goal:
                 return None
+            current_owner = _validate_owner_pair(*_owner_pair(goal))
+            if expected_owner_principal_id is not None or expected_owner_session_id is not None:
+                expected_owner = _validate_owner_pair(
+                    expected_owner_principal_id,
+                    expected_owner_session_id,
+                )
+                if current_owner != expected_owner:
+                    raise GoalOwnershipConflict("goal_owner_mismatch")
+            requested_owner = current_owner
+            if owner_principal_id is not None or owner_session_id is not None:
+                requested_owner = _validate_owner_pair(owner_principal_id, owner_session_id)
+                if current_owner != (None, None) and requested_owner != current_owner:
+                    raise GoalOwnershipConflict("goal_owner_rebind_forbidden")
             current_revision = max(int(goal.revision or 1), 1)
             if expected_revision is not None and expected_revision != current_revision:
                 raise GoalRevisionConflict(goal_id, expected_revision, current_revision)
             changed = False
             values: dict[str, object] = {}
+            descendant_rows: list[Goal] = []
+            old_descendant_path = f"{goal.path}{goal.id}/"
+            if parent_id is not _UNSET:
+                requested_parent_id = _normalized_owner(parent_id)
+                if requested_parent_id == goal.id:
+                    raise ValueError("goal_parent_cycle")
+                parent = None
+                if requested_parent_id is not None:
+                    parent_result = await db.execute(
+                        select(Goal).where(Goal.id == requested_parent_id)
+                    )
+                    parent = parent_result.scalars().first()
+                    if parent is None:
+                        raise ValueError("goal_parent_not_found")
+                    if parent.path.startswith(old_descendant_path):
+                        raise ValueError("goal_parent_cycle")
+                    _validate_parent_owner_binding(
+                        parent,
+                        owner_principal_id=requested_owner[0],
+                        owner_session_id=requested_owner[1],
+                    )
+                if requested_parent_id != goal.parent_id:
+                    next_path = (
+                        f"{parent.path}{parent.id}/" if parent is not None else "/"
+                    )
+                    descendant_result = await db.execute(
+                        select(Goal).where(col(Goal.path).startswith(old_descendant_path))
+                    )
+                    descendant_rows = list(descendant_result.scalars().all())
+                    values["parent_id"] = requested_parent_id
+                    values["path"] = next_path
+                    changed = True
             if title is not None:
                 values["title"] = title
                 changed = True
@@ -220,17 +338,40 @@ class GoalRepository:
                 latest = latest_result.scalars().first()
                 latest_revision = max(int(latest.revision or 1), 1) if latest else current_revision
                 raise GoalRevisionConflict(goal_id, expected_revision or current_revision, latest_revision)
+            if descendant_rows:
+                new_descendant_path = str(values["path"])
+                for descendant in descendant_rows:
+                    descendant.path = (
+                        new_descendant_path
+                        + descendant.path[len(old_descendant_path):]
+                    )
+                    db.add(descendant)
             await db.flush()
             refreshed_result = await db.execute(select(Goal).where(Goal.id == goal_id))
             return refreshed_result.scalars().first()
 
-    async def delete(self, goal_id: str) -> bool:
+    async def delete(
+        self,
+        goal_id: str,
+        *,
+        expected_owner_principal_id: str | None = None,
+        expected_owner_session_id: str | None = None,
+    ) -> bool:
         """Delete a goal and all its descendants."""
         async with get_session() as db:
             result = await db.execute(select(Goal).where(Goal.id == goal_id))
             goal = result.scalars().first()
             if not goal:
                 return False
+
+            root_owner = _validate_owner_pair(*_owner_pair(goal))
+            if expected_owner_principal_id is not None or expected_owner_session_id is not None:
+                expected_owner = _validate_owner_pair(
+                    expected_owner_principal_id,
+                    expected_owner_session_id,
+                )
+                if root_owner != expected_owner:
+                    raise GoalOwnershipConflict("goal_owner_mismatch")
 
             # Delete descendants (path starts with this goal's full path)
             descendant_path = f"{goal.path}{goal.id}/"
@@ -241,6 +382,66 @@ class GoalRepository:
                 descendants.scalars().all(),
                 key=lambda item: (item.path.count("/"), item.created_at),
                 reverse=True,
+            )
+            goal_ids = [goal.id, *(item.id for item in descendant_rows)]
+            for descendant in descendant_rows:
+                if _owner_pair(descendant) != root_owner:
+                    raise GoalOwnershipConflict("goal_descendant_owner_mismatch")
+
+            now = datetime.now(timezone.utc)
+            # Cancel durable effects before deleting the canonical goal. A
+            # native outbox row remains as a receipt, while deferred insights
+            # and pending strategy/job rows cannot be replayed after deletion.
+            await db.execute(
+                delete(QueuedInsight).where(QueuedInsight.goal_id.in_(goal_ids))
+            )
+            await db.execute(
+                update(NativeNotificationOutbox)
+                .where(
+                    NativeNotificationOutbox.goal_id.in_(goal_ids),
+                    NativeNotificationOutbox.status.in_({"queued", "claimed", "display_attempted"}),
+                )
+                .values(
+                    status="cancelled",
+                    cancelled_at=now,
+                    last_error="goal_deleted",
+                    degraded_state="goal_deleted",
+                    lease_owner=None,
+                    lease_expires_at=None,
+                    updated_at=now,
+                )
+            )
+            await db.execute(
+                update(StrategyDelta)
+                .where(
+                    StrategyDelta.goal_id.in_(goal_ids),
+                    StrategyDelta.status == "proposed",
+                )
+                .values(
+                    status="rejected",
+                    updated_at=now,
+                )
+            )
+            await db.execute(
+                update(WorkflowRunState)
+                .where(
+                    WorkflowRunState.goal_id.in_(goal_ids),
+                    WorkflowRunState.status.in_({
+                        "accepted",
+                        "queued",
+                        "awaiting_approval",
+                        "paused",
+                        "blocked",
+                    }),
+                )
+                .values(
+                    status="cancelled",
+                    failure_reason="goal_deleted",
+                    lease_owner=None,
+                    lease_expires_at=None,
+                    finished_at=now,
+                    updated_at=now,
+                )
             )
             for d in descendant_rows:
                 await db.delete(d)
@@ -255,6 +456,8 @@ class GoalRepository:
         domain: Optional[str] = None,
         status: Optional[str] = None,
         parent_id: Optional[str] = None,
+        owner_principal_id: str | None = None,
+        owner_session_id: str | None = None,
     ) -> list[Goal]:
         async with get_session() as db:
             query = select(Goal)
@@ -266,6 +469,10 @@ class GoalRepository:
                 query = query.where(Goal.status == status)
             if parent_id is not None:
                 query = query.where(Goal.parent_id == parent_id)
+            if owner_principal_id is not None:
+                query = query.where(Goal.owner_principal_id == owner_principal_id)
+            if owner_session_id is not None:
+                query = query.where(Goal.owner_session_id == owner_session_id)
             query = query.order_by(Goal.sort_order, col(Goal.created_at).asc())
             result = await db.execute(query)
             return list(result.scalars().all())
@@ -322,10 +529,20 @@ class GoalRepository:
 
         return roots
 
-    async def get_dashboard(self) -> dict:
+    async def get_dashboard(
+        self,
+        *,
+        owner_principal_id: str | None = None,
+        owner_session_id: str | None = None,
+    ) -> dict:
         """Return summary stats for the goals UI."""
         async with get_session() as db:
-            result = await db.execute(select(Goal))
+            query = select(Goal)
+            if owner_principal_id is not None:
+                query = query.where(Goal.owner_principal_id == owner_principal_id)
+            if owner_session_id is not None:
+                query = query.where(Goal.owner_session_id == owner_session_id)
+            result = await db.execute(query)
             all_goals = result.scalars().all()
 
         if not all_goals:

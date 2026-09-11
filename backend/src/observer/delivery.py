@@ -223,6 +223,38 @@ async def _bundle_owner_binding(items: list[object]) -> tuple[str | None, str | 
     session_id = next(iter(session_ids), None)
     owner_principal_id = next(iter(owner_ids), None)
     operator_session_id = next(iter(operator_session_ids), None)
+    goal_ids = {
+        _queued_item_text(item, "goal_id")
+        for item in items
+        if _queued_item_text(item, "goal_id")
+    }
+    budget_period_keys = {
+        _queued_item_text(item, "budget_period_key")
+        for item in items
+        if _queued_item_text(item, "budget_period_key")
+    }
+    budget_limits: list[object] = []
+    for item in items:
+        value = getattr(item, "budget_limit", None)
+        if value is not None and not any(value == existing for existing in budget_limits):
+            budget_limits.append(value)
+    if goal_ids or budget_period_keys or budget_limits:
+        if len(goal_ids) != 1 or len(budget_period_keys) != 1 or len(budget_limits) != 1:
+            raise ConversationIdentityError(
+                "goal_budget_binding_invalid",
+                "A goal-bound bundle requires one complete budget binding.",
+            )
+        budget_limit = budget_limits[0]
+        if isinstance(budget_limit, bool) or not isinstance(budget_limit, int) or budget_limit < 0:
+            raise ConversationIdentityError(
+                "goal_budget_binding_invalid",
+                "A goal-bound bundle requires a valid budget limit.",
+            )
+        if not owner_principal_id or not operator_session_id:
+            raise ConversationIdentityError(
+                "goal_owner_binding_missing",
+                "A goal-bound bundle requires a canonical owner and operator session.",
+            )
     if session_id and owner_principal_id is None:
         from src.agent.session import session_manager
 
@@ -471,6 +503,36 @@ def _has_notification_budget(notification_budget: dict[str, object] | None) -> b
     )
 
 
+def _validate_goal_notification_binding(
+    notification_budget: dict[str, object] | None,
+    *,
+    owner_principal_id: str | None,
+    operator_session_id: str | None,
+) -> None:
+    """Reject goal-bound delivery before policy or transport side effects."""
+
+    if not isinstance(notification_budget, dict) or not notification_budget:
+        return
+    if not _has_notification_budget(notification_budget):
+        return
+    goal_id = str(notification_budget.get("goal_id") or "").strip()
+    period_key = str(notification_budget.get("budget_period_key") or "").strip()
+    limit = notification_budget.get("budget_limit")
+    if (
+        not goal_id
+        or not period_key
+        or isinstance(limit, bool)
+        or not isinstance(limit, int)
+        or limit < 0
+        or not str(owner_principal_id or "").strip()
+        or not str(operator_session_id or "").strip()
+    ):
+        raise ConversationIdentityError(
+            "goal_owner_binding_missing",
+            "Goal-bound delivery requires canonical owner/session and complete budget binding.",
+        )
+
+
 def _queued_item_text(item: object, field: str) -> str:
     value = getattr(item, field, None)
     return value.strip() if isinstance(value, str) else ""
@@ -638,6 +700,11 @@ async def deliver_or_queue(
     from src.memory.procedural_guidance import load_procedural_memory_guidance
 
     ctx = context_manager.get_context()
+    _validate_goal_notification_binding(
+        notification_budget,
+        owner_principal_id=owner_principal_id,
+        operator_session_id=operator_session_id,
+    )
     # A proactive message may be created by an authenticated interactive turn
     # or by an ambient scheduler. Bound identity is resolved before any
     # intervention or delivery receipt is persisted.
@@ -1279,6 +1346,16 @@ async def deliver_queued_bundle() -> int:
                             "budget_period_key": exc.budget_period_key,
                             "budget_limit": exc.budget_limit,
                             "source_insight_ids": source_insight_ids,
+                        }
+                    )
+                    continue
+                except (ConversationIdentityError, ValueError) as exc:
+                    code = getattr(exc, "code", None) or str(exc) or "goal_bound_delivery_invalid"
+                    last_error = _prefer_delivery_error(last_error, code)
+                    owner_binding_failures.append(
+                        {
+                            "source_insight_ids": source_insight_ids,
+                            "reason": code,
                         }
                     )
                     continue

@@ -25,6 +25,7 @@ from src.memory.control import (
     update_strategy_delta,
 )
 from src.goals.repository import (
+    GoalOwnershipConflict,
     GoalRevisionConflict,
     deserialize_admission_budget,
     deserialize_success_criterion,
@@ -66,6 +67,7 @@ class GoalUpdate(BaseModel):
     level: Optional[str] = None
     domain: Optional[str] = None
     status: Optional[str] = None
+    parent_id: Optional[str] = None
     due_date: Optional[str] = None
     success_criterion: Optional[GoalSuccessCriterion] = None
     proactive_enabled: Optional[bool] = None
@@ -425,20 +427,31 @@ async def get_goal_dashboard():
 async def create_goal(body: GoalCreate, request: Request):
     """Create a new goal."""
     operator = _require_authenticated_operator(request)
+    if body.parent_id:
+        parent = await goal_repository.get(body.parent_id)
+        if parent is None:
+            raise HTTPException(status_code=404, detail="Parent goal not found")
+        # This also rejects a legacy/unbound parent before the child row exists.
+        _require_goal_owner(parent, operator)
     due = datetime.fromisoformat(body.due_date) if body.due_date else None
-    goal = await goal_repository.create(
-        title=body.title,
-        level=body.level,
-        domain=body.domain,
-        parent_id=body.parent_id,
-        description=body.description,
-        due_date=due,
-        success_criterion=body.success_criterion,
-        proactive_enabled=False,
-        owner_principal_id=operator.principal.principal_id if operator else None,
-        owner_session_id=operator.session_id if operator else None,
-        admission_budget=body.admission_budget,
-    )
+    try:
+        goal = await goal_repository.create(
+            title=body.title,
+            level=body.level,
+            domain=body.domain,
+            parent_id=body.parent_id,
+            description=body.description,
+            due_date=due,
+            success_criterion=body.success_criterion,
+            proactive_enabled=False,
+            owner_principal_id=operator.principal.principal_id,
+            owner_session_id=operator.session_id,
+            admission_budget=body.admission_budget,
+        )
+    except GoalOwnershipConflict as exc:
+        raise HTTPException(status_code=403, detail={"code": exc.code}) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     if body.proactive_enabled:
         await _record_proactive_permission(
             operator,
@@ -450,6 +463,8 @@ async def create_goal(body: GoalCreate, request: Request):
         goal = await goal_repository.update(
             goal_id=goal.id,
             proactive_enabled=True,
+            expected_owner_principal_id=operator.principal.principal_id,
+            expected_owner_session_id=operator.session_id,
             expected_revision=max(int(goal.revision or 1), 1),
         )
     return {
@@ -493,6 +508,12 @@ async def update_goal(goal_id: str, body: GoalUpdate, request: Request):
                 "recovery": "Refresh the goal and resubmit against the current revision.",
             },
         )
+    requested_parent = body.parent_id if "parent_id" in body.model_fields_set else None
+    if "parent_id" in body.model_fields_set and requested_parent:
+        parent = await goal_repository.get(requested_parent)
+        if parent is None:
+            raise HTTPException(status_code=404, detail="Parent goal not found")
+        _require_goal_owner(parent, operator)
     due = datetime.fromisoformat(body.due_date) if body.due_date else None
     if body.proactive_enabled:
         await _record_proactive_permission(
@@ -503,18 +524,25 @@ async def update_goal(goal_id: str, body: GoalUpdate, request: Request):
             phase="before_enable",
         )
     try:
+        update_kwargs = {
+            "goal_id": goal_id,
+            "title": body.title,
+            "description": body.description,
+            "level": body.level,
+            "domain": body.domain,
+            "status": body.status,
+            "due_date": due,
+            "success_criterion": body.success_criterion,
+            "proactive_enabled": body.proactive_enabled,
+            "admission_budget": body.admission_budget,
+            "expected_owner_principal_id": operator.principal.principal_id,
+            "expected_owner_session_id": operator.session_id,
+            "expected_revision": body.expected_revision,
+        }
+        if "parent_id" in body.model_fields_set:
+            update_kwargs["parent_id"] = requested_parent
         goal = await goal_repository.update(
-            goal_id=goal_id,
-            title=body.title,
-            description=body.description,
-            level=body.level,
-            domain=body.domain,
-            status=body.status,
-            due_date=due,
-            success_criterion=body.success_criterion,
-            proactive_enabled=body.proactive_enabled,
-            admission_budget=body.admission_budget,
-            expected_revision=body.expected_revision,
+            **update_kwargs,
         )
     except GoalRevisionConflict as exc:
         raise HTTPException(
@@ -527,6 +555,8 @@ async def update_goal(goal_id: str, body: GoalUpdate, request: Request):
                 "recovery": "Refresh the goal and resubmit against the current revision.",
             },
         ) from exc
+    except GoalOwnershipConflict as exc:
+        raise HTTPException(status_code=403, detail={"code": exc.code}) from exc
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     if not goal:
@@ -754,6 +784,8 @@ async def apply_goal_strategy_correction(
         updated_goal = await goal_repository.update(
             goal_id=goal_id,
             success_criterion=updated_criterion,
+            expected_owner_principal_id=operator.principal.principal_id,
+            expected_owner_session_id=operator.session_id,
             expected_revision=body.expected_revision,
         )
     except GoalRevisionConflict as exc:
@@ -768,6 +800,9 @@ async def apply_goal_strategy_correction(
                 "recovery": "Refresh the goal and submit a new correction id.",
             },
         ) from exc
+    except GoalOwnershipConflict as exc:
+        await _reject_pending_strategy_delta(existing.delta_id)
+        raise HTTPException(status_code=403, detail={"code": exc.code}) from exc
     except ValueError as exc:
         await _reject_pending_strategy_delta(existing.delta_id)
         raise HTTPException(
@@ -939,6 +974,8 @@ async def rollback_goal_strategy_correction(
         updated_goal = await goal_repository.update(
             goal_id=goal_id,
             success_criterion=restored_criterion,
+            expected_owner_principal_id=operator.principal.principal_id,
+            expected_owner_session_id=operator.session_id,
             expected_revision=body.expected_revision,
         )
     except GoalRevisionConflict as exc:
@@ -952,6 +989,8 @@ async def rollback_goal_strategy_correction(
                 "recovery": "Refresh the goal and resubmit the rollback against the current revision.",
             },
         ) from exc
+    except GoalOwnershipConflict as exc:
+        raise HTTPException(status_code=403, detail={"code": exc.code}) from exc
     if updated_goal is None:
         raise HTTPException(status_code=404, detail="Goal not found")
     try:
@@ -1003,7 +1042,14 @@ async def delete_goal(goal_id: str, request: Request):
     # Preserve the repository's descendant deletion/tombstone behavior only
     # after the canonical public owner/session binding has been verified.
     _require_goal_owner(goal, operator)
-    success = await goal_repository.delete(goal_id)
+    try:
+        success = await goal_repository.delete(
+            goal_id,
+            expected_owner_principal_id=operator.principal.principal_id,
+            expected_owner_session_id=operator.session_id,
+        )
+    except GoalOwnershipConflict as exc:
+        raise HTTPException(status_code=403, detail={"code": exc.code}) from exc
     if not success:
         raise HTTPException(status_code=404, detail="Goal not found")
     return {"status": "ok"}

@@ -21,6 +21,7 @@ from src.scheduler.jobs.strategist_tick import (
     _run_opted_in_goal_web_brief,
     _run_opted_in_goal_snapshot,
     _goal_budget_admission,
+    _goal_work_must_not_continue,
     run_strategist_tick,
 )
 from src.workflows.job_runtime import durable_job_repository
@@ -37,7 +38,13 @@ class _RecordingDurableJobs:
 
 @pytest.mark.asyncio
 async def test_goal_budget_missing_expired_and_valid_admission_are_visible():
-    missing = Goal(id="budget-missing", title="Missing budget", proactive_enabled=True)
+    missing = Goal(
+        id="budget-missing",
+        title="Missing budget",
+        proactive_enabled=True,
+        owner_principal_id="operator:a",
+        owner_session_id="operator-session:a",
+    )
     missing_receipt = await _goal_budget_admission(
         missing,
         capability_id="workflow.goal-snapshot-to-file",
@@ -51,6 +58,8 @@ async def test_goal_budget_missing_expired_and_valid_admission_are_visible():
         id="budget-expired",
         title="Expired budget",
         proactive_enabled=True,
+        owner_principal_id="operator:a",
+        owner_session_id="operator-session:a",
         admission_budget_json=GoalAdmissionBudget(
             reviewed_grant=True,
             grant_id="expired-grant",
@@ -69,6 +78,8 @@ async def test_goal_budget_missing_expired_and_valid_admission_are_visible():
         id="budget-valid",
         title="Valid budget",
         proactive_enabled=True,
+        owner_principal_id="operator:a",
+        owner_session_id="operator-session:a",
         admission_budget_json=GoalAdmissionBudget(
             reviewed_grant=True,
             grant_id="valid-grant",
@@ -90,6 +101,20 @@ async def test_goal_budget_missing_expired_and_valid_admission_are_visible():
         )
     assert valid_receipt["status"] == "admitted"
     assert valid_receipt["budget"].max_attempts == 2
+
+
+@pytest.mark.asyncio
+async def test_goal_budget_without_owner_is_blocked_before_delivery_fallback():
+    receipt = await _goal_budget_admission(
+        Goal(id="unbound-goal", title="Unbound goal", proactive_enabled=True),
+        capability_id="workflow.goal-snapshot-to-file",
+    )
+
+    assert receipt["status"] == "blocked"
+    assert receipt["reason"] == "goal_owner_binding_missing"
+    assert receipt["notification_owner_principal_id"] is None
+    assert receipt["notification_operator_session_id"] is None
+    assert _goal_work_must_not_continue(receipt) is True
 
 
 def _make_context(**overrides) -> CurrentContext:

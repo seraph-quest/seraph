@@ -116,6 +116,17 @@ async def _goal_budget_admission(goal: Goal, *, capability_id: str) -> dict[str,
 
     if not isinstance(goal, Goal):
         return None
+    owner_binding = _notification_delivery_binding(goal)
+    if not owner_binding["notification_owner_principal_id"] or not owner_binding["notification_operator_session_id"]:
+        return {
+            "status": "blocked",
+            "reason": "goal_owner_binding_missing",
+            "goal_id": goal.id,
+            "capability_id": capability_id,
+            "proposal_only": True,
+            "operator_visible": True,
+            **owner_binding,
+        }
     budget = deserialize_admission_budget(goal)
     if budget is None:
         reason = (
@@ -130,6 +141,7 @@ async def _goal_budget_admission(goal: Goal, *, capability_id: str) -> dict[str,
             "capability_id": capability_id,
             "proposal_only": True,
             "operator_visible": True,
+            **owner_binding,
         }
     if not budget.reviewed_grant or not budget.grant_id:
         return {
@@ -139,6 +151,7 @@ async def _goal_budget_admission(goal: Goal, *, capability_id: str) -> dict[str,
             "capability_id": capability_id,
             "proposal_only": True,
             "operator_visible": True,
+            **owner_binding,
         }
     now = datetime.now(timezone.utc)
     if budget.period_expires_at is not None and budget.period_expires_at <= now:
@@ -175,6 +188,7 @@ async def _goal_budget_admission(goal: Goal, *, capability_id: str) -> dict[str,
             "capability_id": capability_id,
             "proposal_only": True,
             "operator_visible": True,
+            **owner_binding,
             "budget": {
                 "max_outstanding_jobs": budget.max_outstanding_jobs,
                 "max_attempts": budget.max_attempts,
@@ -185,6 +199,10 @@ async def _goal_budget_admission(goal: Goal, *, capability_id: str) -> dict[str,
         }
     return {
         "status": "admitted",
+        "goal_id": goal.id,
+        "capability_id": capability_id,
+        "operator_visible": True,
+        **owner_binding,
         "budget": budget,
         "notifications_used": notifications_used if notifications_used is not None else 0,
     }
@@ -200,6 +218,21 @@ async def _record_budget_defer(parent_job_id: str, parent_fencing_token: int, de
         fencing_token=parent_fencing_token,
     )
     return details
+
+
+def _goal_work_must_not_continue(details: dict[str, object]) -> bool:
+    """Keep deferred/failed goal work from falling through to ambient delivery."""
+
+    goal_id = str(details.get("goal_id") or "").strip()
+    if not goal_id:
+        return False
+    return str(details.get("status") or "").strip() in {
+        "blocked",
+        "deferred",
+        "failed",
+        "skipped",
+        "exhausted",
+    }
 
 
 def _reasoning_digest(reasoning: object) -> str:
@@ -849,6 +882,44 @@ async def run_strategist_tick() -> None:
             owner=_STRATEGIST_RUNNER_ID,
             fencing_token=durable_fencing_token,
         )
+        if _goal_work_must_not_continue(proactive_work):
+            fence_details = {
+                "status": "blocked",
+                "reason": str(proactive_work.get("reason") or "goal_work_not_admitted"),
+                "goal_id": proactive_work.get("goal_id"),
+                "capability_id": proactive_work.get("capability_id"),
+                "delivery": "blocked",
+                "transport": "none",
+                "operator_visible": True,
+                "owner_principal_id": proactive_work.get("notification_owner_principal_id"),
+                "operator_session_id": proactive_work.get("notification_operator_session_id"),
+            }
+            await durable_job_repository.record_effect(
+                durable_job_id,
+                effect_type="goal_work_delivery_fence",
+                status="blocked",
+                details=fence_details,
+                owner=_STRATEGIST_RUNNER_ID,
+                fencing_token=durable_fencing_token,
+            )
+            await _transition_tick(
+                durable_job_id,
+                status="blocked",
+                fencing_token=durable_fencing_token,
+                reason=str(fence_details["reason"]),
+                result=fence_details,
+                result_summary="goal-bound work was not admitted; delivery was blocked",
+            )
+            await log_scheduler_job_event(
+                job_name="strategist_tick",
+                outcome="blocked",
+                details={
+                    "duration_ms": int((perf_counter() - started_at) * 1000),
+                    **fence_details,
+                    "durable_job_id": durable_job_id,
+                },
+            )
+            return
         # Keep the shared durable child contract live across the bounded
         # proactive work and model call. The repository performs the row-level
         # state/revision/fence CAS; a lost lease fails closed below.

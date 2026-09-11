@@ -118,11 +118,13 @@ interface CapabilityPackReadback {
     digest?: string;
     goal_id?: string;
     authority_digest?: string;
+    owner_principal_id?: string;
+    session_id?: string;
     status?: string;
   } | null;
-  jobs?: Array<{ job_id?: string; status?: string; domain?: string; readback_ok?: boolean }>;
+  jobs?: Array<{ job_id?: string; status?: string; domain?: string; readback_ok?: boolean; reconciliation_required?: boolean }>;
   local_executions?: Array<{ job_id?: string; domain?: string; outcome?: string; artifact?: { readback_ok?: boolean } }>;
-  reconciliation?: { status?: string; changes?: Array<{ job_id?: string; reason?: string }> };
+  reconciliation?: { status?: string; changes?: Array<{ job_id?: string; status?: string; reason?: string }>; resolved_job_id?: string; resolution_action?: string };
   generation?: number;
 }
 
@@ -6872,6 +6874,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   const [marketplaceFlows, setMarketplaceFlows] = useState<MarketplaceFlowInfo[]>([]);
   const [extensionPackages, setExtensionPackages] = useState<ExtensionPackageInfo[]>([]);
   const [capabilityPackReadback, setCapabilityPackReadback] = useState<CapabilityPackReadback | null>(null);
+  const [capabilityPackReadbackError, setCapabilityPackReadbackError] = useState<string | null>(null);
   const [savedRunbooks, setSavedRunbooks] = useState<RunbookInfo[]>(() => readRunbookMacros());
   const [activityLedger, setActivityLedger] = useState<ActivityLedgerEntry[]>([]);
   const [activitySummary, setActivitySummary] = useState<ActivityLedgerSummary | null>(null);
@@ -7177,13 +7180,19 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
         );
         if (!isCancelled() && readbackResult.ok && readbackResult.payload && typeof readbackResult.payload === "object") {
           setCapabilityPackReadback(readbackResult.payload as CapabilityPackReadback);
+          setCapabilityPackReadbackError(null);
+        } else if (!isCancelled()) {
+          setCapabilityPackReadback(null);
+          setCapabilityPackReadbackError("Capability-pack lifecycle readback is unavailable; recovery state is unverified.");
         }
       } else {
         setCapabilityPackReadback(null);
+        setCapabilityPackReadbackError(null);
       }
     } else {
       setExtensionPackages([]);
       setCapabilityPackReadback(null);
+      setCapabilityPackReadbackError(null);
     }
     setBrowserProviders(normalizeBrowserProviders(browserProvidersResult.payload));
     setBrowserSessions(normalizeBrowserSessions(browserSessionsResult.payload));
@@ -10999,6 +11008,33 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     } catch {
       setOperatorStatus(`Failed to ${actionLabel} ${label}`);
       appendOperatorFeed(`Failed to ${actionLabel} ${label}`, "failed");
+    }
+  }
+
+  async function resolveCapabilityPackRecovery(readback: CapabilityPackReadback) {
+    const job = readback.jobs?.find((item) => item.status === "blocked" || item.reconciliation_required);
+    if (!readback.pack_id || !job?.job_id) {
+      setOperatorStatus("No blocked capability-pack job is available for recovery.");
+      return;
+    }
+    setOperatorStatus(`Resolving capability-pack job ${job.job_id}...`);
+    try {
+      const response = await apiFetch(
+        `${API_URL}/api/capability-packs/${encodeURIComponent(readback.pack_id)}/reconcile/resolve`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ job_id: job.job_id, action: "cancel" }),
+        },
+      );
+      if (!response.ok) {
+        setOperatorStatus("Capability-pack recovery was rejected; inspect the durable receipt.");
+        return;
+      }
+      await refreshCockpit();
+      setOperatorStatus(`Capability-pack job ${job.job_id} resolved.`);
+    } catch {
+      setOperatorStatus("Capability-pack recovery failed; lifecycle state remains guarded.");
     }
   }
 
@@ -15657,6 +15693,15 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                     ) : null}
                   </section>
 
+                  {capabilityPackReadbackError && (
+                    <section className="cockpit-operator-section" aria-label="Capability pack lifecycle degraded state">
+                      <div className="cockpit-operator-row">
+                        <span className="cockpit-key">Capability pack lifecycle</span>
+                        <span className="cockpit-operator-link">degraded</span>
+                      </div>
+                      <div className="cockpit-sublist-item">{capabilityPackReadbackError}</div>
+                    </section>
+                  )}
                   {capabilityPackReadback && (
                     <section className="cockpit-operator-section" aria-label="Capability pack lifecycle readback">
                       <div className="cockpit-operator-row">
@@ -15677,9 +15722,19 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                         ].filter(Boolean).join(" · ")}
                       </div>
                       {capabilityPackReadback.reconciliation?.status === "blocked" && (
-                        <div className="cockpit-sublist-item">
-                          Reconcile interrupted work before retrying; canonical artifacts and outcome receipts remain available.
-                        </div>
+                        <>
+                          <div className="cockpit-sublist-item">
+                            Reconcile interrupted work before retrying; canonical artifacts and outcome receipts remain available.
+                          </div>
+                          <button
+                            type="button"
+                            className="cockpit-operator-button"
+                            disabled={!capabilityPackReadback.jobs?.some((job) => job.status === "blocked" || job.reconciliation_required)}
+                            onClick={() => void resolveCapabilityPackRecovery(capabilityPackReadback)}
+                          >
+                            resolve recovery
+                          </button>
+                        </>
                       )}
                     </section>
                   )}

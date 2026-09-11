@@ -1282,8 +1282,23 @@ def validate_capability_pack_dependencies(
             found_version = None
         if dependency.digest != found_digest:
             errors.append(f"dependency digest mismatch: {dependency.id}")
-        if found_version is not None and str(found_version) != dependency.version:
-            errors.append(f"dependency version mismatch: {dependency.id}")
+        if found_version is not None:
+            found_version_text = str(found_version).strip()
+            if dependency.version != "*" and found_version_text != dependency.version:
+                try:
+                    version_satisfies = Version(found_version_text) in SpecifierSet(dependency.version)
+                except InvalidVersion:
+                    # Older state records sometimes stored the constraint text
+                    # itself.  Preserve that representation only when it is an
+                    # exact match; every other non-version value fails closed.
+                    version_satisfies = False
+                if not version_satisfies:
+                    errors.append(f"dependency version mismatch: {dependency.id}")
+            elif dependency.version == "*" and found_version_text != "*":
+                try:
+                    Version(found_version_text)
+                except InvalidVersion:
+                    errors.append(f"dependency version mismatch: {dependency.id}")
     return tuple(errors)
 
 
@@ -1541,6 +1556,16 @@ class CapabilityPackLoadedWorkflow:
         }
 
 
+def _local_scope_requirements(workflow: CapabilityPackLoadedWorkflow) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Return the reviewed scopes required by one local workflow invocation."""
+
+    required_tools = tuple(dict.fromkeys(tool.strip() for tool in workflow.step_tools if tool.strip()))
+    # Local input is injected by the caller and never read from the host.  The
+    # only filesystem effect performed by this seam is the bounded artifact.
+    required_filesystem = ("artifact_write",)
+    return required_tools, required_filesystem
+
+
 @dataclass(frozen=True)
 class ActiveVersionPointer:
     pack_id: str
@@ -1549,6 +1574,8 @@ class ActiveVersionPointer:
     goal_id: str
     review_id: str
     authority_digest: str
+    owner_principal_id: str
+    session_id: str
     status: str = "active"
     previous_version: str | None = None
     previous_digest: str | None = None
@@ -1562,6 +1589,8 @@ class ActiveVersionPointer:
             "goal_id": self.goal_id,
             "review_id": self.review_id,
             "authority_digest": self.authority_digest,
+            "owner_principal_id": self.owner_principal_id,
+            "session_id": self.session_id,
             "status": self.status,
             "previous_version": self.previous_version,
             "previous_digest": self.previous_digest,
@@ -1768,13 +1797,22 @@ class CapabilityPackLifecycle:
         return receipt
 
     @staticmethod
-    def _cancel_pack_jobs(state: dict[str, Any], pack_id: str, *, digest: str | None, reason: str) -> int:
+    def _cancel_pack_jobs(
+        state: dict[str, Any],
+        pack_id: str,
+        *,
+        digest: str | None,
+        reason: str,
+        statuses: set[str] | frozenset[str] | None = None,
+    ) -> int:
         jobs = state.setdefault("jobs", {})
         cancelled = 0
         for job in jobs.values():
             if not isinstance(job, dict) or job.get("pack_id") != pack_id:
                 continue
             if digest is not None and job.get("digest") != digest:
+                continue
+            if statuses is not None and job.get("status") not in statuses:
                 continue
             if job.get("status") in {"succeeded", "failed", "cancelled", "expired"}:
                 continue
@@ -1794,6 +1832,10 @@ class CapabilityPackLifecycle:
         now: datetime | None = None,
         owner_principal_id: str | None = None,
         session_id: str | None = None,
+        request_fingerprint: str | None = None,
+        request_contract: Mapping[str, Any] | None = None,
+        required_tools: Iterable[str] = (),
+        required_filesystem: Iterable[str] = (),
     ) -> dict[str, Any]:
         """Persist one bounded job contract for a future governed runtime.
 
@@ -1807,6 +1849,8 @@ class CapabilityPackLifecycle:
         pack_id = _validate_pack_id(pack_id)
         goal_id = _validate_goal_id(goal_id)
         job_id = _validate_goal_id(job_id)
+        required_tools = tuple(str(item).strip() for item in required_tools if str(item).strip())
+        required_filesystem = tuple(str(item).strip() for item in required_filesystem if str(item).strip())
         with self._state_lock():
             state = self._load()
             pointer = state["active"].get(pack_id)
@@ -1814,6 +1858,24 @@ class CapabilityPackLifecycle:
                 raise CapabilityPackLifecycleError("job admission requires an active pack")
             if pointer.get("goal_id") != goal_id or not self._pointer_binding_valid(state, pack_id, pointer):
                 raise CapabilityPackLifecycleError("job admission binding is invalid")
+            pointer_owner, pointer_session = self._require_pointer_identity(
+                pointer,
+                owner_principal_id=(
+                    owner_principal_id
+                    if owner_principal_id is not None
+                    else str(pointer.get("owner_principal_id") or "")
+                ),
+                session_id=(
+                    session_id
+                    if session_id is not None
+                    else str(pointer.get("session_id") or "")
+                ),
+            )
+            request_fingerprint = str(request_fingerprint or canonical_digest(
+                "capability-pack-job-v2", pack_id, goal_id, job_id, pointer.get("digest")
+            ))
+            if not _DIGEST_RE.fullmatch(request_fingerprint):
+                raise CapabilityPackLifecycleError("job request fingerprint must be a SHA-256 digest")
             existing = state["jobs"].get(job_id)
             contract = self._execution_contract_from_state(
                 state,
@@ -1821,13 +1883,17 @@ class CapabilityPackLifecycle:
                 goal_id=goal_id,
                 job_id=job_id,
                 now=now,
+                required_tools=required_tools,
+                required_filesystem=required_filesystem,
             )
             if isinstance(existing, Mapping):
                 if existing.get("idempotency_key") != contract.idempotency_key:
                     raise CapabilityPackLifecycleError("job idempotency key conflicts with an existing job")
-                if owner_principal_id is not None and existing.get("owner_principal_id") not in {None, owner_principal_id}:
+                if existing.get("request_fingerprint") != request_fingerprint:
+                    raise CapabilityPackLifecycleError("job request fingerprint conflicts with the immutable job pin")
+                if existing.get("owner_principal_id") != pointer_owner:
                     raise CapabilityPackLifecycleError("job owner identity conflicts with the immutable job pin")
-                if session_id is not None and existing.get("session_id") not in {None, session_id}:
+                if existing.get("session_id") != pointer_session:
                     raise CapabilityPackLifecycleError("job session identity conflicts with the immutable job pin")
                 return {"status": "deduped", "job": deepcopy(dict(existing))}
             if len(state["jobs"]) >= MAX_PACK_JOBS:
@@ -1839,8 +1905,12 @@ class CapabilityPackLifecycle:
                 "digest": pointer.get("digest"),
                 "status": status,
                 "cancel_requested": False,
-                "owner_principal_id": _validate_goal_id(owner_principal_id) if owner_principal_id else None,
-                "session_id": _validate_goal_id(session_id) if session_id else None,
+                "owner_principal_id": pointer_owner,
+                "session_id": pointer_session,
+                "request_fingerprint": request_fingerprint,
+                "request_contract": deepcopy(dict(request_contract or {})),
+                "required_tools": sorted({str(item).strip() for item in required_tools if str(item).strip()}),
+                "required_filesystem": sorted({str(item).strip() for item in required_filesystem if str(item).strip()}),
             }
             state["jobs"][job_id] = job
             receipt = self._record_receipt(state, action="job:admit", status=status, pack_id=pack_id, details={key: value for key, value in job.items() if key not in {"root_path"}})
@@ -2120,6 +2190,8 @@ class CapabilityPackLifecycle:
         goal_id: str,
         job_id: str,
         now: datetime | None = None,
+        required_tools: Iterable[str] = (),
+        required_filesystem: Iterable[str] = (),
     ) -> CapabilityPackExecutionContract:
         pointer = state.get("active", {}).get(pack_id) if isinstance(state.get("active"), Mapping) else None
         if not isinstance(pointer, Mapping) or pointer.get("status") != "active":
@@ -2134,6 +2206,32 @@ class CapabilityPackLifecycle:
         if not isinstance(authority, Mapping) or authority.get("approval") != "always":
             raise CapabilityPackLifecycleError(
                 "execution contract requires authority.approval: always"
+            )
+        granted_tools_raw = authority.get("tools")
+        granted_filesystem_raw = authority.get("filesystem")
+        granted_tools = {
+            str(item).strip()
+            for item in granted_tools_raw
+            if str(item).strip()
+        } if isinstance(granted_tools_raw, (list, tuple, set)) else set()
+        granted_filesystem = {
+            str(item).strip()
+            for item in granted_filesystem_raw
+            if str(item).strip()
+        } if isinstance(granted_filesystem_raw, (list, tuple, set)) else set()
+        required_tool_set = {str(item).strip() for item in required_tools if str(item).strip()}
+        required_filesystem_set = {str(item).strip() for item in required_filesystem if str(item).strip()}
+        if not granted_tools or not granted_filesystem:
+            raise CapabilityPackLifecycleError("reviewed authority scopes are empty")
+        missing_tools = sorted(required_tool_set - granted_tools)
+        if missing_tools:
+            raise CapabilityPackLifecycleError(
+                f"reviewed authority is missing required tools: {', '.join(missing_tools)}"
+            )
+        missing_filesystem = sorted(required_filesystem_set - granted_filesystem)
+        if missing_filesystem:
+            raise CapabilityPackLifecycleError(
+                f"reviewed authority is missing required filesystem scopes: {', '.join(missing_filesystem)}"
             )
         resources = record.get("resources") if isinstance(record.get("resources"), Mapping) else {}
         runtime_seconds = int(resources.get("max_runtime_seconds", 0) or 0)
@@ -2153,6 +2251,11 @@ class CapabilityPackLifecycle:
             priority=priority,
             max_inference_cost_microusd=cost,
             max_artifact_bytes=artifact_bytes,
+            cancel_on_revoke=str(
+                (record.get("lifecycle") if isinstance(record.get("lifecycle"), Mapping) else {}).get(
+                    "revoke_running_jobs", "cancel_at_safe_checkpoint"
+                )
+            ) != "leave_pinned_until_completion",
         )
 
     def build_execution_contract(
@@ -2215,6 +2318,13 @@ class CapabilityPackLifecycle:
         pack_id: str,
         pointer: Mapping[str, Any],
     ) -> bool:
+        try:
+            pointer_owner = _validate_goal_id(str(pointer.get("owner_principal_id") or ""))
+            pointer_session = _validate_goal_id(str(pointer.get("session_id") or ""))
+        except CapabilityPackLifecycleError:
+            # Rows written before authenticated lifecycle identity existed must
+            # not regain authority through a compatibility fallback.
+            return False
         versions = state.get("versions")
         records = versions.get(pack_id) if isinstance(versions, Mapping) else None
         record = records.get(pointer.get("digest")) if isinstance(records, Mapping) else None
@@ -2249,6 +2359,7 @@ class CapabilityPackLifecycle:
             "dependencies": _dependency_bindings(manifest),
             "dependencies_digest": _dependencies_digest(manifest),
             "root_path": _safe_pack_path(root_path),
+            "lifecycle": manifest.lifecycle.model_dump(mode="json"),
             "review_id": review_id,
             "revoked": False,
         }
@@ -2279,11 +2390,35 @@ class CapabilityPackLifecycle:
             "authority_digest": manifest.authority_digest,
             "dependencies_digest": _dependencies_digest(manifest),
             "root_path": _safe_pack_path(root_path),
+            "owner_principal_id": pointer_owner,
+            "session_id": pointer_session,
         }
         return (
             all(pointer.get(field_name) == value for field_name, value in canonical_pointer.items())
             and not bool(record.get("revoked"))
         )
+
+    @staticmethod
+    def _require_pointer_identity(
+        pointer: Mapping[str, Any],
+        *,
+        owner_principal_id: str | None,
+        session_id: str | None,
+    ) -> tuple[str, str]:
+        """Require the exact authenticated owner/session bound at activation."""
+
+        try:
+            expected_owner = _validate_goal_id(str(pointer.get("owner_principal_id") or ""))
+            expected_session = _validate_goal_id(str(pointer.get("session_id") or ""))
+        except CapabilityPackLifecycleError as exc:
+            raise CapabilityPackLifecycleError("pack lifecycle identity binding is unavailable") from exc
+        if owner_principal_id is None or session_id is None:
+            raise CapabilityPackLifecycleError("authenticated owner and session identity are required")
+        supplied_owner = _validate_goal_id(owner_principal_id)
+        supplied_session = _validate_goal_id(session_id)
+        if supplied_owner != expected_owner or supplied_session != expected_session:
+            raise CapabilityPackLifecycleError("pack lifecycle owner or session identity conflicts with the immutable binding")
+        return expected_owner, expected_session
 
     def review(
         self,
@@ -2378,6 +2513,7 @@ class CapabilityPackLifecycle:
                 "dependencies": _dependency_bindings(pack),
                 "dependencies_digest": _dependencies_digest(pack),
                 "root_path": _safe_pack_path(root_path),
+                "lifecycle": pack.lifecycle.model_dump(mode="json"),
                 "review_id": review_id,
                 "revoked": False,
             })
@@ -2441,7 +2577,7 @@ class CapabilityPackLifecycle:
             if isinstance(old_version, Mapping):
                 previous_manifest = old_version
             candidate_delta = self._record_delta(old_version, pack)
-        self._require_approval(
+        approval = self._require_approval(
             state,
             approval_id=approval_id,
             action=action,
@@ -2456,6 +2592,10 @@ class CapabilityPackLifecycle:
             content_digest=content_digest or digest,
             authority_digest=authority_digest or pack.authority_digest,
         )
+        bound_owner = _validate_goal_id(str(owner_principal_id or approval.get("owner_principal_id") or ""))
+        bound_session = _validate_goal_id(str(session_id or approval.get("session_id") or ""))
+        if isinstance(existing, Mapping) and existing.get("status") in {"active", "paused"}:
+            self._require_pointer_identity(existing, owner_principal_id=bound_owner, session_id=bound_session)
         if idempotent_existing:
             return dict(existing), {"digest": digest, "idempotent": True, "approval_id": approval_id}
         record = state["versions"].setdefault(pack.id, {}).setdefault(digest, {
@@ -2471,6 +2611,7 @@ class CapabilityPackLifecycle:
             "dependencies": _dependency_bindings(pack),
             "dependencies_digest": _dependencies_digest(pack),
             "root_path": _safe_pack_path(root_path),
+            "lifecycle": pack.lifecycle.model_dump(mode="json"),
             "review_id": review_id,
             "revoked": False,
         })
@@ -2482,6 +2623,8 @@ class CapabilityPackLifecycle:
             "goal_id": goal_id,
             "review_id": review_id,
             "authority_digest": pack.authority_digest,
+            "owner_principal_id": bound_owner,
+            "session_id": bound_session,
             "dependencies_digest": _dependencies_digest(pack),
             "status": "paused" if isinstance(existing, Mapping) and existing.get("status") == "paused" else "active",
             "previous_version": existing.get("version") if isinstance(existing, Mapping) else None,
@@ -2572,7 +2715,7 @@ class CapabilityPackLifecycle:
             target_digest = str(pointer.get("digest") or "")
             target_version = str(pointer.get("version") or "")
             target_goal = str(pointer.get("goal_id") or "")
-            self._require_approval(
+            approval = self._require_approval(
                 state,
                 approval_id=approval_id,
                 action=action,
@@ -2589,10 +2732,17 @@ class CapabilityPackLifecycle:
                     state["versions"].get(pack_id, {}).get(target_digest, {}).get("authority_digest") or ""
                 ),
             )
+            self._require_pointer_identity(
+                pointer,
+                owner_principal_id=owner_principal_id or str(approval.get("owner_principal_id") or ""),
+                session_id=session_id or str(approval.get("session_id") or ""),
+            )
+            lifecycle = state["versions"].get(pack_id, {}).get(target_digest, {}).get("lifecycle", {})
+            revoke_policy = str(lifecycle.get("revoke_running_jobs") or "cancel_at_safe_checkpoint") if isinstance(lifecycle, Mapping) else "cancel_at_safe_checkpoint"
             cancelled_jobs = self._cancel_pack_jobs(state, pack_id, digest=target_digest, reason=f"{action}_requested")
             next_pointer = dict(pointer)
             next_pointer["status"] = status
-            details = {"version": pointer.get("version"), "digest": pointer.get("digest"), "goal_id": pointer.get("goal_id"), "reason_code": canonical_digest(reason or action)[:16], "approval_id": approval_id, "cancelled_jobs": cancelled_jobs}
+            details = {"version": pointer.get("version"), "digest": pointer.get("digest"), "goal_id": pointer.get("goal_id"), "reason_code": canonical_digest(reason or action)[:16], "approval_id": approval_id, "cancelled_jobs": cancelled_jobs, "revoke_running_jobs": revoke_policy}
             state["active"][pack_id] = next_pointer
             receipt = self._record_receipt(state, action=action, status=status, pack_id=pack_id, details=details)
             self._commit(state)
@@ -2649,7 +2799,7 @@ class CapabilityPackLifecycle:
             target_record = state["versions"].get(pack_id, {}).get(target_digest)
             target_version = str(target_record.get("version") or "") if isinstance(target_record, Mapping) else ""
             target_goal = str(target_record.get("goal_id") or "") if isinstance(target_record, Mapping) else ""
-            self._require_approval(
+            approval = self._require_approval(
                 state,
                 approval_id=approval_id,
                 action="revoke",
@@ -2671,8 +2821,34 @@ class CapabilityPackLifecycle:
             if next_pointer is not None:
                 next_pointer["status"] = "revoked"
                 state["active"][pack_id] = next_pointer
-            cancelled_jobs = self._cancel_pack_jobs(state, pack_id, digest=target_digest, reason="revoke_requested")
-            receipt = self._record_receipt(state, action="revoke", status="revoked", pack_id=pack_id, details={"digest": target_digest, "reason_code": canonical_digest(reason)[:16], "approval_id": approval_id, "cancelled_jobs": cancelled_jobs})
+            lifecycle = target_record.get("lifecycle", {}) if isinstance(target_record, Mapping) else {}
+            revoke_policy = str(lifecycle.get("revoke_running_jobs") or "cancel_at_safe_checkpoint") if isinstance(lifecycle, Mapping) else "cancel_at_safe_checkpoint"
+            if isinstance(pointer, Mapping) and pointer.get("digest") == target_digest:
+                self._require_pointer_identity(
+                    pointer,
+                    owner_principal_id=owner_principal_id or str(approval.get("owner_principal_id") or ""),
+                    session_id=session_id or str(approval.get("session_id") or ""),
+                )
+            cancelled_jobs = (
+                self._cancel_pack_jobs(state, pack_id, digest=target_digest, reason="revoke_requested")
+                if revoke_policy == "cancel_at_safe_checkpoint"
+                else self._cancel_pack_jobs(
+                    state,
+                    pack_id,
+                    digest=target_digest,
+                    reason="revoke_queued_job_requested",
+                    statuses={"accepted", "queued", "paused"},
+                )
+            )
+            pinned_jobs = sum(
+                1
+                for job in state.get("jobs", {}).values()
+                if isinstance(job, Mapping)
+                and job.get("pack_id") == pack_id
+                and job.get("digest") == target_digest
+                and job.get("status") == "running"
+            )
+            receipt = self._record_receipt(state, action="revoke", status="revoked", pack_id=pack_id, details={"digest": target_digest, "reason_code": canonical_digest(reason)[:16], "approval_id": approval_id, "cancelled_jobs": cancelled_jobs, "pinned_running_jobs": pinned_jobs, "revoke_running_jobs": revoke_policy})
             self._commit(state)
         return {"status": "revoked", "pointer": _public_pointer(next_pointer), "receipt": receipt}
 
@@ -2780,6 +2956,7 @@ class CapabilityPackLifecycle:
                 "dependencies": _dependency_bindings(target_manifest),
                 "dependencies_digest": _dependencies_digest(target_manifest),
                 "root_path": _safe_pack_path(root_path),
+                "lifecycle": target_manifest.lifecycle.model_dump(mode="json"),
                 "review_id": expected_review_id,
                 "revoked": False,
             }
@@ -2836,10 +3013,36 @@ class CapabilityPackLifecycle:
     def _safe_local_artifact_path(path: str | Path, *, base_root: str | Path, max_bytes: int) -> Path:
         """Resolve one local artifact path without following symlinks."""
 
-        candidate = Path(path)
-        if not candidate.is_absolute():
-            candidate = Path(base_root) / candidate
-        candidate = candidate.resolve()
+        relative = Path(path)
+        if relative.is_absolute():
+            raise CapabilityPackLifecycleError("local artifact path must be relative to the artifact root")
+        if "\\" in str(path):
+            raise CapabilityPackLifecycleError("local artifact path must use POSIX separators")
+        if not relative.parts or any(part in {"..", ""} for part in relative.parts):
+            raise CapabilityPackLifecycleError("local artifact path must stay within the artifact root")
+        base = Path(base_root)
+        # Check the original path before resolving it.  Resolving first makes a
+        # symlinked parent indistinguishable from a normal directory.
+        _safe_canary_artifact_root(base)
+        base_resolved = base.resolve(strict=True)
+        current = base
+        for part in relative.parts[:-1]:
+            current = current / part
+            try:
+                if current.is_symlink():
+                    raise CapabilityPackLifecycleError("local artifact path cannot contain symlinked directories")
+                if current.exists() and not current.is_dir():
+                    raise CapabilityPackLifecycleError("local artifact parent must be a directory")
+            except OSError as exc:
+                raise CapabilityPackLifecycleError("local artifact path could not be inspected safely") from exc
+        candidate = base / relative
+        resolved = candidate.resolve(strict=False)
+        try:
+            resolved.relative_to(base_resolved)
+        except ValueError as exc:
+            raise CapabilityPackLifecycleError("local artifact path escapes the artifact root") from exc
+        # Recheck after resolution to catch a symlink introduced between the
+        # initial ancestor walk and the final write.
         parent = candidate.parent
         _safe_canary_artifact_root(parent)
         try:
@@ -2861,6 +3064,10 @@ class CapabilityPackLifecycle:
         details: Mapping[str, Any] | None = None,
         receipt_action: str | None = None,
         expected_statuses: set[str] | frozenset[str] | None = None,
+        pack_id: str | None = None,
+        owner_principal_id: str | None = None,
+        session_id: str | None = None,
+        expected_digest: str | None = None,
     ) -> dict[str, Any]:
         if status not in {"running", "succeeded", "failed", "cancelled", "blocked", "recovered"}:
             raise CapabilityPackLifecycleError("unsupported local job terminal status")
@@ -2869,6 +3076,14 @@ class CapabilityPackLifecycle:
             job = state["jobs"].get(job_id)
             if not isinstance(job, Mapping):
                 raise CapabilityPackLifecycleError("local execution job is unavailable")
+            if pack_id is not None and job.get("pack_id") != pack_id:
+                raise CapabilityPackLifecycleError("local execution job pack binding is invalid")
+            if owner_principal_id is not None and job.get("owner_principal_id") != owner_principal_id:
+                raise CapabilityPackLifecycleError("local execution job owner binding is invalid")
+            if session_id is not None and job.get("session_id") != session_id:
+                raise CapabilityPackLifecycleError("local execution job session binding is invalid")
+            if expected_digest is not None and job.get("digest") != expected_digest:
+                raise CapabilityPackLifecycleError("local execution job digest binding is invalid")
             current_status = str(job.get("status") or "")
             if expected_statuses is not None and current_status not in expected_statuses:
                 # A concurrent cancel/revoke/reconcile transition is the
@@ -2891,12 +3106,26 @@ class CapabilityPackLifecycle:
             self._commit(state)
             return {"job": deepcopy(mutable_job), "receipt": receipt}
 
-    def reconcile(self, pack_id: str | None = None) -> dict[str, Any]:
+    def reconcile(
+        self,
+        pack_id: str | None = None,
+        *,
+        owner_principal_id: str | None = None,
+        session_id: str | None = None,
+    ) -> dict[str, Any]:
         """Reconcile interrupted local jobs before a new job can load a pack."""
 
         selected_pack = _validate_pack_id(pack_id) if pack_id is not None else None
         with self._state_lock():
             state = self._load()
+            if selected_pack is not None:
+                selected_pointer = state.get("active", {}).get(selected_pack)
+                if isinstance(selected_pointer, Mapping) and (owner_principal_id is not None or session_id is not None):
+                    self._require_pointer_identity(
+                        selected_pointer,
+                        owner_principal_id=owner_principal_id,
+                        session_id=session_id,
+                    )
             changes: list[dict[str, Any]] = []
             active_by_pack = state.get("active", {})
             for item_job_id, raw_job in list(state.get("jobs", {}).items()):
@@ -2912,15 +3141,21 @@ class CapabilityPackLifecycle:
                 pointer_digest = pointer.get("digest") if isinstance(pointer, Mapping) else None
                 reason: str | None = None
                 next_status = "blocked"
-                if not isinstance(pointer, Mapping) or pointer.get("status") not in {"active", "paused"}:
+                if not isinstance(pointer, Mapping) or pointer.get("status") not in {"active", "paused", "revoked"}:
                     reason = "active_pointer_unavailable"
                     next_status = "cancelled"
                 elif pointer_digest != raw_job.get("digest"):
                     reason = "job_pack_digest_is_no_longer_active"
                     next_status = "cancelled"
                 elif raw_job.get("digest") in state.get("revoked", {}).get(job_pack_id, []):
-                    reason = "job_pack_digest_revoked"
-                    next_status = "cancelled"
+                    if pointer.get("status") == "revoked" and raw_job.get("cancel_on_revoke") is False:
+                        # The reviewed leave-pinned policy permits an already
+                        # running job to finish, while new admission remains
+                        # blocked by the revoked pointer.
+                        reason = None
+                    else:
+                        reason = "job_pack_digest_revoked"
+                        next_status = "cancelled"
                 elif job_status == "running":
                     # A process restart cannot safely infer whether the
                     # workflow wrote an effect before its final receipt.
@@ -2940,9 +3175,13 @@ class CapabilityPackLifecycle:
                 state["jobs"][item_job_id] = mutable_job
                 changes.append({"job_id": item_job_id, "status": next_status, "reason": reason})
             current = state.get("reconciliation") if isinstance(state.get("reconciliation"), Mapping) else {}
-            if changes or current.get("status") != "clean":
+            unresolved = any(
+                isinstance(item, Mapping) and item.get("status") == "blocked"
+                for item in state.get("jobs", {}).values()
+            )
+            if changes or (current.get("status") == "clean" and unresolved):
                 state["reconciliation"] = {
-                    "status": "blocked" if any(item["status"] == "blocked" for item in changes) else "clean",
+                    "status": "blocked" if unresolved or any(item["status"] == "blocked" for item in changes) else "clean",
                     "updated_at": _utc_now(),
                     "changes": changes,
                 }
@@ -2956,6 +3195,77 @@ class CapabilityPackLifecycle:
                     )
                 self._commit(state)
             return deepcopy(dict(state.get("reconciliation") or {"status": "clean", "changes": []}))
+
+    def resolve_reconciliation(
+        self,
+        pack_id: str,
+        *,
+        job_id: str,
+        action: str = "cancel",
+        owner_principal_id: str,
+        session_id: str,
+    ) -> dict[str, Any]:
+        """Resolve one blocked restart job through an explicit operator action."""
+
+        pack_id = _validate_pack_id(pack_id)
+        job_id = _validate_goal_id(job_id)
+        if action not in {"cancel", "recover"}:
+            raise CapabilityPackLifecycleError("reconciliation action must be cancel or recover")
+        with self._state_lock():
+            state = self._load()
+            pointer = state.get("active", {}).get(pack_id)
+            if not isinstance(pointer, Mapping):
+                raise CapabilityPackLifecycleError("reconciliation requires an active pack binding")
+            self._require_pointer_identity(
+                pointer,
+                owner_principal_id=owner_principal_id,
+                session_id=session_id,
+            )
+            job = state.get("jobs", {}).get(job_id)
+            if not isinstance(job, Mapping) or job.get("pack_id") != pack_id or job.get("status") != "blocked":
+                raise CapabilityPackLifecycleError("reconciliation job is not blocked for this pack")
+            if job.get("owner_principal_id") != owner_principal_id or job.get("session_id") != session_id:
+                raise CapabilityPackLifecycleError("reconciliation job identity conflicts with the immutable binding")
+            mutable_job = dict(job)
+            mutable_job.update(
+                {
+                    "status": "cancelled" if action == "cancel" else "recovered",
+                    "reconciliation_required": False,
+                    "recovery_action": f"operator_{action}",
+                    "reconciliation_resolved_at": _utc_now(),
+                }
+            )
+            state["jobs"][job_id] = mutable_job
+            unresolved = any(
+                isinstance(item, Mapping) and item.get("status") == "blocked"
+                for item in state.get("jobs", {}).values()
+            )
+            state["reconciliation"] = {
+                "status": "blocked" if unresolved else "clean",
+                "updated_at": _utc_now(),
+                "changes": [],
+                "resolved_job_id": job_id,
+                "resolution_action": action,
+            }
+            receipt = self._record_receipt(
+                state,
+                action="reconcile:resolve",
+                status=state["reconciliation"]["status"],
+                pack_id=pack_id,
+                details={
+                    "job_id": job_id,
+                    "action": action,
+                    "owner_principal_id": owner_principal_id,
+                    "session_id": session_id,
+                },
+            )
+            self._commit(state)
+            return {
+                "status": state["reconciliation"]["status"],
+                "job": deepcopy(mutable_job),
+                "receipt": receipt,
+                "reconciliation": deepcopy(state["reconciliation"]),
+            }
 
     def execute_local(
         self,
@@ -2971,6 +3281,7 @@ class CapabilityPackLifecycle:
         source_url: str | None = None,
         query: str | None = None,
         goal_snapshot: Mapping[str, Any] | str | None = None,
+        source_payload_digest: str | None = None,
         intercepted_transport: Callable[..., Any] | None = None,
         transport: Callable[..., Any] | None = None,
         workflow_runner: Callable[..., Any] | None = None,
@@ -2988,6 +3299,8 @@ class CapabilityPackLifecycle:
         job_id = _validate_goal_id(job_id)
         owner_principal_id = _validate_goal_id(owner_principal_id)
         session_id = _validate_goal_id(session_id)
+        if source_payload_digest is not None and not _DIGEST_RE.fullmatch(str(source_payload_digest)):
+            raise CapabilityPackLifecycleError("source payload digest must be a SHA-256 digest")
         domain_aliases = {
             "research": "primary",
             "research_brief": "primary",
@@ -3009,7 +3322,11 @@ class CapabilityPackLifecycle:
                 raise CapabilityPackLifecycleError("source URL must be a controlled local/intercepted reference")
 
         # Reconcile stale running work before admitting a fresh job.
-        reconciliation = self.reconcile(pack_id)
+        reconciliation = self.reconcile(
+            pack_id,
+            owner_principal_id=owner_principal_id,
+            session_id=session_id,
+        )
         if reconciliation.get("status") == "blocked":
             raise CapabilityPackLifecycleError("local execution is blocked until interrupted work is reconciled")
         with self._state_lock(shared=True):
@@ -3019,6 +3336,11 @@ class CapabilityPackLifecycle:
                 raise CapabilityPackLifecycleError("local execution requires an active pack")
             if pointer.get("goal_id") != goal_id or not self._pointer_binding_valid(state, pack_id, pointer):
                 raise CapabilityPackLifecycleError("local execution binding is invalid")
+            self._require_pointer_identity(
+                pointer,
+                owner_principal_id=owner_principal_id,
+                session_id=session_id,
+            )
             record = state["versions"].get(pack_id, {}).get(pointer.get("digest"))
             if not isinstance(record, Mapping):
                 raise CapabilityPackLifecycleError("local execution version is unavailable")
@@ -3046,6 +3368,16 @@ class CapabilityPackLifecycle:
                 file_path="builtin:seraph-local-workflow",
                 step_tools=("web_search", "write_file") if domain == "primary" else ("get_goals", "write_file"),
             )
+        required_tools, required_filesystem = _local_scope_requirements(workflow)
+        artifact_root_value = artifact_root or (self.state_path.parent / "capability-pack-artifacts")
+        artifact_path_value = str(artifact_path or (Path("capability-pack") / f"{job_id}.md"))
+        # Validate the requested artifact before durable admission so a path
+        # rejection cannot leave an accepted job that can never be written.
+        self._safe_local_artifact_path(
+            artifact_path_value,
+            base_root=artifact_root_value,
+            max_bytes=max_artifact_bytes,
+        )
         request = CapabilityPackLocalExecutionRequest(
             pack_id=pack_id,
             goal_id=goal_id,
@@ -3053,11 +3385,17 @@ class CapabilityPackLifecycle:
             owner_principal_id=owner_principal_id,
             session_id=session_id,
             domain=domain,
-            artifact_path=str(artifact_path or (Path("capability-pack") / f"{job_id}.md")),
+            artifact_path=artifact_path_value,
             source_url=source_url,
             query=query,
             goal_snapshot=goal_snapshot,
         )
+        request_contract = {
+            **request.as_dict(),
+            "artifact_root": str(artifact_root_value),
+            "source_payload_digest": source_payload_digest,
+        }
+        request_fingerprint = canonical_digest("capability-pack-local-request-v1", request_contract)
         admission = self.register_job(
             pack_id,
             goal_id=goal_id,
@@ -3065,6 +3403,10 @@ class CapabilityPackLifecycle:
             status="accepted",
             owner_principal_id=owner_principal_id,
             session_id=session_id,
+            request_fingerprint=request_fingerprint,
+            request_contract=request_contract,
+            required_tools=required_tools,
+            required_filesystem=required_filesystem,
         )
         pinned_job = admission["job"]
         if pinned_job.get("digest") != pinned_digest or pinned_job.get("version") != pinned_version:
@@ -3084,12 +3426,24 @@ class CapabilityPackLifecycle:
                 }
             if isinstance(existing_job, Mapping) and existing_job.get("status") in {"cancelled", "blocked", "failed", "recovered"}:
                 raise CapabilityPackLifecycleError("idempotent local job is already terminal; use a new job_id")
+            if isinstance(existing_job, Mapping) and existing_job.get("status") in {"accepted", "queued", "running"}:
+                return {
+                    "status": "in_progress",
+                    "request": request.as_dict(),
+                    "execution": deepcopy(dict(existing_execution)) if isinstance(existing_execution, Mapping) else None,
+                    "job": deepcopy(dict(existing_job)),
+                    "receipt": None,
+                }
         self._set_local_job_status(
             job_id,
             status="running",
             details={"execution_mode": "local_functional", "domain": domain, "workflow": workflow.as_dict()},
             receipt_action="local:running",
             expected_statuses={"accepted", "queued", "running"},
+            pack_id=pack_id,
+            owner_principal_id=owner_principal_id,
+            session_id=session_id,
+            expected_digest=pinned_digest,
         )
         try:
             source_payload: Any = None
@@ -3111,8 +3465,10 @@ class CapabilityPackLifecycle:
                     source_text = str(source_payload or "").strip()
                 if not source_text:
                     raise CapabilityPackLifecycleError("intercepted source returned no content")
+                if len(source_text.encode("utf-8")) > MAX_LOCAL_SOURCE_BYTES:
+                    raise CapabilityPackLifecycleError("intercepted source exceeds local source limit")
                 content = (
-                    f"# Local research brief\n\nQuery: {query or goal_id}\n"
+                    f"# Local research brief\n\nGoal: {goal_id}\nQuery: {query or goal_id}\n"
                     f"Source: {source_url}\n\n{source_text}\n"
                 )
                 outcome = "local_research_brief_verified"
@@ -3124,6 +3480,8 @@ class CapabilityPackLifecycle:
                     snapshot_text = str(goal_snapshot or "").strip()
                 if not snapshot_text:
                     raise CapabilityPackLifecycleError("goal snapshot returned no content")
+                if len(snapshot_text.encode("utf-8")) > MAX_LOCAL_SOURCE_BYTES:
+                    raise CapabilityPackLifecycleError("goal snapshot exceeds local source limit")
                 content = f"# Goal snapshot\n\nGoal: {goal_id}\n\n{snapshot_text}\n"
                 outcome = "local_goal_snapshot_verified"
                 source_refs = [f"goal-snapshot:{canonical_digest(goal_id, snapshot_text)}"]
@@ -3136,6 +3494,9 @@ class CapabilityPackLifecycle:
                     runner_result = workflow_runner(workflow.name, request.as_dict(), content)
                 if runner_result is not None:
                     content = str(runner_result)
+            goal_marker = f"Goal: {goal_id}"
+            if not any(line.strip() == goal_marker for line in content.splitlines()):
+                raise CapabilityPackLifecycleError("local artifact is missing the canonical goal identity")
             if len(content.encode("utf-8")) > max_artifact_bytes:
                 raise CapabilityPackLifecycleError("local artifact exceeds the reviewed pack artifact limit")
             artifact = self._safe_local_artifact_path(
@@ -3153,13 +3514,25 @@ class CapabilityPackLifecycle:
                     raise CapabilityPackLifecycleError("local job pin is unavailable")
                 if current_job.get("status") != "running":
                     raise CapabilityPackLifecycleError("local job is no longer runnable")
-                if not isinstance(current_pointer, Mapping) or current_pointer.get("digest") != pinned_digest or current_pointer.get("status") != "active":
+                allow_revoked_completion = (
+                    isinstance(current_pointer, Mapping)
+                    and current_pointer.get("digest") == pinned_digest
+                    and current_pointer.get("status") == "revoked"
+                    and pinned_job.get("cancel_on_revoke") is False
+                )
+                if (
+                    not isinstance(current_pointer, Mapping)
+                    or current_pointer.get("digest") != pinned_digest
+                    or (current_pointer.get("status") != "active" and not allow_revoked_completion)
+                ):
                     raise CapabilityPackLifecycleError("local job was revoked or replaced before artifact write")
             data = content.encode("utf-8")
             _write_canary_artifact(artifact, data)
             readback = artifact.read_bytes()
             if readback != data:
                 raise CapabilityPackLifecycleError("local artifact readback digest mismatch")
+            if not any(line.strip() == goal_marker for line in readback.decode("utf-8", errors="strict").splitlines()):
+                raise CapabilityPackLifecycleError("local artifact readback is missing the canonical goal identity")
             content_digest = hashlib.sha256(data).hexdigest()
             execution = {
                 "schema_version": CAPABILITY_PACK_LOCAL_EXECUTION_SCHEMA,
@@ -3204,18 +3577,28 @@ class CapabilityPackLifecycle:
                 },
                 receipt_action=f"local:{domain}",
                 expected_statuses={"running"},
+                pack_id=pack_id,
+                owner_principal_id=owner_principal_id,
+                session_id=session_id,
+                expected_digest=pinned_digest,
             )
             with self._state_lock():
                 state = self._load()
                 final_pointer = state["active"].get(pack_id)
                 final_job = state["jobs"].get(job_id)
+                allow_revoked_completion = (
+                    isinstance(final_pointer, Mapping)
+                    and final_pointer.get("digest") == pinned_digest
+                    and final_pointer.get("status") == "revoked"
+                    and pinned_job.get("cancel_on_revoke") is False
+                )
                 if (
                     not isinstance(final_pointer, Mapping)
-                    or final_pointer.get("status") != "active"
+                    or (final_pointer.get("status") != "active" and not allow_revoked_completion)
                     or final_pointer.get("digest") != pinned_digest
                     or not isinstance(final_job, Mapping)
                     or final_job.get("status") != "succeeded"
-                    or pinned_digest in state.get("revoked", {}).get(pack_id, [])
+                    or (pinned_digest in state.get("revoked", {}).get(pack_id, []) and not allow_revoked_completion)
                 ):
                     mutable_job = dict(final_job) if isinstance(final_job, Mapping) else {"job_id": job_id}
                     mutable_job.update(
@@ -3255,6 +3638,10 @@ class CapabilityPackLifecycle:
                     details={"execution_mode": "local_functional", "domain": domain, "failure_reason": reason},
                     receipt_action=f"local:{domain}:failed",
                     expected_statuses={"accepted", "queued", "running"},
+                    pack_id=pack_id,
+                    owner_principal_id=owner_principal_id,
+                    session_id=session_id,
+                    expected_digest=pinned_digest,
                 )
             except CapabilityPackLifecycleError:
                 failed = {"job": {"job_id": job_id, "status": "blocked"}, "receipt": None}
@@ -3268,12 +3655,28 @@ class CapabilityPackLifecycle:
     def execute_local_job(self, pack_id: str, **kwargs: Any) -> dict[str, Any]:
         return self.execute_local(pack_id, **kwargs)
 
-    def status(self, pack_id: str) -> dict[str, Any]:
+    def status(
+        self,
+        pack_id: str,
+        *,
+        owner_principal_id: str | None = None,
+        session_id: str | None = None,
+    ) -> dict[str, Any]:
         pack_id = _validate_pack_id(pack_id)
-        self.reconcile(pack_id)
+        self.reconcile(
+            pack_id,
+            owner_principal_id=owner_principal_id,
+            session_id=session_id,
+        )
         with self._state_lock(shared=True):
             state = self._load()
             pointer = state["active"].get(pack_id)
+            if isinstance(pointer, Mapping) and (owner_principal_id is not None or session_id is not None):
+                self._require_pointer_identity(
+                    pointer,
+                    owner_principal_id=owner_principal_id,
+                    session_id=session_id,
+                )
             versions = state["versions"].get(pack_id, {})
             active = _public_pointer(pointer)
             if isinstance(pointer, Mapping) and not self._pointer_binding_valid(state, pack_id, pointer):

@@ -11,6 +11,7 @@ from src.api.capabilities import _require_authenticated_capability_operator
 from src.extensions.capability_pack import (
     CapabilityPackLifecycle,
     CapabilityPackLifecycleError,
+    canonical_digest,
 )
 
 
@@ -30,24 +31,33 @@ class LocalExecutionRequest(BaseModel):
     goal_snapshot: dict[str, Any] | str | None = None
 
 
+class ReconciliationResolutionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    job_id: str
+    action: str = Field(default="cancel", pattern=r"^(cancel|recover)$")
+
+
 def _store() -> CapabilityPackLifecycle:
     return CapabilityPackLifecycle()
 
 
 @router.get("/capability-packs/{pack_id}")
 async def capability_pack_readback(pack_id: str, request: Request) -> dict[str, Any]:
-    _require_authenticated_capability_operator(request)
+    operator = _require_authenticated_capability_operator(request)
+    principal_id = str(getattr(operator.principal, "principal_id", "") or "")
     try:
-        return _store().status(pack_id)
+        return _store().status(pack_id, owner_principal_id=principal_id, session_id=operator.session_id)
     except (CapabilityPackLifecycleError, ValueError) as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @router.post("/capability-packs/{pack_id}/reconcile")
 async def capability_pack_reconcile(pack_id: str, request: Request) -> dict[str, Any]:
-    _require_authenticated_capability_operator(request)
+    operator = _require_authenticated_capability_operator(request)
+    principal_id = str(getattr(operator.principal, "principal_id", "") or "")
     try:
-        return _store().reconcile(pack_id)
+        return _store().reconcile(pack_id, owner_principal_id=principal_id, session_id=operator.session_id)
     except (CapabilityPackLifecycleError, ValueError) as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
@@ -81,10 +91,31 @@ async def capability_pack_execute_local(
             source_url=req.source_url or "local://intercepted/source",
             query=req.query,
             goal_snapshot=req.goal_snapshot,
+            source_payload_digest=canonical_digest(source_payload) if source_payload is not None else None,
             intercepted_transport=intercepted_transport if req.domain in {"primary", "research", "research_brief"} else None,
         )
     except CapabilityPackLifecycleError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
-__all__ = ["LocalExecutionRequest", "router"]
+@router.post("/capability-packs/{pack_id}/reconcile/resolve")
+async def capability_pack_resolve_reconciliation(
+    pack_id: str,
+    req: ReconciliationResolutionRequest,
+    request: Request,
+) -> dict[str, Any]:
+    operator = _require_authenticated_capability_operator(request)
+    principal_id = str(getattr(operator.principal, "principal_id", "") or "")
+    try:
+        return _store().resolve_reconciliation(
+            pack_id,
+            job_id=req.job_id,
+            action=req.action,
+            owner_principal_id=principal_id,
+            session_id=operator.session_id,
+        )
+    except CapabilityPackLifecycleError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+__all__ = ["LocalExecutionRequest", "ReconciliationResolutionRequest", "router"]

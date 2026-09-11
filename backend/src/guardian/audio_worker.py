@@ -1008,6 +1008,55 @@ class AudioIngressWorker:
             )
         return current.principal
 
+    async def _require_current_operator_authority(
+        self,
+        *,
+        owner_principal_id: str | None,
+        operator_session_id: str | None,
+        required_grants: tuple[AuthorityGrant, ...] = (AuthorityGrant.INGRESS,),
+    ) -> TrustPrincipal:
+        """Re-authenticate one direct worker mutation at its effect boundary.
+
+        API middleware authenticates the request, but a worker caller can keep
+        running after that request context has gone stale.  Owner/session
+        strings therefore remain only an identity binding; every direct
+        mutation or admission must re-read the durable operator session and
+        its current grants immediately before the effect.
+        """
+        owner = str(owner_principal_id or "").strip()
+        operator_session = str(operator_session_id or "").strip()
+        if not owner or not operator_session:
+            raise AudioWorkerError(
+                "audio_operator_session_mismatch",
+                "audio worker action requires its owning operator session",
+            )
+        try:
+            current = await authenticate_session(operator_session, touch=False)
+        except AuthFailure as exc:
+            raise AudioWorkerError(
+                "audio_operator_session_invalid",
+                "audio worker action requires a current operator session",
+            ) from exc
+        if current.session_id != operator_session:
+            raise AudioWorkerError(
+                "audio_operator_session_invalid",
+                "audio worker action requires its current operator session",
+            )
+        if not all(
+            self._principal_has_grant(
+                current.principal,
+                owner_principal_id=owner,
+                operator_session_id=operator_session,
+                required_grant=required_grant,
+            )
+            for required_grant in required_grants
+        ):
+            raise AudioWorkerError(
+                "audio_operator_authority_required",
+                "audio worker action is no longer authorized",
+            )
+        return current.principal
+
     async def issue_consent_grant(
         self,
         *,
@@ -1066,6 +1115,10 @@ class AudioIngressWorker:
         operator_session_id: str,
         now: datetime | None = None,
     ) -> bool:
+        await self._require_current_operator_authority(
+            owner_principal_id=owner_principal_id,
+            operator_session_id=operator_session_id,
+        )
         current = _utc(now or self._now())
         if not isinstance(reference, str) or not _CONSENT_REFERENCE_RE.fullmatch(reference):
             raise AudioWorkerError("audio_consent_reference_invalid", "audio consent reference is invalid")
@@ -1076,6 +1129,16 @@ class AudioIngressWorker:
             row = result.scalars().first()
             if row is None or row.owner_principal_id != owner_principal_id or row.operator_session_id != operator_session_id:
                 raise AudioWorkerError("audio_consent_not_found", "audio consent grant is not available")
+            required_grants = (
+                (AuthorityGrant.INGRESS,)
+                if row.boundary == "capture"
+                else (AuthorityGrant.INGRESS, AuthorityGrant.MODEL_INFERENCE)
+            )
+            await self._require_current_operator_authority(
+                owner_principal_id=owner_principal_id,
+                operator_session_id=operator_session_id,
+                required_grants=required_grants,
+            )
             if row.state != AudioConsentState.REVOKED.value:
                 row.state = AudioConsentState.REVOKED.value
                 row.revoked_at = current
@@ -1590,6 +1653,14 @@ class AudioIngressWorker:
     ) -> AudioJobSnapshot:
         """Quarantine and admit one upload; repeated request IDs are idempotent."""
         now = self._now()
+        # The request may arrive through an already-authenticated API route,
+        # but direct worker callers must still prove the durable session and
+        # current ingress grant before session ownership or quarantine state is
+        # touched.
+        await self._require_current_operator_authority(
+            owner_principal_id=request.owner_principal_id,
+            operator_session_id=request.operator_session_id,
+        )
         if len(request.audio_bytes) > RAW_AUDIO_MAX_BYTES:
             raise AudioWorkerError("audio_size_exceeds_limit", "audio upload exceeds the bound")
         if _utc(request.captured_at) + RAW_RETENTION <= now:
@@ -1734,6 +1805,23 @@ class AudioIngressWorker:
                 ingress,
                 capture_consent=submitted_capture_consent,
                 model_consent=submitted_model_consent,
+            )
+            # Re-read both identity authority and consent immediately before
+            # the durable job admission.  The initial checks only authorize
+            # decoding/quarantine work and cannot authorize a later insert
+            # after session revocation or consent revocation.
+            await self._require_current_operator_authority(
+                owner_principal_id=request.owner_principal_id,
+                operator_session_id=request.operator_session_id,
+            )
+            capture_consent, model_consent = await self._resolve_upload_consents(
+                request,
+                now=self._now(),
+            )
+            request = replace(
+                request,
+                capture_consent=capture_consent,
+                model_consent=model_consent,
             )
             row, duplicate = await self._insert_job(
                 request,
@@ -2411,6 +2499,13 @@ class AudioIngressWorker:
             self._assert_operator_session(row, owner_principal_id, operator_session_id)
         except AudioWorkerError as exc:
             raise AudioConfirmationConflict(exc.code) from exc
+        try:
+            await self._require_current_operator_authority(
+                owner_principal_id=row.owner_principal_id,
+                operator_session_id=row.operator_session_id,
+            )
+        except AudioWorkerError as exc:
+            raise AudioConfirmationConflict(exc.code) from exc
         if not isinstance(transcript, str):
             raise AudioConfirmationConflict("transcript_invalid")
         transcript = transcript.strip()
@@ -2548,6 +2643,13 @@ class AudioIngressWorker:
         metadata["ingress"]["idempotency_key_digest"] = idempotency_key_digest
         metadata_json = _bounded_json(metadata)
         try:
+            try:
+                await self._require_current_operator_authority(
+                    owner_principal_id=row.owner_principal_id,
+                    operator_session_id=row.operator_session_id,
+                )
+            except AudioWorkerError as exc:
+                raise AudioConfirmationConflict(exc.code) from exc
             if row.status == "confirming_reserved":
                 existing = await session_manager.get_message(row.message_id)
                 duplicate = existing is not None
@@ -2613,8 +2715,50 @@ class AudioIngressWorker:
                     confirmed_transcript_digest=None,
                 )
             raise AudioConfirmationConflict(exc.code) from exc
+        try:
+            await self._require_current_operator_authority(
+                owner_principal_id=row.owner_principal_id,
+                operator_session_id=row.operator_session_id,
+            )
+        except AudioWorkerError as exc:
+            if fenced_here or row.status == "confirming_reserved":
+                await self._update_if_status(
+                    row.id,
+                    {"confirming", "confirming_reserved"},
+                    status="transcript_ready",
+                    confirmed_transcript_digest=None,
+                )
+            raise AudioConfirmationConflict(exc.code) from exc
         self._cleanup_job_paths(row.raw_path, row.normalized_path)
+        try:
+            await self._require_current_operator_authority(
+                owner_principal_id=row.owner_principal_id,
+                operator_session_id=row.operator_session_id,
+            )
+        except AudioWorkerError as exc:
+            if fenced_here or row.status == "confirming_reserved":
+                await self._update_if_status(
+                    row.id,
+                    {"confirming", "confirming_reserved"},
+                    status="transcript_ready",
+                    confirmed_transcript_digest=None,
+                )
+            raise AudioConfirmationConflict(exc.code) from exc
         self._drop_review_transcript(row.request_id)
+        try:
+            await self._require_current_operator_authority(
+                owner_principal_id=row.owner_principal_id,
+                operator_session_id=row.operator_session_id,
+            )
+        except AudioWorkerError as exc:
+            if fenced_here or row.status == "confirming_reserved":
+                await self._update_if_status(
+                    row.id,
+                    {"confirming", "confirming_reserved"},
+                    status="transcript_ready",
+                    confirmed_transcript_digest=None,
+                )
+            raise AudioConfirmationConflict(exc.code) from exc
         confirmed = await self._update_if_status(
             row.id,
             {"confirming", "confirming_reserved"},
@@ -2636,6 +2780,10 @@ class AudioIngressWorker:
         operator_session_id: str | None = None,
     ) -> AudioJobSnapshot:
         request_id = _validate_request_id(request_id) or ""
+        await self._require_current_operator_authority(
+            owner_principal_id=owner_principal_id,
+            operator_session_id=operator_session_id,
+        )
         row = await self._job(request_id)
         if row is None:
             raise AudioWorkerError("audio_job_not_found", "audio job is not available")
@@ -2644,6 +2792,10 @@ class AudioIngressWorker:
             raise AudioWorkerError("confirmation_in_progress", "transcript confirmation has already fenced cancellation")
         transport_outcome_unknown = row.status == "transporting"
         if row.status in {"confirmed", "failed", "blocked", "cancelled", "degraded"}:
+            await self._require_current_operator_authority(
+                owner_principal_id=row.owner_principal_id,
+                operator_session_id=row.operator_session_id,
+            )
             self._cleanup_job_paths(row.raw_path, row.normalized_path)
             self._drop_review_transcript(row.request_id)
             return self._snapshot(row)
@@ -2654,6 +2806,10 @@ class AudioIngressWorker:
             {"transporting"}
             if transport_outcome_unknown
             else {"queued", "processing", "transcript_ready", "confirming"}
+        )
+        await self._require_current_operator_authority(
+            owner_principal_id=row.owner_principal_id,
+            operator_session_id=row.operator_session_id,
         )
         cancelled = await self._update_if_status(
             row.id,
@@ -2671,6 +2827,10 @@ class AudioIngressWorker:
             # The claim won between the read and the cancellation fence.  A
             # callback may already have crossed the boundary, so retain an
             # explicit unknown outcome instead of reporting a clean cancel.
+            await self._require_current_operator_authority(
+                owner_principal_id=row.owner_principal_id,
+                operator_session_id=row.operator_session_id,
+            )
             cancelled = await self._update_if_status(
                 row.id,
                 {"transporting"},
@@ -2686,6 +2846,10 @@ class AudioIngressWorker:
         if cancelled.status in {"confirming", "confirming_reserved"}:
             raise AudioWorkerError("confirmation_in_progress", "transcript confirmation has already fenced cancellation")
         if cancelled.admission_operation_id:
+            await self._require_current_operator_authority(
+                owner_principal_id=row.owner_principal_id,
+                operator_session_id=row.operator_session_id,
+            )
             try:
                 await self.admission_broker.cancel(
                     cancelled.admission_operation_id,
@@ -2693,12 +2857,20 @@ class AudioIngressWorker:
                 )
             except (KeyError, GpuAdmissionError):
                 pass
+        await self._require_current_operator_authority(
+            owner_principal_id=row.owner_principal_id,
+            operator_session_id=row.operator_session_id,
+        )
         self._cleanup_job_paths(row.raw_path, row.normalized_path)
         self._drop_review_transcript(row.request_id)
         async with self._task_lock:
             task = self._tasks.get(request_id)
         current_task = asyncio.current_task()
         if task is not None and task is not current_task and not task.done():
+            await self._require_current_operator_authority(
+                owner_principal_id=row.owner_principal_id,
+                operator_session_id=row.operator_session_id,
+            )
             task.cancel()
             with suppress(asyncio.CancelledError, Exception):
                 await asyncio.shield(task)

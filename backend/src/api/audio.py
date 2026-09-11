@@ -101,6 +101,8 @@ def _error(exc: AudioWorkerError) -> HTTPException:
         "confirmation_in_progress",
         "transcript_confirmation_digest_required",
         "model_inference_grant_revoked",
+        "audio_operator_session_invalid",
+        "audio_operator_authority_required",
     } else 422
     return HTTPException(status_code=status, detail={"code": exc.code, "message": str(exc)})
 

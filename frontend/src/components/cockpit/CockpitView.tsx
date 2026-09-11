@@ -40,6 +40,7 @@ import {
   type CockpitPaneId,
 } from "./layouts";
 import { SeraphPresencePane } from "./SeraphPresencePane";
+import { PttAudioControl } from "../chat/PttAudioControl";
 
 interface CockpitViewProps {
   onSend: (message: string) => boolean | void | Promise<boolean | void>;
@@ -15022,6 +15023,11 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                     </div>
                   )}
                 </div>
+                <PttAudioControl
+                  key={sessionId ?? "no-session"}
+                  sessionId={sessionId}
+                  disabled={isAgentBusy}
+                />
               </section>
               </CockpitWorkspaceWindow>
             )}

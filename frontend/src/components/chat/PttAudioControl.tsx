@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 export type PttAudioState =
   | "idle"
@@ -31,12 +31,13 @@ export function choosePttMimeType(): string | undefined {
 }
 
 interface PttAudioControlProps {
-  sessionId: string;
+  sessionId: string | null;
   disabled?: boolean;
   endpoint?: string;
 }
 
 export function PttAudioControl({ sessionId, disabled = false, endpoint = "/api/audio/ptt" }: PttAudioControlProps) {
+  const controlDisabled = disabled || !sessionId;
   const [state, setState] = useState<PttAudioState>("idle");
   const [captureConsent, setCaptureConsent] = useState(false);
   const [modelConsent, setModelConsent] = useState(false);
@@ -50,6 +51,8 @@ export function PttAudioControl({ sessionId, disabled = false, endpoint = "/api/
   const recorderRef = useRef<MediaRecorder | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const chunksRef = useRef<Blob[]>([]);
+  const captureGenerationRef = useRef(0);
+  const captureActiveRef = useRef(false);
   const actionSequenceRef = useRef(0);
   const actionRef = useRef<{ sequence: number; controller: AbortController } | null>(null);
 
@@ -131,6 +134,26 @@ export function PttAudioControl({ sessionId, disabled = false, endpoint = "/api/
     streamRef.current = null;
   };
 
+  useEffect(() => () => {
+    actionRef.current?.controller.abort();
+    actionRef.current = null;
+    captureActiveRef.current = false;
+    captureGenerationRef.current += 1;
+    const recorder = recorderRef.current;
+    recorderRef.current = null;
+    if (recorder) {
+      recorder.ondataavailable = null;
+      recorder.onstop = null;
+      try {
+        if (recorder.state !== "inactive") recorder.stop();
+      } catch {
+        // The browser may already have torn down the recorder during unmount.
+      }
+    }
+    stopStream();
+    chunksRef.current = [];
+  }, []);
+
   const applySnapshot = (payload: AudioSnapshot) => {
     setSnapshot(payload);
     if (payload.status === "transcript_ready") {
@@ -175,17 +198,23 @@ export function PttAudioControl({ sessionId, disabled = false, endpoint = "/api/
   };
 
   const beginCapture = async () => {
-    if (disabled || !captureConsent || state !== "idle") return;
+    if (controlDisabled || !captureConsent || state !== "idle") return;
     const mimeType = choosePttMimeType();
     if (!mimeType || !navigator.mediaDevices?.getUserMedia) {
       setState("blocked");
       setError("This browser cannot provide a supported audio recorder.");
       return;
     }
+    const captureGeneration = ++captureGenerationRef.current;
+    captureActiveRef.current = true;
     setError(null);
     setState("requesting_capture");
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      if (!captureActiveRef.current || captureGenerationRef.current !== captureGeneration) {
+        stream.getTracks().forEach((track) => track.stop());
+        return;
+      }
       const recorder = new MediaRecorder(stream, { mimeType });
       chunksRef.current = [];
       recorder.ondataavailable = (event) => {
@@ -200,6 +229,8 @@ export function PttAudioControl({ sessionId, disabled = false, endpoint = "/api/
       recorder.start();
       setState("capturing");
     } catch {
+      if (!captureActiveRef.current || captureGenerationRef.current !== captureGeneration) return;
+      captureActiveRef.current = false;
       stopStream();
       setState("error");
       setError("Microphone capture was unavailable.");
@@ -207,12 +238,30 @@ export function PttAudioControl({ sessionId, disabled = false, endpoint = "/api/
   };
 
   const endCapture = () => {
-    if (state !== "capturing") return;
-    recorderRef.current?.stop();
+    if (!captureActiveRef.current && state !== "capturing") return;
+    captureActiveRef.current = false;
+    captureGenerationRef.current += 1;
+    const recorder = recorderRef.current;
     recorderRef.current = null;
+    if (recorder) {
+      try {
+        if (recorder.state !== "inactive") recorder.stop();
+      } catch {
+        stopStream();
+        setState("error");
+        setError("Microphone capture could not be stopped.");
+      }
+      return;
+    }
+    stopStream();
+    if (state === "requesting_capture") {
+      setState("idle");
+      setError(null);
+    }
   };
 
   const uploadCapture = async (blob: Blob) => {
+    const action = beginAction();
     setState("uploading");
     try {
       if (!captureConsentReference) throw new Error("capture_consent_missing");
@@ -222,9 +271,10 @@ export function PttAudioControl({ sessionId, disabled = false, endpoint = "/api/
         reader.onload = () => resolve(String(reader.result).split(",", 2)[1] || "");
         reader.readAsDataURL(blob);
       });
+      if (!isCurrentAction(action.sequence)) return;
       const capturedAt = new Date();
       const body = {
-        session_id: sessionId,
+        session_id: sessionId ?? "",
         audio_base64: encoded,
         captured_at: capturedAt.toISOString(),
         capture_consent_reference: captureConsentReference,
@@ -234,13 +284,18 @@ export function PttAudioControl({ sessionId, disabled = false, endpoint = "/api/
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
+        signal: action.controller.signal,
       });
       const payload = (await response.json()) as AudioSnapshot & { detail?: { code?: string } };
+      if (!isCurrentAction(action.sequence)) return;
       if (!response.ok) throw new Error(payload.detail?.code || "audio_upload_failed");
       applySnapshot(payload);
     } catch (cause) {
+      if (!isCurrentAction(action.sequence)) return;
       setState("error");
       setError(cause instanceof Error ? cause.message : "audio_upload_failed");
+    } finally {
+      finishAction(action.sequence);
     }
   };
 
@@ -347,21 +402,21 @@ export function PttAudioControl({ sessionId, disabled = false, endpoint = "/api/
     <section className="flex flex-col gap-2 mt-2" aria-label="Push to talk">
       <div className="flex items-center gap-3 text-[10px] font-pixel uppercase">
         <label className="flex items-center gap-1">
-          <input type="checkbox" checked={captureConsent} onChange={(event) => void setServerConsent("capture", event.target.checked)} disabled={disabled || state !== "idle" || consentPending !== null} />
+          <input type="checkbox" checked={captureConsent} onChange={(event) => void setServerConsent("capture", event.target.checked)} disabled={controlDisabled || state !== "idle" || consentPending !== null} />
           Allow microphone capture
         </label>
         <label className="flex items-center gap-1">
-          <input type="checkbox" checked={modelConsent} onChange={(event) => void setServerConsent("model", event.target.checked)} disabled={disabled || state !== "idle" || consentPending !== null} />
+          <input type="checkbox" checked={modelConsent} onChange={(event) => void setServerConsent("model", event.target.checked)} disabled={controlDisabled || state !== "idle" || consentPending !== null} />
           Allow model processing
         </label>
       </div>
       <button
         type="button"
-        disabled={disabled || consentPending !== null || (!captureConsent && state === "idle") || ["uploading", "processing", "confirming", "reloading", "cancelling", "requesting_capture", "review", "review_unavailable", "confirmed", "cancelled"].includes(state)}
+        disabled={controlDisabled || consentPending !== null || (!captureConsent && state === "idle") || ["uploading", "processing", "confirming", "reloading", "cancelling", "requesting_capture", "review", "review_unavailable", "confirmed", "cancelled"].includes(state)}
         onPointerDown={() => void beginCapture()}
         onPointerUp={endCapture}
         onPointerCancel={endCapture}
-        onKeyDown={(event) => { if (event.key === " " || event.key === "Enter") void beginCapture(); }}
+        onKeyDown={(event) => { if (!event.repeat && (event.key === " " || event.key === "Enter")) void beginCapture(); }}
         onKeyUp={(event) => { if (event.key === " " || event.key === "Enter") endCapture(); }}
         className="pixel-border-thin px-3 py-2 font-pixel text-[10px] uppercase disabled:opacity-40"
       >
@@ -392,7 +447,7 @@ export function PttAudioControl({ sessionId, disabled = false, endpoint = "/api/
           </div>
         </div>
       )}
-      <span role="status" className="font-pixel text-[10px]" data-state={state}>{error || state}</span>
+      <span role="status" className="font-pixel text-[10px]" data-state={state}>{!sessionId ? "Select a conversation before recording." : error || state}</span>
     </section>
   );
 }

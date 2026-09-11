@@ -16,6 +16,7 @@ from dataclasses import replace
 from sqlmodel import select
 
 from config.settings import settings
+from src.auth.service import revoke_session
 from src.agent.session import MessageIngressConflictError, session_manager
 from src.guardian.audio_ingress import AudioConsent, AudioConsentState, _build_server_owned_audio_consent
 from src.guardian.audio_worker import (
@@ -388,6 +389,102 @@ async def test_audio_worker_mutations_require_owner_and_operator_session(async_d
                 operator_session_id=OPERATOR_SESSION,
             )
         ).status == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_audio_worker_submit_rejects_revoked_operator_session(async_db, tmp_path: Path):
+    session = await session_manager.get_or_create("audio-session-submit-revoked", owner_principal_id=OPERATOR_OWNER)
+    worker = AudioIngressWorker(
+        transport=InterceptedAudioTransport({"transcript": "must not run"}),
+        admission_broker=RemoteInferenceAdmissionBroker(),
+        quarantine_root=tmp_path,
+    )
+    await revoke_session(OPERATOR_SESSION)
+
+    with pytest.raises(AudioWorkerError) as exc_info:
+        await worker.submit(_request(session.id, request_id="audio-submit-revoked"), process=False)
+
+    assert exc_info.value.code == "audio_operator_session_invalid"
+    async with async_db() as db:
+        result = await db.execute(select(AudioIngressJob).where(AudioIngressJob.request_id == "audio-submit-revoked"))
+        assert result.scalars().first() is None
+    assert not list(tmp_path.iterdir())
+
+
+@pytest.mark.asyncio
+async def test_audio_worker_cancel_rejects_revoked_operator_session(async_db, tmp_path: Path):
+    session = await session_manager.get_or_create("audio-session-cancel-revoked", owner_principal_id=OPERATOR_OWNER)
+    worker = AudioIngressWorker(
+        transport=InterceptedAudioTransport({"transcript": "unused"}),
+        admission_broker=RemoteInferenceAdmissionBroker(),
+        quarantine_root=tmp_path,
+    )
+    with patch.object(settings, "operator_auth_secret", "test-audio-secret"):
+        queued = await worker.submit(_request(session.id, request_id="audio-cancel-revoked"), process=False)
+    await revoke_session(OPERATOR_SESSION)
+
+    with pytest.raises(AudioWorkerError) as exc_info:
+        await worker.cancel(
+            queued.request_id,
+            owner_principal_id=OPERATOR_OWNER,
+            operator_session_id=OPERATOR_SESSION,
+        )
+
+    assert exc_info.value.code == "audio_operator_session_invalid"
+    current = await worker._snapshot_by_request(queued.request_id)
+    assert current.status == "queued"
+    assert list(tmp_path.iterdir())
+
+
+@pytest.mark.asyncio
+async def test_audio_worker_revoke_consent_rejects_revoked_operator_session(async_db, tmp_path: Path):
+    worker = AudioIngressWorker(
+        transport=InterceptedAudioTransport({"transcript": "unused"}),
+        admission_broker=RemoteInferenceAdmissionBroker(),
+        quarantine_root=tmp_path,
+    )
+    await revoke_session(OPERATOR_SESSION)
+
+    with pytest.raises(AudioWorkerError) as exc_info:
+        await worker.revoke_consent_grant(
+            CAPTURE_REF,
+            owner_principal_id=OPERATOR_OWNER,
+            operator_session_id=OPERATOR_SESSION,
+        )
+
+    assert exc_info.value.code == "audio_operator_session_invalid"
+    async with async_db() as db:
+        result = await db.execute(select(AudioConsentGrant).where(AudioConsentGrant.reference == CAPTURE_REF))
+        row = result.scalars().first()
+        assert row is not None
+        assert row.state == AudioConsentState.ACTIVE.value
+
+
+@pytest.mark.asyncio
+async def test_audio_worker_confirm_rejects_revoked_operator_session(async_db, tmp_path: Path):
+    session = await session_manager.get_or_create("audio-session-confirm-revoked", owner_principal_id=OPERATOR_OWNER)
+    worker = AudioIngressWorker(
+        transport=InterceptedAudioTransport({"transcript": "generated"}),
+        admission_broker=RemoteInferenceAdmissionBroker(),
+        quarantine_root=tmp_path,
+    )
+    with patch.object(settings, "operator_auth_secret", "test-audio-secret"):
+        ready = await worker.submit(_request(session.id, request_id="audio-confirm-revoked"), process=True)
+    await revoke_session(OPERATOR_SESSION)
+
+    with pytest.raises(AudioConfirmationConflict) as exc_info:
+        await worker.confirm_transcript(
+            ready.request_id,
+            "operator confirmed",
+            expected_transcript_digest=ready.transcript_digest,
+            owner_principal_id=OPERATOR_OWNER,
+            operator_session_id=OPERATOR_SESSION,
+        )
+
+    assert exc_info.value.code == "audio_operator_session_invalid"
+    current = await worker._snapshot_by_request(ready.request_id)
+    assert current.status == "transcript_ready"
+    assert await session_manager.get_message(ready.message_id) is None
 
 
 @pytest.mark.asyncio

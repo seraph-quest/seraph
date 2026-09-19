@@ -50,6 +50,147 @@ body {
   border: 1px solid var(--app-glass-border);
 }
 
+.cockpit-auth-shell {
+  min-height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: linear-gradient(180deg, #05101a 0%, #07131d 50%, #091722 100%);
+  color: #d7e7f5;
+}
+
+.cockpit-auth-shell,
+.cockpit-auth-shell * {
+  image-rendering: auto;
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+.cockpit-auth-loading {
+  align-items: flex-start;
+  justify-content: flex-start;
+  color: #7e9ab0;
+}
+
+.cockpit-auth-card {
+  border: 1px solid rgba(110, 177, 214, 0.28);
+  background: rgba(9, 25, 39, 0.94);
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.32);
+}
+
+.cockpit-auth-card--warning {
+  border-color: rgba(255, 207, 112, 0.42);
+}
+
+.cockpit-auth-card--danger {
+  border-color: rgba(255, 125, 121, 0.42);
+}
+
+.cockpit-auth-eyebrow {
+  color: #8de2ff;
+  font-size: 11px;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+}
+
+.cockpit-auth-card--warning .cockpit-auth-eyebrow {
+  color: #ffcf70;
+}
+
+.cockpit-auth-card--danger .cockpit-auth-eyebrow,
+.cockpit-auth-error {
+  color: #ff7d79;
+}
+
+.cockpit-auth-title {
+  color: #d7e7f5;
+  font-size: 20px;
+  font-weight: 650;
+  line-height: 1.2;
+}
+
+.cockpit-auth-copy {
+  color: #7e9ab0;
+  font-size: 12px;
+  line-height: 1.65;
+}
+
+.cockpit-auth-label {
+  color: #7e9ab0;
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.cockpit-auth-input {
+  border: 1px solid rgba(110, 177, 214, 0.28);
+  background: rgba(7, 16, 25, 0.7);
+  color: #d7e7f5;
+  outline: none;
+}
+
+.cockpit-auth-input:focus {
+  border-color: rgba(141, 226, 255, 0.64);
+  box-shadow: 0 0 0 2px rgba(141, 226, 255, 0.12);
+}
+
+.cockpit-auth-button {
+  border: 1px solid rgba(141, 226, 255, 0.46);
+  background: rgba(8, 22, 33, 0.86);
+  color: #8de2ff;
+  cursor: pointer;
+  letter-spacing: 0.08em;
+}
+
+.cockpit-auth-button:hover:not(:disabled) {
+  background: rgba(141, 226, 255, 0.12);
+}
+
+.cockpit-auth-button--muted {
+  border-color: rgba(110, 177, 214, 0.28);
+  color: #7e9ab0;
+}
+
+.cockpit-auth-code {
+  color: #ffcf70;
+}
+
+.cockpit-auth-pre {
+  border: 1px solid rgba(110, 177, 214, 0.18);
+  background: rgba(0, 0, 0, 0.2);
+  color: rgba(215, 231, 245, 0.72);
+}
+
+.cockpit-auth-note {
+  color: rgba(126, 154, 176, 0.72);
+}
+
+:root[data-theme="light"] .cockpit-auth-shell {
+  background: linear-gradient(180deg, #f4f8fb 0%, #ebf2f6 50%, #e2ebf1 100%);
+  color: #1a3140;
+}
+
+:root[data-theme="light"] .cockpit-auth-card {
+  border-color: rgba(31, 116, 162, 0.22);
+  background: rgba(251, 253, 255, 0.96);
+  box-shadow: 0 18px 48px rgba(25, 61, 82, 0.14);
+}
+
+:root[data-theme="light"] .cockpit-auth-title {
+  color: #1a3140;
+}
+
+:root[data-theme="light"] .cockpit-auth-copy,
+:root[data-theme="light"] .cockpit-auth-label,
+:root[data-theme="light"] .cockpit-auth-note,
+:root[data-theme="light"] .cockpit-auth-loading {
+  color: #476274;
+}
+
+:root[data-theme="light"] .cockpit-auth-input {
+  background: rgba(255, 255, 255, 0.72);
+  color: #1a3140;
+}
+
 @keyframes float {
   0%,
   100% {
@@ -164,8 +305,14 @@ body {
 
 /* ── Cockpit Surface ─────────────────────────────────── */
 .cockpit-shell,
-.cockpit-shell * {
+.cockpit-shell *,
+.cockpit-modal-shell,
+.cockpit-modal-shell * {
   image-rendering: auto;
+}
+
+.cockpit-modal-shell {
+  font-family: "IBM Plex Mono", "Iosevka", "SFMono-Regular", Menlo, Consolas, monospace;
 }
 
 .cockpit-shell,
@@ -752,6 +899,117 @@ body {
   opacity: 0.42;
   cursor: not-allowed;
   box-shadow: none;
+}
+
+.cockpit-audio-control {
+  border-top: 1px solid var(--cockpit-border);
+  padding-top: 10px;
+  color: var(--cockpit-text);
+}
+
+.cockpit-audio-consent-row {
+  flex-wrap: wrap;
+  color: var(--cockpit-muted);
+  letter-spacing: 0.04em;
+}
+
+.cockpit-audio-consent-row label {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  cursor: pointer;
+}
+
+.cockpit-audio-consent-row input {
+  accent-color: var(--cockpit-accent-strong);
+}
+
+.cockpit-audio-button,
+.cockpit-audio-secondary,
+.cockpit-audio-transcript,
+.cockpit-audio-status {
+  border: 1px solid var(--cockpit-border);
+  border-radius: 1px;
+  background: var(--cockpit-action-bg);
+  color: var(--cockpit-text);
+  font: inherit;
+}
+
+.cockpit-audio-button {
+  align-self: flex-start;
+  cursor: pointer;
+  letter-spacing: 0.08em;
+  transition: border-color 120ms ease, background 120ms ease, color 120ms ease;
+}
+
+.cockpit-audio-button:hover:not(:disabled),
+.cockpit-audio-secondary:hover:not(:disabled) {
+  border-color: var(--cockpit-state-selected-border);
+  background: var(--cockpit-state-selected-fill);
+  color: var(--cockpit-text);
+}
+
+.cockpit-audio-button:focus-visible,
+.cockpit-audio-secondary:focus-visible,
+.cockpit-audio-transcript:focus-visible {
+  outline: none;
+  border-color: var(--cockpit-state-selected-border);
+  box-shadow: 0 0 0 2px var(--cockpit-state-selected-shadow);
+}
+
+.cockpit-audio-button:disabled,
+.cockpit-audio-secondary:disabled {
+  cursor: not-allowed;
+}
+
+.cockpit-audio-secondary {
+  cursor: pointer;
+  color: var(--cockpit-muted);
+}
+
+.cockpit-audio-transcript {
+  min-height: 72px;
+  resize: vertical;
+  background: var(--cockpit-panel-soft);
+}
+
+.cockpit-audio-status {
+  border-color: transparent;
+  background: transparent;
+  color: var(--cockpit-muted);
+  letter-spacing: 0.03em;
+}
+
+.cockpit-audio-status[data-state="blocked"],
+.cockpit-audio-status[data-state="error"] {
+  color: var(--cockpit-danger);
+}
+
+.cockpit-onboarding-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+  padding: 8px;
+  border: 1px solid var(--cockpit-state-warning-border);
+  background: var(--cockpit-state-warning-fill);
+  color: var(--cockpit-muted);
+}
+
+.cockpit-onboarding-copy {
+  display: flex;
+  flex: 1 1 220px;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 10px;
+  line-height: 1.4;
+}
+
+.cockpit-onboarding-status {
+  flex: 1 1 100%;
+  color: var(--cockpit-warning);
+  font-size: 10px;
 }
 
 .cockpit-grid {

@@ -64,7 +64,7 @@ import { PttAudioControl } from "../chat/PttAudioControl";
 
 interface CockpitViewProps {
   onSend: (message: string) => boolean | void | Promise<boolean | void>;
-  onSkipOnboarding?: () => void;
+  onSkipOnboarding?: () => void | boolean | Promise<boolean | void>;
 }
 
 interface ObserverState {
@@ -7214,6 +7214,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   const [mcpPolicyMode, setMcpPolicyMode] = useState<McpPolicyMode | "unknown">("unknown");
   const [approvalMode, setApprovalMode] = useState<ApprovalMode | "unknown">("unknown");
   const [operatorStatus, setOperatorStatus] = useState<string | null>(null);
+  const [onboardingActionStatus, setOnboardingActionStatus] = useState<string | null>(null);
   const [deepPaneLoadState, setDeepPaneLoadState] = useState<Record<DeepPaneKey, DeepPaneLoadState>>({
     presence: "idle",
     activity: "idle",
@@ -7289,6 +7290,17 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   const clearSessionContinuity = useChatStore((s) => s.clearSessionContinuity);
   const setQuestPanelOpen = useChatStore((s) => s.setQuestPanelOpen);
   const setSettingsPanelOpen = useChatStore((s) => s.setSettingsPanelOpen);
+
+  const handleSkipOnboarding = useCallback(async () => {
+    if (!onSkipOnboarding) return;
+    setOnboardingActionStatus("Skipping onboarding…");
+    try {
+      const result = await onSkipOnboarding();
+      setOnboardingActionStatus(result === false ? "Could not skip onboarding. Retry when the backend is connected." : "Onboarding skipped.");
+    } catch {
+      setOnboardingActionStatus("Could not skip onboarding. Retry when the backend is connected.");
+    }
+  }, [onSkipOnboarding]);
 
   const dashboard = useQuestStore((s) => s.dashboard);
   const goalTree = useQuestStore((s) => s.goalTree);
@@ -14592,8 +14604,8 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
 
           <div className="cockpit-action-row">
             {onboardingCompleted === false && onSkipOnboarding && (
-              <button className="cockpit-action cockpit-action--ghost" onClick={onSkipOnboarding}>
-                Skip intro
+              <button className="cockpit-action cockpit-action--ghost" onClick={() => void handleSkipOnboarding()}>
+                Skip onboarding
               </button>
             )}
             <button
@@ -16013,6 +16025,18 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                 onClose={() => closeWindowPane("conversation_pane")}
               >
               <section className="cockpit-panel cockpit-panel--embedded cockpit-chat-panel">
+                {onboardingCompleted === false && onSkipOnboarding && (
+                  <div className="cockpit-onboarding-actions" role="group" aria-label="Onboarding actions">
+                    <div className="cockpit-onboarding-copy">
+                      <span className="cockpit-key">onboarding active</span>
+                      <span>Answer the setup questions below, or skip them to open the full workspace.</span>
+                    </div>
+                    <button type="button" className="cockpit-action cockpit-action--ghost" onClick={() => void handleSkipOnboarding()}>
+                      Skip onboarding
+                    </button>
+                    {onboardingActionStatus && <span className="cockpit-onboarding-status" role="status">{onboardingActionStatus}</span>}
+                  </div>
+                )}
                 <div className="cockpit-feed">
                   {recentConversation.map((message) => (
                     <div key={message.id} className={`cockpit-message cockpit-message--${message.role}`}>
@@ -16046,7 +16070,6 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                   )}
                 </div>
                 <PttAudioControl
-                  key={sessionId ?? "no-session"}
                   sessionId={sessionId}
                   disabled={isAgentBusy}
                 />

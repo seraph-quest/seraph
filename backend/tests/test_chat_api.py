@@ -11,6 +11,7 @@ from src.api.chat import _bind_chat_principal
 from src.audit.repository import audit_repository
 from src.security.trust_contract import AuthorityGrant, PrincipalType, TrustPrincipal
 from src.vault.repository import vault_repository
+from src.model_fabric import NoCompliantModelRouteError
 
 
 @pytest.mark.asyncio
@@ -180,6 +181,75 @@ class TestChatAPI:
             and event["tool_name"] == "onboarding_agent"
             and event["details"]["runtime"] == "direct-openrouter-chat"
             and event["details"]["failure_stage"] == "route_preflight"
+            for event in events
+        )
+
+    @patch("src.api.chat.direct_local_chat_route_error", new_callable=AsyncMock)
+    @patch("src.api.chat.should_use_direct_local_chat", return_value=True)
+    @patch("src.api.chat.run_direct_local_chat", new_callable=AsyncMock)
+    @patch("src.api.chat.create_onboarding_agent")
+    async def test_chat_direct_openrouter_no_compliant_route_is_blocked_before_provider_contact(
+        self,
+        mock_onboarding,
+        mock_direct_chat,
+        mock_should_use_direct,
+        mock_route_error,
+        client,
+    ):
+        mock_route_error.return_value = None
+        mock_direct_chat.side_effect = NoCompliantModelRouteError()
+
+        response = await client.post("/api/chat", json={"message": "Hello"})
+
+        assert response.status_code == 503
+        detail = response.json()["detail"]
+        assert detail["code"] == "no_compliant_route"
+        assert detail["remote_outcome"] == "not_contacted"
+        assert detail["retry_required"] is False
+        assert "No model call was made" in detail["message"]
+        mock_should_use_direct.assert_called_once()
+        mock_route_error.assert_awaited_once()
+        mock_direct_chat.assert_awaited_once()
+        mock_onboarding.assert_not_called()
+
+        events = await audit_repository.list_events(limit=10)
+        assert any(
+            event["event_type"] == "agent_run_blocked"
+            and event["tool_name"] == "onboarding_agent"
+            and event["details"]["runtime"] == "direct-openrouter-chat"
+            and event["details"]["failure_stage"] == "route_preflight"
+            and event["details"]["remote_outcome"] == "not_contacted"
+            for event in events
+        )
+
+    @patch("src.memory.vector_store.search_formatted", return_value="")
+    @patch("src.api.chat.create_onboarding_agent")
+    async def test_chat_agent_no_compliant_route_is_blocked_before_provider_contact(
+        self,
+        mock_onboarding,
+        mock_search,
+        client,
+    ):
+        mock_agent = MagicMock()
+        mock_agent.run.side_effect = NoCompliantModelRouteError()
+        mock_onboarding.return_value = mock_agent
+
+        response = await client.post("/api/chat", json={"message": "Inspect my priorities"})
+
+        assert response.status_code == 503
+        detail = response.json()["detail"]
+        assert detail["code"] == "no_compliant_route"
+        assert detail["remote_outcome"] == "not_contacted"
+        assert detail["retry_required"] is False
+        assert "No model call was made" in detail["message"]
+        mock_agent.run.assert_called_once_with("Inspect my priorities")
+
+        events = await audit_repository.list_events(limit=10)
+        assert any(
+            event["event_type"] == "agent_run_blocked"
+            and event["tool_name"] == "onboarding_agent"
+            and event["details"]["runtime"] == "openrouter-agent"
+            and event["details"]["remote_outcome"] == "not_contacted"
             for event in events
         )
 

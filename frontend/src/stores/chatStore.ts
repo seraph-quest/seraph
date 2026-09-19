@@ -54,7 +54,7 @@ interface ChatStore {
   setToolRegistry: (tools: ToolMeta[]) => void;
   fetchToolRegistry: () => Promise<void>;
   fetchProfile: () => Promise<void>;
-  skipOnboarding: () => Promise<void>;
+  skipOnboarding: () => Promise<boolean>;
   restartOnboarding: () => Promise<void>;
   loadSessions: () => Promise<void>;
   restoreLastSession: () => Promise<void>;
@@ -277,10 +277,12 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       const res = await apiFetch(`${API_URL}/api/user/onboarding/skip`, { method: "POST" });
       if (res.ok) {
         set({ onboardingCompleted: true });
+        return true;
       }
     } catch (err) {
       console.error("Failed to skip onboarding:", err);
     }
+    return false;
   },
 
   restartOnboarding: async () => {
@@ -374,13 +376,20 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           }
           return { sessionId, messages: chatMessages, sessionContinuity: nextContinuity };
         });
-      } else if (res.status === 404 && get().sessionId === sessionId) {
-        safeStorageRemove(LAST_SESSION_KEY);
-        set((state) => {
-          const nextContinuity = { ...state.sessionContinuity };
-          delete nextContinuity[sessionId];
-          return { sessionId: null, messages: [], sessionContinuity: nextContinuity };
-        });
+      } else if (res.status === 404) {
+        const state = get();
+        const isCurrentSession = state.sessionId === sessionId;
+        const isRestoredSession = safeStorageGet(LAST_SESSION_KEY) === sessionId;
+        if (isCurrentSession || isRestoredSession) {
+          safeStorageRemove(LAST_SESSION_KEY);
+          set((current) => {
+            const nextContinuity = { ...current.sessionContinuity };
+            delete nextContinuity[sessionId];
+            return isCurrentSession
+              ? { sessionId: null, messages: [], sessionContinuity: nextContinuity }
+              : { sessionContinuity: nextContinuity };
+          });
+        }
       }
     } catch (err) {
       console.error("Failed to switch session:", err);

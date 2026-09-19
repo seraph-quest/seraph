@@ -20,6 +20,7 @@ import src.db.models  # noqa: F401
 from config.settings import settings
 from src.agent.direct_chat import should_use_direct_local_chat as real_should_use_direct_local_chat
 from src.api.ws import _build_agent
+from src.model_fabric import NoCompliantModelRouteError
 from src.security.trust_contract import AuthorityGrant, PrincipalType, TrustPrincipal
 from src.utils.background import drain_tracked_tasks
 
@@ -417,6 +418,66 @@ class TestWebSocket:
             assert "outcome is uncertain" in received[2]["content"]
             assert "did not retry automatically" in received[2]["content"]
             mock_direct.assert_not_awaited()
+        finally:
+            stack.close()
+            for p in patches:
+                p.stop()
+
+    def test_websocket_direct_chat_route_block_is_not_reported_as_remote_uncertainty(self):
+        client, patches, stack = _make_sync_client_with_db()
+
+        async def _blocked_stream(*args, **kwargs):
+            raise NoCompliantModelRouteError()
+            yield "unreachable"
+
+        try:
+            with (
+                patch("src.api.ws.should_use_direct_local_chat", return_value=True),
+                patch("src.api.ws.direct_local_chat_route_error", new=AsyncMock(return_value=None)),
+                patch("src.api.ws.stream_direct_local_chat", _blocked_stream),
+                client.websocket_connect("/ws/chat") as ws,
+            ):
+                _ = ws.receive_text()
+                ws.send_text(json.dumps({"type": "message", "message": "Hello"}))
+                received = [json.loads(ws.receive_text()) for _ in range(3)]
+
+            assert received[0]["type"] == "status"
+            assert received[1]["type"] == "status"
+            assert received[2]["type"] == "error"
+            assert received[2]["reason"] == "no_compliant_route"
+            assert "blocked before any provider request" in received[2]["content"]
+            assert "No model call was made" in received[2]["content"]
+            assert "outcome is uncertain" not in received[2]["content"]
+        finally:
+            stack.close()
+            for p in patches:
+                p.stop()
+
+    def test_websocket_agent_route_block_is_not_reported_as_generic_failure(self):
+        client, patches, stack = _make_sync_client_with_db()
+        mock_agent = MagicMock()
+        mock_agent.run.side_effect = NoCompliantModelRouteError()
+
+        try:
+            with (
+                patch("src.api.ws.should_use_direct_local_chat", return_value=False),
+                patch("src.api.ws.create_onboarding_agent", return_value=mock_agent),
+                client.websocket_connect("/ws/chat") as ws,
+            ):
+                _ = ws.receive_text()
+                ws.send_text(json.dumps({"type": "message", "message": "Inspect my priorities"}))
+                received = []
+                for _ in range(4):
+                    message = json.loads(ws.receive_text())
+                    received.append(message)
+                    if message["type"] == "error":
+                        break
+
+            error = received[-1]
+            assert error["type"] == "error"
+            assert error["reason"] == "no_compliant_route"
+            assert "blocked before any provider request" in error["content"]
+            assert "No model call was made" in error["content"]
         finally:
             stack.close()
             for p in patches:

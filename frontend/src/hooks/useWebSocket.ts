@@ -15,6 +15,15 @@ function makeId(): string {
 const WS_BACKOFF_MAX_MS = 30_000;
 export const WS_RESPONSE_TIMEOUT_MS = 130_000;
 export const REST_RESPONSE_TIMEOUT_MS = 130_000;
+export const ONBOARDING_SKIP_ACK_TIMEOUT_MS = 10_000;
+
+export function isOnboardingSkipAcknowledgement(
+  data: Pick<WSResponse, "type" | "content" | "reason">,
+): boolean {
+  return data.type === "final"
+    && (data.reason === "onboarding_skipped"
+      || (typeof data.content === "string" && /^onboarding skipped\b/i.test(data.content.trim())));
+}
 
 /** Resolve proxy-relative WebSocket paths against the cockpit origin. */
 export function resolveWebSocketUrl(value: string, locationHref?: string): string {
@@ -141,6 +150,32 @@ export function useWebSocket() {
   const backoffRef = useRef(WS_RECONNECT_DELAY_MS);
   const pendingResumeRef = useRef<{ sessionId: string | null; message: string } | null>(null);
   const streamingMessageRef = useRef<StreamingMessageState>(null);
+  const onboardingSkipResolverRef = useRef<((completed: boolean) => void) | null>(null);
+  const onboardingSkipTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const settleOnboardingSkip = useCallback((completed: boolean) => {
+    if (onboardingSkipTimeoutRef.current) {
+      clearTimeout(onboardingSkipTimeoutRef.current);
+      onboardingSkipTimeoutRef.current = null;
+    }
+    const resolve = onboardingSkipResolverRef.current;
+    onboardingSkipResolverRef.current = null;
+    resolve?.(completed);
+  }, []);
+
+  const fallbackPendingOnboardingSkip = useCallback(() => {
+    const resolve = onboardingSkipResolverRef.current;
+    if (!resolve) return false;
+    onboardingSkipResolverRef.current = null;
+    if (onboardingSkipTimeoutRef.current) {
+      clearTimeout(onboardingSkipTimeoutRef.current);
+      onboardingSkipTimeoutRef.current = null;
+    }
+    void useChatStore.getState().skipOnboarding()
+      .then(resolve)
+      .catch(() => resolve(false));
+    return true;
+  }, []);
 
   const addMessage = useCallback((message: ChatMessage) => {
     useChatStore.getState().addMessage(message);
@@ -498,6 +533,11 @@ export function useWebSocket() {
           setAgentBusy(false);
           onFinalAnswerRef.current(data.content);
 
+          if (isOnboardingSkipAcknowledgement(data)) {
+            useChatStore.getState().setOnboardingCompleted(true);
+            settleOnboardingSkip(true);
+          }
+
           if (!reconcileFinalAnswer(data)) {
             const agentMsg: ChatMessage = {
               id: makeId(),
@@ -593,6 +633,9 @@ export function useWebSocket() {
       if (wsRef.current !== ws) return;
       clearResponseTimeout();
       clearStreamingMessage();
+      if (!fallbackPendingOnboardingSkip()) {
+        settleOnboardingSkip(false);
+      }
       setAgentBusy(false);
       if (connectTimeoutRef.current) {
         clearTimeout(connectTimeoutRef.current);
@@ -627,13 +670,32 @@ export function useWebSocket() {
       setConnectionStatus("error");
       ws.close();
     };
-  }, [addMessage, appendAssistantDelta, clearResponseTimeout, clearStreamingMessage, markSessionContinuity, reconcileFinalAnswer, setSessionId, setConnectionStatus, setAgentBusy, setAmbientState, setChatPanelOpen]);
+  }, [addMessage, appendAssistantDelta, clearResponseTimeout, clearStreamingMessage, fallbackPendingOnboardingSkip, markSessionContinuity, reconcileFinalAnswer, settleOnboardingSkip, setSessionId, setConnectionStatus, setAgentBusy, setAmbientState, setChatPanelOpen]);
 
-  const skipOnboarding = useCallback(() => {
-    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
-    wsRef.current.send(JSON.stringify({ type: "skip_onboarding" }));
-    useChatStore.getState().setOnboardingCompleted(true);
-  }, []);
+  const skipOnboarding = useCallback(async () => {
+    const socket = wsRef.current;
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      settleOnboardingSkip(false);
+      const acknowledgement = new Promise<boolean>((resolve) => {
+        onboardingSkipResolverRef.current = resolve;
+      });
+      onboardingSkipTimeoutRef.current = setTimeout(() => {
+        fallbackPendingOnboardingSkip();
+      }, ONBOARDING_SKIP_ACK_TIMEOUT_MS);
+      try {
+        socket.send(JSON.stringify({ type: "skip_onboarding" }));
+        return acknowledgement;
+      } catch {
+        settleOnboardingSkip(false);
+        // Fall through to the authenticated REST path when the live socket
+        // closes between the readiness check and send. The REST response is
+        // the durable acknowledgement for this fallback.
+      }
+    }
+    // Onboarding must remain actionable while the live link reconnects. The
+    // REST endpoint is authenticated and updates the same durable profile.
+    return useChatStore.getState().skipOnboarding();
+  }, [fallbackPendingOnboardingSkip, settleOnboardingSkip]);
 
   const sendMessage = useCallback(
     async (message: string) => {
@@ -678,9 +740,10 @@ export function useWebSocket() {
       clearResponseTimeout();
       const ws = wsRef.current;
       wsRef.current = null;
+      settleOnboardingSkip(false);
       ws?.close();
     };
-  }, [connect]);
+  }, [connect, settleOnboardingSkip]);
 
   return { sendMessage, skipOnboarding };
 }

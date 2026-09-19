@@ -104,6 +104,25 @@ available only through the explicit manual canary control, which is intentionall
 omitted from keyless local tests. A real key and any canary remain operator-supplied
 follow-up configuration.
 
+### Local cockpit interaction boundaries
+
+The managed development cockpit may be opened over local HTTP for text and
+operator controls. Browser microphone capture follows the browser secure
+context rule: `http://localhost` is eligible, while a LAN HTTP origin such as
+`http://192.168.1.26:3001` cannot request microphone permission. Seraph states
+that limitation directly in the push-to-talk control. The two consent grants
+remain available before a conversation exists, but recording stays disabled
+until a session can own the durable audio request. Audio processing may still
+show a governed degraded state when no audio transport is configured.
+
+Onboarding presents an explicit **Skip onboarding** action in the cockpit. It
+uses the live WebSocket when available and the authenticated REST profile
+endpoint while the socket reconnects; the UI only reports success after one of
+those paths accepts the update. If no compliant OpenRouter route is persisted,
+chat reports that it was blocked before provider contact and tells the operator
+which setup controls are missing. That state does not imply an uncertain
+provider outcome and does not trigger an automatic retry.
+
 The production backend's canonical workspace is the host path configured by
 `BACKEND_DATA_PATH_PROD`, mounted only as `WORKSPACE_DIR=/app/data`. The managed
 maintenance commands resolve that bind before doing any work and fail closed on

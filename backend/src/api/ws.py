@@ -15,7 +15,12 @@ from src.approval.repository import approval_repository
 from src.approval.runtime import get_current_approval_mode, reset_runtime_context, set_runtime_context
 from src.auth.cancellation import reset_revocation_guard, set_revocation_guard
 from src.agent.exceptions import ClarificationRequired
-from src.agent.direct_chat import run_direct_local_chat, should_use_direct_local_chat, stream_direct_local_chat
+from src.agent.direct_chat import (
+    OPENROUTER_CHAT_ROUTE_BLOCKED_MESSAGE,
+    run_direct_local_chat,
+    should_use_direct_local_chat,
+    stream_direct_local_chat,
+)
 from src.agent.factory import build_agent
 from src.agent.onboarding import create_onboarding_agent
 from src.agent.session import (
@@ -62,6 +67,7 @@ from src.llm_runtime import (
     reset_current_llm_request_id,
     set_current_llm_request_id,
 )
+from src.model_fabric import NoCompliantModelRouteError
 
 logger = logging.getLogger(__name__)
 
@@ -396,6 +402,7 @@ async def websocket_chat(websocket: WebSocket):
                             "Onboarding skipped. "
                             "The full workspace is now available. What do you want me to help you do?"
                         ),
+                        reason="onboarding_skipped",
                         seq=_next_seq(),
                     ).model_dump_json()
                 )
@@ -694,6 +701,12 @@ async def websocket_chat(websocket: WebSocket):
                         raise
                     except _OperatorSessionRevoked:
                         raise
+                    except NoCompliantModelRouteError as exc:
+                        # Route admission failed before an upstream request
+                        # could be sent. Do not describe this as an uncertain
+                        # remote outcome or ask the operator to retry a call
+                        # that never reached OpenRouter.
+                        raise exc
                     except Exception as exc:
                         raise _DirectStreamOutcomeUncertain(str(exc)) from exc
 
@@ -722,6 +735,38 @@ async def websocket_chat(websocket: WebSocket):
                         WSResponse(
                             type="error",
                             content="OpenRouter chat timed out — try again",
+                            session_id=session.id,
+                            seq=_next_seq(),
+                        ).model_dump_json()
+                    )
+                    continue
+                except NoCompliantModelRouteError as exc:
+                    safe_error = await redact_secrets_in_text(str(exc) or NoCompliantModelRouteError.code)
+                    blocked_message = OPENROUTER_CHAT_ROUTE_BLOCKED_MESSAGE
+                    logger.info("Direct OpenRouter websocket chat blocked before provider contact", extra={"reason": safe_error})
+                    await log_agent_run_event(
+                        session_id=session.id,
+                        transport="websocket",
+                        is_onboarding=direct_is_onboarding,
+                        outcome="blocked",
+                        policy_mode=get_current_tool_policy_mode(),
+                        details={
+                            "duration_ms": int((perf_counter() - started_at) * 1000),
+                            "message_length": len(ws_msg.message),
+                            "error": safe_error,
+                            "request_id": llm_request_id,
+                            "runtime": "direct-openrouter-chat",
+                            "failure_stage": "route_preflight",
+                            "remote_outcome": "not_contacted",
+                            "retry_required": False,
+                        },
+                    )
+                    active_turn_completed = True
+                    await websocket.send_text(
+                        WSResponse(
+                            type="error",
+                            content=blocked_message,
+                            reason=NoCompliantModelRouteError.code,
                             session_id=session.id,
                             seq=_next_seq(),
                         ).model_dump_json()
@@ -966,6 +1011,40 @@ async def websocket_chat(websocket: WebSocket):
             except _OperatorSessionRevoked:
                 active_turn_completed = True
                 raise
+            except NoCompliantModelRouteError as exc:
+                safe_reason = await redact_secrets_in_text(str(exc) or NoCompliantModelRouteError.code)
+                logger.info(
+                    "WebSocket OpenRouter agent chat blocked before provider contact",
+                    extra={"reason": safe_reason},
+                )
+                await log_agent_run_event(
+                    session_id=session.id,
+                    transport="websocket",
+                    is_onboarding=is_onboarding,
+                    outcome="blocked",
+                    policy_mode=get_current_tool_policy_mode(),
+                    details={
+                        "duration_ms": int((perf_counter() - started_at) * 1000),
+                        "message_length": len(ws_msg.message),
+                        "error": safe_reason,
+                        "request_id": llm_request_id,
+                        "runtime": "openrouter-agent",
+                        "failure_stage": "route_preflight",
+                        "remote_outcome": "not_contacted",
+                        "retry_required": False,
+                    },
+                )
+                active_turn_completed = True
+                await websocket.send_text(
+                    WSResponse(
+                        type="error",
+                        content=OPENROUTER_CHAT_ROUTE_BLOCKED_MESSAGE,
+                        reason=NoCompliantModelRouteError.code,
+                        session_id=session.id,
+                        seq=_next_seq(),
+                    ).model_dump_json()
+                )
+                continue
             except asyncio.TimeoutError:
                 logger.warning("Agent timed out after %ds for session %s", settings.agent_chat_timeout, session.id)
                 run_outcome = "timed_out"

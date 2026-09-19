@@ -5,16 +5,20 @@
  * the backoff behavior and session restoration sequencing.
  */
 import { describe, it, expect, vi } from "vitest";
+import { act, renderHook } from "@testing-library/react";
 
 // We test the constants and behavior rather than the hook directly
 // since hooks require a React rendering context.
 import { WS_RECONNECT_DELAY_MS } from "../config/constants";
 import {
   WS_RESPONSE_TIMEOUT_MS,
+  ONBOARDING_SKIP_ACK_TIMEOUT_MS,
+  useWebSocket,
   buildClarificationMessage,
   reconcileStreamedFinalAnswer,
   reduceAssistantDelta,
   resolveClarificationSessionId,
+  isOnboardingSkipAcknowledgement,
   shouldAcceptActiveResponseSession,
   resolveWebSocketUrl,
 } from "./useWebSocket";
@@ -35,6 +39,104 @@ describe("WS reconnection constants", () => {
     expect(resolveWebSocketUrl("/ws/chat", "http://127.0.0.1:3001/")).toBe("ws://127.0.0.1:3001/ws/chat");
     expect(resolveWebSocketUrl("/ws/chat", "https://cockpit.example/console")).toBe("wss://cockpit.example/ws/chat");
     expect(resolveWebSocketUrl("ws://backend/ws/chat", "http://127.0.0.1:3001/")).toBe("ws://backend/ws/chat");
+  });
+});
+
+describe("onboarding acknowledgement", () => {
+  it("recognizes the server final frame as the durable skip confirmation", () => {
+    expect(isOnboardingSkipAcknowledgement({
+      type: "final",
+      content: "Onboarding skipped. The full workspace is now available.",
+    })).toBe(true);
+    expect(isOnboardingSkipAcknowledgement({
+      type: "final",
+      content: "workspace is ready",
+      reason: "onboarding_skipped",
+    })).toBe(true);
+  });
+
+  it("does not treat an ordinary assistant answer as a skip confirmation", () => {
+    expect(isOnboardingSkipAcknowledgement({
+      type: "final",
+      content: "I can help you plan that.",
+    })).toBe(false);
+    expect(isOnboardingSkipAcknowledgement({
+      type: "error",
+      content: "Onboarding skipped.",
+    })).toBe(false);
+  });
+
+  it("uses the authenticated REST acknowledgement when the socket stays silent", async () => {
+    vi.useFakeTimers();
+    const instances: MockWebSocket[] = [];
+    class MockWebSocket {
+      static OPEN = 1;
+      static CLOSED = 3;
+      readyState = 0;
+      sent: string[] = [];
+      onopen: (() => void) | null = null;
+      onmessage: ((event: { data: string }) => void) | null = null;
+      onclose: ((event: { code: number }) => void) | null = null;
+      onerror: (() => void) | null = null;
+
+      constructor(_url: string) {
+        instances.push(this);
+      }
+
+      send(payload: string) {
+        this.sent.push(payload);
+      }
+
+      close() {
+        this.readyState = MockWebSocket.CLOSED;
+        this.onclose?.({ code: 1000 });
+      }
+    }
+
+    const store = await import("../stores/chatStore");
+    const original = store.useChatStore.getState();
+    const restSkip = vi.fn(async () => true);
+    store.useChatStore.setState({
+      skipOnboarding: restSkip,
+      fetchProfile: vi.fn(async () => {}),
+      fetchToolRegistry: vi.fn(async () => {}),
+      restoreLastSession: vi.fn(async () => {}),
+    });
+    vi.stubGlobal("WebSocket", MockWebSocket);
+
+    try {
+      const { result, unmount } = renderHook(() => useWebSocket());
+      const socket = instances[0];
+      expect(socket).toBeDefined();
+      await act(async () => {
+        socket.readyState = MockWebSocket.OPEN;
+        socket.onopen?.();
+      });
+
+      let skipPromise: Promise<boolean>;
+      await act(async () => {
+        skipPromise = result.current.skipOnboarding();
+      });
+      expect(socket.sent).toEqual([JSON.stringify({ type: "skip_onboarding" })]);
+
+      await act(async () => {
+        vi.advanceTimersByTime(ONBOARDING_SKIP_ACK_TIMEOUT_MS);
+        await Promise.resolve();
+      });
+
+      await expect(skipPromise!).resolves.toBe(true);
+      expect(restSkip).toHaveBeenCalledOnce();
+      unmount();
+    } finally {
+      store.useChatStore.setState({
+        skipOnboarding: original.skipOnboarding,
+        fetchProfile: original.fetchProfile,
+        fetchToolRegistry: original.fetchToolRegistry,
+        restoreLastSession: original.restoreLastSession,
+      });
+      vi.unstubAllGlobals();
+      vi.useRealTimers();
+    }
   });
 });
 

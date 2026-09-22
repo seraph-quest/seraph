@@ -25,7 +25,7 @@ def _run(coro: Any) -> Any:
         return pool.submit(asyncio.run, coro).result()
 
 
-def _context() -> RoutineStepContext:
+def _context(routine_invocation_job_id: str) -> RoutineStepContext:
     principal = get_current_trust_principal()
     principal_type = getattr(principal, "principal_type", None)
     is_operator = (
@@ -57,6 +57,8 @@ def _context() -> RoutineStepContext:
     runtime_job_id = str(getattr(principal, "job_id", "") or "").strip()
     if not runtime_job_id:
         raise PermissionError("guardian routine runtime job binding is missing")
+    if runtime_job_id != routine_invocation_job_id:
+        raise PermissionError("guardian routine runtime parent mismatch")
     job = _run(durable_job_repository.get_job(runtime_job_id))
     if not isinstance(job, dict) or job.get("status") != "running":
         raise PermissionError("guardian routine runtime job is not running")
@@ -72,6 +74,7 @@ def _context() -> RoutineStepContext:
         lease_owner=str(lease["owner"]),
         fencing_token=int(lease["fencing_token"]),
         external_mutation_granted=AuthorityGrant.EXTERNAL_MUTATION.value in grants,
+        runtime_job_id=runtime_job_id,
     )
 
 
@@ -79,7 +82,7 @@ def _dispatch(routine_invocation_job_id: str, step_id: str) -> str:
     value = str(routine_invocation_job_id or "").strip()
     if not value:
         raise ValueError("routine_invocation_job_id is required")
-    context = _context()
+    context = _context(value)
     from src.workflows.routines import routine_service
 
     result = _run(

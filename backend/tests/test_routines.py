@@ -1,7 +1,15 @@
 from __future__ import annotations
 
-import pytest
+import json
+from contextlib import asynccontextmanager
+from types import SimpleNamespace
 
+import pytest
+from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
+from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import StaticPool
+
+from src.db.models import WorkflowRunState
 from src.workflows.routine_steps import RoutineStepContext, guardian_watch_run
 from src.workflows.routine_templates import (
     ROUTINE_STEP_IDS,
@@ -9,10 +17,52 @@ from src.workflows.routine_templates import (
     render_workflow,
     validate_generated_files,
 )
-from src.workflows.routines import RoutineService, _child_job_id, _verified_readback
+from src.workflows.routines import (
+    RoutineError,
+    RoutineInstallRequest,
+    RoutineService,
+    _child_job_id,
+    _expected_publication_job_id,
+    _publication_binding_checkpoint,
+    _verified_readback,
+)
 
 
 ROUTINE_ID = "0123456789abcdef0123456789abcdef"
+
+
+def _async_value(value):
+    async def _value():
+        return value
+
+    return _value()
+
+
+@asynccontextmanager
+async def _local_table_database(model):
+    engine = create_async_engine(
+        "sqlite+aiosqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    factory = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    async with engine.begin() as conn:
+        await conn.run_sync(model.__table__.create)
+
+    @asynccontextmanager
+    async def _get_session():
+        async with factory() as session:
+            try:
+                yield session
+                await session.commit()
+            except Exception:
+                await session.rollback()
+                raise
+
+    try:
+        yield _get_session
+    finally:
+        await engine.dispose()
 
 
 def test_routine_template_is_fixed_order_and_not_user_invocable():
@@ -67,6 +117,83 @@ def test_routine_children_are_uuid5_bound_to_invocation_and_step():
     assert watch != publication
 
 
+def test_publication_adoption_checkpoint_prefers_newest_binding():
+    job = {
+        "checkpoints": [
+            {
+                "checkpoint_id": "routine-child:adoption_pending",
+                "payload": {"m3_job_id": "expected-m3", "status": "prepare_pending"},
+            },
+            {
+                "checkpoint_id": "routine-child:prepared",
+                "payload": {"m3_job_id": "expected-m3", "status": "awaiting_approval"},
+            },
+        ]
+    }
+    assert _publication_binding_checkpoint(job) == {
+        "m3_job_id": "expected-m3",
+        "status": "awaiting_approval",
+    }
+
+
+def test_publication_m3_job_identity_is_deterministic():
+    operation_uuid = "01234567-89ab-cdef-0123-456789abcdef"
+    expected = _expected_publication_job_id("principal-1", operation_uuid)
+    assert expected.startswith("ghfollow_")
+    assert expected == _expected_publication_job_id("principal-1", operation_uuid)
+
+
+@pytest.mark.asyncio
+async def test_install_replay_with_stale_revision_reaches_committed_reconciliation(monkeypatch):
+    service = RoutineService()
+    routine = SimpleNamespace(
+        id=ROUTINE_ID,
+        owner_session_id="session-1",
+        revision=3,
+        state="installed",
+    )
+    version = SimpleNamespace(
+        version=1,
+        source_provenance_json="{}",
+        installed_package_digest="package-digest",
+    )
+    job = {
+        "job_id": f"routine-install:{ROUTINE_ID}:v1",
+        "job_kind": "routine_install",
+        "status": "running",
+        "declared_authority": {"routine_id": ROUTINE_ID, "routine_version": 1},
+    }
+    reconciled = {"status": "installed", "recovery": "reconciled"}
+
+    async def fake_routine(*_args, **_kwargs):
+        return routine
+
+    async def fake_version(*_args, **_kwargs):
+        return version
+
+    async def fake_reconcile(*_args, **_kwargs):
+        return reconciled
+
+    class FakeJobs:
+        async def get_job(self, _job_id):
+            return job
+
+    import src.workflows.routines as routines_module
+
+    monkeypatch.setattr(service, "_routine", fake_routine)
+    monkeypatch.setattr(service, "_version", fake_version)
+    monkeypatch.setattr(service, "_reconcile_committed_install", fake_reconcile)
+    monkeypatch.setattr(routines_module, "durable_job_repository", FakeJobs())
+
+    result = await service.install(
+        ROUTINE_ID,
+        RoutineInstallRequest(version=1, expected_routine_revision=2, approval_id="approval-1"),
+        owner_principal_id="principal-1",
+        owner_session_id="session-1",
+    )
+    assert result == reconciled
+
+
 def test_routine_template_does_not_expose_arbitrary_step_arguments():
     workflow = render_workflow(routine_id=ROUTINE_ID, version=2, name="Guarded")
     assert "command" not in workflow
@@ -83,6 +210,82 @@ def test_generated_routine_steps_are_available_through_native_loader():
 
 
 @pytest.mark.asyncio
+async def test_generated_step_rejects_context_bound_to_another_parent():
+    with pytest.raises(PermissionError, match="runtime parent"):
+        await RoutineService().execute_generated_step(
+            "routine-invocation-target",
+            "guardian_watch_run",
+            context=RoutineStepContext(
+                "principal-1",
+                "session-1",
+                "runner-1",
+                7,
+                runtime_job_id="routine-invocation-other",
+            ),
+        )
+
+
+@pytest.mark.asyncio
+async def test_routine_resume_requires_persisted_approval_owner_session(monkeypatch):
+    import src.workflows.routines as routines_module
+
+    monkeypatch.setattr(
+        routines_module.approval_repository,
+        "get",
+        lambda _approval_id: _async_value(
+            SimpleNamespace(
+                status="approved",
+                owner_principal_id="principal-1",
+                operator_session_id="session-owner",
+                details_json=json.dumps({"durable_job_id": "routine-install-1", "expires_at": 4_000_000_000}),
+            )
+        ),
+    )
+    with pytest.raises(RoutineError, match="approval_owner_session_mismatch"):
+        await RoutineService()._resume_approval(
+            {"job_id": "routine-install-1"},
+            "approval-1",
+            owner_principal_id="principal-1",
+            owner_session_id="session-other",
+        )
+
+
+@pytest.mark.asyncio
+async def test_pause_scan_reads_all_owner_bound_routine_jobs_beyond_page_limit(monkeypatch):
+    rows = [
+        WorkflowRunState(
+            run_identity=f"routine-child:{index}",
+            root_run_identity=f"routine-child:{index}",
+            workflow_name="guardian-routine",
+            job_kind="routine_guardian_watch_run_child",
+            owner_kind="user",
+            owner_principal_id="principal-1",
+            operator_session_id="session-1",
+            status="queued",
+            declared_authority_json=json.dumps({"routine_id": "routine-1", "step_id": "guardian_watch_run"}),
+        )
+        for index in range(101)
+    ]
+    import src.workflows.routines as routines_module
+
+    async with _local_table_database(WorkflowRunState) as get_session:
+        monkeypatch.setattr(routines_module.db_engine, "get_session", get_session)
+        async with get_session() as db:
+            db.add_all(rows)
+
+        jobs = [
+            job
+            async for job in RoutineService()._list_routine_jobs(
+                "routine-1",
+                owner_principal_id="principal-1",
+                owner_session_id="session-1",
+            )
+        ]
+        assert len(jobs) == 101
+        assert {item["job_id"] for item in jobs} == {f"routine-child:{index}" for index in range(101)}
+
+
+@pytest.mark.asyncio
 async def test_watch_wrapper_dispatches_persisted_child_and_records_no_learning(monkeypatch):
     child_id = "routine-child:watch-test"
     child = {
@@ -91,6 +294,7 @@ async def test_watch_wrapper_dispatches_persisted_child_and_records_no_learning(
         "session_id": "session-1",
         "owner": {"principal_id": "principal-1"},
         "lease": {"owner": "runner-1", "fencing_token": 7},
+        "parent_fencing_token": 7,
         "revision": 1,
         "declared_authority": {
             "step_id": "guardian_watch_run",
@@ -104,6 +308,12 @@ async def test_watch_wrapper_dispatches_persisted_child_and_records_no_learning(
 
     class FakeJobs:
         async def get_job(self, _job_id):
+            if _job_id == "routine-invocation-1":
+                return {
+                    "job_id": "routine-invocation-1",
+                    "status": "running",
+                    "lease": {"owner": "routine:parent", "fencing_token": 7},
+                }
             return child
 
         async def record_checkpoint(self, _job_id, **kwargs):
@@ -137,7 +347,7 @@ async def test_watch_wrapper_dispatches_persisted_child_and_records_no_learning(
     monkeypatch.setattr(routines_module, "source_watch_service", FakeWatch())
     result = await RoutineService().execute_watch_step(
         child_id,
-        context=RoutineStepContext("principal-1", "session-1", "runner-1", 7),
+        context=RoutineStepContext("principal-1", "session-1", "runner-1", 7, runtime_job_id="routine-invocation-1"),
     )
     assert result["status"] == "no_change"
     assert result["child_status"] == "succeeded"
@@ -153,6 +363,7 @@ async def test_followthrough_wrapper_uses_only_persisted_m3_child(monkeypatch):
         "session_id": "session-1",
         "owner": {"principal_id": "principal-1"},
         "lease": {"owner": "runner-1", "fencing_token": 9},
+        "parent_fencing_token": 9,
         "revision": 1,
         "declared_authority": {
             "step_id": "github_followthrough",
@@ -164,6 +375,12 @@ async def test_followthrough_wrapper_uses_only_persisted_m3_child(monkeypatch):
 
     class FakeJobs:
         async def get_job(self, _job_id):
+            if _job_id == "routine-invocation-1":
+                return {
+                    "job_id": "routine-invocation-1",
+                    "status": "running",
+                    "lease": {"owner": "routine:parent", "fencing_token": 9},
+                }
             return child
 
         async def record_checkpoint(self, _job_id, **kwargs):
@@ -198,7 +415,7 @@ async def test_followthrough_wrapper_uses_only_persisted_m3_child(monkeypatch):
     monkeypatch.setattr(routines_module, "GitHubFollowthroughService", FakeFollowthrough)
     result = await RoutineService().execute_followthrough_step(
         child_id,
-        context=RoutineStepContext("principal-1", "session-1", "runner-1", 9, external_mutation_granted=True),
+        context=RoutineStepContext("principal-1", "session-1", "runner-1", 9, external_mutation_granted=True, runtime_job_id="routine-invocation-1"),
     )
     assert result["status"] == "succeeded"
     assert result["m3_job_id"] == "ghfollow_1"
@@ -218,6 +435,7 @@ async def test_pause_cancels_m3_child_through_canonical_adapter(monkeypatch):
         "declared_authority": {
             "routine_id": "routine-1",
             "step_id": "github_followthrough",
+            "session_id": "session-1",
         },
         "checkpoints": [
             {
@@ -234,13 +452,16 @@ async def test_pause_cancels_m3_child_through_canonical_adapter(monkeypatch):
             assert limit == 100
             return [m4_child]
 
+        async def get_job(self, job_id):
+            return {"job_id": job_id, "status": "cancelled", "effects": []}
+
         async def cancel_job(self, job_id, **_kwargs):
             cancelled_m4.append(job_id)
             return {"job_id": job_id, "status": "cancelled"}
 
     class FakeFollowthrough:
-        async def cancel(self, *, owner_principal_id, job_id):
-            cancelled_m3.append((owner_principal_id, job_id))
+        async def cancel(self, *, owner_principal_id, owner_session_id, job_id):
+            cancelled_m3.append((owner_principal_id, owner_session_id, job_id))
             return {"job_id": job_id, "status": "cancelled"}
 
     import src.workflows.routines as routines_module
@@ -249,5 +470,91 @@ async def test_pause_cancels_m3_child_through_canonical_adapter(monkeypatch):
     monkeypatch.setattr(routines_module, "GitHubFollowthroughService", FakeFollowthrough)
     await RoutineService()._cancel_pending_jobs("routine-1", reason="routine_paused:user_request")
 
-    assert cancelled_m3 == [("principal-1", "ghfollow_pending")]
+    assert cancelled_m3 == [("principal-1", "session-1", "ghfollow_pending")]
     assert cancelled_m4 == ["routine-child:publication-cancel"]
+
+
+@pytest.mark.asyncio
+async def test_pause_cancel_reports_m3_failure_for_operator_reconciliation(monkeypatch):
+    child = {
+        "job_id": "routine-child:publication-failure",
+        "status": "awaiting_approval",
+        "revision": 4,
+        "owner": {"principal_id": "principal-1"},
+        "declared_authority": {
+            "routine_id": "routine-1",
+            "step_id": "github_followthrough",
+            "session_id": "session-1",
+        },
+        "checkpoints": [
+            {
+                "checkpoint_id": "routine-child:prepared",
+                "payload": {"m3_job_id": "ghfollow_pending"},
+            }
+        ],
+    }
+
+    class FakeJobs:
+        async def list_jobs(self, *, limit):
+            assert limit == 100
+            return [child]
+
+        async def cancel_job(self, job_id, **_kwargs):
+            return {"job_id": job_id, "status": "cancelled"}
+
+    class FailingFollowthrough:
+        async def cancel(self, *, owner_principal_id, owner_session_id, job_id):
+            raise RuntimeError(f"cancel unavailable for {owner_principal_id}:{job_id}")
+
+    import src.workflows.routines as routines_module
+
+    monkeypatch.setattr(routines_module, "durable_job_repository", FakeJobs())
+    monkeypatch.setattr(routines_module, "GitHubFollowthroughService", FailingFollowthrough)
+    failures = await RoutineService()._cancel_pending_jobs("routine-1", reason="routine_paused:user_request")
+
+    assert failures == [
+        {
+            "job_id": "routine-child:publication-failure",
+            "step_id": "github_followthrough",
+            "m3_job_id": "ghfollow_pending",
+            "status": "blocked",
+            "reason_code": "RuntimeError",
+            "operator_action": "reconcile_or_cancel",
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_recovery_refuses_parent_fence_replacement_after_child_wait(monkeypatch):
+    previous = {
+        "job_id": "routine-invocation-1",
+        "status": "running",
+        "revision": 4,
+        "lease": {"owner": "routine:routine-invocation-1", "fencing_token": 7},
+        "declared_authority": {
+            "routine_id": "routine-1",
+            "routine_revision": 3,
+            "principal": "principal-1",
+            "session_id": "session-1",
+        },
+    }
+    latest = {
+        **previous,
+        "lease": {"owner": "routine:routine-invocation-1", "fencing_token": 8},
+    }
+
+    class FakeJobs:
+        async def get_job(self, _job_id):
+            return latest
+
+    service = RoutineService()
+    import src.workflows.routines as routines_module
+
+    monkeypatch.setattr(routines_module, "durable_job_repository", FakeJobs())
+    monkeypatch.setattr(service, "_require_active_routine", lambda *args, **kwargs: _async_value(True))
+    assert await service._reacquire_parent_after_child(
+        previous,
+        routine_id="routine-1",
+        owner_principal_id="principal-1",
+        owner_session_id="session-1",
+    ) is None

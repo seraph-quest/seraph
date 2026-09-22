@@ -16,6 +16,9 @@ class RoutineStepContext:
     # Native workflow adapters set this only after checking the authenticated
     # runtime principal's grant; ordinary M1 steps leave it false.
     external_mutation_granted: bool = False
+    # Native guards bind this context to the exact requested routine
+    # invocation parent, separately from the child lease.
+    runtime_job_id: str | None = None
 
 
 def _require_context(context: RoutineStepContext | None) -> RoutineStepContext:
@@ -25,6 +28,8 @@ def _require_context(context: RoutineStepContext | None) -> RoutineStepContext:
         raise PermissionError("routine step context is incomplete")
     if int(context.fencing_token) <= 0:
         raise PermissionError("routine step lease fence is invalid")
+    if not str(context.runtime_job_id or "").strip():
+        raise PermissionError("routine step runtime parent is missing")
     return context
 
 
@@ -36,16 +41,18 @@ async def guardian_watch_run(
 ) -> dict[str, Any]:
     """Run only the persisted M1 watch bound to this invocation."""
 
-    _require_context(context)
+    trusted = _require_context(context)
     if not isinstance(routine_invocation_job_id, str) or not routine_invocation_job_id.strip():
         raise ValueError("routine_invocation_job_id is required")
+    if trusted.runtime_job_id != routine_invocation_job_id.strip():
+        raise PermissionError("routine runtime parent mismatch")
     if service is None:
         from src.workflows.routines import routine_service
 
         service = routine_service
     return await service.execute_watch_step(
         routine_invocation_job_id.strip(),
-        context=context,
+        context=trusted,
     )
 
 

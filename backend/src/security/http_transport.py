@@ -67,6 +67,12 @@ def _parse_public_url(url: str) -> SplitResult:
     return parsed
 
 
+def parse_public_https_url(url: str) -> SplitResult:
+    """Validate and parse one public HTTPS source URL at admission time."""
+
+    return _parse_public_url(url)
+
+
 def _global_address(address: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address:
     try:
         parsed = ipaddress.ip_address(address)
@@ -138,7 +144,16 @@ async def request_pinned_https(
         raise PinnedTransportError("only GET and POST are supported")
     if json_body is not None and normalized_method != "POST":
         raise PinnedTransportError("JSON request bodies are only allowed for POST")
-    addresses = await _resolve(resolver, parsed.hostname or "", parsed.port or 443)
+    resolve_timeout = float(timeout_seconds)
+    if connect_timeout_seconds is not None:
+        resolve_timeout = min(resolve_timeout, float(connect_timeout_seconds))
+    try:
+        addresses = await asyncio.wait_for(
+            _resolve(resolver, parsed.hostname or "", parsed.port or 443),
+            timeout=resolve_timeout,
+        )
+    except asyncio.TimeoutError as exc:
+        raise TimeoutError("source DNS resolution timed out") from exc
     pinned = addresses[0]
     # ASGI/mock transports need the logical URL so tests can route it.  A real
     # network client uses the pinned address and an explicit Host header.
@@ -208,5 +223,6 @@ __all__ = [
     "PinnedTransportError",
     "default_resolver",
     "fetch_pinned_https",
+    "parse_public_https_url",
     "request_pinned_https",
 ]

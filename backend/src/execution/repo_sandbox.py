@@ -14,6 +14,7 @@ import json
 import os
 from pathlib import Path, PurePosixPath
 import shutil
+import stat
 import subprocess
 import tarfile
 import tempfile
@@ -44,6 +45,107 @@ class RepoSandboxError(RuntimeError):
         self.phase = phase
         self.terminal_status = terminal_status
         self.checkpoint_phases: tuple[str, ...] = ()
+
+
+def _descriptor_flags(*, directory: bool = False) -> int:
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    if directory:
+        flags |= getattr(os, "O_DIRECTORY", 0)
+    return flags
+
+
+def _open_directory_descriptor(path: Path) -> int:
+    """Open every component of an absolute directory path without following links."""
+
+    absolute = path.absolute()
+    parent_fd = os.open(os.sep, _descriptor_flags(directory=True))
+    try:
+        for component in PurePosixPath(absolute).parts:
+            if component == os.sep:
+                continue
+            next_fd = os.open(component, _descriptor_flags(directory=True), dir_fd=parent_fd)
+            os.close(parent_fd)
+            parent_fd = next_fd
+        return parent_fd
+    except OSError as exc:
+        try:
+            os.close(parent_fd)
+        except OSError:
+            pass
+        raise RepoSandboxError("repository directory changed or contains a symlink") from exc
+
+
+def _same_file_identity(left: os.stat_result, right: os.stat_result) -> bool:
+    return (
+        stat.S_ISREG(left.st_mode)
+        and stat.S_ISREG(right.st_mode)
+        and left.st_dev == right.st_dev
+        and left.st_ino == right.st_ino
+    )
+
+
+def _same_file_metadata(left: os.stat_result, right: os.stat_result) -> bool:
+    return (
+        _same_file_identity(left, right)
+        and left.st_nlink == right.st_nlink
+        and left.st_size == right.st_size
+        and left.st_mtime_ns == right.st_mtime_ns
+        and left.st_ctime_ns == right.st_ctime_ns
+    )
+
+
+def _assert_stable_file(initial: os.stat_result, final: os.stat_result) -> None:
+    if not _same_file_metadata(initial, final) or final.st_nlink != 1:
+        raise RepoSandboxError("repository source changed during read")
+
+
+def _open_source_regular_file(
+    root: Path,
+    relative: str,
+    *,
+    expected_stat: os.stat_result | None = None,
+) -> tuple[int, os.stat_result]:
+    """Open one source file through descriptor-relative no-follow traversal."""
+
+    relative_path = PurePosixPath(str(relative))
+    if relative_path.is_absolute() or not relative_path.parts or ".." in relative_path.parts:
+        raise RepoSandboxError("repository source path is invalid")
+    parent_fd = _open_directory_descriptor(root)
+    descriptor = -1
+    try:
+        for component in relative_path.parts[:-1]:
+            next_fd = os.open(component, _descriptor_flags(directory=True), dir_fd=parent_fd)
+            os.close(parent_fd)
+            parent_fd = next_fd
+        descriptor = os.open(
+            relative_path.parts[-1],
+            _descriptor_flags(),
+            dir_fd=parent_fd,
+        )
+        opened_stat = os.fstat(descriptor)
+        if not stat.S_ISREG(opened_stat.st_mode) or opened_stat.st_nlink != 1:
+            os.close(descriptor)
+            descriptor = -1
+            raise RepoSandboxError("repository source is not a single-link regular file")
+        if expected_stat is not None and not _same_file_metadata(expected_stat, opened_stat):
+            os.close(descriptor)
+            descriptor = -1
+            raise RepoSandboxError("repository source identity changed before read")
+        return descriptor, opened_stat
+    except RepoSandboxError:
+        raise
+    except OSError as exc:
+        if descriptor >= 0:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+        raise RepoSandboxError("repository source descriptor could not be opened") from exc
+    finally:
+        try:
+            os.close(parent_fd)
+        except OSError:
+            pass
 
 
 @dataclass(frozen=True, slots=True)
@@ -251,6 +353,61 @@ def validate_archive_members(payload: bytes, *, max_bytes: int) -> list[str]:
     return paths
 
 
+def _patch_paths_from_diff(patch: bytes, allowed_paths: Iterable[str]) -> tuple[str, ...]:
+    """Return and validate the paths named by an approved unified diff."""
+    allowed = {_safe_relative_path(value) for value in allowed_paths}
+    if not allowed or len(allowed) > 64:
+        raise RepoSandboxError("allowed_paths is invalid")
+    if len(patch) > RepoSandboxLimits().max_patch_bytes:
+        raise RepoSandboxError("patch byte limit exceeded")
+    try:
+        text = patch.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise RepoSandboxError("patch must be UTF-8") from exc
+    changed: set[str] = set()
+    for line in text.splitlines():
+        if not (line.startswith("+++ b/") or line.startswith("--- a/")):
+            continue
+        raw = line[6:]
+        if raw == "/dev/null":
+            continue
+        path = _safe_relative_path(raw)
+        if path not in allowed:
+            raise RepoSandboxError(f"patch path is not allowed: {path}")
+        changed.add(path)
+    if not changed:
+        raise RepoSandboxError("patch has no supported file paths")
+    return tuple(sorted(changed))
+
+
+def _worker_test_args(test_args: Iterable[str], allowed_paths: Iterable[str]) -> tuple[str, ...]:
+    """Normalize the fixed pytest argument subset used by the image."""
+    allowed = {_safe_relative_path(value) for value in allowed_paths}
+    accepted_flags = {"-q", "-x", "--maxfail=1", "--disable-warnings"}
+    normalized: list[str] = []
+    named_path = False
+    values = tuple(test_args)
+    if not values or len(values) > 16:
+        raise RepoSandboxError("test_args is invalid")
+    for value in values:
+        item = str(value)
+        if not item or len(item.encode("utf-8")) > 4096:
+            raise RepoSandboxError("test argument is invalid")
+        if item == "pytest":
+            continue
+        if item in accepted_flags:
+            normalized.append(item)
+            continue
+        path = _safe_relative_path(item)
+        if path not in allowed:
+            raise RepoSandboxError("test path is outside allowed_paths")
+        named_path = True
+        normalized.append(path)
+    if not named_path:
+        raise RepoSandboxError("pytest must name an allowed test path")
+    return tuple(normalized)
+
+
 class RootlessDockerRepoSandbox:
     """Fixed rootless Docker profile used by ``engineering.repo-change.v1``."""
 
@@ -342,9 +499,9 @@ class RootlessDockerRepoSandbox:
             if b"SERAPH_EXPORT_READY" in stdout or b"SERAPH_EXPORT_READY" in stderr:
                 return
             if code != 0 and b"No such object" in stderr:
-                raise RepoSandboxError("worker exited before export barrier")
+                raise RepoSandboxError("output_lost", phase="output_exported", terminal_status="failed")
             time.sleep(0.1)
-        raise RepoSandboxError("worker export barrier timed out")
+        raise RepoSandboxError("output_lost", phase="output_exported", terminal_status="failed")
 
     def _run_docker_stream(
         self,
@@ -456,6 +613,169 @@ class RootlessDockerRepoSandbox:
                 if digest.hexdigest() != _digest_file(source):
                     raise RepoSandboxError("input volume file digest changed")
 
+    def _read_input_file(self, *, worker_name: str, relative_path: str) -> bytes:
+        """Read one fixed input file through Docker's bounded tar stream."""
+        relative = _safe_relative_path(relative_path)
+        payload = self._run_docker_stream(
+            ["cp", f"{worker_name}:/input/{relative}", "-"],
+            timeout=30,
+            max_output_bytes=self.limits.max_output_bytes,
+        )
+        paths = validate_archive_members(payload, max_bytes=self.limits.max_output_bytes)
+        if paths != [relative]:
+            raise RepoSandboxError(f"input readback does not match {relative}")
+        try:
+            archive = tarfile.open(fileobj=io.BytesIO(payload), mode="r:")
+        except (tarfile.TarError, OSError) as exc:
+            raise RepoSandboxError("input readback is not a tar archive") from exc
+        with archive:
+            member = next((item for item in archive if item.name.rstrip("/") == relative), None)
+            if member is None or not member.isfile():
+                raise RepoSandboxError(f"input file {relative} is missing")
+            handle = archive.extractfile(member)
+            if handle is None:
+                raise RepoSandboxError(f"input file {relative} could not be read")
+            value = handle.read(self.limits.max_output_bytes + 1)
+        if len(value) > self.limits.max_output_bytes:
+            raise RepoSandboxError(f"input file {relative} exceeds the readback limit")
+        return value
+
+    def _validate_recovered_input(
+        self,
+        *,
+        job: RepoSandboxJob,
+        worker_name: str,
+        image: str,
+        patch_paths: tuple[str, ...],
+    ) -> None:
+        """Rebind recovery to the exact approved input volume contract."""
+        raw_job = self._read_input_file(worker_name=worker_name, relative_path="job.json")
+        try:
+            input_job = json.loads(raw_job.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise RepoSandboxError("recovered input job is invalid", phase="worker_started") from exc
+        if not isinstance(input_job, dict):
+            raise RepoSandboxError("recovered input job is not an object", phase="worker_started")
+        normalized_test_args = _worker_test_args(job.test_args, job.allowed_paths)
+        expected = {
+            "profile": PROFILE,
+            "job_id": job.job_id,
+            "authority_digest": job.authority_digest,
+            "base_digest": job.base_digest,
+            "snapshot_digest": job.base_digest,
+            "patch_sha256": hashlib.sha256(job.patch_bytes).hexdigest(),
+            "allowed_paths": list(job.allowed_paths),
+            "patch_paths": list(patch_paths),
+            "test_args": list(job.test_args),
+            "wall_seconds": int(job.deadline_seconds),
+            "cpu_seconds": int(self.limits.max_cpu_seconds),
+            "worker_image_digest": image,
+            "limits_digest": job.limits_digest,
+            "export_grace_seconds": 30,
+        }
+        if input_job.get("allowed_paths") != expected["allowed_paths"]:
+            raise RepoSandboxError("recovered input allowed_paths do not match approval", phase="worker_started")
+        if any(input_job.get(key) != value for key, value in expected.items() if key != "allowed_paths"):
+            raise RepoSandboxError("recovered input contract does not match approval", phase="worker_started")
+        if list(_worker_test_args(input_job.get("test_args") or (), input_job.get("allowed_paths") or ())) != list(normalized_test_args):
+            raise RepoSandboxError("recovered input test_args are not canonical", phase="worker_started")
+        input_patch = self._read_input_file(worker_name=worker_name, relative_path="patch.diff")
+        if input_patch != job.patch_bytes:
+            raise RepoSandboxError("recovered input patch does not match approval", phase="worker_started")
+        snapshot_manifest = self._read_input_file(worker_name=worker_name, relative_path="snapshot-manifest.json")
+        try:
+            snapshot = json.loads(snapshot_manifest.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise RepoSandboxError("recovered snapshot manifest is invalid", phase="worker_started") from exc
+        if not isinstance(snapshot, dict) or snapshot.get("digest") != job.base_digest:
+            raise RepoSandboxError("recovered snapshot digest does not match approval", phase="worker_started")
+
+    def _validate_worker_output(
+        self,
+        *,
+        outputs: Mapping[str, bytes],
+        job: RepoSandboxJob,
+        image: str,
+        patch_paths: tuple[str, ...],
+    ) -> tuple[dict[str, Any], dict[str, Any], bool]:
+        """Validate both worker manifests and return the terminal test result."""
+        try:
+            manifest = json.loads(outputs["manifest.json"].decode("utf-8"))
+            readback_manifest = json.loads(outputs["readback.json"].decode("utf-8"))
+        except (KeyError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise RepoSandboxError("worker output manifests are invalid", phase="output_exported") from exc
+        if not isinstance(manifest, dict) or not isinstance(readback_manifest, dict):
+            raise RepoSandboxError("worker output manifests are invalid", phase="output_exported")
+        patch_sha256 = hashlib.sha256(job.patch_bytes).hexdigest()
+        required = {
+            "profile": PROFILE,
+            "base_digest": job.base_digest,
+            "snapshot_digest": job.base_digest,
+            "patch_sha256": patch_sha256,
+            "worker_image_digest": image,
+        }
+        expected_allowed_paths = sorted(_safe_relative_path(value) for value in job.allowed_paths)
+        expected_test_args = list(_worker_test_args(job.test_args, job.allowed_paths))
+        exported_diff = outputs.get("diff.patch")
+        if not isinstance(exported_diff, bytes):
+            raise RepoSandboxError("worker output diff is missing", phase="output_exported")
+        if patch_paths and not exported_diff:
+            raise RepoSandboxError("worker output diff is empty", phase="output_exported")
+        try:
+            exported_diff_paths = _patch_paths_from_diff(exported_diff, job.allowed_paths)
+        except RepoSandboxError as exc:
+            raise RepoSandboxError("worker output diff paths are invalid", phase="output_exported") from exc
+        if not set(patch_paths).issubset(set(exported_diff_paths)):
+            raise RepoSandboxError("worker output diff is missing approved patch paths", phase="output_exported")
+        for value in (manifest, readback_manifest):
+            if any(value.get(key) != expected for key, expected in required.items()):
+                raise RepoSandboxError("worker output integrity fields do not match approval", phase="output_exported")
+            if value.get("allowed_paths") != expected_allowed_paths:
+                raise RepoSandboxError("worker output allowed_paths do not match approval", phase="output_exported")
+            if value.get("patch_paths") != list(patch_paths):
+                raise RepoSandboxError("worker output patch paths do not match approval", phase="output_exported")
+            if value.get("test_args") != expected_test_args:
+                raise RepoSandboxError("worker output test_args do not match approval", phase="output_exported")
+            diff_paths = value.get("diff_paths")
+            if (
+                not isinstance(diff_paths, list)
+                or any(not isinstance(path, str) for path in diff_paths)
+                or diff_paths != sorted(set(diff_paths))
+            ):
+                raise RepoSandboxError("worker output diff paths are invalid", phase="output_exported")
+            if any(_safe_relative_path(path) not in set(expected_allowed_paths) for path in diff_paths):
+                raise RepoSandboxError("worker output diff path is outside approval", phase="output_exported")
+            if diff_paths != list(exported_diff_paths):
+                raise RepoSandboxError("worker output diff paths do not match exported diff", phase="output_exported")
+        worker_source_digest = str(manifest.get("worker_source_digest") or "")
+        if (
+            len(worker_source_digest) != 64
+            or any(char not in "0123456789abcdef" for char in worker_source_digest.lower())
+            or worker_source_digest != str(readback_manifest.get("worker_source_digest") or "")
+        ):
+            raise RepoSandboxError("worker source integrity receipt is invalid", phase="output_exported")
+        if (
+            manifest.get("diff_sha256") != readback_manifest.get("diff_sha256")
+            or manifest.get("diff_sha256") != hashlib.sha256(outputs["diff.patch"]).hexdigest()
+        ):
+            raise RepoSandboxError("worker output integrity indicates an incomplete run", phase="output_exported")
+        try:
+            worker_failed = (
+                int(manifest.get("exit_code", 1)) != 0
+                or int(readback_manifest.get("exit_code", 1)) != 0
+                or bool(manifest.get("timed_out"))
+                or bool(readback_manifest.get("timed_out"))
+                or bool(manifest.get("stdout_truncated"))
+                or bool(manifest.get("stderr_truncated"))
+                or bool(readback_manifest.get("stdout_truncated"))
+                or bool(readback_manifest.get("stderr_truncated"))
+                or manifest.get("status") != "succeeded"
+                or readback_manifest.get("status") != "succeeded"
+            )
+        except (TypeError, ValueError) as exc:
+            raise RepoSandboxError("worker output status is invalid", phase="output_exported") from exc
+        return manifest, readback_manifest, worker_failed
+
     def _cleanup_container_and_volume(
         self,
         *,
@@ -491,7 +811,12 @@ class RootlessDockerRepoSandbox:
             }
         return {"status": "cleanup_verified", "cleanup_proven": True, "receipts": receipts}
 
-    def execute_job(self, job: RepoSandboxJob) -> dict[str, Any]:
+    def execute_job(
+        self,
+        job: RepoSandboxJob,
+        *,
+        before_dispatch: Callable[[], None] | None = None,
+    ) -> dict[str, Any]:
         """Execute one already-approved repository job through the fixed profile.
 
         The method deliberately returns an operator-safe receipt plus bounded
@@ -506,6 +831,8 @@ class RootlessDockerRepoSandbox:
             raise RepoSandboxError("approved worker image no longer matches configured image")
         if job.limits_digest and job.limits_digest != limits_digest(self.limits):
             raise RepoSandboxError("approved worker limits no longer match configured limits")
+        patch_paths = _patch_paths_from_diff(job.patch_bytes, job.allowed_paths)
+        _worker_test_args(job.test_args, job.allowed_paths)
         token = self._server_token(job.job_id)
         loader_name = f"{token}-loader"
         worker_name = f"{token}-worker"
@@ -523,6 +850,11 @@ class RootlessDockerRepoSandbox:
         worker_created = False
         loader_created = False
         volume_created = False
+        # Once the dispatch callback returns, at least one Docker resource
+        # operation may have happened even when Docker reports an error.  Do
+        # not rely on a successful create response to decide whether cleanup
+        # is required.
+        docker_dispatch_attempted = False
         try:
             preflight = self.preflight()
             if not preflight.ok:
@@ -545,18 +877,28 @@ class RootlessDockerRepoSandbox:
                     patch=job.patch_bytes,
                     job={
                         "job_id": job.job_id,
+                        "authority_digest": job.authority_digest,
                         "base_digest": job.base_digest,
                         "patch_sha256": patch_sha256,
                         "allowed_paths": list(job.allowed_paths),
+                        "patch_paths": list(patch_paths),
                         "test_args": list(job.test_args),
                         "wall_seconds": int(job.deadline_seconds),
                         "cpu_seconds": self.limits.max_cpu_seconds,
                         "worker_image_digest": image,
+                        "limits_digest": job.limits_digest,
                         "export_grace_seconds": 30,
                     },
                     staging_root=root / "bundle",
                 )
                 transfer = self._bundle_tar(bundle)
+                if before_dispatch is not None:
+                    # The caller owns the durable status/fence check.  Keep
+                    # this callback immediately before the first Docker
+                    # resource creation so cancellation cannot authorize a
+                    # stale dispatch after its final recheck.
+                    before_dispatch()
+                docker_dispatch_attempted = True
                 code, _stdout, stderr = self._run_docker(["volume", "create", input_volume], timeout=10)
                 if code != 0:
                     raise RepoSandboxError(f"input volume creation failed: {stderr[-512:].decode(errors='replace')}")
@@ -608,67 +950,44 @@ class RootlessDockerRepoSandbox:
                     inspected,
                     input_volume=input_volume,
                 )
-                self._wait_for_export_ready(
-                    worker_name,
-                    timeout=min(float(job.deadline_seconds), float(self.limits.max_wall_seconds)),
-                )
-                output_exported = True
-                output_tar = self._run_docker_stream(["cp", f"{worker_name}:/out/.", "-"], timeout=30)
-                expected_output = {"manifest.json", "readback.json", "diff.patch", "pytest.stdout", "pytest.stderr"}
-                self.validate_export(output_tar, expected_files=expected_output)
-                mark_phase("output_exported")
-                code, wait_stdout, wait_stderr = self._run_docker(
-                    ["wait", worker_name], timeout=int(job.deadline_seconds) + 40
-                )
-                outputs: dict[str, bytes] = {}
-                archive = tarfile.open(fileobj=io.BytesIO(output_tar), mode="r:")
-                with archive:
-                    for member in archive:
-                        if member.name.rstrip("/") not in expected_output or not member.isfile():
-                            continue
-                        handle = archive.extractfile(member)
-                        if handle is not None:
-                            outputs[member.name.rstrip("/")] = handle.read(self.limits.max_output_bytes + 1)
-                manifest = json.loads(outputs["manifest.json"].decode("utf-8"))
-                readback_manifest = json.loads(outputs["readback.json"].decode("utf-8"))
-                if not isinstance(manifest, dict) or not isinstance(readback_manifest, dict):
-                    raise RepoSandboxError("worker output manifests are invalid")
-                required = {
-                    "profile": PROFILE,
-                    "base_digest": job.base_digest,
-                    "snapshot_digest": job.base_digest,
-                    "patch_sha256": patch_sha256,
-                    "worker_image_digest": image,
-                }
-                if any(manifest.get(key) != value for key, value in required.items()):
-                    raise RepoSandboxError("worker output integrity fields do not match approval")
-                if any(readback_manifest.get(key) != value for key, value in required.items()):
-                    raise RepoSandboxError("worker readback integrity fields do not match approval")
-                worker_source_digest = str(manifest.get("worker_source_digest") or "")
-                if (
-                    len(worker_source_digest) != 64
-                    or any(char not in "0123456789abcdef" for char in worker_source_digest.lower())
-                    or worker_source_digest != str(readback_manifest.get("worker_source_digest") or "")
-                ):
-                    raise RepoSandboxError("worker source integrity receipt is invalid")
-                if (
-                    manifest.get("diff_sha256") != readback_manifest.get("diff_sha256")
-                    or manifest.get("diff_sha256")
-                    != hashlib.sha256(outputs["diff.patch"]).hexdigest()
-                ):
-                    raise RepoSandboxError("worker output integrity indicates an incomplete run")
-                worker_failed = (
-                    int(manifest.get("exit_code", 1)) != 0
-                    or int(readback_manifest.get("exit_code", 1)) != 0
-                    or bool(manifest.get("timed_out"))
-                    or bool(readback_manifest.get("timed_out"))
-                    or bool(manifest.get("stdout_truncated"))
-                    or bool(manifest.get("stderr_truncated"))
-                    or bool(readback_manifest.get("stdout_truncated"))
-                    or bool(readback_manifest.get("stderr_truncated"))
-                    or manifest.get("status") != "succeeded"
-                    or readback_manifest.get("status") != "succeeded"
-                )
+                try:
+                    self._wait_for_export_ready(
+                        worker_name,
+                        timeout=min(float(job.deadline_seconds), float(self.limits.max_wall_seconds)),
+                    )
+                    output_exported = True
+                    output_tar = self._run_docker_stream(["cp", f"{worker_name}:/out/.", "-"], timeout=30)
+                    expected_output = {"manifest.json", "readback.json", "diff.patch", "pytest.stdout", "pytest.stderr"}
+                    self.validate_export(output_tar, expected_files=expected_output)
+                    mark_phase("output_exported")
+                    code, wait_stdout, wait_stderr = self._run_docker(
+                        ["wait", worker_name], timeout=int(job.deadline_seconds) + 40
+                    )
+                    outputs: dict[str, bytes] = {}
+                    archive = tarfile.open(fileobj=io.BytesIO(output_tar), mode="r:")
+                    with archive:
+                        for member in archive:
+                            if member.name.rstrip("/") not in expected_output or not member.isfile():
+                                continue
+                            handle = archive.extractfile(member)
+                            if handle is not None:
+                                outputs[member.name.rstrip("/")] = handle.read(self.limits.max_output_bytes + 1)
+                    manifest, readback_manifest, worker_failed = self._validate_worker_output(
+                        outputs=outputs,
+                        job=job,
+                        image=image,
+                        patch_paths=patch_paths,
+                    )
+                    try:
+                        worker_failed = worker_failed or int(wait_stdout.strip() or b"1") != 0
+                    except (TypeError, ValueError) as exc:
+                        raise RepoSandboxError("output_lost", phase="output_exported", terminal_status="failed") from exc
+                except RepoSandboxError as exc:
+                    if exc.phase == "output_exported" and exc.terminal_status == "failed":
+                        raise
+                    raise RepoSandboxError("output_lost", phase="output_exported", terminal_status="failed") from exc
+                except (OSError, ValueError, TypeError, KeyError, tarfile.TarError) as exc:
+                    raise RepoSandboxError("output_lost", phase="output_exported", terminal_status="failed") from exc
                 mark_phase("tests_finished")
                 worker_cleanup = self._cleanup_container_and_volume(
                     container_name=worker_name,
@@ -691,7 +1010,7 @@ class RootlessDockerRepoSandbox:
                 post_snapshot = self.snapshot_repository(job.repository_root, root / "post-snapshot")
                 if post_snapshot.digest != job.base_digest:
                     raise RepoSandboxError("original repository changed during execution")
-                terminal = "succeeded" if not worker_failed and int(wait_stdout.strip() or b"1") == 0 else "failed"
+                terminal = "succeeded" if not worker_failed else "failed"
                 return {
                     "status": terminal,
                     "failure_reason": "tests_failed" if terminal == "failed" else None,
@@ -705,11 +1024,24 @@ class RootlessDockerRepoSandbox:
                     "learning": "no_learning",
                     "operator_visible": True,
                 }
-        except RepoSandboxError as exc:
+        except (RepoSandboxError, OSError, ValueError, TypeError, KeyError, tarfile.TarError) as raw_exc:
+            exc = raw_exc if isinstance(raw_exc, RepoSandboxError) else RepoSandboxError(
+                f"worker output or cleanup is invalid: {raw_exc}",
+                phase=phase,
+            )
             exc.phase = phase
             exc.checkpoint_phases = tuple(checkpoint_phases)
-            if worker_created:
-                cleanup = self.cancel(container_name=worker_name, input_volume=input_volume)
+            if docker_dispatch_attempted:
+                # A timeout or daemon disconnect can create a resource while
+                # withholding the successful response.  Attempt both derived
+                # container identities and the volume every time after the
+                # dispatch fence, then keep the effect unknown if any removal
+                # cannot be proven.
+                cleanup = self.cancel(
+                    container_name=worker_name,
+                    additional_container_names=(loader_name,),
+                    input_volume=input_volume,
+                )
                 if cleanup.get("status") == "unknown_external_effect":
                     return {
                         "status": "unknown_external_effect",
@@ -718,17 +1050,9 @@ class RootlessDockerRepoSandbox:
                         "checkpoint_phases": checkpoint_phases,
                         "learning": "no_learning",
                     }
-            elif volume_created:
-                cleanup = self.cancel(container_name=loader_name, input_volume=input_volume)
-                if cleanup.get("status") == "unknown_external_effect":
-                    return {
-                        "status": "unknown_external_effect",
-                        "reason": "cleanup_unproven",
-                        "cleanup": cleanup,
-                        "checkpoint_phases": checkpoint_phases,
-                        "learning": "no_learning",
-                    }
-            raise
+            if isinstance(raw_exc, RepoSandboxError):
+                raise
+            raise exc from raw_exc
 
     @staticmethod
     def _json_output(payload: bytes, *, operation: str) -> dict[str, Any]:
@@ -917,12 +1241,22 @@ class RootlessDockerRepoSandbox:
         candidate = Path(repository_path).expanduser()
         if not candidate.is_absolute():
             candidate = workspace / candidate
-        candidate = candidate.resolve(strict=True)
-        if candidate == workspace or workspace not in candidate.parents:
+        candidate = candidate.absolute()
+        try:
+            candidate.relative_to(workspace)
+        except ValueError as exc:
+            raise RepoSandboxError("repository must be beneath the canonical workspace") from exc
+        current = candidate
+        while current != workspace:
+            if current.is_symlink():
+                raise RepoSandboxError("repository path symlinks are not allowed")
+            current = current.parent
+        resolved = candidate.resolve(strict=True)
+        if resolved == workspace or workspace not in resolved.parents:
             raise RepoSandboxError("repository must be beneath the canonical workspace")
-        if not candidate.is_dir() or candidate.is_symlink():
+        if not resolved.is_dir() or resolved.is_symlink():
             raise RepoSandboxError("repository root must be a real directory")
-        return candidate
+        return resolved
 
     def snapshot_repository(self, repository_path: str | Path, staging_root: str | Path) -> RepositorySnapshot:
         source = self.validate_snapshot_root(repository_path)
@@ -956,9 +1290,15 @@ class RootlessDockerRepoSandbox:
             for name in sorted(file_names):
                 path = root_path / name
                 relative = _safe_relative_path(f"{relative_root}/{name}" if relative_root else name)
-                if path.is_symlink() or not path.is_file():
+                try:
+                    file_stat = path.lstat()
+                except OSError as exc:
+                    raise RepoSandboxError(f"repository entry cannot be inspected: {relative}") from exc
+                if not stat.S_ISREG(file_stat.st_mode):
                     raise RepoSandboxError(f"repository entry is not a regular file: {relative}")
-                size = path.stat().st_size
+                if file_stat.st_nlink != 1:
+                    raise RepoSandboxError(f"repository hardlink is not allowed: {relative}")
+                size = file_stat.st_size
                 if size > self.limits.max_file_bytes:
                     raise RepoSandboxError(f"file limit exceeded: {relative}")
                 total_bytes += size
@@ -968,7 +1308,18 @@ class RootlessDockerRepoSandbox:
                     raise RepoSandboxError("snapshot file limit exceeded")
                 target = destination / relative
                 target.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copyfile(path, target, follow_symlinks=False)
+                descriptor, opened_stat = _open_source_regular_file(
+                    source,
+                    relative,
+                    expected_stat=file_stat,
+                )
+                try:
+                    with os.fdopen(descriptor, "rb") as source_handle:
+                        with target.open("xb") as target_handle:
+                            shutil.copyfileobj(source_handle, target_handle, length=1024 * 1024)
+                        _assert_stable_file(opened_stat, os.fstat(source_handle.fileno()))
+                except OSError as exc:
+                    raise RepoSandboxError(f"repository source could not be copied: {relative}") from exc
                 entries.append(SnapshotEntry(relative, size, _digest_file(target)))
         digest = _digest_entries(entries)
         return RepositorySnapshot(str(source), str(destination), digest, tuple(entries), total_bytes)
@@ -1004,7 +1355,14 @@ class RootlessDockerRepoSandbox:
             raise RepoSandboxError("export does not match the fixed output contract")
         return paths
 
-    def recover_job(self, job: RepoSandboxJob, *, wait_seconds: int = 30) -> dict[str, Any]:
+    def recover_job(
+        self,
+        job: RepoSandboxJob,
+        *,
+        wait_seconds: int = 30,
+        expected_container_name: str | None = None,
+        expected_input_volume: str | None = None,
+    ) -> dict[str, Any]:
         """Adopt one matching worker after a backend restart.
 
         The worker and its input volume are named from the durable job ID.  A
@@ -1015,113 +1373,174 @@ class RootlessDockerRepoSandbox:
         Missing or mismatched state stays operator-visible and blocked.
         """
 
-        if int(job.deadline_seconds) < 30 or int(job.deadline_seconds) > self.limits.max_wall_seconds:
-            raise RepoSandboxError("job deadline is outside the fixed profile")
-        configured_image = self.validate_image_digest(self.config.worker_image_digest)
-        image = self.validate_image_digest(job.worker_image_digest or configured_image)
-        if image != configured_image:
-            raise RepoSandboxError("approved worker image no longer matches configured image")
-        if job.limits_digest and job.limits_digest != limits_digest(self.limits):
-            raise RepoSandboxError("approved worker limits no longer match configured limits")
-        preflight = self.preflight()
-        if not preflight.ok:
+        token = self._server_token(job.job_id)
+        derived_worker_name = f"{token}-worker"
+        derived_loader_name = f"{token}-loader"
+        derived_input_volume = f"{token}-input"
+        def validation_failure(exc: BaseException, *, phase: str = "admitted") -> dict[str, Any]:
+            try:
+                cleanup = self.cancel(
+                    container_name=derived_worker_name,
+                    additional_container_names=(derived_loader_name,),
+                    input_volume=derived_input_volume,
+                )
+            except (OSError, RepoSandboxError, ValueError) as cleanup_exc:
+                cleanup = {"status": "unknown_external_effect", "reason": "cleanup_unproven", "error": str(cleanup_exc)}
+            if cleanup.get("status") == "unknown_external_effect":
+                return {
+                    "status": "unknown_external_effect",
+                    "reason": "cleanup_unproven",
+                    "reason_code": "recovery_validation_cleanup_unproven",
+                    "cleanup": cleanup,
+                    "checkpoint_phases": [phase],
+                    "operator_action": "reconcile_or_cancel",
+                    "side_effects": "unknown",
+                    "operator_visible": True,
+                    "learning": "no_learning",
+                }
             return {
-                "status": "blocked",
-                "reason": preflight.reason,
-                "preflight": preflight.as_receipt(),
-                "checkpoint_phases": ["admitted"],
+                "status": "failed",
+                "reason": str(exc),
+                "reason_code": "recovery_validation_failed",
+                "cleanup": cleanup,
+                "cleanup_proven": True,
+                "checkpoint_phases": [phase],
+                "operator_action": "inspect_output_and_create_fresh_preview",
+                "side_effects": "none",
+                "operator_visible": True,
                 "learning": "no_learning",
             }
-        token = self._server_token(job.job_id)
-        worker_name = f"{token}-worker"
-        input_volume = f"{token}-input"
+        try:
+            if int(job.deadline_seconds) < 30 or int(job.deadline_seconds) > self.limits.max_wall_seconds:
+                raise RepoSandboxError("job deadline is outside the fixed profile")
+            configured_image = self.validate_image_digest(self.config.worker_image_digest)
+            image = self.validate_image_digest(job.worker_image_digest or configured_image)
+            if image != configured_image:
+                raise RepoSandboxError("approved worker image no longer matches configured image")
+            if job.limits_digest and job.limits_digest != limits_digest(self.limits):
+                raise RepoSandboxError("approved worker limits no longer match configured limits")
+            preflight = self.preflight()
+            if not preflight.ok:
+                return validation_failure(RepoSandboxError(preflight.reason), phase="admitted")
+        except (RepoSandboxError, OSError, ValueError) as exc:
+            return validation_failure(exc)
+        if expected_container_name is not None and expected_container_name != derived_worker_name:
+            return validation_failure(
+                RepoSandboxError("recovery worker identity does not match the durable dispatch fence", phase="worker_started"),
+                phase="worker_started",
+            )
+        if expected_input_volume is not None and expected_input_volume != derived_input_volume:
+            return validation_failure(
+                RepoSandboxError("recovery volume identity does not match the durable dispatch fence", phase="worker_started"),
+                phase="worker_started",
+            )
+        worker_name = expected_container_name or derived_worker_name
+        input_volume = expected_input_volume or derived_input_volume
         code, stdout, stderr = self._run_docker(
             ["inspect", "--format", "{{json .}}", worker_name], timeout=10
         )
         if code != 0:
+            try:
+                cleanup = self.cancel(
+                    container_name=worker_name,
+                    additional_container_names=(f"{token}-loader",),
+                    input_volume=input_volume,
+                )
+            except (OSError, RepoSandboxError) as exc:
+                return {
+                    "status": "unknown_external_effect",
+                    "reason": "cleanup_unproven",
+                    "reason_code": "output_lost_cleanup_unproven",
+                    "cleanup": {"status": "unknown_external_effect", "reason": str(exc)},
+                    "checkpoint_phases": ["admitted", "worker_started"],
+                    "operator_action": "reconcile_or_cancel",
+                    "side_effects": "unknown",
+                    "operator_visible": True,
+                    "learning": "no_learning",
+                }
+            if cleanup.get("status") == "unknown_external_effect":
+                return {
+                    "status": "unknown_external_effect",
+                    "reason": "cleanup_unproven",
+                    "reason_code": "output_lost_cleanup_unproven",
+                    "cleanup": cleanup,
+                    "checkpoint_phases": ["admitted", "worker_started"],
+                    "operator_action": "reconcile_or_cancel",
+                    "side_effects": "unknown",
+                    "operator_visible": True,
+                    "learning": "no_learning",
+                }
             return {
-                "status": "blocked",
-                "reason": "matching_worker_not_found",
+                "status": "failed",
+                "reason": "output_lost",
+                "reason_code": "output_lost",
                 "checkpoint_phases": ["admitted", "worker_started"],
+                "operator_action": "inspect_output_and_create_fresh_preview",
+                "recovery_action": "create_fresh_preview_and_approval",
+                "cleanup": cleanup,
+                "side_effects": "none",
+                "cleanup_proven": True,
                 "operator_visible": True,
                 "learning": "no_learning",
             }
-        inspected = self._json_output(stdout, operation="worker recovery inspect")
+        phases = ["admitted", "worker_started"]
         try:
+            # The worker was positively found by inspect.  Every subsequent
+            # identity, profile, and input validation therefore remains under
+            # the cleanup-protected recovery scope; malformed metadata must
+            # not strand a fenced worker or its volume.
+            inspected = self._json_output(stdout, operation="worker recovery inspect")
             effective_profile = self._validate_effective_profile(
                 inspected,
                 input_volume=input_volume,
             )
-        except RepoSandboxError as exc:
-            exc.phase = "worker_started"
-            raise
-        config = inspected.get("Config") if isinstance(inspected, Mapping) else {}
-        if str(config.get("Image") or "") != image:
-            raise RepoSandboxError("worker image binding changed", phase="worker_started")
-        phases = ["admitted", "worker_started", "input_loaded"]
-        try:
-            self._wait_for_export_ready(
-                worker_name,
-                timeout=min(max(1, int(wait_seconds)), int(job.deadline_seconds)),
+            config = inspected.get("Config") if isinstance(inspected, Mapping) else {}
+            if str(config.get("Image") or "") != image:
+                raise RepoSandboxError("worker image binding changed", phase="worker_started")
+            patch_paths = _patch_paths_from_diff(job.patch_bytes, job.allowed_paths)
+            _worker_test_args(job.test_args, job.allowed_paths)
+            self._validate_recovered_input(
+                job=job,
+                worker_name=worker_name,
+                image=image,
+                patch_paths=patch_paths,
             )
-            output_tar = self._run_docker_stream(
-                ["cp", f"{worker_name}:/out/.", "-"],
-                timeout=30,
-                max_output_bytes=self.limits.max_output_bytes,
-            )
-            expected_output = {"manifest.json", "readback.json", "diff.patch", "pytest.stdout", "pytest.stderr"}
-            self.validate_export(output_tar, expected_files=expected_output)
-            outputs: dict[str, bytes] = {}
-            archive = tarfile.open(fileobj=io.BytesIO(output_tar), mode="r:")
-            with archive:
-                for member in archive:
-                    name = member.name.rstrip("/")
-                    if name not in expected_output or not member.isfile():
-                        continue
-                    handle = archive.extractfile(member)
-                    if handle is not None:
-                        outputs[name] = handle.read(self.limits.max_output_bytes + 1)
-            manifest = json.loads(outputs["manifest.json"].decode("utf-8"))
-            readback_manifest = json.loads(outputs["readback.json"].decode("utf-8"))
-            if not isinstance(manifest, dict) or not isinstance(readback_manifest, dict):
-                raise RepoSandboxError("worker output manifests are invalid", phase="output_exported")
-            patch_sha256 = hashlib.sha256(job.patch_bytes).hexdigest()
-            required = {
-                "profile": PROFILE,
-                "base_digest": job.base_digest,
-                "snapshot_digest": job.base_digest,
-                "patch_sha256": patch_sha256,
-                "worker_image_digest": image,
-            }
-            if any(manifest.get(key) != value for key, value in required.items()) or any(
-                readback_manifest.get(key) != value for key, value in required.items()
-            ):
-                raise RepoSandboxError("worker output integrity fields do not match approval", phase="output_exported")
-            worker_source_digest = str(manifest.get("worker_source_digest") or "")
-            if (
-                len(worker_source_digest) != 64
-                or any(char not in "0123456789abcdef" for char in worker_source_digest.lower())
-                or worker_source_digest != str(readback_manifest.get("worker_source_digest") or "")
-            ):
-                raise RepoSandboxError("worker source integrity receipt is invalid", phase="output_exported")
-            if (
-                manifest.get("diff_sha256") != readback_manifest.get("diff_sha256")
-                or manifest.get("diff_sha256") != hashlib.sha256(outputs["diff.patch"]).hexdigest()
-            ):
-                raise RepoSandboxError("worker output integrity indicates an incomplete run", phase="output_exported")
+            phases.append("input_loaded")
+            try:
+                self._wait_for_export_ready(
+                    worker_name,
+                    timeout=min(max(1, int(wait_seconds)), int(job.deadline_seconds)),
+                )
+                output_tar = self._run_docker_stream(
+                    ["cp", f"{worker_name}:/out/.", "-"],
+                    timeout=30,
+                    max_output_bytes=self.limits.max_output_bytes,
+                )
+                expected_output = {"manifest.json", "readback.json", "diff.patch", "pytest.stdout", "pytest.stderr"}
+                self.validate_export(output_tar, expected_files=expected_output)
+                outputs: dict[str, bytes] = {}
+                archive = tarfile.open(fileobj=io.BytesIO(output_tar), mode="r:")
+                with archive:
+                    for member in archive:
+                        name = member.name.rstrip("/")
+                        if name not in expected_output or not member.isfile():
+                            continue
+                        handle = archive.extractfile(member)
+                        if handle is not None:
+                            outputs[name] = handle.read(self.limits.max_output_bytes + 1)
+                manifest, readback_manifest, worker_failed = self._validate_worker_output(
+                    outputs=outputs,
+                    job=job,
+                    image=image,
+                    patch_paths=patch_paths,
+                )
+            except RepoSandboxError as exc:
+                if exc.phase == "output_exported" and exc.terminal_status == "failed":
+                    raise
+                raise RepoSandboxError("output_lost", phase="output_exported", terminal_status="failed") from exc
+            except (OSError, ValueError, TypeError, KeyError, tarfile.TarError) as exc:
+                raise RepoSandboxError("output_lost", phase="output_exported", terminal_status="failed") from exc
             phases.append("output_exported")
-            worker_failed = (
-                int(manifest.get("exit_code", 1)) != 0
-                or int(readback_manifest.get("exit_code", 1)) != 0
-                or bool(manifest.get("timed_out"))
-                or bool(readback_manifest.get("timed_out"))
-                or bool(manifest.get("stdout_truncated"))
-                or bool(manifest.get("stderr_truncated"))
-                or bool(readback_manifest.get("stdout_truncated"))
-                or bool(readback_manifest.get("stderr_truncated"))
-                or manifest.get("status") != "succeeded"
-                or readback_manifest.get("status") != "succeeded"
-            )
             phases.append("tests_finished")
             cleanup = self._cleanup_container_and_volume(
                 container_name=worker_name,
@@ -1155,35 +1574,75 @@ class RootlessDockerRepoSandbox:
                 "learning": "no_learning",
                 "operator_visible": True,
             }
-        except RepoSandboxError as exc:
+        except (RepoSandboxError, OSError, ValueError, TypeError, KeyError, tarfile.TarError) as raw_exc:
+            exc = raw_exc if isinstance(raw_exc, RepoSandboxError) else RepoSandboxError(
+                f"worker recovery output is invalid: {raw_exc}",
+                phase=phases[-1],
+            )
             if not getattr(exc, "phase", None) or exc.phase == "admitted":
                 exc.phase = phases[-1]
             exc.checkpoint_phases = tuple(phases)
-            raise
+            try:
+                cleanup = self.cancel(
+                    container_name=worker_name,
+                    additional_container_names=(f"{token}-loader",),
+                    input_volume=input_volume,
+                )
+            except (OSError, RepoSandboxError, ValueError) as cleanup_exc:
+                return {
+                    "status": "unknown_external_effect",
+                    "reason": "cleanup_unproven",
+                    "cleanup": {"status": "unknown_external_effect", "reason": "recovery_cleanup_unavailable", "error": str(cleanup_exc)},
+                    "checkpoint_phases": phases,
+                    "learning": "no_learning",
+                }
+            if cleanup.get("status") == "unknown_external_effect":
+                return {
+                    "status": "unknown_external_effect",
+                    "reason": "cleanup_unproven",
+                    "cleanup": cleanup,
+                    "checkpoint_phases": phases,
+                    "learning": "no_learning",
+                }
+            if isinstance(raw_exc, RepoSandboxError):
+                raise
+            raise exc from raw_exc
 
-    def cancel(self, *, container_name: str, input_volume: str, output_volume: str | None = None) -> dict[str, Any]:
+    def cancel(
+        self,
+        *,
+        container_name: str,
+        input_volume: str,
+        output_volume: str | None = None,
+        additional_container_names: tuple[str, ...] = (),
+    ) -> dict[str, Any]:
         if not container_name or not input_volume:
             raise RepoSandboxError("server-owned container and volume IDs are required")
+        container_names = tuple(dict.fromkeys((container_name, *additional_container_names)))
         receipts: list[dict[str, Any]] = []
-        for args in (
-            ["stop", "--time=5", container_name],
-            ["kill", container_name],
-            ["rm", "--force", container_name],
-            ["volume", "rm", input_volume],
-        ):
-            code, stdout, stderr = self._run_docker(args, timeout=10)
-            receipts.append({"operation": args[0], "status": "ok" if code == 0 else "failed"})
+        for name in container_names:
+            for args in (
+                ["stop", "--time=5", name],
+                ["kill", name],
+                ["rm", "--force", name],
+            ):
+                code, stdout, stderr = self._run_docker(args, timeout=10)
+                receipts.append({"operation": args[0], "target": name, "status": "ok" if code == 0 else "failed"})
+        code, stdout, stderr = self._run_docker(["volume", "rm", input_volume], timeout=10)
+        receipts.append({"operation": "volume_rm", "target": input_volume, "status": "ok" if code == 0 else "failed"})
         if output_volume:
             code, stdout, stderr = self._run_docker(["volume", "rm", output_volume], timeout=10)
-            receipts.append({"operation": "volume_rm_output", "status": "ok" if code == 0 else "failed"})
-        code, stdout, stderr = self._run_docker(["inspect", container_name], timeout=10)
-        proven_container_removed = code != 0 and b"No such object" in stderr
+            receipts.append({"operation": "volume_rm_output", "target": output_volume, "status": "ok" if code == 0 else "failed"})
+        container_checks: list[bool] = []
+        for name in container_names:
+            code, _, error = self._run_docker(["inspect", name], timeout=10)
+            container_checks.append(code != 0 and b"No such object" in error)
         volume_names = [input_volume] + ([output_volume] if output_volume else [])
         volume_checks: list[bool] = []
         for volume_name in volume_names:
             volume_code, _, volume_error = self._run_docker(["volume", "inspect", volume_name], timeout=10)
             volume_checks.append(volume_code != 0 and b"No such volume" in volume_error)
-        proven_removed = proven_container_removed and all(volume_checks)
+        proven_removed = all(container_checks) and all(volume_checks)
         if not proven_removed:
             return {"status": "unknown_external_effect", "reason": "cleanup_unproven", "receipts": receipts}
         return {"status": "cancelled", "cleanup_proven": True, "volumes_removed": True, "receipts": receipts}

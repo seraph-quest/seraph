@@ -298,6 +298,7 @@ def _connection_payload(row: GitHubFollowthroughConnection | None) -> dict[str, 
             "mode": CONNECTION_MODE_DISABLED,
             "credential_configured": False,
             "active_job_id": None,
+            "active_fence": None,
         }
     return {
         "id": row.id,
@@ -306,6 +307,7 @@ def _connection_payload(row: GitHubFollowthroughConnection | None) -> dict[str, 
         "mode": row.mode,
         "credential_configured": bool(row.vault_key),
         "active_job_id": row.active_job_id,
+        "active_fence": row.active_fence,
     }
 
 
@@ -491,14 +493,55 @@ class GitHubFollowthroughService:
             else:
                 if int(row.revision or 0) != int(expected_revision):
                     raise GitHubFollowthroughError("connection_revision_stale")
-                if row.active_job_id and row.repository != repository:
-                    raise GitHubFollowthroughError("connection_reserved_repository", status_code=409)
-                row.repository = repository
-                row.vault_key = vault_key
-                row.mode = mode
-                row.revision = int(row.revision or 0) + 1
-                row.updated_at = _now()
-                db.add(row)
+                # A live publication owns the complete connection binding
+                # until its dispatch fence is released.  Allowing a mode,
+                # repository, or vault-key update while that fence is held
+                # would let the final handoff validate one revision and send
+                # bytes under another.
+                if row.active_job_id:
+                    raise GitHubFollowthroughError("connection_reserved", status_code=409)
+                # The read above is only for a useful error classification. A
+                # reservation can commit after that read and before this
+                # mutation, so the write itself must carry the reservation
+                # fence. Never overwrite an active job on a stale snapshot.
+                updated = await db.execute(
+                    update(GitHubFollowthroughConnection)
+                    .where(
+                        GitHubFollowthroughConnection.id == row.id,
+                        GitHubFollowthroughConnection.owner_principal_id == owner_principal_id,
+                        GitHubFollowthroughConnection.revision == int(expected_revision),
+                        GitHubFollowthroughConnection.active_job_id.is_(None),
+                    )
+                    .values(
+                        repository=repository,
+                        vault_key=vault_key,
+                        mode=mode,
+                        revision=GitHubFollowthroughConnection.revision + 1,
+                        updated_at=_now(),
+                    )
+                )
+                if updated.rowcount != 1:
+                    latest = (
+                        await db.execute(
+                            select(GitHubFollowthroughConnection).where(
+                                GitHubFollowthroughConnection.id == row.id,
+                                GitHubFollowthroughConnection.owner_principal_id == owner_principal_id,
+                            )
+                        )
+                    ).scalars().first()
+                    if latest is not None and latest.active_job_id:
+                        raise GitHubFollowthroughError("connection_reserved", status_code=409)
+                    raise GitHubFollowthroughError("connection_revision_stale")
+                row = (
+                    await db.execute(
+                        select(GitHubFollowthroughConnection).where(
+                            GitHubFollowthroughConnection.id == row.id,
+                            GitHubFollowthroughConnection.owner_principal_id == owner_principal_id,
+                        )
+                    )
+                ).scalars().first()
+                if row is None:
+                    raise GitHubFollowthroughError("connection_missing", status_code=404)
                 await db.flush()
             db.expunge(row)
         return _connection_payload(row)
@@ -831,6 +874,93 @@ class GitHubFollowthroughService:
             )
             return getattr(result, "rowcount", None) == 1
 
+    async def _assert_dispatch_binding(
+        self,
+        *,
+        owner_principal_id: str,
+        connection_id: str,
+        expected_revision: int,
+        repository: str,
+        vault_key: str,
+        mode: str,
+        job_id: str,
+        fence: int,
+    ) -> None:
+        """Atomically fence the final connection-to-dispatch handoff.
+
+        The live connection read and this compare-and-swap deliberately occur
+        after the durable dispatch guard and immediately before resolving the
+        vault reference.  The active reservation prevents a concurrent
+        connection update from succeeding between this CAS and the POST.
+        """
+
+        async with db_engine.get_session() as db:
+            result = await db.execute(
+                update(GitHubFollowthroughConnection)
+                .where(
+                    GitHubFollowthroughConnection.id == connection_id,
+                    GitHubFollowthroughConnection.owner_principal_id == owner_principal_id,
+                    GitHubFollowthroughConnection.revision == int(expected_revision),
+                    GitHubFollowthroughConnection.repository == repository,
+                    GitHubFollowthroughConnection.vault_key == vault_key,
+                    GitHubFollowthroughConnection.mode == mode,
+                    GitHubFollowthroughConnection.active_job_id == job_id,
+                    GitHubFollowthroughConnection.active_fence == int(fence),
+                )
+                .values(updated_at=_now())
+            )
+            if getattr(result, "rowcount", None) != 1:
+                raise GitHubFollowthroughError("connection_dispatch_binding_stale", status_code=409)
+
+    async def _repair_terminal_connection_reservation(self, current: Mapping[str, Any]) -> str:
+        """Release a connection fence left by a crash after job finalization.
+
+        The durable job transition and connection release are separate CAS
+        writes.  A successful job is therefore allowed to be observed with a
+        stale ``active_job_id``; every successful read/reconcile path retries
+        the exact job/fence release before projecting the receipt.
+        """
+
+        if current.get("status") != "succeeded":
+            return "not_required"
+        authority = current.get("declared_authority") if isinstance(current.get("declared_authority"), Mapping) else {}
+        connection_id = _text(authority.get("connection_id"))
+        if not connection_id:
+            try:
+                prepared = await self._read_prepared(current)
+            except GitHubFollowthroughError:
+                prepared = None
+            connection_id = _text(getattr(prepared, "connection_id", None))
+        if not connection_id:
+            return "not_required"
+        owner = current.get("owner") if isinstance(current.get("owner"), Mapping) else {}
+        owner_principal_id = _text(
+            owner.get("principal_id")
+            or authority.get("principal")
+            or authority.get("owner_principal_id")
+        )
+        job_id = _text(current.get("job_id"))
+        if not owner_principal_id or not job_id:
+            return "pending"
+        connection = await self._get_connection_row(owner_principal_id)
+        if connection is None or connection.active_job_id != job_id:
+            return "released"
+        fence = int(connection.active_fence or 0)
+        if fence <= 0:
+            return "pending"
+        released = await self._release_connection(
+            connection_id=connection_id,
+            owner_principal_id=owner_principal_id,
+            job_id=job_id,
+            fence=fence,
+        )
+        if released:
+            return "released"
+        latest = await self._get_connection_row(owner_principal_id)
+        if latest is None or latest.active_job_id != job_id:
+            return "released"
+        return "pending"
+
     async def _prepare_job_response(
         self,
         current: Mapping[str, Any],
@@ -838,6 +968,12 @@ class GitHubFollowthroughService:
         prepared: PreparedPublication | None = None,
         approval: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
+        connection_release_status = "not_required"
+        if current.get("status") == "succeeded":
+            try:
+                connection_release_status = await self._repair_terminal_connection_reservation(current)
+            except Exception:
+                connection_release_status = "pending"
         if prepared is None:
             try:
                 prepared = await self._read_prepared(current)
@@ -868,6 +1004,11 @@ class GitHubFollowthroughService:
                 if isinstance(item, Mapping)
             ],
         }
+        if connection_release_status == "pending":
+            response["connection_release"] = {
+                "status": "pending",
+                "operator_action": "retry_reconcile",
+            }
         if prepared is not None:
             response["preview"] = {
                 "repository": prepared.repository,
@@ -969,6 +1110,26 @@ class GitHubFollowthroughService:
         if existing is not None:
             if existing.get("input_digest") != input_digest:
                 raise GitHubFollowthroughError("idempotency_conflict")
+            existing_authority = (
+                existing.get("declared_authority")
+                if isinstance(existing.get("declared_authority"), Mapping)
+                else {}
+            )
+            existing_owner = existing.get("owner") if isinstance(existing.get("owner"), Mapping) else {}
+            persisted_principal = _text(
+                existing_owner.get("principal_id")
+                or existing_authority.get("principal")
+                or existing_authority.get("owner_principal_id")
+            )
+            persisted_session = _text(
+                existing_authority.get("session_id")
+                or existing.get("operator_session_id")
+                or existing.get("session_id")
+            )
+            if persisted_principal != _text(owner_principal_id):
+                raise GitHubFollowthroughError("job_owner_mismatch", status_code=403)
+            if persisted_session != _text(owner_session_id):
+                raise GitHubFollowthroughError("job_session_mismatch", status_code=403)
             return await self._prepare_job_response(existing)
         authority = {
             "principal": owner_principal_id,
@@ -1429,6 +1590,89 @@ class GitHubFollowthroughService:
         except DurableJobTransitionError:
             return await durable_job_repository.get_job(prepared.job_id) or latest
 
+    async def _handle_prepared_input_failure(
+        self,
+        current: Mapping[str, Any],
+        *,
+        reason: str,
+    ) -> tuple[dict[str, Any], str]:
+        """Close a missing/tampered prepared payload with an explicit receipt.
+
+        The prepared payload is the durable handoff between approval and
+        execution.  If it disappears, the worker must not leave the job in an
+        approval-held or running state.  An existing publication liability is
+        preserved as unknown; otherwise the operator can re-prepare the job.
+        """
+
+        job_id = _text(current.get("job_id"))
+        latest = await durable_job_repository.get_job(job_id) or dict(current)
+        effects = [item for item in latest.get("effects") or [] if isinstance(item, Mapping)]
+        publication = next(
+            (
+                item
+                for item in reversed(effects)
+                if item.get("effect_type") == "github_publication"
+                and item.get("status") in {"intent", "dispatched", "unknown"}
+            ),
+            None,
+        )
+        lease = latest.get("lease") if isinstance(latest.get("lease"), Mapping) else {}
+        running_owner = str(lease.get("owner") or "")
+        running_fence = int(lease.get("fencing_token") or 0)
+        owner = running_owner if latest.get("status") == "running" and running_owner else None
+        fence = running_fence if owner else None
+        if publication is not None:
+            target_path = str(publication.get("target_path") or "github:unknown")
+            effect_id = str(publication.get("effect_id") or "") or None
+            try:
+                observed = await durable_job_repository.record_effect(
+                    job_id,
+                    effect_type="github_publication",
+                    effect_id=effect_id,
+                    target_path=target_path,
+                    target_digest=str(publication.get("target_digest") or "") or None,
+                    status="unknown",
+                    details={
+                        "reason_code": reason,
+                        "prepared_input_unavailable": True,
+                        "dispatch_confirmed": publication.get("status") == "dispatched",
+                    },
+                    owner=owner,
+                    fencing_token=fence,
+                    expected_revision=latest.get("revision"),
+                )
+                latest = observed
+                refreshed_lease = latest.get("lease") if isinstance(latest.get("lease"), Mapping) else {}
+                latest = await durable_job_repository.transition_job(
+                    job_id,
+                    "unknown_external_effect",
+                    owner=str(refreshed_lease.get("owner") or owner or "") or None,
+                    fencing_token=int(refreshed_lease.get("fencing_token") or fence or 0) or None,
+                    expected_revision=latest.get("revision"),
+                    reason=reason,
+                    result={"recovery_action": "reconcile", "learning": "no_learning"},
+                    result_summary="prepared publication input is unavailable; reconcile before retry",
+                )
+            except DurableJobError:
+                latest = await durable_job_repository.get_job(job_id) or latest
+            return latest, "reconcile"
+
+        if latest.get("status") not in {"blocked", "unknown_external_effect", "cost_liability", "failed"}:
+            try:
+                latest = await durable_job_repository.transition_job(
+                    job_id,
+                    "blocked",
+                    owner=owner,
+                    fencing_token=fence,
+                    expected_revision=latest.get("revision"),
+                    reason=reason,
+                    result={"recovery_action": "reprepare", "learning": "no_learning"},
+                    result_summary="prepared publication input is unavailable; prepare again",
+                )
+            except DurableJobError:
+                latest = await durable_job_repository.get_job(job_id) or latest
+        return latest, "reprepare"
+
     async def _readback(
         self,
         prepared: PreparedPublication,
@@ -1473,7 +1717,11 @@ class GitHubFollowthroughService:
                 observed_body = payload.get("body")
                 observed_issue_url = _text(payload.get("issue_url"))
                 expected_issue_url = f"{GITHUB_ORIGIN}/repos/{prepared.repository}/issues/{prepared.issue_number}"
-                if observed_body == prepared.body and observed_issue_url == expected_issue_url:
+                if (
+                    payload.get("id") == remote_id
+                    and observed_body == prepared.body
+                    and observed_issue_url == expected_issue_url
+                ):
                     return True, "readback_verified", payload
                 return False, "readback_conflict", payload
             retryable = response.status_code == 404 or response.status_code == 429 or response.status_code >= 500
@@ -1722,7 +1970,17 @@ class GitHubFollowthroughService:
             return await self._prepare_job_response(current)
         if current.get("status") == "queued" and not _queued_approval_is_current(current):
             raise GitHubFollowthroughError("approval_required", status_code=403)
-        prepared = await self._read_prepared(current)
+        try:
+            prepared = await self._read_prepared(current)
+        except GitHubFollowthroughError as exc:
+            recovered, recovery_action = await self._handle_prepared_input_failure(
+                current,
+                reason=exc.code,
+            )
+            result = await self._prepare_job_response(recovered)
+            result["recovery_action"] = recovery_action
+            result["reason_code"] = exc.code
+            return result
         if current.get("status") == "awaiting_approval":
             approval_id = _text((current.get("declared_authority") or {}).get("approval_id"))
             approval = await approval_repository.get(approval_id)
@@ -1819,8 +2077,30 @@ class GitHubFollowthroughService:
                 current=current,
             )
             if not can_dispatch:
-                result = await self._prepare_job_response(current, prepared=prepared)
-                result["dispatch"] = "already_fenced"
+                latest_lease = current.get("lease") if isinstance(current.get("lease"), Mapping) else {}
+                latest_owner = str(latest_lease.get("owner") or owner)
+                latest_fence = int(latest_lease.get("fencing_token") or fence)
+                target_path = next(
+                    (
+                        str(item.get("target_path"))
+                        for item in reversed(current.get("effects") or [])
+                        if isinstance(item, Mapping)
+                        and item.get("effect_type") == "github_publication"
+                        and item.get("target_path")
+                    ),
+                    "github:dispatch-guard",
+                )
+                recovered = await self._mark_unknown(
+                    prepared,
+                    reason="dispatch_guard_recovery_required",
+                    current=current,
+                    owner=latest_owner,
+                    fence=latest_fence,
+                    target_path=target_path,
+                )
+                result = await self._prepare_job_response(recovered, prepared=prepared)
+                result["dispatch"] = "recovery_required"
+                result["recovery_action"] = "reconcile"
                 return result
             # Re-read the approval, connection revision, and dossier handoff
             # after the dispatch fence and immediately before resolving the
@@ -1854,6 +2134,16 @@ class GitHubFollowthroughService:
                 external_mutation_granted=external_mutation_granted,
             )
             connection = live_connection
+            await self._assert_dispatch_binding(
+                owner_principal_id=owner_principal_id,
+                connection_id=prepared.connection_id,
+                expected_revision=prepared.connection_revision,
+                repository=prepared.repository,
+                vault_key=str(connection.vault_key),
+                mode=str(connection.mode),
+                job_id=job_id,
+                fence=reservation_fence,
+            )
             token = await self._load_token(connection)
             deadline = min(
                 _now().timestamp() + EXECUTION_DEADLINE_SECONDS,
@@ -2059,10 +2349,24 @@ class GitHubFollowthroughService:
             raise GitHubFollowthroughError("job_not_found", status_code=404)
         return await self._prepare_job_response(current)
 
-    async def cancel(self, *, owner_principal_id: str, job_id: str) -> dict[str, Any]:
+    async def cancel(
+        self,
+        *,
+        owner_principal_id: str,
+        owner_session_id: str,
+        job_id: str,
+    ) -> dict[str, Any]:
         current = await durable_job_repository.get_job(job_id)
         if current is None or current.get("owner", {}).get("principal_id") != owner_principal_id:
             raise GitHubFollowthroughError("job_not_found", status_code=404)
+        authority = current.get("declared_authority") if isinstance(current.get("declared_authority"), Mapping) else {}
+        persisted_session = _text(
+            authority.get("session_id")
+            or current.get("operator_session_id")
+            or current.get("session_id")
+        )
+        if not _text(owner_session_id) or persisted_session != _text(owner_session_id):
+            raise GitHubFollowthroughError("job_session_mismatch", status_code=403)
         if current.get("status") in {"succeeded", "cancelled"}:
             return await self._prepare_job_response(current)
         lease = current.get("lease") or {}
@@ -2121,15 +2425,19 @@ class GitHubFollowthroughService:
             raise GitHubFollowthroughError("repository_binding_changed")
         if connection.mode not in {CONNECTION_MODE_RECONCILE_ONLY, CONNECTION_MODE_ACTIVE}:
             raise GitHubFollowthroughError("reconcile_grant_required", status_code=403)
+        recorded_remote_id: int | None = None
+        for item in reversed(current.get("effects") or []):
+            if not isinstance(item, Mapping):
+                continue
+            details = item.get("details")
+            if isinstance(details, Mapping) and isinstance(details.get("remote_id"), int) and not isinstance(details.get("remote_id"), bool):
+                recorded_remote_id = int(details["remote_id"])
+                break
         remote_id = request.remote_id
+        if remote_id is not None and recorded_remote_id is not None and remote_id != recorded_remote_id:
+            raise GitHubFollowthroughError("remote_id_binding_conflict", status_code=409)
         if remote_id is None:
-            for item in reversed(current.get("effects") or []):
-                if not isinstance(item, Mapping):
-                    continue
-                details = item.get("details")
-                if isinstance(details, Mapping) and isinstance(details.get("remote_id"), int):
-                    remote_id = int(details["remote_id"])
-                    break
+            remote_id = recorded_remote_id
         if remote_id is None:
             raise GitHubFollowthroughError("remote_id_required", status_code=409)
         token = await self._load_token(connection)
@@ -2288,6 +2596,7 @@ async def cancel_github_followthrough_job(job_id: str, request: Request):
         await _require_job_session(job_id, operator)
         return await github_followthrough_service.cancel(
             owner_principal_id=_principal_id(operator),
+            owner_session_id=_session_id(operator),
             job_id=job_id,
         )
     except GitHubFollowthroughError as exc:

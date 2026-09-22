@@ -2475,6 +2475,30 @@ body {
   padding-top: 8px;
 }
 
+.source-watch-actions,
+.source-watch-correction {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-top: 6px;
+}
+
+.source-watch-correction {
+  align-items: center;
+  border-top: 1px solid var(--cockpit-border);
+  padding-top: 6px;
+}
+
+.source-watch-correction input {
+  min-width: 160px;
+  flex: 1 1 160px;
+  border: 1px solid var(--cockpit-border);
+  background: var(--cockpit-bg);
+  color: var(--cockpit-text);
+  padding: 4px 6px;
+  font: 10px/1.3 var(--cockpit-mono, monospace);
+}
+
 .cockpit-outcome-preview {
   max-height: 180px;
   overflow: auto;

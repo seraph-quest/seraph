@@ -13,15 +13,17 @@ import hashlib
 import json
 import os
 from pathlib import Path
+from pathlib import PurePosixPath
 import resource
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import tarfile
 import threading
 import time
-from typing import Any
+from typing import Any, Iterable
 
 
 PROFILE = "repo-python-pytest-v1"
@@ -40,6 +42,103 @@ class WorkerInputError(ValueError):
     """Input was not part of the fixed worker contract."""
 
 
+def _descriptor_flags(*, directory: bool = False) -> int:
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    if directory:
+        flags |= getattr(os, "O_DIRECTORY", 0)
+    return flags
+
+
+def _open_directory_descriptor(path: Path) -> int:
+    """Open every component of an absolute directory path without following links."""
+
+    absolute = path.absolute()
+    parent_fd = os.open(os.sep, _descriptor_flags(directory=True))
+    try:
+        for component in PurePosixPath(absolute).parts:
+            if component == os.sep:
+                continue
+            next_fd = os.open(component, _descriptor_flags(directory=True), dir_fd=parent_fd)
+            os.close(parent_fd)
+            parent_fd = next_fd
+        return parent_fd
+    except OSError as exc:
+        try:
+            os.close(parent_fd)
+        except OSError:
+            pass
+        raise WorkerInputError("snapshot directory changed or contains a symlink") from exc
+
+
+def _same_file_identity(left: os.stat_result, right: os.stat_result) -> bool:
+    return (
+        stat.S_ISREG(left.st_mode)
+        and stat.S_ISREG(right.st_mode)
+        and left.st_dev == right.st_dev
+        and left.st_ino == right.st_ino
+    )
+
+
+def _same_file_metadata(left: os.stat_result, right: os.stat_result) -> bool:
+    return (
+        _same_file_identity(left, right)
+        and left.st_nlink == right.st_nlink
+        and left.st_size == right.st_size
+        and left.st_mtime_ns == right.st_mtime_ns
+        and left.st_ctime_ns == right.st_ctime_ns
+    )
+
+
+def _open_source_regular_file(
+    root: Path,
+    relative: str,
+    *,
+    expected_stat: os.stat_result | None = None,
+) -> tuple[int, os.stat_result]:
+    """Open one snapshot file through descriptor-relative no-follow traversal."""
+
+    relative_path = PurePosixPath(str(relative))
+    if relative_path.is_absolute() or not relative_path.parts or ".." in relative_path.parts:
+        raise WorkerInputError("snapshot source path is invalid")
+    parent_fd = _open_directory_descriptor(root)
+    descriptor = -1
+    try:
+        for component in relative_path.parts[:-1]:
+            next_fd = os.open(component, _descriptor_flags(directory=True), dir_fd=parent_fd)
+            os.close(parent_fd)
+            parent_fd = next_fd
+        descriptor = os.open(relative_path.parts[-1], _descriptor_flags(), dir_fd=parent_fd)
+        opened_stat = os.fstat(descriptor)
+        if not stat.S_ISREG(opened_stat.st_mode) or opened_stat.st_nlink != 1:
+            os.close(descriptor)
+            descriptor = -1
+            raise WorkerInputError("snapshot source is not a single-link regular file")
+        if expected_stat is not None and not _same_file_metadata(expected_stat, opened_stat):
+            os.close(descriptor)
+            descriptor = -1
+            raise WorkerInputError("snapshot source identity changed before read")
+        return descriptor, opened_stat
+    except WorkerInputError:
+        raise
+    except OSError as exc:
+        if descriptor >= 0:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+        raise WorkerInputError("snapshot source descriptor could not be opened") from exc
+    finally:
+        try:
+            os.close(parent_fd)
+        except OSError:
+            pass
+
+
+def _assert_stable_file(initial: os.stat_result, final: os.stat_result) -> None:
+    if not _same_file_metadata(initial, final) or final.st_nlink != 1:
+        raise WorkerInputError("snapshot source changed during read")
+
+
 def _safe_relative(value: object) -> str:
     text = str(value or "")
     if not text or "\x00" in text:
@@ -53,10 +152,10 @@ def _safe_relative(value: object) -> str:
     return normalized
 
 
-def _walk_tree(root: Path) -> list[tuple[str, Path, bool]]:
+def _walk_tree(root: Path) -> list[tuple[str, Path, bool, os.stat_result]]:
     """Return regular files/directories, refusing links and special files."""
     root = root.resolve(strict=True)
-    entries: list[tuple[str, Path, bool]] = []
+    entries: list[tuple[str, Path, bool, os.stat_result]] = []
     file_count = 0
     directory_count = 0
     total_bytes = 0
@@ -76,44 +175,55 @@ def _walk_tree(root: Path) -> list[tuple[str, Path, bool]]:
                 raise WorkerInputError("duplicate snapshot path")
             seen.add(relative)
             try:
-                stat = child.lstat()
+                file_stat = child.lstat()
             except OSError as exc:
                 raise WorkerInputError(f"snapshot stat failed: {exc}") from exc
-            if child.is_symlink() or not (child.is_file() or child.is_dir()):
+            if not (stat.S_ISREG(file_stat.st_mode) or stat.S_ISDIR(file_stat.st_mode)):
                 raise WorkerInputError(f"unsupported snapshot entry: {relative}")
-            if child.is_dir():
+            if stat.S_ISDIR(file_stat.st_mode):
                 directory_count += 1
                 if directory_count > MAX_DIRECTORIES:
                     raise WorkerInputError("snapshot directory limit exceeded")
-                entries.append((relative, child, True))
+                entries.append((relative, child, True, file_stat))
                 stack.append((child, relative, depth + 1))
                 continue
             file_count += 1
             if file_count > MAX_FILES:
                 raise WorkerInputError("snapshot file limit exceeded")
-            if stat.st_size > MAX_FILE_BYTES:
+            if not stat.S_ISREG(file_stat.st_mode) or file_stat.st_nlink != 1:
+                raise WorkerInputError(f"hardlinked or non-regular snapshot entry: {relative}")
+            if file_stat.st_size > MAX_FILE_BYTES:
                 raise WorkerInputError(f"file limit exceeded: {relative}")
-            total_bytes += stat.st_size
+            total_bytes += file_stat.st_size
             if total_bytes > MAX_SNAPSHOT_BYTES:
                 raise WorkerInputError("snapshot byte limit exceeded")
-            entries.append((relative, child, False))
+            entries.append((relative, child, False, file_stat))
     return sorted(entries, key=lambda item: item[0])
 
 
 def tree_digest(root: Path) -> str:
     digest = hashlib.sha256()
-    for relative, path, is_dir in _walk_tree(root):
+    for relative, path, is_dir, expected_stat in _walk_tree(root):
         if relative == ".git" or relative.startswith(".git/"):
             continue
         if is_dir:
             continue
         file_digest = hashlib.sha256()
-        with path.open("rb") as handle:
-            while chunk := handle.read(1024 * 1024):
-                file_digest.update(chunk)
+        descriptor, opened_stat = _open_source_regular_file(
+            root,
+            relative,
+            expected_stat=expected_stat,
+        )
+        try:
+            with os.fdopen(descriptor, "rb") as handle:
+                while chunk := handle.read(1024 * 1024):
+                    file_digest.update(chunk)
+                _assert_stable_file(opened_stat, os.fstat(handle.fileno()))
+        except OSError as exc:
+            raise WorkerInputError("snapshot source could not be read") from exc
         digest.update(relative.encode("utf-8"))
         digest.update(b"\0F\0")
-        digest.update(str(path.stat().st_size).encode("ascii"))
+        digest.update(str(opened_stat.st_size).encode("ascii"))
         digest.update(b"\0")
         digest.update(file_digest.hexdigest().encode("ascii"))
         digest.update(b"\n")
@@ -123,14 +233,24 @@ def tree_digest(root: Path) -> str:
 def _copy_snapshot(source: Path, target: Path) -> None:
     entries = _walk_tree(source)
     target.mkdir(parents=True, exist_ok=True)
-    for relative, path, is_dir in entries:
+    for relative, path, is_dir, expected_stat in entries:
         destination = target / relative
         destination.parent.mkdir(parents=True, exist_ok=True)
         if is_dir:
             destination.mkdir(exist_ok=True)
         else:
-            with path.open("rb") as source_handle, destination.open("xb") as target_handle:
-                shutil.copyfileobj(source_handle, target_handle, length=1024 * 1024)
+            descriptor, opened_stat = _open_source_regular_file(
+                source,
+                relative,
+                expected_stat=expected_stat,
+            )
+            try:
+                with os.fdopen(descriptor, "rb") as source_handle:
+                    with destination.open("xb") as target_handle:
+                        shutil.copyfileobj(source_handle, target_handle, length=1024 * 1024)
+                    _assert_stable_file(opened_stat, os.fstat(source_handle.fileno()))
+            except OSError as exc:
+                raise WorkerInputError("snapshot source could not be copied") from exc
 
 
 def _bounded_bytes(value: bytes, limit: int) -> tuple[bytes, bool]:
@@ -180,6 +300,39 @@ def _validate_patch_paths(patch: bytes, allowed_paths: set[str]) -> list[str]:
             changed.add(path)
     if not changed:
         raise WorkerInputError("patch has no supported file paths")
+    return sorted(changed)
+
+
+def _validate_changed_paths(
+    payload: bytes,
+    allowed_paths: set[str],
+    *,
+    required_paths: Iterable[str] = (),
+) -> list[str]:
+    """Validate the paths reported by git for the exported working diff."""
+    normalized_required = tuple(required_paths)
+    if len(payload) > MAX_OUTPUT_BYTES:
+        raise WorkerInputError("changed path output exceeded limit")
+    if not payload:
+        if normalized_required:
+            raise WorkerInputError("git changed path output is missing approved patch paths")
+        return []
+    if not payload.endswith(b"\0"):
+        raise WorkerInputError("git changed path output is malformed")
+    changed: set[str] = set()
+    for raw in payload[:-1].split(b"\0"):
+        if not raw:
+            raise WorkerInputError("git changed path output contains an empty path")
+        try:
+            path = _safe_relative(raw.decode("utf-8"))
+        except UnicodeDecodeError as exc:
+            raise WorkerInputError("git changed path is not UTF-8") from exc
+        if path not in allowed_paths:
+            raise WorkerInputError(f"worker changed path is not allowed: {path}")
+        changed.add(path)
+    required_set = {_safe_relative(path) for path in normalized_required}
+    if not required_set.issubset(changed):
+        raise WorkerInputError("git changed path output is missing approved patch paths")
     return sorted(changed)
 
 
@@ -327,9 +480,40 @@ def run_job(job_file: Path) -> int:
         (output / "pytest.stdout").write_bytes(stdout)
         (output / "pytest.stderr").write_bytes(stderr)
         after_digest = tree_digest(workspace)
-        diff_code, diff, diff_error, diff_timed_out = _git(workspace, "diff", "--binary", "--no-ext-diff", "--no-color", timeout=30)
+        # ``git diff`` omits untracked files.  Stage the bounded post-test
+        # workspace before exporting so an approved new file cannot silently
+        # disappear from the durable artifact.  The sandbox validates the
+        # resulting path set against both the allowlist and patch paths.
+        stage_code, _, stage_error, stage_timed_out = _git(workspace, "add", "--all", timeout=30)
+        if stage_code != 0 or stage_timed_out:
+            raise WorkerInputError("changed path staging failed")
+        changed_code, changed_paths_raw, changed_error, changed_timed_out = _git(
+            workspace,
+            "diff",
+            "--cached",
+            "--name-only",
+            "-z",
+            "--no-renames",
+            "--no-ext-diff",
+            "--no-color",
+            timeout=30,
+        )
+        if changed_code != 0 or changed_timed_out:
+            raise WorkerInputError("changed path export failed")
+        changed_paths = _validate_changed_paths(changed_paths_raw, allowed_paths, required_paths=patch_paths)
+        diff_code, diff, diff_error, diff_timed_out = _git(
+            workspace,
+            "diff",
+            "--cached",
+            "--binary",
+            "--no-ext-diff",
+            "--no-color",
+            timeout=30,
+        )
         if diff_code != 0 or diff_timed_out or len(diff) > MAX_OUTPUT_BYTES:
             raise WorkerInputError("diff export failed or exceeded limit")
+        if patch_paths and not diff:
+            raise WorkerInputError("diff export is missing approved patch paths")
         (output / "diff.patch").write_bytes(diff)
         diff_sha256 = hashlib.sha256(diff).hexdigest()
         manifest = {
@@ -344,7 +528,9 @@ def run_job(job_file: Path) -> int:
             "worker_image_digest": worker_image_digest,
             "worker_source_digest": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
             "diff_sha256": diff_sha256,
+            "allowed_paths": sorted(allowed_paths),
             "patch_paths": patch_paths,
+            "diff_paths": changed_paths,
             "test_args": test_args,
             "cpu_seconds": cpu_seconds,
             "stdout_truncated": stdout_truncated,

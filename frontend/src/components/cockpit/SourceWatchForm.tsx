@@ -33,6 +33,7 @@ interface SourceWatchRecord {
 
 export interface SourceWatchFormProps {
   goal: SourceWatchFormGoal | null;
+  autoLoad?: boolean;
 }
 
 function detailFromPayload(payload: unknown): string {
@@ -46,7 +47,7 @@ function detailFromPayload(payload: unknown): string {
   return "request failed";
 }
 
-export function SourceWatchForm({ goal }: SourceWatchFormProps) {
+export function SourceWatchForm({ goal, autoLoad = true }: SourceWatchFormProps) {
   const [watches, setWatches] = useState<SourceWatchRecord[]>([]);
   const [source, setSource] = useState("");
   const [includeTerms, setIncludeTerms] = useState("");
@@ -68,8 +69,8 @@ export function SourceWatchForm({ goal }: SourceWatchFormProps) {
   }, []);
 
   useEffect(() => {
-    void loadWatches();
-  }, [loadWatches]);
+    if (autoLoad) void loadWatches();
+  }, [autoLoad, loadWatches]);
 
   const createWatch = async () => {
     if (!goal?.id || !goal.revision || !source.trim()) {
@@ -157,6 +158,9 @@ export function SourceWatchForm({ goal }: SourceWatchFormProps) {
         />
         <button type="button" onClick={() => void createWatch()} disabled={!goal || busy}>
           {busy ? "Working…" : "Add watch"}
+        </button>
+        <button type="button" onClick={() => void loadWatches()} disabled={busy}>
+          Refresh watches
         </button>
       </div>
       {watches.filter((watch) => !goal || watch.goal_id === goal.id).map((watch) => (

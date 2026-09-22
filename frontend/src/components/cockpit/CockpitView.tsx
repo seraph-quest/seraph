@@ -7224,6 +7224,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     expiresAt: null,
   });
   const [githubConnection, setGithubConnection] = useState<GitHubConnectionState | null>(null);
+  const [githubConnectionLoaded, setGithubConnectionLoaded] = useState(false);
   const [githubFollowthrough, setGithubFollowthrough] = useState<CockpitGitHubFollowthrough | null>(null);
   const [feedbackState, setFeedbackState] = useState<Record<string, string>>({});
   const [approvalState, setApprovalState] = useState<Record<string, string>>({});
@@ -7495,6 +7496,21 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     }
   }, []);
 
+  // GitHub connection metadata is intentionally loaded only when the operator
+  // opens the follow-through action. It must not perturb the cockpit's stable
+  // baseline refresh request set or make an external capability look ready.
+  const loadGithubConnection = useCallback(async (): Promise<GitHubConnectionState | null> => {
+    const result = await fetchCockpitJson(`${API_URL}/api/capabilities/github/connection`, 5000);
+    setGithubConnectionLoaded(true);
+    if (result.ok && result.payload && typeof result.payload === "object" && !Array.isArray(result.payload)) {
+      const next = result.payload as GitHubConnectionState;
+      setGithubConnection(next);
+      return next;
+    }
+    setGithubConnection(null);
+    return null;
+  }, [fetchCockpitJson]);
+
   const fetchCockpitBatch = useCallback(async (
     requests: Array<() => Promise<CockpitFetchResult>>,
     isCancelled: () => boolean = () => false,
@@ -7521,7 +7537,6 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       observerResult,
       auditResult,
       approvalsResult,
-      githubConnectionResult,
       capabilitiesResult,
       extensionsResult,
       browserProvidersResult,
@@ -7535,7 +7550,6 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       () => fetchCockpitJson(`${API_URL}/api/observer/state`, 5000, isCancelled),
       () => fetchCockpitJson(`${API_URL}/api/audit/events?limit=12`, 5000, isCancelled),
       () => fetchCockpitJson(`${API_URL}/api/approvals/pending?limit=8`, 5000, isCancelled),
-      () => fetchCockpitJson(`${API_URL}/api/capabilities/github/connection`, 5000, isCancelled),
       () => fetchCockpitJson(`${API_URL}/api/capabilities/overview`, 5000, isCancelled),
       () => fetchCockpitJson(`${API_URL}/api/extensions`, 5000, isCancelled),
       () => sessionId
@@ -7601,11 +7615,6 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       // A failed approval read must not leave stale effect buttons actionable.
       setPendingApprovals([]);
       setApprovalLoadState("stale");
-    }
-    if (githubConnectionResult.ok && githubConnectionResult.payload && typeof githubConnectionResult.payload === "object") {
-      setGithubConnection(githubConnectionResult.payload as GitHubConnectionState);
-    } else if (githubConnectionResult.status === 401 || githubConnectionResult.status === 403) {
-      setGithubConnection(null);
     }
     if (capabilitiesResult.ok && capabilitiesResult.payload) {
       const capabilityPayload = capabilitiesResult.payload as CapabilityOverview;
@@ -10110,7 +10119,15 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       setOperatorStatus("GitHub publication is blocked until the authenticated operator session is current.");
       return;
     }
-    if (!githubConnectionReady || !githubConnection?.revision) {
+    const connection = githubConnection ?? await loadGithubConnection();
+    const connectionReady = Boolean(
+      connection
+      && connection.mode === "active"
+      && connection.credential_configured === true
+      && connection.repository
+      && connection.revision,
+    );
+    if (!connectionReady || !connection?.revision) {
       setOperatorStatus("GitHub publication is blocked: configure an active repository connection and vault credential first.");
       return;
     }
@@ -10161,7 +10178,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
           goal_revision: goalRevision,
           dossier_artifact_id: latestGuardianDossier.id,
           dossier_sha256: latestGuardianDossier.contentSha256,
-          connection_revision: githubConnection.revision,
+          connection_revision: connection.revision,
           action,
           title: action === "create_issue" ? title?.trim() : undefined,
           body: body.trim(),
@@ -10179,7 +10196,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
         setOperatorStatus(`GitHub preview refused: ${typeof detail === "string" ? detail : "the bound dossier or connection is stale"}.`);
         return;
       }
-      const next = normalizeGitHubFollowthrough(payload, githubConnectionReady);
+      const next = normalizeGitHubFollowthrough(payload, true);
       if (!next) {
         setOperatorStatus("GitHub preview returned incomplete metadata; no publication action is enabled.");
         return;
@@ -10252,7 +10269,6 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     }
     await refreshGitHubJob(jobId, "/reconcile", remoteId === undefined ? {} : { remote_id: remoteId });
   }
-
   const latestArtifactLineage = latestArtifact ? resolveArtifactLineage(latestArtifact) : null;
   const artifactSourceMatchesOutcome = Boolean(
     outcomeWorkflow
@@ -15377,6 +15393,15 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                       : workflowLoadState}
                 approvalLoadState={approvalLoadState}
                 recoveryAuthorized={recoveryAuthorityReady}
+                sourceWatchGoal={outcomeGoal}
+                githubConnectionReady={githubConnectionReady}
+                githubConnectionLoaded={githubConnectionLoaded}
+                githubFollowthrough={githubFollowthrough}
+                onPrepareGitHubIssue={() => void prepareGitHubFollowthrough("create_issue")}
+                onPrepareGitHubComment={() => void prepareGitHubFollowthrough("create_comment")}
+                onExecuteGitHubFollowthrough={() => void executeGitHubFollowthrough()}
+                onCancelGitHubFollowthrough={() => void cancelGitHubFollowthrough()}
+                onReconcileGitHubFollowthrough={() => void reconcileGitHubFollowthrough()}
                 onOpenPriorities={() => setQuestPanelOpen(true)}
                 onLoadWork={() => void loadWorkflowRuns()}
                 onInspectWork={() => inspectWorkflowRun(outcomeWorkflow)}
@@ -15408,14 +15433,6 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                     });
                   }
                 }}
-                githubConnectionReady={githubConnectionReady}
-                githubFollowthrough={githubFollowthrough}
-                sourceWatchGoal={outcomeGoal}
-                onPrepareGitHubIssue={() => void prepareGitHubFollowthrough("create_issue")}
-                onPrepareGitHubComment={() => void prepareGitHubFollowthrough("create_comment")}
-                onExecuteGitHubFollowthrough={() => void executeGitHubFollowthrough()}
-                onCancelGitHubFollowthrough={() => void cancelGitHubFollowthrough()}
-                onReconcileGitHubFollowthrough={() => void reconcileGitHubFollowthrough()}
                 onBranch={() => {
                   if (outcomeWorkflow && outcomeCheckpoint) {
                     void queueLiveWorkflowResumePlan(outcomeWorkflow, {

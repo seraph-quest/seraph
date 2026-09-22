@@ -162,6 +162,8 @@ export interface OutcomeCockpitPanelProps {
   onCancelGitHubFollowthrough?: () => void;
   onReconcileGitHubFollowthrough?: () => void;
   githubConnectionReady?: boolean;
+  githubConnectionLoaded?: boolean;
+  /** Goal binding is supplied by the existing outcome route; loading is explicit to preserve refresh order. */
   sourceWatchGoal?: SourceWatchFormGoal | null;
   /** Explicitly supplied by the parent after auth, run, and identity checks. */
   recoveryAuthorized?: boolean;
@@ -307,6 +309,7 @@ export function OutcomeCockpitPanel({
   onCancelGitHubFollowthrough,
   onReconcileGitHubFollowthrough,
   githubConnectionReady = false,
+  githubConnectionLoaded = false,
   sourceWatchGoal = null,
   recoveryAuthorized = false,
 }: OutcomeCockpitPanelProps) {
@@ -327,7 +330,7 @@ export function OutcomeCockpitPanel({
   const workNeedsLoad = !work && ["partial_metadata", "stale", "degraded"].includes(workLoadState);
   const githubState = githubFollowthrough?.state ?? "empty";
   const githubConnectionIsReady = githubFollowthrough?.connectionReady ?? githubConnectionReady;
-  const githubLocked = actionLocked(githubState, githubConnectionIsReady);
+  const githubLocked = actionLocked(githubState, !githubConnectionLoaded || githubConnectionIsReady);
   const githubCanPublish = Boolean(
     githubFollowthrough
     && githubFollowthrough.approvalStatus === "approved"
@@ -532,7 +535,7 @@ export function OutcomeCockpitPanel({
           <ValueRow label="learning record" value={display(result.learningRecordId, "no learning record")} />
         </Card>
 
-        <SourceWatchForm goal={sourceWatchGoal} />
+        <SourceWatchForm goal={sourceWatchGoal} autoLoad={false} />
 
         <Card
           id="outcome-github-followthrough-card"

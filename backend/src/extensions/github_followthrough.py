@@ -728,6 +728,7 @@ class GitHubFollowthroughService:
             raise GitHubFollowthroughError("prepared_input_malformed")
         try:
             operation_id = _uuid(value.get("operation_id"))
+            payload_job_id = _text(value.get("job_id"))
             owner_principal_id = _text(value.get("owner_principal_id"))
             owner_session_id = _text(value.get("owner_session_id"))
             conversation_id = _text(value.get("conversation_id"))
@@ -750,6 +751,13 @@ class GitHubFollowthroughService:
             operation_marker = _text(value.get("operation_marker"))
         except (KeyError, TypeError, ValueError) as exc:
             raise GitHubFollowthroughError("prepared_input_malformed") from exc
+        current_job_id = _text(current.get("job_id"))
+        if (
+            not current_job_id
+            or payload_job_id != current_job_id
+            or current_job_id != f"ghfollow_{operation_id.hex}"
+        ):
+            raise GitHubFollowthroughError("prepared_job_identity_mismatch")
         if (
             not owner_principal_id
             or not owner_session_id

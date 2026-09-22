@@ -475,6 +475,77 @@ async def test_pause_cancels_m3_child_through_canonical_adapter(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_pause_preserves_watch_child_when_active_m1_watch_readback_is_missing(monkeypatch):
+    child_id = "routine-child:watch-cancel-readback"
+    m1_job_id = f"source-watch:watch-1:{child_id}"
+    child = {
+        "job_id": child_id,
+        "status": "awaiting_approval",
+        "revision": 4,
+        "owner": {"principal_id": "principal-1"},
+        "session_id": "session-1",
+        "declared_authority": {
+            "routine_id": "routine-1",
+            "step_id": "guardian_watch_run",
+            "source_watch_id": "watch-1",
+            "session_id": "session-1",
+        },
+        "checkpoints": [],
+    }
+    parent = {
+        "job_id": "routine-invocation-1",
+        "job_kind": "routine_invocation",
+        "status": "running",
+        "revision": 2,
+        "lease": {"owner": "routine:parent", "fencing_token": 7},
+        "declared_authority": {"routine_id": "routine-1"},
+    }
+    cancelled: list[str] = []
+    transitioned: list[tuple[str, str]] = []
+
+    class FakeJobs:
+        async def list_jobs(self, *, limit):
+            assert limit == 100
+            return [child, parent]
+
+        async def get_job(self, job_id):
+            if job_id == m1_job_id:
+                return {"job_id": job_id, "status": "running"}
+            return None
+
+        async def cancel_job(self, job_id, **_kwargs):
+            cancelled.append(job_id)
+            return {"job_id": job_id, "status": "cancelled"}
+
+        async def transition_job(self, job_id, status, **_kwargs):
+            transitioned.append((job_id, status))
+            return {"job_id": job_id, "status": status}
+
+    class MissingWatch:
+        async def get_watch(self, *_args, **_kwargs):
+            return None
+
+    import src.workflows.routines as routines_module
+
+    monkeypatch.setattr(routines_module, "durable_job_repository", FakeJobs())
+    monkeypatch.setattr(routines_module, "source_watch_service", MissingWatch())
+
+    failures = await RoutineService()._cancel_pending_jobs("routine-1", reason="routine_paused:user_request")
+
+    assert cancelled == []
+    assert transitioned == [("routine-invocation-1", "blocked")]
+    assert failures == [
+        {
+            "job_id": child_id,
+            "step_id": "guardian_watch_run",
+            "status": "blocked",
+            "reason_code": "RuntimeError",
+            "operator_action": "recover_or_cancel",
+        }
+    ]
+
+
+@pytest.mark.asyncio
 async def test_pause_cancel_reports_m3_failure_for_operator_reconciliation(monkeypatch):
     child = {
         "job_id": "routine-child:publication-failure",

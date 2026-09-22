@@ -110,7 +110,10 @@ DURABLE_JOB_TRANSITIONS: dict[str, frozenset[str]] = {
     }),
     "unknown_external_effect": frozenset({"blocked", "failed", "cancelled"}),
     "cost_liability": frozenset({"blocked", "failed", "cancelled"}),
-    "failed": frozenset({"queued"}),
+    # A failed local execution can be explicitly settled when recovery has
+    # proved that no external effect remains. Unknown effect history is
+    # redirected to reconciliation below rather than silently cancelled.
+    "failed": frozenset({"queued", "cancelled", "unknown_external_effect", "cost_liability"}),
     "degraded": frozenset(),
     "succeeded": frozenset(),
     "cancelled": frozenset(),
@@ -2197,6 +2200,15 @@ class DurableJobRepository:
                 raise DurableJobTransitionError(
                     "failed jobs require explicit retry with reconciliation"
                 )
+            if current == "failed" and to_status == "cancelled":
+                try:
+                    effect_ledger = _effect_ledger_or_raise(run.effect_receipts_json)
+                except DurableJobTransitionError:
+                    to_status = "unknown_external_effect"
+                    reason = reason or "malformed_effect_history_requires_reconciliation"
+                if effect_ledger is not None and _job_has_unsafe_effects(effect_ledger):
+                    to_status, recovery_reason = _effect_recovery_state(effect_ledger)
+                    reason = reason or f"{recovery_reason}_pending_before_transition"
             if current == "running" and (owner is None or fencing_token is None):
                 raise DurableJobLeaseError(
                     "active jobs require owner and fencing token for every transition"

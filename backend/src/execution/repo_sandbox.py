@@ -1196,14 +1196,34 @@ class RootlessDockerRepoSandbox:
         cap_drop = {str(item).upper() for item in (host.get("CapDrop") or [])}
         if "ALL" not in cap_drop:
             raise RepoSandboxError("worker capabilities were not dropped")
+        cap_add = host.get("CapAdd") or []
+        if cap_add:
+            raise RepoSandboxError("worker capabilities were added")
         security_opt = {str(item).lower() for item in (host.get("SecurityOpt") or [])}
         if "no-new-privileges" not in security_opt:
             raise RepoSandboxError("worker no-new-privileges is not enabled")
+        expected_tmpfs = {
+            "/workspace": "rw,noexec,nosuid,nodev,size=128m,uid=65532,gid=65532,mode=0700",
+            "/out": "rw,noexec,nosuid,nodev,size=16m,uid=65532,gid=65532,mode=0700",
+            "/tmp": "rw,noexec,nosuid,nodev,size=64m,uid=65532,gid=65532,mode=0700",
+        }
+        effective_tmpfs = host.get("Tmpfs") or {}
+        if not isinstance(effective_tmpfs, Mapping) or {
+            str(key): str(value) for key, value in effective_tmpfs.items()
+        } != expected_tmpfs:
+            raise RepoSandboxError("worker tmpfs profile does not match the fixed profile")
         binds = host.get("Binds") or []
         if binds:
             raise RepoSandboxError("worker has an unapproved bind mount")
         mounts = inspected.get("Mounts") if isinstance(inspected, Mapping) else []
         mounts = mounts if isinstance(mounts, list) else []
+        mount_destinations = {
+            str(item.get("Destination") or "")
+            for item in mounts
+            if isinstance(item, Mapping)
+        }
+        if mount_destinations != {"/input", "/workspace", "/out", "/tmp"}:
+            raise RepoSandboxError("worker mount profile does not match the fixed profile")
         input_mounts = [
             item for item in mounts
             if isinstance(item, Mapping) and str(item.get("Destination") or "") == "/input"
@@ -1436,9 +1456,12 @@ class RootlessDockerRepoSandbox:
             )
         worker_name = expected_container_name or derived_worker_name
         input_volume = expected_input_volume or derived_input_volume
-        code, stdout, stderr = self._run_docker(
-            ["inspect", "--format", "{{json .}}", worker_name], timeout=10
-        )
+        try:
+            code, stdout, stderr = self._run_docker(
+                ["inspect", "--format", "{{json .}}", worker_name], timeout=10
+            )
+        except Exception as exc:
+            return validation_failure(exc, phase="worker_started")
         if code != 0:
             try:
                 cleanup = self.cancel(
@@ -1626,22 +1649,42 @@ class RootlessDockerRepoSandbox:
                 ["kill", name],
                 ["rm", "--force", name],
             ):
-                code, stdout, stderr = self._run_docker(args, timeout=10)
-                receipts.append({"operation": args[0], "target": name, "status": "ok" if code == 0 else "failed"})
-        code, stdout, stderr = self._run_docker(["volume", "rm", input_volume], timeout=10)
-        receipts.append({"operation": "volume_rm", "target": input_volume, "status": "ok" if code == 0 else "failed"})
+                try:
+                    code, stdout, stderr = self._run_docker(args, timeout=10)
+                    receipts.append({"operation": args[0], "target": name, "status": "ok" if code == 0 else "failed"})
+                except Exception as exc:
+                    # Cleanup must attempt every bounded target.  A transient
+                    # Docker error on stop/kill cannot prevent the later rm,
+                    # loader, and volume operations from running.
+                    receipts.append({"operation": args[0], "target": name, "status": "error", "error": type(exc).__name__})
+        try:
+            code, stdout, stderr = self._run_docker(["volume", "rm", input_volume], timeout=10)
+            receipts.append({"operation": "volume_rm", "target": input_volume, "status": "ok" if code == 0 else "failed"})
+        except Exception as exc:
+            receipts.append({"operation": "volume_rm", "target": input_volume, "status": "error", "error": type(exc).__name__})
         if output_volume:
-            code, stdout, stderr = self._run_docker(["volume", "rm", output_volume], timeout=10)
-            receipts.append({"operation": "volume_rm_output", "target": output_volume, "status": "ok" if code == 0 else "failed"})
+            try:
+                code, stdout, stderr = self._run_docker(["volume", "rm", output_volume], timeout=10)
+                receipts.append({"operation": "volume_rm_output", "target": output_volume, "status": "ok" if code == 0 else "failed"})
+            except Exception as exc:
+                receipts.append({"operation": "volume_rm_output", "target": output_volume, "status": "error", "error": type(exc).__name__})
         container_checks: list[bool] = []
         for name in container_names:
-            code, _, error = self._run_docker(["inspect", name], timeout=10)
-            container_checks.append(code != 0 and b"No such object" in error)
+            try:
+                code, _, error = self._run_docker(["inspect", name], timeout=10)
+                container_checks.append(code != 0 and b"No such object" in error)
+            except Exception as exc:
+                container_checks.append(False)
+                receipts.append({"operation": "inspect", "target": name, "status": "error", "error": type(exc).__name__})
         volume_names = [input_volume] + ([output_volume] if output_volume else [])
         volume_checks: list[bool] = []
         for volume_name in volume_names:
-            volume_code, _, volume_error = self._run_docker(["volume", "inspect", volume_name], timeout=10)
-            volume_checks.append(volume_code != 0 and b"No such volume" in volume_error)
+            try:
+                volume_code, _, volume_error = self._run_docker(["volume", "inspect", volume_name], timeout=10)
+                volume_checks.append(volume_code != 0 and b"No such volume" in volume_error)
+            except Exception as exc:
+                volume_checks.append(False)
+                receipts.append({"operation": "volume_inspect", "target": volume_name, "status": "error", "error": type(exc).__name__})
         proven_removed = all(container_checks) and all(volume_checks)
         if not proven_removed:
             return {"status": "unknown_external_effect", "reason": "cleanup_unproven", "receipts": receipts}

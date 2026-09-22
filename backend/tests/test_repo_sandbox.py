@@ -20,8 +20,13 @@ from src.execution.repo_sandbox import (
     validate_archive_members,
 )
 from src.execution.repo_worker import (
+    MAX_ALLOWED_PATH_BYTES,
+    MAX_ALLOWED_PATHS,
+    MAX_JOB_BYTES,
     WorkerInputError,
     _open_source_regular_file as _open_worker_source_regular_file,
+    _read_bounded_job_json,
+    _validate_allowed_paths,
     _validate_changed_paths,
     tree_digest,
 )
@@ -75,6 +80,32 @@ def test_backend_and_worker_snapshot_digest_match(tmp_path: Path):
             )
     backend_digest = _digest_entries(entries)
     assert backend_digest == tree_digest(source)
+
+
+def test_worker_job_descriptor_is_bounded_before_json_parse(tmp_path: Path):
+    input_root = tmp_path / "input"
+    input_root.mkdir()
+    job_file = input_root / "job.json"
+    job_file.write_bytes(b"{" + b"x" * MAX_JOB_BYTES)
+
+    with pytest.raises(WorkerInputError, match="job input exceeds"):
+        _read_bounded_job_json(job_file)
+
+
+def test_worker_allowed_paths_are_typed_unique_and_bounded():
+    assert _validate_allowed_paths(["src/app.py"]) == {"src/app.py"}
+    invalid_values = (
+        None,
+        "src/app.py",
+        ("src/app.py",),
+        ["src/app.py", 7],
+        ["src/app.py", "src/app.py"],
+        ["x" * (MAX_ALLOWED_PATH_BYTES + 1)],
+        [f"src/{index}.py" for index in range(MAX_ALLOWED_PATHS + 1)],
+    )
+    for value in invalid_values:
+        with pytest.raises(WorkerInputError, match="allowed_paths"):
+            _validate_allowed_paths(value)
 
 
 def test_socket_and_image_validation_fail_closed():

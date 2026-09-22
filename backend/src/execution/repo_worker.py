@@ -33,9 +33,12 @@ MAX_DEPTH = 16
 MAX_SNAPSHOT_BYTES = 64 * 1024 * 1024
 MAX_FILE_BYTES = 2 * 1024 * 1024
 MAX_PATCH_BYTES = 1 * 1024 * 1024
+MAX_JOB_BYTES = 2 * MAX_PATCH_BYTES
 MAX_OUTPUT_BYTES = 16 * 1024 * 1024
 MAX_STREAM_BYTES = 1 * 1024 * 1024
 MAX_WALL_SECONDS = 180
+MAX_ALLOWED_PATHS = 64
+MAX_ALLOWED_PATH_BYTES = 4096
 
 
 class WorkerInputError(ValueError):
@@ -132,6 +135,25 @@ def _open_source_regular_file(
             os.close(parent_fd)
         except OSError:
             pass
+
+
+def _read_bounded_job_json(job_file: Path) -> dict[str, Any]:
+    """Read the fixed job descriptor through a bounded, no-follow descriptor."""
+    descriptor, _job_stat = _open_source_regular_file(job_file.parent, job_file.name)
+    try:
+        with os.fdopen(descriptor, "rb") as job_handle:
+            payload = job_handle.read(MAX_JOB_BYTES + 1)
+    except OSError as exc:
+        raise WorkerInputError("job input could not be read") from exc
+    if len(payload) > MAX_JOB_BYTES:
+        raise WorkerInputError("job input exceeds the fixed input limit")
+    try:
+        value = json.loads(payload.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise WorkerInputError("job input is not valid UTF-8 JSON") from exc
+    if not isinstance(value, dict):
+        raise WorkerInputError("job input must be an object")
+    return value
 
 
 def _assert_stable_file(initial: os.stat_result, final: os.stat_result) -> None:
@@ -281,6 +303,27 @@ def _validate_test_args(raw: object, allowed_paths: set[str]) -> list[str]:
     return normalized
 
 
+def _validate_allowed_paths(raw: object) -> set[str]:
+    """Validate the fixed, canonical allowlist before constructing a set."""
+    if not isinstance(raw, list) or not raw:
+        raise WorkerInputError("allowed_paths must be a non-empty list")
+    if len(raw) > MAX_ALLOWED_PATHS:
+        raise WorkerInputError("allowed_paths limit exceeded")
+    normalized: list[str] = []
+    for item in raw:
+        if not isinstance(item, str) or not item:
+            raise WorkerInputError("allowed_paths entries must be non-empty strings")
+        if len(item.encode("utf-8")) > MAX_ALLOWED_PATH_BYTES:
+            raise WorkerInputError("allowed_paths entry exceeds the fixed length limit")
+        path = _safe_relative(item)
+        if len(path.encode("utf-8")) > MAX_ALLOWED_PATH_BYTES:
+            raise WorkerInputError("allowed_paths entry exceeds the fixed length limit")
+        if path in normalized:
+            raise WorkerInputError("allowed_paths contains duplicate entries")
+        normalized.append(path)
+    return set(normalized)
+
+
 def _validate_patch_paths(patch: bytes, allowed_paths: set[str]) -> list[str]:
     if len(patch) > MAX_PATCH_BYTES:
         raise WorkerInputError("patch byte limit exceeded")
@@ -418,18 +461,23 @@ def _write_json(path: Path, payload: dict[str, Any]) -> None:
 
 def run_job(job_file: Path) -> int:
     try:
-        job = json.loads(job_file.read_text(encoding="utf-8"))
-        if not isinstance(job, dict) or job.get("profile") != PROFILE:
+        job = _read_bounded_job_json(job_file)
+        if job.get("profile") != PROFILE:
             raise WorkerInputError("unsupported worker profile")
         input_root = job_file.parent
         snapshot_root = input_root / "snapshot"
         patch_path = input_root / "patch.diff"
         workspace = Path("/workspace")
         output = Path("/out")
-        allowed_paths = {_safe_relative(value) for value in job.get("allowed_paths", [])}
-        if not allowed_paths or len(allowed_paths) > 64:
-            raise WorkerInputError("allowed_paths is invalid")
-        patch = patch_path.read_bytes()
+        allowed_paths = _validate_allowed_paths(job.get("allowed_paths"))
+        patch_descriptor, _patch_stat = _open_source_regular_file(input_root, "patch.diff")
+        try:
+            with os.fdopen(patch_descriptor, "rb") as patch_handle:
+                patch = patch_handle.read(MAX_PATCH_BYTES + 1)
+        except OSError as exc:
+            raise WorkerInputError("patch input could not be read") from exc
+        if len(patch) > MAX_PATCH_BYTES:
+            raise WorkerInputError("patch exceeds the fixed input limit")
         patch_paths = _validate_patch_paths(patch, allowed_paths)
         test_args = _validate_test_args(job.get("test_args"), allowed_paths)
         shutil.rmtree(workspace, ignore_errors=True)

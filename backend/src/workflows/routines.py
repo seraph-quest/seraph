@@ -202,9 +202,39 @@ def _owner_matches(job: Mapping[str, Any] | None, principal_id: str, session_id:
     authority = job.get("declared_authority")
     if not isinstance(authority, Mapping):
         authority = {}
+    owner = job.get("owner") if isinstance(job.get("owner"), Mapping) else {}
+    owner_kind = str(owner.get("kind") or authority.get("owner_kind") or "")
+    delegated_principal = str(
+        authority.get("goal_owner_principal_id")
+        or (owner.get("principal_id") if owner_kind == "user" else "")
+        or ""
+    )
+    delegated_session = str(
+        authority.get("goal_owner_session_id")
+        or authority.get("session_id")
+        or ""
+    )
+    persisted_sessions = {
+        str(value)
+        for value in (
+            authority.get("session_id"),
+            job.get("operator_session_id"),
+            job.get("session_id"),
+        )
+        if str(value or "")
+    }
+    if owner_kind == "service" and (
+        not authority.get("goal_owner_principal_id")
+        or not authority.get("goal_owner_session_id")
+    ):
+        return False
+    if owner_kind == "user" and str(owner.get("principal_id") or "") != str(principal_id):
+        return False
     return (
-        str(authority.get("goal_owner_principal_id") or authority.get("principal") or "") == principal_id
-        and str(authority.get("goal_owner_session_id") or authority.get("session_id") or "") == session_id
+        delegated_principal == str(principal_id)
+        and delegated_session == str(session_id)
+        and persisted_sessions
+        and persisted_sessions == {str(session_id)}
     )
 
 
@@ -428,8 +458,17 @@ class RoutineService:
             db.expunge(packet)
         if packet.run_identity != source_watch_job_id or packet.status != "succeeded" or packet.verification_status != "passed":
             raise RoutineError("source_packet_not_verified")
-        watch = await source_watch_service.get_watch(packet.source_watch_id, owner_principal_id=owner_principal_id)
-        if watch is None or watch.get("goal_id") != packet.goal_id:
+        watch = await source_watch_service.get_watch(
+            packet.source_watch_id,
+            owner_principal_id=owner_principal_id,
+            owner_session_id=owner_session_id,
+        )
+        if (
+            watch is None
+            or watch.get("goal_id") != packet.goal_id
+            or str(watch.get("owner_principal_id") or "") != str(owner_principal_id)
+            or str(watch.get("owner_session_id") or "") != str(owner_session_id)
+        ):
             raise RoutineError("source_watch_not_owned", status_code=404)
         if int(watch.get("goal_revision", 0)) != int(packet.goal_revision) or int(watch.get("plan_revision", 0)) != int(packet.plan_revision):
             raise RoutineError("source_watch_revision_stale")
@@ -466,6 +505,28 @@ class RoutineService:
             or not _same_revision(prepared.plan_revision, packet.plan_revision)
         ):
             raise RoutineError("source_m3_dossier_binding_missing")
+        expected_m3_input_digest = _sha(
+            _dump(
+                {
+                    "operation_id": str(prepared.operation_id),
+                    "repository": prepared.repository,
+                    "connection_id": prepared.connection_id,
+                    "connection_revision": int(prepared.connection_revision),
+                    "action": prepared.action,
+                    "issue_number": prepared.issue_number,
+                    "title_sha256": _sha(prepared.title or ""),
+                    "body_sha256": _sha(prepared.body),
+                    "dossier_artifact_id": prepared.dossier_artifact_id,
+                    "dossier_sha256": prepared.dossier_sha256,
+                    "source_watch_id": prepared.source_watch_id,
+                    "goal_id": prepared.goal_id,
+                    "goal_revision": int(prepared.goal_revision),
+                    "plan_revision": int(prepared.plan_revision),
+                }
+            )
+        )
+        if str(m3_job.get("input_digest") or "") != expected_m3_input_digest:
+            raise RoutineError("source_m3_input_digest_mismatch")
         m3_authority = m3_job.get("declared_authority") if isinstance(m3_job.get("declared_authority"), Mapping) else {}
         if (
             str(m3_authority.get("source_watch_id") or "") != str(packet.source_watch_id)
@@ -1011,6 +1072,8 @@ class RoutineService:
         lease = child.get("lease") if isinstance(child.get("lease"), Mapping) else {}
         m3_job_id = ""
         m3_cancellation: dict[str, Any] | None = None
+        m1_job_id = ""
+        m1_cancellation: dict[str, Any] | None = None
         if step_id == "github_followthrough":
             binding = _publication_binding_checkpoint(child) or {}
             m3_job_id = str(binding.get("m3_job_id") or "")
@@ -1026,10 +1089,92 @@ class RoutineService:
                     ),
                     m3_job_id=m3_job_id,
                 )
+        elif step_id == "guardian_watch_run" and cancel_external:
+            # M1 owns the source-watch fence and its durable occurrence.  A
+            # stale M4 wrapper must release that reservation before it is
+            # cancelled; otherwise a paused/revoked routine can strand an
+            # active watch and allow a later scheduler occurrence to race it.
+            child_authority = child.get("declared_authority") if isinstance(child.get("declared_authority"), Mapping) else {}
+            dispatch = _job_checkpoint(child, "routine-child:dispatch_started") or {}
+            m1_job_id = str(dispatch.get("m1_job_id") or "")
+            if not m1_job_id:
+                for effect in child.get("effects", []) or []:
+                    details = effect.get("details") if isinstance(effect, Mapping) else None
+                    if isinstance(details, Mapping) and details.get("m1_job_id"):
+                        m1_job_id = str(details.get("m1_job_id"))
+                        break
+            watch_id = str(child_authority.get("source_watch_id") or "")
+            if not m1_job_id and watch_id and child_id:
+                # M1 derives its occurrence from the M4 child ID. This closes
+                # the crash window between M1 admission and the child receipt
+                # that records the returned M1 ID.
+                m1_job_id = f"source-watch:{watch_id}:{child_id}"
+            owner_principal_id = str(owner.get("principal_id") or "")
+            owner_session_id = str(
+                child.get("operator_session_id")
+                or child.get("session_id")
+                or child_authority.get("session_id")
+                or ""
+            )
+            if m1_job_id and watch_id:
+                try:
+                    watch = await source_watch_service.get_watch(
+                        watch_id,
+                        owner_principal_id=owner_principal_id,
+                        owner_session_id=owner_session_id,
+                    )
+                    m1_job = await durable_job_repository.get_job(m1_job_id)
+                    m1_status = str(m1_job.get("status") or "") if isinstance(m1_job, Mapping) else ""
+                    if m1_status in {"accepted", "queued", "running", "awaiting_approval", "blocked"}:
+                        if not isinstance(watch, Mapping):
+                            raise RuntimeError("source_watch_missing")
+                        active_fence = int(watch.get("active_job_fence") or 0)
+                        if active_fence <= 0 or str(watch.get("active_job_id") or "") != m1_job_id:
+                            raise RuntimeError("source_watch_execution_fence_stale")
+                        m1_cancellation = await source_watch_service.cancel_watch_job(
+                            watch_id=watch_id,
+                            job_id=m1_job_id,
+                            expected_plan_revision=int(watch.get("plan_revision") or 0),
+                            expected_fencing_token=active_fence,
+                            owner_principal_id=owner_principal_id,
+                            owner_session_id=owner_session_id,
+                        )
+                        if str(m1_cancellation.get("status") or "") != "cancelled":
+                            m1_cancellation = {
+                                "ok": False,
+                                "status": str(m1_cancellation.get("status") or "blocked"),
+                                "reason_code": "m1_cancel_not_settled",
+                                "operator_action": "recover_or_cancel",
+                            }
+                        else:
+                            m1_cancellation = {"ok": True, **dict(m1_cancellation)}
+                    elif m1_status in {"unknown_external_effect", "cost_liability"}:
+                        m1_cancellation = {
+                            "ok": False,
+                            "status": m1_status,
+                            "reason_code": "m1_external_effect_unresolved",
+                            "operator_action": "recover_or_cancel",
+                        }
+                    elif isinstance(watch, Mapping) and str(watch.get("active_job_id") or "") == m1_job_id:
+                        raise RuntimeError("source_watch_job_missing")
+                except Exception as exc:
+                    m1_cancellation = {
+                        "ok": False,
+                        "status": "blocked",
+                        "reason_code": type(exc).__name__,
+                        "operator_action": "recover_or_cancel",
+                    }
 
         child_result: Mapping[str, Any] | None = None
         status = str(child.get("status") or "")
-        if status in {"accepted", "queued", "running", "awaiting_approval", "blocked"} and child_id:
+        external_cancellation = (
+            m3_cancellation
+            if m3_cancellation and not m3_cancellation.get("ok")
+            else m1_cancellation
+            if m1_cancellation and not m1_cancellation.get("ok")
+            else None
+        )
+        if external_cancellation is None and status in {"accepted", "queued", "running", "awaiting_approval", "blocked"} and child_id:
             try:
                 child_result = await durable_job_repository.cancel_job(
                     child_id,
@@ -1054,17 +1199,22 @@ class RoutineService:
                 }
 
         m3_unresolved = bool(m3_cancellation and not m3_cancellation.get("ok"))
+        m1_unresolved = bool(m1_cancellation and not m1_cancellation.get("ok"))
+        external_unresolved = m3_unresolved or m1_unresolved
         result_status = str(child_result.get("status") or "cancelled") if child_result else status or "cancelled"
-        recovery = "reconcile_or_cancel" if m3_unresolved else operator_action
+        recovery = "reconcile_or_cancel" if m3_unresolved else "recover_or_cancel" if m1_unresolved else operator_action
         outcome = {
-            "status": "blocked" if m3_unresolved else result_status,
+            "status": "blocked" if external_unresolved else result_status,
             "job_id": parent.get("job_id"),
             "child_job_id": child_id,
             "child_status": result_status,
             "m3_job_id": m3_job_id or None,
+            "m1_job_id": m1_job_id or None,
             "reason_code": (
                 str(m3_cancellation.get("reason_code") or "m3_external_effect_unresolved")
                 if m3_unresolved and m3_cancellation
+                else str(m1_cancellation.get("reason_code") or "m1_watch_effect_unresolved")
+                if m1_unresolved and m1_cancellation
                 else reason_code
             ),
             "recovery": recovery,
@@ -1244,26 +1394,35 @@ class RoutineService:
                             m1_job_id = str(details.get("m1_job_id"))
                             break
                 watch_id = str(authority.get("source_watch_id") or "")
+                if not m1_job_id and watch_id and child_job_id:
+                    m1_job_id = f"source-watch:{watch_id}:{child_job_id}"
                 if m1_job_id and watch_id:
                     try:
                         watch = await source_watch_service.get_watch(
                             watch_id,
                             owner_principal_id=owner_principal_id or str(job.get("owner", {}).get("principal_id") or ""),
+                            owner_session_id=owner_session_id or str(job.get("operator_session_id") or job.get("session_id") or authority.get("session_id") or ""),
                         )
                         m1_job = await durable_job_repository.get_job(m1_job_id)
-                        if watch and m1_job and str(m1_job.get("status") or "") in {
+                        m1_status = str(m1_job.get("status") or "") if isinstance(m1_job, Mapping) else ""
+                        if m1_status in {
                             "accepted", "queued", "running", "awaiting_approval", "blocked"
                         }:
+                            if not isinstance(watch, Mapping):
+                                raise RuntimeError("source_watch_missing")
                             active_fence = int(watch.get("active_job_fence") or 0)
-                            if active_fence:
-                                await source_watch_service.cancel_watch_job(
-                                    watch_id=watch_id,
-                                    job_id=m1_job_id,
-                                    expected_plan_revision=int(watch.get("plan_revision") or 0),
-                                    expected_fencing_token=active_fence,
-                                    owner_principal_id=owner_principal_id or str(job.get("owner", {}).get("principal_id") or ""),
-                                    owner_session_id=str(authority.get("session_id") or ""),
-                                )
+                            if active_fence <= 0 or str(watch.get("active_job_id") or "") != m1_job_id:
+                                raise RuntimeError("source_watch_execution_fence_stale")
+                            await source_watch_service.cancel_watch_job(
+                                watch_id=watch_id,
+                                job_id=m1_job_id,
+                                expected_plan_revision=int(watch.get("plan_revision") or 0),
+                                expected_fencing_token=active_fence,
+                                owner_principal_id=owner_principal_id or str(job.get("owner", {}).get("principal_id") or ""),
+                                owner_session_id=owner_session_id or str(job.get("operator_session_id") or job.get("session_id") or authority.get("session_id") or ""),
+                            )
+                        elif isinstance(watch, Mapping) and str(watch.get("active_job_id") or "") == m1_job_id:
+                            raise RuntimeError("source_watch_job_missing")
                     except Exception as exc:
                         # Keep the child and M1 receipts for the explicit
                         # recovery route if a concurrent worker owns the fence.

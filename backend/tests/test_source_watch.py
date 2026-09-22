@@ -19,6 +19,7 @@ from src.guardian.source_watch import (
     _baseline_only_observations,
     _partition_baseline_observations,
     _completion_notification_body,
+    _failed_recovery_projection,
     _recovery_binding_error,
     _restore_prior_criteria,
     _goal_admission,
@@ -30,6 +31,7 @@ from src.guardian.source_watch import (
     parse_sources,
     redact_export_text,
 )
+import src.guardian.source_watch as source_watch_module
 from src.security.http_transport import PinnedTransportError, fetch_pinned_https
 from src.tools.filesystem_tool import _open_workspace_file
 from config.settings import settings
@@ -625,3 +627,82 @@ async def test_recovery_baseline_gate_blocks_missing_canonical_baseline(async_db
     with pytest.raises(SourceWatchError) as error:
         await SourceWatchService()._repair_recovery_baselines(watch, packet, scan)
     assert error.value.code == "recovery_baseline_unverified"
+
+
+@pytest.mark.asyncio
+async def test_preclaim_packet_failure_blocks_job_and_releases_watch(monkeypatch):
+    watch = GuardianSourceWatch(
+        id="watch-preclaim",
+        goal_id="goal-preclaim",
+        owner_principal_id="operator",
+        owner_session_id="session",
+        scheduled_job_id="scheduled-preclaim",
+        capability_id=CAPABILITY_ID,
+        capability_version=CAPABILITY_ID,
+        state="active",
+        active_job_id="job-preclaim",
+        active_job_fence=7,
+        plan_revision=1,
+    )
+    packet = GuardianDecisionPacket(
+        id="packet-preclaim",
+        source_watch_id=watch.id,
+        watch_id=watch.id,
+        goal_id=watch.goal_id,
+        run_identity="job-preclaim",
+    )
+    service = SourceWatchService()
+    transition_calls: list[dict[str, object]] = []
+    release_calls: list[tuple[object, ...]] = []
+
+    async def transition(job_id, status, **kwargs):
+        transition_calls.append({"job_id": job_id, "status": status, **kwargs})
+        return {"job_id": job_id, "status": status}
+
+    async def mark_packet(packet_id, reason):
+        transition_calls.append({"packet_id": packet_id, "packet_reason": reason})
+
+    async def release_watch(*args):
+        release_calls.append(args)
+        return True
+
+    async def audit(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(source_watch_module.durable_job_repository, "transition_job", transition)
+    monkeypatch.setattr(service, "_mark_packet_failure", mark_packet)
+    monkeypatch.setattr(service, "_release_watch", release_watch)
+    monkeypatch.setattr(source_watch_module, "_audit_watch_event", audit)
+
+    result = await service._settle_preclaim_packet_failure(
+        watch,
+        packet,
+        {"job_id": packet.run_identity, "status": "awaiting_approval", "revision": 4},
+        watch_fence=watch.active_job_fence,
+        reason_code="recovery_baseline_changed",
+    )
+
+    assert result["status"] == "blocked"
+    assert result["memory_status"] == "no_learning"
+    assert result["durable_status"] == "blocked"
+    assert result["watch_released"] is True
+    assert transition_calls[0]["status"] == "blocked"
+    assert transition_calls[0]["expected_state"] == "awaiting_approval"
+    assert transition_calls[0]["expected_revision"] == 4
+    assert release_calls == [(watch.id, packet.run_identity, 7, "blocked", "recovery_baseline_changed")]
+
+
+def test_failed_recovery_projection_preserves_uncertain_durable_status():
+    unknown = _failed_recovery_projection("unknown_external_effect")
+    assert unknown["status"] == "unknown_external_effect"
+    assert unknown["watch_status"] == "blocked"
+    assert unknown["recovery"] == "failed_occurrence_reconciliation_required"
+    assert unknown["reason_code"] == "unknown_external_effect_pending_reconciliation"
+
+    liability = _failed_recovery_projection("cost_liability")
+    assert liability["status"] == "cost_liability"
+    assert liability["watch_status"] == "blocked"
+
+    cancelled = _failed_recovery_projection("cancelled")
+    assert cancelled["status"] == "cancelled"
+    assert cancelled["watch_status"] == "cancelled"

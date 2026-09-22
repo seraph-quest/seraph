@@ -144,6 +144,29 @@ def _no_learning_result(status: str, reason_code: str) -> dict[str, Any]:
     }
 
 
+def _failed_recovery_projection(durable_status: str | None) -> dict[str, str]:
+    """Project failed-job settlement without hiding uncertain effects."""
+
+    status = _text(durable_status) or "blocked"
+    uncertain = status in {"unknown_external_effect", "cost_liability"}
+    public_status = status if uncertain else ("cancelled" if status == "cancelled" else "blocked")
+    return {
+        "status": public_status,
+        "watch_status": "blocked" if uncertain or public_status != "cancelled" else "cancelled",
+        "recovery": (
+            "failed_occurrence_reconciliation_required"
+            if uncertain
+            else "failed_occurrence_settled"
+        ),
+        "reason_code": (
+            f"{status}_pending_reconciliation"
+            if uncertain
+            else "failed_occurrence_reconciled"
+        ),
+        "durable_status": status,
+    }
+
+
 @dataclass(frozen=True)
 class SourceSpec:
     source_key: str
@@ -402,7 +425,7 @@ def _safe_public_source_target(value: Any) -> str:
 def _query_name_is_sensitive(name: str) -> bool:
     normalized = name.casefold().replace("-", "_")
     return normalized in _SENSITIVE_QUERY_NAMES or any(
-        marker in normalized for marker in ("token", "secret", "password", "credential")
+        marker in normalized for marker in ("token", "secret", "password", "credential", "signature", "auth")
     )
 
 
@@ -1884,15 +1907,6 @@ class SourceWatchService:
         ):
             return {"status": "blocked", "reason_code": "goal_binding_stale", "operator_visible": True}
         if _text(watch.state) != "active":
-            if recovery_lease_acquired:
-                job = await self._release_recovery_lease(
-                    job,
-                    reason="watch_paused" if _text(watch.state) == "paused" else "watch_not_active",
-                    result=_no_learning_result(
-                        "deferred" if _text(watch.state) == "paused" else "blocked",
-                        "watch_paused" if _text(watch.state) == "paused" else "watch_not_active",
-                    ),
-                )
             watch_released = False
             if _text(watch.active_job_id) == _text(job_id):
                 watch_released = await self._release_watch(
@@ -2372,6 +2386,62 @@ class SourceWatchService:
             row.updated_at = _now()
             db.add(row)
 
+    async def _settle_preclaim_packet_failure(
+        self,
+        watch: GuardianSourceWatch,
+        packet: GuardianDecisionPacket,
+        job: Mapping[str, Any],
+        *,
+        watch_fence: int,
+        reason_code: str,
+    ) -> dict[str, Any]:
+        """Block an approval packet that failed before durable execution claim."""
+
+        job_id = _text(packet.run_identity)
+        reason = _text(reason_code)[:120] or "approval_packet_validation_failed"
+        settled: Mapping[str, Any] = {}
+        try:
+            settled = await durable_job_repository.transition_job(
+                job_id,
+                "blocked",
+                expected_state="awaiting_approval",
+                expected_revision=job.get("revision"),
+                reason=reason,
+                result=_no_learning_result("blocked", reason),
+                result_summary="source-watch approval packet blocked before execution",
+            )
+        except Exception:
+            settled = await durable_job_repository.get_job(job_id) or {}
+        durable_status = _text(settled.get("status")) or "blocked"
+        watch_released = False
+        if durable_status != "running":
+            try:
+                await self._mark_packet_failure(packet.id, reason)
+            except Exception:
+                pass
+            watch_released = await self._release_watch(
+                watch.id,
+                job_id,
+                watch_fence,
+                "blocked",
+                reason,
+            )
+        await _audit_watch_event(
+            watch,
+            "blocked",
+            job_id=job_id,
+            packet_id=packet.id,
+            reason_code=reason,
+            watch_released=watch_released,
+        )
+        return {
+            **_no_learning_result("blocked", reason),
+            "job_id": job_id,
+            "packet_id": packet.id,
+            "durable_status": durable_status,
+            "watch_released": watch_released,
+        }
+
     async def _create_packet(self, watch: GuardianSourceWatch, job_id: str, scan: ScanResult) -> GuardianDecisionPacket:
         async with db_engine.get_session() as db:
             goal = (await db.execute(select(Goal).where(Goal.id == watch.goal_id))).scalars().first()
@@ -2709,6 +2779,30 @@ class SourceWatchService:
             "budget_digest": current.get("budget_digest"),
             "expires_at": expires_at,
         }
+        try:
+            # Validate and rehydrate the immutable observation while the job is
+            # still approval-held.  A digest mismatch or source reread failure
+            # must not strand a newly claimed execution lease.
+            scan = self._scan_from_packet(watch, packet)
+            if scan.input_digest != packet.input_digest:
+                raise SourceWatchError("packet_observation_stale")
+            scan = await self._rehydrate_recovery_baselines(watch, packet, scan)
+        except SourceWatchError as exc:
+            return await self._settle_preclaim_packet_failure(
+                watch,
+                packet,
+                current,
+                watch_fence=watch_fence,
+                reason_code=exc.code,
+            )
+        except Exception as exc:
+            return await self._settle_preclaim_packet_failure(
+                watch,
+                packet,
+                current,
+                watch_fence=watch_fence,
+                reason_code=type(exc).__name__,
+            )
         resumed = await durable_job_repository.resume_approved_job(
             run_identity,
             approval_receipt=receipt,
@@ -2736,9 +2830,6 @@ class SourceWatchService:
             expected_fencing_token=queued_lease.get("fencing_token"),
             lease_seconds=JOB_DEADLINE_SECONDS,
         )
-        scan = self._scan_from_packet(watch, packet)
-        if scan.input_digest != packet.input_digest:
-            raise SourceWatchError("packet_observation_stale")
         execution_receipt = await self._execute_packet(
             watch,
             packet,
@@ -2834,17 +2925,37 @@ class SourceWatchService:
     ) -> None:
         """Accept existing canonical baselines or repair legacy local input."""
 
+        rehydrated = await self._rehydrate_recovery_baselines(watch, packet, scan)
+        if not rehydrated.baseline_updates:
+            return
+        lease = job.get("lease") if isinstance(job, Mapping) and isinstance(job.get("lease"), Mapping) else {}
+        await self._commit_baselines(
+            watch,
+            rehydrated,
+            status="recovered",
+            job_id=packet.run_identity,
+            fencing_token=int(lease.get("fencing_token") or 0) or None,
+        )
+
+    async def _rehydrate_recovery_baselines(
+        self,
+        watch: GuardianSourceWatch,
+        packet: GuardianDecisionPacket,
+        scan: ScanResult,
+    ) -> ScanResult:
+        """Recover baseline bytes without persisting source text in packets.
+
+        New checkpoints carry hashes and bounded metadata only.  When the
+        canonical baseline row is not already at the approved hash, read the
+        exact source again through the same policy and accept it only when its
+        normalized digest still matches the immutable observation.  Callers
+        that are finalizing a packet can then apply the returned update in the
+        same transaction as the terminal packet state.
+        """
+
         legacy_updates = tuple(item for item in scan.baseline_updates if item.baseline_text is not None)
         if legacy_updates:
-            lease = job.get("lease") if isinstance(job, Mapping) and isinstance(job.get("lease"), Mapping) else {}
-            await self._commit_baselines(
-                watch,
-                scan,
-                status="recovered",
-                job_id=packet.run_identity,
-                fencing_token=int(lease.get("fencing_token") or 0) or None,
-            )
-            return
+            return scan
         expected = {
             item.source.source_key: (item.source.identity_digest, item.new_hash)
             for item in scan.observations
@@ -2855,6 +2966,8 @@ class SourceWatchService:
                 await db.execute(select(GuardianSourceBaseline).where(GuardianSourceBaseline.watch_id == watch.id))
             ).scalars().all()
         actual = {row.source_key: row for row in rows}
+        refresh: list[SourceObservation] = []
+        observations_by_key = {item.source.source_key: item for item in scan.observations}
         for source_key, (identity_digest, new_hash) in expected.items():
             row = actual.get(source_key)
             if (
@@ -2862,7 +2975,37 @@ class SourceWatchService:
                 or _text(row.identity_digest) != identity_digest
                 or _text(row.baseline_sha256) != new_hash
             ):
-                raise SourceWatchError("recovery_baseline_unverified")
+                # A missing canonical row has no trusted prior generation to
+                # reconcile.  Keep that case blocked; a digest-bound reread is
+                # only safe when an owner-bound baseline row already exists.
+                if row is None:
+                    raise SourceWatchError("recovery_baseline_unverified")
+                observed = observations_by_key.get(source_key)
+                if observed is None or not observed.new_hash:
+                    raise SourceWatchError("recovery_baseline_unverified")
+                try:
+                    reader = self._fetcher(observed.source) if self._fetcher is not None else _read_source(observed.source)
+                    raw, metadata = await asyncio.wait_for(
+                        reader,
+                        timeout=SOURCE_READ_DEADLINE_SECONDS,
+                    )
+                    normalized = normalize_source_text(
+                        raw,
+                        html_content=metadata.get("content_type") in {"text/html", "application/xhtml+xml"},
+                    )
+                except (asyncio.TimeoutError, SourceWatchError, OSError) as exc:
+                    raise SourceWatchError("recovery_baseline_unreadable") from exc
+                if _sha(normalized) != new_hash:
+                    raise SourceWatchError("recovery_baseline_changed")
+                refresh.append(
+                    replace(
+                        observed,
+                        baseline_text=normalized,
+                        etag=metadata.get("etag"),
+                        last_modified=metadata.get("last-modified"),
+                    )
+                )
+        return replace(scan, baseline_updates=tuple(refresh)) if refresh else scan
 
     async def _repair_recovery_receipts(
         self,
@@ -3104,9 +3247,12 @@ class SourceWatchService:
                     "recovery_error": type(exc).__name__,
                     "operator_visible": True,
                 }
+            projection = _failed_recovery_projection(_text(settled.get("status")))
+            durable_status = projection["durable_status"]
+            reason_code = projection["reason_code"]
             if packet is not None:
                 try:
-                    await self._mark_packet_failure(packet.id, "failed_occurrence_reconciled")
+                    await self._mark_packet_failure(packet.id, reason_code)
                 except Exception:
                     pass
             watch_released = False
@@ -3115,18 +3261,19 @@ class SourceWatchService:
                     watch.id,
                     job_id,
                     int(watch.active_job_fence or 0),
-                    "cancelled",
-                    "failed_occurrence_reconciled",
+                    projection["watch_status"],
+                    reason_code,
                 )
             return {
-                "status": "cancelled",
+                "status": projection["status"],
                 "job_id": job_id,
                 "packet_id": packet.id if packet is not None else None,
-                "recovery": "failed_occurrence_settled",
+                "recovery": projection["recovery"],
+                "reason_code": reason_code,
                 "watch_released": watch_released,
                 "learning": NO_LEARNING,
                 "operator_visible": True,
-                "durable_status": settled.get("status"),
+                "durable_status": durable_status,
             }
         recovery_lease_acquired = False
         # Admission, queueing, and watch reservation are independent writes.
@@ -4005,7 +4152,6 @@ class SourceWatchService:
             # one local transaction.  A restart cannot observe a successful
             # packet with an uncommitted baseline (or vice versa).
             if scan is not None:
-                await self._apply_baseline_updates(db, watch.id, scan.baseline_updates)
                 current_watch = (
                     await db.execute(select(GuardianSourceWatch).where(GuardianSourceWatch.id == watch.id))
                 ).scalars().first()
@@ -4018,6 +4164,7 @@ class SourceWatchService:
                     or int(current_watch.active_job_fence or 0) <= 0
                 ):
                     raise SourceWatchError("watch_execution_fence_stale")
+                await self._apply_baseline_updates(db, watch.id, scan.baseline_updates)
                 current_watch.last_status = "degraded" if scan.degraded else "succeeded"
                 current_watch.updated_at = _now()
                 db.add(current_watch)

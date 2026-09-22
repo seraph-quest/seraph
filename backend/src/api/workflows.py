@@ -4043,6 +4043,26 @@ def _repo_change_workspace_root() -> Path:
     return Path(settings.workspace_dir).expanduser().resolve()
 
 
+def _repo_change_repository_ref_for_compare(value: str) -> str:
+    """Canonicalize a repository reference without probing Docker or contents."""
+
+    workspace = _repo_change_workspace_root()
+    candidate = Path(str(value or "")).expanduser()
+    if not candidate.is_absolute():
+        candidate = workspace / candidate
+    candidate = candidate.absolute()
+    try:
+        candidate.relative_to(workspace)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail={"code": "repo_change_idempotency_conflict", "fields": ["repository_path"]}) from exc
+    try:
+        resolved = candidate.resolve(strict=False)
+        relative = resolved.relative_to(workspace)
+    except (OSError, ValueError) as exc:
+        raise HTTPException(status_code=409, detail={"code": "repo_change_idempotency_conflict", "fields": ["repository_path"]}) from exc
+    return relative.as_posix()
+
+
 def _repo_change_safe_relative(value: str, *, field_name: str) -> str:
     text = str(value or "").strip()
     path = PurePosixPath(text)
@@ -4251,6 +4271,8 @@ def _repo_change_error_code(exc: BaseException) -> str:
 def _repo_change_patch_error_code(exc: BaseException) -> str:
     """Return a bounded reason code for an approved patch read failure."""
 
+    if isinstance(exc, RepoSandboxError) and str(exc) == "patch_digest_changed":
+        return "patch_digest_changed"
     if isinstance(exc, HTTPException):
         detail = exc.detail
         if isinstance(detail, dict):
@@ -4819,7 +4841,13 @@ async def _execute_repo_change_claimed(
                 exc=exc,
             )
         if hashlib.sha256(patch).hexdigest() != str(authority.get("patch_sha256") or ""):
-            raise RepoSandboxError("patch_digest_changed")
+            return await _repo_change_patch_read_blocked(
+                job_id=str(current["job_id"]),
+                owner=owner,
+                fencing_token=fencing_token,
+                revision=revision,
+                exc=RepoSandboxError("patch_digest_changed"),
+            )
         await record_repo_phase("worker_started", retry=retry)
 
         dispatch_loop = asyncio.get_running_loop()
@@ -5236,6 +5264,34 @@ async def preview_repo_change(req: RepoChangePreviewRequest, request: Request):
                 status_code=409,
                 detail={"code": "repo_change_idempotency_conflict", "fields": immutable_conflicts},
             )
+        # The idempotency row is authoritative.  Compare every execution
+        # input before the recovery/preflight branch so a repeated key cannot
+        # silently adopt a different repository, sandbox policy, or priority.
+        requested_repository_ref = _repo_change_repository_ref_for_compare(req.repository_path)
+        requested_allowed_paths = tuple(
+            _repo_change_safe_relative(value, field_name="allowed_path")
+            for value in req.allowed_paths
+        )
+        if len(set(requested_allowed_paths)) != len(requested_allowed_paths):
+            raise HTTPException(status_code=422, detail={"code": "allowed_paths_duplicate"})
+        requested_test_args = _validate_repo_test_args(
+            tuple(str(value).strip() for value in req.test_args),
+            requested_allowed_paths,
+        )
+        for field, requested, stored in (
+            ("repository_path", requested_repository_ref, authority.get("repository_ref")),
+            ("allowed_paths", list(requested_allowed_paths), authority.get("allowed_paths")),
+            ("test_args", list(requested_test_args), authority.get("test_args")),
+            ("priority", req.priority, existing.get("priority")),
+            ("deadline_seconds", req.deadline_seconds, authority.get("deadline_seconds")),
+        ):
+            if stored is not None and requested != stored:
+                immutable_conflicts.append(field)
+        if immutable_conflicts:
+            raise HTTPException(
+                status_code=409,
+                detail={"code": "repo_change_idempotency_conflict", "fields": immutable_conflicts},
+            )
         status = str(existing.get("status") or "")
         if status in {"accepted", "queued"}:
             try:
@@ -5541,12 +5597,32 @@ async def cancel_repo_change(job_id: str, req: RepoChangeCancelRequest, request:
     status = str(job.get("status") or "")
     if status in {"queued", "awaiting_approval", "accepted", "paused", "blocked"}:
         if status == "blocked" and _repo_change_dispatch_reserved(job):
+            authority = job.get("declared_authority") if isinstance(job.get("declared_authority"), dict) else {}
+            dispatch_ok, dispatch_reason, dispatch_payload = _repo_change_dispatch_contract(job, authority)
+            if not dispatch_ok or dispatch_payload is None:
+                uncertain = await durable_job_repository.transition_job(
+                    job_id,
+                    "unknown_external_effect",
+                    expected_revision=job.get("revision"),
+                    reason=dispatch_reason or "recovery_dispatch_contract_mismatch",
+                    result={
+                        "learning": "no_learning",
+                        "memory_status": "no_learning",
+                        "dispatch_contract": "mismatch",
+                        "operator_action": "reconcile_or_cancel",
+                    },
+                )
+                return {
+                    "status": uncertain.get("status"),
+                    "job": uncertain,
+                    "operator_action": "reconcile_or_cancel",
+                }
             token = RootlessDockerRepoSandbox._server_token(job_id)
             try:
                 cleanup = RootlessDockerRepoSandbox().cancel(
-                    container_name=f"{token}-worker",
+                    container_name=str(dispatch_payload["container_name"]),
                     additional_container_names=(f"{token}-loader",),
-                    input_volume=f"{token}-input",
+                    input_volume=str(dispatch_payload["input_volume"]),
                 )
             except (OSError, RepoSandboxError, ValueError) as exc:
                 cleanup = {"status": "unknown_external_effect", "reason": "cleanup_unproven", "error": type(exc).__name__}
@@ -5633,11 +5709,38 @@ async def cancel_repo_change(job_id: str, req: RepoChangeCancelRequest, request:
             }
         checkpoint_lease = latest.get("lease") or checkpoint.get("lease") or lease
         dispatch_reserved = _repo_change_dispatch_reserved(latest) or _repo_change_dispatch_reserved(checkpoint)
+        dispatch_payload = None
+        if dispatch_reserved:
+            authority = latest.get("declared_authority") if isinstance(latest.get("declared_authority"), dict) else {}
+            dispatch_ok, dispatch_reason, dispatch_payload = _repo_change_dispatch_contract(latest, authority)
+            if not dispatch_ok or dispatch_payload is None:
+                uncertain = await durable_job_repository.transition_job(
+                    job_id,
+                    "unknown_external_effect",
+                    owner=str(checkpoint_lease.get("owner") or "") or None,
+                    fencing_token=int(checkpoint_lease.get("fencing_token") or 0) or None,
+                    expected_revision=latest.get("revision"),
+                    reason=dispatch_reason or "recovery_dispatch_contract_mismatch",
+                    result={
+                        "learning": "no_learning",
+                        "memory_status": "no_learning",
+                        "dispatch_contract": "mismatch",
+                        "operator_action": "reconcile_or_cancel",
+                    },
+                )
+                return {
+                    "status": uncertain.get("status"),
+                    "reason_code": dispatch_reason or "recovery_dispatch_contract_mismatch",
+                    "operator_action": "reconcile_or_cancel",
+                    "job": uncertain,
+                }
+        worker_name = str((dispatch_payload or {}).get("container_name") or f"{token}-worker")
+        input_volume = str((dispatch_payload or {}).get("input_volume") or f"{token}-input")
         try:
             cleanup = RootlessDockerRepoSandbox().cancel(
-                container_name=f"{token}-worker",
+                container_name=worker_name,
                 additional_container_names=(f"{token}-loader",),
-                input_volume=f"{token}-input",
+                input_volume=input_volume,
             )
         except (OSError, RepoSandboxError, ValueError) as exc:
             latest_after_error = await durable_job_repository.get_job(job_id) or latest
@@ -5884,7 +5987,14 @@ async def _recover_repo_change_after_restart(*, job: dict[str, Any], operator: A
                 recovered=True,
             )
         if hashlib.sha256(patch).hexdigest() != str(authority.get("patch_sha256") or ""):
-            raise RepoSandboxError("patch_digest_changed", phase="admitted")
+            return await _repo_change_patch_read_blocked(
+                job_id=job_id,
+                owner=owner,
+                fencing_token=fencing_token,
+                revision=revision,
+                exc=RepoSandboxError("patch_digest_changed", phase="admitted"),
+                recovered=True,
+            )
         result = await asyncio.to_thread(
             RootlessDockerRepoSandbox().recover_job,
             RepoSandboxJob(

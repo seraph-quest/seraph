@@ -1,5 +1,7 @@
 import type { ReactNode } from "react";
 
+import { SourceWatchForm, type SourceWatchFormGoal } from "./SourceWatchForm";
+
 export type OutcomeCockpitState =
   | "loading"
   | "empty"
@@ -106,6 +108,24 @@ export interface OutcomeResultSummary {
   learningRecordId?: string | null;
 }
 
+/** Goal-bound GitHub publication state, shown inside the existing outcome cockpit. */
+export interface GitHubFollowthroughSummary {
+  state: OutcomeCockpitState;
+  repository: string;
+  action: "create_issue" | "create_comment";
+  issueNumber?: number | null;
+  previewTitle?: string | null;
+  previewBody?: string | null;
+  marker?: string | null;
+  sourceArtifactId?: string | null;
+  approvalExpiry?: string | null;
+  approvalStatus?: "pending" | "approved" | "denied" | "expired" | null;
+  connectionReady?: boolean;
+  remoteId?: number | null;
+  remoteUrl?: string | null;
+  recoveryReason?: string | null;
+}
+
 interface OutcomeAction {
   label: string;
   onClick?: () => void;
@@ -133,6 +153,18 @@ export interface OutcomeCockpitPanelProps {
   onContinue?: () => void;
   onRetry?: () => void;
   onBranch?: () => void;
+  githubFollowthrough?: GitHubFollowthroughSummary | null;
+  onPrepareGitHubIssue?: () => void;
+  onPrepareGitHubComment?: () => void;
+  /** Backwards-compatible single prepare action for embedded consumers. */
+  onPrepareGitHubFollowthrough?: () => void;
+  onExecuteGitHubFollowthrough?: () => void;
+  onCancelGitHubFollowthrough?: () => void;
+  onReconcileGitHubFollowthrough?: () => void;
+  githubConnectionReady?: boolean;
+  githubConnectionLoaded?: boolean;
+  /** Goal binding is supplied by the existing outcome route; loading is explicit to preserve refresh order. */
+  sourceWatchGoal?: SourceWatchFormGoal | null;
   /** Explicitly supplied by the parent after auth, run, and identity checks. */
   recoveryAuthorized?: boolean;
 }
@@ -269,6 +301,16 @@ export function OutcomeCockpitPanel({
   onContinue,
   onRetry,
   onBranch,
+  githubFollowthrough = null,
+  onPrepareGitHubIssue,
+  onPrepareGitHubComment,
+  onPrepareGitHubFollowthrough,
+  onExecuteGitHubFollowthrough,
+  onCancelGitHubFollowthrough,
+  onReconcileGitHubFollowthrough,
+  githubConnectionReady = false,
+  githubConnectionLoaded = false,
+  sourceWatchGoal = null,
   recoveryAuthorized = false,
 }: OutcomeCockpitPanelProps) {
   const approvalLocked = approvalLoadState !== "ready"
@@ -286,6 +328,20 @@ export function OutcomeCockpitPanel({
   ) || !work || !recoveryAuthorized || recoveryApprovalLocked;
   const workLoading = workLoadState === "loading";
   const workNeedsLoad = !work && ["partial_metadata", "stale", "degraded"].includes(workLoadState);
+  const githubState = githubFollowthrough?.state ?? "empty";
+  const githubConnectionIsReady = githubFollowthrough?.connectionReady ?? githubConnectionReady;
+  const githubLocked = actionLocked(githubState, !githubConnectionLoaded || githubConnectionIsReady);
+  const githubCanPublish = Boolean(
+    githubFollowthrough
+    && githubFollowthrough.approvalStatus === "approved"
+    && githubConnectionIsReady
+    && !githubLocked,
+  );
+  const githubCanReconcile = Boolean(
+    githubFollowthrough
+    && ["blocked", "degraded", "partial_metadata", "recovered"].includes(githubState)
+    && onReconcileGitHubFollowthrough,
+  );
 
   return (
     <section
@@ -477,6 +533,94 @@ export function OutcomeCockpitPanel({
           <ValueRow label="criterion" value={display(result.criterionId, "criterion unavailable")} />
           <ValueRow label="artifact" value={display(result.artifactRef, "artifact unavailable")} />
           <ValueRow label="learning record" value={display(result.learningRecordId, "no learning record")} />
+        </Card>
+
+        <SourceWatchForm goal={sourceWatchGoal} autoLoad={false} />
+
+        <Card
+          id="outcome-github-followthrough-card"
+          label="GitHub follow-through"
+          state={githubState}
+          actions={(
+            <>
+              {onPrepareGitHubFollowthrough ? (
+                <ActionButton
+                  action={{
+                    label: "Prepare GitHub preview",
+                    onClick: onPrepareGitHubFollowthrough,
+                    disabled: Boolean(githubFollowthrough) || githubLocked,
+                    title: githubLocked ? "A configured connection and current authority are required." : undefined,
+                  }}
+                />
+              ) : null}
+              {onPrepareGitHubIssue ? (
+                <ActionButton
+                  action={{
+                    label: "Prepare issue preview",
+                    onClick: onPrepareGitHubIssue,
+                    disabled: Boolean(githubFollowthrough) || githubLocked,
+                    title: githubLocked ? "A configured connection and current authority are required." : undefined,
+                  }}
+                />
+              ) : null}
+              {onPrepareGitHubComment ? (
+                <ActionButton
+                  action={{
+                    label: "Prepare comment preview",
+                    onClick: onPrepareGitHubComment,
+                    disabled: Boolean(githubFollowthrough) || githubLocked,
+                    title: githubLocked ? "A configured connection and current authority are required." : undefined,
+                  }}
+                />
+              ) : null}
+              {onExecuteGitHubFollowthrough ? (
+                <ActionButton
+                  action={{
+                    label: "Publish approved preview",
+                    onClick: onExecuteGitHubFollowthrough,
+                    disabled: !githubCanPublish,
+                    title: !githubCanPublish ? "Only the exact approved preview may be published." : undefined,
+                  }}
+                />
+              ) : null}
+              {onCancelGitHubFollowthrough ? (
+                <ActionButton
+                  action={{
+                    label: "Cancel publication",
+                    onClick: onCancelGitHubFollowthrough,
+                    disabled: !githubFollowthrough || ["succeeded", "failed", "cancelled"].includes(githubState),
+                  }}
+                />
+              ) : null}
+              {githubCanReconcile ? (
+                <ActionButton action={{ label: "Check destination", onClick: onReconcileGitHubFollowthrough }} />
+              ) : null}
+            </>
+          )}
+        >
+          {githubFollowthrough ? (
+            <>
+              <div className="cockpit-outcome-primary">
+                {githubFollowthrough.action === "create_issue" ? "Create issue" : "Comment on issue / PR"}
+              </div>
+              <ValueRow label="repository" value={display(githubFollowthrough.repository)} />
+              <ValueRow label="target" value={display(githubFollowthrough.issueNumber, githubFollowthrough.action === "create_issue" ? "new issue" : "issue/PR unavailable")} />
+              <ValueRow label="approval" value={display(githubFollowthrough.approvalStatus, "approval unavailable")} />
+              <ValueRow label="approval expiry" value={display(githubFollowthrough.approvalExpiry)} />
+              <ValueRow label="source artifact" value={display(githubFollowthrough.sourceArtifactId)} />
+              {githubFollowthrough.previewTitle ? <ValueRow label="title" value={githubFollowthrough.previewTitle} /> : null}
+              {githubFollowthrough.previewBody ? (
+                <pre className="cockpit-outcome-preview" data-testid="github-followthrough-preview">{githubFollowthrough.previewBody}</pre>
+              ) : (
+                <div className="cockpit-outcome-note">Exact publication text is unavailable; no action is enabled.</div>
+              )}
+              {githubFollowthrough.marker ? <ValueRow label="marker" value={githubFollowthrough.marker} /> : null}
+              {githubFollowthrough.remoteUrl ? <ValueRow label="verified destination" value={githubFollowthrough.remoteUrl} /> : null}
+              {githubFollowthrough.recoveryReason ? <div className="cockpit-outcome-note">{githubFollowthrough.recoveryReason}</div> : null}
+            </>
+          ) : (
+            <div className="cockpit-outcome-empty">No goal-bound GitHub publication is prepared.</div>
+          )}
         </Card>
 
         <Card

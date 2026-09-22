@@ -48,6 +48,7 @@ import {
   type OutcomeRouteSummary,
   type OutcomeWorkSummary,
   type OutcomeApprovalSummary,
+  type GitHubFollowthroughSummary,
 } from "./OutcomeCockpitPanel";
 import {
   displayApprovalScopeTarget,
@@ -7127,6 +7128,13 @@ type OperatorAuthState = {
   sessionId: string | null;
   expiresAt: string | null;
 };
+type GitHubConnectionState = {
+  id?: string | null;
+  repository?: string | null;
+  revision?: number | null;
+  mode?: "disabled" | "active" | "reconcile_only" | string | null;
+  credential_configured?: boolean;
+};
 type DeepPaneLoadState = "idle" | "loading" | "loaded" | "stale" | "failed";
 type DeepPaneKey =
   | "presence"
@@ -7142,6 +7150,65 @@ type DeepPaneKey =
   | "benchmark"
   | "m8";
 
+type CockpitGitHubFollowthrough = GitHubFollowthroughSummary & {
+  jobId?: string | null;
+  approvalId?: string | null;
+};
+
+function githubFollowthroughUiState(status: unknown): OutcomeCockpitState {
+  switch (String(status ?? "")) {
+    case "awaiting_approval":
+      return "awaiting_approval";
+    case "succeeded":
+      return "recovered";
+    case "failed":
+    case "cancelled":
+      return "failed";
+    case "blocked":
+    case "degraded":
+      return "blocked";
+    case "running":
+    case "queued":
+    case "accepted":
+      return "active";
+    default:
+      return "partial_metadata";
+  }
+}
+
+function normalizeGitHubFollowthrough(
+  payload: unknown,
+  connectionReady: boolean,
+): CockpitGitHubFollowthrough | null {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return null;
+  const value = payload as Record<string, unknown>;
+  const preview = value.preview && typeof value.preview === "object" && !Array.isArray(value.preview)
+    ? value.preview as Record<string, unknown>
+    : null;
+  const action = preview?.action === "create_comment" ? "create_comment" : preview?.action === "create_issue" ? "create_issue" : null;
+  if (!action) return null;
+  const issueNumber = typeof preview?.issue_number === "number" ? preview.issue_number : null;
+  const remoteId = typeof value.remote_id === "number" ? value.remote_id : null;
+  return {
+    state: githubFollowthroughUiState(value.status),
+    repository: typeof preview?.repository === "string" ? preview.repository : "",
+    action,
+    issueNumber,
+    previewTitle: typeof preview?.title === "string" ? preview.title : null,
+    previewBody: typeof preview?.body === "string" ? preview.body : null,
+    marker: typeof preview?.marker === "string" ? preview.marker : null,
+    sourceArtifactId: typeof preview?.dossier_artifact_id === "string" ? preview.dossier_artifact_id : null,
+    approvalExpiry: typeof value.approval_expires_at === "string" ? value.approval_expires_at : null,
+    approvalStatus: null,
+    connectionReady,
+    remoteId,
+    remoteUrl: typeof value.remote_url === "string" ? value.remote_url : null,
+    recoveryReason: typeof value.recovery_reason === "string" ? value.recovery_reason : null,
+    jobId: typeof value.job_id === "string" ? value.job_id : null,
+    approvalId: typeof value.approval_id === "string" ? value.approval_id : null,
+  };
+}
+
 export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   const inputRef = useRef<HTMLInputElement>(null);
   const [composer, setComposer] = useState("");
@@ -7156,6 +7223,9 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     sessionId: null,
     expiresAt: null,
   });
+  const [githubConnection, setGithubConnection] = useState<GitHubConnectionState | null>(null);
+  const [githubConnectionLoaded, setGithubConnectionLoaded] = useState(false);
+  const [githubFollowthrough, setGithubFollowthrough] = useState<CockpitGitHubFollowthrough | null>(null);
   const [feedbackState, setFeedbackState] = useState<Record<string, string>>({});
   const [approvalState, setApprovalState] = useState<Record<string, string>>({});
   const [selectedInspector, setSelectedInspector] = useState<InspectorSelection | null>(null);
@@ -7425,6 +7495,21 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       window.clearTimeout(timeout);
     }
   }, []);
+
+  // GitHub connection metadata is intentionally loaded only when the operator
+  // opens the follow-through action. It must not perturb the cockpit's stable
+  // baseline refresh request set or make an external capability look ready.
+  const loadGithubConnection = useCallback(async (): Promise<GitHubConnectionState | null> => {
+    const result = await fetchCockpitJson(`${API_URL}/api/capabilities/github/connection`, 5000);
+    setGithubConnectionLoaded(true);
+    if (result.ok && result.payload && typeof result.payload === "object" && !Array.isArray(result.payload)) {
+      const next = result.payload as GitHubConnectionState;
+      setGithubConnection(next);
+      return next;
+    }
+    setGithubConnection(null);
+    return null;
+  }, [fetchCockpitJson]);
 
   const fetchCockpitBatch = useCallback(async (
     requests: Array<() => Promise<CockpitFetchResult>>,
@@ -10014,6 +10099,176 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     : null;
   const latestArtifact = [...artifacts]
     .sort((left, right) => new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime())[0] ?? null;
+  const latestGuardianDossier = [...artifacts]
+    .filter((artifact) => (
+      artifact.artifactType === "guardian_decision_dossier"
+      && Boolean(artifact.contentSha256)
+      && (!sessionId || !artifact.sessionId || artifact.sessionId === sessionId)
+    ))
+    .sort((left, right) => new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime())[0] ?? null;
+  const githubConnectionReady = Boolean(
+    githubConnection
+    && githubConnection.mode === "active"
+    && githubConnection.credential_configured === true
+    && githubConnection.repository
+    && githubConnection.revision,
+  );
+
+  async function prepareGitHubFollowthrough(action: "create_issue" | "create_comment") {
+    if (!operatorAuth.principalId || !operatorAuth.sessionId || operatorAuth.status !== "authenticated") {
+      setOperatorStatus("GitHub publication is blocked until the authenticated operator session is current.");
+      return;
+    }
+    const connection = githubConnection ?? await loadGithubConnection();
+    const connectionReady = Boolean(
+      connection
+      && connection.mode === "active"
+      && connection.credential_configured === true
+      && connection.repository
+      && connection.revision,
+    );
+    if (!connectionReady || !connection?.revision) {
+      setOperatorStatus("GitHub publication is blocked: configure an active repository connection and vault credential first.");
+      return;
+    }
+    if (!currentGoal || !latestGuardianDossier?.contentSha256) {
+      setOperatorStatus("GitHub publication is blocked: a verified guardian dossier for the current goal is required.");
+      return;
+    }
+    const goalRevision = currentGoal.revision ?? currentGoalLoop?.goal.revision ?? null;
+    if (!goalRevision || !sessionId) {
+      setOperatorStatus("GitHub publication is blocked: the current goal/session binding is incomplete.");
+      return;
+    }
+    const suggestedBody = [
+      `Goal: ${currentGoal.title}`,
+      latestGuardianDossier.summary,
+    ].filter(Boolean).join("\n\n").slice(0, 19_500);
+    const body = typeof window !== "undefined"
+      ? window.prompt("Review the exact public GitHub text before preparing approval.", suggestedBody)
+      : null;
+    if (!body?.trim()) {
+      setOperatorStatus("GitHub publication preparation cancelled before any network write.");
+      return;
+    }
+    const title = action === "create_issue"
+      ? (typeof window !== "undefined" ? window.prompt("Review the GitHub issue title.", currentGoal.title.slice(0, 200)) : null)
+      : null;
+    if (action === "create_issue" && !title?.trim()) {
+      setOperatorStatus("GitHub issue preparation cancelled before any network write.");
+      return;
+    }
+    let issueNumber: number | undefined;
+    if (action === "create_comment") {
+      const rawIssueNumber = typeof window !== "undefined" ? window.prompt("Enter the existing GitHub issue or PR number.") : null;
+      issueNumber = rawIssueNumber ? Number.parseInt(rawIssueNumber, 10) : NaN;
+      if (!Number.isSafeInteger(issueNumber) || issueNumber <= 0) {
+        setOperatorStatus("GitHub comment preparation cancelled: a positive issue/PR number is required.");
+        return;
+      }
+    }
+    setOperatorStatus("Preparing the exact GitHub preview; no publication request is sent yet…");
+    try {
+      const response = await apiFetch(`${API_URL}/api/capabilities/github/prepare`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          conversation_id: sessionId,
+          goal_id: currentGoal.id,
+          goal_revision: goalRevision,
+          dossier_artifact_id: latestGuardianDossier.id,
+          dossier_sha256: latestGuardianDossier.contentSha256,
+          connection_revision: connection.revision,
+          action,
+          title: action === "create_issue" ? title?.trim() : undefined,
+          body: body.trim(),
+          issue_number: action === "create_comment" ? issueNumber : undefined,
+          idempotency_key: typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+            ? crypto.randomUUID()
+            : `00000000-0000-4000-8000-${Date.now().toString(16).padStart(12, "0").slice(-12)}`,
+        }),
+      });
+      const payload = await response.json().catch(() => null);
+      if (!response.ok) {
+        const detail = payload && typeof payload === "object" && "detail" in payload
+          ? (payload as { detail?: unknown }).detail
+          : null;
+        setOperatorStatus(`GitHub preview refused: ${typeof detail === "string" ? detail : "the bound dossier or connection is stale"}.`);
+        return;
+      }
+      const next = normalizeGitHubFollowthrough(payload, true);
+      if (!next) {
+        setOperatorStatus("GitHub preview returned incomplete metadata; no publication action is enabled.");
+        return;
+      }
+      if (next.approvalId && pendingApprovals.some((approval) => approval.id === next.approvalId)) {
+        next.approvalStatus = "pending";
+      }
+      setGithubFollowthrough(next);
+      setOperatorStatus("GitHub preview is ready in the approval queue. Review the exact text and approve it there.");
+      await refreshCockpit();
+    } catch {
+      setOperatorStatus("GitHub preview could not be prepared; no publication request was sent.");
+    }
+  }
+
+  async function refreshGitHubJob(jobId: string, path: "" | "/execute" | "/cancel" | "/reconcile", body?: Record<string, unknown>) {
+    if (!operatorAuth.sessionId) return;
+    try {
+      const response = await apiFetch(`${API_URL}/api/capabilities/github/jobs/${encodeURIComponent(jobId)}${path}`, {
+        method: path ? "POST" : "GET",
+        headers: path ? { "Content-Type": "application/json" } : undefined,
+        body: path ? JSON.stringify(body ?? {}) : undefined,
+      });
+      const payload = await response.json().catch(() => null);
+      if (!response.ok) {
+        const detail = payload && typeof payload === "object" && "detail" in payload
+          ? (payload as { detail?: unknown }).detail
+          : null;
+        setOperatorStatus(`GitHub follow-through refused: ${typeof detail === "string" ? detail : "the current job state is stale"}.`);
+        return;
+      }
+      const next = normalizeGitHubFollowthrough(payload, githubConnectionReady);
+      if (next) {
+        setGithubFollowthrough((current) => ({
+          ...next,
+          approvalStatus: current?.approvalStatus ?? next.approvalStatus,
+        }));
+      }
+      await refreshCockpit();
+    } catch {
+      setOperatorStatus("GitHub follow-through status is temporarily unavailable; inspect the durable job before acting again.");
+    }
+  }
+
+  async function executeGitHubFollowthrough() {
+    const jobId = githubFollowthrough?.jobId;
+    if (!jobId) return;
+    setOperatorStatus("Resuming the approved GitHub publication…");
+    await refreshGitHubJob(jobId, "/execute");
+  }
+
+  async function cancelGitHubFollowthrough() {
+    const jobId = githubFollowthrough?.jobId;
+    if (!jobId) return;
+    setOperatorStatus("Cancelling GitHub publication before any further dispatch…");
+    await refreshGitHubJob(jobId, "/cancel");
+  }
+
+  async function reconcileGitHubFollowthrough() {
+    const jobId = githubFollowthrough?.jobId;
+    if (!jobId) return;
+    const suggested = githubFollowthrough.remoteId ? String(githubFollowthrough.remoteId) : "";
+    const rawRemoteId = typeof window !== "undefined"
+      ? window.prompt("Enter the verified GitHub object ID if it is known; leave blank to receive a durable block.", suggested)
+      : null;
+    const remoteId = rawRemoteId?.trim() ? Number.parseInt(rawRemoteId, 10) : undefined;
+    if (remoteId !== undefined && (!Number.isSafeInteger(remoteId) || remoteId <= 0)) {
+      setOperatorStatus("GitHub reconciliation cancelled: the remote ID must be a positive integer.");
+      return;
+    }
+    await refreshGitHubJob(jobId, "/reconcile", remoteId === undefined ? {} : { remote_id: remoteId });
+  }
   const latestArtifactLineage = latestArtifact ? resolveArtifactLineage(latestArtifact) : null;
   const artifactSourceMatchesOutcome = Boolean(
     outcomeWorkflow
@@ -11998,6 +12253,18 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       const payload = await response.json();
       const nextStatus = payload?.status ?? (decision === "approve" ? "approved" : "denied");
       setApprovalState((current) => ({ ...current, [approval.id]: nextStatus }));
+      if (githubFollowthrough?.approvalId === approval.id) {
+        setGithubFollowthrough((current) => current ? {
+          ...current,
+          approvalStatus: nextStatus === "approved"
+            ? "approved"
+            : nextStatus === "denied"
+              ? "denied"
+              : nextStatus === "expired"
+                ? "expired"
+                : "pending",
+        } : current);
+      }
       setPendingApprovals((current) => current.filter((item) => item.id !== approval.id));
 
       if (decision === "approve" && payload?.resume_message) {
@@ -15126,6 +15393,15 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                       : workflowLoadState}
                 approvalLoadState={approvalLoadState}
                 recoveryAuthorized={recoveryAuthorityReady}
+                sourceWatchGoal={outcomeGoal}
+                githubConnectionReady={githubConnectionReady}
+                githubConnectionLoaded={githubConnectionLoaded}
+                githubFollowthrough={githubFollowthrough}
+                onPrepareGitHubIssue={() => void prepareGitHubFollowthrough("create_issue")}
+                onPrepareGitHubComment={() => void prepareGitHubFollowthrough("create_comment")}
+                onExecuteGitHubFollowthrough={() => void executeGitHubFollowthrough()}
+                onCancelGitHubFollowthrough={() => void cancelGitHubFollowthrough()}
+                onReconcileGitHubFollowthrough={() => void reconcileGitHubFollowthrough()}
                 onOpenPriorities={() => setQuestPanelOpen(true)}
                 onLoadWork={() => void loadWorkflowRuns()}
                 onInspectWork={() => inspectWorkflowRun(outcomeWorkflow)}

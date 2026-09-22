@@ -110,7 +110,10 @@ DURABLE_JOB_TRANSITIONS: dict[str, frozenset[str]] = {
     }),
     "unknown_external_effect": frozenset({"blocked", "failed", "cancelled"}),
     "cost_liability": frozenset({"blocked", "failed", "cancelled"}),
-    "failed": frozenset({"queued"}),
+    # A failed local execution can be explicitly settled when recovery has
+    # proved that no external effect remains. Unknown effect history is
+    # redirected to reconciliation below rather than silently cancelled.
+    "failed": frozenset({"queued", "cancelled", "unknown_external_effect", "cost_liability"}),
     "degraded": frozenset(),
     "succeeded": frozenset(),
     "cancelled": frozenset(),
@@ -2197,6 +2200,15 @@ class DurableJobRepository:
                 raise DurableJobTransitionError(
                     "failed jobs require explicit retry with reconciliation"
                 )
+            if current == "failed" and to_status == "cancelled":
+                try:
+                    effect_ledger = _effect_ledger_or_raise(run.effect_receipts_json)
+                except DurableJobTransitionError:
+                    to_status = "unknown_external_effect"
+                    reason = reason or "malformed_effect_history_requires_reconciliation"
+                if effect_ledger is not None and _job_has_unsafe_effects(effect_ledger):
+                    to_status, recovery_reason = _effect_recovery_state(effect_ledger)
+                    reason = reason or f"{recovery_reason}_pending_before_transition"
             if current == "running" and (owner is None or fencing_token is None):
                 raise DurableJobLeaseError(
                     "active jobs require owner and fencing token for every transition"
@@ -3248,6 +3260,96 @@ class DurableJobRepository:
             db.expunge(refreshed)
             return _serialize(refreshed, receipt={"kind": "checkpoint", "status": "recorded", **receipt})
 
+    async def record_recovery_checkpoint(
+        self,
+        job_id: str,
+        *,
+        owner_kind: str,
+        owner_principal_id: str,
+        checkpoint_id: str,
+        state: Any,
+        checkpoint_payload: Any | None = None,
+        expected_revision: int | None = None,
+    ) -> dict[str, Any]:
+        """Append a checkpoint while an external effect is under recovery.
+
+        Recovery runs deliberately have no worker lease.  This narrow seam is
+        only for an authenticated owner recording evidence after an
+        independent external readback; it cannot claim, dispatch, or resume a
+        job.
+        """
+        if not _text(checkpoint_id):
+            raise ValueError("checkpoint_id is required")
+        if not _text(owner_kind) or not _text(owner_principal_id):
+            raise DurableJobLeaseError("recovery owner identity is required")
+        async with self._session() as db:
+            run = await self._fetch(db, job_id)
+            await _assert_canonical_goal_fence(
+                db,
+                goal_id=getattr(run, "goal_id", None),
+                goal_revision=getattr(run, "goal_revision", None),
+                owner_kind=_text(getattr(run, "owner_kind", None)),
+                owner_principal_id=getattr(run, "owner_principal_id", None),
+                session_id=getattr(run, "session_id", None),
+                authority=getattr(run, "declared_authority_json", None),
+            )
+            if (
+                _text(getattr(run, "owner_kind", None)) != _text(owner_kind)
+                or _text(getattr(run, "owner_principal_id", None)) != _text(owner_principal_id)
+            ):
+                raise DurableJobLeaseError("recovery owner does not match durable job owner")
+            if run.status not in {"unknown_external_effect", "cost_liability", "blocked", "failed"}:
+                raise DurableJobTransitionError(
+                    f"recovery checkpoint not allowed from {run.status}"
+                )
+            if run.lease_owner or run.lease_expires_at:
+                raise DurableJobLeaseError("recovery checkpoint requires an unleased job")
+            current_revision = _revision(run)
+            if expected_revision is not None and int(expected_revision) != current_revision:
+                raise DurableJobLeaseError("durable job revision is stale")
+            receipt = {
+                "checkpoint_id": checkpoint_id,
+                "state_digest": _digest(state),
+                "state_keys": sorted(str(key) for key in state.keys()) if isinstance(state, dict) else [],
+                "safe": True,
+                "payload": _safe_structure(checkpoint_payload) if checkpoint_payload is not None else None,
+                "recorded_at": _utc_now().isoformat(),
+                "recovery_owner_kind": owner_kind,
+                "recovery_owner_principal_id": owner_principal_id,
+            }
+            existing = _json_load(run.checkpoint_receipts_json, [])
+            existing = [
+                item
+                for item in existing
+                if isinstance(item, dict) and item.get("checkpoint_id") != checkpoint_id
+            ]
+            existing.append(receipt)
+            now = _utc_now()
+            conditions = [
+                WorkflowRunState.run_identity == job_id,
+                WorkflowRunState.status == run.status,
+                WorkflowRunState.revision == current_revision,
+                WorkflowRunState.lease_owner.is_(None),
+                WorkflowRunState.lease_expires_at.is_(None),
+            ]
+            _append_parent_fence_condition(conditions, run, now=now)
+            updated = await db.execute(
+                update(WorkflowRunState)
+                .execution_options(synchronize_session=False)
+                .where(*conditions)
+                .values(
+                    checkpoint_receipts_json=_canonical(existing[-50:]),
+                    updated_at=now,
+                    heartbeat_at=now,
+                    revision=WorkflowRunState.revision + 1,
+                )
+            )
+            if not _rowcount_is_one(updated):
+                raise DurableJobLeaseError("job changed during recovery checkpoint")
+            refreshed = await self._fetch(db, job_id)
+            db.expunge(refreshed)
+            return _serialize(refreshed, receipt={"kind": "recovery_checkpoint", "status": "recorded", **receipt})
+
     async def record_artifact(
         self,
         job_id: str,
@@ -3345,6 +3447,96 @@ class DurableJobRepository:
             db.expunge(refreshed)
             return _serialize(refreshed, receipt={"kind": "artifact", "status": "recorded", **receipt})
 
+    async def record_recovery_artifact(
+        self,
+        job_id: str,
+        *,
+        owner_kind: str,
+        owner_principal_id: str,
+        file_path: str,
+        artifact_type: str = "workspace_file",
+        content: str | bytes | None = None,
+        expected_revision: int | None = None,
+    ) -> dict[str, Any]:
+        """Persist an artifact after recovery readback, without a worker lease."""
+        if not _text(owner_kind) or not _text(owner_principal_id):
+            raise DurableJobLeaseError("recovery owner identity is required")
+        async with self._session() as db:
+            run = await self._fetch(db, job_id)
+            await _assert_canonical_goal_fence(
+                db,
+                goal_id=getattr(run, "goal_id", None),
+                goal_revision=getattr(run, "goal_revision", None),
+                owner_kind=_text(getattr(run, "owner_kind", None)),
+                owner_principal_id=getattr(run, "owner_principal_id", None),
+                session_id=getattr(run, "session_id", None),
+                authority=getattr(run, "declared_authority_json", None),
+            )
+            if (
+                _text(getattr(run, "owner_kind", None)) != _text(owner_kind)
+                or _text(getattr(run, "owner_principal_id", None)) != _text(owner_principal_id)
+            ):
+                raise DurableJobLeaseError("recovery owner does not match durable job owner")
+            if run.status not in {"unknown_external_effect", "cost_liability", "blocked", "failed"}:
+                raise DurableJobTransitionError(f"recovery artifact not allowed from {run.status}")
+            if run.lease_owner or run.lease_expires_at:
+                raise DurableJobLeaseError("recovery artifact requires an unleased job")
+            current_revision = _revision(run)
+            if expected_revision is not None and int(expected_revision) != current_revision:
+                raise DurableJobLeaseError("durable job revision is stale")
+            record = build_artifact_record(
+                file_path=file_path,
+                artifact_type=artifact_type,
+                producer=run.job_kind,
+                run_id=job_id,
+                session_id=run.session_id,
+                content=content,
+            )
+            receipt = {
+                "artifact_id": record["artifact_id"],
+                "artifact_type": record["artifact_type"],
+                "file_path": record["file_path"],
+                "producer": record["producer"],
+                "content_sha256": record["content_sha256"],
+                "size_bytes": record["size_bytes"],
+                "exists": record["exists"],
+                "recorded_at": _utc_now().isoformat(),
+                "recovery_owner_kind": owner_kind,
+                "recovery_owner_principal_id": owner_principal_id,
+            }
+            existing = _json_load(run.artifact_receipts_json, [])
+            existing = [
+                item
+                for item in existing
+                if isinstance(item, dict) and item.get("artifact_id") != receipt["artifact_id"]
+            ]
+            existing.append(receipt)
+            now = _utc_now()
+            conditions = [
+                WorkflowRunState.run_identity == job_id,
+                WorkflowRunState.status == run.status,
+                WorkflowRunState.revision == current_revision,
+                WorkflowRunState.lease_owner.is_(None),
+                WorkflowRunState.lease_expires_at.is_(None),
+            ]
+            _append_parent_fence_condition(conditions, run, now=now)
+            updated = await db.execute(
+                update(WorkflowRunState)
+                .execution_options(synchronize_session=False)
+                .where(*conditions)
+                .values(
+                    artifact_receipts_json=_canonical(existing[-100:]),
+                    updated_at=now,
+                    heartbeat_at=now,
+                    revision=WorkflowRunState.revision + 1,
+                )
+            )
+            if not _rowcount_is_one(updated):
+                raise DurableJobLeaseError("job changed during recovery artifact write")
+            refreshed = await self._fetch(db, job_id)
+            db.expunge(refreshed)
+            return _serialize(refreshed, receipt={"kind": "recovery_artifact", "status": "recorded", **receipt})
+
     async def record_effect(
         self,
         job_id: str,
@@ -3411,9 +3603,22 @@ class DurableJobRepository:
                 session_id=getattr(run, "session_id", None),
                 authority=getattr(run, "declared_authority_json", None),
             )
-            if _deadline_expired(run):
+            recovery_readback = (
+                receipt_kind == "readback"
+                and owner is None
+                and fencing_token is None
+                and isinstance(safe_details, Mapping)
+                and _text(safe_details.get("reconciliation_owner_id"))
+                == _text(getattr(run, "owner_principal_id", None))
+                and run.status in {"unknown_external_effect", "cost_liability", "blocked", "failed"}
+                and not run.lease_owner
+                and not run.lease_expires_at
+            )
+            if _deadline_expired(run) and not recovery_readback:
                 raise DurableJobTransitionError("job deadline has expired")
-            if run.status in DURABLE_JOB_TERMINAL_STATUSES or run.status in {"failed", "cancelled"}:
+            if run.status in DURABLE_JOB_TERMINAL_STATUSES or (
+                run.status == "failed" and not recovery_readback
+            ):
                 raise DurableJobTransitionError(f"terminal job cannot record effects ({run.status})")
             lease_present = bool(run.lease_owner or run.lease_expires_at)
             if run.status == "running" and (owner is None or fencing_token is None):
@@ -3423,7 +3628,9 @@ class DurableJobRepository:
                     raise DurableJobLeaseError("owner and fencing token are required for leased effect writes")
                 self._assert_lease(run, owner=owner, fencing_token=fencing_token)
             elif owner is None and fencing_token is None:
-                if not _is_typed_admission_receipt(
+                if recovery_readback:
+                    pass
+                elif not _is_typed_admission_receipt(
                     run,
                     effect_type=effect_type,
                     receipt_kind=receipt_kind,
@@ -4036,6 +4243,106 @@ class DurableJobRepository:
             db.expunge(refreshed)
             return _serialize(refreshed, receipt=receipt)
 
+    async def finalize_reconciled_job(
+        self,
+        job_id: str,
+        *,
+        owner_kind: str,
+        owner_principal_id: str,
+        expected_revision: int | None = None,
+        result: Any = None,
+        result_summary: str | None = None,
+    ) -> dict[str, Any]:
+        """Close an uncertain job only after its exact effect was read back.
+
+        This is intentionally separate from ``transition_job``: recovery has
+        no worker lease and must never make an arbitrary blocked job
+        successful.  The effect ledger must already contain a verified
+        readback and no unresolved liability.
+        """
+        if not _text(owner_kind) or not _text(owner_principal_id):
+            raise DurableJobLeaseError("recovery owner identity is required")
+        async with self._session() as db:
+            run = await self._fetch(db, job_id)
+            await _assert_canonical_goal_fence(
+                db,
+                goal_id=getattr(run, "goal_id", None),
+                goal_revision=getattr(run, "goal_revision", None),
+                owner_kind=_text(getattr(run, "owner_kind", None)),
+                owner_principal_id=getattr(run, "owner_principal_id", None),
+                session_id=getattr(run, "session_id", None),
+                authority=getattr(run, "declared_authority_json", None),
+            )
+            if (
+                _text(getattr(run, "owner_kind", None)) != _text(owner_kind)
+                or _text(getattr(run, "owner_principal_id", None)) != _text(owner_principal_id)
+            ):
+                raise DurableJobLeaseError("recovery owner does not match durable job owner")
+            if run.status not in {"unknown_external_effect", "cost_liability", "blocked", "failed"}:
+                raise DurableJobTransitionError(
+                    f"only an uncertain job may be finalized by reconciliation (current={run.status})"
+                )
+            if run.lease_owner or run.lease_expires_at:
+                raise DurableJobLeaseError("reconciled finalization requires an unleased job")
+            current_revision = _revision(run)
+            if expected_revision is not None and int(expected_revision) != current_revision:
+                raise DurableJobLeaseError("durable job revision is stale")
+            effects = _effect_ledger_or_raise(run.effect_receipts_json)
+            if _job_has_unsafe_effects(effects):
+                raise DurableJobTransitionError(
+                    "cannot finalize reconciliation while an external effect remains unresolved"
+                )
+            if not _verified_readback_exists(effects):
+                raise DurableJobTransitionError(
+                    "reconciled finalization requires a verified capability readback"
+                )
+            now = _utc_now()
+            conditions = [
+                WorkflowRunState.run_identity == job_id,
+                WorkflowRunState.status == run.status,
+                WorkflowRunState.revision == current_revision,
+                WorkflowRunState.owner_kind == owner_kind,
+                WorkflowRunState.owner_principal_id == owner_principal_id,
+                WorkflowRunState.lease_owner.is_(None),
+                WorkflowRunState.lease_expires_at.is_(None),
+            ]
+            _append_parent_fence_condition(conditions, run, now=now)
+            values: dict[str, Any] = {
+                "status": "succeeded",
+                "failure_reason": None,
+                "lease_owner": None,
+                "lease_expires_at": None,
+                "finished_at": now,
+                "updated_at": now,
+                "heartbeat_at": now,
+                "revision": WorkflowRunState.revision + 1,
+            }
+            if result is not None:
+                values["result_digest"] = _digest(result)
+                values["result_summary"] = _text(result_summary, "reconciled result recorded")
+            elif result_summary is not None:
+                values["result_summary"] = _text(result_summary)
+            updated = await db.execute(
+                update(WorkflowRunState)
+                .execution_options(synchronize_session=False)
+                .where(*conditions)
+                .values(**values)
+            )
+            if not _rowcount_is_one(updated):
+                raise DurableJobLeaseError("job changed during reconciled finalization")
+            refreshed = await self._fetch(db, job_id)
+            receipt = {
+                "kind": "reconciled_finalization",
+                "status": "recorded",
+                "owner_kind": owner_kind,
+                "owner_principal_id": owner_principal_id,
+                "reason": "verified_external_readback",
+                "revision": _revision(refreshed),
+                "operator_visible": True,
+            }
+            db.expunge(refreshed)
+            return _serialize(refreshed, receipt=receipt)
+
     async def reconcile_external_effect(
         self,
         job_id: str,
@@ -4368,6 +4675,82 @@ class DurableJobRepository:
                 db.expunge(refreshed)
                 recovered.append(_serialize(refreshed, receipt=receipt))
         return recovered
+
+    async def recover_stale_job(
+        self,
+        job_id: str,
+        *,
+        now: datetime | None = None,
+    ) -> dict[str, Any]:
+        """Recover one expired lease without touching unrelated jobs.
+
+        Capability-specific recovery routes must not run the global stale-job
+        sweep as a side effect of inspecting one receipt.  This narrow CAS
+        uses the same conservative classification as ``recover_stale_jobs``:
+        an expired worker is cleared to a visible blocked/failed state, while
+        any unresolved effect remains authoritative.  A caller can then make
+        a capability-specific decision under the new fencing token.
+        """
+
+        observed_at = now or _utc_now()
+        async with self._session() as db:
+            run = await self._fetch(db, job_id)
+            if run.status != "running":
+                db.expunge(run)
+                return _serialize(run, receipt={"kind": "targeted_recovery", "status": "noop", "operator_visible": True})
+            try:
+                lease_expires = _as_utc(run.lease_expires_at)
+            except ValueError as exc:
+                raise DurableJobTransitionError("job lease metadata is malformed") from exc
+            if lease_expires is not None and lease_expires > observed_at:
+                raise DurableJobLeaseError("job lease is still active")
+            try:
+                deadline = _as_utc(run.deadline_at)
+            except ValueError:
+                deadline = None
+            if deadline is not None and deadline <= observed_at:
+                recovery_status, recovery_reason = "failed", "deadline_expired"
+            else:
+                recovery_status, recovery_reason = _restart_recovery_state(run)
+            expected_revision = _revision(run)
+            expected_fence = int(run.fencing_token or 0)
+            conditions = [
+                WorkflowRunState.run_identity == job_id,
+                WorkflowRunState.status == "running",
+                WorkflowRunState.revision == expected_revision,
+                WorkflowRunState.fencing_token == expected_fence,
+            ]
+            _append_goal_fence_condition(conditions, run)
+            updated = await db.execute(
+                update(WorkflowRunState)
+                .execution_options(synchronize_session=False)
+                .where(*conditions)
+                .values(
+                    status=recovery_status,
+                    failure_reason=recovery_reason,
+                    lease_owner=None,
+                    lease_expires_at=None,
+                    fencing_token=WorkflowRunState.fencing_token + 1,
+                    revision=WorkflowRunState.revision + 1,
+                    updated_at=observed_at,
+                    heartbeat_at=observed_at,
+                    finished_at=(observed_at if recovery_status == "failed" else None),
+                )
+            )
+            if not _rowcount_is_one(updated):
+                raise DurableJobLeaseError("job changed during targeted recovery")
+            refreshed = await self._fetch(db, job_id)
+            receipt = {
+                "kind": "targeted_recovery",
+                "status": recovery_status,
+                "reason": recovery_reason,
+                "previous_owner": run.lease_owner,
+                "fencing_token": refreshed.fencing_token,
+                "revision": _revision(refreshed),
+                "operator_visible": True,
+            }
+            db.expunge(refreshed)
+            return _serialize(refreshed, receipt=receipt)
 
     def _assert_lease(self, run: WorkflowRunState, *, owner: str | None, fencing_token: int | None) -> None:
         if owner is None and fencing_token is None:

@@ -56,7 +56,12 @@ def test_transition_table_is_the_single_normative_lifecycle_contract():
         "failed",
         "cancelled",
     })
-    assert DURABLE_JOB_TRANSITIONS["failed"] == frozenset({"queued"})
+    assert DURABLE_JOB_TRANSITIONS["failed"] == frozenset({
+        "queued",
+        "cancelled",
+        "unknown_external_effect",
+        "cost_liability",
+    })
     assert DURABLE_JOB_TRANSITIONS["succeeded"] == frozenset()
     assert DURABLE_JOB_TRANSITIONS["cancelled"] == frozenset()
     assert "queued" in DURABLE_JOB_TRANSITIONS["awaiting_approval"]

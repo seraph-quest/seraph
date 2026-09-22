@@ -287,6 +287,190 @@ class ScheduledJobRun(SQLModel, table=True):
     metadata_json: Optional[str] = Field(default=None)
 
 
+class GuardianSourceWatch(SQLModel, table=True):
+    """Owner-bound source watch configuration and its scheduler fence."""
+
+    __tablename__ = "guardian_source_watches"
+    __table_args__ = (
+        Index("ux_guardian_source_watches_scheduled_job", "scheduled_job_id", unique=True),
+    )
+
+    id: str = Field(default_factory=_uuid, primary_key=True)
+    goal_id: str = Field(index=True)
+    owner_principal_id: str = Field(index=True)
+    owner_session_id: str = Field(index=True)
+    state: str = Field(default="active", index=True)
+    capability_id: str = Field(default="guardian.research-watch.v1", index=True)
+    capability_version: str = Field(default="1", index=True)
+    goal_revision: int = Field(default=1, index=True)
+    plan_revision: int = Field(default=1, index=True)
+    sources_json: str = Field(default="[]")
+    criteria_json: str = Field(default="{}")
+    schedule_spec_json: str = Field(default="{}")
+    read_authority_json: str = Field(default="{}")
+    write_authority_json: str = Field(default="{}")
+    write_mode: str = Field(default="approval_each_run", index=True)
+    scheduled_job_id: str = Field(index=True)
+    source_set_digest: str = Field(default="", index=True)
+    criteria_digest: str = Field(default="", index=True)
+    active_job_id: Optional[str] = Field(default=None, index=True)
+    active_job_fence: int = Field(default=0, index=True)
+    active_job_started_at: Optional[datetime] = Field(default=None)
+    last_run_identity: Optional[str] = Field(default=None, index=True)
+    last_status: Optional[str] = Field(default=None, index=True)
+    last_error_code: Optional[str] = Field(default=None, index=True)
+    created_at: datetime = Field(default_factory=_now)
+    updated_at: datetime = Field(default_factory=_now)
+
+
+class GuardianSourceBaseline(SQLModel, table=True):
+    """Canonical local baseline for one source identity generation."""
+
+    __tablename__ = "guardian_source_baselines"
+    __table_args__ = (
+        Index(
+            "ux_guardian_source_baselines_watch_source",
+            "watch_id",
+            "source_key",
+            unique=True,
+        ),
+    )
+
+    id: str = Field(default_factory=_uuid, primary_key=True)
+    watch_id: str = Field(index=True)
+    source_key: str = Field(index=True)
+    kind: str = Field(default="")
+    target: str = Field(default="")
+    identity_digest: str = Field(default="", index=True)
+    generation: int = Field(default=1)
+    baseline_text: str = Field(default="")
+    baseline_sha256: str = Field(default="", index=True)
+    etag: Optional[str] = Field(default=None)
+    last_modified: Optional[str] = Field(default=None)
+    observed_at: datetime = Field(default_factory=_now, index=True)
+    state: str = Field(default="missing", index=True)
+    last_error_code: Optional[str] = Field(default=None, index=True)
+    updated_at: datetime = Field(default_factory=_now)
+
+
+class GuardianDecisionPacket(SQLModel, table=True):
+    """Immutable observed checkpoint and verified local artifact handoff."""
+
+    __tablename__ = "guardian_decision_packets"
+    __table_args__ = (
+        Index(
+            "ux_guardian_decision_packets_watch_input",
+            "watch_id",
+            "input_digest",
+            unique=True,
+        ),
+    )
+
+    id: str = Field(default_factory=_uuid, primary_key=True)
+    source_watch_id: str = Field(index=True)
+    watch_id: str = Field(index=True)
+    goal_id: str = Field(index=True)
+    goal_revision: int = Field(default=1, index=True)
+    plan_revision: int = Field(default=1, index=True)
+    run_identity: str = Field(index=True)
+    input_digest: str = Field(default="", index=True)
+    criteria_digest: str = Field(default="", index=True)
+    source_observation_json: str = Field(default="{}")
+    material_source_keys_json: str = Field(default="[]")
+    proposal_text: str = Field(default="")
+    task_text: str = Field(default="")
+    status: str = Field(default="prepared", index=True)
+    approval_id: Optional[str] = Field(default=None, index=True)
+    dossier_path: Optional[str] = Field(default=None)
+    dossier_artifact_id: Optional[str] = Field(default=None, index=True)
+    dossier_sha256: Optional[str] = Field(default=None, index=True)
+    task_path: Optional[str] = Field(default=None)
+    task_artifact_id: Optional[str] = Field(default=None, index=True)
+    task_sha256: Optional[str] = Field(default=None, index=True)
+    verification_status: str = Field(default="pending", index=True)
+    memory_status: str = Field(default="no_learning", index=True)
+    strategy_delta_id: Optional[str] = Field(default=None, index=True)
+    observed_checkpoint_json: str = Field(default="{}")
+    observed_checkpoint_sha256: str = Field(default="", index=True)
+    redaction_manifest_json: str = Field(default="{}")
+    outcome_json: str = Field(default="{}")
+    failure_code: Optional[str] = Field(default=None, index=True)
+    created_at: datetime = Field(default_factory=_now, index=True)
+    updated_at: datetime = Field(default_factory=_now)
+
+
+class GitHubFollowthroughConnection(SQLModel, table=True):
+    """Operator-owned GitHub binding for the bounded follow-through path.
+
+    The vault key is a server-side reference only. It is excluded from API
+    projections, durable job inputs, artifacts, and audit details.
+    """
+
+    __tablename__ = "github_followthrough_connections"
+    __table_args__ = (
+        Index(
+            "ux_github_followthrough_connections_owner",
+            "owner_principal_id",
+            unique=True,
+        ),
+    )
+
+    id: str = Field(default_factory=_uuid, primary_key=True)
+    owner_principal_id: str = Field(index=True)
+    repository: str = Field(default="")
+    vault_key: str = Field(default="")
+    revision: int = Field(default=1, index=True)
+    mode: str = Field(default="disabled", index=True)
+    active_job_id: Optional[str] = Field(default=None, index=True)
+    active_fence: Optional[int] = Field(default=None, index=True)
+    created_at: datetime = Field(default_factory=_now, index=True)
+    updated_at: datetime = Field(default_factory=_now, index=True)
+
+
+class GuardianRoutine(SQLModel, table=True):
+    """Owner-bound reusable guardian routine metadata.
+
+    The row is only a selector and provenance index.  Authority remains in
+    the current package review, source-watch grants, and invocation approvals.
+    """
+
+    __tablename__ = "guardian_routines"
+
+    id: str = Field(default_factory=_uuid, primary_key=True)
+    owner_principal_id: str = Field(index=True)
+    owner_session_id: str = Field(index=True)
+    name: str = Field(default="", index=True)
+    state: str = Field(default="prepared", index=True)
+    revision: int = Field(default=1, index=True)
+    current_version: Optional[int] = Field(default=None, index=True)
+    created_at: datetime = Field(default_factory=_now)
+    updated_at: datetime = Field(default_factory=_now)
+
+
+class GuardianRoutineVersion(SQLModel, table=True):
+    """Immutable routine bytes and verified M1/M3 provenance."""
+
+    __tablename__ = "guardian_routine_versions"
+    __table_args__ = (
+        Index("ux_guardian_routine_versions_routine_version", "routine_id", "version", unique=True),
+    )
+
+    id: str = Field(default_factory=_uuid, primary_key=True)
+    routine_id: str = Field(index=True)
+    version: int = Field(default=1, index=True)
+    source_provenance_json: str = Field(default="{}")
+    workflow_bytes: str = Field(default="")
+    workflow_sha256: str = Field(default="", index=True)
+    runbook_bytes: str = Field(default="")
+    runbook_sha256: str = Field(default="", index=True)
+    installed_package_digest: Optional[str] = Field(default=None, index=True)
+    source_repository: Optional[str] = Field(default=None)
+    source_action: Optional[str] = Field(default=None)
+    source_issue_number: Optional[int] = Field(default=None)
+    created_at: datetime = Field(default_factory=_now, index=True)
+    installed_at: Optional[datetime] = Field(default=None, index=True)
+
+
 class WorkflowRunState(SQLModel, table=True):
     __tablename__ = "workflow_run_states"
     __table_args__ = (

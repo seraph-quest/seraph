@@ -1,16 +1,20 @@
 """Workflows API — list, toggle, reload reusable multi-step workflows."""
 
 from collections import defaultdict
-from datetime import datetime, timezone
+import asyncio
+from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 import logging
 import os
 import re
+from pathlib import Path, PurePosixPath
+import tempfile
+import uuid
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlmodel import col, select
 
 from config.settings import settings
@@ -34,12 +38,18 @@ from src.audit.runtime import log_integration_event
 from src.auth.cancellation import RuntimeRevokedError, assert_runtime_not_revoked
 from src.auth.service import bind_operator_principal
 from src.db.engine import get_session
-from src.db.models import AuditEvent
+from src.db.models import AuditEvent, Goal, GuardianDecisionPacket, GuardianSourceWatch
 from src.extensions.registry import ExtensionRegistry
 from src.extensions.registry import default_manifest_roots_for_workspace
 from src.extensions.workflow_runtimes import list_workflow_runtime_inventory
 from src.observer.manager import context_manager
 from src.extensions.workspace_package import save_workspace_contribution
+from src.execution.repo_sandbox import (
+    RepoSandboxError,
+    RepoSandboxJob,
+    RootlessDockerRepoSandbox,
+    limits_digest,
+)
 from src.goals.repository import deserialize_success_criterion, goal_repository
 from src.tools.policy import get_current_tool_policy_mode
 from src.workflows.loader import parse_workflow_content
@@ -50,7 +60,10 @@ from src.workflows.manager import (
 )
 from src.workflows.durable_state import _safe_operator_recovery_target, workflow_state_repository
 from src.workflows.job_runtime import (
+    DurableJobIdentity,
+    DurableJobSpec,
     DurableJobError,
+    DurableJobTransitionError,
     durable_job_repository,
     durable_lease_id,
 )
@@ -84,6 +97,42 @@ class WorkflowRunControlRequest(BaseModel):
 class WorkflowDraftRequest(BaseModel):
     content: str
     file_name: str | None = None
+
+
+class RepoChangePreviewRequest(BaseModel):
+    """Operator request for the fixed repository change capability.
+
+    The request contains references and bounded intent only.  The backend
+    resolves the candidate, patch bytes, execution owner, image, and runtime
+    limits from canonical state before admitting a durable job.
+    """
+
+    model_config = {"extra": "forbid"}
+
+    goal_id: str = Field(min_length=1, max_length=160)
+    goal_revision: int = Field(ge=1)
+    candidate_id: str = Field(min_length=1, max_length=160)
+    idempotency_key: str = Field(min_length=1, max_length=160)
+    evidence_refs: list[str] = Field(default_factory=list, max_length=32)
+    repository_path: str = Field(min_length=1, max_length=512)
+    patch_artifact_id: str = Field(min_length=1, max_length=160)
+    patch_sha256: str = Field(min_length=64, max_length=64)
+    allowed_paths: list[str] = Field(min_length=1, max_length=64)
+    test_args: list[str] = Field(min_length=1, max_length=16)
+    priority: int = Field(default=50, ge=0, le=100)
+    deadline_seconds: int = Field(default=180, ge=30, le=180)
+
+
+class RepoChangeResumeRequest(BaseModel):
+    model_config = {"extra": "forbid"}
+
+    approval_id: str = Field(min_length=1, max_length=160)
+
+
+class RepoChangeCancelRequest(BaseModel):
+    model_config = {"extra": "forbid"}
+
+    reason: str = Field(default="operator_requested_stop", min_length=1, max_length=160)
 
 
 _WORKFLOW_CONTROL_ACTIONS = frozenset(
@@ -3964,6 +4013,820 @@ async def _list_workflow_runs(
         reverse=True,
     )
     return completed[:limit]
+
+
+_REPO_CHANGE_JOB_KIND = "engineering.repo-change.v1"
+_REPO_CHANGE_CAPABILITY_VERSION = "engineering.repo-change.v1"
+_REPO_CHANGE_SERVICE_LEASE = "service:repo-change"
+_REPO_CHANGE_APPROVAL_TTL_SECONDS = 5 * 60
+_REPO_CHANGE_JOB_TTL_SECONDS = 10 * 60
+
+
+def _repo_change_workspace_root() -> Path:
+    return Path(settings.workspace_dir).expanduser().resolve()
+
+
+def _repo_change_safe_relative(value: str, *, field_name: str) -> str:
+    text = str(value or "").strip()
+    path = PurePosixPath(text)
+    if not text or "\x00" in text or path.is_absolute() or ".." in path.parts:
+        raise HTTPException(status_code=422, detail={"code": f"{field_name}_invalid"})
+    normalized = path.as_posix()
+    if normalized in {"", "."} or normalized.startswith("/"):
+        raise HTTPException(status_code=422, detail={"code": f"{field_name}_invalid"})
+    return normalized
+
+
+def _repo_change_patch_path(artifact_id: str) -> Path:
+    if not _WORKFLOW_SAFE_ARTIFACT_ID_RE.fullmatch(str(artifact_id or "")):
+        raise HTTPException(status_code=422, detail={"code": "patch_artifact_id_invalid"})
+    root = _repo_change_workspace_root()
+    for candidate in (
+        root / "artifacts" / "repo-change" / f"{artifact_id}.patch",
+        root / ".seraph" / "repo-change" / "artifacts" / f"{artifact_id}.patch",
+    ):
+        try:
+            resolved = candidate.resolve(strict=True)
+        except OSError:
+            continue
+        if resolved.is_file():
+            return resolved
+    raise HTTPException(status_code=422, detail={"code": "patch_artifact_unavailable"})
+
+
+def _repo_change_job_id(principal_id: str, idempotency_key: str) -> str:
+    digest = hashlib.sha256(
+        f"{_REPO_CHANGE_JOB_KIND}\0{principal_id}\0{idempotency_key}".encode("utf-8")
+    ).hexdigest()[:32]
+    return f"repo-change-{digest}"
+
+
+def _validate_repo_test_args(test_args: tuple[str, ...], allowed_paths: tuple[str, ...]) -> tuple[str, ...]:
+    accepted_flags = {"pytest", "-q", "-x", "--maxfail=1", "--disable-warnings"}
+    allowed = set(allowed_paths)
+    if not test_args or len(test_args) > 16:
+        raise HTTPException(status_code=422, detail={"code": "test_args_invalid"})
+    normalized: list[str] = []
+    named_path = False
+    for value in test_args:
+        item = str(value).strip()
+        if not item or len(item.encode("utf-8")) > 4096:
+            raise HTTPException(status_code=422, detail={"code": "test_args_invalid"})
+        if item in accepted_flags:
+            if item != "pytest":
+                normalized.append(item)
+            continue
+        path = _repo_change_safe_relative(item, field_name="test_arg")
+        if path not in allowed:
+            raise HTTPException(status_code=422, detail={"code": "test_arg_outside_allowed_paths"})
+        named_path = True
+        normalized.append(path)
+    if not named_path:
+        raise HTTPException(status_code=422, detail={"code": "test_path_required"})
+    if sum(len(item.encode("utf-8")) for item in normalized) > 64 * 1024:
+        raise HTTPException(status_code=422, detail={"code": "test_args_invalid"})
+    return tuple(normalized)
+
+
+async def _resolve_repo_change_candidate(
+    *,
+    candidate_id: str,
+    goal_id: str,
+    goal_revision: int,
+    owner_principal_id: str,
+    owner_session_id: str,
+    evidence_refs: list[str],
+) -> dict[str, Any]:
+    """Resolve the M1 proof used by repository execution.
+
+    The request may name a candidate, but it cannot manufacture the authority
+    chain.  A successful, owner-bound M1 packet is the canonical candidate
+    proof for this capability; all execution bindings are derived from it.
+    """
+    async with get_session() as db:
+        goal = (await db.execute(select(Goal).where(Goal.id == goal_id))).scalars().first()
+        if goal is None or str(goal.owner_principal_id or "") != owner_principal_id or str(goal.owner_session_id or "") != owner_session_id:
+            raise HTTPException(status_code=404, detail={"code": "goal_not_owned"})
+        if int(goal.revision or 0) != int(goal_revision) or str(getattr(goal.status, "value", goal.status) or "") != "active":
+            raise HTTPException(status_code=409, detail={"code": "goal_revision_stale"})
+        packet = (
+            await db.execute(
+                select(GuardianDecisionPacket).where(
+                    GuardianDecisionPacket.id == candidate_id,
+                    GuardianDecisionPacket.goal_id == goal_id,
+                    GuardianDecisionPacket.goal_revision == goal_revision,
+                    GuardianDecisionPacket.status == "succeeded",
+                    GuardianDecisionPacket.verification_status == "passed",
+                )
+            )
+        ).scalars().first()
+        if packet is None:
+            raise HTTPException(status_code=409, detail={"code": "m1_candidate_proof_required"})
+        watch = (
+            await db.execute(
+                select(GuardianSourceWatch).where(
+                    GuardianSourceWatch.id == packet.source_watch_id,
+                    GuardianSourceWatch.owner_principal_id == owner_principal_id,
+                    GuardianSourceWatch.goal_id == goal_id,
+                    GuardianSourceWatch.state == "active",
+                )
+            )
+        ).scalars().first()
+        if watch is None or int(watch.goal_revision or 0) != int(goal_revision) or not packet.dossier_artifact_id or not packet.dossier_sha256:
+            raise HTTPException(status_code=409, detail={"code": "m1_candidate_proof_stale"})
+        canonical_refs = {
+            f"guardian-packet:{packet.id}",
+            str(packet.id),
+            str(packet.dossier_artifact_id),
+        }
+        supplied = {str(item).strip() for item in evidence_refs if str(item).strip()}
+        if supplied and not supplied.intersection(canonical_refs):
+            raise HTTPException(status_code=409, detail={"code": "m1_evidence_binding_mismatch"})
+        return {
+            "source_watch_id": packet.source_watch_id,
+            "source_watch_job_id": packet.run_identity,
+            "source_packet_id": packet.id,
+            "source_plan_revision": int(packet.plan_revision),
+            "dossier_artifact_id": str(packet.dossier_artifact_id),
+            "dossier_sha256": str(packet.dossier_sha256),
+            "evidence_refs": sorted(canonical_refs),
+        }
+
+
+async def _run_repo_change_after_approval(*, job: dict[str, Any], operator: Any, approval_id: str) -> dict[str, Any]:
+    current = await durable_job_repository.get_job(str(job["job_id"]))
+    if current is None:
+        raise HTTPException(status_code=404, detail={"code": "repo_change_job_not_found"})
+    authority = current.get("declared_authority") or {}
+    if not isinstance(authority, dict):
+        raise HTTPException(status_code=409, detail={"code": "repo_change_authority_corrupt"})
+    approval = await approval_repository.get(approval_id)
+    if approval is None or str(getattr(approval, "status", "")) != "approved":
+        raise HTTPException(status_code=409, detail={"code": "approval_not_current"})
+    try:
+        details = json.loads(getattr(approval, "details_json", None) or "{}")
+    except (TypeError, ValueError):
+        details = {}
+    if not isinstance(details, dict):
+        raise HTTPException(status_code=409, detail={"code": "approval_binding_corrupt"})
+    expires_at = details.get("approval_expires_at", details.get("expires_at"))
+    if expires_at is None and getattr(approval, "expires_at", None) is not None:
+        expires_at = approval.expires_at.timestamp()
+    try:
+        expires_at = float(expires_at)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise HTTPException(status_code=409, detail={"code": "approval_expiry_invalid"}) from exc
+    operator_principal_id = str(operator.principal.principal_id)
+    operator_session_id = str(operator.session_id)
+    receipt = {
+        "status": "approved", "authenticated": True,
+        "operator_principal_id": operator_principal_id, "operator_session_id": operator_session_id,
+        "owner_kind": current["owner"]["kind"], "owner_principal_id": current["owner"]["principal_id"],
+        "service_id": current["owner"].get("service_id"), "approval_id": approval_id,
+        "authority_digest": current.get("authority_digest"), "goal_id": current.get("goal_id"),
+        "goal_revision": current.get("goal_revision"), "plan_revision": current.get("plan_revision"),
+        "capability_version": current.get("capability_version"), "budget_microusd": 0,
+        "budget_digest": current.get("budget_digest"), "expires_at": expires_at,
+    }
+    try:
+        resumed = await durable_job_repository.resume_approved_job(
+            str(current["job_id"]), approval_receipt=receipt, approval_id=approval_id,
+            authority_digest=str(current.get("authority_digest") or ""), goal_id=current.get("goal_id"),
+            goal_revision=current.get("goal_revision"), plan_revision=current.get("plan_revision"),
+            capability_version=str(current.get("capability_version") or ""), owner_kind=str(current["owner"]["kind"]),
+            owner_principal_id=str(current["owner"]["principal_id"]), service_id=current["owner"].get("service_id"),
+            budget_microusd=0, budget_digest=str(current.get("budget_digest") or ""),
+            operator_principal_id=operator_principal_id, operator_session_id=operator_session_id,
+            expires_at=expires_at, expected_revision=current.get("revision"),
+        )
+        queued_lease = resumed.get("lease") or {}
+        claimed = await durable_job_repository.claim_job(
+            str(current["job_id"]), owner=_REPO_CHANGE_SERVICE_LEASE,
+            expected_revision=resumed.get("revision"), expected_fencing_token=queued_lease.get("fencing_token"),
+            lease_seconds=int(authority.get("deadline_seconds", 180)) + 60,
+        )
+    except (DurableJobError, ValueError) as exc:
+        raise HTTPException(status_code=409, detail={"code": "approval_resume_blocked", "reason": str(exc)}) from exc
+
+    lease = claimed.get("lease") or {}
+    owner = str(lease.get("owner") or _REPO_CHANGE_SERVICE_LEASE)
+    fencing_token = int(lease.get("fencing_token") or 0)
+    revision = int(claimed.get("revision") or 0)
+
+    async def record_repo_phase(phase: str, **details: Any) -> dict[str, Any]:
+        """Persist one bounded execution phase under the current job fence."""
+
+        nonlocal owner, fencing_token, revision
+        latest = await durable_job_repository.get_job(str(current["job_id"])) or claimed
+        latest_lease = latest.get("lease") or lease
+        updated = await durable_job_repository.record_checkpoint(
+            str(current["job_id"]),
+            checkpoint_id=phase,
+            state={"phase": phase, **details},
+            owner=str(latest_lease.get("owner") or owner),
+            fencing_token=int(latest_lease.get("fencing_token") or fencing_token),
+            expected_revision=int(latest.get("revision") or revision),
+        )
+        owner = str((updated.get("lease") or {}).get("owner") or owner)
+        fencing_token = int((updated.get("lease") or {}).get("fencing_token") or fencing_token)
+        revision = int(updated.get("revision") or revision)
+        return updated
+
+    # The durable row is already accepted and the approval CAS has succeeded.
+    # Record both facts after claiming the execution lease so every checkpoint
+    # has an owner/fence and survives a process restart.
+    await record_repo_phase("admitted", job_status="accepted")
+    await record_repo_phase("approved", approval_id=approval_id)
+    try:
+        patch_path = _repo_change_patch_path(str(authority.get("patch_artifact_id") or ""))
+        patch = patch_path.read_bytes()
+        if hashlib.sha256(patch).hexdigest() != str(authority.get("patch_sha256") or ""):
+            raise RepoSandboxError("patch_digest_changed")
+        await record_repo_phase("worker_started")
+        result = await asyncio.to_thread(
+            RootlessDockerRepoSandbox().execute_job,
+            RepoSandboxJob(
+                job_id=str(current["job_id"]), repository_root=str(authority.get("repository_ref") or ""),
+                patch_bytes=patch, allowed_paths=tuple(authority.get("allowed_paths") or ()),
+                test_args=tuple(authority.get("test_args") or ()), authority_digest=str(current.get("authority_digest") or ""),
+                base_digest=str(authority.get("base_digest") or ""), deadline_seconds=int(authority.get("deadline_seconds", 180)),
+                worker_image_digest=str(authority.get("image_digest") or ""),
+                limits_digest=str(authority.get("limits_digest") or ""),
+            ),
+        )
+        result_phases = result.get("checkpoint_phases") if isinstance(result, dict) else []
+        for phase in ("snapshot_verified", "input_loaded", "tests_finished", "output_exported"):
+            if isinstance(result_phases, list) and phase in result_phases:
+                await record_repo_phase(
+                    phase,
+                    profile=authority.get("profile"),
+                    image_digest=authority.get("image_digest"),
+                )
+    except (OSError, RepoSandboxError) as exc:
+        latest = await durable_job_repository.get_job(str(current["job_id"]))
+        latest_lease = (latest or {}).get("lease") or lease
+        if isinstance(exc, RepoSandboxError):
+            for phase in exc.checkpoint_phases:
+                if phase in {"snapshot_verified", "input_loaded", "tests_finished", "output_exported"}:
+                    try:
+                        await record_repo_phase(phase, error_phase=True)
+                    except Exception:
+                        break
+        failure_status = (
+            "failed"
+            if isinstance(exc, RepoSandboxError) and exc.terminal_status == "failed"
+            else "blocked"
+        )
+        try:
+            await durable_job_repository.transition_job(
+                str(current["job_id"]),
+                failure_status,
+                owner=str(latest_lease.get("owner") or owner),
+                fencing_token=int(latest_lease.get("fencing_token") or fencing_token),
+                expected_revision=(await durable_job_repository.get_job(str(current["job_id"])) or latest or {}).get("revision"),
+                reason=str(exc),
+                result={
+                    "learning": "no_learning",
+                    "memory_status": "no_learning",
+                    "phase": getattr(exc, "phase", "admitted"),
+                },
+            )
+        except Exception:
+            pass
+        return {"status": failure_status, "reason_code": str(exc), "job_id": current["job_id"], "learning": "no_learning"}
+
+    latest = await durable_job_repository.get_job(str(current["job_id"]))
+    latest_lease = (latest or {}).get("lease") or lease
+    owner = str(latest_lease.get("owner") or owner)
+    fencing_token = int(latest_lease.get("fencing_token") or fencing_token)
+    revision = int((latest or {}).get("revision") or 0)
+    if result.get("status") == "unknown_external_effect":
+        await durable_job_repository.transition_job(
+            str(current["job_id"]), "unknown_external_effect", owner=owner, fencing_token=fencing_token,
+            expected_revision=revision, reason="cleanup_unproven",
+            result={"learning": "no_learning", "memory_status": "no_learning"},
+        )
+        return {"status": "unknown_external_effect", "job_id": current["job_id"], "learning": "no_learning"}
+    outputs = result.get("outputs") if isinstance(result, dict) else {}
+    manifest = result.get("manifest") if isinstance(result, dict) else {}
+    outputs = outputs if isinstance(outputs, dict) else {}
+    manifest = manifest if isinstance(manifest, dict) else {}
+    result_phases = result.get("checkpoint_phases") if isinstance(result, dict) else []
+    if result.get("status") == "blocked":
+        if isinstance(result_phases, list):
+            for phase in result_phases:
+                if phase in {"snapshot_verified", "input_loaded", "tests_finished", "output_exported"}:
+                    await record_repo_phase(phase, profile=authority.get("profile"), image_digest=authority.get("image_digest"))
+        latest = await durable_job_repository.get_job(str(current["job_id"])) or latest or current
+        latest_lease = latest.get("lease") or latest_lease
+        blocked = await durable_job_repository.transition_job(
+            str(current["job_id"]),
+            "blocked",
+            owner=str(latest_lease.get("owner") or owner),
+            fencing_token=int(latest_lease.get("fencing_token") or fencing_token),
+            expected_revision=int(latest.get("revision") or revision),
+            reason=str(result.get("reason") or "sandbox_preflight_blocked"),
+            result={"learning": "no_learning", "memory_status": "no_learning", "preflight": result.get("preflight")},
+        )
+        return {"status": "blocked", "job_id": current["job_id"], "learning": "no_learning", "job": blocked}
+    if isinstance(result.get("cleanup"), dict) and result["cleanup"].get("status") == "cleanup_verified":
+        latest = await durable_job_repository.get_job(str(current["job_id"])) or latest or current
+        latest_lease = latest.get("lease") or latest_lease
+        cleanup_checkpoint = await record_repo_phase("cleanup_verified")
+        revision = int(cleanup_checkpoint.get("revision") or revision)
+    artifact_root = _repo_change_workspace_root() / "artifacts" / "repo-change" / str(current["job_id"])
+    artifact_root.mkdir(parents=True, exist_ok=True)
+    written: dict[str, str] = {}
+    for name in ("manifest.json", "readback.json", "diff.patch", "pytest.stdout", "pytest.stderr"):
+        payload = outputs.get(name)
+        if not isinstance(payload, bytes):
+            continue
+        destination = artifact_root / name
+        destination.write_bytes(payload)
+        written[name] = destination.relative_to(_repo_change_workspace_root()).as_posix()
+        latest = await durable_job_repository.record_artifact(
+            str(current["job_id"]), file_path=written[name], artifact_type="repo_change_" + name.replace(".", "_"),
+            owner=owner, fencing_token=fencing_token, expected_revision=revision,
+        )
+        revision = int(latest.get("revision") or revision)
+    readback_path = written.get("readback.json")
+    readback_bytes = outputs.get("readback.json")
+    if result.get("status") == "succeeded" and readback_path and isinstance(readback_bytes, bytes):
+        latest = await durable_job_repository.record_readback(
+            str(current["job_id"]), target_path=readback_path, status="succeeded",
+            target_digest=hashlib.sha256(readback_bytes).hexdigest(), content_sha256=hashlib.sha256(readback_bytes).hexdigest(),
+            details={"verified": True, "output_exists": True, "workspace_contained": True, "goal_id_read_back": bool(current.get("goal_id")), "learning": "no_learning"},
+            owner=owner, fencing_token=fencing_token, expected_revision=revision,
+        )
+        revision = int(latest.get("revision") or revision)
+        latest = await durable_job_repository.get_job(str(current["job_id"])) or latest
+        latest_lease = latest.get("lease") or latest_lease
+        checkpoint = await durable_job_repository.record_checkpoint(
+            str(current["job_id"]),
+            checkpoint_id="readback_verified",
+            state={"phase": "readback_verified", "readback_path": readback_path},
+            owner=owner,
+            fencing_token=fencing_token,
+            expected_revision=int(latest.get("revision") or revision),
+        )
+        revision = int(checkpoint.get("revision") or revision)
+        await durable_job_repository.transition_job(
+            str(current["job_id"]), "succeeded", owner=owner, fencing_token=fencing_token, expected_revision=revision,
+            reason="repo_change_readback_verified", result={"readback_path": readback_path, "learning": "no_learning", "manifest": manifest},
+            result_summary="Bounded repository change completed with verified readback.",
+        )
+    else:
+        await durable_job_repository.transition_job(
+            str(current["job_id"]), "failed", owner=owner, fencing_token=fencing_token, expected_revision=revision,
+            reason=str(result.get("failure_reason") or manifest.get("status") or "worker_failed"),
+            result={"learning": "no_learning", "memory_status": "no_learning", "manifest": manifest},
+        )
+    return (await durable_job_repository.get_job(str(current["job_id"]))) or {"status": "failed", "job_id": current["job_id"]}
+
+
+@router.post("/workflows/repo-change/preview")
+async def preview_repo_change(req: RepoChangePreviewRequest, request: Request):
+    operator = _require_authenticated_capability_operator(request)
+    principal_id = str(operator.principal.principal_id)
+    sandbox = RootlessDockerRepoSandbox()
+    preflight = sandbox.preflight()
+    if not preflight.ok:
+        return {"status": "blocked", "reason_code": preflight.reason, "preflight": preflight.as_receipt(), "operator_visible": True}
+    if not _WORKFLOW_SAFE_ARTIFACT_DIGEST_RE.fullmatch(req.patch_sha256):
+        raise HTTPException(status_code=422, detail={"code": "patch_sha256_invalid"})
+    allowed_paths = tuple(_repo_change_safe_relative(value, field_name="allowed_path") for value in req.allowed_paths)
+    if len(set(allowed_paths)) != len(allowed_paths):
+        raise HTTPException(status_code=422, detail={"code": "allowed_paths_duplicate"})
+    test_args = _validate_repo_test_args(
+        tuple(str(value).strip() for value in req.test_args),
+        allowed_paths,
+    )
+    candidate_proof = await _resolve_repo_change_candidate(
+        candidate_id=req.candidate_id,
+        goal_id=req.goal_id,
+        goal_revision=req.goal_revision,
+        owner_principal_id=principal_id,
+        owner_session_id=str(operator.session_id),
+        evidence_refs=req.evidence_refs,
+    )
+    patch_path = _repo_change_patch_path(req.patch_artifact_id)
+    try:
+        patch = patch_path.read_bytes()
+    except OSError as exc:
+        raise HTTPException(status_code=422, detail={"code": "patch_artifact_unavailable"}) from exc
+    if hashlib.sha256(patch).hexdigest() != req.patch_sha256:
+        raise HTTPException(status_code=409, detail={"code": "patch_digest_changed"})
+    repository = sandbox.validate_snapshot_root(req.repository_path)
+    workspace = _repo_change_workspace_root()
+    repository_ref = repository.relative_to(workspace).as_posix()
+    with tempfile.TemporaryDirectory(prefix="seraph-repo-preview-") as temp_dir:
+        snapshot = sandbox.snapshot_repository(repository, Path(temp_dir) / "snapshot")
+    image = sandbox.validate_image_digest(sandbox.config.worker_image_digest)
+    job_id = _repo_change_job_id(principal_id, req.idempotency_key)
+    authority = {
+        "principal": principal_id, "owner_kind": "user", "session_id": str(operator.session_id),
+        "capability_version": _REPO_CHANGE_CAPABILITY_VERSION, "profile": str(sandbox.config.profile),
+        "image_digest": image, "base_digest": snapshot.digest, "patch_artifact_id": req.patch_artifact_id,
+        "patch_sha256": req.patch_sha256, "repository_ref": repository_ref, "allowed_paths": list(allowed_paths),
+        "test_args": list(test_args), "deadline_seconds": int(req.deadline_seconds), "budget_microusd": 0,
+        "limits_digest": limits_digest(sandbox.limits),
+        "candidate_id": req.candidate_id, "evidence_refs": candidate_proof["evidence_refs"],
+        "source_watch_id": candidate_proof["source_watch_id"],
+        "source_watch_job_id": candidate_proof["source_watch_job_id"],
+        "source_packet_id": candidate_proof["source_packet_id"],
+        "source_plan_revision": candidate_proof["source_plan_revision"],
+        "dossier_artifact_id": candidate_proof["dossier_artifact_id"],
+        "dossier_sha256": candidate_proof["dossier_sha256"],
+    }
+    spec = DurableJobSpec(
+        identity=DurableJobIdentity(
+            job_id=job_id, owner_kind="user", owner_principal_id=principal_id, job_kind=_REPO_CHANGE_JOB_KIND,
+            capability_version=_REPO_CHANGE_CAPABILITY_VERSION, idempotency_scope="repo-change", idempotency_key=req.idempotency_key,
+        ),
+        inputs={"base_digest": snapshot.digest, "patch_sha256": req.patch_sha256, "candidate_id": req.candidate_id, "repository_ref": repository_ref, "allowed_paths": list(allowed_paths), "test_args": list(test_args), **candidate_proof},
+        session_id=str(operator.session_id), operator_session_id=str(operator.session_id), goal_id=req.goal_id,
+        goal_revision=req.goal_revision, candidate_id=req.candidate_id, priority=req.priority, declared_authority=authority,
+        deadline_at=datetime.now(timezone.utc) + timedelta(seconds=_REPO_CHANGE_JOB_TTL_SECONDS), max_attempts=1,
+        run_fingerprint=hashlib.sha256(json.dumps(authority, sort_keys=True).encode("utf-8")).hexdigest(), budget_microusd=0,
+    )
+    try:
+        admitted = await durable_job_repository.admit_job(spec)
+        if admitted.get("status") == "accepted":
+            queued = await durable_job_repository.queue_job(job_id, expected_revision=admitted.get("revision"))
+            claimed = await durable_job_repository.claim_job(
+                job_id, owner=_REPO_CHANGE_SERVICE_LEASE, expected_revision=queued.get("revision"),
+                expected_fencing_token=(queued.get("lease") or {}).get("fencing_token"), lease_seconds=360,
+            )
+        else:
+            claimed = admitted
+        if claimed.get("status") == "awaiting_approval":
+            return {"status": "awaiting_approval", **claimed}
+        lease = claimed.get("lease") or {}
+        fingerprint = fingerprint_tool_call(
+            _REPO_CHANGE_JOB_KIND,
+            {"job_id": job_id, "base_digest": snapshot.digest, "patch_sha256": req.patch_sha256, "candidate_id": req.candidate_id, "source_packet_id": candidate_proof["source_packet_id"]},
+        )
+        approval = await approval_repository.get_or_create_pending(
+            session_id=str(operator.session_id), tool_name=_REPO_CHANGE_JOB_KIND, risk_level="high",
+            summary=f"Approve bounded repository change for goal {req.goal_id}", fingerprint=fingerprint,
+            details={
+                "approval_owner_principal_id": principal_id, "approval_owner_operator_session_id": str(operator.session_id),
+                "approval_operator_principal_id": principal_id, "approval_execution_owner_principal_id": principal_id,
+                "approval_execution_session_id": str(operator.session_id), "approval_conversation_id": str(operator.session_id),
+                "durable_job_id": job_id, "durable_owner_kind": "user", "durable_owner_principal_id": principal_id,
+                "durable_authority_digest": claimed.get("authority_digest"), "durable_goal_id": req.goal_id,
+                "durable_goal_revision": req.goal_revision, "durable_capability_version": _REPO_CHANGE_CAPABILITY_VERSION,
+                "durable_budget_digest": claimed.get("budget_digest"), "patch_sha256": req.patch_sha256,
+                "base_digest": snapshot.digest, "candidate_id": req.candidate_id,
+                "evidence_refs": candidate_proof["evidence_refs"],
+                "source_packet_id": candidate_proof["source_packet_id"],
+                "dossier_artifact_id": candidate_proof["dossier_artifact_id"],
+                "dossier_sha256": candidate_proof["dossier_sha256"],
+                "expires_at": (datetime.now(timezone.utc) + timedelta(seconds=_REPO_CHANGE_APPROVAL_TTL_SECONDS)).timestamp(),
+            },
+        )
+        bound = await durable_job_repository.bind_approval_id(
+            job_id, approval.id, owner=str(lease.get("owner") or _REPO_CHANGE_SERVICE_LEASE),
+            fencing_token=int(lease.get("fencing_token") or 0), expected_revision=claimed.get("revision"),
+        )
+        await approval_repository.update_pending_details(
+            approval.id, owner_principal_id=principal_id, operator_session_id=str(operator.session_id),
+            updates={"approval_id": approval.id, "durable_approval_id": approval.id, "authority_digest": bound.get("authority_digest"), "durable_authority_digest": bound.get("authority_digest"), "approval_expires_at": approval.expires_at.timestamp() if approval.expires_at else None},
+        )
+        held = await durable_job_repository.transition_job(
+            job_id, "awaiting_approval", owner=str(lease.get("owner") or _REPO_CHANGE_SERVICE_LEASE),
+            fencing_token=int(lease.get("fencing_token") or 0), expected_revision=bound.get("revision"), reason="repo_change_approval_required",
+        )
+        return {"status": "awaiting_approval", "approval_id": approval.id, "base_digest": snapshot.digest, "patch_sha256": req.patch_sha256, "profile": str(sandbox.config.profile), "image_digest": image, "allowed_paths": list(allowed_paths), "test_args": list(test_args), "limits": {field: getattr(sandbox.limits, field) for field in sandbox.limits.__dataclass_fields__}, **held}
+    except (DurableJobError, RepoSandboxError, ValueError) as exc:
+        raise HTTPException(status_code=409, detail={"code": "repo_change_admission_blocked", "reason": str(exc)}) from exc
+
+
+@router.get("/workflows/repo-change/{job_id}")
+async def get_repo_change(job_id: str, request: Request):
+    operator = _require_authenticated_capability_operator(request)
+    job = await durable_job_repository.get_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail={"code": "repo_change_job_not_found"})
+    if str(job.get("owner", {}).get("principal_id") or "") != str(operator.principal.principal_id):
+        raise HTTPException(status_code=403, detail={"code": "repo_change_owner_mismatch"})
+    if str((job.get("declared_authority") or {}).get("session_id") or "") != str(operator.session_id):
+        raise HTTPException(status_code=403, detail={"code": "repo_change_session_mismatch"})
+    return {"status": job.get("status"), "job": job, "operator_action": "recover_or_cancel" if job.get("status") in {"running", "unknown_external_effect"} else "none"}
+
+
+@router.post("/workflows/repo-change/{job_id}/resume")
+async def resume_repo_change(job_id: str, req: RepoChangeResumeRequest, request: Request):
+    operator = _require_authenticated_capability_operator(request)
+    job = await durable_job_repository.get_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail={"code": "repo_change_job_not_found"})
+    if str(job.get("owner", {}).get("principal_id") or "") != str(operator.principal.principal_id):
+        raise HTTPException(status_code=403, detail={"code": "repo_change_owner_mismatch"})
+    if str((job.get("declared_authority") or {}).get("session_id") or "") != str(operator.session_id):
+        raise HTTPException(status_code=403, detail={"code": "repo_change_session_mismatch"})
+    return await _run_repo_change_after_approval(job=job, operator=operator, approval_id=req.approval_id)
+
+
+@router.post("/workflows/repo-change/{job_id}/cancel")
+async def cancel_repo_change(job_id: str, req: RepoChangeCancelRequest, request: Request):
+    operator = _require_authenticated_capability_operator(request)
+    job = await durable_job_repository.get_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail={"code": "repo_change_job_not_found"})
+    if str(job.get("owner", {}).get("principal_id") or "") != str(operator.principal.principal_id):
+        raise HTTPException(status_code=403, detail={"code": "repo_change_owner_mismatch"})
+    if str((job.get("declared_authority") or {}).get("session_id") or "") != str(operator.session_id):
+        raise HTTPException(status_code=403, detail={"code": "repo_change_session_mismatch"})
+    status = str(job.get("status") or "")
+    if status in {"queued", "awaiting_approval", "accepted", "paused", "blocked"}:
+        cancelled = await durable_job_repository.transition_job(
+            job_id,
+            "cancelled",
+            reason=req.reason,
+            expected_revision=job.get("revision"),
+            result={"learning": "no_learning", "memory_status": "no_learning"},
+        )
+        return {"status": cancelled.get("status"), "job": cancelled}
+    if status == "running":
+        token = RootlessDockerRepoSandbox._server_token(job_id)
+        lease = job.get("lease") or {}
+        checkpoint = await durable_job_repository.record_checkpoint(
+            job_id,
+            checkpoint_id="cancel_requested",
+            state={"phase": "cancel_requested", "reason": req.reason},
+            owner=str(lease.get("owner") or ""),
+            fencing_token=int(lease.get("fencing_token") or 0),
+            expected_revision=job.get("revision"),
+        )
+        checkpoint_lease = checkpoint.get("lease") or lease
+        cleanup = RootlessDockerRepoSandbox().cancel(container_name=f"{token}-worker", input_volume=f"{token}-input")
+        if cleanup.get("status") != "cancelled":
+            uncertain = await durable_job_repository.transition_job(
+                job_id,
+                "unknown_external_effect",
+                owner=str(checkpoint_lease.get("owner") or lease.get("owner") or ""),
+                fencing_token=int(checkpoint_lease.get("fencing_token") or lease.get("fencing_token") or 0),
+                expected_revision=checkpoint.get("revision"),
+                reason="reconciliation_required",
+                result={"learning": "no_learning", "memory_status": "no_learning", "cleanup": cleanup},
+            )
+            return {"status": "unknown_external_effect", "cleanup": cleanup, "job": uncertain, "learning": "no_learning"}
+        cancelled = await durable_job_repository.transition_job(
+            job_id,
+            "cancelled",
+            owner=str(checkpoint_lease.get("owner") or lease.get("owner") or ""),
+            fencing_token=int(checkpoint_lease.get("fencing_token") or lease.get("fencing_token") or 0),
+            expected_revision=checkpoint.get("revision"),
+            reason=req.reason,
+            result={"learning": "no_learning", "memory_status": "no_learning", "cleanup": cleanup},
+        )
+        return {"status": cancelled.get("status"), "cleanup": cleanup, "job": cancelled}
+    return {"status": status, "job": job, "operator_action": "reconcile" if status == "unknown_external_effect" else "none"}
+
+
+async def _recover_repo_change_after_restart(*, job: dict[str, Any], operator: Any) -> dict[str, Any]:
+    """Adopt a matching worker without replaying the approved operation."""
+
+    job_id = str(job["job_id"])
+    authority = job.get("declared_authority") if isinstance(job.get("declared_authority"), dict) else {}
+    status = str(job.get("status") or "")
+    if status == "unknown_external_effect":
+        return {
+            "status": "blocked",
+            "durable_status": status,
+            "reason_code": "reconciliation_required",
+            "operator_action": "reconcile_or_cancel_before_retry",
+            "side_effects": "none",
+            "learning": "no_learning",
+            "job": job,
+        }
+    if status != "running":
+        return {"status": status, "job": job, "recovery": "terminal_or_not_running", "operator_visible": True}
+    lease = job.get("lease") if isinstance(job.get("lease"), dict) else {}
+    expires_at = lease.get("expires_at")
+    try:
+        lease_active = expires_at is not None and datetime.fromisoformat(str(expires_at).replace("Z", "+00:00")) > datetime.now(timezone.utc)
+    except (TypeError, ValueError):
+        lease_active = False
+    if lease_active:
+        return {
+            "status": "blocked",
+            "durable_status": status,
+            "reason_code": "recovery_lease_active",
+            "operator_action": "wait_for_worker_or_cancel",
+            "side_effects": "none",
+            "learning": "no_learning",
+            "job": job,
+        }
+    try:
+        stale = await durable_job_repository.recover_stale_job(job_id)
+        if stale.get("status") != "blocked":
+            return {"status": stale.get("status"), "job": stale, "recovery": "lease_recovery_terminal", "operator_visible": True}
+        queued = await durable_job_repository.resume_job(
+            job_id,
+            expected_revision=stale.get("revision"),
+            reason="repo_change_restart_adoption",
+        )
+        if queued.get("status") != "queued":
+            return {"status": queued.get("status"), "job": queued, "recovery": "resume_blocked", "operator_visible": True}
+        claimed = await durable_job_repository.claim_job(
+            job_id,
+            owner=_REPO_CHANGE_SERVICE_LEASE,
+            expected_revision=queued.get("revision"),
+            expected_fencing_token=(queued.get("lease") or {}).get("fencing_token"),
+            lease_seconds=int(authority.get("deadline_seconds", 180)) + 60,
+        )
+    except (DurableJobError, ValueError) as exc:
+        return {
+            "status": "blocked",
+            "job_id": job_id,
+            "reason_code": "restart_lease_recovery_blocked",
+            "reason": str(exc),
+            "operator_visible": True,
+            "learning": "no_learning",
+        }
+
+    lease = claimed.get("lease") if isinstance(claimed.get("lease"), dict) else {}
+    owner = str(lease.get("owner") or _REPO_CHANGE_SERVICE_LEASE)
+    fencing_token = int(lease.get("fencing_token") or 0)
+    revision = int(claimed.get("revision") or 0)
+
+    async def record_repo_phase(phase: str, **details: Any) -> dict[str, Any]:
+        nonlocal owner, fencing_token, revision
+        latest = await durable_job_repository.get_job(job_id) or claimed
+        latest_lease = latest.get("lease") if isinstance(latest.get("lease"), dict) else lease
+        updated = await durable_job_repository.record_checkpoint(
+            job_id,
+            checkpoint_id=phase,
+            state={"phase": phase, **details},
+            owner=str(latest_lease.get("owner") or owner),
+            fencing_token=int(latest_lease.get("fencing_token") or fencing_token),
+            expected_revision=int(latest.get("revision") or revision),
+        )
+        owner = str((updated.get("lease") or {}).get("owner") or owner)
+        fencing_token = int((updated.get("lease") or {}).get("fencing_token") or fencing_token)
+        revision = int(updated.get("revision") or revision)
+        return updated
+
+    await record_repo_phase("admitted", job_status="accepted")
+    await record_repo_phase("approved", recovery=True)
+    try:
+        patch_path = _repo_change_patch_path(str(authority.get("patch_artifact_id") or ""))
+        patch = patch_path.read_bytes()
+        if hashlib.sha256(patch).hexdigest() != str(authority.get("patch_sha256") or ""):
+            raise RepoSandboxError("patch_digest_changed", phase="admitted")
+        result = await asyncio.to_thread(
+            RootlessDockerRepoSandbox().recover_job,
+            RepoSandboxJob(
+                job_id=job_id,
+                repository_root=str(authority.get("repository_ref") or ""),
+                patch_bytes=patch,
+                allowed_paths=tuple(authority.get("allowed_paths") or ()),
+                test_args=tuple(authority.get("test_args") or ()),
+                authority_digest=str(job.get("authority_digest") or ""),
+                base_digest=str(authority.get("base_digest") or ""),
+                deadline_seconds=int(authority.get("deadline_seconds", 180)),
+                worker_image_digest=str(authority.get("image_digest") or ""),
+                limits_digest=str(authority.get("limits_digest") or ""),
+            ),
+        )
+    except (OSError, RepoSandboxError) as exc:
+        latest = await durable_job_repository.get_job(job_id) or claimed
+        latest_lease = latest.get("lease") if isinstance(latest.get("lease"), dict) else lease
+        failure_status = "failed" if isinstance(exc, RepoSandboxError) and exc.terminal_status == "failed" else "blocked"
+        try:
+            await durable_job_repository.transition_job(
+                job_id,
+                failure_status,
+                owner=str(latest_lease.get("owner") or owner),
+                fencing_token=int(latest_lease.get("fencing_token") or fencing_token),
+                expected_revision=latest.get("revision"),
+                reason=str(exc),
+                result={"learning": "no_learning", "memory_status": "no_learning", "phase": getattr(exc, "phase", "admitted")},
+            )
+        except Exception:
+            pass
+        return {"status": failure_status, "job_id": job_id, "reason_code": str(exc), "learning": "no_learning", "operator_visible": True}
+
+    result_phases = result.get("checkpoint_phases") if isinstance(result, dict) else []
+    if isinstance(result_phases, list):
+        for phase in ("snapshot_verified", "input_loaded", "tests_finished", "output_exported"):
+            if phase in result_phases:
+                await record_repo_phase(phase, recovery=True, profile=authority.get("profile"), image_digest=authority.get("image_digest"))
+    latest = await durable_job_repository.get_job(job_id) or claimed
+    latest_lease = latest.get("lease") if isinstance(latest.get("lease"), dict) else lease
+    owner = str(latest_lease.get("owner") or owner)
+    fencing_token = int(latest_lease.get("fencing_token") or fencing_token)
+    revision = int(latest.get("revision") or revision)
+    if result.get("status") == "unknown_external_effect":
+        unknown = await durable_job_repository.transition_job(
+            job_id,
+            "unknown_external_effect",
+            owner=owner,
+            fencing_token=fencing_token,
+            expected_revision=revision,
+            reason="cleanup_unproven",
+            result={"learning": "no_learning", "memory_status": "no_learning", "cleanup": result.get("cleanup")},
+        )
+        return {"status": "unknown_external_effect", "job_id": job_id, "job": unknown, "learning": "no_learning"}
+    if result.get("status") == "blocked":
+        blocked = await durable_job_repository.transition_job(
+            job_id,
+            "blocked",
+            owner=owner,
+            fencing_token=fencing_token,
+            expected_revision=revision,
+            reason=str(result.get("reason") or "sandbox_recovery_blocked"),
+            result={"learning": "no_learning", "memory_status": "no_learning", "preflight": result.get("preflight")},
+        )
+        return {"status": "blocked", "job_id": job_id, "job": blocked, "learning": "no_learning", "operator_visible": True}
+    if isinstance(result.get("cleanup"), dict) and result["cleanup"].get("status") == "cleanup_verified":
+        cleanup_checkpoint = await record_repo_phase("cleanup_verified", recovery=True)
+        revision = int(cleanup_checkpoint.get("revision") or revision)
+    outputs = result.get("outputs") if isinstance(result, dict) else {}
+    manifest = result.get("manifest") if isinstance(result, dict) else {}
+    outputs = outputs if isinstance(outputs, dict) else {}
+    manifest = manifest if isinstance(manifest, dict) else {}
+    artifact_root = _repo_change_workspace_root() / "artifacts" / "repo-change" / job_id
+    artifact_root.mkdir(parents=True, exist_ok=True)
+    written: dict[str, str] = {}
+    for name in ("manifest.json", "readback.json", "diff.patch", "pytest.stdout", "pytest.stderr"):
+        payload = outputs.get(name)
+        if not isinstance(payload, bytes):
+            continue
+        destination = artifact_root / name
+        destination.write_bytes(payload)
+        written[name] = destination.relative_to(_repo_change_workspace_root()).as_posix()
+        receipt = await durable_job_repository.record_artifact(
+            job_id,
+            file_path=written[name],
+            artifact_type="repo_change_" + name.replace(".", "_"),
+            owner=owner,
+            fencing_token=fencing_token,
+            expected_revision=revision,
+        )
+        revision = int(receipt.get("revision") or revision)
+    readback_path = written.get("readback.json")
+    readback_bytes = outputs.get("readback.json")
+    if result.get("status") == "succeeded" and readback_path and isinstance(readback_bytes, bytes):
+        receipt = await durable_job_repository.record_readback(
+            job_id,
+            target_path=readback_path,
+            status="succeeded",
+            target_digest=hashlib.sha256(readback_bytes).hexdigest(),
+            content_sha256=hashlib.sha256(readback_bytes).hexdigest(),
+            details={"verified": True, "output_exists": True, "workspace_contained": True, "goal_id_read_back": bool(latest.get("goal_id")), "learning": "no_learning", "recovered": True},
+            owner=owner,
+            fencing_token=fencing_token,
+            expected_revision=revision,
+        )
+        revision = int(receipt.get("revision") or revision)
+        checkpoint = await durable_job_repository.record_checkpoint(
+            job_id,
+            checkpoint_id="readback_verified",
+            state={"phase": "readback_verified", "readback_path": readback_path, "recovered": True},
+            owner=owner,
+            fencing_token=fencing_token,
+            expected_revision=revision,
+        )
+        revision = int(checkpoint.get("revision") or revision)
+        done = await durable_job_repository.transition_job(
+            job_id,
+            "succeeded",
+            owner=owner,
+            fencing_token=fencing_token,
+            expected_revision=revision,
+            reason="repo_change_restart_readback_verified",
+            result={"readback_path": readback_path, "learning": "no_learning", "manifest": manifest, "recovered": True},
+            result_summary="Bounded repository change was recovered from the matching worker and read back.",
+        )
+        return {"status": "succeeded", "job": done, "recovery": "worker_adopted", "learning": "no_learning"}
+    failed = await durable_job_repository.transition_job(
+        job_id,
+        "failed",
+        owner=owner,
+        fencing_token=fencing_token,
+        expected_revision=revision,
+        reason=str(result.get("failure_reason") or manifest.get("status") or "worker_failed"),
+        result={"learning": "no_learning", "memory_status": "no_learning", "manifest": manifest, "recovered": True},
+    )
+    return {"status": "failed", "job": failed, "recovery": "worker_adopted", "learning": "no_learning"}
+
+
+@router.post("/workflows/repo-change/{job_id}/recover")
+async def recover_repo_change(job_id: str, request: Request):
+    """Recover one expired repository worker through its durable identity."""
+
+    operator = _require_authenticated_capability_operator(request)
+    job = await durable_job_repository.get_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail={"code": "repo_change_job_not_found"})
+    if str(job.get("owner", {}).get("principal_id") or "") != str(operator.principal.principal_id):
+        raise HTTPException(status_code=403, detail={"code": "repo_change_owner_mismatch"})
+    if str((job.get("declared_authority") or {}).get("session_id") or "") != str(operator.session_id):
+        raise HTTPException(status_code=403, detail={"code": "repo_change_session_mismatch"})
+    return await _recover_repo_change_after_restart(job=job, operator=operator)
 
 
 @router.get("/workflows")

@@ -327,4 +327,34 @@ describe("OutcomeCockpitPanel", () => {
     expect(screen.getByText("operator_auth_session")).toBeInTheDocument();
     expect(screen.getByText("2026-09-09T12:00:00Z")).toBeInTheDocument();
   });
+
+  it("shows the exact goal-bound GitHub preview and keeps publication approval-bound", () => {
+    const onPrepare = vi.fn();
+    const onExecute = vi.fn();
+    const previewBody = "A reviewed decision.\n\n<!-- seraph-operation:op-1 -->";
+    renderFixture({}, {
+      githubConnectionReady: true,
+      onPrepareGitHubFollowthrough: onPrepare,
+      onExecuteGitHubFollowthrough: onExecute,
+      githubFollowthrough: {
+        state: "active",
+        repository: "acme/example",
+        action: "create_issue",
+        previewTitle: "Reviewed decision",
+        previewBody,
+        marker: "<!-- seraph-operation:op-1 -->",
+        sourceArtifactId: "dossier-1",
+        approvalStatus: "approved",
+        approvalExpiry: "2099-01-01T00:00:00Z",
+        connectionReady: true,
+      },
+    });
+
+    expect(screen.getByTestId("outcome-github-followthrough-card")).toHaveAttribute("data-state", "active");
+    expect(screen.getByTestId("github-followthrough-preview")).toHaveTextContent("A reviewed decision.");
+    expect(screen.getByTestId("github-followthrough-preview")).toHaveTextContent("<!-- seraph-operation:op-1 -->");
+    fireEvent.click(screen.getByRole("button", { name: "Publish approved preview" }));
+    expect(onExecute).toHaveBeenCalledOnce();
+    expect(onPrepare).not.toHaveBeenCalled();
+  });
 });

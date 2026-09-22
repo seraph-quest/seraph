@@ -105,6 +105,21 @@ SOURCE_CONTRACTS: tuple[SourceContractDefinition, ...] = (
         description="Create or update tracked work items through a typed authenticated source.",
         preferred_access="managed_connector",
     ),
+    # These two contracts are deliberately separate from the generic
+    # connector write surface.  They describe the goal-bound backend-owned
+    # follow-through path, whose exact preview, approval, intent, and remote
+    # readback rules live in ``github_followthrough.py``.  A connector must
+    # not claim either operation merely because it advertises work_items.write.
+    SourceContractDefinition(
+        name="github_followthrough.create_issue",
+        description="Publish an approved goal dossier as one GitHub issue and verify its destination.",
+        preferred_access="goal_followthrough_api",
+    ),
+    SourceContractDefinition(
+        name="github_followthrough.create_comment",
+        description="Publish an approved goal dossier as one GitHub issue or pull-request comment and verify its destination.",
+        preferred_access="goal_followthrough_api",
+    ),
 )
 
 _MANAGED_CAPABILITY_CONTRACTS: dict[str, tuple[str, ...]] = {

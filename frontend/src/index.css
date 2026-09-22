@@ -2434,6 +2434,60 @@ body {
   overflow-wrap: anywhere;
 }
 
+.source-watch-form-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 5px;
+  margin: 8px 0;
+}
+
+.source-watch-form-grid input {
+  width: 100%;
+  min-width: 0;
+  border: 1px solid var(--cockpit-border);
+  background: var(--cockpit-bg);
+  color: var(--cockpit-text);
+  padding: 5px 6px;
+  font: 10px/1.3 var(--cockpit-mono, monospace);
+}
+
+.source-watch-form-grid button,
+.source-watch-record button {
+  width: fit-content;
+  border: 1px solid var(--cockpit-border);
+  background: var(--cockpit-soft-button-bg);
+  color: var(--cockpit-accent-strong);
+  padding: 4px 6px;
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.source-watch-form-grid button:disabled,
+.source-watch-record button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.source-watch-record {
+  border-top: 1px solid var(--cockpit-border);
+  margin-top: 8px;
+  padding-top: 8px;
+}
+
+.cockpit-outcome-preview {
+  max-height: 180px;
+  overflow: auto;
+  margin: 8px 0 0;
+  padding: 6px;
+  border: 1px solid var(--cockpit-border);
+  color: var(--cockpit-text);
+  background: var(--cockpit-bg);
+  font: 10px/1.45 var(--cockpit-mono, monospace);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 .cockpit-outcome-empty {
   color: var(--cockpit-muted);
 }

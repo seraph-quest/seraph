@@ -81,11 +81,16 @@ def test_source_contract_is_bounded_and_identity_is_stable():
         {
             "source_key": "legacy",
             "kind": "public_https_text",
-            "target": "https://user:secret@example.com/status.txt?token=raw-secret",
+            "target": (
+                "https://user:secret@example.com/status.txt?token=raw-secret"
+                "&x-api-key=raw-api-secret&x_api_key=raw-underscore-secret"
+            ),
         }
     )
     assert "secret" not in projected["target"]
     assert "raw-secret" not in projected["target"]
+    assert "raw-api-secret" not in projected["target"]
+    assert "raw-underscore-secret" not in projected["target"]
 
 
 def test_baseline_initialization_is_packet_free_and_notification_is_hash_only():

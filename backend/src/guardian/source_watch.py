@@ -121,6 +121,8 @@ _SENSITIVE_QUERY_NAMES = {
     "sig",
     "signature",
     "token",
+    "x_api_key",
+    "xapikey",
 }
 
 

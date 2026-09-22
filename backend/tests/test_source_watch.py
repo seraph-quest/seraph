@@ -692,6 +692,70 @@ async def test_preclaim_packet_failure_blocks_job_and_releases_watch(monkeypatch
     assert release_calls == [(watch.id, packet.run_identity, 7, "blocked", "recovery_baseline_changed")]
 
 
+@pytest.mark.asyncio
+async def test_preclaim_settlement_cas_failure_keeps_live_approval_and_watch(monkeypatch):
+    watch = GuardianSourceWatch(
+        id="watch-preclaim-live",
+        goal_id="goal-preclaim-live",
+        owner_principal_id="operator",
+        owner_session_id="session",
+        scheduled_job_id="scheduled-preclaim-live",
+        capability_id=CAPABILITY_ID,
+        capability_version=CAPABILITY_ID,
+        state="active",
+        active_job_id="job-preclaim-live",
+        active_job_fence=8,
+        plan_revision=1,
+    )
+    packet = GuardianDecisionPacket(
+        id="packet-preclaim-live",
+        source_watch_id=watch.id,
+        watch_id=watch.id,
+        goal_id=watch.goal_id,
+        run_identity="job-preclaim-live",
+    )
+    service = SourceWatchService()
+    mark_calls: list[tuple[object, ...]] = []
+    release_calls: list[tuple[object, ...]] = []
+
+    async def transition(*_args, **_kwargs):
+        raise RuntimeError("storage_cas_unavailable")
+
+    async def get_job(_job_id):
+        return {"job_id": packet.run_identity, "status": "awaiting_approval", "revision": 5}
+
+    async def mark_packet(*args):
+        mark_calls.append(args)
+
+    async def release_watch(*args):
+        release_calls.append(args)
+        return True
+
+    async def audit(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(source_watch_module.durable_job_repository, "transition_job", transition)
+    monkeypatch.setattr(source_watch_module.durable_job_repository, "get_job", get_job)
+    monkeypatch.setattr(service, "_mark_packet_failure", mark_packet)
+    monkeypatch.setattr(service, "_release_watch", release_watch)
+    monkeypatch.setattr(source_watch_module, "_audit_watch_event", audit)
+
+    result = await service._settle_preclaim_packet_failure(
+        watch,
+        packet,
+        {"job_id": packet.run_identity, "status": "awaiting_approval", "revision": 4},
+        watch_fence=watch.active_job_fence,
+        reason_code="recovery_baseline_changed",
+    )
+
+    assert result["status"] == "blocked"
+    assert result["reason_code"] == "approval_settlement_required"
+    assert result["durable_status"] == "awaiting_approval"
+    assert result["watch_released"] is False
+    assert mark_calls == []
+    assert release_calls == []
+
+
 def test_failed_recovery_projection_preserves_uncertain_durable_status():
     unknown = _failed_recovery_projection("unknown_external_effect")
     assert unknown["status"] == "unknown_external_effect"

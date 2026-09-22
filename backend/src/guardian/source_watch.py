@@ -2400,6 +2400,7 @@ class SourceWatchService:
         job_id = _text(packet.run_identity)
         reason = _text(reason_code)[:120] or "approval_packet_validation_failed"
         settled: Mapping[str, Any] = {}
+        transition_failed = False
         try:
             settled = await durable_job_repository.transition_job(
                 job_id,
@@ -2411,10 +2412,40 @@ class SourceWatchService:
                 result_summary="source-watch approval packet blocked before execution",
             )
         except Exception:
-            settled = await durable_job_repository.get_job(job_id) or {}
-        durable_status = _text(settled.get("status")) or "blocked"
+            transition_failed = True
+            try:
+                settled = await durable_job_repository.get_job(job_id) or {}
+            except Exception:
+                settled = {}
+        durable_status = _text(settled.get("status")) or "unknown"
+        settled_statuses = {
+            "blocked",
+            "failed",
+            "cancelled",
+            "unknown_external_effect",
+            "cost_liability",
+        }
+        if transition_failed and durable_status not in settled_statuses:
+            # Do not mark the packet or clear the watch while the durable
+            # approval-held row is still live. The operator can retry this
+            # exact bounded settlement after the storage/CAS fault clears.
+            await _audit_watch_event(
+                watch,
+                "blocked",
+                job_id=job_id,
+                packet_id=packet.id,
+                reason_code="approval_settlement_required",
+                watch_released=False,
+            )
+            return {
+                **_no_learning_result("blocked", "approval_settlement_required"),
+                "job_id": job_id,
+                "packet_id": packet.id,
+                "durable_status": durable_status,
+                "watch_released": False,
+            }
         watch_released = False
-        if durable_status != "running":
+        if durable_status in settled_statuses:
             try:
                 await self._mark_packet_failure(packet.id, reason)
             except Exception:
@@ -3239,12 +3270,25 @@ class SourceWatchService:
                     reason="failed_occurrence_reconciled",
                 )
             except Exception as exc:
+                watch_released = False
+                if _text(watch.active_job_id) == _text(job_id):
+                    try:
+                        watch_released = await self._release_watch(
+                            watch.id,
+                            job_id,
+                            int(watch.active_job_fence or 0),
+                            "blocked",
+                            "failed_occurrence_reconciliation_required",
+                        )
+                    except Exception:
+                        watch_released = False
                 return {
                     "status": "blocked",
                     "job_id": job_id,
                     "packet_id": packet.id if packet is not None else None,
                     "reason_code": "failed_occurrence_reconciliation_required",
                     "recovery_error": type(exc).__name__,
+                    "watch_released": watch_released,
                     "operator_visible": True,
                 }
             projection = _failed_recovery_projection(_text(settled.get("status")))

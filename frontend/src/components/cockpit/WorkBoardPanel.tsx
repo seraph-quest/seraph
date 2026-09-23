@@ -78,6 +78,7 @@ const RECOVERY_LABELS: Record<WorkBoardRecoveryAction, string> = {
 const TASK_LIMIT = 100;
 const EVENT_LIMIT = 100;
 const MAX_SYNC_PAGES = 20;
+const DETAIL_REFRESH_BATCH_SIZE = 8;
 const RECONNECT_DELAY_MS = 3_000;
 
 export interface WorkBoardPanelProps {
@@ -157,6 +158,19 @@ function asSafeInteger(value: unknown): value is number {
   return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
 }
 
+function isWorkBoardEvent(value: unknown): value is WorkBoardEvent {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const event = value as Partial<WorkBoardEvent>;
+  return asSafeInteger(event.event_id)
+    && typeof event.task_id === "string"
+    && event.task_id.length > 0
+    && typeof event.kind === "string"
+    && Boolean(event.metadata)
+    && typeof event.metadata === "object"
+    && !Array.isArray(event.metadata)
+    && typeof event.created_at === "string";
+}
+
 function responseError(payload: unknown, status: number): WorkBoardApiError {
   const body = payload && typeof payload === "object" ? payload as ApiErrorBody : {};
   const detail = body.detail;
@@ -177,6 +191,11 @@ function responseError(payload: unknown, status: number): WorkBoardApiError {
 
 async function boardRequest<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await apiFetch(boardApiUrl(path), init);
+  if (init?.signal?.aborted) {
+    const error = new Error("The work-board request was cancelled.");
+    error.name = "AbortError";
+    throw error;
+  }
   const payload = await response.json().catch(() => null);
   if (!response.ok) throw responseError(payload, response.status);
   return payload as T;
@@ -184,6 +203,11 @@ async function boardRequest<T>(path: string, init?: RequestInit): Promise<T> {
 
 async function apiRequest<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await apiFetch(`${API_URL}${path}`, init);
+  if (init?.signal?.aborted) {
+    const error = new Error("The work-board request was cancelled.");
+    error.name = "AbortError";
+    throw error;
+  }
   const payload = await response.json().catch(() => null);
   if (!response.ok) throw responseError(payload, response.status);
   return payload as T;
@@ -230,6 +254,12 @@ function toLocalDateTime(value: string | null | undefined): string {
   if (!Number.isFinite(date.getTime())) return "";
   const offset = date.getTimezoneOffset() * 60_000;
   return new Date(date.getTime() - offset).toISOString().slice(0, 16);
+}
+
+function normalizedIsoOrNull(value: string | null | undefined): string | null {
+  if (!value) return null;
+  const timestamp = new Date(value).getTime();
+  return Number.isFinite(timestamp) ? new Date(timestamp).toISOString() : value;
 }
 
 function eventSummary(event: WorkBoardEvent): string {
@@ -373,7 +403,24 @@ function WorkBoardPanel({ onOpenApprovals, onInspectWorkflowRun }: WorkBoardPane
   const stoppedRef = useRef(false);
   const syncingRef = useRef(false);
   const socketGenerationRef = useRef(0);
-  const reconnectRef = useRef<(() => Promise<void>) | null>(null);
+  const reconnectRef = useRef<(() => Promise<boolean>) | null>(null);
+  const eventReconcileQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const taskDetailRequestVersionRef = useRef(new Map<string, number>());
+  const requestControllersRef = useRef(new Set<AbortController>());
+
+  const requestBoard = useCallback(<T,>(path: string, init?: RequestInit): Promise<T> => {
+    const controller = new AbortController();
+    requestControllersRef.current.add(controller);
+    return boardRequest<T>(path, { ...init, signal: controller.signal })
+      .finally(() => requestControllersRef.current.delete(controller));
+  }, []);
+
+  const requestApi = useCallback(<T,>(path: string, init?: RequestInit): Promise<T> => {
+    const controller = new AbortController();
+    requestControllersRef.current.add(controller);
+    return apiRequest<T>(path, { ...init, signal: controller.signal })
+      .finally(() => requestControllersRef.current.delete(controller));
+  }, []);
 
   useEffect(() => {
     tasksRef.current = tasks;
@@ -395,7 +442,7 @@ function WorkBoardPanel({ onOpenApprovals, onInspectWorkflowRun }: WorkBoardPane
     for (let pageNumber = 0; pageNumber < MAX_SYNC_PAGES; pageNumber += 1) {
       const query = new URLSearchParams({ limit: String(TASK_LIMIT) });
       if (after !== null) query.set("after", String(after));
-      const page = await boardRequest<WorkBoardTaskPage>(`/tasks?${query.toString()}`);
+      const page = await requestBoard<WorkBoardTaskPage>(`/tasks?${query.toString()}`);
       if (!page || !Array.isArray(page.tasks) || !asSafeInteger(page.last_event_id)) {
         throw new WorkBoardSyncError("The board snapshot returned an invalid cursor or task list. The last confirmed state is preserved.");
       }
@@ -412,7 +459,7 @@ function WorkBoardPanel({ onOpenApprovals, onInspectWorkflowRun }: WorkBoardPane
       after = page.next_after;
     }
     throw new WorkBoardSyncError("The board has more pages than this bounded snapshot can load. Refresh to try again.");
-  }, []);
+  }, [requestBoard]);
 
   const loadEventDelta = useCallback(async (startingCursor: number): Promise<EventDelta> => {
     let after = startingCursor;
@@ -420,16 +467,26 @@ function WorkBoardPanel({ onOpenApprovals, onInspectWorkflowRun }: WorkBoardPane
     const cursors = new Set<number>();
     for (let pageNumber = 0; pageNumber < MAX_SYNC_PAGES; pageNumber += 1) {
       const query = new URLSearchParams({ after: String(after), limit: String(EVENT_LIMIT) });
-      const page = await boardRequest<WorkBoardEventPage>(`/events?${query.toString()}`);
+      const page = await requestBoard<WorkBoardEventPage>(`/events?${query.toString()}`);
       if (!page || !Array.isArray(page.events) || !asSafeInteger(page.last_event_id) || typeof page.gap !== "boolean") {
         throw new WorkBoardSyncError("The event cursor response is invalid. The board is stale until a fresh snapshot succeeds.");
       }
       if (page.gap) throw new WorkBoardSyncError("The event cursor is too old. The board is refreshing from a fresh snapshot.");
+      let previousEventId = after;
+      for (const event of page.events) {
+        if (!isWorkBoardEvent(event) || event.event_id <= previousEventId) {
+          throw new WorkBoardSyncError("The event stream contains malformed or out-of-order data. The board is taking a fresh snapshot.");
+        }
+        previousEventId = event.event_id;
+      }
+      if (page.last_event_id < previousEventId || page.last_event_id < after) {
+        throw new WorkBoardSyncError("The event cursor moved backwards. The board is taking a fresh snapshot.");
+      }
       events.push(...page.events);
       if (page.events.length === 0 || page.events.length < EVENT_LIMIT || page.last_event_id === after) {
         return { events, eventCursor: page.last_event_id };
       }
-      if (page.last_event_id < after || cursors.has(page.last_event_id)) {
+      if (page.last_event_id <= after || cursors.has(page.last_event_id)) {
         throw new WorkBoardSyncError("The event stream returned a non-advancing cursor. The board is stale.");
       }
       cursors.add(page.last_event_id);
@@ -437,75 +494,88 @@ function WorkBoardPanel({ onOpenApprovals, onInspectWorkflowRun }: WorkBoardPane
       after = page.last_event_id;
     }
     throw new WorkBoardSyncError("The event backlog exceeded the bounded catch-up window. The board is refreshing.");
-  }, []);
+  }, [requestBoard]);
 
   const fetchTaskDetail = useCallback(async (taskId: string): Promise<WorkBoardTaskDetail> => {
-    return boardRequest<WorkBoardTaskDetail>(`/tasks/${encodeURIComponent(taskId)}`);
-  }, []);
+    return requestBoard<WorkBoardTaskDetail>(`/tasks/${encodeURIComponent(taskId)}`);
+  }, [requestBoard]);
 
-  const reloadOneTask = useCallback(async (taskId: string) => {
+  const readTaskDetail = useCallback(async (taskId: string): Promise<WorkBoardTaskDetail | null> => {
+    const requestVersion = (taskDetailRequestVersionRef.current.get(taskId) ?? 0) + 1;
+    taskDetailRequestVersionRef.current.set(taskId, requestVersion);
+    const nextDetail = await fetchTaskDetail(taskId);
+    return taskDetailRequestVersionRef.current.get(taskId) === requestVersion ? nextDetail : null;
+  }, [fetchTaskDetail]);
+
+  const reloadOneTask = useCallback(async (taskId: string, generation: number): Promise<boolean> => {
     try {
-      const nextDetail = await fetchTaskDetail(taskId);
+      const nextDetail = await readTaskDetail(taskId);
+      if (!nextDetail || generation !== socketGenerationRef.current) return false;
       setTasks((current) => uniqueTasks([
         ...current.filter((task) => task.task_id !== nextDetail.task.task_id),
         nextDetail.task,
       ]));
       if (selectedTaskIdRef.current === taskId) setDetail(nextDetail);
+      return true;
     } catch (error) {
-      if (error instanceof WorkBoardApiError && error.status === 404) {
-        void reconnectRef.current?.();
-      } else {
+      if (generation === socketGenerationRef.current) {
         setStale(true);
         setBoardError(errorText(error));
       }
+      return false;
     }
-  }, [fetchTaskDetail]);
+  }, [readTaskDetail]);
 
   const loadSnapshotAndCatchUp = useCallback(async (): Promise<number> => {
-    setLoading((current) => current && tasksRef.current.length === 0);
     const snapshot = await loadAllTaskPages();
     setTasks(snapshot.tasks);
-    setStale(false);
-    setBoardError(null);
     const delta = await loadEventDelta(snapshot.eventCursor);
-    eventCursorRef.current = delta.eventCursor;
-    const taskIds = Array.from(new Set(delta.events.map((event) => event.task_id).filter(Boolean)));
+    const taskIds = Array.from(new Set([
+      ...delta.events.map((event) => event.task_id),
+      ...(selectedTaskIdRef.current ? [selectedTaskIdRef.current] : []),
+    ].filter(Boolean)));
     if (taskIds.length) {
-      const refreshed = await Promise.all(taskIds.map((taskId) => fetchTaskDetail(taskId).catch(() => null)));
-      const changed = refreshed.filter((item): item is WorkBoardTaskDetail => item !== null).map((item) => item.task);
+      const refreshed: WorkBoardTaskDetail[] = [];
+      for (let index = 0; index < taskIds.length; index += DETAIL_REFRESH_BATCH_SIZE) {
+        const batch = taskIds.slice(index, index + DETAIL_REFRESH_BATCH_SIZE);
+        const results = await Promise.all(batch.map((taskId) => readTaskDetail(taskId)));
+        if (results.some((item) => item === null)) {
+          throw new WorkBoardSyncError("A task changed during event catch-up. The board is taking another fresh snapshot.");
+        }
+        refreshed.push(...results as WorkBoardTaskDetail[]);
+      }
+      const changed = refreshed.map((item) => item.task);
       if (changed.length) {
         setTasks((current) => uniqueTasks([
           ...current.filter((task) => !changed.some((item) => item.task_id === task.task_id)),
           ...changed,
         ]));
-        const selected = refreshed.find((item) => item?.task.task_id === selectedTaskIdRef.current);
+        const selected = refreshed.find((item) => item.task.task_id === selectedTaskIdRef.current);
         if (selected) setDetail(selected);
       }
     }
+    eventCursorRef.current = delta.eventCursor;
     setLoading(false);
     setStale(false);
+    setBoardError(null);
     return delta.eventCursor;
-  }, [fetchTaskDetail, loadAllTaskPages, loadEventDelta]);
+  }, [loadAllTaskPages, loadEventDelta, readTaskDetail]);
 
   const refreshSnapshot = useCallback(async () => {
     setBoardError(null);
-    setLoading((current) => current && tasksRef.current.length === 0);
-    try {
-      await loadSnapshotAndCatchUp();
+    const synchronized = await reconnectRef.current?.();
+    if (synchronized) {
       setAnnouncement("Work board refreshed from the authenticated server snapshot.");
-    } catch (error) {
-      setStale(true);
-      setLoading(false);
-      setBoardError(errorText(error));
     }
-  }, [loadSnapshotAndCatchUp]);
+  }, []);
 
   const refreshSelectedTask = useCallback(async () => {
     if (!selectedTaskId) return;
     setDetailLoading(true);
     setDetailError(null);
     try {
-      const nextDetail = await fetchTaskDetail(selectedTaskId);
+      const nextDetail = await readTaskDetail(selectedTaskId);
+      if (!nextDetail) return;
       setDetail(nextDetail);
       setTasks((current) => uniqueTasks([
         ...current.filter((task) => task.task_id !== selectedTaskId),
@@ -517,11 +587,10 @@ function WorkBoardPanel({ onOpenApprovals, onInspectWorkflowRun }: WorkBoardPane
     } finally {
       setDetailLoading(false);
     }
-  }, [fetchTaskDetail, refreshSnapshot, selectedTaskId]);
+  }, [readTaskDetail, refreshSnapshot, selectedTaskId]);
 
   const openSocketAt = useCallback((cursor: number) => {
     if (stoppedRef.current) return;
-    socketRef.current?.close(1000, "reconnecting");
     const generation = socketGenerationRef.current + 1;
     socketGenerationRef.current = generation;
     setConnectionState("connecting");
@@ -574,10 +643,28 @@ function WorkBoardPanel({ onOpenApprovals, onInspectWorkflowRun }: WorkBoardPane
         void reconnectRef.current?.();
         return;
       }
-      const currentCursor = eventCursorRef.current ?? cursor;
-      if (eventPayload.event_id <= currentCursor) return;
-      eventCursorRef.current = eventPayload.event_id;
-      void reloadOneTask(eventPayload.task_id);
+      if (!isWorkBoardEvent(eventPayload)) {
+        setStale(true);
+        setBoardError("A live event had invalid task metadata. The board is taking a fresh snapshot.");
+        socket.close(4000, "invalid_event");
+        void reconnectRef.current?.();
+        return;
+      }
+      const eventId = eventPayload.event_id;
+      const taskId = eventPayload.task_id;
+      eventReconcileQueueRef.current = eventReconcileQueueRef.current.then(async () => {
+        if (generation !== socketGenerationRef.current) return;
+        const currentCursor = eventCursorRef.current ?? cursor;
+        if (eventId <= currentCursor) return;
+        const reconciled = await reloadOneTask(taskId, generation);
+        if (!reconciled) {
+          if (generation === socketGenerationRef.current) void reconnectRef.current?.();
+          return;
+        }
+        if (generation === socketGenerationRef.current) eventCursorRef.current = eventId;
+      }).catch(() => {
+        if (generation === socketGenerationRef.current) void reconnectRef.current?.();
+      });
     };
     socket.onclose = (event) => {
       if (generation !== socketGenerationRef.current || stoppedRef.current) return;
@@ -603,17 +690,27 @@ function WorkBoardPanel({ onOpenApprovals, onInspectWorkflowRun }: WorkBoardPane
     };
   }, [reloadOneTask]);
 
-  const reconnectFromSnapshot = useCallback(async () => {
-    if (stoppedRef.current || syncingRef.current) return;
+  const reconnectFromSnapshot = useCallback(async (): Promise<boolean> => {
+    if (stoppedRef.current || syncingRef.current) return false;
     syncingRef.current = true;
+    // Invalidate pending socket handlers before reading a new snapshot. The
+    // HTTP snapshot and catch-up then become the only state authority.
+    socketGenerationRef.current += 1;
+    const previousSocket = socketRef.current;
+    socketRef.current = null;
+    previousSocket?.close(4000, "snapshot_sync");
     if (reconnectTimerRef.current !== null) {
       window.clearTimeout(reconnectTimerRef.current);
       reconnectTimerRef.current = null;
     }
     setConnectionState("connecting");
+    setStale(true);
+    setBoardError(null);
+    setLoading(tasksRef.current.length === 0);
     try {
       const cursor = await loadSnapshotAndCatchUp();
       if (!stoppedRef.current) openSocketAt(cursor);
+      return !stoppedRef.current;
     } catch (error) {
       if (!stoppedRef.current) {
         setStale(true);
@@ -627,6 +724,7 @@ function WorkBoardPanel({ onOpenApprovals, onInspectWorkflowRun }: WorkBoardPane
           }, RECONNECT_DELAY_MS);
         }
       }
+      return false;
     } finally {
       syncingRef.current = false;
     }
@@ -639,22 +737,26 @@ function WorkBoardPanel({ onOpenApprovals, onInspectWorkflowRun }: WorkBoardPane
   useEffect(() => {
     stoppedRef.current = false;
     void reconnectFromSnapshot();
-    void apiRequest<GoalInfo[]>("/api/goals/tree")
+    void requestApi<GoalInfo[]>("/api/goals/tree")
       .then((payload) => {
         if (!Array.isArray(payload)) throw new Error("Goals response was not a list");
         setGoals(payload);
         setGoalError(null);
       })
-      .catch((error) => setGoalError(errorText(error)));
+      .catch((error) => {
+        if (!(error instanceof Error && error.name === "AbortError")) setGoalError(errorText(error));
+      });
     return () => {
       stoppedRef.current = true;
       socketGenerationRef.current += 1;
+      requestControllersRef.current.forEach((controller) => controller.abort());
+      requestControllersRef.current.clear();
       if (reconnectTimerRef.current !== null) window.clearTimeout(reconnectTimerRef.current);
       reconnectTimerRef.current = null;
       socketRef.current?.close(1000, "component_unmounted");
       socketRef.current = null;
     };
-  }, [reconnectFromSnapshot]);
+  }, [reconnectFromSnapshot, requestApi]);
 
   useEffect(() => {
     if (!selectedTaskId) {
@@ -665,19 +767,22 @@ function WorkBoardPanel({ onOpenApprovals, onInspectWorkflowRun }: WorkBoardPane
       setDetailLimit(null);
       return;
     }
+    let active = true;
     setDetailLoading(true);
     setDetailError(null);
-    void fetchTaskDetail(selectedTaskId)
+    void readTaskDetail(selectedTaskId)
       .then((nextDetail) => {
+        if (!active || !nextDetail) return;
         setDetail(nextDetail);
         setTasks((current) => uniqueTasks([
           ...current.filter((task) => task.task_id !== selectedTaskId),
           nextDetail.task,
         ]));
       })
-      .catch((error) => setDetailError(errorText(error)))
-      .finally(() => setDetailLoading(false));
-  }, [fetchTaskDetail, selectedTaskId]);
+      .catch((error) => { if (active) setDetailError(errorText(error)); })
+      .finally(() => { if (active) setDetailLoading(false); });
+    return () => { active = false; };
+  }, [readTaskDetail, selectedTaskId]);
 
   useEffect(() => {
     if (!createOpen || !createDraft.goalId || !createDraft.goalRevision) {
@@ -695,7 +800,7 @@ function WorkBoardPanel({ onOpenApprovals, onInspectWorkflowRun }: WorkBoardPane
     setCreateLimit(null);
     setCreateLimitError(null);
     setCreateLimitAcknowledged(false);
-    void boardRequest<WorkBoardExecutionLimits>(
+    void requestBoard<WorkBoardExecutionLimits>(
       `/goals/${encodeURIComponent(createDraft.goalId)}/execution-limits?goal_revision=${goalRevision}`,
     ).then((limits) => {
       if (!active) return;
@@ -708,7 +813,7 @@ function WorkBoardPanel({ onOpenApprovals, onInspectWorkflowRun }: WorkBoardPane
       if (active) setCreateLimitError(errorText(error));
     });
     return () => { active = false; };
-  }, [createDraft.goalId, createDraft.goalRevision, createOpen]);
+  }, [createDraft.goalId, createDraft.goalRevision, createOpen, requestBoard]);
 
   useEffect(() => {
     if (!selectedTask) {
@@ -721,7 +826,7 @@ function WorkBoardPanel({ onOpenApprovals, onInspectWorkflowRun }: WorkBoardPane
     setDetailLimit(null);
     setDetailLimitError(null);
     setDetailLimitAcknowledged(false);
-    void boardRequest<WorkBoardExecutionLimits>(
+    void requestBoard<WorkBoardExecutionLimits>(
       `/goals/${encodeURIComponent(selectedTask.goal_id)}/execution-limits?goal_revision=${selectedTask.goal_revision}`,
     ).then((limits) => {
       if (!active) return;
@@ -734,7 +839,7 @@ function WorkBoardPanel({ onOpenApprovals, onInspectWorkflowRun }: WorkBoardPane
       if (active) setDetailLimitError(errorText(error));
     });
     return () => { active = false; };
-  }, [selectedTask?.goal_id, selectedTask?.goal_revision, selectedTask?.task_id]);
+  }, [selectedTask?.goal_id, selectedTask?.goal_revision, selectedTask?.task_id, requestBoard]);
 
   const assigneeOptions = useMemo(() => {
     return Array.from(new Set(tasks.map((task) => task.assignee_id).filter((value): value is string => Boolean(value)))).sort();
@@ -743,7 +848,7 @@ function WorkBoardPanel({ onOpenApprovals, onInspectWorkflowRun }: WorkBoardPane
   const visibleTasks = useMemo(() => {
     const query = searchText.trim().toLocaleLowerCase();
     return tasks.filter((task) => {
-      if (task.status === "archived" && !showArchived) return false;
+      if (task.status === "archived" && !showArchived && statusFilter !== "archived") return false;
       if (statusFilter !== "all" && task.status !== statusFilter) return false;
       if (assigneeFilter !== "all" && task.assignee_id !== assigneeFilter) return false;
       if (!query) return true;
@@ -765,6 +870,10 @@ function WorkBoardPanel({ onOpenApprovals, onInspectWorkflowRun }: WorkBoardPane
 
   const openTask = useCallback((taskId: string) => {
     setActionError(null);
+    setBlockReason("");
+    setBlockConfirmed(false);
+    setUnblockResolution("");
+    setCommentDraft("");
     setSelectedTaskId(taskId);
     setEditMode(false);
     setDetail(null);
@@ -796,6 +905,11 @@ function WorkBoardPanel({ onOpenApprovals, onInspectWorkflowRun }: WorkBoardPane
       setCreateError("A Todo task needs a complete typed capability specification and acknowledgment of its current runtime limit.");
       return;
     }
+    if (Boolean(createDraft.typedInputRef.trim()) !== Boolean(createDraft.typedInputDigest.trim())
+      || (createDraft.typedInputDigest.trim() && !hasValidDigest(createDraft.typedInputDigest))) {
+      setCreateError("Typed input reference and SHA-256 digest must be supplied together.");
+      return;
+    }
     if (createDraft.requiresReview && !createDraft.reviewerId.trim()) {
       setCreateError("Choose the named reviewer when review is required.");
       return;
@@ -820,7 +934,7 @@ function WorkBoardPanel({ onOpenApprovals, onInspectWorkflowRun }: WorkBoardPane
     };
     setCreateBusy(true);
     try {
-      const response = await boardRequest<{ task: WorkBoardTask; idempotent_replay: boolean }>("/tasks", {
+      const response = await requestBoard<{ task: WorkBoardTask; idempotent_replay: boolean }>("/tasks", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
@@ -850,7 +964,7 @@ function WorkBoardPanel({ onOpenApprovals, onInspectWorkflowRun }: WorkBoardPane
   };
 
   const openEditMode = () => {
-    if (!selectedTask) return;
+    if (!selectedTask || ["running", "review", "done", "archived"].includes(selectedTask.status)) return;
     setEditDraft({
       title: selectedTask.title,
       body: selectedTask.body,
@@ -884,20 +998,33 @@ function WorkBoardPanel({ onOpenApprovals, onInspectWorkflowRun }: WorkBoardPane
       setBusyAction(false);
       return;
     }
-    const body: WorkBoardTaskPatchRequest = {
-      expected_revision: selectedTask.task_revision,
-      title: editDraft.title.trim(),
-      body: editDraft.body.trim(),
-      priority,
-      capability_id: editDraft.capabilityId.trim() || null,
-      typed_input_ref: ref || null,
-      typed_input_digest: digest.toLowerCase() || null,
-      executor_id: editDraft.executorId.trim() || null,
-      assignee_id: editDraft.assigneeId.trim() || null,
-      scheduled_at: editDraft.scheduledAt ? new Date(editDraft.scheduledAt).toISOString() : null,
-    };
+    const body: WorkBoardTaskPatchRequest = { expected_revision: selectedTask.task_revision };
+    const title = editDraft.title.trim();
+    const taskBody = editDraft.body.trim();
+    const capabilityId = editDraft.capabilityId.trim() || null;
+    const executorId = editDraft.executorId.trim() || null;
+    const assigneeId = editDraft.assigneeId.trim() || null;
+    const scheduledAt = editDraft.scheduledAt ? new Date(editDraft.scheduledAt).toISOString() : null;
+    const typedInputChanged = ref !== (selectedTask.typed_input_ref ?? "")
+      || digest.toLowerCase() !== (selectedTask.typed_input_digest ?? "");
+    if (title !== selectedTask.title) body.title = title;
+    if (taskBody !== selectedTask.body) body.body = taskBody;
+    if (priority !== selectedTask.priority) body.priority = priority;
+    if (capabilityId !== selectedTask.capability_id) body.capability_id = capabilityId;
+    if (typedInputChanged) {
+      body.typed_input_ref = ref || null;
+      body.typed_input_digest = digest.toLowerCase() || null;
+    }
+    if (executorId !== selectedTask.executor_id) body.executor_id = executorId;
+    if (assigneeId !== selectedTask.assignee_id) body.assignee_id = assigneeId;
+    if (scheduledAt !== normalizedIsoOrNull(selectedTask.scheduled_at)) body.scheduled_at = scheduledAt;
+    if (Object.keys(body).length === 1) {
+      setActionError("There are no task changes to save.");
+      setBusyAction(false);
+      return;
+    }
     try {
-      await boardRequest<{ task: WorkBoardTask }>(`/tasks/${encodeURIComponent(selectedTask.task_id)}`, {
+      await requestBoard<{ task: WorkBoardTask }>(`/tasks/${encodeURIComponent(selectedTask.task_id)}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
@@ -933,7 +1060,7 @@ function WorkBoardPanel({ onOpenApprovals, onInspectWorkflowRun }: WorkBoardPane
     setBusyAction(true);
     setActionError(null);
     try {
-      await boardRequest<{ task: WorkBoardTask } | { task: WorkBoardTask; attempt: unknown }>(
+      await requestBoard<{ task: WorkBoardTask } | { task: WorkBoardTask; attempt: unknown }>(
         `/tasks/${encodeURIComponent(selectedTask.task_id)}/actions`,
         { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) },
       );
@@ -965,7 +1092,7 @@ function WorkBoardPanel({ onOpenApprovals, onInspectWorkflowRun }: WorkBoardPane
     setBusyAction(true);
     setActionError(null);
     try {
-      await boardRequest<{ comment: WorkBoardComment }>(`/tasks/${encodeURIComponent(selectedTask.task_id)}/comments`, {
+      await requestBoard<{ comment: WorkBoardComment }>(`/tasks/${encodeURIComponent(selectedTask.task_id)}/comments`, {
         method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
       });
       setCommentDraft("");
@@ -1066,6 +1193,15 @@ function WorkBoardPanel({ onOpenApprovals, onInspectWorkflowRun }: WorkBoardPane
     && selectedTask.typed_input_ref
     && selectedTask.typed_input_digest
     && hasValidDigest(selectedTask.typed_input_digest)
+    && detailLimit
+    && detailLimit.goal_revision === selectedTask.goal_revision
+    && detailLimitAcknowledged,
+  );
+  const canRetry = Boolean(
+    selectedTask
+    && selectedTask.status === "blocked"
+    && selectedTask.recovery_action === "retry"
+    && !isActiveAttempt(selectedTask)
     && detailLimit
     && detailLimit.goal_revision === selectedTask.goal_revision
     && detailLimitAcknowledged,
@@ -1269,7 +1405,13 @@ function WorkBoardPanel({ onOpenApprovals, onInspectWorkflowRun }: WorkBoardPane
                 <section className="rounded border border-white/10 p-3">
                   <div className="flex items-center justify-between gap-2">
                     <div className="font-semibold">Task specification</div>
-                    <button type="button" className="cockpit-feedback-button" onClick={openEditMode} disabled={busyAction}>Edit bounded fields</button>
+                    <button
+                      type="button"
+                      className="cockpit-feedback-button"
+                      onClick={openEditMode}
+                      disabled={busyAction || ["running", "review", "done", "archived"].includes(selectedTask.status)}
+                      title={["running", "review", "done", "archived"].includes(selectedTask.status) ? "This task state does not allow specification edits." : undefined}
+                    >Edit bounded fields</button>
                   </div>
                   <p className="mt-2 whitespace-pre-wrap break-words">{selectedTask.body || "No task description."}</p>
                   <div className="mt-2">Priority {selectedTask.priority} · Assignee {selectedTask.assignee_id ?? "Unassigned"} · Scheduled {safeDateTime(selectedTask.scheduled_at)}</div>
@@ -1306,7 +1448,18 @@ function WorkBoardPanel({ onOpenApprovals, onInspectWorkflowRun }: WorkBoardPane
                     </form>
                   )}
                   {selectedTask.status === "blocked" && selectedTask.recovery_action === "retry" && !isActiveAttempt(selectedTask) && (
-                    <button type="button" className="cockpit-feedback-button" disabled={busyAction} onClick={() => void performAction("retry", {}, true)}>Retry (new attempt)</button>
+                    <button
+                      type="button"
+                      className="cockpit-feedback-button"
+                      disabled={busyAction || !canRetry}
+                      title={!canRetry ? "Acknowledge the current server-derived runtime limit before retrying." : undefined}
+                      onClick={() => void performAction("retry", {}, true)}
+                    >Retry (new attempt)</button>
+                  )}
+                  {selectedTask.status === "blocked" && selectedTask.recovery_action === "retry" && !canRetry && (
+                    <div className="w-full text-amber-200" role="status">
+                      Retry stays disabled until the current goal revision limit is loaded and acknowledged. {detailLimitError ?? "Check the current runtime limit above."}
+                    </div>
                   )}
                   {selectedTask.status === "blocked" && selectedTask.recovery_action !== "retry" && selectedTask.recovery_action !== "unblock" && selectedTask.recovery_action && (
                     <div className="w-full rounded bg-amber-950/20 p-2" role="status">

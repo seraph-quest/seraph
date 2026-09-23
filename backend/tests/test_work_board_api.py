@@ -1,6 +1,11 @@
 """Authenticated HTTP contract checks for work-board M1."""
 
+import json
+
 import pytest
+
+from src.api.work_board import _attempt_payload, _task_payload as serialize_task_payload
+from src.db.models import WorkBoardAttempt, WorkBoardTask
 
 
 def _task_payload(*, key: str = "api-task"):
@@ -105,3 +110,113 @@ async def test_invalid_running_or_done_patch_is_rejected(client, async_db):
                 task_id,
                 WorkBoardTaskPatch(expected_revision=task.task_revision, title="blocked"),
             )
+
+
+@pytest.mark.asyncio
+async def test_http_comments_links_and_status_action_success(client):
+    goal_id = await _create_goal(client, goal_id="goal-http-success")
+    parent_payload = _task_payload(key="http-parent")
+    parent_payload["goal_id"] = goal_id
+    child_payload = _task_payload(key="http-child")
+    child_payload["goal_id"] = goal_id
+    parent = await client.post("/api/work-board/tasks", json=parent_payload)
+    child = await client.post("/api/work-board/tasks", json=child_payload)
+    assert parent.status_code == child.status_code == 200
+    parent_id = parent.json()["task"]["task_id"]
+    child_data = child.json()["task"]
+    child_id = child_data["task_id"]
+
+    comment = await client.post(
+        f"/api/work-board/tasks/{child_id}/comments",
+        json={"expected_revision": 1, "body": "operator handoff"},
+    )
+    assert comment.status_code == 200
+    assert comment.json()["comment"]["body"] == "operator handoff"
+
+    link = await client.post(
+        "/api/work-board/links",
+        json={
+            "parent_task_id": parent_id,
+            "child_task_id": child_id,
+            "expected_child_revision": 2,
+        },
+    )
+    assert link.status_code == 200
+    assert link.json()["link"]["parent_task_id"] == parent_id
+
+    blocked = await client.post(
+        f"/api/work-board/tasks/{child_id}/actions",
+        json={
+            "action": "block",
+            "expected_revision": 3,
+            "reason": "Operator needs to revise the specification",
+        },
+    )
+    assert blocked.status_code == 200
+    assert blocked.json()["task"]["status"] == "blocked"
+
+
+def test_detail_reference_serializers_drop_unknown_private_values():
+    attempt = WorkBoardAttempt(
+        task_id="task-safe-refs",
+        executor_id="executor.local",
+        workflow_run_id="/private/run-secret",
+        receipt_refs_json=json.dumps(
+            [
+                {
+                    "job_id": "job:1",
+                    "workflow_run_id": "/private/run-secret",
+                    "status": "succeeded",
+                    "verified": True,
+                    "file_path": "/private/source.txt",
+                    "summary": "PRIVATE SOURCE BODY",
+                    "readback_status": "verified",
+                    "verification_status": "passed",
+                }
+            ]
+        ),
+    )
+    task = WorkBoardTask(
+        task_id="task-safe-refs",
+        owner_principal_id="operator:test-bypass",
+        owner_session_id="test-auth-bypass",
+        goal_id="goal-safe-refs",
+        title="Safe refs",
+        result_refs_json=json.dumps(
+            [
+                {
+                    "artifact_id": "artifact:1",
+                    "workflow_run_id": "private/run",
+                    "secret": "DO NOT SERIALIZE",
+                    "body": "PRIVATE RESULT BODY",
+                }
+            ]
+        ),
+        artifact_refs_json=json.dumps(
+            [
+                {
+                    "artifact_id": "artifact:2",
+                    "file_path": "/private/artifact.txt",
+                    "private_source": "PRIVATE ARTIFACT BODY",
+                }
+            ]
+        ),
+    )
+
+    attempt_payload = _attempt_payload(attempt)
+    task_payload = serialize_task_payload(task)
+    serialized = json.dumps({"attempt": attempt_payload, "task": task_payload})
+    assert attempt_payload["workflow_run_id"] is None
+    assert attempt_payload["receipt_refs"] == [
+        {
+            "job_id": "job:1",
+            "status": "succeeded",
+            "verified": True,
+            "readback_status": "verified",
+            "verification_status": "passed",
+        }
+    ]
+    assert task_payload["result_refs"] == [{"artifact_id": "artifact:1"}]
+    assert task_payload["artifact_refs"] == [{"artifact_id": "artifact:2"}]
+    assert "PRIVATE" not in serialized
+    assert "/private" not in serialized

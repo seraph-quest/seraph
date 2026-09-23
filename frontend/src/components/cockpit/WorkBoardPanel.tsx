@@ -85,9 +85,15 @@ const BOARD_REQUEST_TIMEOUT_MS = 15_000;
 export interface WorkBoardPanelProps {
   onOpenApprovals?: () => void;
   onInspectWorkflowRun?: (workflowRunId: string) => void;
-  onInspectArtifact?: (reference: WorkBoardReceiptReference) => void;
+  onInspectArtifact?: (request: WorkBoardArtifactInspectRequest) => void;
   ownerPrincipalId?: string | null;
   ownerSessionId?: string | null;
+}
+
+export interface WorkBoardArtifactInspectRequest {
+  reference: WorkBoardReceiptReference;
+  ownerSessionId: string | null;
+  workflowRunId: string | null;
 }
 
 interface ApiErrorBody {
@@ -640,32 +646,34 @@ function WorkBoardPanel({
   }, [loadAllTaskPages, loadEventDelta, readTaskDetail]);
 
   const refreshSnapshot = useCallback(async (): Promise<boolean> => {
+    if (stoppedRef.current) return false;
     setBoardError(null);
     const synchronized = await reconnectRef.current?.();
-    if (synchronized) {
+    if (synchronized && !stoppedRef.current) {
       setAnnouncement("Work board refreshed from the authenticated server snapshot.");
     }
-    return Boolean(synchronized);
+    return Boolean(synchronized && !stoppedRef.current);
   }, []);
 
   const refreshSelectedTask = useCallback(async () => {
-    if (!selectedTaskId) return;
+    if (stoppedRef.current || !selectedTaskId) return;
     const requestedTaskId = selectedTaskId;
     setDetailLoading(true);
     setDetailError(null);
     try {
       const nextDetail = await readTaskDetail(requestedTaskId);
-      if (!nextDetail || selectedTaskIdRef.current !== requestedTaskId) return;
+      if (stoppedRef.current || !nextDetail || selectedTaskIdRef.current !== requestedTaskId) return;
       setDetail(nextDetail);
       setTasks((current) => uniqueTasks([
         ...current.filter((task) => task.task_id !== requestedTaskId),
         nextDetail.task,
       ]));
     } catch (error) {
+      if (stoppedRef.current) return;
       if (selectedTaskIdRef.current === requestedTaskId) setDetailError(errorText(error));
       if (error instanceof WorkBoardApiError && error.status === 409) void refreshSnapshot();
     } finally {
-      if (selectedTaskIdRef.current === requestedTaskId) setDetailLoading(false);
+      if (!stoppedRef.current && selectedTaskIdRef.current === requestedTaskId) setDetailLoading(false);
     }
   }, [readTaskDetail, refreshSnapshot, selectedTaskId]);
 
@@ -1137,23 +1145,24 @@ function WorkBoardPanel({
       if (pendingCreateScope && pendingTaskCreates.get(pendingCreateScope)?.idempotencyKey === pending.idempotencyKey) {
         pendingTaskCreates.delete(pendingCreateScope);
       }
-      setPendingCreate(null);
       createIdempotencyRef.current = makeIdempotencyKey();
+      if (stoppedRef.current) return;
+      setPendingCreate(null);
       setCreateOpen(false);
       setCreateDraft(emptyCreateDraft());
       await refreshSnapshot();
+      if (stoppedRef.current) return;
       openTask(response.task.task_id);
       setAnnouncement(response.idempotent_replay ? "The matching task already exists." : "Task created in the canonical work board.");
     } catch (error) {
       const definitiveRejection = error instanceof WorkBoardApiError
-        && error.status >= 400
-        && error.status < 500
+        && [400, 401, 403, 404, 422].includes(error.status)
         && error.code !== "idempotency_conflict";
       if (definitiveRejection) {
         if (pendingCreateScope && pendingTaskCreates.get(pendingCreateScope)?.idempotencyKey === pending.idempotencyKey) {
           pendingTaskCreates.delete(pendingCreateScope);
         }
-        setPendingCreate(null);
+        if (!stoppedRef.current) setPendingCreate(null);
         createIdempotencyRef.current = makeIdempotencyKey();
       }
       if (!stoppedRef.current) {
@@ -1237,19 +1246,24 @@ function WorkBoardPanel({
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
       });
+      if (stoppedRef.current) return;
       await refreshSnapshot();
+      if (stoppedRef.current) return;
       await refreshSelectedTask();
+      if (stoppedRef.current) return;
       setEditMode(false);
       setAnnouncement("Task fields saved with the current revision.");
     } catch (error) {
+      if (stoppedRef.current) return;
       setActionError(inputErrorMessage(error));
       if (error instanceof WorkBoardApiError && error.status === 409) {
         setStale(true);
         await refreshSnapshot();
+        if (stoppedRef.current) return;
         await refreshSelectedTask();
       }
     } finally {
-      setBusyAction(false);
+      if (!stoppedRef.current) setBusyAction(false);
     }
   };
 
@@ -1272,24 +1286,30 @@ function WorkBoardPanel({
         `/tasks/${encodeURIComponent(selectedTask.task_id)}/actions`,
         { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) },
       );
+      if (stoppedRef.current) return;
       await refreshSnapshot();
+      if (stoppedRef.current) return;
       await refreshSelectedTask();
+      if (stoppedRef.current) return;
       setBlockReason("");
       setBlockConfirmed(false);
       setUnblockResolution("");
       setAnnouncement(`${STATUS_LABELS[selectedTask.status]} task action ${action} requested.`);
     } catch (error) {
+      if (stoppedRef.current) return;
       setActionError(inputErrorMessage(error));
       if (error instanceof WorkBoardApiError && error.status === 409) {
         setStale(true);
         await refreshSnapshot();
+        if (stoppedRef.current) return;
         await refreshSelectedTask();
       } else if (action === "promote") {
         await refreshSnapshot();
+        if (stoppedRef.current) return;
         await refreshSelectedTask();
       }
     } finally {
-      setBusyAction(false);
+      if (!stoppedRef.current) setBusyAction(false);
     }
   };
 
@@ -1306,18 +1326,22 @@ function WorkBoardPanel({
       await requestBoard<{ comment: WorkBoardComment }>(`/tasks/${encodeURIComponent(selectedTask.task_id)}/comments`, {
         method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
       });
+      if (stoppedRef.current) return;
       setCommentDraft("");
       await refreshSelectedTask();
+      if (stoppedRef.current) return;
       await refreshSnapshot();
     } catch (error) {
+      if (stoppedRef.current) return;
       setActionError(inputErrorMessage(error));
       if (error instanceof WorkBoardApiError && error.status === 409) {
         setStale(true);
         await refreshSnapshot();
+        if (stoppedRef.current) return;
         await refreshSelectedTask();
       }
     } finally {
-      setBusyAction(false);
+      if (!stoppedRef.current) setBusyAction(false);
     }
   };
 
@@ -1762,7 +1786,7 @@ function WorkBoardPanel({
                           <div>{receipt.status ?? receipt.outcome ?? "Receipt"}{receipt.verified === true ? " · verified" : ""}{receipt.readback_status ? ` · readback ${READBACK_LABELS[receipt.readback_status]}` : ""}</div>
                           {receipt.content_sha256 && <div className="break-all font-mono text-[10px]">SHA-256 {receipt.content_sha256}</div>}
                           {receipt.file_path && <div className="break-all text-[10px]">Artifact path {receipt.file_path}</div>}
-                          {(receipt.file_path || receipt.artifact_id) && onInspectArtifact && <button type="button" className="mt-1 underline" aria-label={`Inspect artifact ${receipt.file_path ?? receipt.artifact_id}`} onClick={() => onInspectArtifact(receipt)}>Inspect artifact</button>}
+                          {(receipt.file_path || receipt.artifact_id || receipt.target_path || receipt.effect_id) && onInspectArtifact && <button type="button" className="mt-1 underline" aria-label={`Inspect execution evidence ${receipt.file_path ?? receipt.target_path ?? receipt.artifact_id ?? receipt.effect_id}`} onClick={() => onInspectArtifact({ reference: receipt, ownerSessionId: selectedTask.origin_session_id ?? ownerSessionId ?? null, workflowRunId: attempt.workflow_run_id })}>{receipt.target_path || receipt.effect_id ? "Inspect readback evidence" : "Inspect artifact"}</button>}
                           {receipt.workflow_run_id && onInspectWorkflowRun && <button type="button" className="underline" onClick={() => onInspectWorkflowRun(receipt.workflow_run_id!)}>Inspect existing workflow record</button>}
                         </div>
                       ))}
@@ -1774,7 +1798,7 @@ function WorkBoardPanel({
                       <div>{reference.status ?? reference.outcome ?? "Reference"}{reference.verified === true ? " · verified" : ""}</div>
                       {reference.content_sha256 && <div className="break-all font-mono text-[10px]">SHA-256 {reference.content_sha256}</div>}
                       {reference.file_path && <div className="break-all text-[10px]">Artifact path {reference.file_path}</div>}
-                      {(reference.file_path || reference.artifact_id) && onInspectArtifact && <button type="button" className="mt-1 underline" aria-label={`Inspect artifact ${reference.file_path ?? reference.artifact_id}`} onClick={() => onInspectArtifact(reference)}>Inspect artifact</button>}
+                      {(reference.file_path || reference.artifact_id || reference.target_path || reference.effect_id) && onInspectArtifact && <button type="button" className="mt-1 underline" aria-label={`Inspect execution evidence ${reference.file_path ?? reference.target_path ?? reference.artifact_id ?? reference.effect_id}`} onClick={() => onInspectArtifact({ reference, ownerSessionId: selectedTask.origin_session_id ?? ownerSessionId ?? null, workflowRunId: reference.workflow_run_id ?? selectedTask.latest_attempt?.workflow_run_id ?? null })}>{reference.target_path || reference.effect_id ? "Inspect readback evidence" : "Inspect artifact"}</button>}
                       {reference.workflow_run_id && onInspectWorkflowRun && <button type="button" className="underline" onClick={() => onInspectWorkflowRun(reference.workflow_run_id!)}>Open workflow evidence</button>}
                     </div>
                   ))}

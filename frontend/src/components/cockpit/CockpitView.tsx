@@ -13,7 +13,7 @@ import { useChatStore } from "../../stores/chatStore";
 import { useQuestStore } from "../../stores/questStore";
 import { useCockpitLayoutStore } from "../../stores/cockpitLayoutStore";
 import { PANEL_MIN_SIZES, usePanelLayoutStore } from "../../stores/panelLayoutStore";
-import type { ChatMessage, ConnectionStatus, GoalInfo, GoalLoopReceipt, WorkBoardReceiptReference } from "../../types";
+import type { ChatMessage, ConnectionStatus, GoalInfo, GoalLoopReceipt } from "../../types";
 import {
   buildWorkflowDraft,
   workflowAcceptsArtifact,
@@ -25,6 +25,7 @@ import { ResizeHandles } from "../ResizeHandles";
 import {
   collectArtifacts,
   formatInspectorValue,
+  resolveWorkBoardArtifact,
   type ArtifactRecord,
   type CockpitAuditEvent,
   type WorkflowRunRecord,
@@ -62,7 +63,7 @@ import {
 } from "./cockpitAuthority";
 import { SeraphPresencePane } from "./SeraphPresencePane";
 import { PttAudioControl } from "../chat/PttAudioControl";
-import { WorkBoardPanel } from "./WorkBoardPanel";
+import { WorkBoardPanel, type WorkBoardArtifactInspectRequest } from "./WorkBoardPanel";
 
 interface CockpitViewProps {
   onSend: (message: string) => boolean | void | Promise<boolean | void>;
@@ -7748,27 +7749,28 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       () => fetchCockpitJson(`${API_URL}/api/workflows/runs?limit=40`, 5000),
     ]);
     let ok = false;
+    let primaryRuns: WorkflowRunRecord[] = [];
+    let lineageRuns: WorkflowRunRecord[] = [];
     if (workflowRunsResult.ok && workflowRunsResult.payload && typeof workflowRunsResult.payload === "object") {
       const runs = (workflowRunsResult.payload as { runs?: unknown }).runs;
-      setWorkflowRuns(
-        Array.isArray(runs)
-          ? runs.map((run: Record<string, unknown>) => normalizeWorkflowRun(run))
-          : [],
-      );
+      primaryRuns = Array.isArray(runs)
+        ? runs.map((run: Record<string, unknown>) => normalizeWorkflowRun(run))
+        : [];
+      setWorkflowRuns(primaryRuns);
       ok = true;
     }
     if (artifactLineageRunsResult.ok && artifactLineageRunsResult.payload && typeof artifactLineageRunsResult.payload === "object") {
       const runs = (artifactLineageRunsResult.payload as { runs?: unknown }).runs;
-      setArtifactLineageRuns(
-        Array.isArray(runs)
-          ? runs.map((run: Record<string, unknown>) => normalizeWorkflowRun(run))
-          : [],
-      );
+      lineageRuns = Array.isArray(runs)
+        ? runs.map((run: Record<string, unknown>) => normalizeWorkflowRun(run))
+        : [];
+      setArtifactLineageRuns(lineageRuns);
       ok = true;
     } else if (!ok) {
       setArtifactLineageRuns([]);
     }
     markDeepPaneLoaded("workflows", ok);
+    return [...lineageRuns, ...primaryRuns];
   }, [fetchCockpitBatch, fetchCockpitJson, markDeepPaneLoaded, sessionId, updateDeepPaneState]);
 
   const loadControlPlane = useCallback(async () => {
@@ -8751,29 +8753,40 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     if (!workflow) return;
     setSelectedInspector({ kind: "workflow", workflow: resolveWorkflowRun(workflow) });
   }
-  function inspectWorkBoardArtifact(reference: WorkBoardReceiptReference) {
-    const artifact = artifacts.find((entry) => (
-      (reference.artifact_id && entry.id === reference.artifact_id)
-      || (reference.file_path && entry.filePath === reference.file_path)
-    ));
+  function inspectWorkBoardArtifact(request: WorkBoardArtifactInspectRequest) {
+    const { reference, ownerSessionId, workflowRunId } = request;
+    if (workflowRunId) {
+      const workflow = workflowRunByIdentity.get(workflowRunId)
+        ?? workflowRunById.get(workflowRunId);
+      const artifact = workflow
+        ? resolveWorkBoardArtifact(workflow.artifacts, reference, { ownerSessionId, workflowRunId })
+        : null;
+      if (artifact) {
+        setSelectedInspector({ kind: "artifact", artifact });
+        focusPane("inspector_pane");
+        return;
+      }
+      focusPane("workflows_pane");
+      if (workflow) inspectWorkflowRun(workflow);
+      else {
+        setOperatorStatus("Loading workflow evidence for the task's immutable run link.");
+        void loadWorkflowRuns().then((runs) => {
+          const loadedWorkflow = runs.find((run) => run.runIdentity === workflowRunId || run.id === workflowRunId);
+          if (loadedWorkflow) inspectWorkflowRun(loadedWorkflow);
+          else setOperatorStatus("The task's linked workflow run is not in the current evidence index. Refresh workflow evidence and retry.");
+        });
+      }
+      return;
+    }
+
+    const artifact = resolveWorkBoardArtifact(artifacts, reference, { ownerSessionId, workflowRunId: null });
     if (artifact) {
       setSelectedInspector({ kind: "artifact", artifact });
       focusPane("inspector_pane");
       return;
     }
-    if (reference.workflow_run_id) {
-      focusPane("workflows_pane");
-      const workflow = workflowRunByIdentity.get(reference.workflow_run_id)
-        ?? workflowRunById.get(reference.workflow_run_id);
-      if (workflow) inspectWorkflowRun(workflow);
-      else {
-        setOperatorStatus("Artifact readback is not in the current index. Refresh workflow evidence to load the task's linked run.");
-        void loadWorkflowRuns();
-      }
-      return;
-    }
     focusPane("inspector_pane");
-    setOperatorStatus(`Artifact ${reference.file_path ?? reference.artifact_id ?? "reference"} is not in the current evidence index. Refresh activity and workflow evidence, then inspect again.`);
+    setOperatorStatus(`Exact task evidence ${reference.file_path ?? reference.target_path ?? reference.artifact_id ?? reference.effect_id ?? "reference"} is not in the current session index. Refresh activity and workflow evidence, then inspect again.`);
   }
   async function queueLiveWorkflowResumePlan(
     workflow: WorkflowRunRecord | null | undefined,

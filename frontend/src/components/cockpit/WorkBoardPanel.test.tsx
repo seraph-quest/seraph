@@ -229,6 +229,7 @@ describe("WorkBoardPanel", () => {
   it("takes a fresh snapshot when a live event detail cannot be read", async () => {
     const currentTask = task({ status: "ready" });
     let taskListCalls = 0;
+    let eventCalls = 0;
     let detailCalls = 0;
     fetchMock.mockImplementation((input: RequestInfo | URL) => {
       const url = String(input);
@@ -236,7 +237,12 @@ describe("WorkBoardPanel", () => {
         taskListCalls += 1;
         return Promise.resolve(response(page([currentTask], taskListCalls === 1 ? 42 : 43)));
       }
-      if (url.includes("/api/work-board/events?after=42")) return Promise.resolve(response(events(42)));
+      if (url.includes("/api/work-board/events?after=42")) {
+        eventCalls += 1;
+        return Promise.resolve(response(eventCalls === 1
+          ? events(42)
+          : { events: [boardEvent(43)], last_event_id: 43, gap: false }));
+      }
       if (url.includes("/api/work-board/events?after=43")) return Promise.resolve(response(events(43)));
       if (url.endsWith("/api/goals/tree")) return Promise.resolve(response([]));
       if (url.includes("/api/work-board/tasks/task-1")) {
@@ -256,6 +262,135 @@ describe("WorkBoardPanel", () => {
     expect(TestBoardSocket.instances[1]?.url).toContain("/ws/work-board/events?after=43");
   });
 
+  it("replays ordered REST events when WebSocket notifications arrive out of order", async () => {
+    const taskA = task({ task_id: "task-a", title: "Task A before" });
+    const taskB = task({ task_id: "task-b", creation_sequence: 2, title: "Task B before" });
+    const updatedA = { ...taskA, title: "Task A refreshed", task_revision: 4 };
+    const updatedB = { ...taskB, title: "Task B refreshed", task_revision: 4 };
+    let eventDeltaCalls = 0;
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/work-board/tasks?") && !url.match(/\/tasks\/[^?]+/)) return Promise.resolve(response(page([taskA, taskB], 42)));
+      if (url.includes("/api/work-board/events?after=42")) {
+        eventDeltaCalls += 1;
+        return Promise.resolve(response(eventDeltaCalls === 1
+          ? events(42)
+          : { events: [{ ...boardEvent(43), task_id: "task-a" }, { ...boardEvent(44), task_id: "task-b" }], last_event_id: 44, gap: false }));
+      }
+      if (url.endsWith("/api/goals/tree")) return Promise.resolve(response([]));
+      if (url.endsWith("/api/work-board/tasks/task-a")) return Promise.resolve(response(detail(updatedA)));
+      if (url.endsWith("/api/work-board/tasks/task-b")) return Promise.resolve(response(detail(updatedB)));
+      return Promise.resolve(response({}));
+    });
+
+    render(<WorkBoardPanel />);
+    await waitFor(() => expect(TestBoardSocket.instances).toHaveLength(1));
+    act(() => {
+      TestBoardSocket.instances[0]?.send({ ...boardEvent(44), task_id: "task-b" });
+      TestBoardSocket.instances[0]?.send({ ...boardEvent(43), task_id: "task-a" });
+    });
+
+    expect(await screen.findByText("Task A refreshed")).toBeInTheDocument();
+    expect(await screen.findByText("Task B refreshed")).toBeInTheDocument();
+    expect(fetchMock.mock.calls.some(([input]) => String(input).endsWith("/api/work-board/tasks/task-a"))).toBe(true);
+    expect(fetchMock.mock.calls.some(([input]) => String(input).endsWith("/api/work-board/tasks/task-b"))).toBe(true);
+  });
+
+  it("reconnects from a fresh snapshot when the REST event feed trails a WebSocket event", async () => {
+    const currentTask = task({ status: "ready" });
+    let taskListCalls = 0;
+    let event42Calls = 0;
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/work-board/tasks?") && !url.match(/\/tasks\/[^?]+/)) {
+        taskListCalls += 1;
+        return Promise.resolve(response(page([currentTask], taskListCalls === 1 ? 42 : 43)));
+      }
+      if (url.includes("/api/work-board/events?after=42")) {
+        event42Calls += 1;
+        return Promise.resolve(response(event42Calls === 1
+          ? events(42)
+          : { events: [boardEvent(43)], last_event_id: 43, gap: false }));
+      }
+      if (url.includes("/api/work-board/events?after=43")) return Promise.resolve(response(events(43)));
+      if (url.endsWith("/api/goals/tree")) return Promise.resolve(response([]));
+      return Promise.resolve(response({}));
+    });
+
+    render(<WorkBoardPanel />);
+    await waitFor(() => expect(TestBoardSocket.instances).toHaveLength(1));
+    act(() => TestBoardSocket.instances[0]?.send(boardEvent(44)));
+
+    await waitFor(() => expect(TestBoardSocket.instances).toHaveLength(2));
+    expect(taskListCalls).toBeGreaterThanOrEqual(2);
+    expect(TestBoardSocket.instances[1]?.url).toContain("/ws/work-board/events?after=43");
+  });
+
+  it("lets a new socket generation reconcile after an old detail request is aborted", async () => {
+    const original = task({ status: "ready", title: "Before reconnect" });
+    const updated = { ...original, title: "Updated after reconnect", task_revision: 4 };
+    let taskListCalls = 0;
+    let event42Calls = 0;
+    let detailCalls = 0;
+    const pendingRequest: { signal: AbortSignal | null } = { signal: null };
+    fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes("/api/work-board/tasks?") && !url.match(/\/tasks\/[^?]+/)) {
+        taskListCalls += 1;
+        return Promise.resolve(response(page([taskListCalls === 1 ? original : updated], taskListCalls === 1 ? 42 : 43)));
+      }
+      if (url.includes("/api/work-board/events?after=42")) {
+        event42Calls += 1;
+        return Promise.resolve(response(event42Calls === 1
+          ? events(42)
+          : { events: [boardEvent(43)], last_event_id: 43, gap: false }));
+      }
+      if (url.includes("/api/work-board/events?after=43")) {
+        if (taskListCalls === 2) return Promise.resolve(response(events(43)));
+        return Promise.resolve(response({ events: [boardEvent(44)], last_event_id: 44, gap: false }));
+      }
+      if (url.endsWith("/api/goals/tree")) return Promise.resolve(response([]));
+      if (url.endsWith("/api/work-board/tasks/task-1")) {
+        detailCalls += 1;
+        if (detailCalls === 1) {
+          pendingRequest.signal = init?.signal ?? null;
+          return new Promise((_resolve, reject) => {
+            pendingRequest.signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")), { once: true });
+          });
+        }
+        return Promise.resolve(response(detail(updated)));
+      }
+      return Promise.resolve(response({}));
+    });
+
+    render(<WorkBoardPanel />);
+    await waitFor(() => expect(TestBoardSocket.instances).toHaveLength(1));
+    act(() => TestBoardSocket.instances[0]?.send(boardEvent(43)));
+    await waitFor(() => expect(pendingRequest.signal).not.toBeNull());
+
+    vi.useFakeTimers();
+    act(() => TestBoardSocket.instances[0]?.close(1006, "network reset"));
+    await act(async () => {
+      vi.advanceTimersByTime(3_000);
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(TestBoardSocket.instances).toHaveLength(2);
+    expect(pendingRequest.signal?.aborted).toBe(true);
+
+    act(() => TestBoardSocket.instances[1]?.send(boardEvent(44)));
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(screen.getByText("Updated after reconnect")).toBeInTheDocument();
+    vi.useRealTimers();
+  });
+
   it("rejects illegal drag requests that would force Running or Done", async () => {
     const triageTask = task({ status: "triage", title: "Rough idea", capability_id: null, typed_input_ref: null, typed_input_digest: null });
     const doneTask = task({ task_id: "task-done", creation_sequence: 2, status: "done", title: "Finished task" });
@@ -272,10 +407,121 @@ describe("WorkBoardPanel", () => {
     const triageCard = within(screen.getByRole("region", { name: "Triage column" })).getByRole("listitem");
     fireEvent.dragStart(triageCard, { dataTransfer: { setData: vi.fn(), getData: vi.fn(() => "task-1"), effectAllowed: "move" } });
     fireEvent.drop(screen.getByRole("region", { name: "Running column" }), { dataTransfer: { getData: () => "task-1" } });
+    await waitFor(() => expect(screen.getAllByRole("alert").some((alert) => alert.textContent?.includes("directly to Running"))).toBe(true));
     fireEvent.drop(screen.getByRole("region", { name: "Done column" }), { dataTransfer: { getData: () => "task-1" } });
 
     expect(fetchMock.mock.calls.some(([, init]) => (init as RequestInit | undefined)?.method === "POST")).toBe(false);
-    expect(screen.getByText(/backend does not allow moving Triage directly to Done/i)).toBeInTheDocument();
+    await waitFor(() => expect(screen.getAllByRole("alert").some((alert) => alert.textContent?.includes("directly to Done"))).toBe(true));
+    expect(screen.getAllByRole("alert").find((alert) => alert.textContent?.includes("directly to Done"))).toHaveTextContent(/board was refreshed from the server/i);
+    await waitFor(() => expect(fetchMock.mock.calls.filter(([input]) => String(input).includes("/api/work-board/tasks?")).length).toBeGreaterThanOrEqual(2));
+  });
+
+  it("promotes an eligible Triage card through the backend when dropped in Todo", async () => {
+    const triage = task({ status: "triage", title: "Ready to specify" });
+    const promoted = { ...triage, status: "todo" as const, task_revision: 4 };
+    let taskListCalls = 0;
+    fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes("/api/work-board/tasks?") && !url.match(/\/tasks\/[^?]+/)) {
+        taskListCalls += 1;
+        return Promise.resolve(response(page([taskListCalls === 1 ? triage : promoted], taskListCalls === 1 ? 42 : 43)));
+      }
+      if (url.includes("/api/work-board/events?after=42")) return Promise.resolve(response(events(42)));
+      if (url.includes("/api/work-board/events?after=43")) return Promise.resolve(response(events(43)));
+      if (url.endsWith("/api/goals/tree")) return Promise.resolve(response([]));
+      if (url.includes("/api/work-board/goals/goal-1/execution-limits")) return Promise.resolve(response(limits()));
+      if (url.includes("/api/work-board/tasks/task-1/actions") && init?.method === "POST") {
+        return Promise.resolve(response({ task: promoted }));
+      }
+      if (url.endsWith("/api/work-board/tasks/task-1")) return Promise.resolve(response(detail(taskListCalls === 1 ? triage : promoted)));
+      return Promise.resolve(response({}));
+    });
+
+    render(<WorkBoardPanel />);
+    const triageCard = within(await screen.findByRole("region", { name: "Triage column" })).getByRole("listitem");
+    fireEvent.click(screen.getByRole("button", { name: "Open task Ready to specify" }));
+    fireEvent.click(await screen.findByLabelText(/I acknowledge the server-derived runtime limit/));
+    fireEvent.dragStart(triageCard, { dataTransfer: { setData: vi.fn(), getData: vi.fn(() => "task-1"), effectAllowed: "move" } });
+    fireEvent.drop(screen.getByRole("region", { name: "Todo column" }), { dataTransfer: { getData: () => "task-1" } });
+
+    await waitFor(() => expect(fetchMock.mock.calls.some(([, init]) => {
+      const body = JSON.parse(String((init as RequestInit | undefined)?.body ?? "{}")) as Record<string, unknown>;
+      return (init as RequestInit | undefined)?.method === "POST" && body.action === "promote" && body.expected_revision === 3;
+    })).toBe(true));
+    expect(await screen.findByRole("region", { name: "Todo column" })).toHaveTextContent("Ready to specify");
+  });
+
+  it("shows archived tasks when the Archived status filter is selected", async () => {
+    const archived = task({ status: "archived", title: "Old completed task" });
+    taskResponse(fetchMock, archived);
+
+    render(<WorkBoardPanel />);
+    fireEvent.change(await screen.findByLabelText("Status filter"), { target: { value: "archived" } });
+
+    expect(await screen.findByRole("region", { name: "Archived tasks" })).toHaveTextContent("Old completed task");
+  });
+
+  it("keeps task B selected when task A comment refresh resolves late", async () => {
+    const taskA = task({ task_id: "task-a", title: "Task A" });
+    const taskB = task({ task_id: "task-b", creation_sequence: 2, title: "Task B" });
+    let taskADetailCalls = 0;
+    let resolveLateA: ((value: ReturnType<typeof response>) => void) | null = null;
+    fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes("/api/work-board/tasks?") && !url.match(/\/tasks\/[^?]+/)) return Promise.resolve(response(page([taskA, taskB])));
+      if (url.includes("/api/work-board/events")) return Promise.resolve(response(events()));
+      if (url.endsWith("/api/goals/tree")) return Promise.resolve(response([]));
+      if (url.endsWith("/api/work-board/tasks/task-a/comments") && init?.method === "POST") return Promise.resolve(response({ comment: {} }));
+      if (url.endsWith("/api/work-board/tasks/task-a")) {
+        taskADetailCalls += 1;
+        if (taskADetailCalls === 2) {
+          return new Promise<ReturnType<typeof response>>((resolve) => { resolveLateA = resolve; });
+        }
+        return Promise.resolve(response(detail(taskA)));
+      }
+      if (url.endsWith("/api/work-board/tasks/task-b")) return Promise.resolve(response(detail(taskB)));
+      return Promise.resolve(response({}));
+    });
+
+    render(<WorkBoardPanel />);
+    fireEvent.click(await screen.findByRole("button", { name: "Open task Task A" }));
+    const comment = await screen.findByLabelText("Comment");
+    fireEvent.change(comment, { target: { value: "refresh after posting" } });
+    fireEvent.click(screen.getByRole("button", { name: "Add comment" }));
+    await waitFor(() => expect(resolveLateA).not.toBeNull());
+
+    fireEvent.click(screen.getByRole("button", { name: "Open task Task B" }));
+    expect(await within(screen.getByRole("dialog")).findByText("Task B")).toBeInTheDocument();
+    await act(async () => { resolveLateA?.(response(detail({ ...taskA, title: "Stale Task A response", task_revision: 99 }))); });
+    expect(within(screen.getByRole("dialog")).getByText("Task B")).toBeInTheDocument();
+    expect(screen.queryByText("Stale Task A response")).not.toBeInTheDocument();
+  });
+
+  it("traps focus in the create dialog, closes on Escape, and restores focus", async () => {
+    taskResponse(fetchMock, task());
+    render(<WorkBoardPanel />);
+    const opener = await screen.findByRole("button", { name: "Create task" });
+    fireEvent.click(opener);
+    const dialog = await screen.findByRole("dialog", { name: "Create a goal-linked task" });
+    const focusables = Array.from(dialog.querySelectorAll<HTMLElement>("button:not([disabled]), input:not([disabled]):not([type=\"hidden\"]), select:not([disabled]), textarea:not([disabled])"));
+    expect(document.activeElement).toBe(focusables[0]);
+    const background = opener.closest<HTMLElement>(".cockpit-operator-row");
+    expect(background?.inert).toBe(true);
+
+    const first = focusables[0];
+    const last = focusables[focusables.length - 1];
+    expect(first).toBeDefined();
+    expect(last).toBeDefined();
+    first?.focus();
+    fireEvent.keyDown(document, { key: "Tab", shiftKey: true });
+    expect(document.activeElement).toBe(last);
+    fireEvent.keyDown(document, { key: "Tab" });
+    expect(document.activeElement).toBe(first);
+    fireEvent.keyDown(document, { key: "Escape" });
+
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Create a goal-linked task" })).not.toBeInTheDocument());
+    expect(document.activeElement).toBe(opener);
+    expect(background?.inert).toBe(false);
   });
 
   it("refreshes canonical detail and snapshot after a stale revision conflict", async () => {

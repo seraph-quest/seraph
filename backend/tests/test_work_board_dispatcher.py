@@ -809,6 +809,7 @@ async def test_racing_passes_create_one_attempt(tmp_path: Path):
         WorkBoardTask.__table__,
         WorkBoardAttempt.__table__,
         WorkBoardEvent.__table__,
+        WorkBoardLink.__table__,
     ]
     async with engine.begin() as connection:
         await connection.run_sync(
@@ -990,8 +991,21 @@ async def test_pending_admission_reconciles_after_restart(tmp_path: Path, monkey
 
 
 @pytest.mark.asyncio
-async def test_stale_fence_cannot_attach_output(async_db):
+async def test_stale_fence_cannot_attach_output(async_db, tmp_path: Path, monkeypatch):
     repository = WorkBoardRepository()
+    workspace = tmp_path / "workspace"
+    (workspace / "inputs").mkdir(parents=True)
+    raw = json.dumps(
+        {
+            "schema_version": 1,
+            "capability_id": "workflow.goal-snapshot-to-file",
+            "input": {"file_path": "artifacts/stale.md"},
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+    (workspace / "inputs" / "stale.json").write_bytes(raw)
+    monkeypatch.setattr(settings, "workspace_dir", str(workspace))
     async with async_db() as db:
         db.add(
             Goal(
@@ -1013,6 +1027,9 @@ async def test_stale_fence_cannot_attach_output(async_db):
                 title="Stale output",
                 idempotency_key="task-stale-output",
                 status=WorkBoardStatus.ready,
+                capability_id="workflow.goal-snapshot-to-file",
+                typed_input_ref="workspace-json:inputs/stale.json",
+                typed_input_digest=hashlib.sha256(raw).hexdigest(),
                 executor_id="executor.stale",
             )
         )
@@ -1024,18 +1041,86 @@ async def test_stale_fence_cannot_attach_output(async_db):
             lease_owner="service:work-board",
         )
         assert claim is not None
+        await db.commit()
+        dispatcher = WorkBoardDispatcher(repository=repository)
+        jobs = DurableJobRepository()
+        spec, _inputs, job_id, _owner, _runtime = dispatcher._build_spec(
+            claim.task,
+            claim.attempt,
+            runtime_seconds=300,
+        )
+        admitted = await jobs.admit_job(spec)
+        queued = await jobs.queue_job(job_id, expected_revision=admitted["revision"])
+        leased = await jobs.claim_job(
+            job_id,
+            owner="worker:stale-proof",
+            lease_seconds=300,
+            expected_revision=queued["revision"],
+            expected_fencing_token=queued["lease"]["fencing_token"],
+        )
+        linked = await repository.link_attempt_workflow_run(
+            db,
+            claim.task.task_id,
+            claim.attempt.attempt_id,
+            workflow_run_id=job_id,
+            expected_revision=claim.task.task_revision,
+            board_fence=claim.attempt.fencing_token,
+            lease_owner=claim.attempt.lease_owner or "service:work-board",
+            workflow_projection=leased,
+            expected_identity={
+                "owner_principal_id": spec.identity.owner_principal_id,
+                "owner_kind": spec.identity.owner_kind,
+                "service_id": spec.service_id,
+                "goal_id": spec.goal_id,
+                "goal_revision": spec.goal_revision,
+                "operator_session_id": spec.operator_session_id,
+                "session_id": spec.session_id,
+                "capability_id": spec.identity.job_kind,
+                "capability_version": spec.identity.capability_version,
+                "input_digest": hashlib.sha256(json.dumps(spec.inputs, sort_keys=True, separators=(",", ":"), default=str).encode()).hexdigest(),
+                "authority_digest": hashlib.sha256(json.dumps(spec.declared_authority, sort_keys=True, separators=(",", ":"), default=str).encode()).hexdigest(),
+                "run_fingerprint": spec.run_fingerprint,
+                "idempotency_scope": spec.identity.idempotency_scope,
+                "idempotency_key": spec.identity.idempotency_key,
+            },
+        )
+        readback = await jobs.record_effect(
+            job_id,
+            effect_type="board_child_readback",
+            receipt_kind="readback",
+            status="succeeded",
+            target_path="artifacts/stale.md",
+            target_digest="a" * 64,
+            content_sha256="a" * 64,
+            details={"verified": True},
+            owner="worker:stale-proof",
+            fencing_token=leased["lease"]["fencing_token"],
+            expected_revision=leased["revision"],
+        )
+        await jobs.transition_job(
+            job_id,
+            "succeeded",
+            owner="worker:stale-proof",
+            fencing_token=leased["lease"]["fencing_token"],
+            expected_revision=readback["revision"],
+            result={"content_sha256": "a" * 64, "verified": True},
+            result_summary="verified readback",
+        )
         with pytest.raises(BoardError, match="stale"):
             await repository.project_attempt(
                 db,
                 claim.task.task_id,
                 claim.attempt.attempt_id,
-                expected_revision=claim.task.task_revision,
+                expected_revision=linked.task.task_revision,
                 board_fence=claim.attempt.fencing_token + 1,
                 lease_owner="service:work-board",
                 status=WorkBoardStatus.done,
                 outcome="verified",
                 verified_readback={
-                    "workflow_run_id": "run-stale",
+                    "source": "workflow_run",
+                    "status": "succeeded",
+                    "verified": True,
+                    "workflow_run_id": job_id,
                     "content_sha256": "a" * 64,
                 },
             )

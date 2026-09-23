@@ -53,6 +53,7 @@ from src.auth.service import (
     authenticate_session,
     bind_operator_principal,
 )
+from src.db.engine import get_session
 from src.guardian.state import build_guardian_state
 from src.models.schemas import ChatIngressEnvelope, WSMessage, WSResponse
 from src.operators.local_codex import ExternalAgentRuntimeRemovedError
@@ -60,6 +61,7 @@ from src.scheduler.connection_manager import ws_manager
 from src.tools.policy import get_current_tool_policy_mode
 from src.vault.redaction import redact_secrets_for_streaming_snapshot, redact_secrets_in_text
 from src.vlm_runtime import direct_local_chat_route_error
+from src.work_board.repository import BoardError
 from src.llm_runtime import (
     _finish_request,
     _mark_request_timed_out,
@@ -268,6 +270,187 @@ async def _build_agent(
         else set()
     )
     return agent, False, specialist_names
+
+
+@router.websocket("/work-board/events")
+async def websocket_work_board_events(websocket: WebSocket):
+    """Authenticated, owner-scoped work-board event stream.
+
+    The browser must use the HTTP board snapshot as its state authority.  This
+    socket only carries safe event metadata and a bounded cursor-gap marker.
+    """
+    try:
+        operator = await authenticate_websocket(websocket)
+    except AuthFailure as exc:
+        await websocket.close(code=4401, reason=exc.code)
+        return
+    try:
+        after = int(websocket.query_params.get("after", "0") or "0")
+    except (TypeError, ValueError):
+        await websocket.close(code=4400, reason="invalid_cursor")
+        return
+    if after < 0:
+        await websocket.close(code=4400, reason="invalid_cursor")
+        return
+
+    await websocket.accept()
+    queue = ws_manager.connect_work_board(
+        websocket,
+        owner_principal_id=operator.principal.principal_id,
+        operator_session_id=operator.session_id,
+    )
+    auth_revoked = asyncio.Event()
+    revocation_guard = Event()
+    auth_session_id = operator.session_id if auth_enabled() else None
+    revocation_task = asyncio.create_task(
+        watch_operator_session(websocket, auth_session_id, auth_revoked, revocation_guard),
+        name=f"work-board-auth-watch:{operator.session_id[:8]}",
+    )
+    last_event_id = after
+    delivered_event_ids: set[int] = set()
+    disconnect_task: asyncio.Task | None = None
+    event_task: asyncio.Task | None = None
+    try:
+        from src.api.work_board import _event_payload, repository as work_board_repository
+        from src.work_board.contracts import WorkBoardOwner
+
+        owner = WorkBoardOwner(
+            principal_id=operator.principal.principal_id,
+            session_id=operator.session_id,
+        )
+
+        async def _send_persisted_event(event) -> None:
+            """Send one replay event while suppressing cursor duplicates."""
+            nonlocal last_event_id
+            payload = _event_payload(event)
+            event_id = payload.get("event_id")
+            if type(event_id) is int:
+                if event_id <= last_event_id or event_id in delivered_event_ids:
+                    return
+                # The monotonic cursor makes the set naturally redundant for
+                # ordered pages, but bounding it protects long-lived sockets
+                # if a transport delivers out-of-order duplicates.
+                if len(delivered_event_ids) >= 512:
+                    delivered_event_ids.clear()
+                delivered_event_ids.add(event_id)
+                last_event_id = event_id
+            await websocket.send_json(payload)
+
+        replay_after = after
+        while True:
+            async with get_session() as db:
+                page = await work_board_repository.list_events(
+                    db,
+                    owner,
+                    after=replay_after,
+                    limit=100,
+                )
+            if page.gap:
+                gap_cursor = int(page.last_event_id or last_event_id)
+                if gap_cursor > last_event_id:
+                    await websocket.send_json(
+                        {"type": "cursor_gap", "last_event_id": gap_cursor}
+                    )
+                    last_event_id = gap_cursor
+                break
+            for event in page.events:
+                await _send_persisted_event(event)
+            if not page.events or len(page.events) < 100:
+                break
+            next_cursor = next(
+                (
+                    int(event.event_id)
+                    for event in reversed(page.events)
+                    if type(event.event_id) is int
+                ),
+                replay_after,
+            )
+            if next_cursor <= replay_after:
+                # Defensive stop against a malformed repository page; do not
+                # spin forever while holding an authenticated socket.
+                break
+            replay_after = next_cursor
+
+        # A WebSocket server does not learn that an idle browser went away
+        # until it reads the ASGI receive channel.  Keep that read pending
+        # alongside the board queue so a client close promptly reaches the
+        # common unregister path below.  Without this task an idle socket can
+        # remain in the manager's binding and queue maps indefinitely.
+        disconnect_task = asyncio.create_task(
+            websocket.receive(),
+            name="work-board-disconnect-wait",
+        )
+        while True:
+            event_task = asyncio.create_task(queue.get(), name="work-board-event-wait")
+            wait_set = {event_task, disconnect_task}
+            if auth_session_id:
+                wait_set.add(revocation_task)
+            done, _ = await asyncio.wait(wait_set, return_when=asyncio.FIRST_COMPLETED)
+            if revocation_task in done and auth_revoked.is_set():
+                event_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await event_task
+                event_task = None
+                return
+            if disconnect_task in done:
+                event_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await event_task
+                event_task = None
+                try:
+                    message = disconnect_task.result()
+                except WebSocketDisconnect:
+                    return
+                if isinstance(message, dict) and message.get("type") == "websocket.disconnect":
+                    return
+                # Client messages are not part of this read-only event
+                # stream.  Ignore one and keep observing the channel.
+                disconnect_task = asyncio.create_task(
+                    websocket.receive(),
+                    name="work-board-disconnect-wait",
+                )
+                continue
+            payload = await event_task
+            event_task = None
+            if payload.get("type") == "cursor_gap":
+                gap_cursor = int(payload.get("last_event_id") or last_event_id)
+                if gap_cursor > last_event_id:
+                    await websocket.send_json(payload)
+                    last_event_id = gap_cursor
+                continue
+            event_id = payload.get("event_id")
+            if type(event_id) is int and (
+                event_id <= last_event_id or event_id in delivered_event_ids
+            ):
+                continue
+            await websocket.send_json(payload)
+            if type(event_id) is int:
+                if len(delivered_event_ids) >= 512:
+                    delivered_event_ids.clear()
+                delivered_event_ids.add(event_id)
+                last_event_id = event_id
+    except WebSocketDisconnect:
+        logger.info("Work-board websocket client disconnected")
+    except BoardError as exc:
+        with suppress(Exception):
+            await websocket.close(code=4400, reason=exc.code)
+    except Exception:
+        logger.exception("Work-board websocket failed")
+        with suppress(Exception):
+            await websocket.close(code=1011, reason="work_board_event_stream_unavailable")
+    finally:
+        for pending_task in (event_task, disconnect_task):
+            if pending_task is not None and not pending_task.done():
+                pending_task.cancel()
+        for pending_task in (event_task, disconnect_task):
+            if pending_task is not None:
+                with suppress(asyncio.CancelledError, Exception):
+                    await pending_task
+        ws_manager.disconnect_work_board(websocket)
+        if not revocation_task.done():
+            revocation_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await revocation_task
 
 
 @router.websocket("/chat")

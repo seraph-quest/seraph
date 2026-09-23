@@ -28,6 +28,7 @@ from src.api.skills import router as skills_router
 from src.api.tools import router as tools_router
 from src.api.telegram import router as telegram_router
 from src.api.vault import router as vault_router
+from src.api.work_board import router as work_board_router
 from src.api.workflows import router as workflows_router
 from src.api.ws import router as ws_router
 
@@ -63,4 +64,5 @@ api_router.include_router(workflows_router, prefix="/api", tags=["workflows"])
 api_router.include_router(observer_router, prefix="/api", tags=["observer"])
 api_router.include_router(settings_router, prefix="/api", tags=["settings"])
 api_router.include_router(vault_router, prefix="/api", tags=["vault"])
+api_router.include_router(work_board_router, prefix="/api", tags=["work-board"])
 api_router.include_router(ws_router, prefix="/ws", tags=["websocket"])

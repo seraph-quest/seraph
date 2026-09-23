@@ -63,6 +63,11 @@ OPERATOR_REQUIRED_TABLES = (
     "memory_tombstones",
     "audio_ingress_jobs",
     "audio_consent_grants",
+    "work_board_tasks",
+    "work_board_attempts",
+    "work_board_links",
+    "work_board_comments",
+    "work_board_events",
 )
 
 _LEGACY_WORKFLOW_STATUS_MAP = {
@@ -893,8 +898,9 @@ async def _ensure_memory_indexes(conn) -> None:
 async def init_db() -> None:
     """Create all tables on startup."""
     # Keep SQLite bound to the same canonical workspace registry used by
-    # artifact and vault persistence.  This is a path-ownership check only;
-    # migration and backup/restore lifecycle work remains a later #742 slice.
+    # artifact and vault persistence.  New board tables are additive SQLModel
+    # metadata and therefore participate in the canonical SQLite backup and
+    # restore inventory without introducing a second migration framework.
     canonical_workspace_registry(settings.workspace_dir).classify_path("seraph.db")
     # Ensure every SQLModel table class is registered before create_all runs.
     from src.db import models as _models  # noqa: F401

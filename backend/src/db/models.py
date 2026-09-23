@@ -3,7 +3,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Optional
 
-from sqlalchemy import Index, text
+from sqlalchemy import Column, Index, Integer, UniqueConstraint, text
 from sqlmodel import Field, SQLModel, Relationship
 
 
@@ -31,6 +31,24 @@ class GoalStatus(str, enum.Enum):
     completed = "completed"
     paused = "paused"
     abandoned = "abandoned"
+
+
+class WorkBoardStatus(str, enum.Enum):
+    """Canonical operator task projection states.
+
+    WorkflowRunState remains the authority for execution.  These values are
+    the operator-facing coordination states and deliberately do not mirror
+    the durable workflow status vocabulary.
+    """
+
+    triage = "triage"
+    todo = "todo"
+    ready = "ready"
+    running = "running"
+    blocked = "blocked"
+    review = "review"
+    done = "done"
+    archived = "archived"
 
 
 class MemoryCategory(str, enum.Enum):
@@ -469,6 +487,152 @@ class GuardianRoutineVersion(SQLModel, table=True):
     source_issue_number: Optional[int] = Field(default=None)
     created_at: datetime = Field(default_factory=_now, index=True)
     installed_at: Optional[datetime] = Field(default=None, index=True)
+
+
+# ─── Operator work board ────────────────────────────────
+
+
+class WorkBoardTask(SQLModel, table=True):
+    """One authenticated operator's durable task intent and projection.
+
+    ``creation_sequence`` is the SQLite insertion sequence used for stable
+    FIFO ordering.  ``task_id`` is the public opaque identifier used by API
+    callers and relationships, so changing the presentation identifier never
+    changes the ordering key.
+    """
+
+    __tablename__ = "work_board_tasks"
+    __table_args__ = (
+        Index(
+            "ix_work_board_tasks_ready_order",
+            "status",
+            "priority",
+            "creation_sequence",
+        ),
+        Index(
+            "ux_work_board_tasks_idempotency",
+            "owner_principal_id",
+            "owner_session_id",
+            "idempotency_scope",
+            "idempotency_key",
+            unique=True,
+        ),
+        {"sqlite_autoincrement": True},
+    )
+
+    creation_sequence: Optional[int] = Field(
+        default=None,
+        sa_column=Column(Integer, primary_key=True, autoincrement=True),
+    )
+    task_id: str = Field(default_factory=_uuid, index=True, unique=True)
+    owner_principal_id: str = Field(index=True)
+    owner_session_id: str = Field(index=True)
+    origin_session_id: Optional[str] = Field(default=None, index=True)
+    origin_thread_id: Optional[str] = Field(default=None, index=True)
+    goal_id: str = Field(index=True)
+    goal_revision: int = Field(default=1, index=True)
+    title: str = Field(default="", max_length=200)
+    body: str = Field(default="", max_length=4_000)
+    capability_id: Optional[str] = Field(default=None, index=True)
+    typed_input_ref: Optional[str] = Field(default=None, index=True)
+    typed_input_digest: Optional[str] = Field(default=None, index=True)
+    executor_id: Optional[str] = Field(default=None, index=True)
+    assignee_id: Optional[str] = Field(default=None, index=True)
+    priority: int = Field(default=50, index=True)
+    idempotency_scope: str = Field(default="task", index=True)
+    idempotency_key: str = Field(index=True)
+    idempotency_payload_digest: str = Field(default="", index=True)
+    idempotency_binding: Optional[str] = Field(default=None, index=True)
+    scheduled_at: Optional[datetime] = Field(default=None, index=True)
+    status: WorkBoardStatus = Field(default=WorkBoardStatus.triage, index=True)
+    block_kind: Optional[str] = Field(default=None, index=True)
+    block_reason: Optional[str] = Field(default=None)
+    block_source_status: Optional[str] = Field(default=None, index=True)
+    requires_review: bool = Field(default=False, index=True)
+    reviewer_id: Optional[str] = Field(default=None, index=True)
+    task_revision: int = Field(default=1, index=True)
+    result_refs_json: str = Field(default="[]")
+    artifact_refs_json: str = Field(default="[]")
+    created_at: datetime = Field(default_factory=_now, index=True)
+    updated_at: datetime = Field(default_factory=_now, index=True)
+    completed_at: Optional[datetime] = Field(default=None, index=True)
+    archived_at: Optional[datetime] = Field(default=None, index=True)
+
+
+class WorkBoardAttempt(SQLModel, table=True):
+    """Historical execution attempt linked to at most one durable run."""
+
+    __tablename__ = "work_board_attempts"
+
+    attempt_id: str = Field(default_factory=_uuid, primary_key=True)
+    task_id: str = Field(foreign_key="work_board_tasks.task_id", index=True)
+    workflow_run_id: Optional[str] = Field(default=None, index=True)
+    task_revision_at_claim: int = Field(default=1, index=True)
+    lease_owner: Optional[str] = Field(default=None, index=True)
+    lease_expires_at: Optional[datetime] = Field(default=None, index=True)
+    heartbeat_at: Optional[datetime] = Field(default=None, index=True)
+    fencing_token: int = Field(default=0, index=True)
+    executor_id: str = Field(default="", index=True)
+    started_at: Optional[datetime] = Field(default=None, index=True)
+    ended_at: Optional[datetime] = Field(default=None, index=True)
+    outcome: Optional[str] = Field(default=None, index=True)
+    receipt_refs_json: str = Field(default="[]")
+    created_at: datetime = Field(default_factory=_now, index=True)
+    updated_at: datetime = Field(default_factory=_now, index=True)
+
+
+class WorkBoardLink(SQLModel, table=True):
+    """Parent-to-child task dependency in the same canonical workspace."""
+
+    __tablename__ = "work_board_links"
+    __table_args__ = (
+        UniqueConstraint(
+            "parent_task_id",
+            "child_task_id",
+            name="ux_work_board_links_parent_child",
+        ),
+    )
+
+    link_id: str = Field(default_factory=_uuid, primary_key=True)
+    owner_principal_id: str = Field(index=True)
+    owner_session_id: str = Field(index=True)
+    parent_task_id: str = Field(foreign_key="work_board_tasks.task_id", index=True)
+    child_task_id: str = Field(foreign_key="work_board_tasks.task_id", index=True)
+    created_at: datetime = Field(default_factory=_now, index=True)
+
+
+class WorkBoardComment(SQLModel, table=True):
+    """Bounded operator handoff/comment record."""
+
+    __tablename__ = "work_board_comments"
+
+    comment_id: str = Field(default_factory=_uuid, primary_key=True)
+    task_id: str = Field(foreign_key="work_board_tasks.task_id", index=True)
+    owner_principal_id: str = Field(index=True)
+    owner_session_id: str = Field(index=True)
+    author_principal_id: str = Field(index=True)
+    author_session_id: str = Field(index=True)
+    body: str = Field(default="", max_length=2_000)
+    created_at: datetime = Field(default_factory=_now, index=True)
+
+
+class WorkBoardEvent(SQLModel, table=True):
+    """Append-only safe metadata event with a global monotonic cursor."""
+
+    __tablename__ = "work_board_events"
+
+    event_id: Optional[int] = Field(
+        default=None,
+        sa_column=Column(Integer, primary_key=True, autoincrement=True),
+    )
+    task_id: str = Field(foreign_key="work_board_tasks.task_id", index=True)
+    owner_principal_id: str = Field(index=True)
+    owner_session_id: str = Field(index=True)
+    actor_principal_id: str = Field(index=True)
+    actor_session_id: Optional[str] = Field(default=None, index=True)
+    kind: str = Field(index=True)
+    metadata_json: str = Field(default="{}")
+    created_at: datetime = Field(default_factory=_now, index=True)
 
 
 class WorkflowRunState(SQLModel, table=True):

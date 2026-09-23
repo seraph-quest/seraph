@@ -330,6 +330,7 @@ _SAFE_EVENT_OUTCOMES = frozenset(
         "transient",
         "read_back",
         "reconciled",
+        "verified",
         "unknown",
         "unknown_external_effect",
         "cost_liability",

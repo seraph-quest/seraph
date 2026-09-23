@@ -464,6 +464,7 @@ async def _async_value(value):
         ("approval expired", "needs_input"),
         ("worker timed out", "transient"),
         ("verified_readback_missing", "verified_readback_missing"),
+        ("goal_snapshot_executed_and_verified", "goal_snapshot_executed_and_verified"),
     ],
 )
 def test_adapter_reasons_are_closed_stable_codes(value: str, expected: str):

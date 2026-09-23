@@ -544,3 +544,9 @@ def test_event_and_attempt_serializers_drop_legacy_prose_secrets_and_paths():
     assert attempt_payload["workflow_run_id"] == "run:7"
     assert "PRIVATE" not in serialized
     assert "/private" not in serialized
+
+
+def test_attempt_serializer_preserves_verified_outcome():
+    attempt = WorkBoardAttempt(task_id="task-verified", outcome="verified")
+
+    assert _attempt_payload(attempt)["outcome"] == "verified"

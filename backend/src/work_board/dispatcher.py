@@ -230,6 +230,7 @@ _STABLE_REASON_CODES = frozenset(
         "goal_not_found",
         "goal_owner_unbound",
         "goal_revision_stale",
+        "goal_snapshot_executed_and_verified",
         "needs_input",
         "no_external_effect",
         "not_dispatched",

@@ -688,6 +688,8 @@ async def test_goal_snapshot_executes_and_reads_back(async_db, monkeypatch, tmp_
     assert outcome["completed"] is True, outcome
     assert task.status is WorkBoardStatus.done
     assert attempt.workflow_run_id == f"work-board:{task.task_id}:{attempt.attempt_id}"
+    assert attempt.outcome == "verified"
+    assert json.loads(attempt.result_refs_json)[0]["reason_code"] == "goal_snapshot_executed_and_verified"
     assert (tmp_path / "artifacts/managed-board-snapshot.md").is_file()
     content = (tmp_path / "artifacts/managed-board-snapshot.md").read_text(encoding="utf-8")
     assert task.goal_id in content

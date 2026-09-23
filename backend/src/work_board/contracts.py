@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from enum import Enum
+import re
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -30,6 +31,24 @@ class WorkBoardBaseModel(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
 
+_SAFE_REFERENCE = re.compile(r"^[A-Za-z0-9_.:/-]{1,512}$")
+
+
+def _safe_reference(value: str | None, *, field_name: str) -> str | None:
+    """Keep identifiers and workspace references bounded and opaque."""
+    if value is None:
+        return None
+    normalized = str(value).strip()
+    if (
+        not _SAFE_REFERENCE.fullmatch(normalized)
+        or normalized.startswith(("/", "~"))
+        or "\\" in normalized
+        or any(part in {"", ".", ".."} for part in normalized.split("/"))
+    ):
+        raise ValueError(f"{field_name} must be a bounded safe reference")
+    return normalized
+
+
 class WorkBoardTaskCreate(WorkBoardBaseModel):
     title: str = Field(min_length=1, max_length=200)
     body: str = Field(default="", max_length=4_000)
@@ -48,6 +67,11 @@ class WorkBoardTaskCreate(WorkBoardBaseModel):
     requires_review: bool = False
     reviewer_id: str | None = Field(default=None, min_length=1, max_length=128)
     origin_thread_id: str | None = Field(default=None, min_length=1, max_length=256)
+
+    @field_validator("capability_id", "typed_input_ref", "executor_id", "assignee_id")
+    @classmethod
+    def validate_safe_references(cls, value: str | None, info) -> str | None:
+        return _safe_reference(value, field_name=str(info.field_name))
 
     @field_validator("typed_input_digest")
     @classmethod
@@ -86,6 +110,11 @@ class WorkBoardTaskPatch(WorkBoardBaseModel):
     executor_id: str | None = Field(default=None, min_length=1, max_length=128)
     assignee_id: str | None = Field(default=None, min_length=1, max_length=128)
     scheduled_at: datetime | None = None
+
+    @field_validator("capability_id", "typed_input_ref", "executor_id", "assignee_id")
+    @classmethod
+    def validate_safe_references(cls, value: str | None, info) -> str | None:
+        return _safe_reference(value, field_name=str(info.field_name))
 
     @field_validator("typed_input_digest")
     @classmethod

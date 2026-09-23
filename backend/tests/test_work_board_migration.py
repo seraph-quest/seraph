@@ -12,16 +12,12 @@ from src.db import engine as db_engine
 from src.db.engine import OPERATOR_REQUIRED_TABLES
 from src.db.models import Goal, SQLModel
 from src.workspace import (
-    WorkspaceConfig,
-    WorkspaceDatabaseObjectSpec,
-    WorkspaceIdentity,
-    WorkspacePathSpec,
-    WorkspaceRootKind,
-    WorkspaceStateClass,
-    WorkspaceStateRegistry,
     backup_workspace,
+    canonical_workspace_registry,
+    production_workspace_inventory,
     restore_workspace,
 )
+from src.workspace.lifecycle import lifecycle_fence_marker
 
 
 def test_work_board_tables_are_registered_in_canonical_metadata():
@@ -36,17 +32,40 @@ def test_work_board_tables_are_registered_in_canonical_metadata():
     assert expected.issubset(set(OPERATOR_REQUIRED_TABLES))
 
 
-def _board_workspace(tmp_path: Path) -> tuple[Path, WorkspaceStateRegistry]:
+def _board_workspace(tmp_path: Path):
+    """Build a canonical production-shaped workspace for lifecycle proof."""
     root = tmp_path / "board-workspace"
     root.mkdir()
-    (root / ".seraph-synthetic-workspace").write_bytes(b"seraph-synthetic-workspace-v1\n")
-    (root / "soul.md").write_text("board test\n", encoding="utf-8")
-    (root / "artifacts").mkdir()
-    (root / "extensions").mkdir()
-    (root / ".vault-key").write_text("vault-test-secret\n", encoding="utf-8")
-    (root / "derived").mkdir()
-    (root / "cache").mkdir()
-    (root / "tmp").mkdir()
+    registry = canonical_workspace_registry(root)
+    directory_paths = {
+        "artifacts",
+        "extensions",
+        "skills",
+        "workflows",
+        "runbooks",
+        "plans",
+        "reports",
+        "notes",
+        "local-runtime-profile-receipts",
+        "lance",
+        ".seraph-extension-snapshots",
+        "cache",
+        "tmp",
+    }
+    for spec in registry.config.declared_paths:
+        path = root / spec.logical_path
+        if spec.logical_path in directory_paths:
+            path.mkdir(parents=True, exist_ok=True)
+        elif spec.logical_path == ".vault-key":
+            path.write_text("vault-test-secret\n", encoding="utf-8")
+        elif spec.logical_path == "seraph.db":
+            continue
+        elif spec.logical_path == ".seraph-workspace-maintenance.lock":
+            path.write_bytes(b"")
+        elif spec.logical_path == "soul.md":
+            path.write_text("board test\n", encoding="utf-8")
+        elif spec.logical_path != "google_calendar_token.json":
+            path.write_text("{}\n", encoding="utf-8")
     with sqlite3.connect(root / "seraph.db") as connection:
         connection.executescript(
             """
@@ -103,33 +122,13 @@ def _board_workspace(tmp_path: Path) -> tuple[Path, WorkspaceStateRegistry]:
                 VALUES ('task-roundtrip', 'task.created', '{}');
             """
         )
-    config = WorkspaceConfig(
-        identity=WorkspaceIdentity("synthetic-board", root, WorkspaceRootKind.SYNTHETIC_FIXTURE),
-        declared_paths=(
-            WorkspacePathSpec("seraph.db", WorkspaceStateClass.CANONICAL),
-            WorkspacePathSpec("soul.md", WorkspaceStateClass.CANONICAL),
-            WorkspacePathSpec("artifacts", WorkspaceStateClass.CANONICAL),
-            WorkspacePathSpec("extensions", WorkspaceStateClass.CANONICAL),
-            WorkspacePathSpec(".vault-key", WorkspaceStateClass.SECRET_RECOVERY),
-            WorkspacePathSpec("derived", WorkspaceStateClass.DERIVED),
-            WorkspacePathSpec("cache", WorkspaceStateClass.CACHE),
-            WorkspacePathSpec("tmp", WorkspaceStateClass.DISPOSABLE),
-            WorkspacePathSpec(".seraph-synthetic-workspace", WorkspaceStateClass.DISPOSABLE),
-        ),
-        expected_database_objects=(
-            WorkspaceDatabaseObjectSpec("work_board_tasks", "table", WorkspaceStateClass.CANONICAL),
-            WorkspaceDatabaseObjectSpec("work_board_attempts", "table", WorkspaceStateClass.CANONICAL),
-            WorkspaceDatabaseObjectSpec("work_board_links", "table", WorkspaceStateClass.CANONICAL),
-            WorkspaceDatabaseObjectSpec("work_board_comments", "table", WorkspaceStateClass.CANONICAL),
-            WorkspaceDatabaseObjectSpec("work_board_events", "table", WorkspaceStateClass.CANONICAL),
-        ),
-    )
-    return root, WorkspaceStateRegistry(config)
+    return root, registry
 
 
 def test_backup_restore_retains_work_board_task_and_event_records(tmp_path):
     root, registry = _board_workspace(tmp_path)
-    inventory = registry.build_manifest()["database"]["tables"]
+    inventory_receipt = production_workspace_inventory(root)
+    inventory = inventory_receipt["manifest"]["database"]["tables"]
     assert {
         "work_board_tasks",
         "work_board_attempts",
@@ -137,20 +136,42 @@ def test_backup_restore_retains_work_board_task_and_event_records(tmp_path):
         "work_board_comments",
         "work_board_events",
     }.issubset({table["name"] for table in inventory})
-    archive = Path(backup_workspace(root, registry=registry)["archive_path"])
+    assert registry.classify_path("seraph.db").value == "canonical"
+    with lifecycle_fence_marker():
+        archive = Path(backup_workspace(root, registry=registry)["archive_path"])
     with sqlite3.connect(root / "seraph.db") as connection:
         connection.execute("DELETE FROM work_board_events")
         connection.execute("DELETE FROM work_board_comments")
         connection.execute("DELETE FROM work_board_links")
         connection.execute("DELETE FROM work_board_attempts")
         connection.execute("DELETE FROM work_board_tasks")
-    restore_workspace(
-        root,
-        archive,
-        registry=registry,
-        confirm=True,
-        restore_id="restore-board-records",
-    )
+    with lifecycle_fence_marker():
+        restore_workspace(
+            root,
+            archive,
+            registry=registry,
+            confirm=True,
+            restore_id="restore-board-records",
+            reconcile_restore=lambda **_kwargs: {
+                "status": "ready",
+                "derived_rebuild": {
+                    "status": "clean_targets_recreated",
+                    "rebuilt_directories": [],
+                    "stored_derived_files": 0,
+                },
+                "authority_invalidation": {
+                    "status": "applied",
+                    "tables_present": [],
+                    "operator_sessions_invalidated": 0,
+                    "workflow_authority_rows_blocked": 0,
+                },
+                "token_invalidation": {
+                    "status": "applied",
+                    "optional_credentials_invalidated": [],
+                },
+                "secret_values_included": False,
+            },
+        )
     with sqlite3.connect(root / "seraph.db") as connection:
         task = connection.execute(
             "SELECT task_id, title, status FROM work_board_tasks"

@@ -13,11 +13,12 @@ from datetime import datetime, timezone
 import hashlib
 import json
 import re
-from typing import Any
+from typing import Any, Mapping
 
 from sqlalchemy import delete, func, select, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
 from src.db.models import (
     Goal,
@@ -44,6 +45,30 @@ _SAFE_ID = re.compile(r"^[A-Za-z0-9_.:/-]{1,512}$")
 _DIGEST = re.compile(r"^[0-9a-f]{64}$")
 _EVENT_LIMIT = 100
 _TASK_LIMIT = 100
+_ALLOWED_RECEIPT_STATUSES = {
+    "accepted",
+    "queued",
+    "running",
+    "succeeded",
+    "degraded",
+    "settled",
+    "failed",
+    "blocked",
+    "cancelled",
+    "awaiting_approval",
+    "needs_input",
+    "capability",
+    "transient",
+    "read_back",
+    "reconciled",
+    "unknown",
+    "unknown_external_effect",
+    "cost_liability",
+    "intent",
+    "dispatched",
+    "no_external_effect",
+    "not_dispatched",
+}
 
 
 async def _begin_sqlite_immediate(db: AsyncSession) -> None:
@@ -101,13 +126,149 @@ def _validate_safe_identifier(value: str | None, *, field: str, max_length: int 
     if value is None:
         return
     normalized = str(value).strip()
-    if not normalized or len(normalized) > max_length or not _SAFE_ID.fullmatch(normalized):
+    if (
+        not normalized
+        or len(normalized) > max_length
+        or not _SAFE_ID.fullmatch(normalized)
+        or normalized.startswith(("/", "~"))
+        or "\\" in normalized
+        or any(part in {"", ".", ".."} for part in normalized.split("/"))
+    ):
         raise BoardError("invalid_reference", f"{field} must be a bounded safe reference")
 
 
 def _validate_digest(value: str | None, *, field: str) -> None:
     if value is not None and not _DIGEST.fullmatch(str(value).lower()):
         raise BoardError("invalid_digest", f"{field} must be a SHA-256 hexadecimal digest")
+
+
+def _safe_reference(value: Any, *, max_length: int = 512) -> str | None:
+    """Return one bounded opaque identifier, or ``None`` when unsafe."""
+    if not isinstance(value, str):
+        return None
+    bounded = value.strip()
+    if (
+        not bounded
+        or len(bounded) > max_length
+        or not _SAFE_ID.fullmatch(bounded)
+        or bounded.startswith(("/", "~"))
+        or "\\" in bounded
+        or any(part in {"", ".", ".."} for part in bounded.split("/"))
+    ):
+        return None
+    return bounded
+
+
+def _safe_code(value: Any, *, max_length: int = 128) -> str | None:
+    bounded = _safe_reference(value, max_length=max_length)
+    if bounded is None or "/" in bounded or "\\" in bounded:
+        return None
+    return bounded
+
+
+def safe_workflow_run_id(value: Any) -> str | None:
+    """Return a safe durable-run reference for an operator projection."""
+    reference = _safe_reference(value)
+    if reference is None or "/" in reference or "\\" in reference:
+        return None
+    return reference
+
+
+def _safe_receipt_refs(value: Any, *, limit: int = 32) -> list[dict[str, Any]]:
+    """Keep only bounded, structured receipt references in board projections."""
+    values = value if isinstance(value, (list, tuple)) else [value]
+    allowed = {
+        "artifact_id",
+        "artifact_type",
+        "file_path",
+        "content_sha256",
+        "size_bytes",
+        "exists",
+        "effect_id",
+        "effect_type",
+        "status",
+        "verified",
+        "target_digest",
+        "target_path",
+        "job_id",
+        "workflow_run_id",
+        "recovery_action",
+        "reason_code",
+        "error_code",
+        "child_job_id",
+        "readback_status",
+        "verification_status",
+        "outcome",
+    }
+    safe_items: list[dict[str, Any]] = []
+    for item in values[:limit]:
+        if not isinstance(item, Mapping):
+            continue
+        safe: dict[str, Any] = {}
+        for key in allowed:
+            if key not in item:
+                continue
+            candidate = item[key]
+            if isinstance(candidate, bool) or candidate is None:
+                safe[key] = candidate
+            elif isinstance(candidate, int):
+                safe[key] = candidate
+            elif isinstance(candidate, str):
+                bounded = candidate.strip()
+                if key in {"content_sha256", "target_digest"}:
+                    if not _DIGEST.fullmatch(bounded.lower()):
+                        continue
+                    safe[key] = bounded.lower()
+                elif key in {
+                    "artifact_id",
+                    "artifact_type",
+                    "effect_id",
+                    "effect_type",
+                    "status",
+                    "job_id",
+                    "workflow_run_id",
+                    "child_job_id",
+                    "recovery_action",
+                    "reason_code",
+                    "error_code",
+                    "readback_status",
+                    "verification_status",
+                    "outcome",
+                }:
+                    if len(bounded) > 512 or not _SAFE_ID.fullmatch(bounded):
+                        continue
+                    if key == "status" and bounded not in _ALLOWED_RECEIPT_STATUSES:
+                        continue
+                    if key == "readback_status" and bounded not in {
+                        "not_started", "pending", "verified", "failed", "unknown", "not_applicable"
+                    }:
+                        continue
+                    if key == "verification_status" and bounded not in {
+                        "not_started", "pending", "passed", "failed", "reconciliation_required", "cancelled"
+                    }:
+                        continue
+                    if key == "workflow_run_id":
+                        bounded = safe_workflow_run_id(bounded) or ""
+                        if not bounded:
+                            continue
+                    if key in {"recovery_action", "reason_code", "error_code", "outcome"}:
+                        bounded = _safe_code(bounded) or ""
+                        if not bounded:
+                            continue
+                    safe[key] = bounded
+                elif key in {"file_path", "target_path"}:
+                    if (
+                        not bounded
+                        or bounded.startswith(("/", "~"))
+                        or "\\" in bounded
+                        or any(part in {"", ".", ".."} for part in bounded.split("/"))
+                        or len(bounded) > 512
+                    ):
+                        continue
+                    safe[key] = bounded
+        if safe:
+            safe_items.append(safe)
+    return safe_items
 
 
 def _safe_metadata(metadata: dict[str, Any]) -> str:
@@ -392,7 +553,11 @@ class WorkBoardRepository:
                 raise BoardIdempotencyConflict(request.idempotency_scope, request.idempotency_key)
             latest_event = await db.execute(
                 select(WorkBoardEvent)
-                .where(WorkBoardEvent.task_id == existing.task_id)
+                .where(
+                    WorkBoardEvent.task_id == existing.task_id,
+                    WorkBoardEvent.owner_principal_id == owner.principal_id,
+                    WorkBoardEvent.owner_session_id == owner.session_id,
+                )
                 .order_by(WorkBoardEvent.event_id.desc())
                 .limit(1)
             )
@@ -439,16 +604,58 @@ class WorkBoardRepository:
             requires_review=request.requires_review,
             reviewer_id=request.reviewer_id,
         )
-        db.add(task)
         try:
-            await db.flush()
+            # Keep a concurrent unique-key loser usable for the winner
+            # refetch.  The savepoint contains only this insert.
+            async with db.begin_nested():
+                db.add(task)
+                await db.flush()
         except IntegrityError as exc:
             # A concurrent request can win the unique idempotency index after
-            # the preflight query.  Let the caller retry and read the winner;
-            # never return an uncommitted duplicate projection.
+            # the preflight query.  Return that canonical task when the owner,
+            # session, and key match exactly; unrelated integrity failures stay
+            # typed conflicts.
+            winner_result = await db.execute(
+                select(WorkBoardTask).where(
+                    WorkBoardTask.owner_principal_id == owner.principal_id,
+                    WorkBoardTask.owner_session_id == owner.session_id,
+                    WorkBoardTask.idempotency_scope == request.idempotency_scope,
+                    WorkBoardTask.idempotency_key == request.idempotency_key,
+                )
+            )
+            winner = winner_result.scalar_one_or_none()
+            if winner is not None:
+                if winner.idempotency_payload_digest != digest:
+                    raise BoardIdempotencyConflict(
+                        request.idempotency_scope,
+                        request.idempotency_key,
+                    ) from exc
+                latest_event = await db.execute(
+                    select(WorkBoardEvent)
+                    .where(
+                        WorkBoardEvent.task_id == winner.task_id,
+                        WorkBoardEvent.owner_principal_id == owner.principal_id,
+                        WorkBoardEvent.owner_session_id == owner.session_id,
+                    )
+                    .order_by(WorkBoardEvent.event_id.desc())
+                    .limit(1)
+                )
+                event = latest_event.scalar_one_or_none()
+                if event is None:
+                    event = await self._event(
+                        db,
+                        winner,
+                        owner,
+                        kind="task.replayed",
+                        metadata={
+                            "status": winner.status.value,
+                            "task_revision": winner.task_revision,
+                        },
+                    )
+                return BoardMutation(winner, event, idempotent_replay=True)
             raise BoardError(
-                "idempotency_race",
-                "The idempotency key was claimed concurrently; retry the request",
+                "integrity_conflict",
+                "The task could not be persisted because another record conflicts with it",
                 status_code=409,
             ) from exc
         event = await self._event(
@@ -576,6 +783,14 @@ class WorkBoardRepository:
             if field in {"title", "body"}:
                 safe_changes[field] = await self._safe_text(str(value))
             else:
+                if field in {"capability_id", "typed_input_ref", "executor_id", "assignee_id"}:
+                    _validate_safe_identifier(
+                        value,
+                        field=field,
+                        max_length=128 if field in {"capability_id", "executor_id", "assignee_id"} else 512,
+                    )
+                elif field == "typed_input_digest":
+                    _validate_digest(value, field=field)
                 safe_changes[field] = value
         authority_fields = {
             "capability_id",
@@ -759,6 +974,7 @@ class WorkBoardRepository:
         self,
         db: AsyncSession,
         *,
+        owner: WorkBoardOwner,
         parent_task_id: str,
         child_task_id: str,
     ) -> bool:
@@ -771,9 +987,20 @@ class WorkBoardRepository:
             visited.add(current)
             if current == parent_task_id:
                 return True
+            child_task = WorkBoardTask
+            parent_task = aliased(WorkBoardTask)
             result = await db.execute(
-                select(WorkBoardLink.child_task_id).where(
-                    WorkBoardLink.parent_task_id == current
+                select(WorkBoardLink.child_task_id)
+                .join(child_task, child_task.task_id == WorkBoardLink.child_task_id)
+                .join(parent_task, parent_task.task_id == WorkBoardLink.parent_task_id)
+                .where(
+                    WorkBoardLink.parent_task_id == current,
+                    WorkBoardLink.owner_principal_id == owner.principal_id,
+                    WorkBoardLink.owner_session_id == owner.session_id,
+                    child_task.owner_principal_id == owner.principal_id,
+                    child_task.owner_session_id == owner.session_id,
+                    parent_task.owner_principal_id == owner.principal_id,
+                    parent_task.owner_session_id == owner.session_id,
                 )
             )
             frontier.extend(str(value) for value in result.scalars().all())
@@ -804,7 +1031,12 @@ class WorkBoardRepository:
         )
         if duplicate.scalar_one_or_none() is not None:
             raise BoardError("link_exists", "The dependency link already exists")
-        if await self._would_cycle(db, parent_task_id=parent.task_id, child_task_id=child.task_id):
+        if await self._would_cycle(
+            db,
+            owner=owner,
+            parent_task_id=parent.task_id,
+            child_task_id=child.task_id,
+        ):
             raise BoardError("dependency_cycle", "The dependency would create a cycle")
         demote_ready = (
             child.status is WorkBoardStatus.ready
@@ -907,7 +1139,11 @@ class WorkBoardRepository:
             (
                 await db.execute(
                     select(WorkBoardComment)
-                    .where(WorkBoardComment.task_id == task.task_id)
+                    .where(
+                        WorkBoardComment.task_id == task.task_id,
+                        WorkBoardComment.owner_principal_id == owner.principal_id,
+                        WorkBoardComment.owner_session_id == owner.session_id,
+                    )
                     .order_by(WorkBoardComment.created_at.asc())
                 )
             ).scalars().all()

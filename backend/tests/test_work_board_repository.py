@@ -5,7 +5,13 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from src.db.models import Goal, WorkBoardStatus
+from src.db.models import (
+    Goal,
+    WorkBoardComment,
+    WorkBoardLink,
+    WorkBoardStatus,
+    WorkBoardTask,
+)
 from src.work_board.contracts import (
     WorkBoardAction,
     WorkBoardActionRequest,
@@ -25,6 +31,7 @@ from src.work_board.repository import (
     BoardRevisionConflict,
     WorkBoardRepository,
 )
+from pydantic import ValidationError
 
 
 OWNER = WorkBoardOwner(principal_id="operator:test-bypass", session_id="test-auth-bypass")
@@ -84,6 +91,59 @@ async def test_idempotency_conflict_is_rejected(async_db):
 
 
 @pytest.mark.asyncio
+async def test_malformed_cross_owner_comments_are_excluded_from_detail(async_db):
+    repository = WorkBoardRepository()
+    async with async_db() as db:
+        created = await _create(db, key="comment-owner-scope")
+        db.add_all(
+            [
+                WorkBoardComment(
+                    task_id=created.task.task_id,
+                    owner_principal_id=OWNER.principal_id,
+                    owner_session_id="old-session",
+                    author_principal_id=OWNER.principal_id,
+                    author_session_id="old-session",
+                    body="stale session comment",
+                ),
+                WorkBoardComment(
+                    task_id=created.task.task_id,
+                    owner_principal_id="operator:other",
+                    owner_session_id="other-session",
+                    author_principal_id="operator:other",
+                    author_session_id="other-session",
+                    body="cross owner comment",
+                ),
+            ]
+        )
+        await db.commit()
+        detail = await repository.get_detail(db, OWNER, created.task.task_id)
+        assert detail["comments"] == []
+
+
+def test_patch_rejects_unsafe_reference_and_digest_inputs():
+    digest = sha256(b"typed-input").hexdigest()
+    with pytest.raises(ValidationError):
+        WorkBoardTaskPatch(
+            expected_revision=1,
+            typed_input_ref="/private/operator-secret.json",
+            typed_input_digest=digest,
+        )
+    with pytest.raises(ValidationError):
+        WorkBoardTaskPatch(
+            expected_revision=1,
+            typed_input_ref="workspace-json:inputs/../secret.json",
+            typed_input_digest=digest,
+        )
+    with pytest.raises(ValidationError):
+        WorkBoardTaskPatch(
+            expected_revision=1,
+            capability_id="capability.local",
+            typed_input_ref="workspace-json:inputs/task.json",
+            typed_input_digest="not-a-digest",
+        )
+
+
+@pytest.mark.asyncio
 async def test_cross_owner_and_revoked_session_denied(async_db):
     async with async_db() as db:
         mutation = await _create(db, key="owner")
@@ -93,6 +153,52 @@ async def test_cross_owner_and_revoked_session_denied(async_db):
                 WorkBoardOwner(principal_id="operator:test-bypass", session_id="revoked-session"),
                 mutation.task.task_id,
             )
+
+
+@pytest.mark.asyncio
+async def test_cycle_check_ignores_malformed_cross_owner_link_endpoints(async_db):
+    repository = WorkBoardRepository()
+    async with async_db() as db:
+        parent = await _create(db, key="cycle-owner-parent", title="Parent")
+        child = await _create(db, key="cycle-owner-child", title="Child")
+        foreign_task = WorkBoardTask(
+            task_id="foreign-cycle-node",
+            owner_principal_id="operator:other",
+            owner_session_id="other-session",
+            goal_id="foreign-goal",
+            title="Foreign node",
+            idempotency_key="foreign-cycle-node",
+        )
+        db.add(foreign_task)
+        await db.flush()
+        db.add_all(
+            [
+                WorkBoardLink(
+                    owner_principal_id=OWNER.principal_id,
+                    owner_session_id=OWNER.session_id,
+                    parent_task_id=child.task.task_id,
+                    child_task_id=foreign_task.task_id,
+                ),
+                WorkBoardLink(
+                    owner_principal_id=OWNER.principal_id,
+                    owner_session_id=OWNER.session_id,
+                    parent_task_id=foreign_task.task_id,
+                    child_task_id=parent.task.task_id,
+                ),
+            ]
+        )
+        await db.commit()
+        link, _event = await repository.add_link(
+            db,
+            OWNER,
+            WorkBoardLinkCreate(
+                parent_task_id=parent.task.task_id,
+                child_task_id=child.task.task_id,
+                expected_child_revision=child.task.task_revision,
+            ),
+        )
+        assert link.parent_task_id == parent.task.task_id
+        assert link.child_task_id == child.task.task_id
 
 
 @pytest.mark.asyncio

@@ -34,6 +34,8 @@ from src.work_board.repository import (
     BoardError,
     BoardMutation,
     WorkBoardRepository,
+    _safe_receipt_refs,
+    safe_workflow_run_id,
 )
 
 
@@ -114,8 +116,8 @@ def _task_payload(
         "dependency_count": dependency_count,
         "completed_dependency_count": completed_dependency_count,
         "task_revision": task.task_revision,
-        "result_refs": _decode_json_list(task.result_refs_json),
-        "artifact_refs": _decode_json_list(task.artifact_refs_json),
+        "result_refs": _safe_receipt_refs(_decode_json_list(task.result_refs_json)),
+        "artifact_refs": _safe_receipt_refs(_decode_json_list(task.artifact_refs_json)),
         "created_at": _json_value(task.created_at),
         "updated_at": _json_value(task.updated_at),
         "completed_at": _json_value(task.completed_at),
@@ -151,7 +153,7 @@ def _attempt_payload(attempt: WorkBoardAttempt) -> dict[str, Any]:
     return {
         "attempt_id": attempt.attempt_id,
         "task_id": attempt.task_id,
-        "workflow_run_id": attempt.workflow_run_id,
+        "workflow_run_id": safe_workflow_run_id(attempt.workflow_run_id),
         "task_revision_at_claim": attempt.task_revision_at_claim,
         "lease_owner": attempt.lease_owner,
         "lease_expires_at": _json_value(attempt.lease_expires_at),
@@ -161,7 +163,7 @@ def _attempt_payload(attempt: WorkBoardAttempt) -> dict[str, Any]:
         "started_at": _json_value(attempt.started_at),
         "ended_at": _json_value(attempt.ended_at),
         "outcome": attempt.outcome,
-        "receipt_refs": _decode_json_list(attempt.receipt_refs_json),
+        "receipt_refs": _safe_receipt_refs(_decode_json_list(attempt.receipt_refs_json)),
         "created_at": _json_value(attempt.created_at),
         "updated_at": _json_value(attempt.updated_at),
     }

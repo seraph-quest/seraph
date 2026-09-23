@@ -42,6 +42,7 @@ from src.work_board.contracts import (
 
 
 _SAFE_ID = re.compile(r"^[A-Za-z0-9_.:/-]{1,512}$")
+_SAFE_RECEIPT_IDENTIFIER = re.compile(r"^[A-Za-z0-9_.:-]{1,512}$")
 _DIGEST = re.compile(r"^[0-9a-f]{64}$")
 _EVENT_LIMIT = 100
 _TASK_LIMIT = 100
@@ -238,7 +239,20 @@ def _safe_receipt_refs(value: Any, *, limit: int = 32) -> list[dict[str, Any]]:
                     "verification_status",
                     "outcome",
                 }:
-                    if len(bounded) > 512 or not _SAFE_ID.fullmatch(bounded):
+                    identifier_pattern = (
+                        _SAFE_RECEIPT_IDENTIFIER
+                        if key
+                        in {
+                            "artifact_id",
+                            "artifact_type",
+                            "effect_id",
+                            "effect_type",
+                            "job_id",
+                            "child_job_id",
+                        }
+                        else _SAFE_ID
+                    )
+                    if len(bounded) > 512 or not identifier_pattern.fullmatch(bounded):
                         continue
                     if key == "status" and bounded not in _ALLOWED_RECEIPT_STATUSES:
                         continue

@@ -169,14 +169,25 @@ def test_detail_reference_serializers_drop_unknown_private_values():
             [
                 {
                     "job_id": "job:1",
+                    "artifact_id": "/private/run",
+                    "effect_id": "runs/effect",
+                    "child_job_id": "child/jobs",
+                    "artifact_type": "goal_snapshot",
+                    "effect_type": "readback",
                     "workflow_run_id": "/private/run-secret",
                     "status": "succeeded",
                     "verified": True,
                     "file_path": "/private/source.txt",
+                    "target_path": "artifacts/result.txt",
                     "summary": "PRIVATE SOURCE BODY",
                     "readback_status": "verified",
                     "verification_status": "passed",
-                }
+                },
+                {
+                    "artifact_type": "private/type",
+                    "effect_type": "effects/type",
+                    "status": "succeeded",
+                },
             ]
         ),
     )
@@ -191,6 +202,8 @@ def test_detail_reference_serializers_drop_unknown_private_values():
                 {
                     "artifact_id": "artifact:1",
                     "workflow_run_id": "private/run",
+                    "file_path": "artifacts/result.txt",
+                    "target_path": "reports/result.txt",
                     "secret": "DO NOT SERIALIZE",
                     "body": "PRIVATE RESULT BODY",
                 }
@@ -200,7 +213,11 @@ def test_detail_reference_serializers_drop_unknown_private_values():
             [
                 {
                     "artifact_id": "artifact:2",
+                    "effect_id": "/private/run",
+                    "job_id": "jobs/run",
+                    "child_job_id": "child/jobs",
                     "file_path": "/private/artifact.txt",
+                    "target_path": "derived/result.txt",
                     "private_source": "PRIVATE ARTIFACT BODY",
                 }
             ]
@@ -214,14 +231,26 @@ def test_detail_reference_serializers_drop_unknown_private_values():
     assert attempt_payload["receipt_refs"] == [
         {
             "job_id": "job:1",
+            "artifact_type": "goal_snapshot",
+            "effect_type": "readback",
+            "target_path": "artifacts/result.txt",
             "status": "succeeded",
             "verified": True,
             "readback_status": "verified",
             "verification_status": "passed",
+        },
+        {"status": "succeeded"},
+    ]
+    assert task_payload["result_refs"] == [
+        {
+            "artifact_id": "artifact:1",
+            "file_path": "artifacts/result.txt",
+            "target_path": "reports/result.txt",
         }
     ]
-    assert task_payload["result_refs"] == [{"artifact_id": "artifact:1"}]
-    assert task_payload["artifact_refs"] == [{"artifact_id": "artifact:2"}]
+    assert task_payload["artifact_refs"] == [
+        {"artifact_id": "artifact:2", "target_path": "derived/result.txt"}
+    ]
     assert "PRIVATE" not in serialized
     assert "/private" not in serialized
 

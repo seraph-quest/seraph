@@ -62,6 +62,7 @@ import {
 } from "./cockpitAuthority";
 import { SeraphPresencePane } from "./SeraphPresencePane";
 import { PttAudioControl } from "../chat/PttAudioControl";
+import { WorkBoardPanel } from "./WorkBoardPanel";
 
 interface CockpitViewProps {
   onSend: (message: string) => boolean | void | Promise<boolean | void>;
@@ -6795,6 +6796,7 @@ const COCKPIT_WINDOW_HINTS = {
   operatorTimeline: "Browse what Seraph did, why it did it, and what spent budget across user, guardian, workflow, and system activity.",
   interventions: "Recent proactive nudges, delivery outcomes, and feedback signal.",
   workflowTimeline: "Inspect runs, branch from failures, and resume repaired steps.",
+  workBoard: "Coordinate bounded tasks, inspect verified attempts, and recover blocked work.",
   audit: "Durable tool, memory, workflow, and integration events for the current window.",
   trace: "In-flight routing, tool, and error activity while work is happening.",
   inspector: "Select a run, approval, intervention, or event to inspect details and recovery actions.",
@@ -8168,6 +8170,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       guardianState: paneVisibility.guardian_state_pane,
       timeline: paneVisibility.operator_timeline_pane,
       workflows: paneVisibility.workflows_pane,
+      workBoard: paneVisibility.work_board_pane,
       interventions: paneVisibility.interventions_pane,
       audit: paneVisibility.audit_pane,
       trace: paneVisibility.trace_pane,
@@ -15870,6 +15873,33 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                 )}
               </div>
             </section>
+          </CockpitWorkspaceWindow>
+        )}
+
+        {visibleSections.workBoard && (
+          <CockpitWorkspaceWindow
+            panelId="work_board_pane"
+            title="Work board"
+            meta="bounded operator tasks"
+            hint={COCKPIT_WINDOW_HINTS.workBoard}
+            showHint={cockpitHintsEnabled}
+            minWidth={640}
+            minHeight={360}
+            onClose={() => closeWindowPane("work_board_pane")}
+          >
+            <WorkBoardPanel
+              onOpenApprovals={() => focusPane("approvals_pane")}
+              onInspectWorkflowRun={(workflowRunId) => {
+                focusPane("workflows_pane");
+                const workflow = workflowRunByIdentity.get(workflowRunId) ?? workflowRunById.get(workflowRunId);
+                if (workflow) {
+                  inspectWorkflowRun(workflow);
+                } else {
+                  setOperatorStatus("Workflow evidence is not in the current timeline snapshot. Refresh the workflow pane to load it.");
+                  void loadWorkflowRuns();
+                }
+              }}
+            />
           </CockpitWorkspaceWindow>
         )}
 

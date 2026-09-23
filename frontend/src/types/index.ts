@@ -110,6 +110,235 @@ export interface GoalInfo {
   success_criterion?: GoalSuccessCriterion | null;
 }
 
+export type WorkBoardStatus =
+  | "triage"
+  | "todo"
+  | "ready"
+  | "running"
+  | "blocked"
+  | "review"
+  | "done"
+  | "archived";
+
+export type WorkBoardRecoveryAction =
+  | "cancel"
+  | "unblock"
+  | "retry"
+  | "approve_existing_run"
+  | "restore_prerequisite"
+  | "reconcile_admission_binding"
+  | "reconcile_external_effect";
+
+export type WorkBoardReadbackStatus =
+  | "not_started"
+  | "pending"
+  | "verified"
+  | "failed"
+  | "unknown"
+  | "not_applicable";
+
+export type WorkBoardVerificationStatus =
+  | "not_started"
+  | "pending"
+  | "passed"
+  | "failed"
+  | "reconciliation_required"
+  | "cancelled";
+
+export interface WorkBoardReceiptReference {
+  artifact_id?: string;
+  artifact_type?: string;
+  file_path?: string;
+  content_sha256?: string;
+  size_bytes?: number;
+  exists?: boolean | null;
+  effect_id?: string;
+  effect_type?: string;
+  status?: string;
+  verified?: boolean | null;
+  target_digest?: string;
+  target_path?: string;
+  job_id?: string;
+  workflow_run_id?: string;
+  recovery_action?: string;
+  reason_code?: string;
+  error_code?: string;
+  child_job_id?: string;
+  readback_status?: WorkBoardReadbackStatus;
+  verification_status?: WorkBoardVerificationStatus;
+  outcome?: string;
+}
+
+export interface WorkBoardAttempt {
+  attempt_id: string;
+  task_id: string;
+  workflow_run_id: string | null;
+  task_revision_at_claim: number;
+  lease_owner: string | null;
+  cancel_requested_at: string | null;
+  lease_expires_at: string | null;
+  heartbeat_at: string | null;
+  fencing_token: number;
+  executor_id: string | null;
+  started_at: string;
+  ended_at: string | null;
+  outcome: string | null;
+  receipt_refs: WorkBoardReceiptReference[];
+  readback_status: WorkBoardReadbackStatus;
+  verification_status: WorkBoardVerificationStatus;
+  created_at: string;
+  updated_at: string;
+}
+
+/** Safe task projection returned by the authenticated /api/work-board routes. */
+export interface WorkBoardTask {
+  task_id: string;
+  creation_sequence: number;
+  owner_principal_id: string;
+  owner_session_id: string;
+  origin_session_id: string | null;
+  origin_thread_id: string | null;
+  goal_id: string;
+  goal_revision: number;
+  title: string;
+  body: string;
+  capability_id: string | null;
+  typed_input_ref: string | null;
+  typed_input_digest: string | null;
+  executor_id: string | null;
+  assignee_id: string | null;
+  priority: number;
+  idempotency_scope: string;
+  idempotency_key: string;
+  scheduled_at: string | null;
+  status: WorkBoardStatus;
+  block_kind: string | null;
+  block_reason: string | null;
+  block_source_status: WorkBoardStatus | null;
+  cancel_requested_at: string | null;
+  requires_review: boolean;
+  reviewer_id: string | null;
+  dependency_count: number;
+  completed_dependency_count: number;
+  dispatch_rank: number | null;
+  recovery_action: WorkBoardRecoveryAction | null;
+  readback_status: WorkBoardReadbackStatus;
+  verification_status: WorkBoardVerificationStatus;
+  task_revision: number;
+  result_refs: WorkBoardReceiptReference[];
+  artifact_refs: WorkBoardReceiptReference[];
+  latest_attempt: WorkBoardAttempt | null;
+  created_at: string;
+  updated_at: string;
+  completed_at: string | null;
+  archived_at: string | null;
+}
+
+export interface WorkBoardComment {
+  comment_id: string;
+  task_id: string;
+  author_principal_id: string;
+  author_session_id: string;
+  body: string;
+  created_at: string;
+}
+
+export interface WorkBoardEvent {
+  event_id: number;
+  task_id: string;
+  kind: string;
+  metadata: Record<string, unknown>;
+  created_at: string;
+}
+
+export interface WorkBoardTaskDetail {
+  task: WorkBoardTask;
+  attempts: WorkBoardAttempt[];
+  parents: string[];
+  children: string[];
+  comments: WorkBoardComment[];
+  events: WorkBoardEvent[];
+  revision: number;
+}
+
+export interface WorkBoardTaskPage {
+  tasks: WorkBoardTask[];
+  next_after: number | null;
+  last_event_id: number;
+}
+
+export interface WorkBoardEventPage {
+  events: WorkBoardEvent[];
+  last_event_id: number;
+  gap: boolean;
+}
+
+export interface WorkBoardExecutionLimits {
+  goal_id: string;
+  goal_revision: number;
+  effective_max_runtime_seconds: number;
+  default_max_runtime_seconds: number;
+  hard_max_runtime_seconds: number;
+  attempt_limit: number;
+  limit_source: "goal_admission_budget" | "default";
+}
+
+export interface WorkBoardTaskCreateRequest {
+  title: string;
+  body?: string;
+  goal_id: string;
+  goal_revision: number;
+  status?: "triage" | "todo";
+  capability_id?: string | null;
+  typed_input_ref?: string | null;
+  typed_input_digest?: string | null;
+  executor_id?: string | null;
+  assignee_id?: string | null;
+  priority?: number;
+  idempotency_scope?: string;
+  idempotency_key: string;
+  scheduled_at?: string | null;
+  requires_review?: boolean;
+  reviewer_id?: string | null;
+  origin_thread_id?: string | null;
+}
+
+export interface WorkBoardTaskPatchRequest {
+  expected_revision: number;
+  title?: string;
+  body?: string;
+  priority?: number;
+  capability_id?: string | null;
+  typed_input_ref?: string | null;
+  typed_input_digest?: string | null;
+  executor_id?: string | null;
+  assignee_id?: string | null;
+  scheduled_at?: string | null;
+}
+
+export type WorkBoardAction = "promote" | "block" | "unblock" | "retry" | "cancel" | "archive";
+
+export interface WorkBoardActionRequest {
+  action: WorkBoardAction;
+  expected_revision: number;
+  block_kind?: "operator";
+  reason?: string;
+  resolution?: string;
+}
+
+export interface WorkBoardCommentCreateRequest {
+  expected_revision: number;
+  body: string;
+}
+
+export interface WorkBoardLinkCreateRequest {
+  parent_task_id: string;
+  child_task_id: string;
+  expected_child_revision: number;
+}
+
+export interface WorkBoardLinkDeleteRequest extends WorkBoardLinkCreateRequest {}
+
 /** The smaller goal shape returned by the loop inspection endpoint. */
 export interface GoalLoopGoal {
   id: string;

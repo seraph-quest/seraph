@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { FormEvent } from "react";
+import type { FormEvent, MouseEvent } from "react";
 
 import { API_URL, WS_URL } from "../../config/constants";
 import { resolveWebSocketUrl } from "../../hooks/useWebSocket";
@@ -80,6 +80,7 @@ const EVENT_LIMIT = 100;
 const MAX_SYNC_PAGES = 20;
 const DETAIL_REFRESH_BATCH_SIZE = 8;
 const RECONNECT_DELAY_MS = 3_000;
+const BOARD_REQUEST_TIMEOUT_MS = 15_000;
 
 export interface WorkBoardPanelProps {
   onOpenApprovals?: () => void;
@@ -360,6 +361,7 @@ function WorkBoardPanel({ onOpenApprovals, onInspectWorkflowRun }: WorkBoardPane
   const [detailLoading, setDetailLoading] = useState(false);
   const [detailError, setDetailError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
+  const [moveFeedback, setMoveFeedback] = useState<string | null>(null);
   const [busyAction, setBusyAction] = useState(false);
   const [createOpen, setCreateOpen] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
@@ -399,6 +401,7 @@ function WorkBoardPanel({ onOpenApprovals, onInspectWorkflowRun }: WorkBoardPane
   const eventCursorRef = useRef<number | null>(null);
   const selectedTaskIdRef = useRef(selectedTaskId);
   const socketRef = useRef<WebSocket | null>(null);
+  const socketEventControllerRef = useRef<AbortController | null>(null);
   const reconnectTimerRef = useRef<number | null>(null);
   const stoppedRef = useRef(false);
   const syncingRef = useRef(false);
@@ -407,12 +410,37 @@ function WorkBoardPanel({ onOpenApprovals, onInspectWorkflowRun }: WorkBoardPane
   const eventReconcileQueueRef = useRef<Promise<void>>(Promise.resolve());
   const taskDetailRequestVersionRef = useRef(new Map<string, number>());
   const requestControllersRef = useRef(new Set<AbortController>());
+  const createDialogRef = useRef<HTMLFormElement | null>(null);
+  const createOpenerRef = useRef<HTMLElement | null>(null);
+  const createBusyRef = useRef(createBusy);
+  createBusyRef.current = createBusy;
 
   const requestBoard = useCallback(<T,>(path: string, init?: RequestInit): Promise<T> => {
     const controller = new AbortController();
+    const upstreamSignal = init?.signal;
+    const abortFromUpstream = () => controller.abort();
+    if (upstreamSignal?.aborted) controller.abort();
+    else upstreamSignal?.addEventListener("abort", abortFromUpstream, { once: true });
     requestControllersRef.current.add(controller);
+    const method = (init?.method ?? "GET").toUpperCase();
+    const hasTimeout = method === "GET" || method === "HEAD";
+    let timedOut = false;
+    const timeout = hasTimeout
+      ? window.setTimeout(() => {
+        timedOut = true;
+        controller.abort();
+      }, BOARD_REQUEST_TIMEOUT_MS)
+      : null;
     return boardRequest<T>(path, { ...init, signal: controller.signal })
-      .finally(() => requestControllersRef.current.delete(controller));
+      .catch((error) => {
+        if (timedOut) throw new WorkBoardSyncError("The work-board request timed out. The last confirmed state is preserved while the board reconnects.");
+        throw error;
+      })
+      .finally(() => {
+        if (timeout !== null) window.clearTimeout(timeout);
+        upstreamSignal?.removeEventListener("abort", abortFromUpstream);
+        requestControllersRef.current.delete(controller);
+      });
   }, []);
 
   const requestApi = useCallback(<T,>(path: string, init?: RequestInit): Promise<T> => {
@@ -431,7 +459,8 @@ function WorkBoardPanel({ onOpenApprovals, onInspectWorkflowRun }: WorkBoardPane
   }, [selectedTaskId]);
 
   const allGoals = useMemo(() => flattenGoals(goals), [goals]);
-  const selectedTask = detail?.task ?? tasks.find((task) => task.task_id === selectedTaskId) ?? null;
+  const selectedDetail = selectedTaskId && detail?.task.task_id === selectedTaskId ? detail : null;
+  const selectedTask = selectedDetail?.task ?? tasks.find((task) => task.task_id === selectedTaskId) ?? null;
   const taskById = useMemo(() => new Map(tasks.map((task) => [task.task_id, task])), [tasks]);
 
   const loadAllTaskPages = useCallback(async (): Promise<BoardSnapshot> => {
@@ -461,13 +490,13 @@ function WorkBoardPanel({ onOpenApprovals, onInspectWorkflowRun }: WorkBoardPane
     throw new WorkBoardSyncError("The board has more pages than this bounded snapshot can load. Refresh to try again.");
   }, [requestBoard]);
 
-  const loadEventDelta = useCallback(async (startingCursor: number): Promise<EventDelta> => {
+  const loadEventDelta = useCallback(async (startingCursor: number, signal?: AbortSignal): Promise<EventDelta> => {
     let after = startingCursor;
     const events: WorkBoardEvent[] = [];
     const cursors = new Set<number>();
     for (let pageNumber = 0; pageNumber < MAX_SYNC_PAGES; pageNumber += 1) {
       const query = new URLSearchParams({ after: String(after), limit: String(EVENT_LIMIT) });
-      const page = await requestBoard<WorkBoardEventPage>(`/events?${query.toString()}`);
+      const page = await requestBoard<WorkBoardEventPage>(`/events?${query.toString()}`, { signal });
       if (!page || !Array.isArray(page.events) || !asSafeInteger(page.last_event_id) || typeof page.gap !== "boolean") {
         throw new WorkBoardSyncError("The event cursor response is invalid. The board is stale until a fresh snapshot succeeds.");
       }
@@ -496,26 +525,44 @@ function WorkBoardPanel({ onOpenApprovals, onInspectWorkflowRun }: WorkBoardPane
     throw new WorkBoardSyncError("The event backlog exceeded the bounded catch-up window. The board is refreshing.");
   }, [requestBoard]);
 
-  const fetchTaskDetail = useCallback(async (taskId: string): Promise<WorkBoardTaskDetail> => {
-    return requestBoard<WorkBoardTaskDetail>(`/tasks/${encodeURIComponent(taskId)}`);
+  const fetchTaskDetail = useCallback(async (taskId: string, signal?: AbortSignal): Promise<WorkBoardTaskDetail> => {
+    return requestBoard<WorkBoardTaskDetail>(`/tasks/${encodeURIComponent(taskId)}`, { signal });
   }, [requestBoard]);
 
-  const readTaskDetail = useCallback(async (taskId: string): Promise<WorkBoardTaskDetail | null> => {
+  const readTaskDetail = useCallback(async (taskId: string, signal?: AbortSignal): Promise<WorkBoardTaskDetail | null> => {
     const requestVersion = (taskDetailRequestVersionRef.current.get(taskId) ?? 0) + 1;
     taskDetailRequestVersionRef.current.set(taskId, requestVersion);
-    const nextDetail = await fetchTaskDetail(taskId);
+    const nextDetail = await fetchTaskDetail(taskId, signal);
     return taskDetailRequestVersionRef.current.get(taskId) === requestVersion ? nextDetail : null;
   }, [fetchTaskDetail]);
 
-  const reloadOneTask = useCallback(async (taskId: string, generation: number): Promise<boolean> => {
+  const reloadEventTasks = useCallback(async (generation: number, targetEventId: number): Promise<boolean> => {
+    const startingCursor = eventCursorRef.current;
+    const controller = socketEventControllerRef.current;
+    if (startingCursor === null || !controller) return false;
     try {
-      const nextDetail = await readTaskDetail(taskId);
-      if (!nextDetail || generation !== socketGenerationRef.current) return false;
-      setTasks((current) => uniqueTasks([
-        ...current.filter((task) => task.task_id !== nextDetail.task.task_id),
-        nextDetail.task,
-      ]));
-      if (selectedTaskIdRef.current === taskId) setDetail(nextDetail);
+      const delta = await loadEventDelta(startingCursor, controller.signal);
+      if (generation !== socketGenerationRef.current || controller.signal.aborted) return false;
+      if (delta.eventCursor < targetEventId || !delta.events.some((event) => event.event_id === targetEventId)) return false;
+      const taskIds = Array.from(new Set(delta.events.map((event) => event.task_id)));
+      const refreshed: WorkBoardTaskDetail[] = [];
+      for (let index = 0; index < taskIds.length; index += DETAIL_REFRESH_BATCH_SIZE) {
+        const batch = taskIds.slice(index, index + DETAIL_REFRESH_BATCH_SIZE);
+        const results = await Promise.all(batch.map((taskId) => readTaskDetail(taskId, controller.signal)));
+        if (results.some((item) => item === null)) return false;
+        refreshed.push(...results as WorkBoardTaskDetail[]);
+      }
+      if (generation !== socketGenerationRef.current || controller.signal.aborted) return false;
+      if (refreshed.length) {
+        const changed = refreshed.map((item) => item.task);
+        setTasks((current) => uniqueTasks([
+          ...current.filter((task) => !changed.some((item) => item.task_id === task.task_id)),
+          ...changed,
+        ]));
+        const selected = refreshed.find((item) => item.task.task_id === selectedTaskIdRef.current);
+        if (selected) setDetail(selected);
+      }
+      eventCursorRef.current = delta.eventCursor;
       return true;
     } catch (error) {
       if (generation === socketGenerationRef.current) {
@@ -524,7 +571,7 @@ function WorkBoardPanel({ onOpenApprovals, onInspectWorkflowRun }: WorkBoardPane
       }
       return false;
     }
-  }, [readTaskDetail]);
+  }, [loadEventDelta, readTaskDetail]);
 
   const loadSnapshotAndCatchUp = useCallback(async (): Promise<number> => {
     const snapshot = await loadAllTaskPages();
@@ -561,36 +608,42 @@ function WorkBoardPanel({ onOpenApprovals, onInspectWorkflowRun }: WorkBoardPane
     return delta.eventCursor;
   }, [loadAllTaskPages, loadEventDelta, readTaskDetail]);
 
-  const refreshSnapshot = useCallback(async () => {
+  const refreshSnapshot = useCallback(async (): Promise<boolean> => {
     setBoardError(null);
     const synchronized = await reconnectRef.current?.();
     if (synchronized) {
       setAnnouncement("Work board refreshed from the authenticated server snapshot.");
     }
+    return Boolean(synchronized);
   }, []);
 
   const refreshSelectedTask = useCallback(async () => {
     if (!selectedTaskId) return;
+    const requestedTaskId = selectedTaskId;
     setDetailLoading(true);
     setDetailError(null);
     try {
-      const nextDetail = await readTaskDetail(selectedTaskId);
-      if (!nextDetail) return;
+      const nextDetail = await readTaskDetail(requestedTaskId);
+      if (!nextDetail || selectedTaskIdRef.current !== requestedTaskId) return;
       setDetail(nextDetail);
       setTasks((current) => uniqueTasks([
-        ...current.filter((task) => task.task_id !== selectedTaskId),
+        ...current.filter((task) => task.task_id !== requestedTaskId),
         nextDetail.task,
       ]));
     } catch (error) {
-      setDetailError(errorText(error));
+      if (selectedTaskIdRef.current === requestedTaskId) setDetailError(errorText(error));
       if (error instanceof WorkBoardApiError && error.status === 409) void refreshSnapshot();
     } finally {
-      setDetailLoading(false);
+      if (selectedTaskIdRef.current === requestedTaskId) setDetailLoading(false);
     }
   }, [readTaskDetail, refreshSnapshot, selectedTaskId]);
 
   const openSocketAt = useCallback((cursor: number) => {
     if (stoppedRef.current) return;
+    socketEventControllerRef.current?.abort();
+    const eventController = new AbortController();
+    socketEventControllerRef.current = eventController;
+    eventReconcileQueueRef.current = Promise.resolve();
     const generation = socketGenerationRef.current + 1;
     socketGenerationRef.current = generation;
     setConnectionState("connecting");
@@ -651,17 +704,14 @@ function WorkBoardPanel({ onOpenApprovals, onInspectWorkflowRun }: WorkBoardPane
         return;
       }
       const eventId = eventPayload.event_id;
-      const taskId = eventPayload.task_id;
       eventReconcileQueueRef.current = eventReconcileQueueRef.current.then(async () => {
         if (generation !== socketGenerationRef.current) return;
         const currentCursor = eventCursorRef.current ?? cursor;
         if (eventId <= currentCursor) return;
-        const reconciled = await reloadOneTask(taskId, generation);
+        const reconciled = await reloadEventTasks(generation, eventId);
         if (!reconciled) {
           if (generation === socketGenerationRef.current) void reconnectRef.current?.();
-          return;
         }
-        if (generation === socketGenerationRef.current) eventCursorRef.current = eventId;
       }).catch(() => {
         if (generation === socketGenerationRef.current) void reconnectRef.current?.();
       });
@@ -688,7 +738,7 @@ function WorkBoardPanel({ onOpenApprovals, onInspectWorkflowRun }: WorkBoardPane
     socket.onerror = () => {
       if (generation === socketGenerationRef.current) setConnectionState("disconnected");
     };
-  }, [reloadOneTask]);
+  }, [reloadEventTasks]);
 
   const reconnectFromSnapshot = useCallback(async (): Promise<boolean> => {
     if (stoppedRef.current || syncingRef.current) return false;
@@ -696,6 +746,9 @@ function WorkBoardPanel({ onOpenApprovals, onInspectWorkflowRun }: WorkBoardPane
     // Invalidate pending socket handlers before reading a new snapshot. The
     // HTTP snapshot and catch-up then become the only state authority.
     socketGenerationRef.current += 1;
+    socketEventControllerRef.current?.abort();
+    socketEventControllerRef.current = null;
+    eventReconcileQueueRef.current = Promise.resolve();
     const previousSocket = socketRef.current;
     socketRef.current = null;
     previousSocket?.close(4000, "snapshot_sync");
@@ -749,6 +802,9 @@ function WorkBoardPanel({ onOpenApprovals, onInspectWorkflowRun }: WorkBoardPane
     return () => {
       stoppedRef.current = true;
       socketGenerationRef.current += 1;
+      socketEventControllerRef.current?.abort();
+      socketEventControllerRef.current = null;
+      eventReconcileQueueRef.current = Promise.resolve();
       requestControllersRef.current.forEach((controller) => controller.abort());
       requestControllersRef.current.clear();
       if (reconnectTimerRef.current !== null) window.clearTimeout(reconnectTimerRef.current);
@@ -816,6 +872,74 @@ function WorkBoardPanel({ onOpenApprovals, onInspectWorkflowRun }: WorkBoardPane
   }, [createDraft.goalId, createDraft.goalRevision, createOpen, requestBoard]);
 
   useEffect(() => {
+    if (!createOpen) return;
+    const dialog = createDialogRef.current;
+    if (!dialog) return;
+
+    const previousInertStates: Array<{ element: HTMLElement; inert: boolean }> = [];
+    let current: HTMLElement | null = dialog;
+    while (current && current !== document.body) {
+      const parent: HTMLElement | null = current.parentElement;
+      if (!parent) break;
+      for (const sibling of Array.from(parent.children)) {
+        if (sibling === current || !(sibling instanceof HTMLElement)) continue;
+        previousInertStates.push({ element: sibling, inert: Boolean(sibling.inert) });
+        sibling.inert = true;
+      }
+      current = parent;
+    }
+
+    const focusableSelector = [
+      "a[href]",
+      "button:not([disabled])",
+      "input:not([disabled]):not([type=\"hidden\"])",
+      "select:not([disabled])",
+      "textarea:not([disabled])",
+      "[tabindex]:not([tabindex=\"-1\"])",
+    ].join(",");
+    const focusables = () => Array.from(dialog.querySelectorAll<HTMLElement>(focusableSelector))
+      .filter((element) => !element.hidden && element.getAttribute("aria-hidden") !== "true");
+    const focusInitial = () => (dialog.querySelector<HTMLElement>("[autofocus]") ?? focusables()[0] ?? dialog).focus();
+    focusInitial();
+
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        closeCreateDialog();
+        return;
+      }
+      if (event.key !== "Tab") return;
+      const items = focusables();
+      const first = items[0];
+      const last = items[items.length - 1];
+      if (!first || !last) {
+        event.preventDefault();
+        dialog.focus();
+      } else if (event.shiftKey && (document.activeElement === first || !dialog.contains(document.activeElement))) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && (document.activeElement === last || !dialog.contains(document.activeElement))) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+    const onFocusIn = (event: FocusEvent) => {
+      if (event.target instanceof Node && !dialog.contains(event.target)) focusInitial();
+    };
+    document.addEventListener("keydown", onKeyDown);
+    document.addEventListener("focusin", onFocusIn);
+
+    return () => {
+      document.removeEventListener("keydown", onKeyDown);
+      document.removeEventListener("focusin", onFocusIn);
+      for (const { element, inert } of previousInertStates) element.inert = inert;
+      const opener = createOpenerRef.current;
+      if (opener?.isConnected) opener.focus();
+      createOpenerRef.current = null;
+    };
+  }, [createOpen]);
+
+  useEffect(() => {
     if (!selectedTask) {
       setDetailLimit(null);
       setDetailLimitError(null);
@@ -869,7 +993,9 @@ function WorkBoardPanel({ onOpenApprovals, onInspectWorkflowRun }: WorkBoardPane
   const archivedTasks = useMemo(() => visibleTasks.filter((task) => task.status === "archived"), [visibleTasks]);
 
   const openTask = useCallback((taskId: string) => {
+    selectedTaskIdRef.current = taskId;
     setActionError(null);
+    setMoveFeedback(null);
     setBlockReason("");
     setBlockConfirmed(false);
     setUnblockResolution("");
@@ -878,6 +1004,20 @@ function WorkBoardPanel({ onOpenApprovals, onInspectWorkflowRun }: WorkBoardPane
     setEditMode(false);
     setDetail(null);
   }, []);
+
+  const closeTask = useCallback(() => {
+    selectedTaskIdRef.current = null;
+    setSelectedTaskId(null);
+  }, []);
+
+  const openCreateDialog = (event: MouseEvent<HTMLButtonElement>) => {
+    createOpenerRef.current = event.currentTarget;
+    setCreateOpen(true);
+  };
+
+  const closeCreateDialog = () => {
+    if (!createBusyRef.current) setCreateOpen(false);
+  };
 
   const createTask = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -1076,6 +1216,9 @@ function WorkBoardPanel({ onOpenApprovals, onInspectWorkflowRun }: WorkBoardPane
         setStale(true);
         await refreshSnapshot();
         await refreshSelectedTask();
+      } else if (action === "promote") {
+        await refreshSnapshot();
+        await refreshSelectedTask();
       }
     } finally {
       setBusyAction(false);
@@ -1164,28 +1307,6 @@ function WorkBoardPanel({ onOpenApprovals, onInspectWorkflowRun }: WorkBoardPane
     }
   };
 
-  const dragTaskIdRef = useRef<string | null>(null);
-  const dropTask = (status: WorkBoardStatus) => async (event: React.DragEvent<HTMLElement>) => {
-    event.preventDefault();
-    const taskId = event.dataTransfer.getData("text/plain") || dragTaskIdRef.current;
-    dragTaskIdRef.current = null;
-    const task = tasks.find((item) => item.task_id === taskId);
-    if (!task) return;
-    if (task.status === "triage" && status === "todo") {
-      setAnnouncement("Open task details, complete the typed specification, and acknowledge the current limit before promoting to Todo.");
-      openTask(task.task_id);
-      return;
-    }
-    // Ready/Running/Review/Done are server-owned; no card drag can force them.
-    setAnnouncement(`The backend does not allow moving ${STATUS_LABELS[task.status]} directly to ${STATUS_LABELS[status]}.`);
-  };
-
-  const canManuallyBlock = (task: WorkBoardTask) => {
-    return ["triage", "todo", "ready", "review"].includes(task.status)
-      && !isActiveAttempt(task)
-      && task.status !== "running";
-  };
-
   const canPromote = Boolean(
     selectedTask
     && selectedTask.status === "triage"
@@ -1197,6 +1318,41 @@ function WorkBoardPanel({ onOpenApprovals, onInspectWorkflowRun }: WorkBoardPane
     && detailLimit.goal_revision === selectedTask.goal_revision
     && detailLimitAcknowledged,
   );
+
+  const dragTaskIdRef = useRef<string | null>(null);
+  const dropTask = (status: WorkBoardStatus) => async (event: React.DragEvent<HTMLElement>) => {
+    event.preventDefault();
+    const taskId = event.dataTransfer.getData("text/plain") || dragTaskIdRef.current;
+    dragTaskIdRef.current = null;
+    const task = tasks.find((item) => item.task_id === taskId);
+    if (!task) return;
+    if (task.status === "triage" && status === "todo") {
+      if (selectedTask?.task_id === task.task_id && canPromote) {
+        setMoveFeedback(null);
+        await performAction("promote");
+        return;
+      }
+      const message = "Open task details, complete the typed specification, and acknowledge the current limit before promoting to Todo.";
+      setMoveFeedback(message);
+      setAnnouncement(message);
+      openTask(task.task_id);
+      return;
+    }
+    // Ready/Running/Review/Done are server-owned; no card drag can force them.
+    const rejectedMove = `The backend does not allow moving ${STATUS_LABELS[task.status]} directly to ${STATUS_LABELS[status]}.`;
+    setMoveFeedback(rejectedMove);
+    const refreshed = await refreshSnapshot();
+    const message = `${rejectedMove} ${refreshed ? "The board was refreshed from the server." : "The refresh failed; the last confirmed state remains visible."}`;
+    setMoveFeedback(message);
+    setAnnouncement(message);
+  };
+
+  const canManuallyBlock = (task: WorkBoardTask) => {
+    return ["triage", "todo", "ready", "review"].includes(task.status)
+      && !isActiveAttempt(task)
+      && task.status !== "running";
+  };
+
   const canRetry = Boolean(
     selectedTask
     && selectedTask.status === "blocked"
@@ -1227,7 +1383,7 @@ function WorkBoardPanel({ onOpenApprovals, onInspectWorkflowRun }: WorkBoardPane
           </div>
         </div>
         <div className="cockpit-operator-actions flex-wrap">
-          <button type="button" className="cockpit-feedback-button" onClick={() => setCreateOpen(true)}>
+          <button type="button" className="cockpit-feedback-button" onClick={openCreateDialog}>
             Create task
           </button>
           <button type="button" className="cockpit-feedback-button" onClick={() => void refreshSnapshot()} disabled={loading}>
@@ -1280,6 +1436,7 @@ function WorkBoardPanel({ onOpenApprovals, onInspectWorkflowRun }: WorkBoardPane
           {boardError}
         </div>
       )}
+      {moveFeedback && <div className="mt-3 rounded border border-amber-500/40 p-2 text-sm" role="alert">{moveFeedback}</div>}
       {goalError && <div className="mt-2 text-xs text-amber-300" role="status">Goal metadata unavailable: {goalError}</div>}
       <div className="sr-only" aria-live="polite">{announcement}</div>
 
@@ -1354,7 +1511,7 @@ function WorkBoardPanel({ onOpenApprovals, onInspectWorkflowRun }: WorkBoardPane
         </div>
       )}
 
-      {showArchived && (
+      {(showArchived || statusFilter === "archived") && (
         <section className="mt-4 rounded border border-white/10 p-3" aria-label="Archived tasks">
           <h3 className="text-xs font-semibold uppercase tracking-wide">Archived tasks · {archivedTasks.length}</h3>
           <div className="mt-2 grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
@@ -1369,14 +1526,14 @@ function WorkBoardPanel({ onOpenApprovals, onInspectWorkflowRun }: WorkBoardPane
       )}
 
       {selectedTask && (
-        <div className="fixed inset-0 z-[80] flex justify-end bg-black/55" onMouseDown={(event) => { if (event.target === event.currentTarget) setSelectedTaskId(null); }}>
+        <div className="fixed inset-0 z-[80] flex justify-end bg-black/55" onMouseDown={(event) => { if (event.target === event.currentTarget) closeTask(); }}>
           <aside role="dialog" aria-modal="false" aria-labelledby="work-board-detail-title" className="h-full w-full max-w-2xl overflow-y-auto border-l border-white/15 bg-slate-950 p-4 shadow-2xl">
             <div className="sticky top-0 z-10 -mx-4 -mt-4 mb-4 flex items-center justify-between border-b border-white/10 bg-slate-950/95 px-4 py-3 backdrop-blur">
               <div>
                 <div className="text-[10px] uppercase tracking-wide opacity-70">{STATUS_LABELS[selectedTask.status]} · revision {selectedTask.task_revision}</div>
                 <h2 id="work-board-detail-title" className="text-lg font-semibold">{selectedTask.title}</h2>
               </div>
-              <button type="button" className="cockpit-feedback-button" aria-label="Close task details" onClick={() => setSelectedTaskId(null)}>Close</button>
+              <button type="button" className="cockpit-feedback-button" aria-label="Close task details" onClick={closeTask}>Close</button>
             </div>
 
             {(detailLoading || stale) && <div className="mb-3 text-xs text-amber-200" role="status">{detailLoading ? "Refreshing task detail…" : "Showing the last confirmed task detail."}</div>}
@@ -1494,7 +1651,7 @@ function WorkBoardPanel({ onOpenApprovals, onInspectWorkflowRun }: WorkBoardPane
                 <div className="mt-1">Parent progress {selectedTask.completed_dependency_count}/{selectedTask.dependency_count}</div>
                 <div className="mt-2 grid gap-1">
                   <div className="text-[10px] uppercase opacity-70">Parents</div>
-                  {detail?.parents.map((parentId) => {
+                  {selectedDetail?.parents.map((parentId) => {
                     const parent = taskById.get(parentId);
                     return <div key={parentId} className="flex items-center justify-between gap-2"><button type="button" className="break-all text-left underline" onClick={() => openTask(parentId)}>{parent?.title ?? parentId}</button><span>{parent ? STATUS_LABELS[parent.status] : "Not in current snapshot"}</span><button type="button" className="underline" disabled={busyAction || selectedTask.status === "running"} onClick={() => void deleteLink(parentId, selectedTask.task_id, selectedTask.task_revision)}>Remove</button></div>;
                   })}
@@ -1503,7 +1660,7 @@ function WorkBoardPanel({ onOpenApprovals, onInspectWorkflowRun }: WorkBoardPane
                     <button type="submit" className="cockpit-feedback-button" disabled={busyAction || !parentTaskIdDraft.trim() || selectedTask.status === "running"}>Add parent</button>
                   </form>
                   <div className="mt-2 text-[10px] uppercase opacity-70">Children</div>
-                  {detail?.children.map((childId) => {
+                  {selectedDetail?.children.map((childId) => {
                     const child = taskById.get(childId);
                     return <div key={childId} className="flex items-center justify-between gap-2"><button type="button" className="break-all text-left underline" onClick={() => openTask(childId)}>{child?.title ?? childId}</button><span>{child ? STATUS_LABELS[child.status] : "Not in current snapshot"}</span><button type="button" className="underline" disabled={busyAction} onClick={() => void deleteLink(selectedTask.task_id, childId, child?.task_revision ?? selectedTask.task_revision)}>Remove</button></div>;
                   })}
@@ -1518,7 +1675,7 @@ function WorkBoardPanel({ onOpenApprovals, onInspectWorkflowRun }: WorkBoardPane
                 <div className="font-semibold">Attempts, readback, and artifacts</div>
                 {selectedTask.latest_attempt && <div className="mt-1">Latest attempt: {attemptLabel(selectedTask)} · readback {READBACK_LABELS[selectedTask.latest_attempt.readback_status]} · verification {VERIFICATION_LABELS[selectedTask.latest_attempt.verification_status]}</div>}
                 <div className="mt-2 grid gap-2">
-                  {detail?.attempts.map((attempt) => (
+                  {selectedDetail?.attempts.map((attempt) => (
                     <div key={attempt.attempt_id} className="rounded bg-black/20 p-2">
                       <div>Attempt {attempt.attempt_id} · {attempt.ended_at ? attempt.outcome ?? "ended" : "active"} · fence {attempt.fencing_token}</div>
                       <div>Started {safeDateTime(attempt.started_at)} · ended {safeDateTime(attempt.ended_at)} · executor {attempt.executor_id ?? "Unassigned"}</div>
@@ -1544,15 +1701,15 @@ function WorkBoardPanel({ onOpenApprovals, onInspectWorkflowRun }: WorkBoardPane
                       {reference.workflow_run_id && onInspectWorkflowRun && <button type="button" className="underline" onClick={() => onInspectWorkflowRun(reference.workflow_run_id!)}>Open workflow evidence</button>}
                     </div>
                   ))}
-                  {(!detail?.attempts.length && !selectedTask.result_refs.length && !selectedTask.artifact_refs.length) && <div className="cockpit-empty">No attempts or output references yet.</div>}
+                  {(!selectedDetail?.attempts.length && !selectedTask.result_refs.length && !selectedTask.artifact_refs.length) && <div className="cockpit-empty">No attempts or output references yet.</div>}
                 </div>
               </section>
 
               <section className="rounded border border-white/10 p-3">
                 <div className="font-semibold">Comments</div>
                 <div className="mt-2 grid gap-2">
-                  {detail?.comments.map((comment) => <article key={comment.comment_id} className="rounded bg-black/20 p-2"><div className="text-[10px] opacity-70">{comment.author_principal_id} · {safeDateTime(comment.created_at)}</div><div className="mt-1 whitespace-pre-wrap break-words">{comment.body}</div></article>)}
-                  {(!detail?.comments.length) && <div className="cockpit-empty">No comments yet.</div>}
+                  {selectedDetail?.comments.map((comment) => <article key={comment.comment_id} className="rounded bg-black/20 p-2"><div className="text-[10px] opacity-70">{comment.author_principal_id} · {safeDateTime(comment.created_at)}</div><div className="mt-1 whitespace-pre-wrap break-words">{comment.body}</div></article>)}
+                  {(!selectedDetail?.comments.length) && <div className="cockpit-empty">No comments yet.</div>}
                 </div>
                 <form className="mt-2 grid gap-2" onSubmit={(event) => void addComment(event)}>
                   <label>Comment<textarea className="cockpit-input mt-1 w-full" maxLength={2000} rows={2} value={commentDraft} onChange={(event) => setCommentDraft(event.currentTarget.value)} /></label>
@@ -1563,8 +1720,8 @@ function WorkBoardPanel({ onOpenApprovals, onInspectWorkflowRun }: WorkBoardPane
               <section className="rounded border border-white/10 p-3">
                 <div className="font-semibold">Safe task event timeline</div>
                 <div className="mt-2 grid gap-2">
-                  {detail?.events.map((event) => <div key={event.event_id} className="border-l border-white/20 pl-2"><div>{event.kind.replace(/[_.]/g, " ")} · {safeDateTime(event.created_at)}</div><div className="text-[10px] opacity-70">{eventSummary(event)}</div></div>)}
-                  {(!detail?.events.length) && <div className="cockpit-empty">No task events yet.</div>}
+                  {selectedDetail?.events.map((event) => <div key={event.event_id} className="border-l border-white/20 pl-2"><div>{event.kind.replace(/[_.]/g, " ")} · {safeDateTime(event.created_at)}</div><div className="text-[10px] opacity-70">{eventSummary(event)}</div></div>)}
+                  {(!selectedDetail?.events.length) && <div className="cockpit-empty">No task events yet.</div>}
                 </div>
               </section>
             </div>
@@ -1573,9 +1730,9 @@ function WorkBoardPanel({ onOpenApprovals, onInspectWorkflowRun }: WorkBoardPane
       )}
 
       {createOpen && (
-        <div className="fixed inset-0 z-[90] flex items-center justify-center bg-black/65 p-4" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !createBusy) setCreateOpen(false); }}>
-          <form role="dialog" aria-modal="true" aria-labelledby="work-board-create-title" className="max-h-[90vh] w-full max-w-2xl overflow-y-auto rounded border border-white/15 bg-slate-950 p-4 shadow-2xl" onSubmit={(event) => void createTask(event)}>
-            <div className="flex items-center justify-between gap-2"><h2 id="work-board-create-title" className="text-lg font-semibold">Create a goal-linked task</h2><button type="button" className="cockpit-feedback-button" onClick={() => setCreateOpen(false)} disabled={createBusy}>Close</button></div>
+        <div className="fixed inset-0 z-[90] flex items-center justify-center bg-black/65 p-4" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) closeCreateDialog(); }}>
+          <form ref={createDialogRef} role="dialog" aria-modal="true" aria-labelledby="work-board-create-title" tabIndex={-1} className="max-h-[90vh] w-full max-w-2xl overflow-y-auto rounded border border-white/15 bg-slate-950 p-4 shadow-2xl" onSubmit={(event) => void createTask(event)}>
+            <div className="flex items-center justify-between gap-2"><h2 id="work-board-create-title" className="text-lg font-semibold">Create a goal-linked task</h2><button type="button" className="cockpit-feedback-button" onClick={closeCreateDialog} disabled={createBusy}>Close</button></div>
             <p className="mt-1 text-xs opacity-70">A free-text idea starts in Triage. Todo requires a typed capability input and current runtime-limit acknowledgment. The dispatcher alone promotes eligible work to Ready.</p>
             {createError && <div className="mt-2 rounded border border-amber-500/40 p-2 text-sm" role="alert">{createError}</div>}
             <div className="mt-3 grid gap-3 sm:grid-cols-2">
@@ -1598,7 +1755,7 @@ function WorkBoardPanel({ onOpenApprovals, onInspectWorkflowRun }: WorkBoardPane
                 {!createDraft.goalId ? <div className="text-xs opacity-70">Choose a goal to read its current server-derived execution limit.</div> : createLimit ? <><div>{createLimit.effective_max_runtime_seconds} seconds · source {createLimit.limit_source} · hard ceiling {createLimit.hard_max_runtime_seconds} seconds · {createLimit.attempt_limit} attempts</div><label className="mt-2 flex items-start gap-2"><input type="checkbox" checked={createLimitAcknowledged} onChange={(event) => setCreateLimitAcknowledged(event.currentTarget.checked)} /><span>I acknowledge this current limit. It cannot be increased from the board.</span></label></> : <div className="text-xs text-amber-200">{createLimitError ?? "Checking the current goal revision and limit…"}</div>}
               </div>
             </div>
-            <div className="mt-3 flex flex-wrap justify-end gap-2"><button type="button" className="cockpit-feedback-button" onClick={() => setCreateOpen(false)} disabled={createBusy}>Cancel</button><button type="submit" className="cockpit-feedback-button" disabled={createBusy || !createDraft.goalId || !createDraft.goalRevision || (createDraft.status === "todo" && (!createLimit || !createLimitAcknowledged || !createDraft.capabilityId.trim() || !createDraft.typedInputRef.trim() || !hasValidDigest(createDraft.typedInputDigest)))}>{createBusy ? "Creating…" : createDraft.status === "triage" ? "Create in Triage" : "Create specified Todo"}</button></div>
+            <div className="mt-3 flex flex-wrap justify-end gap-2"><button type="button" className="cockpit-feedback-button" onClick={closeCreateDialog} disabled={createBusy}>Cancel</button><button type="submit" className="cockpit-feedback-button" disabled={createBusy || !createDraft.goalId || !createDraft.goalRevision || (createDraft.status === "todo" && (!createLimit || !createLimitAcknowledged || !createDraft.capabilityId.trim() || !createDraft.typedInputRef.trim() || !hasValidDigest(createDraft.typedInputDigest)))}>{createBusy ? "Creating…" : createDraft.status === "triage" ? "Create in Triage" : "Create specified Todo"}</button></div>
           </form>
         </div>
       )}

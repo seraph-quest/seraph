@@ -413,6 +413,8 @@ function WorkBoardPanel({ onOpenApprovals, onInspectWorkflowRun }: WorkBoardPane
   const createDialogRef = useRef<HTMLFormElement | null>(null);
   const createOpenerRef = useRef<HTMLElement | null>(null);
   const createBusyRef = useRef(createBusy);
+  const taskDetailPanelRef = useRef<HTMLElement | null>(null);
+  const taskDetailOpenerRef = useRef<HTMLElement | null>(null);
   createBusyRef.current = createBusy;
 
   const requestBoard = useCallback(<T,>(path: string, init?: RequestInit): Promise<T> => {
@@ -841,6 +843,16 @@ function WorkBoardPanel({ onOpenApprovals, onInspectWorkflowRun }: WorkBoardPane
   }, [readTaskDetail, selectedTaskId]);
 
   useEffect(() => {
+    if (selectedTaskId) {
+      taskDetailPanelRef.current?.focus();
+      return;
+    }
+    const opener = taskDetailOpenerRef.current;
+    if (opener?.isConnected) opener.focus();
+    taskDetailOpenerRef.current = null;
+  }, [selectedTaskId]);
+
+  useEffect(() => {
     if (!createOpen || !createDraft.goalId || !createDraft.goalRevision) {
       setCreateLimit(null);
       setCreateLimitError(null);
@@ -993,6 +1005,11 @@ function WorkBoardPanel({ onOpenApprovals, onInspectWorkflowRun }: WorkBoardPane
   const archivedTasks = useMemo(() => visibleTasks.filter((task) => task.status === "archived"), [visibleTasks]);
 
   const openTask = useCallback((taskId: string) => {
+    if (selectedTaskIdRef.current === null && document.activeElement instanceof HTMLElement) {
+      taskDetailOpenerRef.current = createOpenerRef.current?.isConnected
+        ? createOpenerRef.current
+        : document.activeElement;
+    }
     selectedTaskIdRef.current = taskId;
     setActionError(null);
     setMoveFeedback(null);
@@ -1526,8 +1543,7 @@ function WorkBoardPanel({ onOpenApprovals, onInspectWorkflowRun }: WorkBoardPane
       )}
 
       {selectedTask && (
-        <div className="fixed inset-0 z-[80] flex justify-end bg-black/55" onMouseDown={(event) => { if (event.target === event.currentTarget) closeTask(); }}>
-          <aside role="dialog" aria-modal="false" aria-labelledby="work-board-detail-title" className="h-full w-full max-w-2xl overflow-y-auto border-l border-white/15 bg-slate-950 p-4 shadow-2xl">
+        <aside ref={taskDetailPanelRef} role="region" aria-label={`Task details for ${selectedTask.title}`} tabIndex={-1} className="fixed inset-y-0 right-0 z-[80] h-full w-full max-w-2xl overflow-y-auto border-l border-white/15 bg-slate-950 p-4 shadow-2xl">
             <div className="sticky top-0 z-10 -mx-4 -mt-4 mb-4 flex items-center justify-between border-b border-white/10 bg-slate-950/95 px-4 py-3 backdrop-blur">
               <div>
                 <div className="text-[10px] uppercase tracking-wide opacity-70">{STATUS_LABELS[selectedTask.status]} · revision {selectedTask.task_revision}</div>
@@ -1725,8 +1741,7 @@ function WorkBoardPanel({ onOpenApprovals, onInspectWorkflowRun }: WorkBoardPane
                 </div>
               </section>
             </div>
-          </aside>
-        </div>
+        </aside>
       )}
 
       {createOpen && (

@@ -814,6 +814,14 @@ async def test_admission_is_idempotent_and_lifecycle_records_safe_receipts(async
     await durable_job_repository.queue_job(admitted["job_id"])
     claimed = await durable_job_repository.claim_job(admitted["job_id"], owner="runner-a")
     token = claimed["lease"]["fencing_token"]
+    current_lease = await durable_job_repository.assert_active_lease(
+        admitted["job_id"], owner="runner-a", fencing_token=token
+    )
+    assert current_lease["lease"]["owner"] == "runner-a"
+    with pytest.raises(DurableJobLeaseError):
+        await durable_job_repository.assert_active_lease(
+            admitted["job_id"], owner="runner-stale", fencing_token=token
+        )
     with pytest.raises(DurableJobLeaseError):
         await durable_job_repository.record_artifact(
             admitted["job_id"], file_path="reports/unsafe.json"
@@ -866,6 +874,69 @@ async def test_admission_is_idempotent_and_lifecycle_records_safe_receipts(async
     assert retried["status"] == "queued"
     assert retried["receipt"]["reconciliation_receipt_digest"]
     assert retried["effects"][0]["status"] == "reconciled"
+
+
+@pytest.mark.asyncio
+async def test_active_lease_read_rejects_stale_owner_fence_and_status(monkeypatch):
+    from src.workflows import job_runtime as job_runtime_module
+
+    repository = DurableJobRepository()
+    expiry = datetime.now(timezone.utc) + timedelta(minutes=1)
+    run = SimpleNamespace(
+        status="running",
+        lease_owner="runner-current",
+        fencing_token=8,
+        lease_expires_at=expiry,
+    )
+
+    class _Session:
+        def expunge(self, _run):
+            return None
+
+    class _SessionContext:
+        async def __aenter__(self):
+            return _Session()
+
+        async def __aexit__(self, *_args):
+            return None
+
+    async def fetch(_db, _job_id):
+        return run
+
+    monkeypatch.setattr(repository, "_session", lambda: _SessionContext())
+    monkeypatch.setattr(repository, "_fetch", fetch)
+    monkeypatch.setattr(
+        job_runtime_module,
+        "_serialize",
+        lambda _run: {"job_id": "job-lease-read", "status": run.status},
+    )
+
+    current = await repository.assert_active_lease(
+        "job-lease-read", owner="runner-current", fencing_token=8
+    )
+    assert current == {"job_id": "job-lease-read", "status": "running"}
+
+    with pytest.raises(DurableJobLeaseError):
+        await repository.assert_active_lease(
+            "job-lease-read", owner="runner-stale", fencing_token=8
+        )
+    with pytest.raises(DurableJobLeaseError):
+        await repository.assert_active_lease(
+            "job-lease-read", owner="runner-current", fencing_token=7
+        )
+
+    run.lease_expires_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+    with pytest.raises(DurableJobLeaseError, match="expired"):
+        await repository.assert_active_lease(
+            "job-lease-read", owner="runner-current", fencing_token=8
+        )
+
+    run.lease_expires_at = expiry
+    run.status = "blocked"
+    with pytest.raises(DurableJobLeaseError, match="not running"):
+        await repository.assert_active_lease(
+            "job-lease-read", owner="runner-current", fencing_token=8
+        )
 
 
 @pytest.mark.asyncio
@@ -1574,6 +1645,142 @@ async def test_child_admission_requires_the_current_parent_fence(async_db):
 
 
 @pytest.mark.asyncio
+async def test_cancel_job_tree_inherits_root_and_cancels_exact_tree_child_first(async_db):
+    """Cancellation follows the durable parent tree, including deep children."""
+
+    root = await durable_job_repository.admit_job(
+        _spec(job_id="job-tree-root", dedupe_key="candidate-tree-root")
+    )
+    await durable_job_repository.queue_job(root["job_id"])
+    root_claim = await durable_job_repository.claim_job(root["job_id"], owner="runner-tree-root")
+
+    child_spec = replace(
+        _spec(job_id="job-tree-child", dedupe_key="candidate-tree-child"),
+        parent_job_id=root["job_id"],
+        parent_fencing_token=root_claim["lease"]["fencing_token"],
+    )
+    child = await durable_job_repository.admit_job(child_spec)
+    await durable_job_repository.queue_job(child["job_id"])
+    child_claim = await durable_job_repository.claim_job(child["job_id"], owner="runner-tree-child")
+
+    grandchild = await durable_job_repository.admit_job(
+        replace(
+            _spec(job_id="job-tree-grandchild", dedupe_key="candidate-tree-grandchild"),
+            parent_job_id=child["job_id"],
+            parent_fencing_token=child_claim["lease"]["fencing_token"],
+        )
+    )
+    await durable_job_repository.queue_job(grandchild["job_id"])
+    await durable_job_repository.claim_job(grandchild["job_id"], owner="runner-tree-grandchild")
+
+    other_root = await durable_job_repository.admit_job(
+        _spec(job_id="job-other-root", dedupe_key="candidate-other-root")
+    )
+    await durable_job_repository.queue_job(other_root["job_id"])
+    await durable_job_repository.claim_job(other_root["job_id"], owner="runner-other-root")
+
+    assert root["root_run_identity"] == root["job_id"]
+    assert child["root_run_identity"] == root["job_id"]
+    assert grandchild["root_run_identity"] == root["job_id"]
+    assert child["branch_depth"] == 1
+    assert grandchild["branch_depth"] == 2
+    assert other_root["root_run_identity"] == other_root["job_id"]
+
+    cancelled = await durable_job_repository.cancel_job_tree(root["job_id"])
+
+    # The repository performs each real SQLite CAS in this returned order, so
+    # a deeper worker is cancelled before its parent can be released.
+    assert [receipt["job_id"] for receipt in cancelled] == [
+        grandchild["job_id"],
+        child["job_id"],
+        root["job_id"],
+    ]
+    assert all(receipt["status"] == "cancelled" for receipt in cancelled)
+
+    for job_id in (grandchild["job_id"], child["job_id"], root["job_id"]):
+        readback = await durable_job_repository.get_job(job_id)
+        assert readback is not None
+        assert readback["status"] == "cancelled"
+        assert readback["root_run_identity"] == root["job_id"]
+        assert readback["lease"]["owner"] is None
+        assert readback["lease"]["expires_at"] is None
+        assert readback["finished_at"] is not None
+
+    other_readback = await durable_job_repository.get_job(other_root["job_id"])
+    assert other_readback is not None
+    assert other_readback["status"] == "running"
+    assert other_readback["root_run_identity"] == other_root["job_id"]
+    assert other_readback["lease"]["owner"] == "runner-other-root"
+
+
+@pytest.mark.asyncio
+async def test_cancel_job_tree_recovers_legacy_self_root_descendants(async_db):
+    """Parent links recover active pre-lineage rows without crossing roots."""
+
+    root = await durable_job_repository.admit_job(
+        _spec(job_id="job-legacy-root", dedupe_key="candidate-legacy-root")
+    )
+    await durable_job_repository.queue_job(root["job_id"])
+    root_claim = await durable_job_repository.claim_job(root["job_id"], owner="runner-legacy-root")
+
+    child = await durable_job_repository.admit_job(
+        replace(
+            _spec(job_id="job-legacy-child", dedupe_key="candidate-legacy-child"),
+            parent_job_id=root["job_id"],
+            parent_fencing_token=root_claim["lease"]["fencing_token"],
+        )
+    )
+    await durable_job_repository.queue_job(child["job_id"])
+    child_claim = await durable_job_repository.claim_job(child["job_id"], owner="runner-legacy-child")
+
+    grandchild = await durable_job_repository.admit_job(
+        replace(
+            _spec(job_id="job-legacy-grandchild", dedupe_key="candidate-legacy-grandchild"),
+            parent_job_id=child["job_id"],
+            parent_fencing_token=child_claim["lease"]["fencing_token"],
+        )
+    )
+    await durable_job_repository.queue_job(grandchild["job_id"])
+    await durable_job_repository.claim_job(grandchild["job_id"], owner="runner-legacy-grandchild")
+
+    other_root = await durable_job_repository.admit_job(
+        _spec(job_id="job-legacy-other-root", dedupe_key="candidate-legacy-other-root")
+    )
+    await durable_job_repository.queue_job(other_root["job_id"])
+    await durable_job_repository.claim_job(other_root["job_id"], owner="runner-legacy-other-root")
+
+    # Simulate active rows admitted before root/branch lineage was persisted.
+    async with async_db() as db:
+        await db.execute(
+            update(WorkflowRunState)
+            .where(
+                WorkflowRunState.run_identity.in_([
+                    child["job_id"],
+                    grandchild["job_id"],
+                ])
+            )
+            .values(
+                root_run_identity=WorkflowRunState.run_identity,
+                branch_depth=0,
+            )
+        )
+
+    cancelled = await durable_job_repository.cancel_job_tree(root["job_id"])
+    assert [receipt["job_id"] for receipt in cancelled] == [
+        grandchild["job_id"],
+        child["job_id"],
+        root["job_id"],
+    ]
+    for job_id in (grandchild["job_id"], child["job_id"], root["job_id"]):
+        readback = await durable_job_repository.get_job(job_id)
+        assert readback is not None
+        assert readback["status"] == "cancelled"
+    other_readback = await durable_job_repository.get_job(other_root["job_id"])
+    assert other_readback is not None
+    assert other_readback["status"] == "running"
+
+
+@pytest.mark.asyncio
 async def test_illegal_transition_stale_lease_and_restart_recovery_are_fail_closed(async_db):
     admitted = await durable_job_repository.admit_job(_spec(job_id="job-743-2", dedupe_key="candidate-2"))
     with pytest.raises(DurableJobTransitionError):
@@ -1591,6 +1798,10 @@ async def test_illegal_transition_stale_lease_and_restart_recovery_are_fail_clos
     assert recovered_job["failure_reason"] == "stale_lease_requires_reconciliation"
     assert recovered_job["receipt"]["operator_action"] == "reconcile_effects_then_retry_or_cancel"
 
+    with pytest.raises(DurableJobLeaseError):
+        await durable_job_repository.assert_active_lease(
+            admitted["job_id"], owner="runner-a", fencing_token=token
+        )
     with pytest.raises(DurableJobLeaseError):
         await durable_job_repository.record_checkpoint(
             admitted["job_id"],

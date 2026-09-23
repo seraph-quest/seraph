@@ -441,6 +441,8 @@ class GoalSnapshotToFileAdapter:
         global_authority_policy: GlobalCapabilityPolicy | None = None,
         authority_principal: TrustPrincipal | None = None,
         authority_approval: ApprovalBinding | None = None,
+        work_board_task_id: str | None = None,
+        work_board_attempt_id: str | None = None,
         clock: Callable[[], datetime] = _now,
     ) -> None:
         self.request = request
@@ -451,6 +453,10 @@ class GoalSnapshotToFileAdapter:
         self.global_authority_policy = global_authority_policy
         self.authority_principal = authority_principal
         self.authority_approval = authority_approval
+        self.work_board_task_id = _text(work_board_task_id) or None
+        self.work_board_attempt_id = _text(work_board_attempt_id) or None
+        if (self.work_board_task_id is None) != (self.work_board_attempt_id is None):
+            raise ValueError("work-board task and attempt identity must be supplied together")
         self.clock = clock
         self.last_receipt: dict[str, Any] | None = None
         self._resolved_workflow_binding: dict[str, Any] | None = None
@@ -494,7 +500,38 @@ class GoalSnapshotToFileAdapter:
     def _workflow_inputs(self, path: str) -> dict[str, Any]:
         return {"file_path": path}
 
+    def _board_attempt_identity(self) -> tuple[str, str] | None:
+        """Return the server-only board task/attempt identity, if present.
+
+        The ordinary goal snapshot scheduler keeps its historical candidate
+        identity.  Board dispatch uses a separate child identity so two board
+        attempts cannot dedupe onto one scheduler child.  The dispatcher is
+        the only caller that may provide this parent shape; validating it here
+        also makes a malformed or forged parent fail before durable admission.
+        """
+
+        if self.work_board_task_id is None:
+            return None
+        task_id, attempt_id = self.work_board_task_id, self.work_board_attempt_id or ""
+        if (
+            not task_id
+            or not attempt_id
+            or any(char not in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_.-" for char in task_id)
+            or any(char not in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_.-" for char in attempt_id)
+        ):
+            raise ValueError("work-board parent must contain bounded task and attempt identifiers")
+        if self.request.parent_fencing_token is None:
+            raise ValueError("work-board child admission requires the parent workflow fence")
+        expected_parent = f"work-board:{task_id}:{attempt_id}"
+        if _text(self.request.parent_job_id) != expected_parent:
+            raise ValueError("work-board child parent does not match the server-bound task attempt")
+        return task_id, attempt_id
+
     def _job_identifier(self, candidate: GoalCandidateDecision) -> str:
+        board_identity = self._board_attempt_identity()
+        if board_identity is not None:
+            task_id, attempt_id = board_identity
+            return f"goal-snapshot-work-board:{task_id}:{attempt_id}"
         return "job_goal_snapshot_" + _safe_digest(
             {
                 "candidate": candidate.dedupe_key,
@@ -505,11 +542,15 @@ class GoalSnapshotToFileAdapter:
         )[:24]
 
     def _idempotency_scope(self) -> str:
-        return (
-            "goal-snapshot-to-file-scheduler"
-            if self.request.parent_job_id
-            else "goal-snapshot-to-file"
-        )
+        if self._board_attempt_identity() is not None:
+            return "goal-snapshot-work-board-attempt"
+        return "goal-snapshot-to-file-scheduler" if self.request.parent_job_id else "goal-snapshot-to-file"
+
+    def _idempotency_key(self, candidate: GoalCandidateDecision) -> str:
+        board_identity = self._board_attempt_identity()
+        if board_identity is not None:
+            return ":".join(board_identity)
+        return candidate.dedupe_key
 
     def _success_reason(self) -> str:
         return "goal_snapshot_executed_and_verified"
@@ -866,7 +907,13 @@ class GoalSnapshotToFileAdapter:
         if principal.session_id and principal.session_id != self.request.session_id:
             raise ValueError("authenticated_owner_session_mismatch")
         if principal.job_id and principal.job_id != job_id:
-            raise ValueError("authenticated_owner_job_mismatch")
+            board_parent = _text(self.request.parent_job_id)
+            if not (
+                self.work_board_task_id
+                and board_parent
+                and principal.job_id == board_parent
+            ):
+                raise ValueError("authenticated_owner_job_mismatch")
         # The durable child job is the execution identity for this effect.  A
         # trusted service principal may delegate its authenticated grant to
         # that exact child identity; the authority gate still checks auth,
@@ -1311,7 +1358,7 @@ class GoalSnapshotToFileAdapter:
                 job_kind=self._capability_identifier(),
                 capability_version=self.request.capability_version,
                 idempotency_scope=self._idempotency_scope(),
-                idempotency_key=candidate.dedupe_key,
+                idempotency_key=self._idempotency_key(candidate),
             ),
             inputs={
                 "goal_id": candidate.goal_id,
@@ -1561,6 +1608,8 @@ class GoalSnapshotToFileAdapter:
                 path,
                 session_id=self.request.session_id,
                 job_id=job_id,
+                parent_fencing_token=fencing_token,
+                root_run_identity=_text(claimed.get("root_run_identity")) or job_id,
                 principal=authority_material.principal if authority_material is not None else None,
             )
         except Exception as exc:
@@ -1838,7 +1887,10 @@ class GoalSnapshotToFileAdapter:
             workflow = workflow_manager.get_workflow(self._workflow_identifier())
             if workflow is None or not workflow.enabled:
                 return None, None, "workflow_not_loaded_or_disabled"
-            tools = get_tools()
+            # The normal agent surface is global and deliberately excludes
+            # board controls.  A dispatcher-bound worker may opt into the
+            # six task-scoped tools for this concrete governed runtime.
+            tools = get_tools(include_bound_worker=True)
             tool = next((item for item in tools if getattr(item, "name", "") == workflow.tool_name), None)
             if tool is None:
                 return None, None, "governed_workflow_tool_unavailable"
@@ -1875,12 +1927,40 @@ class GoalSnapshotToFileAdapter:
         *,
         session_id: str,
         job_id: str,
+        parent_fencing_token: int,
+        root_run_identity: str,
         principal: TrustPrincipal | None = None,
     ) -> tuple[Any, dict[str, Any] | None]:
         if principal is None:
             raise PermissionError("authenticated_owner_missing")
-        effective_principal = principal
-        call = partial(tool, **self._workflow_inputs(path), sanitize_inputs_outputs=True)
+        # The service principal belongs to the GoalSnapshot child while the
+        # adapter is invoking the nested WorkflowTool.  Let WorkflowTool bind
+        # that same service authority to its own durable run; carrying the
+        # parent's transient job_id would be rejected as a conflicting run.
+        # Durable parent identity and fencing remain explicit control inputs.
+        effective_principal = (
+            replace(principal, job_id=None)
+            if self.workflow_tool_provider is None
+            else principal
+        )
+        # The production WorkflowTool creates a nested durable run for the
+        # workflow steps. Bind that run to this already-claimed GoalSnapshot
+        # child so get_goals can validate the exact parent fence and owner
+        # delegation. Injected providers are deliberately kept on their old
+        # narrow call contract for deterministic tests and local adapters.
+        control_inputs: dict[str, Any] = {}
+        if self.workflow_tool_provider is None:
+            control_inputs = {
+                "_seraph_parent_run_identity": job_id,
+                "_seraph_parent_fencing_token": parent_fencing_token,
+                "_seraph_root_run_identity": root_run_identity or job_id,
+            }
+        call = partial(
+            tool,
+            **self._workflow_inputs(path),
+            **control_inputs,
+            sanitize_inputs_outputs=True,
+        )
         if self.workflow_tool_provider is not None:
             # The injectable boundary is deliberately synchronous for tests;
             # the production provider below runs wrappers off the event loop.
@@ -2489,8 +2569,20 @@ class GoalSnapshotToFileService:
             reason=outcome.reason,
         )
 
-    async def run(self, request: GoalSnapshotToFileRequest | dict[str, Any]) -> GoalSnapshotToFileResult:
+    async def run(
+        self,
+        request: GoalSnapshotToFileRequest | dict[str, Any],
+        *,
+        work_board_task_id: str | None = None,
+        work_board_attempt_id: str | None = None,
+    ) -> GoalSnapshotToFileResult:
         request = request if isinstance(request, self.request_model) else self.request_model.model_validate(request)
+        if (work_board_task_id is None) != (work_board_attempt_id is None):
+            raise ValueError("work-board task and attempt identity must be supplied together")
+        if work_board_task_id is not None:
+            expected_parent = f"work-board:{_text(work_board_task_id)}:{_text(work_board_attempt_id)}"
+            if _text(request.parent_job_id) != expected_parent:
+                raise ValueError("work-board request parent does not match server-bound identity")
         goal = await self.goals.get(request.goal_id)
         candidate = self._candidate_for_request(goal, request)
         adapter = self.adapter_type(
@@ -2502,6 +2594,8 @@ class GoalSnapshotToFileService:
             global_authority_policy=self.global_authority_policy,
             authority_principal=self.authority_principal,
             authority_approval=self.authority_approval,
+            work_board_task_id=work_board_task_id,
+            work_board_attempt_id=work_board_attempt_id,
         )
         outcome = await self.dispatcher(candidate, adapter=adapter)
         if not isinstance(outcome, GoalOutcomeReceipt):

@@ -30,10 +30,17 @@ from src.workflows.manager import (
 )
 from src.approval.exceptions import ApprovalRequired
 from src.approval.runtime import (
+    get_current_fencing_token,
+    get_current_lease_owner,
     get_current_session_id,
     get_current_trust_principal,
     reset_runtime_context,
+    reset_runtime_fencing_token,
+    reset_runtime_lease_owner,
+    reset_runtime_trust_principal,
     set_runtime_context,
+    set_runtime_fencing_token,
+    set_runtime_lease_owner,
 )
 from src.auth.cancellation import (
     RuntimeRevokedError,
@@ -1018,19 +1025,71 @@ def test_workflow_step_binding_rejects_conflicting_job_identity():
             DurableWorkflowStateUnavailable,
             match="conflicts with the durable run",
         ):
-            _bind_workflow_step_trust_principal("current-run")
+            _bind_workflow_step_trust_principal("current-run", 2)
         assert get_current_trust_principal() == principal
+        assert get_current_fencing_token() is None
+        assert get_current_lease_owner() is None
     finally:
         reset_runtime_context(tokens)
 
 
 def test_workflow_step_binding_leaves_principal_less_context_unbound():
     tokens = set_runtime_context("principal-less-session", "balanced")
+    original_fencing_token = set_runtime_fencing_token(None)
+    original_lease_owner = set_runtime_lease_owner(None)
     try:
-        assert _bind_workflow_step_trust_principal("principal-less-run") is None
+        principal_token, fencing_token, lease_owner = _bind_workflow_step_trust_principal(
+            "principal-less-run",
+            9,
+            "principal-less-lease",
+        )
+        assert principal_token is None
         assert get_current_trust_principal() is None
+        assert get_current_fencing_token() == "9"
+        assert get_current_lease_owner() == "principal-less-lease"
+        reset_runtime_lease_owner(lease_owner)
+        reset_runtime_fencing_token(fencing_token)
+        assert get_current_fencing_token() is None
     finally:
+        reset_runtime_lease_owner(original_lease_owner)
+        reset_runtime_fencing_token(original_fencing_token)
         reset_runtime_context(tokens)
+
+
+def test_workflow_step_binding_sets_and_resets_current_run_fence():
+    principal = TrustPrincipal(
+        principal_id="service:workflow-test",
+        principal_type=PrincipalType.SERVICE,
+        grants=(AuthorityGrant.CAPABILITY_EXECUTE,),
+        session_id="workflow-test-session",
+    )
+    context_tokens = set_runtime_context(
+        "workflow-test-session",
+        "balanced",
+        trust_principal=principal,
+    )
+    original_fencing_token = set_runtime_fencing_token("parent-fence")
+    original_lease_owner = set_runtime_lease_owner("parent-owner")
+    try:
+        principal_token, fencing_token, lease_owner = _bind_workflow_step_trust_principal(
+            "nested-run",
+            3,
+            "nested-owner",
+        )
+        bound = get_current_trust_principal()
+        assert bound is not None and bound.job_id == "nested-run"
+        assert get_current_fencing_token() == "3"
+        assert get_current_lease_owner() == "nested-owner"
+        reset_runtime_lease_owner(lease_owner)
+        reset_runtime_fencing_token(fencing_token)
+        reset_runtime_trust_principal(principal_token)
+        assert get_current_trust_principal() == principal
+        assert get_current_fencing_token() == "parent-fence"
+        assert get_current_lease_owner() == "parent-owner"
+    finally:
+        reset_runtime_lease_owner(original_lease_owner)
+        reset_runtime_fencing_token(original_fencing_token)
+        reset_runtime_context(context_tokens)
 
 
 def test_workflow_tool_fails_closed_before_tool_call_when_required_durable_state_unavailable():

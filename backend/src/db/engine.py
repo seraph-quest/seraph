@@ -895,6 +895,29 @@ async def _ensure_memory_indexes(conn) -> None:
     )
 
 
+async def _ensure_work_board_indexes(conn) -> None:
+    """Add the M2 attempt uniqueness fences to existing workspaces."""
+
+    await conn.exec_driver_sql(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS ux_work_board_attempts_active_task
+        ON work_board_attempts (task_id)
+        WHERE ended_at IS NULL
+        """
+    )
+
+
+async def _ensure_work_board_columns(conn) -> None:
+    """Additive columns for existing canonical board workspaces."""
+
+    result = await conn.exec_driver_sql("PRAGMA table_info(work_board_attempts)")
+    columns = {row[1] for row in result.fetchall()}
+    if columns and "cancel_requested_at" not in columns:
+        await conn.exec_driver_sql(
+            "ALTER TABLE work_board_attempts ADD COLUMN cancel_requested_at DATETIME"
+        )
+
+
 async def init_db() -> None:
     """Create all tables on startup."""
     # Keep SQLite bound to the same canonical workspace registry used by
@@ -914,7 +937,16 @@ async def init_db() -> None:
         # preserve and block those rows for operator reconciliation.
         await _ensure_legacy_columns(conn)
         await _ensure_telegram_transport_columns(conn)
+        await _ensure_work_board_columns(conn)
         await conn.run_sync(SQLModel.metadata.create_all)
+        await _ensure_work_board_indexes(conn)
+        await conn.exec_driver_sql(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS ux_work_board_attempts_workflow_run
+            ON work_board_attempts (workflow_run_id)
+            WHERE workflow_run_id IS NOT NULL
+            """
+        )
         await _ensure_memory_indexes(conn)
         await _ensure_search_indexes(conn)
 

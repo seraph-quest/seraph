@@ -1483,8 +1483,12 @@ def _serialize(run: WorkflowRunState, *, receipt: dict[str, Any] | None = None) 
         "job_id": run.run_identity,
         "run_identity": run.run_identity,
         "record_schema_version": int(getattr(run, "record_schema_version", DURABLE_JOB_RECORD_SCHEMA_VERSION) or 0),
+        "root_run_identity": getattr(run, "root_run_identity", None),
+        "parent_run_identity": getattr(run, "parent_run_identity", None),
         "parent_job_id": getattr(run, "parent_job_id", None),
         "parent_fencing_token": getattr(run, "parent_fencing_token", None),
+        "branch_kind": getattr(run, "branch_kind", None),
+        "branch_depth": int(getattr(run, "branch_depth", 0) or 0),
         "owner": {
             "kind": getattr(run, "owner_kind", "legacy"),
             "principal_id": getattr(run, "owner_principal_id", None),
@@ -1677,6 +1681,8 @@ class DurableJobRepository:
             dedupe_key=identity.idempotency_key,
         )
         authority_digest = _digest(spec.declared_authority)
+        root_run_identity = identity.job_id
+        branch_depth = 0
         async with self._session() as db:
             if not _text(spec.goal_id) and spec.goal_revision is not None:
                 raise DurableJobTransitionError("goal_revision requires a canonical goal")
@@ -1739,6 +1745,24 @@ class DurableJobRepository:
                     or int(parent.fencing_token or 0) != parent_fence
                 ):
                     raise DurableJobLeaseError("parent job fence is stale or expired")
+                # A durable child belongs to the same cancellation/readback
+                # tree as the validated parent.  The parent fence above is
+                # the authority that makes this lineage trustworthy; derive
+                # the root only after that validation succeeds.  Legacy rows
+                # may have an empty root, so retain their run identity as the
+                # safe fallback instead of creating a second tree.
+                root_run_identity = _text(getattr(parent, "root_run_identity", None))
+                if not root_run_identity:
+                    root_run_identity = _text(parent.run_identity)
+                try:
+                    parent_branch_depth = int(getattr(parent, "branch_depth", 0) or 0)
+                except (TypeError, ValueError) as exc:
+                    raise DurableJobTransitionError(
+                        "parent branch depth is malformed"
+                    ) from exc
+                if parent_branch_depth < 0:
+                    raise DurableJobTransitionError("parent branch depth is malformed")
+                branch_depth = parent_branch_depth + 1
             await ensure_sessions_exist(db, [spec.session_id])
             existing = (
                 await db.execute(
@@ -1793,7 +1817,7 @@ class DurableJobRepository:
             failure_reason = "deadline_expired" if status == "failed" else None
             run = WorkflowRunState(
                 run_identity=identity.job_id,
-                root_run_identity=identity.job_id,
+                root_run_identity=root_run_identity,
                 parent_run_identity=spec.parent_job_id,
                 parent_job_id=spec.parent_job_id,
                 parent_fencing_token=spec.parent_fencing_token,
@@ -1803,6 +1827,7 @@ class DurableJobRepository:
                 conversation_id=spec.conversation_id or spec.session_id,
                 operator_session_id=spec.operator_session_id,
                 status=status,
+                branch_depth=branch_depth,
                 run_fingerprint=run_fingerprint,
                 arguments_json=_canonical(safe_inputs),
                 approval_context_json=_canonical(_safe_structure(spec.declared_authority)),
@@ -1900,6 +1925,128 @@ class DurableJobRepository:
             ).scalars().first()
             if run is None:
                 return None
+            db.expunge(run)
+            return _serialize(run)
+
+    async def assert_active_lease(
+        self,
+        job_id: str,
+        *,
+        owner: str,
+        fencing_token: int,
+    ) -> dict[str, Any]:
+        """Re-read a running job and reject a stale or expired lease."""
+        async with self._session() as db:
+            run = await self._fetch(db, job_id)
+            if run.status != "running":
+                raise DurableJobLeaseError("durable job is not running")
+            self._assert_lease(run, owner=owner, fencing_token=fencing_token)
+            db.expunge(run)
+            return _serialize(run)
+
+    async def get_by_idempotency_binding(
+        self,
+        *,
+        owner_principal_id: str,
+        goal_id: str | None,
+        goal_revision: int | None,
+        idempotency_scope: str,
+        idempotency_key: str,
+        expected_job_id: str | None = None,
+        owner_kind: str | None = None,
+        service_id: str | None = None,
+        session_id: str | None = None,
+        operator_session_id: str | None = None,
+        job_kind: str | None = None,
+        capability_version: str | None = None,
+        input_digest: str | None = None,
+        authority_digest: str | None = None,
+        run_fingerprint: str | None = None,
+    ) -> dict[str, Any] | None:
+        """Read the exact durable admission for one immutable binding.
+
+        Restart recovery must look up the binding persisted by admission. A
+        reconstructed job id is only an advisory hint and cannot prove that a
+        durable run belongs to the board attempt. The binding calculation is
+        the same canonical function used by ``admit_job``.
+        """
+
+        owner_principal_id = _bounded_identifier(
+            owner_principal_id,
+            field_name="owner_principal_id",
+        )
+        idempotency_scope = _bounded_identifier(
+            idempotency_scope,
+            field_name="idempotency_scope",
+        )
+        idempotency_key = _bounded_identifier(
+            idempotency_key,
+            field_name="idempotency_key",
+        )
+        expected_job_id = _bounded_identifier(expected_job_id, field_name="expected_job_id") or None
+        owner_kind = _bounded_identifier(owner_kind, field_name="owner_kind") or None
+        service_id = _bounded_identifier(service_id, field_name="service_id") or None
+        session_id = _bounded_identifier(session_id, field_name="session_id") or None
+        operator_session_id = (
+            _bounded_identifier(operator_session_id, field_name="operator_session_id") or None
+        )
+        job_kind = _bounded_identifier(job_kind, field_name="job_kind") or None
+        capability_version = (
+            _bounded_identifier(capability_version, field_name="capability_version") or None
+        )
+        input_digest = _bounded_identifier(input_digest, field_name="input_digest") or None
+        authority_digest = _bounded_identifier(authority_digest, field_name="authority_digest") or None
+        run_fingerprint = _bounded_identifier(run_fingerprint, field_name="run_fingerprint") or None
+        binding = _binding(
+            owner_principal_id=owner_principal_id,
+            goal_id=goal_id,
+            goal_revision=goal_revision,
+            idempotency_scope=idempotency_scope,
+            dedupe_key=idempotency_key,
+        )
+        async with self._session() as db:
+            run = (
+                await db.execute(
+                    select(WorkflowRunState).where(
+                        WorkflowRunState.idempotency_binding == binding,
+                    )
+                )
+            ).scalars().first()
+            if run is None:
+                return None
+            # The binding includes the immutable fields above, and these
+            # explicit checks keep a malformed legacy row from being treated
+            # as a recovery match merely because its digest collides.
+            if (
+                run.idempotency_binding != binding
+                or run.owner_principal_id != owner_principal_id
+                or run.goal_id != goal_id
+                or run.goal_revision != goal_revision
+                or run.idempotency_scope != idempotency_scope
+                or run.idempotency_key != idempotency_key
+                or (expected_job_id is not None and run.run_identity != expected_job_id)
+                or (owner_kind is not None and run.owner_kind != owner_kind)
+                or (service_id is not None and run.service_id != service_id)
+                or (session_id is not None and run.session_id != session_id)
+                or (
+                    operator_session_id is not None
+                    and run.operator_session_id != operator_session_id
+                )
+                or (job_kind is not None and run.job_kind != job_kind)
+                or (
+                    capability_version is not None
+                    and run.capability_version != capability_version
+                )
+                or (input_digest is not None and run.input_digest != input_digest)
+                or (authority_digest is not None and run.authority_digest != authority_digest)
+                or (
+                    run_fingerprint is not None
+                    and run.run_fingerprint != run_fingerprint
+                )
+            ):
+                raise DurableJobIdempotencyConflict(
+                    "durable admission binding conflicts on immutable identity"
+                )
             db.expunge(run)
             return _serialize(run)
 
@@ -2373,6 +2520,122 @@ class DurableJobRepository:
             expected_revision=expected_revision,
             reason=reason,
         )
+
+    async def cancel_job_tree(
+        self,
+        root_job_id: str,
+        *,
+        reason: str = "operator_cancelled",
+    ) -> list[dict[str, Any]]:
+        """Cancel a durable root and its persisted descendants safely.
+
+        Descendants are cancelled before their parent so a child cannot keep
+        running after the board has requested cancellation. Each transition
+        goes through the existing lease/revision/fencing CAS; unresolved
+        external effects remain in their authoritative unknown state and are
+        returned for operator reconciliation.
+        """
+
+        root_job_id = _text(root_job_id)
+        if not root_job_id:
+            raise DurableJobNotFound("<empty>")
+        async with self._session() as db:
+            # Current admissions share ``root_run_identity``.  Older durable
+            # rows can still be active with a self-root, however, so walk the
+            # persisted parent links as a bounded frontier as well.  The
+            # parent link is the exact tree edge; a different root's rows do
+            # not enter this set merely because their root identity is close
+            # in text or ordering.
+            runs_by_id: dict[str, WorkflowRunState] = {}
+            frontier = {root_job_id}
+            while frontier:
+                result = await db.execute(
+                    select(WorkflowRunState).where(
+                        or_(
+                            WorkflowRunState.run_identity.in_(frontier),
+                            WorkflowRunState.root_run_identity.in_(frontier),
+                            WorkflowRunState.parent_run_identity.in_(frontier),
+                        )
+                    )
+                )
+                next_frontier: set[str] = set()
+                for run in result.scalars().all():
+                    run_identity = _text(run.run_identity)
+                    if not run_identity or run_identity in runs_by_id:
+                        continue
+                    runs_by_id[run_identity] = run
+                    next_frontier.add(run_identity)
+                frontier = next_frontier
+            runs = list(runs_by_id.values())
+        if not runs:
+            raise DurableJobNotFound(root_job_id)
+
+        # Use the live parent links to order legacy rows whose persisted
+        # branch_depth was never populated.  Falling back to the durable depth
+        # keeps a row with incomplete legacy ancestry cancellable while still
+        # making descendants precede their parent whenever the edge is known.
+        def _tree_depth(run: WorkflowRunState) -> int:
+            current_id = _text(run.run_identity)
+            depth = 0
+            visited: set[str] = set()
+            while current_id and current_id != root_job_id:
+                if current_id in visited:
+                    break
+                visited.add(current_id)
+                current = runs_by_id.get(current_id)
+                parent_id = _text(getattr(current, "parent_run_identity", None)) if current else ""
+                if not parent_id or parent_id not in runs_by_id:
+                    break
+                depth += 1
+                current_id = parent_id
+            if depth:
+                return depth
+            return max(0, int(getattr(run, "branch_depth", 0) or 0))
+
+        runs.sort(
+            key=lambda run: (
+                _tree_depth(run),
+                0 if run.run_identity == root_job_id else 1,
+            ),
+            reverse=True,
+        )
+        receipts: list[dict[str, Any]] = []
+        for run in runs:
+            current = await self.get_job(run.run_identity)
+            if not isinstance(current, Mapping):
+                continue
+            status = _text(current.get("status"))
+            if status in DURABLE_JOB_TERMINAL_STATUSES:
+                receipts.append(dict(current))
+                continue
+            # An unresolved effect cannot be converted into a successful
+            # cancellation claim. The normal transition classifier preserves
+            # the unknown/cost state for running jobs; skip already-unknown
+            # rows so no caller can erase their liability.
+            if status in UNCERTAIN_EXTERNAL_EFFECT_STATUSES:
+                receipts.append(dict(current))
+                continue
+            lease = current.get("lease") if isinstance(current.get("lease"), Mapping) else {}
+            kwargs: dict[str, Any] = {
+                "expected_revision": current.get("revision"),
+                "reason": reason,
+            }
+            if status == "running":
+                owner = _text(lease.get("owner"))
+                fence = lease.get("fencing_token")
+                if not owner or fence is None:
+                    receipts.append(dict(current))
+                    continue
+                kwargs.update(owner=owner, fencing_token=int(fence))
+            try:
+                cancelled = await self.cancel_job(run.run_identity, **kwargs)
+            except DurableJobError:
+                # A concurrent worker/recovery pass won the CAS. Re-read the
+                # durable projection and report that authoritative outcome.
+                cancelled = await self.get_job(run.run_identity)
+            if isinstance(cancelled, Mapping):
+                receipts.append(dict(cancelled))
+        return receipts
 
     async def pause_job(
         self,

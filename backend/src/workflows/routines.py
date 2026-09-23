@@ -574,6 +574,7 @@ class RoutineService:
         goal_revision: int,
         plan_revision: int | None,
         candidate_id: str | None,
+        work_board_idempotency_key: str | None = None,
     ) -> dict[str, Any]:
         admitted = await durable_job_repository.admit_job(
             DurableJobSpec(
@@ -583,8 +584,8 @@ class RoutineService:
                     owner_principal_id=owner_principal_id,
                     job_kind=job_kind,
                     capability_version=ROUTINE_CAPABILITY_VERSION,
-                    idempotency_scope=job_kind,
-                    idempotency_key=idempotency_key,
+                    idempotency_scope=("work-board-attempt" if work_board_idempotency_key else job_kind),
+                    idempotency_key=(work_board_idempotency_key or idempotency_key),
                 ),
                 inputs=dict(inputs),
                 session_id=owner_session_id,
@@ -602,12 +603,19 @@ class RoutineService:
             )
         )
         if admitted.get("status") == "accepted":
-            admitted = await durable_job_repository.queue_job(job_id, expected_revision=admitted.get("revision"))
+            admitted = await durable_job_repository.queue_job(
+                job_id,
+                expected_revision=admitted.get("revision"),
+                expected_fencing_token=int(admitted.get("fencing_token") or 0),
+            )
+        if admitted.get("status") == "queued":
             admitted = await durable_job_repository.claim_job(
                 job_id,
                 owner=f"routine:{job_id}",
                 expected_revision=admitted.get("revision"),
-                expected_fencing_token=(admitted.get("lease") or {}).get("fencing_token"),
+                expected_fencing_token=(admitted.get("lease") or {}).get(
+                    "fencing_token", admitted.get("fencing_token")
+                ),
                 lease_seconds=ROUTINE_DEADLINE_SECONDS,
             )
         return admitted
@@ -1513,6 +1521,37 @@ class RoutineService:
                 )
         return failures
 
+    async def cancel_invocation_job_tree(
+        self,
+        invocation_job_id: str,
+        *,
+        routine_id: str,
+        owner_principal_id: str,
+        owner_session_id: str,
+        reason: str,
+    ) -> list[dict[str, Any]]:
+        """Cancel only one board-selected invocation and its descendants.
+
+        The routine-wide pause/revoke helper intentionally remains separate;
+        a board task may cancel one invocation without changing the routine's
+        future activation state.
+        """
+
+        job = await durable_job_repository.get_job(invocation_job_id)
+        if not isinstance(job, Mapping):
+            raise RoutineError("routine_invocation_not_found")
+        owner = job.get("owner") if isinstance(job.get("owner"), Mapping) else {}
+        authority = job.get("declared_authority") if isinstance(job.get("declared_authority"), Mapping) else {}
+        persisted_session = str(authority.get("session_id") or job.get("operator_session_id") or job.get("session_id") or "")
+        if str(owner.get("principal_id") or "") != str(owner_principal_id) or persisted_session != str(owner_session_id):
+            raise RoutineError("routine_invocation_owner_mismatch")
+        if str(authority.get("routine_id") or "") != str(routine_id):
+            raise RoutineError("routine_invocation_binding_mismatch")
+        return await durable_job_repository.cancel_job_tree(
+            invocation_job_id,
+            reason=str(reason)[:128],
+        )
+
     async def from_run(self, req: RoutineFromRunRequest, *, owner_principal_id: str, owner_session_id: str) -> dict[str, Any]:
         provenance, packet = await self._source_proof(
             source_watch_job_id=req.source_watch_job_id,
@@ -2067,7 +2106,17 @@ class RoutineService:
                 raise RoutineError("routine_revision_stale")
         return await self.read(routine_id, owner_principal_id=owner_principal_id, owner_session_id=owner_session_id)
 
-    async def invoke(self, routine_id: str, req: RoutineInvokeRequest, *, owner_principal_id: str, owner_session_id: str) -> dict[str, Any]:
+    async def invoke(
+        self,
+        routine_id: str,
+        req: RoutineInvokeRequest,
+        *,
+        owner_principal_id: str,
+        owner_session_id: str,
+        work_board_idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        if work_board_idempotency_key is not None and not str(work_board_idempotency_key).strip():
+            raise RoutineError("work_board_binding_invalid")
         routine = await self._routine(routine_id, owner_principal_id)
         self._require_routine_owner_session(routine, owner_session_id)
         if routine.revision != req.expected_routine_revision or routine.state != "active":
@@ -2131,7 +2180,7 @@ class RoutineService:
             "capability_id": ROUTINE_CAPABILITY_VERSION,
             "budget_microusd": 0,
         }
-        job = await self._admit_user_job(job_id=job_id, job_kind="routine_invocation", idempotency_key=f"{owner_principal_id}:{routine_id}:{invocation_uuid}", inputs={"routine_id": routine_id, "routine_version": req.version, "source_watch_id": req.source_watch_id, "source_watch_revision": req.expected_watch_revision, "invocation_uuid": invocation_uuid}, authority=authority, owner_principal_id=owner_principal_id, owner_session_id=owner_session_id, goal_id=req.goal_id, goal_revision=req.expected_goal_revision, plan_revision=int(watch.get("plan_revision") or 1), candidate_id=None)
+        job = await self._admit_user_job(job_id=job_id, job_kind="routine_invocation", idempotency_key=f"{owner_principal_id}:{routine_id}:{invocation_uuid}", inputs={"routine_id": routine_id, "routine_version": req.version, "source_watch_id": req.source_watch_id, "source_watch_revision": req.expected_watch_revision, "invocation_uuid": invocation_uuid}, authority=authority, owner_principal_id=owner_principal_id, owner_session_id=owner_session_id, goal_id=req.goal_id, goal_revision=req.expected_goal_revision, plan_revision=int(watch.get("plan_revision") or 1), candidate_id=None, work_board_idempotency_key=work_board_idempotency_key)
         receipt = job.get("receipt") if isinstance(job.get("receipt"), Mapping) else {}
         deduped = receipt.get("status") == "deduped"
         durable_authority = job.get("declared_authority") if isinstance(job.get("declared_authority"), Mapping) else {}
@@ -2140,6 +2189,29 @@ class RoutineService:
             # The durable row is authoritative for retries.  Never create or
             # replace an approval for a terminal, running, or already-held
             # invocation that won the idempotency race.
+            if (
+                job.get("status") == "running"
+                and not durable_approval_id
+                and not any(isinstance(item, Mapping) for item in (job.get("effects") or []))
+            ):
+                # A process can stop after the exact board binding is
+                # claimed but before the approval row is created.  Reuse the
+                # same leased durable run and create the one canonical
+                # approval; no capability step or external effect is replayed.
+                approval_id = await self._hold_approval(
+                    job,
+                    tool_name=ROUTINE_INVOKE_TOOL,
+                    summary=f"Run guardian routine {routine_id} for goal {req.goal_id}",
+                    owner_principal_id=owner_principal_id,
+                    owner_session_id=owner_session_id,
+                )
+                return {
+                    "status": "awaiting_approval",
+                    "job_id": str(job.get("job_id") or job_id),
+                    "approval_id": approval_id,
+                    "deduped": True,
+                    "preview": {"routine_id": routine_id, "routine_revision": routine.revision, "version": req.version, "goal_id": req.goal_id, "goal_revision": req.expected_goal_revision, "source_watch_id": req.source_watch_id, "source_watch_revision": req.expected_watch_revision, "package_digest": version.installed_package_digest, "steps": ["guardian_watch_run", "github_followthrough"]},
+                }
             return {
                 "status": job.get("status"),
                 "job_id": str(job.get("job_id") or job_id),

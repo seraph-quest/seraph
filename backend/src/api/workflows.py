@@ -16,6 +16,7 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field
+from sqlalchemy import or_
 from sqlmodel import col, select
 
 from config.settings import settings
@@ -37,9 +38,17 @@ from src.approval.runtime import reset_runtime_context, set_runtime_context
 from src.audit.repository import audit_repository
 from src.audit.runtime import log_integration_event
 from src.auth.cancellation import RuntimeRevokedError, assert_runtime_not_revoked
-from src.auth.service import bind_operator_principal
+from src.auth.service import AuthFailure, AuthenticatedOperator, authenticate_session, bind_operator_principal
 from src.db.engine import get_session
-from src.db.models import AuditEvent, Goal, GuardianDecisionPacket, GuardianSourceWatch
+from src.db.models import (
+    AuditEvent,
+    Goal,
+    GuardianDecisionPacket,
+    GuardianSourceWatch,
+    WorkBoardAttempt,
+    WorkBoardTask,
+    WorkflowRunState,
+)
 from src.extensions.registry import ExtensionRegistry
 from src.extensions.registry import default_manifest_roots_for_workspace
 from src.extensions.workflow_runtimes import list_workflow_runtime_inventory
@@ -82,6 +91,144 @@ from src.workspace import WorkspaceStateClass, canonical_workspace_registry
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+
+_SAFE_BOARD_JOB_ID = re.compile(r"^[A-Za-z0-9_.:/-]{1,512}$")
+_SAFE_BOARD_DIGEST = re.compile(r"^[0-9a-f]{64}$")
+_SAFE_BOARD_REASON_CODES = frozenset(
+    {
+        "adapter_blocked",
+        "capability",
+        "cancelled",
+        "cost_liability",
+        "deadline_expired",
+        "execution_blocked",
+        "goal_binding_stale",
+        "goal_not_active",
+        "goal_revision_stale",
+        "needs_input",
+        "reconcile_admission_binding",
+        "reconcile_external_effect",
+        "transient",
+        "unknown_effect",
+        "verified_readback_missing",
+    }
+)
+
+
+def _safe_board_job_reference(value: Any) -> str | None:
+    candidate = str(value or "").strip()
+    if not candidate or not _SAFE_BOARD_JOB_ID.fullmatch(candidate):
+        return None
+    return candidate
+
+
+def _safe_board_failure_reason(value: Any) -> str | None:
+    candidate = str(value or "").strip().lower()
+    if candidate in _SAFE_BOARD_REASON_CODES:
+        return candidate
+    if any(token in candidate for token in ("unknown", "effect", "cost", "reconcile")):
+        return "unknown_effect"
+    if any(token in candidate for token in ("approval", "input", "consent")):
+        return "needs_input"
+    if any(token in candidate for token in ("cancel", "revok")):
+        return "cancelled"
+    if any(token in candidate for token in ("deadline", "timeout", "rate", "failed", "failure")):
+        return "transient"
+    return "execution_blocked" if candidate else None
+
+
+def _safe_board_job_receipts(value: Any) -> list[dict[str, Any]]:
+    """Return only artifact/readback identifiers for a board job projection."""
+
+    if not isinstance(value, list):
+        return []
+    allowed = {
+        "artifact_id",
+        "artifact_type",
+        "effect_id",
+        "effect_type",
+        "job_id",
+        "child_job_id",
+        "workflow_run_id",
+        "status",
+        "verified",
+        "exists",
+        "size_bytes",
+        "content_sha256",
+        "target_digest",
+        "file_path",
+        "target_path",
+        "receipt_kind",
+    }
+    result: list[dict[str, Any]] = []
+    for item in value[:32]:
+        if not isinstance(item, dict):
+            continue
+        safe: dict[str, Any] = {}
+        for key in allowed:
+            candidate = item.get(key)
+            if isinstance(candidate, bool) or candidate is None:
+                safe[key] = candidate
+            elif isinstance(candidate, int):
+                safe[key] = candidate
+            elif isinstance(candidate, str):
+                text = candidate.strip()
+                if key in {"content_sha256", "target_digest"}:
+                    if _SAFE_BOARD_DIGEST.fullmatch(text.lower()):
+                        safe[key] = text.lower()
+                elif key in {"file_path", "target_path"}:
+                    if (
+                        text
+                        and not text.startswith(("/", "~"))
+                        and "\\" not in text
+                        and len(text) <= 512
+                        and all(part not in {"", ".", ".."} for part in text.split("/"))
+                    ):
+                        safe[key] = text
+                elif _SAFE_BOARD_JOB_ID.fullmatch(text):
+                    safe[key] = text[:512]
+        if safe:
+            result.append(safe)
+    return result
+
+
+def _safe_board_job_projection(run: WorkflowRunState) -> dict[str, Any]:
+    """Serialize the durable run fields M3 needs without inputs or prose."""
+
+    def loads(value: str | None, fallback: Any) -> Any:
+        try:
+            parsed = json.loads(value or "")
+        except (TypeError, ValueError):
+            return fallback
+        return parsed
+
+    safe_failure = _safe_board_failure_reason(getattr(run, "failure_reason", None))
+    return {
+        "job_id": run.run_identity,
+        "parent_job_id": getattr(run, "parent_job_id", None),
+        "status": run.status,
+        "goal_id": getattr(run, "goal_id", None),
+        "goal_revision": getattr(run, "goal_revision", None),
+        "job_kind": getattr(run, "job_kind", None),
+        "capability_version": getattr(run, "capability_version", None),
+        "input_digest": getattr(run, "input_digest", None),
+        "authority_digest": getattr(run, "authority_digest", None),
+        "run_fingerprint": getattr(run, "run_fingerprint", None),
+        "idempotency": {
+            "scope": getattr(run, "idempotency_scope", None),
+            "key": getattr(run, "idempotency_key", None),
+            "binding": getattr(run, "idempotency_binding", None),
+        },
+        "revision": int(getattr(run, "revision", 0) or 0),
+        "attempt_count": int(getattr(run, "attempt_count", 0) or 0),
+        "max_attempts": int(getattr(run, "max_attempts", 1) or 1),
+        "failure_reason": safe_failure,
+        "artifacts": _safe_board_job_receipts(loads(getattr(run, "artifact_receipts_json", None), [])),
+        "effects": _safe_board_job_receipts(loads(getattr(run, "effect_receipts_json", None), [])),
+        "started_at": run.started_at.isoformat() if run.started_at else None,
+        "updated_at": run.updated_at.isoformat() if run.updated_at else None,
+        "finished_at": run.finished_at.isoformat() if run.finished_at else None,
+    }
 
 _WORKFLOW_FILENAME_RE = re.compile(r"[^a-zA-Z0-9_-]+")
 
@@ -4039,6 +4186,28 @@ _REPO_CHANGE_APPROVAL_TTL_SECONDS = 5 * 60
 _REPO_CHANGE_JOB_TTL_SECONDS = 10 * 60
 
 
+async def authenticate_repo_change_operator(
+    owner_session_id: str,
+    *,
+    owner_principal_id: str | None = None,
+) -> AuthenticatedOperator:
+    """Resolve a live operator for server initiated repo-change dispatch.
+
+    Board adapters use the same session validation as the HTTP route and never
+    construct a synthetic ``Request`` object.  The optional principal check
+    binds the task owner to the authenticated session before any preview or
+    durable admission work begins.
+    """
+
+    try:
+        operator = await authenticate_session(owner_session_id, touch=False)
+    except AuthFailure as exc:
+        raise HTTPException(status_code=403, detail={"code": exc.code}) from exc
+    if owner_principal_id is not None and str(operator.principal.principal_id) != str(owner_principal_id):
+        raise HTTPException(status_code=403, detail={"code": "repo_change_owner_mismatch"})
+    return operator
+
+
 def _repo_change_workspace_root() -> Path:
     return Path(settings.workspace_dir).expanduser().resolve()
 
@@ -5236,11 +5405,23 @@ async def _recover_repo_change_preview_job(*, job: dict[str, Any], operator: Any
 
 
 
-@router.post("/workflows/repo-change/preview")
-async def preview_repo_change(req: RepoChangePreviewRequest, request: Request):
-    operator = _require_authenticated_capability_operator(request)
+async def _preview_repo_change_for_operator(
+    req: RepoChangePreviewRequest,
+    operator: AuthenticatedOperator,
+    *,
+    work_board_task_id: str | None = None,
+    work_board_attempt_id: str | None = None,
+):
+    if (work_board_task_id is None) != (work_board_attempt_id is None):
+        raise HTTPException(status_code=409, detail={"code": "work_board_binding_invalid"})
     principal_id = str(operator.principal.principal_id)
-    job_id = _repo_change_job_id(principal_id, req.idempotency_key)
+    idempotency_scope = "work-board-attempt" if work_board_task_id else "repo-change"
+    idempotency_key = (
+        f"{work_board_task_id}:{work_board_attempt_id}"
+        if work_board_task_id
+        else req.idempotency_key
+    )
+    job_id = _repo_change_job_id(principal_id, idempotency_key)
     existing = await durable_job_repository.get_job(job_id)
     if existing is not None:
         owner = existing.get("owner") if isinstance(existing.get("owner"), dict) else {}
@@ -5358,7 +5539,7 @@ async def preview_repo_change(req: RepoChangePreviewRequest, request: Request):
     spec = DurableJobSpec(
         identity=DurableJobIdentity(
             job_id=job_id, owner_kind="user", owner_principal_id=principal_id, job_kind=_REPO_CHANGE_JOB_KIND,
-            capability_version=_REPO_CHANGE_CAPABILITY_VERSION, idempotency_scope="repo-change", idempotency_key=req.idempotency_key,
+            capability_version=_REPO_CHANGE_CAPABILITY_VERSION, idempotency_scope=idempotency_scope, idempotency_key=idempotency_key,
         ),
         inputs={"base_digest": snapshot.digest, "patch_sha256": req.patch_sha256, "candidate_id": req.candidate_id, "repository_ref": repository_ref, "allowed_paths": list(allowed_paths), "test_args": list(test_args), **candidate_proof},
         session_id=str(operator.session_id), operator_session_id=str(operator.session_id), goal_id=req.goal_id,
@@ -5444,6 +5625,12 @@ async def preview_repo_change(req: RepoChangePreviewRequest, request: Request):
         return {"status": "awaiting_approval", "approval_id": approval.id, "base_digest": snapshot.digest, "patch_sha256": req.patch_sha256, "profile": str(sandbox.config.profile), "image_digest": image, "allowed_paths": list(allowed_paths), "test_args": list(test_args), "limits": {field: getattr(sandbox.limits, field) for field in sandbox.limits.__dataclass_fields__}, **held}
     except (DurableJobError, RepoSandboxError, ValueError) as exc:
         raise HTTPException(status_code=409, detail={"code": "repo_change_admission_blocked", "reason": str(exc)}) from exc
+
+
+@router.post("/workflows/repo-change/preview")
+async def preview_repo_change(req: RepoChangePreviewRequest, request: Request):
+    operator = _require_authenticated_capability_operator(request)
+    return await _preview_repo_change_for_operator(req, operator)
 
 
 @router.get("/workflows/repo-change/{job_id}")
@@ -5584,9 +5771,20 @@ async def retry_repo_change(job_id: str, req: RepoChangeRetryRequest, request: R
     }
 
 
-@router.post("/workflows/repo-change/{job_id}/cancel")
-async def cancel_repo_change(job_id: str, req: RepoChangeCancelRequest, request: Request):
-    operator = _require_authenticated_capability_operator(request)
+async def cancel_repo_change_for_authenticated_operator(
+    job_id: str,
+    *,
+    operator: AuthenticatedOperator,
+    reason: str,
+):
+    """Cancel a repo-change job for an already authenticated owner.
+
+    The HTTP route and the work-board adapter share this exact cleanup and
+    durable readback path.  The board dispatcher passes the live operator
+    resolved from the task owner session; it never constructs a synthetic
+    ``Request`` or bypasses the route's owner/session checks.
+    """
+
     job = await durable_job_repository.get_job(job_id)
     if job is None:
         raise HTTPException(status_code=404, detail={"code": "repo_change_job_not_found"})
@@ -5632,7 +5830,7 @@ async def cancel_repo_change(job_id: str, req: RepoChangeCancelRequest, request:
                 job_id,
                 settled_status,
                 expected_revision=job.get("revision"),
-                reason=req.reason if cleanup_proven else "cleanup_unproven",
+                    reason=reason if cleanup_proven else "cleanup_unproven",
                 result={
                     "learning": "no_learning",
                     "memory_status": "no_learning",
@@ -5650,7 +5848,7 @@ async def cancel_repo_change(job_id: str, req: RepoChangeCancelRequest, request:
         cancelled = await durable_job_repository.transition_job(
             job_id,
             "cancelled",
-            reason=req.reason,
+            reason=reason,
             expected_revision=job.get("revision"),
             result={"learning": "no_learning", "memory_status": "no_learning"},
         )
@@ -5662,7 +5860,7 @@ async def cancel_repo_change(job_id: str, req: RepoChangeCancelRequest, request:
             checkpoint = await durable_job_repository.record_checkpoint(
                 job_id,
                 checkpoint_id="cancel_requested",
-                state={"phase": "cancel_requested", "reason": req.reason},
+                    state={"phase": "cancel_requested", "reason": reason},
                 owner=str(lease.get("owner") or ""),
                 fencing_token=int(lease.get("fencing_token") or 0),
                 expected_revision=job.get("revision"),
@@ -5805,7 +6003,7 @@ async def cancel_repo_change(job_id: str, req: RepoChangeCancelRequest, request:
         transition_status = "unknown_external_effect" if cleanup_unproven else "cancelled"
         transition_lease = latest_after_cleanup.get("lease") or checkpoint_lease
         transition_revision = latest_after_cleanup.get("revision")
-        transition_reason = "cleanup_unproven" if cleanup_unproven else req.reason
+        transition_reason = "cleanup_unproven" if cleanup_unproven else reason
         transition_result = (
             {
                 "learning": "no_learning",
@@ -5860,6 +6058,16 @@ async def cancel_repo_change(job_id: str, req: RepoChangeCancelRequest, request:
             "learning": "no_learning",
         }
     return {"status": status, "job": job, "operator_action": "reconcile" if status == "unknown_external_effect" else "none"}
+
+
+@router.post("/workflows/repo-change/{job_id}/cancel")
+async def cancel_repo_change(job_id: str, req: RepoChangeCancelRequest, request: Request):
+    operator = _require_authenticated_capability_operator(request)
+    return await cancel_repo_change_for_authenticated_operator(
+        job_id,
+        operator=operator,
+        reason=req.reason,
+    )
 
 
 async def _recover_repo_change_after_restart(*, job: dict[str, Any], operator: Any) -> dict[str, Any]:
@@ -6235,6 +6443,76 @@ async def recover_repo_change(job_id: str, request: Request):
     if str((job.get("declared_authority") or {}).get("session_id") or "") != str(operator.session_id):
         raise HTTPException(status_code=403, detail={"code": "repo_change_session_mismatch"})
     return await _recover_repo_change_after_restart(job=job, operator=operator)
+
+
+@router.get("/workflows/jobs/{job_id}")
+@router.get("/jobs/{job_id}")
+async def get_board_bound_workflow_job(job_id: str, request: Request):
+    """Return a safe durable-run projection for an owned board attempt.
+
+    Generic workflow reads intentionally remain separate. This route first
+    proves that the requested run is the parent of an attempt owned by the
+    authenticated operator, then permits only that run's durable descendants.
+    Raw arguments, private results, and unbounded runtime prose never cross
+    this board readback boundary.
+    """
+
+    operator = _require_authenticated_capability_operator(request)
+    requested = _safe_board_job_reference(job_id)
+    if requested is None:
+        raise HTTPException(status_code=404, detail={"code": "workflow_job_not_found"})
+    principal_id = str(operator.principal.principal_id)
+    session_id = str(operator.session_id)
+    async with get_session() as db:
+        root_rows = (
+            await db.execute(
+                select(WorkBoardAttempt.workflow_run_id)
+                .join(WorkBoardTask, WorkBoardTask.task_id == WorkBoardAttempt.task_id)
+                .where(
+                    WorkBoardTask.owner_principal_id == principal_id,
+                    WorkBoardTask.owner_session_id == session_id,
+                    WorkBoardAttempt.workflow_run_id.is_not(None),
+                )
+            )
+        ).scalars().all()
+        allowed = {str(value) for value in root_rows if value}
+        if requested not in allowed:
+            frontier = list(allowed)
+            # Descendant traversal is bounded; a malformed lineage cannot
+            # turn an operator read into an unbounded database scan.
+            for _ in range(32):
+                if not frontier or len(allowed) >= 256:
+                    break
+                descendants = (
+                    await db.execute(
+                        select(WorkflowRunState.run_identity).where(
+                            or_(
+                                WorkflowRunState.parent_job_id.in_(frontier),
+                                WorkflowRunState.parent_run_identity.in_(frontier),
+                            )
+                        )
+                    )
+                ).scalars().all()
+                next_frontier = []
+                for value in descendants:
+                    identity = str(value)
+                    if identity not in allowed:
+                        allowed.add(identity)
+                        next_frontier.append(identity)
+                frontier = next_frontier
+            if requested not in allowed:
+                raise HTTPException(status_code=404, detail={"code": "workflow_job_not_found"})
+        run = (
+            await db.execute(
+                select(WorkflowRunState).where(WorkflowRunState.run_identity == requested)
+            )
+        ).scalar_one_or_none()
+        if run is None:
+            raise HTTPException(status_code=404, detail={"code": "workflow_job_not_found"})
+        bound_session = str(getattr(run, "operator_session_id", None) or "").strip()
+        if bound_session != session_id:
+            raise HTTPException(status_code=404, detail={"code": "workflow_job_not_found"})
+        return {"job": _safe_board_job_projection(run)}
 
 
 @router.get("/workflows")

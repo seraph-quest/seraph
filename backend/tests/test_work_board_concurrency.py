@@ -10,7 +10,7 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import NullPool
 from sqlmodel import SQLModel
 
-from src.db.models import Goal, WorkBoardEvent, WorkBoardLink, WorkBoardTask
+from src.db.models import Goal, WorkBoardAttempt, WorkBoardEvent, WorkBoardLink, WorkBoardTask
 from src.work_board.contracts import WorkBoardLinkCreate, WorkBoardOwner, WorkBoardTaskCreate
 from src.work_board.repository import WorkBoardRepository
 
@@ -113,7 +113,12 @@ async def test_opposite_dependency_writes_serialize_cycle_check_and_insert(tmp_p
         cursor.execute("PRAGMA busy_timeout=5000")
         cursor.close()
 
-    tables = [WorkBoardTask.__table__, WorkBoardLink.__table__, WorkBoardEvent.__table__]
+    tables = [
+        WorkBoardTask.__table__,
+        WorkBoardAttempt.__table__,
+        WorkBoardLink.__table__,
+        WorkBoardEvent.__table__,
+    ]
     async with engine.begin() as connection:
         await connection.run_sync(lambda sync: SQLModel.metadata.create_all(sync, tables=tables))
 
@@ -190,7 +195,12 @@ async def test_task_list_snapshot_does_not_pair_old_tasks_with_new_event_cursor(
         cursor.execute("PRAGMA busy_timeout=5000")
         cursor.close()
 
-    tables = [WorkBoardTask.__table__, WorkBoardLink.__table__, WorkBoardEvent.__table__]
+    tables = [
+        WorkBoardTask.__table__,
+        WorkBoardAttempt.__table__,
+        WorkBoardLink.__table__,
+        WorkBoardEvent.__table__,
+    ]
     async with engine.begin() as connection:
         await connection.run_sync(lambda sync: SQLModel.metadata.create_all(sync, tables=tables))
 

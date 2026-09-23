@@ -2,13 +2,22 @@
 
 from hashlib import sha256
 import json
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import select
 
 from config.settings import settings
-from src.db.models import Goal, WorkBoardAttempt, WorkBoardStatus, WorkBoardTask, WorkflowRunState
+from src.db.models import (
+    Goal,
+    OperatorSession,
+    Session,
+    WorkBoardAttempt,
+    WorkBoardStatus,
+    WorkBoardTask,
+    WorkflowRunState,
+)
 from src.goals.contracts import CriterionVerifierKind, GoalSuccessCriterion
 from src.work_board.dispatcher import (
     GOAL_SNAPSHOT_CAPABILITY,
@@ -488,7 +497,7 @@ async def _run_real_board_goal_snapshot(async_db, monkeypatch, tmp_path, *, obse
     )
     task = WorkBoardTask(
         task_id=task_id,
-        owner_principal_id="operator:managed",
+        owner_principal_id="operator:single",
         owner_session_id="managed-session",
         goal_id=goal_id,
         goal_revision=1,
@@ -502,15 +511,25 @@ async def _run_real_board_goal_snapshot(async_db, monkeypatch, tmp_path, *, obse
         status=WorkBoardStatus.ready,
     )
     async with async_db() as db:
+        now = datetime.now(timezone.utc)
         db.add(
             Goal(
                 id=goal_id,
                 title="Managed board goal",
                 status="active",
                 revision=1,
-                owner_principal_id="operator:managed",
+                owner_principal_id="operator:single",
                 owner_session_id="managed-session",
                 success_criterion_json=criterion.model_dump_json(),
+            )
+        )
+        db.add(Session(id="managed-session", owner_principal_id="operator:single"))
+        db.add(
+            OperatorSession(
+                id="managed-session",
+                token_hash="managed-session-token-hash",
+                idle_expires_at=now + timedelta(hours=1),
+                absolute_expires_at=now + timedelta(hours=1),
             )
         )
         db.add(task)
@@ -571,10 +590,20 @@ async def _run_real_board_goal_snapshot(async_db, monkeypatch, tmp_path, *, obse
     )
     assert workflow_tool is not None
     writes: list[tuple[str, str]] = []
+    write_contexts: list[tuple[str | None, str | None]] = []
     original_write = filesystem_tool._write_workspace_text_bounded
 
     def observed_write(path, content, **kwargs):
+        from src.approval.runtime import get_current_fencing_token, get_current_trust_principal
+
+        principal = get_current_trust_principal()
         writes.append((str(path), content))
+        write_contexts.append(
+            (
+                getattr(principal, "job_id", None),
+                get_current_fencing_token(),
+            )
+        )
         return original_write(path, content, **kwargs)
 
     monkeypatch.setattr(filesystem_tool, "_write_workspace_text_bounded", observed_write)
@@ -630,9 +659,18 @@ async def _run_real_board_goal_snapshot(async_db, monkeypatch, tmp_path, *, obse
         f"outcome={outcome!r}; task={stored_task.status}; "
         f"block={stored_task.block_reason!r}; attempt={stored_attempt.outcome!r}; "
         f"receipts={stored_attempt.receipt_refs_json!r}; "
-        f"runs={[(run.run_identity, run.status, run.parent_job_id, run.job_kind, run.owner_kind, run.owner_principal_id, run.service_id, run.capability_version, run.goal_id, run.goal_revision, run.operator_session_id, run.error, run.last_completed_step_id, run.metadata_json) for run in runs]!r}"
+        f"runs={[(run.run_identity, run.status, run.failure_reason) for run in runs]!r}"
     )
     assert any(goal_id in content for _path, content in writes)
+    nested = next(
+        run
+        for run in runs
+        if run.run_identity not in {
+            f"work-board:{task.task_id}:{claim.attempt.attempt_id}",
+            f"goal-snapshot-work-board:{task.task_id}:{claim.attempt.attempt_id}",
+        }
+    )
+    assert write_contexts == [(nested.run_identity, str(nested.fencing_token))]
     return outcome, stored_task, stored_attempt, runs
 
 
@@ -653,11 +691,21 @@ async def test_goal_snapshot_executes_and_reads_back(async_db, monkeypatch, tmp_
     assert (tmp_path / "artifacts/managed-board-snapshot.md").is_file()
     content = (tmp_path / "artifacts/managed-board-snapshot.md").read_text(encoding="utf-8")
     assert task.goal_id in content
-    assert len(runs) == 2
+    assert len(runs) == 3
     root = next(run for run in runs if run.run_identity == attempt.workflow_run_id)
     child = next(run for run in runs if run.run_identity == f"goal-snapshot-work-board:{task.task_id}:{attempt.attempt_id}")
-    assert root.status == child.status == "succeeded"
+    nested = next(
+        run
+        for run in runs
+        if run.run_identity not in {root.run_identity, child.run_identity}
+    )
+    assert root.status == child.status == nested.status == "succeeded"
     assert child.parent_run_identity == root.run_identity
+    assert child.root_run_identity == root.run_identity
+    assert nested.parent_run_identity == child.run_identity
+    assert nested.parent_job_id == child.run_identity
+    assert nested.parent_fencing_token == child.fencing_token
+    assert nested.root_run_identity == root.run_identity
     root_effects = json.loads(root.metadata_json or "{}") if root.metadata_json else {}
     assert root_effects is not None
 

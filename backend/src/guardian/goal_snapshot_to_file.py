@@ -1608,6 +1608,8 @@ class GoalSnapshotToFileAdapter:
                 path,
                 session_id=self.request.session_id,
                 job_id=job_id,
+                parent_fencing_token=fencing_token,
+                root_run_identity=_text(claimed.get("root_run_identity")) or job_id,
                 principal=authority_material.principal if authority_material is not None else None,
             )
         except Exception as exc:
@@ -1925,12 +1927,40 @@ class GoalSnapshotToFileAdapter:
         *,
         session_id: str,
         job_id: str,
+        parent_fencing_token: int,
+        root_run_identity: str,
         principal: TrustPrincipal | None = None,
     ) -> tuple[Any, dict[str, Any] | None]:
         if principal is None:
             raise PermissionError("authenticated_owner_missing")
-        effective_principal = principal
-        call = partial(tool, **self._workflow_inputs(path), sanitize_inputs_outputs=True)
+        # The service principal belongs to the GoalSnapshot child while the
+        # adapter is invoking the nested WorkflowTool.  Let WorkflowTool bind
+        # that same service authority to its own durable run; carrying the
+        # parent's transient job_id would be rejected as a conflicting run.
+        # Durable parent identity and fencing remain explicit control inputs.
+        effective_principal = (
+            replace(principal, job_id=None)
+            if self.workflow_tool_provider is None
+            else principal
+        )
+        # The production WorkflowTool creates a nested durable run for the
+        # workflow steps. Bind that run to this already-claimed GoalSnapshot
+        # child so get_goals can validate the exact parent fence and owner
+        # delegation. Injected providers are deliberately kept on their old
+        # narrow call contract for deterministic tests and local adapters.
+        control_inputs: dict[str, Any] = {}
+        if self.workflow_tool_provider is None:
+            control_inputs = {
+                "_seraph_parent_run_identity": job_id,
+                "_seraph_parent_fencing_token": parent_fencing_token,
+                "_seraph_root_run_identity": root_run_identity or job_id,
+            }
+        call = partial(
+            tool,
+            **self._workflow_inputs(path),
+            **control_inputs,
+            sanitize_inputs_outputs=True,
+        )
         if self.workflow_tool_provider is not None:
             # The injectable boundary is deliberately synchronous for tests;
             # the production provider below runs wrappers off the event loop.

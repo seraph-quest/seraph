@@ -258,25 +258,58 @@ class _ExactGoalRepository:
 
 
 class _GoalSnapshotJobs:
-    def __init__(self, projection: dict[str, Any]):
-        self.projection = projection
+    def __init__(self, projection: dict[str, Any], parent_projection: dict[str, Any] | None = None):
+        self.projections = {
+            str(projection["job_id"]): projection,
+        }
+        if parent_projection is not None:
+            self.projections[str(parent_projection["job_id"])] = parent_projection
         self.job_ids: list[str] = []
 
-    async def get_job(self, job_id: str) -> dict[str, Any]:
+    async def get_job(self, job_id: str) -> dict[str, Any] | None:
         self.job_ids.append(job_id)
-        return self.projection
+        return self.projections.get(job_id)
 
 
-def _goal_snapshot_projection(
+def _goal_snapshot_projections(
     *,
     goal: Goal,
-    job_id: str = "goal-snapshot-work-board:task-1:attempt-1",
-) -> dict[str, Any]:
+    job_id: str = "goal-snapshot-workflow:run-1",
+    parent_job_id: str = "goal-snapshot-work-board:task-1:attempt-1",
+    parent_fence: int = 7,
+) -> tuple[dict[str, Any], dict[str, Any]]:
     service_id = "service:goal-snapshot"
-    authority = {
+    nested_authority = {
+        "principal": service_id,
+        "owner_kind": "service",
+        "service_id": service_id,
+        "session_id": goal.owner_session_id,
+        "capability": "workflow_goal_snapshot_to_file",
+    }
+    nested = {
+        "job_id": job_id,
+        "run_identity": job_id,
+        "root_run_identity": parent_job_id,
+        "parent_run_identity": parent_job_id,
+        "parent_job_id": parent_job_id,
+        "parent_fencing_token": parent_fence,
+        "status": "running",
+        "owner": {
+            "kind": "service",
+            "principal_id": service_id,
+            "service_id": service_id,
+        },
+        "job_kind": "goal-snapshot-to-file",
+        "capability_version": "workflow-v2",
+        "session_id": goal.owner_session_id,
+        "operator_session_id": None,
+        "declared_authority": nested_authority,
+    }
+    parent_authority = {
         "capability_id": CAPABILITY_ID,
         "capability_version": CAPABILITY_VERSION,
         "principal": service_id,
+        "authenticated": True,
         "owner_kind": "service",
         "owner_principal_id": service_id,
         "service_id": service_id,
@@ -286,9 +319,10 @@ def _goal_snapshot_projection(
         "goal_owner_principal_id": goal.owner_principal_id,
         "goal_owner_session_id": goal.owner_session_id,
     }
-    return {
-        "job_id": job_id,
-        "run_identity": job_id,
+    parent = {
+        "job_id": parent_job_id,
+        "run_identity": parent_job_id,
+        "root_run_identity": parent_job_id,
         "status": "running",
         "owner": {
             "kind": "service",
@@ -301,8 +335,14 @@ def _goal_snapshot_projection(
         "operator_session_id": None,
         "goal_id": goal.id,
         "goal_revision": goal.revision,
-        "declared_authority": authority,
+        "lease": {
+            "owner": "goal-snapshot-parent-runner",
+            "fencing_token": parent_fence,
+            "expires_at": (datetime.now(timezone.utc) + timedelta(seconds=60)).isoformat(),
+        },
+        "declared_authority": parent_authority,
     }
+    return nested, parent
 
 
 def _goal_snapshot_service_principal(job_id: str, session_id: str) -> TrustPrincipal:
@@ -332,11 +372,16 @@ def test_request_contract_binds_capability_owner_and_bounded_path():
         _request(goal_owner_principal_id="operator:goal-owner")
 
 
-def _patch_goal_snapshot_goal_read(monkeypatch, goal: Goal, projection: dict[str, Any]):
+def _patch_goal_snapshot_goal_read(
+    monkeypatch,
+    goal: Goal,
+    projection: dict[str, Any],
+    parent_projection: dict[str, Any],
+):
     from src.tools import goal_tools
 
     goals = _ExactGoalRepository(goal)
-    jobs = _GoalSnapshotJobs(projection)
+    jobs = _GoalSnapshotJobs(projection, parent_projection)
     monkeypatch.setattr(goal_tools, "goal_repository", goals)
     monkeypatch.setattr(goal_tools, "durable_job_repository", jobs)
 
@@ -362,13 +407,23 @@ def test_goal_snapshot_get_goals_reads_only_the_delegated_goal(monkeypatch):
         owner_principal_id="operator:single",
         owner_session_id="operator-session:single",
     )
-    job_id = "goal-snapshot-work-board:task-1:attempt-1"
-    projection = _goal_snapshot_projection(goal=goal, job_id=job_id)
-    goals, jobs = _patch_goal_snapshot_goal_read(monkeypatch, goal, projection)
+    parent_job_id = "goal-snapshot-work-board:task-1:attempt-1"
+    nested_job_id = "goal-snapshot-workflow:run-1"
+    projection, parent_projection = _goal_snapshot_projections(
+        goal=goal,
+        job_id=nested_job_id,
+        parent_job_id=parent_job_id,
+    )
+    goals, jobs = _patch_goal_snapshot_goal_read(
+        monkeypatch,
+        goal,
+        projection,
+        parent_projection,
+    )
     tokens = set_runtime_context(
         goal.owner_session_id,
         "balanced",
-        trust_principal=_goal_snapshot_service_principal(job_id, goal.owner_session_id),
+        trust_principal=_goal_snapshot_service_principal(nested_job_id, goal.owner_session_id),
     )
     try:
         result = get_goals.forward()
@@ -376,40 +431,72 @@ def test_goal_snapshot_get_goals_reads_only_the_delegated_goal(monkeypatch):
         reset_runtime_context(tokens)
 
     assert result == "- [GoalLevel.daily/GoalDomain.productivity] Keep the operator plan current (id=goal-1, active)"
-    assert jobs.job_ids == [job_id]
+    assert jobs.job_ids == [nested_job_id, parent_job_id]
     assert goals.get_ids == [goal.id]
     assert goals.list_called is False
 
 
 @pytest.mark.parametrize(
-    "mutate_projection",
+    "mutate_projections",
     [
-        lambda projection: projection["owner"].update(service_id="service:other"),
-        lambda projection: projection.update(job_id="goal-snapshot-work-board:task-other:attempt-1"),
-        lambda projection: projection.update(status="accepted"),
-        lambda projection: projection.update(goal_revision=2),
-        lambda projection: projection["declared_authority"].update(
+        lambda nested, _parent: nested["owner"].update(service_id="service:other"),
+        lambda nested, _parent: nested.update(job_id="goal-snapshot-workflow:run-other"),
+        lambda nested, _parent: nested.update(status="accepted"),
+        lambda _nested, parent: parent.update(goal_revision=2),
+        lambda _nested, parent: parent["declared_authority"].update(
             goal_owner_principal_id="operator:other"
         ),
+        lambda nested, _parent: nested.update(parent_fencing_token=8),
+        lambda nested, _parent: nested.pop("parent_run_identity"),
+        lambda nested, _parent: nested.pop("root_run_identity"),
+        lambda _nested, parent: parent.update(root_run_identity="other-root"),
+        lambda _nested, parent: parent["lease"].pop("expires_at"),
+        lambda _nested, parent: parent["lease"].update(expires_at="not-a-timestamp"),
+        lambda _nested, parent: parent["lease"].update(
+            expires_at=(datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat()
+        ),
     ],
-    ids=["wrong-service", "wrong-child", "not-running", "stale-revision", "wrong-owner"],
+    ids=[
+        "wrong-service",
+        "wrong-child",
+        "not-running",
+        "stale-revision",
+        "wrong-owner",
+        "stale-parent-fence",
+        "missing-parent-run-identity",
+        "missing-root-identity",
+        "mismatched-parent-root",
+        "missing-lease-expiry",
+        "malformed-lease-expiry",
+        "expired-lease",
+    ],
 )
 def test_goal_snapshot_get_goals_rejects_stale_or_mismatched_delegation(
     monkeypatch,
-    mutate_projection,
+    mutate_projections,
 ):
     goal = _goal(
         owner_principal_id="operator:single",
         owner_session_id="operator-session:single",
     )
-    job_id = "goal-snapshot-work-board:task-1:attempt-1"
-    projection = _goal_snapshot_projection(goal=goal, job_id=job_id)
-    mutate_projection(projection)
-    _patch_goal_snapshot_goal_read(monkeypatch, goal, projection)
+    parent_job_id = "goal-snapshot-work-board:task-1:attempt-1"
+    nested_job_id = "goal-snapshot-workflow:run-1"
+    projection, parent_projection = _goal_snapshot_projections(
+        goal=goal,
+        job_id=nested_job_id,
+        parent_job_id=parent_job_id,
+    )
+    mutate_projections(projection, parent_projection)
+    _patch_goal_snapshot_goal_read(
+        monkeypatch,
+        goal,
+        projection,
+        parent_projection,
+    )
     tokens = set_runtime_context(
         goal.owner_session_id,
         "balanced",
-        trust_principal=_goal_snapshot_service_principal(job_id, goal.owner_session_id),
+        trust_principal=_goal_snapshot_service_principal(nested_job_id, goal.owner_session_id),
     )
     try:
         with pytest.raises(PermissionError):
@@ -428,7 +515,7 @@ def test_goal_snapshot_get_goals_rejects_stale_or_mismatched_delegation(
             authenticated=True,
             grants=(AuthorityGrant.CAPABILITY_EXECUTE,),
             session_id="operator-session:single",
-            job_id="goal-snapshot-work-board:task-1:attempt-1",
+            job_id="goal-snapshot-workflow:run-1",
         ),
         TrustPrincipal(
             principal_id="service:goal-snapshot",
@@ -445,9 +532,19 @@ def test_goal_snapshot_get_goals_rejects_unbound_service_context(monkeypatch, pr
         owner_principal_id="operator:single",
         owner_session_id="operator-session:single",
     )
-    job_id = "goal-snapshot-work-board:task-1:attempt-1"
-    projection = _goal_snapshot_projection(goal=goal, job_id=job_id)
-    _patch_goal_snapshot_goal_read(monkeypatch, goal, projection)
+    parent_job_id = "goal-snapshot-work-board:task-1:attempt-1"
+    nested_job_id = "goal-snapshot-workflow:run-1"
+    projection, parent_projection = _goal_snapshot_projections(
+        goal=goal,
+        job_id=nested_job_id,
+        parent_job_id=parent_job_id,
+    )
+    _patch_goal_snapshot_goal_read(
+        monkeypatch,
+        goal,
+        projection,
+        parent_projection,
+    )
     tokens = set_runtime_context(goal.owner_session_id, "balanced", trust_principal=principal)
     try:
         with pytest.raises(PermissionError):
@@ -461,11 +558,21 @@ def test_goal_snapshot_get_goals_rejects_invalid_live_owner_session(monkeypatch)
         owner_principal_id="operator:single",
         owner_session_id="operator-session:single",
     )
-    job_id = "goal-snapshot-work-board:task-1:attempt-1"
-    projection = _goal_snapshot_projection(goal=goal, job_id=job_id)
+    parent_job_id = "goal-snapshot-work-board:task-1:attempt-1"
+    nested_job_id = "goal-snapshot-workflow:run-1"
+    projection, parent_projection = _goal_snapshot_projections(
+        goal=goal,
+        job_id=nested_job_id,
+        parent_job_id=parent_job_id,
+    )
     from src.tools import goal_tools
 
-    _patch_goal_snapshot_goal_read(monkeypatch, goal, projection)
+    _patch_goal_snapshot_goal_read(
+        monkeypatch,
+        goal,
+        projection,
+        parent_projection,
+    )
 
     async def reject_session(_session_id: str, *, touch: bool = True):
         raise RuntimeError("session revoked")
@@ -474,7 +581,7 @@ def test_goal_snapshot_get_goals_rejects_invalid_live_owner_session(monkeypatch)
     tokens = set_runtime_context(
         goal.owner_session_id,
         "balanced",
-        trust_principal=_goal_snapshot_service_principal(job_id, goal.owner_session_id),
+        trust_principal=_goal_snapshot_service_principal(nested_job_id, goal.owner_session_id),
     )
     try:
         with pytest.raises(PermissionError, match="owner session"):

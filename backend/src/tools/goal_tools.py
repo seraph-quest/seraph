@@ -1,6 +1,7 @@
 import asyncio
 import concurrent.futures
 from collections.abc import Mapping
+from datetime import datetime, timezone
 from typing import Optional
 
 from smolagents import tool
@@ -15,6 +16,9 @@ from src.workflows.job_runtime import durable_job_repository
 _GOAL_SNAPSHOT_SERVICE_ID = "service:goal-snapshot"
 _GOAL_SNAPSHOT_JOB_KIND = "workflow.goal-snapshot-to-file"
 _GOAL_SNAPSHOT_CAPABILITY_VERSION = "1"
+_GOAL_SNAPSHOT_WORKFLOW_JOB_KIND = "goal-snapshot-to-file"
+_GOAL_SNAPSHOT_WORKFLOW_CAPABILITY_VERSION = "workflow-v2"
+_GOAL_SNAPSHOT_WORKFLOW_TOOL_NAME = "workflow_goal_snapshot_to_file"
 
 
 def _run(coro):
@@ -73,6 +77,26 @@ def _positive_revision(value: object) -> int | None:
     return value
 
 
+def _future_lease_expiry(value: object) -> datetime | None:
+    """Parse a lease expiry with the durable runtime's UTC-naive convention."""
+
+    raw = _text(value)
+    if not raw:
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except (TypeError, ValueError, OverflowError):
+        return None
+    # SQLite may round-trip a UTC datetime without its offset. Match the
+    # durable runtime's _as_utc() behavior for that canonical serialized form.
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    if parsed.utcoffset() is None:
+        return None
+    expiry = parsed.astimezone(timezone.utc)
+    return expiry if expiry > datetime.now(timezone.utc) else None
+
+
 def _service_goal_snapshot_context() -> tuple[str, str]:
     """Resolve the one durable child allowed to read a delegated goal.
 
@@ -118,37 +142,102 @@ def _service_goal_snapshot_context() -> tuple[str, str]:
 
 
 async def _load_delegated_goal(*, job_id: str, session_id: str):
-    """Read exactly the goal delegated by the current durable child run."""
+    """Read exactly the goal delegated by a nested snapshot workflow run.
+
+    The service principal is bound to the nested WorkflowTool run while its
+    ``get_goals`` step executes.  That run is useful only when its persisted
+    parent is the still-running, fenced GoalSnapshot child that carries the
+    operator-owned goal delegation.  The nested workflow projection alone
+    cannot grant a goal read because it intentionally has no canonical goal
+    authority of its own.
+    """
 
     try:
         projection = await durable_job_repository.get_job(job_id)
     except Exception as exc:
-        raise PermissionError("goal snapshot durable child is unavailable") from exc
+        raise PermissionError("goal snapshot workflow run is unavailable") from exc
     if not isinstance(projection, Mapping):
-        raise PermissionError("goal snapshot durable child is missing")
+        raise PermissionError("goal snapshot workflow run is missing")
 
     persisted_job_id = _text(projection.get("job_id") or projection.get("run_identity"))
-    owner = projection.get("owner")
-    authority = projection.get("declared_authority")
-    if not isinstance(owner, Mapping) or not isinstance(authority, Mapping):
-        raise PermissionError("goal snapshot durable delegation is incomplete")
+    workflow_owner = projection.get("owner")
+    workflow_authority = projection.get("declared_authority")
+    if not isinstance(workflow_owner, Mapping) or not isinstance(workflow_authority, Mapping):
+        raise PermissionError("goal snapshot workflow delegation is incomplete")
     if (
         persisted_job_id != job_id
         or _text(projection.get("status")) != "running"
-        or _text(owner.get("kind")) != "service"
-        or _text(owner.get("principal_id")) != _GOAL_SNAPSHOT_SERVICE_ID
-        or _text(owner.get("service_id")) != _GOAL_SNAPSHOT_SERVICE_ID
-        or _text(projection.get("job_kind")) != _GOAL_SNAPSHOT_JOB_KIND
-        or _text(projection.get("capability_version")) != _GOAL_SNAPSHOT_CAPABILITY_VERSION
+        or _text(workflow_owner.get("kind")) != "service"
+        or _text(workflow_owner.get("principal_id")) != _GOAL_SNAPSHOT_SERVICE_ID
+        or _text(workflow_owner.get("service_id")) != _GOAL_SNAPSHOT_SERVICE_ID
+        or _text(projection.get("job_kind")) != _GOAL_SNAPSHOT_WORKFLOW_JOB_KIND
+        or _text(projection.get("capability_version")) != _GOAL_SNAPSHOT_WORKFLOW_CAPABILITY_VERSION
         or _text(projection.get("session_id")) != session_id
+        or _text(workflow_authority.get("principal")) != _GOAL_SNAPSHOT_SERVICE_ID
+        or _text(workflow_authority.get("owner_kind")) != "service"
+        or _text(workflow_authority.get("service_id")) != _GOAL_SNAPSHOT_SERVICE_ID
+        or _text(workflow_authority.get("session_id")) != session_id
+        or _text(workflow_authority.get("capability")) != _GOAL_SNAPSHOT_WORKFLOW_TOOL_NAME
     ):
-        raise PermissionError("goal snapshot durable child identity is stale or mismatched")
+        raise PermissionError("goal snapshot workflow identity is stale or mismatched")
     persisted_operator_session = _text(projection.get("operator_session_id"))
     if persisted_operator_session and persisted_operator_session != session_id:
-        raise PermissionError("goal snapshot durable child operator session is stale")
+        raise PermissionError("goal snapshot workflow operator session is stale")
 
-    goal_id = _text(projection.get("goal_id"))
-    goal_revision = _positive_revision(projection.get("goal_revision"))
+    parent_job_id = _text(projection.get("parent_job_id"))
+    parent_run_identity = _text(projection.get("parent_run_identity"))
+    parent_fencing_token = _positive_revision(projection.get("parent_fencing_token"))
+    root_run_identity = _text(projection.get("root_run_identity"))
+    if (
+        not parent_job_id
+        or not parent_run_identity
+        or parent_run_identity != parent_job_id
+        or parent_fencing_token is None
+        or not root_run_identity
+    ):
+        raise PermissionError("goal snapshot workflow lineage is incomplete")
+
+    try:
+        parent = await durable_job_repository.get_job(parent_job_id)
+    except Exception as exc:
+        raise PermissionError("goal snapshot parent run is unavailable") from exc
+    if not isinstance(parent, Mapping):
+        raise PermissionError("goal snapshot parent run is missing")
+
+    parent_persisted_job_id = _text(parent.get("job_id") or parent.get("run_identity"))
+    parent_owner = parent.get("owner")
+    authority = parent.get("declared_authority")
+    parent_lease = parent.get("lease")
+    if (
+        not isinstance(parent_owner, Mapping)
+        or not isinstance(authority, Mapping)
+        or not isinstance(parent_lease, Mapping)
+    ):
+        raise PermissionError("goal snapshot parent delegation is incomplete")
+    parent_fence = _positive_revision(parent_lease.get("fencing_token"))
+    parent_root_identity = _text(parent.get("root_run_identity"))
+    if (
+        parent_persisted_job_id != parent_job_id
+        or _text(parent.get("status")) != "running"
+        or _text(parent_owner.get("kind")) != "service"
+        or _text(parent_owner.get("principal_id")) != _GOAL_SNAPSHOT_SERVICE_ID
+        or _text(parent_owner.get("service_id")) != _GOAL_SNAPSHOT_SERVICE_ID
+        or _text(parent.get("job_kind")) != _GOAL_SNAPSHOT_JOB_KIND
+        or _text(parent.get("capability_version")) != _GOAL_SNAPSHOT_CAPABILITY_VERSION
+        or _text(parent.get("session_id")) != session_id
+        or not _text(parent_lease.get("owner"))
+        or parent_fence != parent_fencing_token
+        or _future_lease_expiry(parent_lease.get("expires_at")) is None
+        or not parent_root_identity
+        or parent_root_identity != root_run_identity
+    ):
+        raise PermissionError("goal snapshot parent identity or fence is stale")
+    parent_operator_session = _text(parent.get("operator_session_id"))
+    if parent_operator_session and parent_operator_session != session_id:
+        raise PermissionError("goal snapshot parent operator session is stale")
+
+    goal_id = _text(parent.get("goal_id"))
+    goal_revision = _positive_revision(parent.get("goal_revision"))
     authority_goal_id = _text(authority.get("goal_id"))
     authority_goal_revision = _positive_revision(authority.get("goal_revision"))
     delegated_owner = _text(authority.get("goal_owner_principal_id"))
@@ -169,7 +258,28 @@ async def _load_delegated_goal(*, job_id: str, session_id: str):
         and delegated_session
         and delegated_session == session_id
     ):
-        raise PermissionError("goal snapshot delegated goal binding is stale or incomplete")
+        raise PermissionError("goal snapshot parent goal binding is stale or incomplete")
+
+    # The nested workflow normally carries no goal contract of its own.  If a
+    # projection does carry one, it must agree with the parent rather than
+    # widening the delegated read.
+    nested_goal_id = _text(projection.get("goal_id"))
+    nested_goal_revision = projection.get("goal_revision")
+    nested_authority_goal_id = _text(workflow_authority.get("goal_id"))
+    nested_authority_goal_revision = workflow_authority.get("goal_revision")
+    if (
+        (nested_goal_id and nested_goal_id != goal_id)
+        or (
+            nested_goal_revision is not None
+            and _positive_revision(nested_goal_revision) != goal_revision
+        )
+        or (nested_authority_goal_id and nested_authority_goal_id != goal_id)
+        or (
+            nested_authority_goal_revision is not None
+            and _positive_revision(nested_authority_goal_revision) != goal_revision
+        )
+    ):
+        raise PermissionError("goal snapshot nested goal binding is stale or mismatched")
 
     try:
         live_session = await authenticate_session(delegated_session, touch=False)
@@ -189,7 +299,15 @@ async def _load_delegated_goal(*, job_id: str, session_id: str):
         and live_principal_id == delegated_owner
         and bool(getattr(live_principal, "authenticated", False))
         and not bool(getattr(live_principal, "revoked", False))
-        and _text(getattr(live_session, "session_id", None))
+        and _text(getattr(live_session, "session_id", None)) == delegated_session
+        and (
+            not _text(getattr(live_principal, "session_id", None))
+            or _text(getattr(live_principal, "session_id", None)) == delegated_session
+        )
+        and (
+            not _text(getattr(live_principal, "operator_session_id", None))
+            or _text(getattr(live_principal, "operator_session_id", None)) == delegated_session
+        )
     ):
         raise PermissionError("goal snapshot owner session is not authenticated")
 

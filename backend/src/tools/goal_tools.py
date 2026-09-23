@@ -6,7 +6,12 @@ from typing import Optional
 
 from smolagents import tool
 
-from src.approval.runtime import get_current_session_id, get_current_trust_principal
+from src.approval.runtime import (
+    get_current_fencing_token,
+    get_current_lease_owner,
+    get_current_session_id,
+    get_current_trust_principal,
+)
 from src.auth.service import authenticate_session
 from src.goals.repository import GoalOwnershipConflict, goal_repository
 from src.security.trust_contract import AuthorityGrant, PrincipalType
@@ -141,7 +146,13 @@ def _service_goal_snapshot_context() -> tuple[str, str]:
     return job_id, conversation_session
 
 
-async def _load_delegated_goal(*, job_id: str, session_id: str):
+async def _load_delegated_goal(
+    *,
+    job_id: str,
+    session_id: str,
+    nested_fencing_token: str | None,
+    nested_lease_owner: str | None,
+):
     """Read exactly the goal delegated by a nested snapshot workflow run.
 
     The service principal is bound to the nested WorkflowTool run while its
@@ -162,8 +173,20 @@ async def _load_delegated_goal(*, job_id: str, session_id: str):
     persisted_job_id = _text(projection.get("job_id") or projection.get("run_identity"))
     workflow_owner = projection.get("owner")
     workflow_authority = projection.get("declared_authority")
-    if not isinstance(workflow_owner, Mapping) or not isinstance(workflow_authority, Mapping):
+    workflow_lease = projection.get("lease")
+    if (
+        not isinstance(workflow_owner, Mapping)
+        or not isinstance(workflow_authority, Mapping)
+        or not isinstance(workflow_lease, Mapping)
+    ):
         raise PermissionError("goal snapshot workflow delegation is incomplete")
+    try:
+        expected_nested_fence = int(str(nested_fencing_token or "").strip())
+    except (TypeError, ValueError, OverflowError):
+        expected_nested_fence = None
+    if expected_nested_fence is not None and expected_nested_fence < 1:
+        expected_nested_fence = None
+    expected_nested_owner = _text(nested_lease_owner)
     if (
         persisted_job_id != job_id
         or _text(projection.get("status")) != "running"
@@ -178,8 +201,13 @@ async def _load_delegated_goal(*, job_id: str, session_id: str):
         or _text(workflow_authority.get("service_id")) != _GOAL_SNAPSHOT_SERVICE_ID
         or _text(workflow_authority.get("session_id")) != session_id
         or _text(workflow_authority.get("capability")) != _GOAL_SNAPSHOT_WORKFLOW_TOOL_NAME
+        or not expected_nested_owner
+        or _text(workflow_lease.get("owner")) != expected_nested_owner
+        or expected_nested_fence is None
+        or _positive_revision(workflow_lease.get("fencing_token")) != expected_nested_fence
+        or _future_lease_expiry(workflow_lease.get("expires_at")) is None
     ):
-        raise PermissionError("goal snapshot workflow identity is stale or mismatched")
+        raise PermissionError("goal snapshot workflow identity or fence is stale or mismatched")
     persisted_operator_session = _text(projection.get("operator_session_id"))
     if persisted_operator_session and persisted_operator_session != session_id:
         raise PermissionError("goal snapshot workflow operator session is stale")
@@ -454,7 +482,14 @@ def get_goals(level: str = "", domain: str = "", status: str = "active") -> str:
         if level or domain or status not in {"", "active"}:
             raise PermissionError("goal snapshot service reads only its delegated goal")
         job_id, session_id = _service_goal_snapshot_context()
-        goal = _run(_load_delegated_goal(job_id=job_id, session_id=session_id))
+        goal = _run(
+            _load_delegated_goal(
+                job_id=job_id,
+                session_id=session_id,
+                nested_fencing_token=get_current_fencing_token(),
+                nested_lease_owner=get_current_lease_owner(),
+            )
+        )
         return _format_goal(goal)
 
     owner_principal_id, owner_session_id = _authenticated_goal_owner()

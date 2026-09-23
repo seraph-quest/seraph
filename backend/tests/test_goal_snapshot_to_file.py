@@ -12,7 +12,14 @@ from typing import Any
 import pytest
 
 from config.settings import settings
-from src.approval.runtime import reset_runtime_context, set_runtime_context
+from src.approval.runtime import (
+    reset_runtime_context,
+    reset_runtime_fencing_token,
+    reset_runtime_lease_owner,
+    set_runtime_context,
+    set_runtime_fencing_token,
+    set_runtime_lease_owner,
+)
 from src.db.models import Goal
 from src.goals.contracts import GoalCandidateRequest, GoalSuccessCriterion
 from src.goals.repository import serialize_success_criterion
@@ -303,6 +310,11 @@ def _goal_snapshot_projections(
         "capability_version": "workflow-v2",
         "session_id": goal.owner_session_id,
         "operator_session_id": None,
+        "lease": {
+            "owner": f"workflow-runner:{hashlib.sha256(job_id.encode()).hexdigest()[:20]}",
+            "fencing_token": 11,
+            "expires_at": (datetime.now(timezone.utc) + timedelta(seconds=60)).isoformat(),
+        },
         "declared_authority": nested_authority,
     }
     parent_authority = {
@@ -425,9 +437,15 @@ def test_goal_snapshot_get_goals_reads_only_the_delegated_goal(monkeypatch):
         "balanced",
         trust_principal=_goal_snapshot_service_principal(nested_job_id, goal.owner_session_id),
     )
+    nested_fence_token = set_runtime_fencing_token("11")
+    nested_owner_token = set_runtime_lease_owner(
+        f"workflow-runner:{hashlib.sha256(nested_job_id.encode()).hexdigest()[:20]}"
+    )
     try:
         result = get_goals.forward()
     finally:
+        reset_runtime_lease_owner(nested_owner_token)
+        reset_runtime_fencing_token(nested_fence_token)
         reset_runtime_context(tokens)
 
     assert result == "- [GoalLevel.daily/GoalDomain.productivity] Keep the operator plan current (id=goal-1, active)"
@@ -455,6 +473,12 @@ def test_goal_snapshot_get_goals_reads_only_the_delegated_goal(monkeypatch):
         lambda _nested, parent: parent["lease"].update(
             expires_at=(datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat()
         ),
+        lambda nested, _parent: nested.pop("lease"),
+        lambda nested, _parent: nested["lease"].update(fencing_token=12),
+        lambda nested, _parent: nested["lease"].update(owner="workflow-runner:stale"),
+        lambda nested, _parent: nested["lease"].update(
+            expires_at=(datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat()
+        ),
     ],
     ids=[
         "wrong-service",
@@ -469,6 +493,10 @@ def test_goal_snapshot_get_goals_reads_only_the_delegated_goal(monkeypatch):
         "missing-lease-expiry",
         "malformed-lease-expiry",
         "expired-lease",
+        "missing-nested-lease",
+        "stale-nested-fence",
+        "stale-nested-owner",
+        "expired-nested-lease",
     ],
 )
 def test_goal_snapshot_get_goals_rejects_stale_or_mismatched_delegation(
@@ -498,10 +526,16 @@ def test_goal_snapshot_get_goals_rejects_stale_or_mismatched_delegation(
         "balanced",
         trust_principal=_goal_snapshot_service_principal(nested_job_id, goal.owner_session_id),
     )
+    nested_fence_token = set_runtime_fencing_token("11")
+    nested_owner_token = set_runtime_lease_owner(
+        f"workflow-runner:{hashlib.sha256(nested_job_id.encode()).hexdigest()[:20]}"
+    )
     try:
         with pytest.raises(PermissionError):
             get_goals.forward()
     finally:
+        reset_runtime_lease_owner(nested_owner_token)
+        reset_runtime_fencing_token(nested_fence_token)
         reset_runtime_context(tokens)
 
 
@@ -583,10 +617,16 @@ def test_goal_snapshot_get_goals_rejects_invalid_live_owner_session(monkeypatch)
         "balanced",
         trust_principal=_goal_snapshot_service_principal(nested_job_id, goal.owner_session_id),
     )
+    nested_fence_token = set_runtime_fencing_token("11")
+    nested_owner_token = set_runtime_lease_owner(
+        f"workflow-runner:{hashlib.sha256(nested_job_id.encode()).hexdigest()[:20]}"
+    )
     try:
         with pytest.raises(PermissionError, match="owner session"):
             get_goals.forward()
     finally:
+        reset_runtime_lease_owner(nested_owner_token)
+        reset_runtime_fencing_token(nested_fence_token)
         reset_runtime_context(tokens)
 
 

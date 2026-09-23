@@ -1928,6 +1928,22 @@ class DurableJobRepository:
             db.expunge(run)
             return _serialize(run)
 
+    async def assert_active_lease(
+        self,
+        job_id: str,
+        *,
+        owner: str,
+        fencing_token: int,
+    ) -> dict[str, Any]:
+        """Re-read a running job and reject a stale or expired lease."""
+        async with self._session() as db:
+            run = await self._fetch(db, job_id)
+            if run.status != "running":
+                raise DurableJobLeaseError("durable job is not running")
+            self._assert_lease(run, owner=owner, fencing_token=fencing_token)
+            db.expunge(run)
+            return _serialize(run)
+
     async def get_by_idempotency_binding(
         self,
         *,

@@ -23,6 +23,7 @@ _current_trust_principal: ContextVar[TrustPrincipal | None] = ContextVar(
     default=None,
 )
 _current_fencing_token: ContextVar[str | None] = ContextVar("capability_fencing_token", default=None)
+_current_lease_owner: ContextVar[str | None] = ContextVar("durable_lease_owner", default=None)
 
 # Approval rows are consumed by the async repository and then handed to the
 # synchronous capability host.  The short-lived binding below is an opaque
@@ -234,6 +235,20 @@ def reset_runtime_fencing_token(token: Token) -> None:
 
 def get_current_fencing_token() -> str | None:
     return _current_fencing_token.get()
+
+
+def set_runtime_lease_owner(owner: str | None) -> Token:
+    """Bind the durable lease owner while a workflow step executes."""
+    normalized = str(owner).strip() if owner is not None else ""
+    return _current_lease_owner.set(normalized or None)
+
+
+def reset_runtime_lease_owner(token: Token) -> None:
+    _current_lease_owner.reset(token)
+
+
+def get_current_lease_owner() -> str | None:
+    return _current_lease_owner.get()
 
 
 def scheduled_workflow_service_principal(

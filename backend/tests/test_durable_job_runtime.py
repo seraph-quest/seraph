@@ -814,6 +814,14 @@ async def test_admission_is_idempotent_and_lifecycle_records_safe_receipts(async
     await durable_job_repository.queue_job(admitted["job_id"])
     claimed = await durable_job_repository.claim_job(admitted["job_id"], owner="runner-a")
     token = claimed["lease"]["fencing_token"]
+    current_lease = await durable_job_repository.assert_active_lease(
+        admitted["job_id"], owner="runner-a", fencing_token=token
+    )
+    assert current_lease["lease"]["owner"] == "runner-a"
+    with pytest.raises(DurableJobLeaseError):
+        await durable_job_repository.assert_active_lease(
+            admitted["job_id"], owner="runner-stale", fencing_token=token
+        )
     with pytest.raises(DurableJobLeaseError):
         await durable_job_repository.record_artifact(
             admitted["job_id"], file_path="reports/unsafe.json"
@@ -866,6 +874,69 @@ async def test_admission_is_idempotent_and_lifecycle_records_safe_receipts(async
     assert retried["status"] == "queued"
     assert retried["receipt"]["reconciliation_receipt_digest"]
     assert retried["effects"][0]["status"] == "reconciled"
+
+
+@pytest.mark.asyncio
+async def test_active_lease_read_rejects_stale_owner_fence_and_status(monkeypatch):
+    from src.workflows import job_runtime as job_runtime_module
+
+    repository = DurableJobRepository()
+    expiry = datetime.now(timezone.utc) + timedelta(minutes=1)
+    run = SimpleNamespace(
+        status="running",
+        lease_owner="runner-current",
+        fencing_token=8,
+        lease_expires_at=expiry,
+    )
+
+    class _Session:
+        def expunge(self, _run):
+            return None
+
+    class _SessionContext:
+        async def __aenter__(self):
+            return _Session()
+
+        async def __aexit__(self, *_args):
+            return None
+
+    async def fetch(_db, _job_id):
+        return run
+
+    monkeypatch.setattr(repository, "_session", lambda: _SessionContext())
+    monkeypatch.setattr(repository, "_fetch", fetch)
+    monkeypatch.setattr(
+        job_runtime_module,
+        "_serialize",
+        lambda _run: {"job_id": "job-lease-read", "status": run.status},
+    )
+
+    current = await repository.assert_active_lease(
+        "job-lease-read", owner="runner-current", fencing_token=8
+    )
+    assert current == {"job_id": "job-lease-read", "status": "running"}
+
+    with pytest.raises(DurableJobLeaseError):
+        await repository.assert_active_lease(
+            "job-lease-read", owner="runner-stale", fencing_token=8
+        )
+    with pytest.raises(DurableJobLeaseError):
+        await repository.assert_active_lease(
+            "job-lease-read", owner="runner-current", fencing_token=7
+        )
+
+    run.lease_expires_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+    with pytest.raises(DurableJobLeaseError, match="expired"):
+        await repository.assert_active_lease(
+            "job-lease-read", owner="runner-current", fencing_token=8
+        )
+
+    run.lease_expires_at = expiry
+    run.status = "blocked"
+    with pytest.raises(DurableJobLeaseError, match="not running"):
+        await repository.assert_active_lease(
+            "job-lease-read", owner="runner-current", fencing_token=8
+        )
 
 
 @pytest.mark.asyncio
@@ -1727,6 +1798,10 @@ async def test_illegal_transition_stale_lease_and_restart_recovery_are_fail_clos
     assert recovered_job["failure_reason"] == "stale_lease_requires_reconciliation"
     assert recovered_job["receipt"]["operator_action"] == "reconcile_effects_then_retry_or_cancel"
 
+    with pytest.raises(DurableJobLeaseError):
+        await durable_job_repository.assert_active_lease(
+            admitted["job_id"], owner="runner-a", fencing_token=token
+        )
     with pytest.raises(DurableJobLeaseError):
         await durable_job_repository.record_checkpoint(
             admitted["job_id"],

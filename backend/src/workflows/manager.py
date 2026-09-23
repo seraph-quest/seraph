@@ -21,10 +21,12 @@ from sqlmodel import col, select
 from src.audit.formatting import format_tool_call_summary, redact_for_audit
 from src.approval.runtime import (
     get_current_session_id,
-    reset_runtime_fencing_token,
     get_current_trust_principal,
+    reset_runtime_fencing_token,
+    reset_runtime_lease_owner,
     reset_runtime_trust_principal,
     set_runtime_fencing_token,
+    set_runtime_lease_owner,
     set_runtime_trust_principal,
 )
 from src.db.engine import get_session
@@ -176,6 +178,7 @@ def _workflow_durable_owner_fields() -> dict[str, str]:
 def _bind_workflow_step_trust_principal(
     run_identity: str,
     fencing_token: int | str | None,
+    lease_owner: str | None = None,
 ):
     """Bind the current durable run and fence only while a workflow step executes.
 
@@ -207,7 +210,8 @@ def _bind_workflow_step_trust_principal(
         else None
     )
     fencing_context_token = set_runtime_fencing_token(fence_token)
-    return principal_token, fencing_context_token
+    lease_owner_token = set_runtime_lease_owner(lease_owner)
+    return principal_token, fencing_context_token, lease_owner_token
 
 
 def _workflow_recovery_owner(principal_id: str, session_id: str) -> str:
@@ -1254,6 +1258,16 @@ class _CanonicalWorkflowStateWriter:
             },
         )
 
+    async def assert_active_lease(self) -> dict[str, Any]:
+        """Revalidate the durable lease immediately before step dispatch."""
+        self._assert_runtime_owner()
+        current = await self.repository.assert_active_lease(
+            self.job_id,
+            owner=self.owner,
+            fencing_token=self.fencing_token,
+        )
+        return self._sync(current)
+
     async def record_step_completed(self, **kwargs: Any) -> dict[str, Any]:
         self._assert_runtime_owner()
         step_id = str(kwargs.get("step_id") or "").strip()
@@ -1992,15 +2006,24 @@ class WorkflowTool(Tool):
             step_started_at = _utc_now_iso()
             started = time.perf_counter()
             try:
+                if isinstance(state_repository, _CanonicalWorkflowStateWriter):
+                    _run_workflow_state_write(
+                        state_repository,
+                        state_repository.assert_active_lease(),
+                        phase=f"step_dispatch:{step.id}",
+                    )
                 step_fence = (
                     state_repository.fencing_token
                     if isinstance(state_repository, _CanonicalWorkflowStateWriter)
                     else None
                 )
-                step_principal_token, step_fencing_context_token = (
+                step_principal_token, step_fencing_context_token, step_lease_owner_token = (
                     _bind_workflow_step_trust_principal(
                         durable_run_identity,
                         step_fence,
+                        state_repository.owner
+                        if isinstance(state_repository, _CanonicalWorkflowStateWriter)
+                        else None,
                     )
                 )
                 try:
@@ -2009,6 +2032,7 @@ class WorkflowTool(Tool):
                         sanitize_inputs_outputs=sanitize_inputs_outputs,
                     )
                 finally:
+                    reset_runtime_lease_owner(step_lease_owner_token)
                     reset_runtime_fencing_token(step_fencing_context_token)
                     if step_principal_token is not None:
                         reset_runtime_trust_principal(step_principal_token)

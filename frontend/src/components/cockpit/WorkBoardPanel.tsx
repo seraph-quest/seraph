@@ -85,6 +85,9 @@ const BOARD_REQUEST_TIMEOUT_MS = 15_000;
 export interface WorkBoardPanelProps {
   onOpenApprovals?: () => void;
   onInspectWorkflowRun?: (workflowRunId: string) => void;
+  onInspectArtifact?: (reference: WorkBoardReceiptReference) => void;
+  ownerPrincipalId?: string | null;
+  ownerSessionId?: string | null;
 }
 
 interface ApiErrorBody {
@@ -137,6 +140,33 @@ interface CreateDraft {
   scheduledAt: string;
   requiresReview: boolean;
   reviewerId: string;
+}
+
+interface PendingTaskCreate {
+  idempotencyKey: string;
+  draft: CreateDraft;
+  payload: WorkBoardTaskCreateRequest;
+}
+
+const pendingTaskCreates = new Map<string, PendingTaskCreate>();
+
+function emptyCreateDraft(): CreateDraft {
+  return {
+    title: "",
+    body: "",
+    goalId: "",
+    goalRevision: "",
+    status: "triage",
+    capabilityId: "",
+    typedInputRef: "",
+    typedInputDigest: "",
+    executorId: "",
+    assigneeId: "",
+    priority: "50",
+    scheduledAt: "",
+    requiresReview: false,
+    reviewerId: "",
+  };
 }
 
 interface EditDraft {
@@ -343,7 +373,19 @@ function safeReferenceLabel(reference: WorkBoardReceiptReference): string {
     || "Safe reference";
 }
 
-function WorkBoardPanel({ onOpenApprovals, onInspectWorkflowRun }: WorkBoardPanelProps) {
+function WorkBoardPanel({
+  onOpenApprovals,
+  onInspectWorkflowRun,
+  onInspectArtifact,
+  ownerPrincipalId,
+  ownerSessionId,
+}: WorkBoardPanelProps) {
+  const pendingCreateScope = ownerPrincipalId && ownerSessionId
+    ? `${ownerPrincipalId}\u0000${ownerSessionId}`
+    : null;
+  const pendingCreateAtMount = pendingCreateScope ? pendingTaskCreates.get(pendingCreateScope) ?? null : null;
+  const createIdempotencyRef = useRef(pendingCreateAtMount?.idempotencyKey ?? makeIdempotencyKey());
+  const [pendingCreate, setPendingCreate] = useState<PendingTaskCreate | null>(pendingCreateAtMount);
   const [tasks, setTasks] = useState<WorkBoardTask[]>([]);
   const [goals, setGoals] = useState<GoalInfo[]>([]);
   const [loading, setLoading] = useState(true);
@@ -363,28 +405,15 @@ function WorkBoardPanel({ onOpenApprovals, onInspectWorkflowRun }: WorkBoardPane
   const [actionError, setActionError] = useState<string | null>(null);
   const [moveFeedback, setMoveFeedback] = useState<string | null>(null);
   const [busyAction, setBusyAction] = useState(false);
-  const [createOpen, setCreateOpen] = useState(false);
-  const [createError, setCreateError] = useState<string | null>(null);
+  const [createOpen, setCreateOpen] = useState(Boolean(pendingCreateAtMount));
+  const [createError, setCreateError] = useState<string | null>(pendingCreateAtMount
+    ? "A previous create did not return a receipt. Retry the same request to reconcile it before editing or starting another task."
+    : null);
   const [createBusy, setCreateBusy] = useState(false);
   const [createLimit, setCreateLimit] = useState<WorkBoardExecutionLimits | null>(null);
   const [createLimitError, setCreateLimitError] = useState<string | null>(null);
   const [createLimitAcknowledged, setCreateLimitAcknowledged] = useState(false);
-  const [createDraft, setCreateDraft] = useState<CreateDraft>({
-    title: "",
-    body: "",
-    goalId: "",
-    goalRevision: "",
-    status: "triage",
-    capabilityId: "",
-    typedInputRef: "",
-    typedInputDigest: "",
-    executorId: "",
-    assigneeId: "",
-    priority: "50",
-    scheduledAt: "",
-    requiresReview: false,
-    reviewerId: "",
-  });
+  const [createDraft, setCreateDraft] = useState<CreateDraft>(() => pendingCreateAtMount?.draft ?? emptyCreateDraft());
   const [editMode, setEditMode] = useState(false);
   const [editDraft, setEditDraft] = useState<EditDraft | null>(null);
   const [detailLimit, setDetailLimit] = useState<WorkBoardExecutionLimits | null>(null);
@@ -1033,7 +1062,7 @@ function WorkBoardPanel({ onOpenApprovals, onInspectWorkflowRun }: WorkBoardPane
   };
 
   const closeCreateDialog = () => {
-    if (!createBusyRef.current) setCreateOpen(false);
+    if (!createBusyRef.current && !pendingCreate) setCreateOpen(false);
   };
 
   const createTask = async (event: FormEvent<HTMLFormElement>) => {
@@ -1058,7 +1087,7 @@ function WorkBoardPanel({ onOpenApprovals, onInspectWorkflowRun }: WorkBoardPane
       setCreateError("Priority must be between 0 and 100.");
       return;
     }
-    if (createDraft.status === "todo" && (!specComplete || !createLimit || !createLimitAcknowledged)) {
+    if (!pendingCreate && createDraft.status === "todo" && (!specComplete || !createLimit || !createLimitAcknowledged)) {
       setCreateError("A Todo task needs a complete typed capability specification and acknowledgment of its current runtime limit.");
       return;
     }
@@ -1089,32 +1118,54 @@ function WorkBoardPanel({ onOpenApprovals, onInspectWorkflowRun }: WorkBoardPane
       requires_review: createDraft.requiresReview,
       reviewer_id: createDraft.requiresReview ? createDraft.reviewerId.trim() : null,
     };
+    const pending = pendingCreate ?? {
+      idempotencyKey: createIdempotencyRef.current,
+      draft: { ...createDraft },
+      payload: body,
+    };
+    if (!pendingCreate) {
+      if (pendingCreateScope) pendingTaskCreates.set(pendingCreateScope, pending);
+      setPendingCreate(pending);
+    }
     setCreateBusy(true);
     try {
       const response = await requestBoard<{ task: WorkBoardTask; idempotent_replay: boolean }>("/tasks", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
+        body: JSON.stringify(pending.payload),
       });
+      if (pendingCreateScope && pendingTaskCreates.get(pendingCreateScope)?.idempotencyKey === pending.idempotencyKey) {
+        pendingTaskCreates.delete(pendingCreateScope);
+      }
+      setPendingCreate(null);
       createIdempotencyRef.current = makeIdempotencyKey();
       setCreateOpen(false);
-      setCreateDraft({
-        title: "", body: "", goalId: "", goalRevision: "", status: "triage", capabilityId: "",
-        typedInputRef: "", typedInputDigest: "", executorId: "", assigneeId: "", priority: "50",
-        scheduledAt: "", requiresReview: false, reviewerId: "",
-      });
+      setCreateDraft(emptyCreateDraft());
       await refreshSnapshot();
       openTask(response.task.task_id);
       setAnnouncement(response.idempotent_replay ? "The matching task already exists." : "Task created in the canonical work board.");
     } catch (error) {
-      setCreateError(inputErrorMessage(error));
-      if (error instanceof WorkBoardApiError && error.status === 409) await refreshSnapshot();
+      const definitiveRejection = error instanceof WorkBoardApiError
+        && error.status >= 400
+        && error.status < 500
+        && error.code !== "idempotency_conflict";
+      if (definitiveRejection) {
+        if (pendingCreateScope && pendingTaskCreates.get(pendingCreateScope)?.idempotencyKey === pending.idempotencyKey) {
+          pendingTaskCreates.delete(pendingCreateScope);
+        }
+        setPendingCreate(null);
+        createIdempotencyRef.current = makeIdempotencyKey();
+      }
+      if (!stoppedRef.current) {
+        setCreateError(definitiveRejection
+          ? inputErrorMessage(error)
+          : "The create receipt was not confirmed. Retry the unchanged request to reconcile it with the same idempotency key.");
+        if (error instanceof WorkBoardApiError && error.status === 409) await refreshSnapshot();
+      }
     } finally {
-      setCreateBusy(false);
+      if (!stoppedRef.current) setCreateBusy(false);
     }
   };
-
-  const createIdempotencyRef = useRef(makeIdempotencyKey());
 
   const setCreateField = <K extends keyof CreateDraft>(key: K, value: CreateDraft[K]) => {
     setCreateDraft((current) => ({ ...current, [key]: value }));
@@ -1279,22 +1330,26 @@ function WorkBoardPanel({ onOpenApprovals, onInspectWorkflowRun }: WorkBoardPane
     setBusyAction(true);
     setActionError(null);
     try {
-      await boardRequest(`/links`, {
+      await requestBoard(`/links`, {
         method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
       });
+      if (stoppedRef.current) return;
       setParentTaskIdDraft("");
       setChildTaskIdDraft("");
       await refreshSelectedTask();
+      if (stoppedRef.current) return;
       await refreshSnapshot();
     } catch (error) {
+      if (stoppedRef.current) return;
       setActionError(inputErrorMessage(error));
       if (error instanceof WorkBoardApiError && error.status === 409) {
         setStale(true);
         await refreshSnapshot();
+        if (stoppedRef.current) return;
         await refreshSelectedTask();
       }
     } finally {
-      setBusyAction(false);
+      if (!stoppedRef.current) setBusyAction(false);
     }
   };
 
@@ -1307,20 +1362,24 @@ function WorkBoardPanel({ onOpenApprovals, onInspectWorkflowRun }: WorkBoardPane
     setBusyAction(true);
     setActionError(null);
     try {
-      await boardRequest(`/links`, {
+      await requestBoard(`/links`, {
         method: "DELETE", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
       });
+      if (stoppedRef.current) return;
       await refreshSelectedTask();
+      if (stoppedRef.current) return;
       await refreshSnapshot();
     } catch (error) {
+      if (stoppedRef.current) return;
       setActionError(inputErrorMessage(error));
       if (error instanceof WorkBoardApiError && error.status === 409) {
         setStale(true);
         await refreshSnapshot();
+        if (stoppedRef.current) return;
         await refreshSelectedTask();
       }
     } finally {
-      setBusyAction(false);
+      if (!stoppedRef.current) setBusyAction(false);
     }
   };
 
@@ -1703,6 +1762,7 @@ function WorkBoardPanel({ onOpenApprovals, onInspectWorkflowRun }: WorkBoardPane
                           <div>{receipt.status ?? receipt.outcome ?? "Receipt"}{receipt.verified === true ? " · verified" : ""}{receipt.readback_status ? ` · readback ${READBACK_LABELS[receipt.readback_status]}` : ""}</div>
                           {receipt.content_sha256 && <div className="break-all font-mono text-[10px]">SHA-256 {receipt.content_sha256}</div>}
                           {receipt.file_path && <div className="break-all text-[10px]">Artifact path {receipt.file_path}</div>}
+                          {(receipt.file_path || receipt.artifact_id) && onInspectArtifact && <button type="button" className="mt-1 underline" aria-label={`Inspect artifact ${receipt.file_path ?? receipt.artifact_id}`} onClick={() => onInspectArtifact(receipt)}>Inspect artifact</button>}
                           {receipt.workflow_run_id && onInspectWorkflowRun && <button type="button" className="underline" onClick={() => onInspectWorkflowRun(receipt.workflow_run_id!)}>Inspect existing workflow record</button>}
                         </div>
                       ))}
@@ -1714,6 +1774,7 @@ function WorkBoardPanel({ onOpenApprovals, onInspectWorkflowRun }: WorkBoardPane
                       <div>{reference.status ?? reference.outcome ?? "Reference"}{reference.verified === true ? " · verified" : ""}</div>
                       {reference.content_sha256 && <div className="break-all font-mono text-[10px]">SHA-256 {reference.content_sha256}</div>}
                       {reference.file_path && <div className="break-all text-[10px]">Artifact path {reference.file_path}</div>}
+                      {(reference.file_path || reference.artifact_id) && onInspectArtifact && <button type="button" className="mt-1 underline" aria-label={`Inspect artifact ${reference.file_path ?? reference.artifact_id}`} onClick={() => onInspectArtifact(reference)}>Inspect artifact</button>}
                       {reference.workflow_run_id && onInspectWorkflowRun && <button type="button" className="underline" onClick={() => onInspectWorkflowRun(reference.workflow_run_id!)}>Open workflow evidence</button>}
                     </div>
                   ))}
@@ -1747,11 +1808,12 @@ function WorkBoardPanel({ onOpenApprovals, onInspectWorkflowRun }: WorkBoardPane
       {createOpen && (
         <div className="fixed inset-0 z-[90] flex items-center justify-center bg-black/65 p-4" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) closeCreateDialog(); }}>
           <form ref={createDialogRef} role="dialog" aria-modal="true" aria-labelledby="work-board-create-title" tabIndex={-1} className="max-h-[90vh] w-full max-w-2xl overflow-y-auto rounded border border-white/15 bg-slate-950 p-4 shadow-2xl" onSubmit={(event) => void createTask(event)}>
-            <div className="flex items-center justify-between gap-2"><h2 id="work-board-create-title" className="text-lg font-semibold">Create a goal-linked task</h2><button type="button" className="cockpit-feedback-button" onClick={closeCreateDialog} disabled={createBusy}>Close</button></div>
+            <div className="flex items-center justify-between gap-2"><h2 id="work-board-create-title" className="text-lg font-semibold">Create a goal-linked task</h2><button type="button" className="cockpit-feedback-button" onClick={closeCreateDialog} disabled={createBusy || Boolean(pendingCreate)}>Close</button></div>
             <p className="mt-1 text-xs opacity-70">A free-text idea starts in Triage. Todo requires a typed capability input and current runtime-limit acknowledgment. The dispatcher alone promotes eligible work to Ready.</p>
+            {pendingCreate && <p className="mt-2 rounded border border-amber-500/40 p-2 text-sm" role="status">This exact task request has an unconfirmed receipt. Its fields and idempotency key are held until the server confirms the existing task or accepts the same request.</p>}
             {createError && <div className="mt-2 rounded border border-amber-500/40 p-2 text-sm" role="alert">{createError}</div>}
-            <div className="mt-3 grid gap-3 sm:grid-cols-2">
-              <label className="sm:col-span-2">Title<input className="cockpit-input mt-1 w-full" autoFocus maxLength={200} required value={createDraft.title} onChange={(event) => setCreateField("title", event.currentTarget.value)} /></label>
+            <fieldset disabled={Boolean(pendingCreate)} className="mt-3 grid gap-3 sm:grid-cols-2">
+              <label className="sm:col-span-2">Title<input className="cockpit-input mt-1 w-full" autoFocus={!pendingCreate} maxLength={200} required value={createDraft.title} onChange={(event) => setCreateField("title", event.currentTarget.value)} /></label>
               <label className="sm:col-span-2">Bounded task description<textarea className="cockpit-input mt-1 w-full" maxLength={4000} rows={3} value={createDraft.body} onChange={(event) => setCreateField("body", event.currentTarget.value)} /></label>
               <label>Goal<select className="cockpit-input mt-1 w-full" required value={createDraft.goalId} onChange={(event) => selectGoal(event.currentTarget.value)}><option value="">Choose a goal</option>{allGoals.map((goal) => <option key={goal.id} value={goal.id}>{goal.title} · {goal.id}</option>)}</select></label>
               <label>Goal revision<input className="cockpit-input mt-1 w-full" type="number" min={1} readOnly value={createDraft.goalRevision} aria-readonly="true" /></label>
@@ -1769,8 +1831,8 @@ function WorkBoardPanel({ onOpenApprovals, onInspectWorkflowRun }: WorkBoardPane
                 <div className="font-semibold">Effective runtime limit</div>
                 {!createDraft.goalId ? <div className="text-xs opacity-70">Choose a goal to read its current server-derived execution limit.</div> : createLimit ? <><div>{createLimit.effective_max_runtime_seconds} seconds · source {createLimit.limit_source} · hard ceiling {createLimit.hard_max_runtime_seconds} seconds · {createLimit.attempt_limit} attempts</div><label className="mt-2 flex items-start gap-2"><input type="checkbox" checked={createLimitAcknowledged} onChange={(event) => setCreateLimitAcknowledged(event.currentTarget.checked)} /><span>I acknowledge this current limit. It cannot be increased from the board.</span></label></> : <div className="text-xs text-amber-200">{createLimitError ?? "Checking the current goal revision and limit…"}</div>}
               </div>
-            </div>
-            <div className="mt-3 flex flex-wrap justify-end gap-2"><button type="button" className="cockpit-feedback-button" onClick={closeCreateDialog} disabled={createBusy}>Cancel</button><button type="submit" className="cockpit-feedback-button" disabled={createBusy || !createDraft.goalId || !createDraft.goalRevision || (createDraft.status === "todo" && (!createLimit || !createLimitAcknowledged || !createDraft.capabilityId.trim() || !createDraft.typedInputRef.trim() || !hasValidDigest(createDraft.typedInputDigest)))}>{createBusy ? "Creating…" : createDraft.status === "triage" ? "Create in Triage" : "Create specified Todo"}</button></div>
+            </fieldset>
+            <div className="mt-3 flex flex-wrap justify-end gap-2"><button type="button" className="cockpit-feedback-button" onClick={closeCreateDialog} disabled={createBusy || Boolean(pendingCreate)}>Cancel</button><button type="submit" className="cockpit-feedback-button" disabled={createBusy || (!pendingCreate && (!createDraft.goalId || !createDraft.goalRevision || (createDraft.status === "todo" && (!createLimit || !createLimitAcknowledged || !createDraft.capabilityId.trim() || !createDraft.typedInputRef.trim() || !hasValidDigest(createDraft.typedInputDigest)))))}>{createBusy ? "Creating…" : pendingCreate ? "Retry create and reconcile" : createDraft.status === "triage" ? "Create in Triage" : "Create specified Todo"}</button></div>
           </form>
         </div>
       )}

@@ -134,7 +134,12 @@ function limits(goalRevision = 3) {
   };
 }
 
-function taskResponse(fetchMock: ReturnType<typeof vi.fn>, currentTask: WorkBoardTask, eventCursor = 7) {
+function taskResponse(
+  fetchMock: ReturnType<typeof vi.fn>,
+  currentTask: WorkBoardTask,
+  eventCursor = 7,
+  currentDetail = detail(currentTask),
+) {
   fetchMock.mockImplementation((input: RequestInfo | URL) => {
     const url = String(input);
     if (url.includes("/api/work-board/tasks?") && !url.match(/\/tasks\/[^?]+/)) {
@@ -146,7 +151,7 @@ function taskResponse(fetchMock: ReturnType<typeof vi.fn>, currentTask: WorkBoar
       return Promise.resolve(response(limits(currentTask.goal_revision)));
     }
     if (url.includes(`/api/work-board/tasks/${currentTask.task_id}`)) {
-      return Promise.resolve(response(detail(currentTask)));
+      return Promise.resolve(response(currentDetail));
     }
     return Promise.resolve(response({}));
   });
@@ -496,6 +501,136 @@ describe("WorkBoardPanel", () => {
     await act(async () => { resolveLateA?.(response(detail({ ...taskA, title: "Stale Task A response", task_revision: 99 }))); });
     expect(within(taskDetails).getByText("Task B")).toBeInTheDocument();
     expect(screen.queryByText("Stale Task A response")).not.toBeInTheDocument();
+  });
+
+  it("aborts a pending dependency link on unmount without refreshing after cleanup", async () => {
+    const parent = task({ task_id: "task-parent", title: "Parent task" });
+    const child = task({ task_id: "task-child", creation_sequence: 2, title: "Child task" });
+    let resolveLink: ((value: ReturnType<typeof response>) => void) | null = null;
+    const linkRequest = { signal: null as AbortSignal | null };
+    fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes("/api/work-board/tasks?") && !url.match(/\/tasks\/[^?]+/)) return Promise.resolve(response(page([parent, child])));
+      if (url.includes("/api/work-board/events")) return Promise.resolve(response(events()));
+      if (url.endsWith("/api/goals/tree")) return Promise.resolve(response([]));
+      if (url.endsWith("/api/work-board/tasks/task-child")) return Promise.resolve(response(detail(child)));
+      if (url.endsWith("/api/work-board/links") && init?.method === "POST") {
+        linkRequest.signal = init.signal as AbortSignal;
+        return new Promise<ReturnType<typeof response>>((resolve) => { resolveLink = resolve; });
+      }
+      return Promise.resolve(response({}));
+    });
+
+    const { unmount } = render(<WorkBoardPanel />);
+    fireEvent.click(await screen.findByRole("button", { name: "Open task Child task" }));
+    fireEvent.change(await screen.findByLabelText("Parent task ID"), { target: { value: "task-parent" } });
+    fireEvent.click(screen.getByRole("button", { name: "Add parent" }));
+    await waitFor(() => expect(resolveLink).not.toBeNull());
+
+    const callsBeforeUnmount = fetchMock.mock.calls.length;
+    unmount();
+    expect(linkRequest.signal?.aborted).toBe(true);
+    await act(async () => { resolveLink?.(response({ link: {} })); });
+
+    expect(fetchMock.mock.calls).toHaveLength(callsBeforeUnmount);
+  });
+
+  it("opens task artifact references through the existing artifact inspector callback", async () => {
+    const reference = { artifact_id: "artifact:notes/result.md", file_path: "notes/result.md", content_sha256: "b".repeat(64), verified: true };
+    const currentTask = task({
+      title: "Artifact task",
+      artifact_refs: [reference],
+      result_refs: [],
+    });
+    const onInspectArtifact = vi.fn();
+    taskResponse(fetchMock, currentTask);
+    render(<WorkBoardPanel onInspectArtifact={onInspectArtifact} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Open task Artifact task" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Inspect artifact notes/result.md" }));
+
+    expect(onInspectArtifact).toHaveBeenCalledWith(reference);
+  });
+
+  it("opens attempt receipt artifacts through the existing artifact inspector callback", async () => {
+    const reference = { artifact_id: "artifact:attempt-output", file_path: "artifacts/output.md", verified: true };
+    const currentTask = task({ title: "Attempt artifact task" });
+    taskResponse(fetchMock, currentTask, 7, detail(currentTask, {
+      attempts: [endedAttempt({ receipt_refs: [reference] })],
+    }));
+    const onInspectArtifact = vi.fn();
+    render(<WorkBoardPanel onInspectArtifact={onInspectArtifact} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Open task Attempt artifact task" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Inspect artifact artifacts/output.md" }));
+
+    expect(onInspectArtifact).toHaveBeenCalledWith(reference);
+  });
+
+  it("retries an uncertain create with the same payload and idempotency key after remount", async () => {
+    const goal = {
+      id: "goal-pending-create",
+      parent_id: null,
+      path: "goal-pending-create",
+      level: "daily",
+      title: "Pending create goal",
+      description: null,
+      status: "active",
+      domain: "productivity",
+      start_date: null,
+      due_date: null,
+      revision: 1,
+    };
+    const createdTask = task({ task_id: "task-created-once", title: "Create once", goal_id: goal.id, goal_revision: 1 });
+    let postCount = 0;
+    let accepted = false;
+    let retryPayload: Record<string, unknown> | null = null;
+    const firstRequest = { payload: null as Record<string, unknown> | null, signal: null as AbortSignal | null };
+    let resolveFirst: ((value: ReturnType<typeof response>) => void) | null = null;
+    fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes("/api/work-board/tasks?") && !url.match(/\/tasks\/[^?]+/)) return Promise.resolve(response(page(accepted ? [createdTask] : [])));
+      if (url.includes("/api/work-board/events")) return Promise.resolve(response(events()));
+      if (url.endsWith("/api/goals/tree")) return Promise.resolve(response([goal]));
+      if (url.endsWith(`/api/work-board/goals/${goal.id}/execution-limits`)) return Promise.resolve(response(limits(1)));
+      if (url.endsWith("/api/work-board/tasks") && init?.method === "POST") {
+        postCount += 1;
+        const payload = JSON.parse(String(init.body)) as Record<string, unknown>;
+        if (postCount === 1) {
+          firstRequest.payload = payload;
+          firstRequest.signal = init.signal as AbortSignal;
+          return new Promise<ReturnType<typeof response>>((resolve) => { resolveFirst = resolve; });
+        }
+        retryPayload = payload;
+        return Promise.resolve(response({ task: createdTask, idempotent_replay: true }));
+      }
+      if (url.endsWith(`/api/work-board/tasks/${createdTask.task_id}`)) return Promise.resolve(response(detail(createdTask)));
+      return Promise.resolve(response({}));
+    });
+
+    const props = { ownerPrincipalId: "operator:pending-create", ownerSessionId: "session:pending-create" };
+    const firstMount = render(<WorkBoardPanel {...props} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Create task" }));
+    fireEvent.change(await screen.findByLabelText("Title"), { target: { value: "Create once" } });
+    fireEvent.change(screen.getByLabelText("Goal"), { target: { value: goal.id } });
+    fireEvent.click(screen.getByRole("button", { name: "Create in Triage" }));
+    await waitFor(() => expect(resolveFirst).not.toBeNull());
+
+    firstMount.unmount();
+    expect(firstRequest.signal?.aborted).toBe(true);
+    accepted = true;
+    await act(async () => { resolveFirst?.(response({ task: createdTask, idempotent_replay: false })); });
+
+    render(<WorkBoardPanel {...props} />);
+    const dialog = await screen.findByRole("dialog", { name: "Create a goal-linked task" });
+    expect(within(dialog).getByLabelText("Title")).toHaveValue("Create once");
+    expect(within(dialog).getByLabelText("Title")).toBeDisabled();
+    expect(within(dialog).getByRole("status")).toHaveTextContent(/unconfirmed receipt/i);
+    fireEvent.click(within(dialog).getByRole("button", { name: "Retry create and reconcile" }));
+
+    await waitFor(() => expect(postCount).toBe(2));
+    expect(retryPayload).toEqual(firstRequest.payload);
+    expect(await screen.findByRole("region", { name: "Task details for Create once" })).toBeInTheDocument();
   });
 
   it("keeps task details modeless and restores focus to the opener when closed", async () => {

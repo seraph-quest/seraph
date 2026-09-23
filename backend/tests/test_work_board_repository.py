@@ -423,6 +423,49 @@ async def test_dependency_cycle_rejected(async_db):
 
 
 @pytest.mark.asyncio
+async def test_task_detail_reports_owned_dependency_progress(monkeypatch):
+    class FakeResult:
+        def __init__(self, rows=()):
+            self.rows = list(rows)
+
+        def scalars(self):
+            return self
+
+        def all(self):
+            return self.rows
+
+    child = WorkBoardTask(
+        task_id="detail-progress-child",
+        owner_principal_id=OWNER.principal_id,
+        owner_session_id=OWNER.session_id,
+        goal_id="goal-1",
+        title="Child",
+        idempotency_key="detail-progress-child",
+    )
+    repository = WorkBoardRepository()
+    monkeypatch.setattr(repository, "_owned_task", AsyncMock(return_value=child))
+
+    async def get_progress(parent_status):
+        db = type("FakeSession", (), {})()
+        db.execute = AsyncMock(
+            side_effect=[
+                FakeResult(),  # attempts
+                FakeResult(),  # comments
+                FakeResult([("detail-progress-parent", parent_status)]),
+                FakeResult(),  # children
+                FakeResult(),  # events
+            ]
+        )
+        return await repository.get_detail(db, OWNER, child.task_id)
+
+    incomplete = await get_progress(WorkBoardStatus.triage)
+    completed = await get_progress(WorkBoardStatus.done)
+
+    assert incomplete["dependency_counts"] == (1, 0)
+    assert completed["dependency_counts"] == (1, 1)
+
+
+@pytest.mark.asyncio
 async def test_triage_requires_typed_spec_before_promotion(async_db):
     async with async_db() as db:
         mutation = await _create(db, key="promote")

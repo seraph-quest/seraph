@@ -398,7 +398,7 @@ def test_detail_reference_serializers_drop_unknown_private_values():
     )
 
     attempt_payload = _attempt_payload(attempt)
-    task_payload = serialize_task_payload(task)
+    task_payload = serialize_task_payload(task, dependency_counts=(2, 1))
     serialized = json.dumps({"attempt": attempt_payload, "task": task_payload})
     assert attempt_payload["workflow_run_id"] is None
     assert attempt_payload["receipt_refs"] == [
@@ -424,6 +424,8 @@ def test_detail_reference_serializers_drop_unknown_private_values():
     assert task_payload["artifact_refs"] == [
         {"artifact_id": "artifact:2", "target_path": "derived/result.txt"}
     ]
+    assert task_payload["dependency_count"] == 2
+    assert task_payload["completed_dependency_count"] == 1
     assert "PRIVATE" not in serialized
     assert "/private" not in serialized
 

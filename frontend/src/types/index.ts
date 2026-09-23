@@ -110,6 +110,161 @@ export interface GoalInfo {
   success_criterion?: GoalSuccessCriterion | null;
 }
 
+/** Canonical task states exposed by the authenticated operator work board. */
+export type WorkBoardTaskStatus =
+  | "triage"
+  | "todo"
+  | "ready"
+  | "running"
+  | "blocked"
+  | "review"
+  | "done"
+  | "archived";
+
+export type WorkBoardBlockKind =
+  | "dependency"
+  | "needs_input"
+  | "capability"
+  | "transient"
+  | "cancelled"
+  | "review_expired"
+  | "unknown_effect"
+  | "operator";
+
+/**
+ * Operator-safe receipt/artifact projection returned by the work-board API.
+ *
+ * This is deliberately a closed set. The backend strips workflow payloads and
+ * secrets before storing these references, and the UI must not render unknown
+ * object fields as arbitrary JSON or prose.
+ */
+export interface WorkBoardSafeReference {
+  artifact_id?: string | null;
+  artifact_type?: string | null;
+  file_path?: string | null;
+  content_sha256?: string | null;
+  size_bytes?: number | null;
+  exists?: boolean | null;
+  effect_id?: string | null;
+  effect_type?: string | null;
+  status?: string | null;
+  verified?: boolean | null;
+  target_digest?: string | null;
+  target_path?: string | null;
+  job_id?: string | null;
+  workflow_run_id?: string | null;
+  recovery_action?: string | null;
+  reason_code?: string | null;
+  error_code?: string | null;
+  child_job_id?: string | null;
+}
+
+export type WorkBoardReference = string | WorkBoardSafeReference;
+
+export interface WorkBoardTask {
+  task_id: string;
+  creation_sequence?: number;
+  owner_principal_id?: string;
+  owner_session_id?: string;
+  origin_thread_id?: string | null;
+  goal_id: string;
+  goal_revision: number;
+  title: string;
+  body?: string | null;
+  capability_id?: string | null;
+  typed_input_ref?: string | null;
+  typed_input_digest?: string | null;
+  executor_id?: string | null;
+  assignee_id?: string | null;
+  priority: number;
+  idempotency_scope?: string | null;
+  idempotency_key?: string | null;
+  scheduled_at?: string | null;
+  status: WorkBoardTaskStatus;
+  block_kind?: WorkBoardBlockKind | null;
+  block_reason?: string | null;
+  block_source_status?: WorkBoardTaskStatus | null;
+  requires_review: boolean;
+  reviewer_id?: string | null;
+  /** Detail responses expose this as `revision`; task list payloads may use `task_revision`. */
+  revision?: number;
+  task_revision?: number;
+  created_at: string;
+  updated_at: string;
+  completed_at?: string | null;
+  archived_at?: string | null;
+  result_refs?: WorkBoardReference[];
+  artifact_refs?: WorkBoardReference[];
+  dependency_count?: number;
+  completed_dependency_count?: number;
+  latest_attempt?: WorkBoardAttempt | null;
+}
+
+export interface WorkBoardAttempt {
+  attempt_id: string;
+  task_id?: string;
+  workflow_run_id?: string | null;
+  task_revision_at_claim: number;
+  lease_owner?: string | null;
+  lease_expires_at?: string | null;
+  lease_heartbeat_at?: string | null;
+  heartbeat_at?: string | null;
+  fence?: number | null;
+  fencing_token?: number | null;
+  executor_id?: string | null;
+  started_at?: string | null;
+  ended_at?: string | null;
+  outcome?: string | null;
+  receipt_refs?: WorkBoardReference[];
+  artifact_refs?: WorkBoardReference[];
+  readback_status?: string | null;
+}
+
+export interface WorkBoardLink {
+  parent_task_id: string;
+  child_task_id: string;
+  created_at?: string;
+}
+
+export interface WorkBoardComment {
+  comment_id: string;
+  task_id?: string;
+  author_principal_id?: string;
+  body: string;
+  created_at: string;
+}
+
+export interface WorkBoardEvent {
+  event_id: number;
+  task_id: string;
+  actor?: string | null;
+  kind: string;
+  created_at: string;
+  metadata?: Record<string, unknown>;
+}
+
+export interface WorkBoardTaskDetail extends WorkBoardTask {
+  attempts: WorkBoardAttempt[];
+  parents: WorkBoardLink[];
+  children: WorkBoardLink[];
+  comments: WorkBoardComment[];
+  events: WorkBoardEvent[];
+  recovery_action?: string | null;
+}
+
+export interface WorkBoardTaskListResponse {
+  tasks: WorkBoardTask[];
+  next_after?: number | string | null;
+  last_event_id?: number | null;
+  gap?: boolean;
+}
+
+export interface WorkBoardEventListResponse {
+  events: WorkBoardEvent[];
+  last_event_id?: number | null;
+  gap?: boolean;
+}
+
 /** The smaller goal shape returned by the loop inspection endpoint. */
 export interface GoalLoopGoal {
   id: string;

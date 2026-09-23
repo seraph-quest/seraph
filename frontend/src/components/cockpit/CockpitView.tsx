@@ -62,6 +62,7 @@ import {
 } from "./cockpitAuthority";
 import { SeraphPresencePane } from "./SeraphPresencePane";
 import { PttAudioControl } from "../chat/PttAudioControl";
+import { WorkBoardPanel } from "./WorkBoardPanel";
 
 interface CockpitViewProps {
   onSend: (message: string) => boolean | void | Promise<boolean | void>;
@@ -8165,6 +8166,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
         || paneVisibility.goals_pane
         || paneVisibility.outputs_pane
         || paneVisibility.approvals_pane,
+      workBoard: paneVisibility.work_board_pane,
       guardianState: paneVisibility.guardian_state_pane,
       timeline: paneVisibility.operator_timeline_pane,
       workflows: paneVisibility.workflows_pane,
@@ -15870,6 +15872,21 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                 )}
               </div>
             </section>
+          </CockpitWorkspaceWindow>
+        )}
+
+        {visibleSections.workBoard && (
+          <CockpitWorkspaceWindow
+            panelId="work_board_pane"
+            title="Work board"
+            meta="canonical operator tasks"
+            hint="Bounded task intent and recovery controls. Workflow runs remain the execution authority."
+            showHint={cockpitHintsEnabled}
+            minWidth={420}
+            minHeight={280}
+            onClose={() => closeWindowPane("work_board_pane")}
+          >
+            <WorkBoardPanel onStatus={setOperatorStatus} />
           </CockpitWorkspaceWindow>
         )}
 

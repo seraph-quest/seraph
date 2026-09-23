@@ -22,7 +22,8 @@ export const PANEL_MIN_SIZES: Record<string, { width: number; height: number }> 
   sessions_pane: { width: 224, height: 96 },
   goals_pane: { width: 224, height: 112 },
   outputs_pane: { width: 224, height: 96 },
-  presence_pane: { width: 432, height: 384 },
+  work_board_pane: { width: 420, height: 280 },
+  presence_pane: { width: 560, height: 384 },
   approvals_pane: { width: 224, height: 112 },
   operator_timeline_pane: { width: 304, height: 176 },
   response_pane: { width: 224, height: 112 },
@@ -71,7 +72,7 @@ interface LayoutColumn {
 const DEFAULT_LEFT_COLUMNS: LayoutColumn[] = [
   { weight: 0.76, panes: ["sessions_pane", "goals_pane", "outputs_pane"] },
   { weight: 1.12, panes: ["response_pane", "guardian_state_pane", "interventions_pane", "conversation_pane"] },
-  { weight: 1.08, panes: ["operator_timeline_pane", "workflows_pane", "approvals_pane", "inspector_pane"] },
+  { weight: 1.08, panes: ["operator_timeline_pane", "work_board_pane", "workflows_pane", "approvals_pane", "inspector_pane"] },
 ];
 
 const DEFAULT_RIGHT_ZONE_WEIGHT = 1.84;
@@ -91,7 +92,7 @@ const LAYOUT_COLUMNS: Record<CockpitLayoutId, LayoutColumn[]> = {
     { weight: 1.12, panes: ["conversation_pane", "operator_surface_pane", "desktop_shell_pane"] },
   ],
   review: [
-    { weight: 1.08, panes: ["response_pane", "operator_timeline_pane", "workflows_pane"] },
+    { weight: 1.08, panes: ["response_pane", "operator_timeline_pane", "work_board_pane", "workflows_pane"] },
     { weight: 0.94, panes: ["interventions_pane", "approvals_pane"] },
     { weight: 1.22, panes: ["audit_pane", "trace_pane", "inspector_pane"] },
   ],
@@ -124,8 +125,16 @@ function distributeHeights(
   const minTotal = mins.reduce((sum, value) => sum + value, 0);
 
   if (usable <= minTotal) {
-    const compact = snap(usable / ids.length);
-    const heights = ids.map((id) => Math.max(PANEL_MIN_SIZES[id]?.height ?? 96, compact));
+    // Preserve the column and its gaps when a five-pane stack cannot fit at
+    // every drag-resize minimum. Packed panes remain scrollable; allowing the
+    // stack to compact is safer than clipping the workspace below the frame.
+    const scale = minTotal > 0 ? usable / minTotal : 0;
+    const heights = mins.map((minimum, index) => {
+      if (index === mins.length - 1) return 0;
+      return Math.max(1, Math.floor((minimum * scale) / PANEL_GRID_SIZE) * PANEL_GRID_SIZE);
+    });
+    const used = heights.reduce((sum, value) => sum + value, 0);
+    heights[heights.length - 1] = Math.max(1, usable - used);
     return heights;
   }
 
@@ -156,18 +165,24 @@ function buildPanelsForColumns(frame: ReturnType<typeof getWorkspaceFrame>, colu
   const totalGap = WORKSPACE_GAP * (columnCount - 1);
   const availableWidth = frame.width - totalGap;
   const totalWeight = columns.reduce((sum, column) => sum + column.weight, 0);
+  const minWidths = columns.map((column) => Math.max(...column.panes.map((id) => PANEL_MIN_SIZES[id]?.width ?? 224)));
+  const minWidthTotal = minWidths.reduce((sum, width) => sum + width, 0);
+  const widthScale = minWidthTotal > 0 && availableWidth < minWidthTotal
+    ? Math.max(0, availableWidth / minWidthTotal)
+    : 1;
+  const flexWidth = Math.max(0, availableWidth - minWidthTotal);
+  const idealWidths = minWidths.map((minimum, index) =>
+    minimum * widthScale + (flexWidth * widthScale * columns[index].weight) / totalWeight,
+  );
   const columnWidths: number[] = [];
   let assignedWidth = 0;
 
-  columns.forEach((column, index) => {
+  columns.forEach((_column, index) => {
     if (index === columnCount - 1) {
-      const minWidth = Math.max(...column.panes.map((id) => PANEL_MIN_SIZES[id]?.width ?? 224));
-      columnWidths.push(snap(Math.max(minWidth, availableWidth - assignedWidth)));
+      columnWidths.push(Math.max(1, availableWidth - assignedWidth));
       return;
     }
-    const rawWidth = (availableWidth * column.weight) / totalWeight;
-    const minWidth = Math.max(...column.panes.map((id) => PANEL_MIN_SIZES[id]?.width ?? 224));
-    const width = snap(Math.max(minWidth, rawWidth));
+    const width = Math.max(1, snap(idealWidths[index]));
     columnWidths.push(width);
     assignedWidth += width;
   });
@@ -190,13 +205,13 @@ function buildPanelsForColumns(frame: ReturnType<typeof getWorkspaceFrame>, colu
           : columnWidths[columnIndex];
       const height =
         rowIndex === column.panes.length - 1
-          ? snap(frame.y + frame.height - y)
+          ? frame.y + frame.height - y
           : heights[rowIndex];
       panels[id] = {
         x,
         y,
-        width: Math.max(PANEL_MIN_SIZES[id]?.width ?? 224, width),
-        height: Math.max(PANEL_MIN_SIZES[id]?.height ?? 96, height),
+        width: Math.max(1, width),
+        height: Math.max(1, height),
       };
       y = snap(y + height + WORKSPACE_GAP);
     });
@@ -249,7 +264,7 @@ function buildDefaultPackedPanels(
     panels[DEFAULT_RIGHT_ZONE_PRESENCE_ID] = {
       x: zoneX,
       y: snap(frame.y),
-      width: Math.max(PANEL_MIN_SIZES[DEFAULT_RIGHT_ZONE_PRESENCE_ID]?.width ?? 224, zoneWidth),
+      width: Math.max(1, zoneWidth),
       height: Math.max(presenceMinHeight, zoneHeight),
     };
     return panels;
@@ -266,7 +281,7 @@ function buildDefaultPackedPanels(
     panels[DEFAULT_RIGHT_ZONE_PRESENCE_ID] = {
       x: zoneX,
       y: snap(frame.y),
-      width: Math.max(PANEL_MIN_SIZES[DEFAULT_RIGHT_ZONE_PRESENCE_ID]?.width ?? 224, zoneWidth),
+      width: Math.max(1, zoneWidth),
       height: Math.max(presenceMinHeight, presenceHeight),
     };
   }
@@ -320,8 +335,8 @@ function buildDefaultPackedPanels(
       panels[id] = {
         x,
         y: rowY,
-        width: Math.max(PANEL_MIN_SIZES[id]?.width ?? 224, width),
-        height: Math.max(PANEL_MIN_SIZES[id]?.height ?? 96, rowHeight),
+        width: Math.max(1, width),
+        height: Math.max(1, rowHeight),
       };
     });
   });
@@ -391,6 +406,7 @@ function defaultZStack(): string[] {
     "operator_timeline_pane",
     "response_pane",
     "guardian_state_pane",
+    "work_board_pane",
     "workflows_pane",
     "interventions_pane",
     "audit_pane",

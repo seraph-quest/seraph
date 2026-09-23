@@ -107,6 +107,24 @@ describe("panelLayoutStore packed cockpit layouts", () => {
     expect(panels.presence_pane.width).toBeGreaterThan(panels.response_pane.width);
   });
 
+  it("keeps the five-pane default column and presence inside the workspace frame", () => {
+    vi.stubGlobal("window", { innerWidth: 1600, innerHeight: 980 });
+
+    const panels = getPackedCockpitPanels("default", getDefaultPaneVisibility("default"));
+    const defaultColumn = [
+      "operator_timeline_pane",
+      "work_board_pane",
+      "workflows_pane",
+      "approvals_pane",
+      "inspector_pane",
+    ];
+
+    expect(defaultColumn.every((id) => panels[id].x === panels.operator_timeline_pane.x)).toBe(true);
+    expect(panels.presence_pane.width).toBeGreaterThanOrEqual(560);
+    expect(panels.presence_pane.x + panels.presence_pane.width).toBeLessThanOrEqual(1584);
+    expect(panels.work_board_pane.y + panels.work_board_pane.height).toBeLessThanOrEqual(840);
+  });
+
   it("keeps focus and review layouts functionally distinct", () => {
     vi.stubGlobal("window", { innerWidth: 1600, innerHeight: 980 });
 

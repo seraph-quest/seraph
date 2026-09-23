@@ -4,6 +4,7 @@ export type CockpitPaneId =
   | "sessions_pane"
   | "goals_pane"
   | "outputs_pane"
+  | "work_board_pane"
   | "presence_pane"
   | "approvals_pane"
   | "operator_timeline_pane"
@@ -39,6 +40,7 @@ export const COCKPIT_PANES: CockpitPaneDefinition[] = [
   { id: "sessions_pane", label: "Sessions", group: "Core" },
   { id: "goals_pane", label: "Priorities", group: "Core" },
   { id: "outputs_pane", label: "Recent Outputs", group: "Core" },
+  { id: "work_board_pane", label: "Work Board", group: "Core" },
   { id: "response_pane", label: "Latest Response", group: "Guardian" },
   { id: "guardian_state_pane", label: "Guardian State", group: "Guardian" },
   { id: "operator_timeline_pane", label: "Activity Ledger", group: "Guardian" },
@@ -75,6 +77,7 @@ export const COCKPIT_LAYOUTS: Record<CockpitLayoutId, CockpitLayoutDefinition> =
     paneVisibility: {
       ...ALL_VISIBLE,
       outputs_pane: false,
+      work_board_pane: true,
       audit_pane: false,
       trace_pane: false,
       desktop_shell_pane: false,
@@ -90,6 +93,7 @@ export const COCKPIT_LAYOUTS: Record<CockpitLayoutId, CockpitLayoutDefinition> =
       sessions_pane: false,
       goals_pane: false,
       outputs_pane: false,
+      work_board_pane: false,
       approvals_pane: false,
       audit_pane: false,
       trace_pane: false,
@@ -111,6 +115,7 @@ export const COCKPIT_LAYOUTS: Record<CockpitLayoutId, CockpitLayoutDefinition> =
       sessions_pane: false,
       goals_pane: false,
       outputs_pane: false,
+      work_board_pane: true,
       guardian_state_pane: false,
       presence_pane: false,
       conversation_pane: false,

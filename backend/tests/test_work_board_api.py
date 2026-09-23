@@ -321,6 +321,7 @@ async def test_http_comments_links_and_status_action_success(client):
         json={
             "action": "block",
             "expected_revision": 3,
+            "block_kind": "operator",
             "reason": "Operator needs to revise the specification",
         },
     )

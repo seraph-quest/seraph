@@ -139,6 +139,7 @@ async def test_generic_unblock_requires_operator_block_and_current_goal(async_db
                 WorkBoardActionRequest(
                     action=WorkBoardAction.unblock,
                     expected_revision=task.task_revision,
+                    resolution="reconcile operator specification",
                 ),
             )
 
@@ -161,6 +162,7 @@ async def test_generic_unblock_requires_operator_block_and_current_goal(async_db
                 WorkBoardActionRequest(
                     action=WorkBoardAction.unblock,
                     expected_revision=expected_revision,
+                    resolution="restore the prior safe phase",
                 ),
             )
 
@@ -188,6 +190,7 @@ async def test_generic_unblock_rejects_unsafe_restorable_phase(async_db, source)
                 WorkBoardActionRequest(
                     action=WorkBoardAction.unblock,
                     expected_revision=current.task_revision,
+                    resolution="restore the prior safe phase",
                 ),
             )
         assert raised.value.code == "invalid_recovery_phase"
@@ -215,6 +218,7 @@ async def test_generic_unblock_demotes_ready_phase_for_fresh_admission(async_db)
             WorkBoardActionRequest(
                 action=WorkBoardAction.unblock,
                 expected_revision=current.task_revision,
+                resolution="restore the prior safe phase",
             ),
         )
         assert mutation.task.status is WorkBoardStatus.todo
@@ -254,6 +258,7 @@ async def test_generic_unblock_refuses_operator_block_with_existing_attempt(asyn
                 WorkBoardActionRequest(
                     action=WorkBoardAction.unblock,
                     expected_revision=blocked.task.task_revision,
+                    resolution="restore the prior safe phase",
                 ),
             )
 

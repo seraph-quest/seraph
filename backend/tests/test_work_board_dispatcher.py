@@ -2,19 +2,32 @@
 
 from types import SimpleNamespace
 import asyncio
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 import hashlib
+import json
 from pathlib import Path
 from typing import Any
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import event, select
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import NullPool
 from sqlmodel import SQLModel
 
-from src.db.models import Goal, WorkBoardAttempt, WorkBoardStatus, WorkBoardTask
+from config.settings import settings
+from src.db.models import (
+    Goal,
+    Secret,
+    Session,
+    WorkBoardAttempt,
+    WorkBoardEvent,
+    WorkBoardLink,
+    WorkBoardStatus,
+    WorkBoardTask,
+    WorkflowRunState,
+)
 from src.work_board.contracts import WorkBoardOwner
 from src.work_board.dispatcher import (
     BoardDispatchClaim,
@@ -22,6 +35,7 @@ from src.work_board.dispatcher import (
     _stable_reason_code,
 )
 from src.work_board.repository import BoardMutation, BoardError, WorkBoardRepository
+from src.workflows.job_runtime import DurableJobRepository
 
 
 OWNER = WorkBoardOwner(principal_id="operator:dispatcher", session_id="dispatcher-session")
@@ -122,6 +136,8 @@ async def test_attempt_run_link_persisted_before_adapter_execution(monkeypatch):
         capability_id="guardian.research-watch.v1",
         task_revision=8,
         requires_review=False,
+        executor_id="executor.one",
+        priority=50,
     )
     attempt = SimpleNamespace(
         attempt_id="4e6f6d65-2d61-4d32-a9f4-0b4e2b8e6d70",
@@ -714,3 +730,368 @@ async def test_stale_board_fence_cannot_heartbeat_or_project(async_db):
                 board_fence=claim.attempt.fencing_token + 1,
                 lease_owner="worker-fence",
             )
+
+
+@pytest.mark.asyncio
+async def test_priority_then_fifo(async_db):
+    """Candidate ordering is read from the real board rows, not a caller list."""
+
+    repository = WorkBoardRepository()
+    async with async_db() as db:
+        db.add_all(
+            [
+                WorkBoardTask(
+                    task_id="priority-low",
+                    owner_principal_id=OWNER.principal_id,
+                    owner_session_id=OWNER.session_id,
+                    goal_id="goal-order",
+                    goal_revision=1,
+                    title="Low",
+                    idempotency_key="priority-low",
+                    status=WorkBoardStatus.ready,
+                    priority=20,
+                ),
+                WorkBoardTask(
+                    task_id="priority-high-old",
+                    owner_principal_id=OWNER.principal_id,
+                    owner_session_id=OWNER.session_id,
+                    goal_id="goal-order",
+                    goal_revision=1,
+                    title="High old",
+                    idempotency_key="priority-high-old",
+                    status=WorkBoardStatus.ready,
+                    priority=90,
+                ),
+                WorkBoardTask(
+                    task_id="priority-high-new",
+                    owner_principal_id=OWNER.principal_id,
+                    owner_session_id=OWNER.session_id,
+                    goal_id="goal-order",
+                    goal_revision=1,
+                    title="High new",
+                    idempotency_key="priority-high-new",
+                    status=WorkBoardStatus.todo,
+                    priority=90,
+                ),
+            ]
+        )
+        await db.flush()
+        candidates = await repository.list_dispatch_candidates(db, limit=20)
+
+    assert [item.task_id for item in candidates] == [
+        "priority-high-old",
+        "priority-high-new",
+        "priority-low",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_racing_passes_create_one_attempt(tmp_path: Path):
+    """Two real SQLite writers can produce only one fenced active attempt."""
+
+    engine = create_async_engine(
+        f"sqlite+aiosqlite:///{tmp_path / 'racing-dispatch.db'}",
+        connect_args={"check_same_thread": False},
+        poolclass=NullPool,
+    )
+
+    @event.listens_for(engine.sync_engine, "connect")
+    def _configure_sqlite(connection, _record):
+        cursor = connection.cursor()
+        cursor.execute("PRAGMA foreign_keys=ON")
+        cursor.execute("PRAGMA journal_mode=WAL")
+        cursor.execute("PRAGMA busy_timeout=5000")
+        cursor.close()
+
+    runtime_tables = [
+        Session.__table__,
+        Goal.__table__,
+        WorkBoardTask.__table__,
+        WorkBoardAttempt.__table__,
+        WorkBoardEvent.__table__,
+    ]
+    async with engine.begin() as connection:
+        await connection.run_sync(
+            lambda sync: SQLModel.metadata.create_all(sync, tables=runtime_tables)
+        )
+    factory = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    async with factory() as db:
+        db.add(
+            Goal(
+                id="goal-racing",
+                title="Racing goal",
+                status="active",
+                revision=1,
+                owner_principal_id=OWNER.principal_id,
+                owner_session_id=OWNER.session_id,
+            )
+        )
+        db.add(
+            WorkBoardTask(
+                task_id="task-racing-real",
+                owner_principal_id=OWNER.principal_id,
+                owner_session_id=OWNER.session_id,
+                goal_id="goal-racing",
+                goal_revision=1,
+                title="Racing",
+                idempotency_key="task-racing-real",
+                status=WorkBoardStatus.ready,
+                priority=50,
+            )
+        )
+        await db.commit()
+
+    async def claim_once():
+        repository = WorkBoardRepository()
+        async with factory() as db:
+            claim = await repository.claim_ready_task(
+                db,
+                "task-racing-real",
+                expected_revision=1,
+                lease_owner="service:work-board",
+                lease_seconds=300,
+            )
+            await db.commit()
+            return claim
+
+    first, second = await asyncio.gather(claim_once(), claim_once())
+    claims = [claim for claim in (first, second) if claim is not None]
+    assert len(claims) == 1
+    async with factory() as db:
+        attempts = list((await db.execute(select(WorkBoardAttempt))).scalars().all())
+        task = (
+            await db.execute(select(WorkBoardTask).where(WorkBoardTask.task_id == "task-racing-real"))
+        ).scalar_one()
+    assert len(attempts) == 1
+    assert task.status is WorkBoardStatus.running
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_pending_admission_reconciles_after_restart(tmp_path: Path, monkeypatch):
+    """A claimed pending row links an existing exact durable admission after restart."""
+
+    workspace = tmp_path / "workspace"
+    (workspace / "inputs").mkdir(parents=True)
+    raw = json.dumps(
+        {
+            "schema_version": 1,
+            "capability_id": "workflow.goal-snapshot-to-file",
+            "input": {"file_path": "artifacts/restart.md"},
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+    (workspace / "inputs" / "restart.json").write_bytes(raw)
+    monkeypatch.setattr(settings, "workspace_dir", str(workspace))
+
+    engine = create_async_engine(
+        f"sqlite+aiosqlite:///{tmp_path / 'pending-admission.db'}",
+        connect_args={"check_same_thread": False},
+        poolclass=NullPool,
+    )
+    runtime_tables = [
+        Session.__table__,
+        Goal.__table__,
+        WorkBoardTask.__table__,
+        WorkBoardAttempt.__table__,
+        WorkBoardEvent.__table__,
+        WorkBoardLink.__table__,
+        WorkflowRunState.__table__,
+        Secret.__table__,
+    ]
+    async with engine.begin() as connection:
+        await connection.run_sync(
+            lambda sync: SQLModel.metadata.create_all(sync, tables=runtime_tables)
+        )
+    factory = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+
+    @asynccontextmanager
+    async def durable_session():
+        async with factory() as db:
+            try:
+                yield db
+                await db.commit()
+            except Exception:
+                await db.rollback()
+                raise
+
+    monkeypatch.setattr("src.workflows.job_runtime.get_session", durable_session)
+    monkeypatch.setattr("src.vault.repository.get_session", durable_session)
+    repository = WorkBoardRepository()
+    jobs = DurableJobRepository()
+    task = WorkBoardTask(
+        task_id="task-pending-restart",
+        owner_principal_id=OWNER.principal_id,
+        owner_session_id=OWNER.session_id,
+        goal_id="goal-pending-restart",
+        goal_revision=1,
+        title="Pending restart",
+        idempotency_key="task-pending-restart",
+        status=WorkBoardStatus.ready,
+        capability_id="workflow.goal-snapshot-to-file",
+        typed_input_ref="workspace-json:inputs/restart.json",
+        typed_input_digest=hashlib.sha256(raw).hexdigest(),
+        executor_id="executor.local",
+    )
+    async with factory() as db:
+        db.add(
+            Goal(
+                id="goal-pending-restart",
+                title="Pending goal",
+                status="active",
+                revision=1,
+                owner_principal_id=OWNER.principal_id,
+                owner_session_id=OWNER.session_id,
+            )
+        )
+        db.add(task)
+        await db.commit()
+
+    async with factory() as db:
+        claim = await repository.claim_ready_task(
+            db,
+            task.task_id,
+            expected_revision=1,
+            lease_owner="service:work-board",
+            lease_seconds=300,
+        )
+        assert claim is not None
+        await db.commit()
+
+    dispatcher = WorkBoardDispatcher(
+        repository=repository,
+        jobs=jobs,
+        session_provider=durable_session,
+    )
+    spec, _inputs, expected_job_id, _owner, _runtime = dispatcher._build_spec(
+        claim.task,
+        claim.attempt,
+        runtime_seconds=300,
+    )
+    admitted = await jobs.admit_job(spec)
+    assert admitted["job_id"] == expected_job_id
+    assert admitted["status"] == "accepted"
+    restarted = WorkBoardDispatcher(
+        repository=repository,
+        jobs=jobs,
+        session_provider=durable_session,
+    )
+    recovered = await restarted.reconcile_pending_attempts()
+    assert recovered == [expected_job_id]
+    async with factory() as db:
+        linked = (
+            await db.execute(
+                select(WorkBoardAttempt).where(WorkBoardAttempt.attempt_id == claim.attempt.attempt_id)
+            )
+        ).scalar_one()
+    assert linked.workflow_run_id == expected_job_id
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_stale_fence_cannot_attach_output(async_db):
+    repository = WorkBoardRepository()
+    async with async_db() as db:
+        db.add(
+            Goal(
+                id="goal-stale-output",
+                title="Stale output goal",
+                status="active",
+                revision=1,
+                owner_principal_id=OWNER.principal_id,
+                owner_session_id=OWNER.session_id,
+            )
+        )
+        db.add(
+            WorkBoardTask(
+                task_id="task-stale-output",
+                owner_principal_id=OWNER.principal_id,
+                owner_session_id=OWNER.session_id,
+                goal_id="goal-stale-output",
+                goal_revision=1,
+                title="Stale output",
+                idempotency_key="task-stale-output",
+                status=WorkBoardStatus.ready,
+                executor_id="executor.stale",
+            )
+        )
+        await db.flush()
+        claim = await repository.claim_ready_task(
+            db,
+            "task-stale-output",
+            expected_revision=1,
+            lease_owner="service:work-board",
+        )
+        assert claim is not None
+        with pytest.raises(BoardError, match="stale"):
+            await repository.project_attempt(
+                db,
+                claim.task.task_id,
+                claim.attempt.attempt_id,
+                expected_revision=claim.task.task_revision,
+                board_fence=claim.attempt.fencing_token + 1,
+                lease_owner="service:work-board",
+                status=WorkBoardStatus.done,
+                outcome="verified",
+                verified_readback={
+                    "workflow_run_id": "run-stale",
+                    "content_sha256": "a" * 64,
+                },
+            )
+
+
+@pytest.mark.asyncio
+async def test_unknown_effect_never_auto_retries(async_db):
+    repository = WorkBoardRepository()
+    async with async_db() as db:
+        db.add(
+            Goal(
+                id="goal-unknown-effect",
+                title="Unknown effect goal",
+                status="active",
+                revision=1,
+                owner_principal_id=OWNER.principal_id,
+                owner_session_id=OWNER.session_id,
+            )
+        )
+        task = WorkBoardTask(
+            task_id="task-unknown-effect",
+            owner_principal_id=OWNER.principal_id,
+            owner_session_id=OWNER.session_id,
+            goal_id="goal-unknown-effect",
+            goal_revision=1,
+            title="Unknown effect",
+            idempotency_key="task-unknown-effect",
+            status=WorkBoardStatus.blocked,
+            block_kind="unknown_effect",
+            block_reason="Reconciliation required",
+            block_source_status=WorkBoardStatus.ready.value,
+            task_revision=4,
+        )
+        db.add(task)
+        await db.flush()
+        db.add(
+            WorkBoardAttempt(
+                task_id=task.task_id,
+                executor_id="executor.unknown",
+                fencing_token=1,
+                ended_at=datetime.now(timezone.utc),
+                outcome="unknown_effect",
+                receipt_refs_json=json.dumps(
+                    [{"job_id": "run-unknown", "status": "unknown", "reason_code": "unknown_effect"}]
+                ),
+            )
+        )
+        await db.flush()
+        with pytest.raises(BoardError, match="typed recovery"):
+            await repository.retry_task(
+                db,
+                OWNER,
+                task.task_id,
+                expected_revision=task.task_revision,
+            )
+        refreshed = (
+            await db.execute(select(WorkBoardTask).where(WorkBoardTask.task_id == task.task_id))
+        ).scalar_one()
+        assert refreshed.status is WorkBoardStatus.blocked

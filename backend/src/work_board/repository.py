@@ -322,6 +322,7 @@ def _safe_receipt_refs(value: Any, *, limit: int = 32) -> list[dict[str, Any]]:
                             "effect_id",
                             "effect_type",
                             "job_id",
+                            "workflow_run_id",
                             "child_job_id",
                         }
                         else _SAFE_ID
@@ -464,6 +465,7 @@ def _safe_receipt_refs(value: Any, *, limit: int = 32) -> list[dict[str, Any]]:
                             "effect_id",
                             "effect_type",
                             "job_id",
+                            "workflow_run_id",
                             "child_job_id",
                         }
                         else _SAFE_ID
@@ -509,11 +511,20 @@ def _projection_value(projection: Mapping[str, Any], field_name: str) -> Any:
     if field_name in {"owner_principal_id", "owner_kind", "service_id"}:
         owner = projection.get("owner")
         if isinstance(owner, Mapping):
+            if field_name == "owner_principal_id":
+                return owner.get("principal_id") or owner.get(field_name)
+            if field_name == "owner_kind":
+                return owner.get("kind") or owner.get(field_name)
             return owner.get(field_name)
     if field_name in {"idempotency_scope", "idempotency_key", "idempotency_binding"}:
         idempotency = projection.get("idempotency")
         if isinstance(idempotency, Mapping):
-            return idempotency.get(field_name)
+            short_name = {
+                "idempotency_scope": "scope",
+                "idempotency_key": "key",
+                "idempotency_binding": "binding",
+            }[field_name]
+            return idempotency.get(short_name) or idempotency.get(field_name)
     if field_name in {"capability_id", "capability_version"}:
         authority = projection.get("declared_authority")
         if isinstance(authority, Mapping) and field_name in authority:

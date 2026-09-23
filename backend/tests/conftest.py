@@ -39,6 +39,7 @@ _PATCH_TARGETS = [
     "src.profile.service.get_db",
     "src.api.settings.get_db",  # aliased: `import get_session as get_db`
     "src.api.work_board.get_session",
+    "src.work_board.dispatcher.get_session",
     "src.api.ws.get_session",
     "src.api.nodes.get_session",
     "src.api.observer.get_session",

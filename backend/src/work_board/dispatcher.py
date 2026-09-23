@@ -389,7 +389,11 @@ class WorkBoardDispatcher:
     ) -> None:
         self.repository = repository or WorkBoardRepository()
         self.jobs = jobs or durable_job_repository
-        self.session_provider = session_provider or get_session
+        # Resolve the module-level provider at call time when no explicit
+        # provider is injected.  This keeps the shared scheduler/API
+        # dispatcher testable and preserves the managed runtime's current
+        # workspace session factory.
+        self.session_provider = session_provider or (lambda: get_session())
         self.now = now
         self.runner_id = runner_id
         self.runner_session = f"{runner_id}:session"
@@ -2745,6 +2749,12 @@ class WorkBoardDispatcher:
                 # while the admission status is still being inspected.
                 _ = linked
             except Exception as exc:
+                logger.warning(
+                    "pending board attempt %s reconciliation failed: %s: %s",
+                    attempt.attempt_id,
+                    type(exc).__name__,
+                    _safe_error_code(exc),
+                )
                 try:
                     claim = BoardDispatchClaim(task, attempt, None)  # type: ignore[arg-type]
                     await self._project_blocked(claim, "unknown_effect", type(exc).__name__)

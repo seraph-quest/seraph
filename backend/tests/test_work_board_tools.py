@@ -52,7 +52,7 @@ def test_bound_worker_host_exposes_only_the_six_scoped_controls():
         "work_board_comment",
         "work_board_block",
         "work_board_request_review",
-        "work_board_completion_request",
+        "work_board_request_completion",
     ]
     assert all("create" not in tool.name and "link" not in tool.name and "unblock" not in tool.name for tool in host.tools)
 
@@ -66,6 +66,6 @@ def test_bound_worker_context_is_the_only_runtime_injection_path():
             "work_board_comment",
             "work_board_block",
             "work_board_request_review",
-            "work_board_completion_request",
+            "work_board_request_completion",
         ]
     assert get_bound_work_board_tools() == []

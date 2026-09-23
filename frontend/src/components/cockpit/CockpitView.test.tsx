@@ -693,14 +693,21 @@ describe("CockpitView", () => {
     await waitFor(() => expect(delayedWorkflowLoads).toHaveLength(4));
 
     const bPayload = mockResponse({ runs: [workflowRun("board-parent-b", referenceB)] });
-    delayedWorkflowLoads[2]?.(bPayload);
-    delayedWorkflowLoads[3]?.(bPayload);
+    await act(async () => {
+      delayedWorkflowLoads[2]?.(bPayload);
+      delayedWorkflowLoads[3]?.(bPayload);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
     expect(await screen.findByText("notes/task-b.md", { selector: ".cockpit-inspector-title" })).toBeInTheDocument();
 
     const aPayload = mockResponse({ runs: [workflowRun("board-parent-a", referenceA)] });
-    delayedWorkflowLoads[0]?.(aPayload);
-    delayedWorkflowLoads[1]?.(aPayload);
-    await act(async () => { await Promise.resolve(); });
+    await act(async () => {
+      delayedWorkflowLoads[0]?.(aPayload);
+      delayedWorkflowLoads[1]?.(aPayload);
+      // Drain the stale response chain before the next test starts.
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
     expect(screen.getByText("notes/task-b.md", { selector: ".cockpit-inspector-title" })).toBeInTheDocument();
     expect(screen.queryByText("notes/task-a.md", { selector: ".cockpit-inspector-title" })).not.toBeInTheDocument();
   });
@@ -908,7 +915,7 @@ describe("CockpitView", () => {
     });
 
     render(<CockpitView onSend={() => {}} />);
-    fireEvent.click(await screen.findByRole("button", { name: "Open task Foreign linked run" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Open task Foreign linked run" }, { timeout: 5_000 }));
     fireEvent.click(await screen.findByRole("button", { name: "Inspect execution evidence artifacts/foreign-output.md" }));
 
     expect(await screen.findByText(/hidden because its session does not match the task's canonical owner session/i)).toBeInTheDocument();

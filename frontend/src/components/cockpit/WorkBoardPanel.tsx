@@ -84,7 +84,7 @@ const BOARD_REQUEST_TIMEOUT_MS = 15_000;
 
 export interface WorkBoardPanelProps {
   onOpenApprovals?: () => void;
-  onInspectWorkflowRun?: (workflowRunId: string) => void;
+  onInspectWorkflowRun?: (workflowRunId: string, ownerSessionId: string | null) => void;
   onInspectArtifact?: (request: WorkBoardArtifactInspectRequest) => void;
   ownerPrincipalId?: string | null;
   ownerSessionId?: string | null;
@@ -612,8 +612,10 @@ function WorkBoardPanel({
 
   const loadSnapshotAndCatchUp = useCallback(async (): Promise<number> => {
     const snapshot = await loadAllTaskPages();
+    if (stoppedRef.current) return snapshot.eventCursor;
     setTasks(snapshot.tasks);
     const delta = await loadEventDelta(snapshot.eventCursor);
+    if (stoppedRef.current) return delta.eventCursor;
     const taskIds = Array.from(new Set([
       ...delta.events.map((event) => event.task_id),
       ...(selectedTaskIdRef.current ? [selectedTaskIdRef.current] : []),
@@ -623,6 +625,7 @@ function WorkBoardPanel({
       for (let index = 0; index < taskIds.length; index += DETAIL_REFRESH_BATCH_SIZE) {
         const batch = taskIds.slice(index, index + DETAIL_REFRESH_BATCH_SIZE);
         const results = await Promise.all(batch.map((taskId) => readTaskDetail(taskId)));
+        if (stoppedRef.current) return delta.eventCursor;
         if (results.some((item) => item === null)) {
           throw new WorkBoardSyncError("A task changed during event catch-up. The board is taking another fresh snapshot.");
         }
@@ -831,12 +834,13 @@ function WorkBoardPanel({
     void reconnectFromSnapshot();
     void requestApi<GoalInfo[]>("/api/goals/tree")
       .then((payload) => {
+        if (stoppedRef.current) return;
         if (!Array.isArray(payload)) throw new Error("Goals response was not a list");
         setGoals(payload);
         setGoalError(null);
       })
       .catch((error) => {
-        if (!(error instanceof Error && error.name === "AbortError")) setGoalError(errorText(error));
+        if (!stoppedRef.current && !(error instanceof Error && error.name === "AbortError")) setGoalError(errorText(error));
       });
     return () => {
       stoppedRef.current = true;
@@ -1442,6 +1446,7 @@ function WorkBoardPanel({
     const rejectedMove = `The backend does not allow moving ${STATUS_LABELS[task.status]} directly to ${STATUS_LABELS[status]}.`;
     setMoveFeedback(rejectedMove);
     const refreshed = await refreshSnapshot();
+    if (stoppedRef.current) return;
     const message = `${rejectedMove} ${refreshed ? "The board was refreshed from the server." : "The refresh failed; the last confirmed state remains visible."}`;
     setMoveFeedback(message);
     setAnnouncement(message);
@@ -1779,15 +1784,15 @@ function WorkBoardPanel({
                       <div>Attempt {attempt.attempt_id} · {attempt.ended_at ? attempt.outcome ?? "ended" : "active"} · fence {attempt.fencing_token}</div>
                       <div>Started {safeDateTime(attempt.started_at)} · ended {safeDateTime(attempt.ended_at)} · executor {attempt.executor_id ?? "Unassigned"}</div>
                       <div>Readback {READBACK_LABELS[attempt.readback_status]} · verification {VERIFICATION_LABELS[attempt.verification_status]}</div>
-                      {attempt.workflow_run_id && <div className="mt-1 break-all">Workflow run {attempt.workflow_run_id}{onInspectWorkflowRun && <button type="button" className="ml-2 underline" onClick={() => onInspectWorkflowRun(attempt.workflow_run_id!)}>Open workflow evidence</button>}</div>}
+                      {attempt.workflow_run_id && <div className="mt-1 break-all">Workflow run {attempt.workflow_run_id}{onInspectWorkflowRun && <button type="button" className="ml-2 underline" onClick={() => onInspectWorkflowRun(attempt.workflow_run_id!, selectedTask.owner_session_id)}>Open workflow evidence</button>}</div>}
                       {[...attempt.receipt_refs].map((receipt, index) => (
                         <div key={`${attempt.attempt_id}:receipt:${index}`} className="mt-1 border-t border-white/10 pt-1">
                           <div>{receiptTitle(receipt)} · {safeReferenceLabel(receipt)}</div>
                           <div>{receipt.status ?? receipt.outcome ?? "Receipt"}{receipt.verified === true ? " · verified" : ""}{receipt.readback_status ? ` · readback ${READBACK_LABELS[receipt.readback_status]}` : ""}</div>
                           {receipt.content_sha256 && <div className="break-all font-mono text-[10px]">SHA-256 {receipt.content_sha256}</div>}
                           {receipt.file_path && <div className="break-all text-[10px]">Artifact path {receipt.file_path}</div>}
-                          {(receipt.file_path || receipt.artifact_id || receipt.target_path || receipt.effect_id) && onInspectArtifact && <button type="button" className="mt-1 underline" aria-label={`Inspect execution evidence ${receipt.file_path ?? receipt.target_path ?? receipt.artifact_id ?? receipt.effect_id}`} onClick={() => onInspectArtifact({ reference: receipt, ownerSessionId: selectedTask.origin_session_id ?? ownerSessionId ?? null, workflowRunId: attempt.workflow_run_id })}>{receipt.target_path || receipt.effect_id ? "Inspect readback evidence" : "Inspect artifact"}</button>}
-                          {receipt.workflow_run_id && onInspectWorkflowRun && <button type="button" className="underline" onClick={() => onInspectWorkflowRun(receipt.workflow_run_id!)}>Inspect existing workflow record</button>}
+                          {(receipt.file_path || receipt.artifact_id || receipt.target_path || receipt.effect_id) && onInspectArtifact && <button type="button" className="mt-1 underline" aria-label={`Inspect execution evidence ${receipt.file_path ?? receipt.target_path ?? receipt.artifact_id ?? receipt.effect_id}`} onClick={() => onInspectArtifact({ reference: receipt, ownerSessionId: selectedTask.owner_session_id, workflowRunId: attempt.workflow_run_id })}>{receipt.target_path || receipt.effect_id ? "Inspect readback evidence" : "Inspect artifact"}</button>}
+                          {receipt.workflow_run_id && onInspectWorkflowRun && <button type="button" className="underline" onClick={() => onInspectWorkflowRun(receipt.workflow_run_id!, selectedTask.owner_session_id)}>Inspect existing workflow record</button>}
                         </div>
                       ))}
                     </div>
@@ -1798,8 +1803,8 @@ function WorkBoardPanel({
                       <div>{reference.status ?? reference.outcome ?? "Reference"}{reference.verified === true ? " · verified" : ""}</div>
                       {reference.content_sha256 && <div className="break-all font-mono text-[10px]">SHA-256 {reference.content_sha256}</div>}
                       {reference.file_path && <div className="break-all text-[10px]">Artifact path {reference.file_path}</div>}
-                      {(reference.file_path || reference.artifact_id || reference.target_path || reference.effect_id) && onInspectArtifact && <button type="button" className="mt-1 underline" aria-label={`Inspect execution evidence ${reference.file_path ?? reference.target_path ?? reference.artifact_id ?? reference.effect_id}`} onClick={() => onInspectArtifact({ reference, ownerSessionId: selectedTask.origin_session_id ?? ownerSessionId ?? null, workflowRunId: reference.workflow_run_id ?? selectedTask.latest_attempt?.workflow_run_id ?? null })}>{reference.target_path || reference.effect_id ? "Inspect readback evidence" : "Inspect artifact"}</button>}
-                      {reference.workflow_run_id && onInspectWorkflowRun && <button type="button" className="underline" onClick={() => onInspectWorkflowRun(reference.workflow_run_id!)}>Open workflow evidence</button>}
+                      {(reference.file_path || reference.artifact_id || reference.target_path || reference.effect_id) && onInspectArtifact && <button type="button" className="mt-1 underline" aria-label={`Inspect execution evidence ${reference.file_path ?? reference.target_path ?? reference.artifact_id ?? reference.effect_id}`} onClick={() => onInspectArtifact({ reference, ownerSessionId: selectedTask.owner_session_id, workflowRunId: reference.workflow_run_id ?? selectedTask.latest_attempt?.workflow_run_id ?? null })}>{reference.target_path || reference.effect_id ? "Inspect readback evidence" : "Inspect artifact"}</button>}
+                      {reference.workflow_run_id && onInspectWorkflowRun && <button type="button" className="underline" onClick={() => onInspectWorkflowRun(reference.workflow_run_id!, selectedTask.owner_session_id)}>Open workflow evidence</button>}
                     </div>
                   ))}
                   {(!selectedDetail?.attempts.length && !selectedTask.result_refs.length && !selectedTask.artifact_refs.length) && <div className="cockpit-empty">No attempts or output references yet.</div>}

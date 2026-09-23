@@ -1483,8 +1483,12 @@ def _serialize(run: WorkflowRunState, *, receipt: dict[str, Any] | None = None) 
         "job_id": run.run_identity,
         "run_identity": run.run_identity,
         "record_schema_version": int(getattr(run, "record_schema_version", DURABLE_JOB_RECORD_SCHEMA_VERSION) or 0),
+        "root_run_identity": getattr(run, "root_run_identity", None),
+        "parent_run_identity": getattr(run, "parent_run_identity", None),
         "parent_job_id": getattr(run, "parent_job_id", None),
         "parent_fencing_token": getattr(run, "parent_fencing_token", None),
+        "branch_kind": getattr(run, "branch_kind", None),
+        "branch_depth": int(getattr(run, "branch_depth", 0) or 0),
         "owner": {
             "kind": getattr(run, "owner_kind", "legacy"),
             "principal_id": getattr(run, "owner_principal_id", None),
@@ -1677,6 +1681,8 @@ class DurableJobRepository:
             dedupe_key=identity.idempotency_key,
         )
         authority_digest = _digest(spec.declared_authority)
+        root_run_identity = identity.job_id
+        branch_depth = 0
         async with self._session() as db:
             if not _text(spec.goal_id) and spec.goal_revision is not None:
                 raise DurableJobTransitionError("goal_revision requires a canonical goal")
@@ -1739,6 +1745,24 @@ class DurableJobRepository:
                     or int(parent.fencing_token or 0) != parent_fence
                 ):
                     raise DurableJobLeaseError("parent job fence is stale or expired")
+                # A durable child belongs to the same cancellation/readback
+                # tree as the validated parent.  The parent fence above is
+                # the authority that makes this lineage trustworthy; derive
+                # the root only after that validation succeeds.  Legacy rows
+                # may have an empty root, so retain their run identity as the
+                # safe fallback instead of creating a second tree.
+                root_run_identity = _text(getattr(parent, "root_run_identity", None))
+                if not root_run_identity:
+                    root_run_identity = _text(parent.run_identity)
+                try:
+                    parent_branch_depth = int(getattr(parent, "branch_depth", 0) or 0)
+                except (TypeError, ValueError) as exc:
+                    raise DurableJobTransitionError(
+                        "parent branch depth is malformed"
+                    ) from exc
+                if parent_branch_depth < 0:
+                    raise DurableJobTransitionError("parent branch depth is malformed")
+                branch_depth = parent_branch_depth + 1
             await ensure_sessions_exist(db, [spec.session_id])
             existing = (
                 await db.execute(
@@ -1793,7 +1817,7 @@ class DurableJobRepository:
             failure_reason = "deadline_expired" if status == "failed" else None
             run = WorkflowRunState(
                 run_identity=identity.job_id,
-                root_run_identity=identity.job_id,
+                root_run_identity=root_run_identity,
                 parent_run_identity=spec.parent_job_id,
                 parent_job_id=spec.parent_job_id,
                 parent_fencing_token=spec.parent_fencing_token,
@@ -1803,6 +1827,7 @@ class DurableJobRepository:
                 conversation_id=spec.conversation_id or spec.session_id,
                 operator_session_id=spec.operator_session_id,
                 status=status,
+                branch_depth=branch_depth,
                 run_fingerprint=run_fingerprint,
                 arguments_json=_canonical(safe_inputs),
                 approval_context_json=_canonical(_safe_structure(spec.declared_authority)),
@@ -2499,20 +2524,61 @@ class DurableJobRepository:
         if not root_job_id:
             raise DurableJobNotFound("<empty>")
         async with self._session() as db:
-            result = await db.execute(
-                select(WorkflowRunState).where(
-                    or_(
-                        WorkflowRunState.run_identity == root_job_id,
-                        WorkflowRunState.root_run_identity == root_job_id,
+            # Current admissions share ``root_run_identity``.  Older durable
+            # rows can still be active with a self-root, however, so walk the
+            # persisted parent links as a bounded frontier as well.  The
+            # parent link is the exact tree edge; a different root's rows do
+            # not enter this set merely because their root identity is close
+            # in text or ordering.
+            runs_by_id: dict[str, WorkflowRunState] = {}
+            frontier = {root_job_id}
+            while frontier:
+                result = await db.execute(
+                    select(WorkflowRunState).where(
+                        or_(
+                            WorkflowRunState.run_identity.in_(frontier),
+                            WorkflowRunState.root_run_identity.in_(frontier),
+                            WorkflowRunState.parent_run_identity.in_(frontier),
+                        )
                     )
                 )
-            )
-            runs = list(result.scalars().all())
+                next_frontier: set[str] = set()
+                for run in result.scalars().all():
+                    run_identity = _text(run.run_identity)
+                    if not run_identity or run_identity in runs_by_id:
+                        continue
+                    runs_by_id[run_identity] = run
+                    next_frontier.add(run_identity)
+                frontier = next_frontier
+            runs = list(runs_by_id.values())
         if not runs:
             raise DurableJobNotFound(root_job_id)
+
+        # Use the live parent links to order legacy rows whose persisted
+        # branch_depth was never populated.  Falling back to the durable depth
+        # keeps a row with incomplete legacy ancestry cancellable while still
+        # making descendants precede their parent whenever the edge is known.
+        def _tree_depth(run: WorkflowRunState) -> int:
+            current_id = _text(run.run_identity)
+            depth = 0
+            visited: set[str] = set()
+            while current_id and current_id != root_job_id:
+                if current_id in visited:
+                    break
+                visited.add(current_id)
+                current = runs_by_id.get(current_id)
+                parent_id = _text(getattr(current, "parent_run_identity", None)) if current else ""
+                if not parent_id or parent_id not in runs_by_id:
+                    break
+                depth += 1
+                current_id = parent_id
+            if depth:
+                return depth
+            return max(0, int(getattr(run, "branch_depth", 0) or 0))
+
         runs.sort(
             key=lambda run: (
-                int(getattr(run, "branch_depth", 0) or 0),
+                _tree_depth(run),
                 0 if run.run_identity == root_job_id else 1,
             ),
             reverse=True,

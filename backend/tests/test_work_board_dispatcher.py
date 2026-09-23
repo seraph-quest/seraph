@@ -124,7 +124,7 @@ def test_direct_adapters_use_the_reviewed_root_and_binding_identities():
 
 
 @pytest.mark.asyncio
-async def test_attempt_run_link_persisted_before_adapter_execution(monkeypatch):
+async def test_direct_adapter_admission_order_unit(monkeypatch):
     """A direct adapter cannot enter its effect phase before board linking."""
 
     task = SimpleNamespace(
@@ -770,18 +770,33 @@ async def test_priority_then_fifo(async_db):
                     goal_revision=1,
                     title="High new",
                     idempotency_key="priority-high-new",
-                    status=WorkBoardStatus.todo,
+                    status=WorkBoardStatus.ready,
                     priority=90,
                 ),
             ]
         )
+        db.add_all(
+            [
+                WorkBoardTask(
+                    task_id=f"priority-todo-{index}",
+                    owner_principal_id=OWNER.principal_id,
+                    owner_session_id=OWNER.session_id,
+                    goal_id="goal-order",
+                    goal_revision=1,
+                    title=f"Todo backlog {index}",
+                    idempotency_key=f"priority-todo-{index}",
+                    status=WorkBoardStatus.todo,
+                    priority=100,
+                )
+                for index in range(30)
+            ]
+        )
         await db.flush()
-        candidates = await repository.list_dispatch_candidates(db, limit=20)
+        candidates = await repository.list_dispatch_candidates(db, limit=2)
 
     assert [item.task_id for item in candidates] == [
         "priority-high-old",
         "priority-high-new",
-        "priority-low",
     ]
 
 
@@ -816,6 +831,17 @@ async def test_racing_passes_create_one_attempt(tmp_path: Path):
             lambda sync: SQLModel.metadata.create_all(sync, tables=runtime_tables)
         )
     factory = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+
+    @asynccontextmanager
+    async def durable_session():
+        async with factory() as db:
+            try:
+                yield db
+                await db.commit()
+            except Exception:
+                await db.rollback()
+                raise
+
     async with factory() as db:
         db.add(
             Goal(
@@ -842,22 +868,34 @@ async def test_racing_passes_create_one_attempt(tmp_path: Path):
         )
         await db.commit()
 
-    async def claim_once():
-        repository = WorkBoardRepository()
-        async with factory() as db:
-            claim = await repository.claim_ready_task(
-                db,
-                "task-racing-real",
-                expected_revision=1,
-                lease_owner="service:work-board",
-                lease_seconds=300,
-            )
-            await db.commit()
-            return claim
+    async def empty_reconcile(*_args, **_kwargs):
+        return []
 
-    first, second = await asyncio.gather(claim_once(), claim_once())
-    claims = [claim for claim in (first, second) if claim is not None]
-    assert len(claims) == 1
+    async def ready(_task):
+        return None, None
+
+    async def runtime(_task):
+        return 300
+
+    async def admitted(_claim):
+        return {"admitted": True, "completed": False, "blocked": False}
+
+    dispatchers = [
+        WorkBoardDispatcher(
+            repository=WorkBoardRepository(),
+            session_provider=durable_session,
+        )
+        for _ in range(2)
+    ]
+    for dispatcher in dispatchers:
+        dispatcher.reconcile_pending_attempts = empty_reconcile
+        dispatcher.reconcile_linked_attempts = empty_reconcile
+        dispatcher._readiness = ready
+        dispatcher._effective_runtime = runtime
+        dispatcher._admit_execute_project = admitted
+
+    first, second = await asyncio.gather(*(dispatcher.run_pass() for dispatcher in dispatchers))
+    assert first["claimed"] + second["claimed"] == 1
     async with factory() as db:
         attempts = list((await db.execute(select(WorkBoardAttempt))).scalars().all())
         task = (

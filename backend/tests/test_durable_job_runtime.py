@@ -1574,6 +1574,142 @@ async def test_child_admission_requires_the_current_parent_fence(async_db):
 
 
 @pytest.mark.asyncio
+async def test_cancel_job_tree_inherits_root_and_cancels_exact_tree_child_first(async_db):
+    """Cancellation follows the durable parent tree, including deep children."""
+
+    root = await durable_job_repository.admit_job(
+        _spec(job_id="job-tree-root", dedupe_key="candidate-tree-root")
+    )
+    await durable_job_repository.queue_job(root["job_id"])
+    root_claim = await durable_job_repository.claim_job(root["job_id"], owner="runner-tree-root")
+
+    child_spec = replace(
+        _spec(job_id="job-tree-child", dedupe_key="candidate-tree-child"),
+        parent_job_id=root["job_id"],
+        parent_fencing_token=root_claim["lease"]["fencing_token"],
+    )
+    child = await durable_job_repository.admit_job(child_spec)
+    await durable_job_repository.queue_job(child["job_id"])
+    child_claim = await durable_job_repository.claim_job(child["job_id"], owner="runner-tree-child")
+
+    grandchild = await durable_job_repository.admit_job(
+        replace(
+            _spec(job_id="job-tree-grandchild", dedupe_key="candidate-tree-grandchild"),
+            parent_job_id=child["job_id"],
+            parent_fencing_token=child_claim["lease"]["fencing_token"],
+        )
+    )
+    await durable_job_repository.queue_job(grandchild["job_id"])
+    await durable_job_repository.claim_job(grandchild["job_id"], owner="runner-tree-grandchild")
+
+    other_root = await durable_job_repository.admit_job(
+        _spec(job_id="job-other-root", dedupe_key="candidate-other-root")
+    )
+    await durable_job_repository.queue_job(other_root["job_id"])
+    await durable_job_repository.claim_job(other_root["job_id"], owner="runner-other-root")
+
+    assert root["root_run_identity"] == root["job_id"]
+    assert child["root_run_identity"] == root["job_id"]
+    assert grandchild["root_run_identity"] == root["job_id"]
+    assert child["branch_depth"] == 1
+    assert grandchild["branch_depth"] == 2
+    assert other_root["root_run_identity"] == other_root["job_id"]
+
+    cancelled = await durable_job_repository.cancel_job_tree(root["job_id"])
+
+    # The repository performs each real SQLite CAS in this returned order, so
+    # a deeper worker is cancelled before its parent can be released.
+    assert [receipt["job_id"] for receipt in cancelled] == [
+        grandchild["job_id"],
+        child["job_id"],
+        root["job_id"],
+    ]
+    assert all(receipt["status"] == "cancelled" for receipt in cancelled)
+
+    for job_id in (grandchild["job_id"], child["job_id"], root["job_id"]):
+        readback = await durable_job_repository.get_job(job_id)
+        assert readback is not None
+        assert readback["status"] == "cancelled"
+        assert readback["root_run_identity"] == root["job_id"]
+        assert readback["lease"]["owner"] is None
+        assert readback["lease"]["expires_at"] is None
+        assert readback["finished_at"] is not None
+
+    other_readback = await durable_job_repository.get_job(other_root["job_id"])
+    assert other_readback is not None
+    assert other_readback["status"] == "running"
+    assert other_readback["root_run_identity"] == other_root["job_id"]
+    assert other_readback["lease"]["owner"] == "runner-other-root"
+
+
+@pytest.mark.asyncio
+async def test_cancel_job_tree_recovers_legacy_self_root_descendants(async_db):
+    """Parent links recover active pre-lineage rows without crossing roots."""
+
+    root = await durable_job_repository.admit_job(
+        _spec(job_id="job-legacy-root", dedupe_key="candidate-legacy-root")
+    )
+    await durable_job_repository.queue_job(root["job_id"])
+    root_claim = await durable_job_repository.claim_job(root["job_id"], owner="runner-legacy-root")
+
+    child = await durable_job_repository.admit_job(
+        replace(
+            _spec(job_id="job-legacy-child", dedupe_key="candidate-legacy-child"),
+            parent_job_id=root["job_id"],
+            parent_fencing_token=root_claim["lease"]["fencing_token"],
+        )
+    )
+    await durable_job_repository.queue_job(child["job_id"])
+    child_claim = await durable_job_repository.claim_job(child["job_id"], owner="runner-legacy-child")
+
+    grandchild = await durable_job_repository.admit_job(
+        replace(
+            _spec(job_id="job-legacy-grandchild", dedupe_key="candidate-legacy-grandchild"),
+            parent_job_id=child["job_id"],
+            parent_fencing_token=child_claim["lease"]["fencing_token"],
+        )
+    )
+    await durable_job_repository.queue_job(grandchild["job_id"])
+    await durable_job_repository.claim_job(grandchild["job_id"], owner="runner-legacy-grandchild")
+
+    other_root = await durable_job_repository.admit_job(
+        _spec(job_id="job-legacy-other-root", dedupe_key="candidate-legacy-other-root")
+    )
+    await durable_job_repository.queue_job(other_root["job_id"])
+    await durable_job_repository.claim_job(other_root["job_id"], owner="runner-legacy-other-root")
+
+    # Simulate active rows admitted before root/branch lineage was persisted.
+    async with async_db() as db:
+        await db.execute(
+            update(WorkflowRunState)
+            .where(
+                WorkflowRunState.run_identity.in_([
+                    child["job_id"],
+                    grandchild["job_id"],
+                ])
+            )
+            .values(
+                root_run_identity=WorkflowRunState.run_identity,
+                branch_depth=0,
+            )
+        )
+
+    cancelled = await durable_job_repository.cancel_job_tree(root["job_id"])
+    assert [receipt["job_id"] for receipt in cancelled] == [
+        grandchild["job_id"],
+        child["job_id"],
+        root["job_id"],
+    ]
+    assert all(
+        (await durable_job_repository.get_job(job_id))["status"] == "cancelled"
+        for job_id in (grandchild["job_id"], child["job_id"], root["job_id"])
+    )
+    other_readback = await durable_job_repository.get_job(other_root["job_id"])
+    assert other_readback is not None
+    assert other_readback["status"] == "running"
+
+
+@pytest.mark.asyncio
 async def test_illegal_transition_stale_lease_and_restart_recovery_are_fail_closed(async_db):
     admitted = await durable_job_repository.admit_job(_spec(job_id="job-743-2", dedupe_key="candidate-2"))
     with pytest.raises(DurableJobTransitionError):

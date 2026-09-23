@@ -1943,10 +1943,10 @@ class WorkBoardRepository:
 
         observed_at = now or _now()
         bounded_limit = max(1, min(int(limit), 20))
-        result = await db.execute(
+        ready_result = await db.execute(
             select(WorkBoardTask)
             .where(
-                WorkBoardTask.status.in_((WorkBoardStatus.todo, WorkBoardStatus.ready)),
+                WorkBoardTask.status == WorkBoardStatus.ready,
                 (
                     WorkBoardTask.scheduled_at.is_(None)
                     | (WorkBoardTask.scheduled_at <= observed_at)
@@ -1958,7 +1958,29 @@ class WorkBoardRepository:
             )
             .limit(bounded_limit)
         )
-        return list(result.scalars().all())
+        ready_tasks = list(ready_result.scalars().all())
+        remaining = bounded_limit - len(ready_tasks)
+        if remaining <= 0:
+            return ready_tasks
+        # Promotion candidates are read in their own bounded phase.  A large
+        # Todo backlog can therefore never consume the pass window reserved
+        # for already-admitted Ready work.
+        todo_result = await db.execute(
+            select(WorkBoardTask)
+            .where(
+                WorkBoardTask.status == WorkBoardStatus.todo,
+                (
+                    WorkBoardTask.scheduled_at.is_(None)
+                    | (WorkBoardTask.scheduled_at <= observed_at)
+                ),
+            )
+            .order_by(
+                WorkBoardTask.priority.desc(),
+                WorkBoardTask.creation_sequence.asc(),
+            )
+            .limit(remaining)
+        )
+        return ready_tasks + list(todo_result.scalars().all())
 
     async def promote_task_ready(
         self,

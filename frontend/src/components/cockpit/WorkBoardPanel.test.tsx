@@ -301,6 +301,74 @@ describe("WorkBoardPanel", () => {
     expect(fetchMock.mock.calls.some(([input]) => String(input).endsWith("/api/work-board/tasks/task-b"))).toBe(true);
   });
 
+  it("refreshes a task for a late lower event instead of skipping its update", async () => {
+    const taskA = task({ task_id: "task-a", title: "Task A before" });
+    const taskB = task({ task_id: "task-b", creation_sequence: 2, title: "Task B before" });
+    const updatedA = { ...taskA, title: "Task A refreshed after the late event", task_revision: 4 };
+    const updatedB = { ...taskB, title: "Task B refreshed first", task_revision: 4 };
+    let eventDeltaCalls = 0;
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/work-board/tasks?") && !url.match(/\/tasks\/[^?]+/)) return Promise.resolve(response(page([taskA, taskB], 42)));
+      if (url.includes("/api/work-board/events?after=42")) {
+        eventDeltaCalls += 1;
+        return Promise.resolve(response(eventDeltaCalls === 1
+          ? { events: [{ ...boardEvent(44), task_id: "task-b" }], last_event_id: 44, gap: false }
+          : events(42)));
+      }
+      if (url.endsWith("/api/goals/tree")) return Promise.resolve(response([]));
+      if (url.endsWith("/api/work-board/tasks/task-a")) return Promise.resolve(response(detail(updatedA)));
+      if (url.endsWith("/api/work-board/tasks/task-b")) return Promise.resolve(response(detail(updatedB)));
+      return Promise.resolve(response({}));
+    });
+
+    render(<WorkBoardPanel />);
+    await waitFor(() => expect(TestBoardSocket.instances).toHaveLength(1));
+    act(() => {
+      TestBoardSocket.instances[0]?.send({ ...boardEvent(44), task_id: "task-b" });
+      TestBoardSocket.instances[0]?.send({ ...boardEvent(43), task_id: "task-a" });
+    });
+
+    expect(await screen.findByText("Task B refreshed first")).toBeInTheDocument();
+    expect(await screen.findByText("Task A refreshed after the late event")).toBeInTheDocument();
+    expect(fetchMock.mock.calls.some(([input]) => String(input).endsWith("/api/work-board/tasks/task-a"))).toBe(true);
+  });
+
+  it("keeps a remounted board generation from applying a late snapshot or cursor", async () => {
+    const staleTask = task({ title: "Stale first generation" });
+    const currentTask = task({ title: "Current remounted generation" });
+    let taskPageCalls = 0;
+    let resolveStaleSnapshot: ((value: ReturnType<typeof response>) => void) | null = null;
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/work-board/tasks?") && !url.match(/\/tasks\/[^?]+/)) {
+        taskPageCalls += 1;
+        if (taskPageCalls === 1) {
+          return new Promise<ReturnType<typeof response>>((resolve) => { resolveStaleSnapshot = resolve; });
+        }
+        return Promise.resolve(response(page([currentTask], 20)));
+      }
+      if (url.includes("/api/work-board/events?after=20")) return Promise.resolve(response(events(20)));
+      if (url.includes("/api/work-board/events?after=99")) throw new Error("stale generation advanced the cursor");
+      if (url.includes("/api/work-board/events")) return Promise.resolve(response(events(20)));
+      if (url.endsWith("/api/goals/tree")) return Promise.resolve(response([]));
+      return Promise.resolve(response({}));
+    });
+
+    const firstMount = render(<WorkBoardPanel />);
+    await waitFor(() => expect(resolveStaleSnapshot).not.toBeNull());
+    firstMount.unmount();
+
+    render(<WorkBoardPanel />);
+    expect(await screen.findByText("Current remounted generation")).toBeInTheDocument();
+    await act(async () => { resolveStaleSnapshot?.(response(page([staleTask], 99))); });
+
+    expect(screen.queryByText("Stale first generation")).not.toBeInTheDocument();
+    expect(TestBoardSocket.instances).toHaveLength(1);
+    expect(TestBoardSocket.instances[0]?.url).toContain("/ws/work-board/events?after=20");
+    expect(fetchMock.mock.calls.some(([input]) => String(input).includes("/events?after=99"))).toBe(false);
+  });
+
   it("reconnects from a fresh snapshot when the REST event feed trails a WebSocket event", async () => {
     const currentTask = task({ status: "ready" });
     let taskListCalls = 0;
@@ -624,6 +692,37 @@ describe("WorkBoardPanel", () => {
       reference,
       ownerSessionId: "canonical-owner-session",
       workflowRunId: null,
+      parentWorkflowRunId: null,
+    });
+  });
+
+  it("uses the registered child durable run for a board result artifact", async () => {
+    const reference = {
+      job_id: "child-run-1",
+      workflow_run_id: "parent-run-1",
+      artifact_id: "art_" + "a".repeat(24),
+      file_path: "notes/child-output.md",
+      content_sha256: "b".repeat(64),
+      verified: true,
+    };
+    const currentTask = task({
+      title: "Child result artifact",
+      artifact_refs: [],
+      result_refs: [reference],
+      latest_attempt: endedAttempt({ workflow_run_id: "parent-run-1" }),
+    });
+    taskResponse(fetchMock, currentTask, 7, detail(currentTask, { attempts: [currentTask.latest_attempt!] }));
+    const onInspectArtifact = vi.fn();
+    render(<WorkBoardPanel onInspectArtifact={onInspectArtifact} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Open task Child result artifact" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Inspect execution evidence notes/child-output.md" }));
+
+    expect(onInspectArtifact).toHaveBeenCalledWith({
+      reference,
+      ownerSessionId: "operator-session-1",
+      workflowRunId: "child-run-1",
+      parentWorkflowRunId: "parent-run-1",
     });
   });
 
@@ -661,6 +760,7 @@ describe("WorkBoardPanel", () => {
       reference,
       ownerSessionId: "operator-session-1",
       workflowRunId: "workflow-run-1",
+      parentWorkflowRunId: "workflow-run-1",
     });
   });
 
@@ -789,6 +889,7 @@ describe("WorkBoardPanel", () => {
       reference,
       ownerSessionId: "canonical-owner-session",
       workflowRunId: "workflow-run-1",
+      parentWorkflowRunId: "workflow-run-1",
     });
   });
 

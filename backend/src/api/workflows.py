@@ -940,6 +940,54 @@ def _safe_workflow_artifact_projection(value: Any) -> dict[str, Any]:
             path = _safe_workflow_artifact_path(item.get("file_path") or item.get("path"))
             if path is not None:
                 candidates.append((path, item))
+    # Typed durable runs persist artifact receipts directly on the canonical
+    # job row.  Keep those receipts as the source of the artifact registry so
+    # a child run can be inspected from a board result reference without
+    # requiring a legacy audit event or a fabricated parent registry.
+    raw_artifacts = value.get("artifacts")
+    if not isinstance(raw_artifacts, list):
+        raw_artifacts = value.get("artifact_receipts")
+    if isinstance(raw_artifacts, list):
+        for item in raw_artifacts:
+            if not isinstance(item, dict):
+                continue
+            path = _safe_workflow_artifact_path(item.get("file_path") or item.get("path"))
+            if path is not None:
+                candidates.append((path, item))
+
+    # The board's registered capability settles its parent with an
+    # independent readback receipt.  When that receipt carries the child
+    # artifact identity, expose the same bounded artifact handle on the
+    # parent projection.  Only the canonical workspace path, identifier, and
+    # digest are eligible; receipt details remain private.
+    raw_effects = value.get("effects")
+    if not isinstance(raw_effects, list):
+        raw_effects = value.get("effect_receipts")
+    if isinstance(raw_effects, list):
+        for item in raw_effects:
+            if not isinstance(item, dict):
+                continue
+            if item.get("receipt_kind") != "readback" or item.get("effect_type") != "board_child_readback":
+                continue
+            details = item.get("details") if isinstance(item.get("details"), dict) else {}
+            artifact_id = _safe_workflow_artifact_id(details.get("artifact_id"))
+            path = _safe_workflow_artifact_path(item.get("target_path"))
+            if artifact_id is None or path is None:
+                continue
+            candidates.append(
+                (
+                    path,
+                    {
+                        "artifact_id": artifact_id,
+                        "file_path": path,
+                        "content_sha256": item.get("content_sha256") or item.get("target_digest"),
+                    },
+                )
+            )
+
+    # Bare paths are a compatibility fallback.  Add them after typed
+    # registries and receipts so an explicit artifact ID and digest win when
+    # several sources describe the same path.
     if isinstance(raw_paths, list):
         for raw_path in raw_paths:
             path = _safe_workflow_artifact_path(raw_path)
@@ -1054,6 +1102,17 @@ def _safe_canonical_receipt_projection(
             path = _safe_workflow_artifact_path(item["file_path"])
             if path is not None:
                 receipt["file_path"] = path
+        if kind == "effect":
+            target_path = _safe_workflow_artifact_path(item.get("target_path"))
+            if target_path is not None:
+                receipt["target_path"] = target_path
+            details = item.get("details") if isinstance(item.get("details"), dict) else {}
+            child_job_id = _safe_workflow_token(details.get("child_job_id"), fallback="")
+            if child_job_id:
+                receipt["child_job_id"] = child_job_id
+            artifact_id = _safe_workflow_artifact_id(details.get("artifact_id"))
+            if artifact_id is not None:
+                receipt["artifact_id"] = artifact_id
         safe.append(receipt)
     return safe
 

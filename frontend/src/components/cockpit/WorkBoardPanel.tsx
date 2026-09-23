@@ -94,6 +94,7 @@ export interface WorkBoardArtifactInspectRequest {
   reference: WorkBoardReceiptReference;
   ownerSessionId: string | null;
   workflowRunId: string | null;
+  parentWorkflowRunId: string | null;
 }
 
 interface ApiErrorBody {
@@ -379,6 +380,17 @@ function safeReferenceLabel(reference: WorkBoardReceiptReference): string {
     || "Safe reference";
 }
 
+function referenceWorkflowRunId(
+  reference: WorkBoardReceiptReference,
+  fallback: string | null,
+): string | null {
+  // Registered board adapters return the child durable job in ``job_id``
+  // while ``workflow_run_id`` remains the immutable parent attempt link.
+  // Follow the child when it is present so the inspector can enforce the
+  // child session/parent lineage checks against its own projection.
+  return reference.child_job_id ?? reference.job_id ?? reference.workflow_run_id ?? fallback;
+}
+
 function WorkBoardPanel({
   onOpenApprovals,
   onInspectWorkflowRun,
@@ -439,7 +451,9 @@ function WorkBoardPanel({
   const socketEventControllerRef = useRef<AbortController | null>(null);
   const reconnectTimerRef = useRef<number | null>(null);
   const stoppedRef = useRef(false);
+  const boardGenerationRef = useRef(0);
   const syncingRef = useRef(false);
+  const syncingGenerationRef = useRef(0);
   const socketGenerationRef = useRef(0);
   const reconnectRef = useRef<(() => Promise<boolean>) | null>(null);
   const eventReconcileQueueRef = useRef<Promise<void>>(Promise.resolve());
@@ -451,6 +465,10 @@ function WorkBoardPanel({
   const taskDetailPanelRef = useRef<HTMLElement | null>(null);
   const taskDetailOpenerRef = useRef<HTMLElement | null>(null);
   createBusyRef.current = createBusy;
+
+  const isCurrentBoardGeneration = useCallback((generation: number): boolean => (
+    !stoppedRef.current && generation === boardGenerationRef.current
+  ), []);
 
   const requestBoard = useCallback(<T,>(path: string, init?: RequestInit): Promise<T> => {
     const controller = new AbortController();
@@ -573,11 +591,29 @@ function WorkBoardPanel({
     return taskDetailRequestVersionRef.current.get(taskId) === requestVersion ? nextDetail : null;
   }, [fetchTaskDetail]);
 
-  const reloadEventTasks = useCallback(async (generation: number, targetEventId: number): Promise<boolean> => {
+  const reloadEventTasks = useCallback(async (
+    generation: number,
+    targetEventId: number,
+    eventTaskId?: string,
+  ): Promise<boolean> => {
     const startingCursor = eventCursorRef.current;
     const controller = socketEventControllerRef.current;
     if (startingCursor === null || !controller) return false;
     try {
+      // A late notification can arrive after a newer event has advanced the
+      // cursor.  Refresh its task directly instead of treating the lower ID
+      // as already reconciled; the REST page may have been observed before
+      // that event became visible to this owner.
+      if (eventTaskId && targetEventId <= startingCursor) {
+        const refreshed = await readTaskDetail(eventTaskId, controller.signal);
+        if (generation !== socketGenerationRef.current || controller.signal.aborted || !refreshed) return false;
+        setTasks((current) => uniqueTasks([
+          ...current.filter((task) => task.task_id !== refreshed.task.task_id),
+          refreshed.task,
+        ]));
+        if (refreshed.task.task_id === selectedTaskIdRef.current) setDetail(refreshed);
+        return true;
+      }
       const delta = await loadEventDelta(startingCursor, controller.signal);
       if (generation !== socketGenerationRef.current || controller.signal.aborted) return false;
       if (delta.eventCursor < targetEventId || !delta.events.some((event) => event.event_id === targetEventId)) return false;
@@ -610,12 +646,14 @@ function WorkBoardPanel({
     }
   }, [loadEventDelta, readTaskDetail]);
 
-  const loadSnapshotAndCatchUp = useCallback(async (): Promise<number> => {
+  const loadSnapshotAndCatchUp = useCallback(async (
+    generation = boardGenerationRef.current,
+  ): Promise<number> => {
     const snapshot = await loadAllTaskPages();
-    if (stoppedRef.current) return snapshot.eventCursor;
+    if (!isCurrentBoardGeneration(generation)) return snapshot.eventCursor;
     setTasks(snapshot.tasks);
     const delta = await loadEventDelta(snapshot.eventCursor);
-    if (stoppedRef.current) return delta.eventCursor;
+    if (!isCurrentBoardGeneration(generation)) return delta.eventCursor;
     const taskIds = Array.from(new Set([
       ...delta.events.map((event) => event.task_id),
       ...(selectedTaskIdRef.current ? [selectedTaskIdRef.current] : []),
@@ -625,7 +663,7 @@ function WorkBoardPanel({
       for (let index = 0; index < taskIds.length; index += DETAIL_REFRESH_BATCH_SIZE) {
         const batch = taskIds.slice(index, index + DETAIL_REFRESH_BATCH_SIZE);
         const results = await Promise.all(batch.map((taskId) => readTaskDetail(taskId)));
-        if (stoppedRef.current) return delta.eventCursor;
+        if (!isCurrentBoardGeneration(generation)) return delta.eventCursor;
         if (results.some((item) => item === null)) {
           throw new WorkBoardSyncError("A task changed during event catch-up. The board is taking another fresh snapshot.");
         }
@@ -641,12 +679,13 @@ function WorkBoardPanel({
         if (selected) setDetail(selected);
       }
     }
+    if (!isCurrentBoardGeneration(generation)) return delta.eventCursor;
     eventCursorRef.current = delta.eventCursor;
     setLoading(false);
     setStale(false);
     setBoardError(null);
     return delta.eventCursor;
-  }, [loadAllTaskPages, loadEventDelta, readTaskDetail]);
+  }, [isCurrentBoardGeneration, loadAllTaskPages, loadEventDelta, readTaskDetail]);
 
   const refreshSnapshot = useCallback(async (): Promise<boolean> => {
     if (stoppedRef.current) return false;
@@ -680,8 +719,8 @@ function WorkBoardPanel({
     }
   }, [readTaskDetail, refreshSnapshot, selectedTaskId]);
 
-  const openSocketAt = useCallback((cursor: number) => {
-    if (stoppedRef.current) return;
+  const openSocketAt = useCallback((cursor: number, boardGeneration = boardGenerationRef.current) => {
+    if (!isCurrentBoardGeneration(boardGeneration)) return;
     socketEventControllerRef.current?.abort();
     const eventController = new AbortController();
     socketEventControllerRef.current = eventController;
@@ -704,10 +743,10 @@ function WorkBoardPanel({
     }
     socketRef.current = socket;
     socket.onopen = () => {
-      if (generation === socketGenerationRef.current) setConnectionState("connected");
+      if (isCurrentBoardGeneration(boardGeneration) && generation === socketGenerationRef.current) setConnectionState("connected");
     };
     socket.onmessage = (message) => {
-      if (generation !== socketGenerationRef.current) return;
+      if (!isCurrentBoardGeneration(boardGeneration) || generation !== socketGenerationRef.current) return;
       let payload: unknown;
       try {
         payload = JSON.parse(String(message.data));
@@ -748,18 +787,16 @@ function WorkBoardPanel({
       const eventId = eventPayload.event_id;
       eventReconcileQueueRef.current = eventReconcileQueueRef.current.then(async () => {
         if (generation !== socketGenerationRef.current) return;
-        const currentCursor = eventCursorRef.current ?? cursor;
-        if (eventId <= currentCursor) return;
-        const reconciled = await reloadEventTasks(generation, eventId);
+        const reconciled = await reloadEventTasks(generation, eventId, eventPayload.task_id);
         if (!reconciled) {
-          if (generation === socketGenerationRef.current) void reconnectRef.current?.();
+          if (isCurrentBoardGeneration(boardGeneration) && generation === socketGenerationRef.current) void reconnectRef.current?.();
         }
       }).catch(() => {
-        if (generation === socketGenerationRef.current) void reconnectRef.current?.();
+        if (isCurrentBoardGeneration(boardGeneration) && generation === socketGenerationRef.current) void reconnectRef.current?.();
       });
     };
     socket.onclose = (event) => {
-      if (generation !== socketGenerationRef.current || stoppedRef.current) return;
+      if (!isCurrentBoardGeneration(boardGeneration) || generation !== socketGenerationRef.current) return;
       if (event.code === 4401) {
         setConnectionState("denied");
         setStale(true);
@@ -778,13 +815,17 @@ function WorkBoardPanel({
       }
     };
     socket.onerror = () => {
-      if (generation === socketGenerationRef.current) setConnectionState("disconnected");
+      if (isCurrentBoardGeneration(boardGeneration) && generation === socketGenerationRef.current) setConnectionState("disconnected");
     };
-  }, [reloadEventTasks]);
+  }, [isCurrentBoardGeneration, reloadEventTasks]);
 
-  const reconnectFromSnapshot = useCallback(async (): Promise<boolean> => {
-    if (stoppedRef.current || syncingRef.current) return false;
+  const reconnectFromSnapshot = useCallback(async (
+    boardGeneration = boardGenerationRef.current,
+  ): Promise<boolean> => {
+    if (!isCurrentBoardGeneration(boardGeneration) || syncingRef.current) return false;
     syncingRef.current = true;
+    const syncGeneration = syncingGenerationRef.current + 1;
+    syncingGenerationRef.current = syncGeneration;
     // Invalidate pending socket handlers before reading a new snapshot. The
     // HTTP snapshot and catch-up then become the only state authority.
     socketGenerationRef.current += 1;
@@ -803,11 +844,11 @@ function WorkBoardPanel({
     setBoardError(null);
     setLoading(tasksRef.current.length === 0);
     try {
-      const cursor = await loadSnapshotAndCatchUp();
-      if (!stoppedRef.current) openSocketAt(cursor);
-      return !stoppedRef.current;
+      const cursor = await loadSnapshotAndCatchUp(boardGeneration);
+      if (isCurrentBoardGeneration(boardGeneration)) openSocketAt(cursor, boardGeneration);
+      return isCurrentBoardGeneration(boardGeneration);
     } catch (error) {
-      if (!stoppedRef.current) {
+      if (isCurrentBoardGeneration(boardGeneration)) {
         setStale(true);
         setLoading(false);
         setConnectionState("disconnected");
@@ -821,29 +862,34 @@ function WorkBoardPanel({
       }
       return false;
     } finally {
-      syncingRef.current = false;
+      if (syncingGenerationRef.current === syncGeneration) syncingRef.current = false;
     }
-  }, [loadSnapshotAndCatchUp, openSocketAt]);
+  }, [isCurrentBoardGeneration, loadSnapshotAndCatchUp, openSocketAt]);
 
   useEffect(() => {
     reconnectRef.current = reconnectFromSnapshot;
   }, [reconnectFromSnapshot]);
 
   useEffect(() => {
+    const boardGeneration = boardGenerationRef.current + 1;
+    boardGenerationRef.current = boardGeneration;
     stoppedRef.current = false;
-    void reconnectFromSnapshot();
+    void reconnectFromSnapshot(boardGeneration);
     void requestApi<GoalInfo[]>("/api/goals/tree")
       .then((payload) => {
-        if (stoppedRef.current) return;
+        if (!isCurrentBoardGeneration(boardGeneration)) return;
         if (!Array.isArray(payload)) throw new Error("Goals response was not a list");
         setGoals(payload);
         setGoalError(null);
       })
       .catch((error) => {
-        if (!stoppedRef.current && !(error instanceof Error && error.name === "AbortError")) setGoalError(errorText(error));
+        if (isCurrentBoardGeneration(boardGeneration) && !(error instanceof Error && error.name === "AbortError")) setGoalError(errorText(error));
       });
     return () => {
       stoppedRef.current = true;
+      syncingRef.current = false;
+      syncingGenerationRef.current += 1;
+      boardGenerationRef.current += 1;
       socketGenerationRef.current += 1;
       socketEventControllerRef.current?.abort();
       socketEventControllerRef.current = null;
@@ -855,7 +901,7 @@ function WorkBoardPanel({
       socketRef.current?.close(1000, "component_unmounted");
       socketRef.current = null;
     };
-  }, [reconnectFromSnapshot, requestApi]);
+  }, [isCurrentBoardGeneration, reconnectFromSnapshot, requestApi]);
 
   useEffect(() => {
     if (!selectedTaskId) {
@@ -1791,7 +1837,7 @@ function WorkBoardPanel({
                           <div>{receipt.status ?? receipt.outcome ?? "Receipt"}{receipt.verified === true ? " · verified" : ""}{receipt.readback_status ? ` · readback ${READBACK_LABELS[receipt.readback_status]}` : ""}</div>
                           {receipt.content_sha256 && <div className="break-all font-mono text-[10px]">SHA-256 {receipt.content_sha256}</div>}
                           {receipt.file_path && <div className="break-all text-[10px]">Artifact path {receipt.file_path}</div>}
-                          {(receipt.file_path || receipt.artifact_id || receipt.target_path || receipt.effect_id) && onInspectArtifact && <button type="button" className="mt-1 underline" aria-label={`Inspect execution evidence ${receipt.file_path ?? receipt.target_path ?? receipt.artifact_id ?? receipt.effect_id}`} onClick={() => onInspectArtifact({ reference: receipt, ownerSessionId: selectedTask.owner_session_id, workflowRunId: attempt.workflow_run_id })}>{receipt.target_path || receipt.effect_id ? "Inspect readback evidence" : "Inspect artifact"}</button>}
+                          {(receipt.file_path || receipt.artifact_id || receipt.target_path || receipt.effect_id) && onInspectArtifact && <button type="button" className="mt-1 underline" aria-label={`Inspect execution evidence ${receipt.file_path ?? receipt.target_path ?? receipt.artifact_id ?? receipt.effect_id}`} onClick={() => onInspectArtifact({ reference: receipt, ownerSessionId: selectedTask.owner_session_id, workflowRunId: referenceWorkflowRunId(receipt, attempt.workflow_run_id), parentWorkflowRunId: attempt.workflow_run_id })}>{receipt.target_path || receipt.effect_id ? "Inspect readback evidence" : "Inspect artifact"}</button>}
                           {receipt.workflow_run_id && onInspectWorkflowRun && <button type="button" className="underline" onClick={() => onInspectWorkflowRun(receipt.workflow_run_id!, selectedTask.owner_session_id)}>Inspect existing workflow record</button>}
                         </div>
                       ))}
@@ -1803,7 +1849,7 @@ function WorkBoardPanel({
                       <div>{reference.status ?? reference.outcome ?? "Reference"}{reference.verified === true ? " · verified" : ""}</div>
                       {reference.content_sha256 && <div className="break-all font-mono text-[10px]">SHA-256 {reference.content_sha256}</div>}
                       {reference.file_path && <div className="break-all text-[10px]">Artifact path {reference.file_path}</div>}
-                      {(reference.file_path || reference.artifact_id || reference.target_path || reference.effect_id) && onInspectArtifact && <button type="button" className="mt-1 underline" aria-label={`Inspect execution evidence ${reference.file_path ?? reference.target_path ?? reference.artifact_id ?? reference.effect_id}`} onClick={() => onInspectArtifact({ reference, ownerSessionId: selectedTask.owner_session_id, workflowRunId: reference.workflow_run_id ?? selectedTask.latest_attempt?.workflow_run_id ?? null })}>{reference.target_path || reference.effect_id ? "Inspect readback evidence" : "Inspect artifact"}</button>}
+                      {(reference.file_path || reference.artifact_id || reference.target_path || reference.effect_id) && onInspectArtifact && <button type="button" className="mt-1 underline" aria-label={`Inspect execution evidence ${reference.file_path ?? reference.target_path ?? reference.artifact_id ?? reference.effect_id}`} onClick={() => onInspectArtifact({ reference, ownerSessionId: selectedTask.owner_session_id, workflowRunId: referenceWorkflowRunId(reference, selectedTask.latest_attempt?.workflow_run_id ?? null), parentWorkflowRunId: selectedTask.latest_attempt?.workflow_run_id ?? null })}>{reference.target_path || reference.effect_id ? "Inspect readback evidence" : "Inspect artifact"}</button>}
                       {reference.workflow_run_id && onInspectWorkflowRun && <button type="button" className="underline" onClick={() => onInspectWorkflowRun(reference.workflow_run_id!, selectedTask.owner_session_id)}>Open workflow evidence</button>}
                     </div>
                   ))}

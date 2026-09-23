@@ -76,6 +76,9 @@ export interface WorkflowStepRecord {
 export interface WorkflowEffectReceiptRecord {
   receiptKind?: string | null;
   effectType?: string | null;
+  artifactId?: string | null;
+  childJobId?: string | null;
+  targetPath?: string | null;
   status?: string | null;
   safe?: boolean;
   reconciled?: boolean;

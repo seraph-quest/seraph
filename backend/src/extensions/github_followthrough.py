@@ -1054,8 +1054,11 @@ class GitHubFollowthroughService:
         owner_principal_id: str,
         owner_session_id: str,
         external_mutation_granted: bool = False,
+        work_board_idempotency_key: str | None = None,
         request: PrepareRequest,
     ) -> dict[str, Any]:
+        if work_board_idempotency_key is not None and not str(work_board_idempotency_key).strip():
+            raise GitHubFollowthroughError("work_board_binding_invalid", status_code=409)
         await _require_live_owner_session(
             owner_principal_id=owner_principal_id,
             owner_session_id=owner_session_id,
@@ -1138,7 +1141,13 @@ class GitHubFollowthroughService:
                 raise GitHubFollowthroughError("job_owner_mismatch", status_code=403)
             if persisted_session != _text(owner_session_id):
                 raise GitHubFollowthroughError("job_session_mismatch", status_code=403)
-            return await self._prepare_job_response(existing)
+            # Accepted/queued rows are the crash window between durable
+            # admission and preparation.  Fall through to the canonical
+            # admission/preparation path so the same binding is queued,
+            # claimed, and receives its existing approval record.  Every
+            # later state is returned as a read-only durable projection.
+            if str(existing.get("status") or "") not in {"accepted", "queued"}:
+                return await self._prepare_job_response(existing)
         authority = {
             "principal": owner_principal_id,
             "owner_kind": "user",
@@ -1160,8 +1169,8 @@ class GitHubFollowthroughService:
                     owner_principal_id=owner_principal_id,
                     job_kind=JOB_KIND,
                     capability_version=CAPABILITY_VERSION,
-                    idempotency_scope="github-followthrough",
-                    idempotency_key=str(client_key),
+                    idempotency_scope=("work-board-attempt" if work_board_idempotency_key else "github-followthrough"),
+                    idempotency_key=(str(work_board_idempotency_key) if work_board_idempotency_key else str(client_key)),
                 ),
                 inputs=input_fields,
                 session_id=owner_session_id,

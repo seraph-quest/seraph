@@ -112,6 +112,7 @@ def init_scheduler() -> AsyncIOScheduler | None:
     from src.scheduler.jobs.goal_check import run_goal_check
     from src.scheduler.jobs.calendar_scan import run_calendar_scan
     from src.scheduler.jobs.strategist_tick import run_strategist_tick
+    from src.work_board.dispatcher import run_work_board_dispatch
     from src.scheduler.jobs.daily_briefing import run_daily_briefing
     from src.scheduler.jobs.evening_review import run_evening_review
     from src.scheduler.jobs.activity_digest import run_activity_digest
@@ -147,6 +148,13 @@ def init_scheduler() -> AsyncIOScheduler | None:
             "trigger": IntervalTrigger(minutes=settings.strategist_interval_min),
             "id": "strategist_tick",
             "name": "Strategist tick",
+        },
+        {
+            "func": _async_job_wrapper(run_work_board_dispatch, loop, job_id="work_board_dispatch"),
+            "trigger": IntervalTrigger(seconds=5),
+            "id": "work_board_dispatch",
+            "name": "Operator work-board dispatch",
+            "misfire_grace_time": 5,
         },
         {
             "func": _async_job_wrapper(run_daily_briefing, loop, job_id="daily_briefing", allow_model_inference=True),

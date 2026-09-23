@@ -563,6 +563,20 @@ class WorkBoardAttempt(SQLModel, table=True):
     """Historical execution attempt linked to at most one durable run."""
 
     __tablename__ = "work_board_attempts"
+    __table_args__ = (
+        Index(
+            "ux_work_board_attempts_active_task",
+            "task_id",
+            unique=True,
+            sqlite_where=text("ended_at IS NULL"),
+        ),
+        Index(
+            "ux_work_board_attempts_workflow_run",
+            "workflow_run_id",
+            unique=True,
+            sqlite_where=text("workflow_run_id IS NOT NULL"),
+        ),
+    )
 
     attempt_id: str = Field(default_factory=_uuid, primary_key=True)
     task_id: str = Field(foreign_key="work_board_tasks.task_id", index=True)
@@ -575,6 +589,7 @@ class WorkBoardAttempt(SQLModel, table=True):
     executor_id: str = Field(default="", index=True)
     started_at: Optional[datetime] = Field(default=None, index=True)
     ended_at: Optional[datetime] = Field(default=None, index=True)
+    cancel_requested_at: Optional[datetime] = Field(default=None, index=True)
     outcome: Optional[str] = Field(default=None, index=True)
     receipt_refs_json: str = Field(default="[]")
     created_at: datetime = Field(default_factory=_now, index=True)

@@ -127,10 +127,15 @@ def _append_workflow_tools(base_tools: list, active_skill_names: list[str], mcp_
     return base_tools + workflow_tools
 
 
-def get_tools() -> list:
-    """Return all auto-discovered tools + MCP tools."""
+def get_tools(*, include_bound_worker: bool = False) -> list:
+    """Return the governed tool surface, optionally with server-bound worker controls."""
     base_tools, active_skill_names, mcp_mode = get_base_tools_and_active_skills()
-    return _append_workflow_tools(base_tools, active_skill_names, mcp_mode)
+    tools = _append_workflow_tools(base_tools, active_skill_names, mcp_mode)
+    if include_bound_worker:
+        from src.tools.work_board_tools import get_bound_work_board_tools
+
+        tools.extend(get_bound_work_board_tools())
+    return tools
 
 
 def create_agent(

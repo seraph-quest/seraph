@@ -1903,6 +1903,112 @@ class DurableJobRepository:
             db.expunge(run)
             return _serialize(run)
 
+    async def get_by_idempotency_binding(
+        self,
+        *,
+        owner_principal_id: str,
+        goal_id: str | None,
+        goal_revision: int | None,
+        idempotency_scope: str,
+        idempotency_key: str,
+        expected_job_id: str | None = None,
+        owner_kind: str | None = None,
+        service_id: str | None = None,
+        session_id: str | None = None,
+        operator_session_id: str | None = None,
+        job_kind: str | None = None,
+        capability_version: str | None = None,
+        input_digest: str | None = None,
+        authority_digest: str | None = None,
+        run_fingerprint: str | None = None,
+    ) -> dict[str, Any] | None:
+        """Read the exact durable admission for one immutable binding.
+
+        Restart recovery must look up the binding persisted by admission. A
+        reconstructed job id is only an advisory hint and cannot prove that a
+        durable run belongs to the board attempt. The binding calculation is
+        the same canonical function used by ``admit_job``.
+        """
+
+        owner_principal_id = _bounded_identifier(
+            owner_principal_id,
+            field_name="owner_principal_id",
+        )
+        idempotency_scope = _bounded_identifier(
+            idempotency_scope,
+            field_name="idempotency_scope",
+        )
+        idempotency_key = _bounded_identifier(
+            idempotency_key,
+            field_name="idempotency_key",
+        )
+        expected_job_id = _bounded_identifier(expected_job_id, field_name="expected_job_id") or None
+        owner_kind = _bounded_identifier(owner_kind, field_name="owner_kind") or None
+        service_id = _bounded_identifier(service_id, field_name="service_id") or None
+        session_id = _bounded_identifier(session_id, field_name="session_id") or None
+        operator_session_id = (
+            _bounded_identifier(operator_session_id, field_name="operator_session_id") or None
+        )
+        job_kind = _bounded_identifier(job_kind, field_name="job_kind") or None
+        capability_version = (
+            _bounded_identifier(capability_version, field_name="capability_version") or None
+        )
+        input_digest = _bounded_identifier(input_digest, field_name="input_digest") or None
+        authority_digest = _bounded_identifier(authority_digest, field_name="authority_digest") or None
+        run_fingerprint = _bounded_identifier(run_fingerprint, field_name="run_fingerprint") or None
+        binding = _binding(
+            owner_principal_id=owner_principal_id,
+            goal_id=goal_id,
+            goal_revision=goal_revision,
+            idempotency_scope=idempotency_scope,
+            dedupe_key=idempotency_key,
+        )
+        async with self._session() as db:
+            run = (
+                await db.execute(
+                    select(WorkflowRunState).where(
+                        WorkflowRunState.idempotency_binding == binding,
+                    )
+                )
+            ).scalars().first()
+            if run is None:
+                return None
+            # The binding includes the immutable fields above, and these
+            # explicit checks keep a malformed legacy row from being treated
+            # as a recovery match merely because its digest collides.
+            if (
+                run.idempotency_binding != binding
+                or run.owner_principal_id != owner_principal_id
+                or run.goal_id != goal_id
+                or run.goal_revision != goal_revision
+                or run.idempotency_scope != idempotency_scope
+                or run.idempotency_key != idempotency_key
+                or (expected_job_id is not None and run.run_identity != expected_job_id)
+                or (owner_kind is not None and run.owner_kind != owner_kind)
+                or (service_id is not None and run.service_id != service_id)
+                or (session_id is not None and run.session_id != session_id)
+                or (
+                    operator_session_id is not None
+                    and run.operator_session_id != operator_session_id
+                )
+                or (job_kind is not None and run.job_kind != job_kind)
+                or (
+                    capability_version is not None
+                    and run.capability_version != capability_version
+                )
+                or (input_digest is not None and run.input_digest != input_digest)
+                or (authority_digest is not None and run.authority_digest != authority_digest)
+                or (
+                    run_fingerprint is not None
+                    and run.run_fingerprint != run_fingerprint
+                )
+            ):
+                raise DurableJobIdempotencyConflict(
+                    "durable admission binding conflicts on immutable identity"
+                )
+            db.expunge(run)
+            return _serialize(run)
+
     async def bind_approval_id(
         self,
         job_id: str,
@@ -2373,6 +2479,81 @@ class DurableJobRepository:
             expected_revision=expected_revision,
             reason=reason,
         )
+
+    async def cancel_job_tree(
+        self,
+        root_job_id: str,
+        *,
+        reason: str = "operator_cancelled",
+    ) -> list[dict[str, Any]]:
+        """Cancel a durable root and its persisted descendants safely.
+
+        Descendants are cancelled before their parent so a child cannot keep
+        running after the board has requested cancellation. Each transition
+        goes through the existing lease/revision/fencing CAS; unresolved
+        external effects remain in their authoritative unknown state and are
+        returned for operator reconciliation.
+        """
+
+        root_job_id = _text(root_job_id)
+        if not root_job_id:
+            raise DurableJobNotFound("<empty>")
+        async with self._session() as db:
+            result = await db.execute(
+                select(WorkflowRunState).where(
+                    or_(
+                        WorkflowRunState.run_identity == root_job_id,
+                        WorkflowRunState.root_run_identity == root_job_id,
+                    )
+                )
+            )
+            runs = list(result.scalars().all())
+        if not runs:
+            raise DurableJobNotFound(root_job_id)
+        runs.sort(
+            key=lambda run: (
+                int(getattr(run, "branch_depth", 0) or 0),
+                0 if run.run_identity == root_job_id else 1,
+            ),
+            reverse=True,
+        )
+        receipts: list[dict[str, Any]] = []
+        for run in runs:
+            current = await self.get_job(run.run_identity)
+            if not isinstance(current, Mapping):
+                continue
+            status = _text(current.get("status"))
+            if status in DURABLE_JOB_TERMINAL_STATUSES:
+                receipts.append(dict(current))
+                continue
+            # An unresolved effect cannot be converted into a successful
+            # cancellation claim. The normal transition classifier preserves
+            # the unknown/cost state for running jobs; skip already-unknown
+            # rows so no caller can erase their liability.
+            if status in UNCERTAIN_EXTERNAL_EFFECT_STATUSES:
+                receipts.append(dict(current))
+                continue
+            lease = current.get("lease") if isinstance(current.get("lease"), Mapping) else {}
+            kwargs: dict[str, Any] = {
+                "expected_revision": current.get("revision"),
+                "reason": reason,
+            }
+            if status == "running":
+                owner = _text(lease.get("owner"))
+                fence = lease.get("fencing_token")
+                if not owner or fence is None:
+                    receipts.append(dict(current))
+                    continue
+                kwargs.update(owner=owner, fencing_token=int(fence))
+            try:
+                cancelled = await self.cancel_job(run.run_identity, **kwargs)
+            except DurableJobError:
+                # A concurrent worker/recovery pass won the CAS. Re-read the
+                # durable projection and report that authoritative outcome.
+                cancelled = await self.get_job(run.run_identity)
+            if isinstance(cancelled, Mapping):
+                receipts.append(dict(cancelled))
+        return receipts
 
     async def pause_job(
         self,

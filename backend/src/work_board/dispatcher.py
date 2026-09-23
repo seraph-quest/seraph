@@ -2501,6 +2501,7 @@ class WorkBoardDispatcher:
                     "workspace_contained": True,
                     "goal_id_read_back": True,
                     "child_job_id": outcome.get("child_job_id"),
+                    "artifact_id": _text((outcome.get("result_refs") or [{}])[0].get("artifact_id")),
                 },
                 owner=owner,
                 fencing_token=fence,

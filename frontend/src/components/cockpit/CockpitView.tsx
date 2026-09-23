@@ -6088,6 +6088,9 @@ function normalizeWorkflowRun(value: Record<string, unknown>): WorkflowRunRecord
     receipts.push({
       receiptKind: text("receipt_kind"),
       effectType: text("effect_type"),
+      artifactId: text("artifact_id"),
+      childJobId: text("child_job_id"),
+      targetPath: text("target_path"),
       status: text("status"),
       safe: typeof record.safe === "boolean" ? record.safe : undefined,
       reconciled: typeof record.reconciled === "boolean" ? record.reconciled : undefined,
@@ -7372,6 +7375,10 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   const activityLedgerScopeRef = useRef<string>("");
   const cockpitRefreshInFlightRef = useRef(false);
   const goalLoopRequestKeyRef = useRef<string | null>(null);
+  const workBoardInspectionGenerationRef = useRef(0);
+  useEffect(() => () => {
+    workBoardInspectionGenerationRef.current += 1;
+  }, []);
   const [toolPolicyMode, setToolPolicyMode] = useState<ToolPolicyMode | "unknown">("unknown");
   const [mcpPolicyMode, setMcpPolicyMode] = useState<McpPolicyMode | "unknown">("unknown");
   const [approvalMode, setApprovalMode] = useState<ApprovalMode | "unknown">("unknown");
@@ -7831,12 +7838,14 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     markDeepPaneLoaded("activity", false);
   }, [fetchCockpitJson, markDeepPaneLoaded, sessionId, updateDeepPaneState]);
 
-  const loadWorkflowRuns = useCallback(async () => {
+  const loadWorkflowRuns = useCallback(async (isCurrent?: () => boolean) => {
+    if (isCurrent && !isCurrent()) return [];
     updateDeepPaneState("workflows", "loading");
     const [workflowRunsResult, artifactLineageRunsResult] = await fetchCockpitBatch([
       () => fetchCockpitJson(`${API_URL}/api/workflows/runs?limit=8${sessionId ? `&session_id=${encodeURIComponent(sessionId)}` : ""}`, 5000),
       () => fetchCockpitJson(`${API_URL}/api/workflows/runs?limit=40`, 5000),
     ]);
+    if (isCurrent && !isCurrent()) return [];
     let ok = false;
     let primaryRuns: WorkflowRunRecord[] = [];
     let lineageRuns: WorkflowRunRecord[] = [];
@@ -7848,6 +7857,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       setWorkflowRuns(primaryRuns);
       ok = true;
     }
+    if (isCurrent && !isCurrent()) return [];
     if (artifactLineageRunsResult.ok && artifactLineageRunsResult.payload && typeof artifactLineageRunsResult.payload === "object") {
       const runs = (artifactLineageRunsResult.payload as { runs?: unknown }).runs;
       lineageRuns = Array.isArray(runs)
@@ -7858,6 +7868,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     } else if (!ok) {
       setArtifactLineageRuns([]);
     }
+    if (isCurrent && !isCurrent()) return [];
     markDeepPaneLoaded("workflows", ok);
     return [...lineageRuns, ...primaryRuns];
   }, [fetchCockpitBatch, fetchCockpitJson, markDeepPaneLoaded, sessionId, updateDeepPaneState]);
@@ -8843,6 +8854,8 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     setSelectedInspector({ kind: "workflow", workflow: resolveWorkflowRun(workflow) });
   }
   function inspectWorkBoardWorkflowRun(workflowRunId: string, ownerSessionId: string | null) {
+    const inspectionGeneration = ++workBoardInspectionGenerationRef.current;
+    const isCurrentInspection = () => inspectionGeneration === workBoardInspectionGenerationRef.current;
     if (!ownerSessionId) {
       setOperatorStatus("Task workflow evidence is unavailable because the task's canonical owner session is missing.");
       return;
@@ -8860,7 +8873,8 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
 
     focusPane("workflows_pane");
     setOperatorStatus("Loading workflow evidence for the task's immutable run link.");
-    void loadWorkflowRuns().then((runs) => {
+    void loadWorkflowRuns(isCurrentInspection).then((runs) => {
+      if (!isCurrentInspection()) return;
       const loadedWorkflow = runs.find((run) => run.runIdentity === workflowRunId || run.id === workflowRunId);
       if (!loadedWorkflow) {
         setOperatorStatus("The task's linked workflow run is not in the current evidence index. Refresh workflow evidence and retry.");
@@ -8870,11 +8884,21 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
         inspectWorkflowRun(loadedWorkflow);
       }
     }).catch(() => {
+      if (!isCurrentInspection()) return;
       setOperatorStatus("Workflow evidence could not be loaded. Refresh workflow evidence and retry.");
     });
   }
   function inspectWorkBoardArtifact(request: WorkBoardArtifactInspectRequest) {
-    const { reference, ownerSessionId, workflowRunId } = request;
+    const inspectionGeneration = ++workBoardInspectionGenerationRef.current;
+    const isCurrentInspection = () => inspectionGeneration === workBoardInspectionGenerationRef.current;
+    const { reference, ownerSessionId, workflowRunId, parentWorkflowRunId } = request;
+    const expectedParentWorkflowRunId = parentWorkflowRunId && parentWorkflowRunId !== workflowRunId
+      ? parentWorkflowRunId
+      : null;
+    const matchesParentWorkflow = (workflow: WorkflowRunRecord) => (
+      expectedParentWorkflowRunId === null
+      || workflow.parentRunIdentity === expectedParentWorkflowRunId
+    );
     if (workflowRunId) {
       if (!ownerSessionId) {
         setOperatorStatus("Task workflow evidence is unavailable because the task's canonical owner session is missing.");
@@ -8884,6 +8908,10 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
         ?? workflowRunById.get(workflowRunId);
       if (workflow && workflow.sessionId !== ownerSessionId) {
         setOperatorStatus("Task workflow evidence is hidden because its session does not match the task's canonical owner session.");
+        return;
+      }
+      if (workflow && !matchesParentWorkflow(workflow)) {
+        setOperatorStatus("Task child workflow evidence is hidden because its parent does not match the task's immutable run link.");
         return;
       }
       if (workflow) {
@@ -8899,7 +8927,8 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
 
       focusPane("workflows_pane");
       setOperatorStatus("Loading workflow evidence for the task's immutable run link.");
-      void loadWorkflowRuns().then((runs) => {
+      void loadWorkflowRuns(isCurrentInspection).then((runs) => {
+        if (!isCurrentInspection()) return;
         const loadedWorkflow = runs.find((run) => run.runIdentity === workflowRunId || run.id === workflowRunId);
         if (!loadedWorkflow) {
           setOperatorStatus("The task's linked workflow run is not in the current evidence index. Refresh workflow evidence and retry.");
@@ -8907,6 +8936,10 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
         }
         if (loadedWorkflow.sessionId !== ownerSessionId) {
           setOperatorStatus("Task workflow evidence is hidden because its session does not match the task's canonical owner session.");
+          return;
+        }
+        if (!matchesParentWorkflow(loadedWorkflow)) {
+          setOperatorStatus("Task child workflow evidence is hidden because its parent does not match the task's immutable run link.");
           return;
         }
         const artifact = resolveWorkBoardArtifact(loadedWorkflow.artifacts, reference, { ownerSessionId, workflowRunId });
@@ -8917,6 +8950,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
           inspectWorkflowRun(loadedWorkflow);
         }
       }).catch(() => {
+        if (!isCurrentInspection()) return;
         setOperatorStatus("Workflow evidence could not be loaded. Refresh workflow evidence and retry.");
       });
       return;
@@ -13980,6 +14014,9 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                   {receipt.exists === true ? " · target exists" : receipt.exists === false ? " · target missing" : ""}
                 </div>
                 {receipt.effectIdDigest && <div className="cockpit-value">effect reference digest {receipt.effectIdDigest}</div>}
+                {receipt.artifactId && <div className="cockpit-value">artifact {receipt.artifactId}</div>}
+                {receipt.childJobId && <div className="cockpit-value">child workflow run {receipt.childJobId}</div>}
+                {receipt.targetPath && <div className="cockpit-value">readback path {receipt.targetPath}</div>}
                 {receipt.targetDigest && <div className="cockpit-value">target SHA-256 {receipt.targetDigest}</div>}
                 {receipt.contentSha256 && <div className="cockpit-value">artifact SHA-256 {receipt.contentSha256}</div>}
                 {receipt.readbackDigest && <div className="cockpit-value">readback SHA-256 {receipt.readbackDigest}</div>}

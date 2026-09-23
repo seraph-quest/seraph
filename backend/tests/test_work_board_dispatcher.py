@@ -31,6 +31,7 @@ from src.db.models import (
 from src.work_board.contracts import WorkBoardOwner
 from src.work_board.dispatcher import (
     BoardDispatchClaim,
+    GOAL_SNAPSHOT_CAPABILITY,
     WorkBoardDispatcher,
     _stable_reason_code,
 )
@@ -543,6 +544,81 @@ async def test_linked_recovery_requires_exact_binding_before_projection():
 
 
 @pytest.mark.asyncio
+async def test_linked_running_missing_lease_fails_closed(monkeypatch):
+    """A linked running root without an expiry cannot remain Running forever."""
+
+    task = SimpleNamespace(
+        task_id="task-missing-lease",
+        owner_principal_id="operator:one",
+        owner_session_id="session-one",
+        goal_id="goal-one",
+        goal_revision=3,
+        capability_id="guardian.research-watch.v1",
+        status=WorkBoardStatus.running,
+        task_revision=4,
+        requires_review=False,
+    )
+    attempt = SimpleNamespace(
+        task_id=task.task_id,
+        attempt_id="attempt-missing-lease",
+        workflow_run_id="source-watch:watch-1:attempt-missing-lease",
+        ended_at=None,
+        cancel_requested_at=None,
+        lease_owner="service:work-board",
+        fencing_token=2,
+    )
+
+    class Jobs:
+        async def get_job(self, job_id):
+            return {
+                "job_id": job_id,
+                "run_identity": job_id,
+                "status": "running",
+                "effects": [],
+                "lease": {},
+            }
+
+    class Repository:
+        async def list_linked_active_attempts(self, _db, *, limit):
+            assert limit > 0
+            return [(task, attempt)]
+
+    class Session:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+    dispatcher = WorkBoardDispatcher(
+        repository=Repository(),
+        jobs=Jobs(),
+        session_provider=lambda: Session(),
+    )
+    monkeypatch.setattr(
+        "src.work_board.dispatcher._parse_typed_input",
+        lambda _task: {"watch_id": "watch-1", "expected_plan_revision": 3},
+    )
+    dispatcher._lookup_linked_binding = lambda *_args, **_kwargs: _async_value(
+        attempt.workflow_run_id
+    )
+    projected: list[dict[str, Any]] = []
+
+    async def project(*_args, **kwargs):
+        projected.append(kwargs)
+
+    dispatcher._project = project
+
+    recovered = await dispatcher.reconcile_linked_attempts()
+
+    assert recovered == [attempt.workflow_run_id]
+    assert projected
+    assert projected[0]["status"] is WorkBoardStatus.blocked
+    assert projected[0]["block_kind"] == "unknown_effect"
+    assert projected[0]["block_reason"] == "reconcile_external_effect"
+
+
+@pytest.mark.asyncio
 async def test_dispatch_pass_admits_at_most_two_in_priority_fifo_order():
     first = _dispatch_task("high-old", status=WorkBoardStatus.ready, priority=90, sequence=1)
     second = _dispatch_task("high-new", status=WorkBoardStatus.ready, priority=90, sequence=2)
@@ -582,6 +658,137 @@ async def test_dispatch_pass_admits_at_most_two_in_priority_fifo_order():
     assert admitted == ["high-old", "high-new"]
     assert receipt["admitted"] == 2
     assert receipt["considered"] == 3
+
+
+@pytest.mark.asyncio
+async def test_post_link_exception_reconciles_active_durable_root_before_block():
+    """A caller failure after link reads the durable root before board projection."""
+
+    task = SimpleNamespace(
+        task_id="task-post-link-recovery",
+        owner_principal_id="operator:one",
+        owner_session_id="session-one",
+        goal_id="goal-one",
+        goal_revision=3,
+        capability_id=GOAL_SNAPSHOT_CAPABILITY,
+        task_revision=1,
+        requires_review=False,
+        priority=50,
+    )
+    attempt = SimpleNamespace(
+        task_id=task.task_id,
+        attempt_id="attempt-post-link-recovery",
+        fencing_token=7,
+        lease_owner="service:work-board",
+        workflow_run_id=None,
+        ended_at=None,
+    )
+    job_id = f"work-board:{task.task_id}:{attempt.attempt_id}"
+    linked = False
+    reads_after_link: list[str] = []
+    projected: list[dict[str, Any]] = []
+
+    class Jobs:
+        def __init__(self):
+            self.status = "accepted"
+
+        async def admit_job(self, _spec):
+            return {"job_id": job_id, "run_identity": job_id, "status": self.status, "revision": 1}
+
+        async def queue_job(self, requested_job_id, **_kwargs):
+            assert requested_job_id == job_id
+            assert linked is True
+            self.status = "queued"
+            raise RuntimeError("injected post-link queue failure")
+
+        async def get_job(self, requested_job_id):
+            assert requested_job_id == job_id
+            assert linked is True
+            reads_after_link.append(requested_job_id)
+            return {
+                "job_id": job_id,
+                "run_identity": job_id,
+                "status": self.status,
+                "revision": 2,
+                "effects": [],
+            }
+
+    class Repository:
+        async def link_attempt_workflow_run(self, _db, *_args, **_kwargs):
+            nonlocal linked
+            linked = True
+            attempt.workflow_run_id = job_id
+            return SimpleNamespace(task=SimpleNamespace(task_revision=2))
+
+        async def get_detail(self, _db, _owner, task_id):
+            assert task_id == task.task_id
+            current_values = vars(task).copy()
+            current_values["task_revision"] = 2
+            current_task = SimpleNamespace(**current_values)
+            return {"task": current_task, "attempts": [attempt]}
+
+        async def project_attempt(self, *_args, **kwargs):
+            projected.append(dict(kwargs))
+            return None
+
+    class Session:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+    class Spec:
+        identity = SimpleNamespace(
+            job_id=job_id,
+            owner_principal_id="service:work-board",
+            owner_kind="service",
+            job_kind=GOAL_SNAPSHOT_CAPABILITY,
+            capability_version="1",
+            idempotency_scope="work-board-attempt",
+            idempotency_key=f"{task.task_id}:{attempt.attempt_id}",
+        )
+        service_id = "service:work-board"
+        goal_id = task.goal_id
+        goal_revision = task.goal_revision
+        operator_session_id = task.owner_session_id
+        session_id = task.owner_session_id
+        inputs = {}
+        declared_authority = {"finite_authority": True}
+        run_fingerprint = "f" * 64
+
+    jobs = Jobs()
+    dispatcher = WorkBoardDispatcher(
+        repository=Repository(),
+        jobs=jobs,
+        session_provider=lambda: Session(),
+    )
+
+    async def runtime(_task):
+        return 300
+
+    dispatcher._effective_runtime = runtime
+    dispatcher._build_spec = lambda *_args, **_kwargs: (
+        Spec(),
+        {},
+        job_id,
+        "service:work-board",
+        300,
+    )
+
+    async def record_projection(*_args, **kwargs):
+        projected.append(dict(kwargs))
+
+    dispatcher._project = record_projection
+    dispatcher._project_blocked = record_projection
+    claim = BoardDispatchClaim(task, attempt, SimpleNamespace(event_id=1))
+
+    result = await dispatcher._admit_execute_project(claim)
+
+    assert result == {"admitted": True, "completed": False, "blocked": True}
+    assert linked is True
+    assert reads_after_link == [job_id]
+    assert projected == []
 
 
 async def _empty_reconcile(*_args, **_kwargs):

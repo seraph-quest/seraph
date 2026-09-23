@@ -516,46 +516,68 @@ async def _run_real_board_goal_snapshot(async_db, monkeypatch, tmp_path, *, obse
         db.add(task)
         await db.commit()
 
-    class _ManagedWorkflow:
-        name = "workflow_goal_snapshot_to_file"
-
-        def get_approval_context(self, _arguments):
-            return {
-                "workflow_name": "goal-snapshot-to-file",
-                "workflow_version": "1",
-                "execution_boundaries": ["workspace_write"],
-                "step_tools": ["get_goals", "write_file"],
-            }
-
-        def __call__(self, *, file_path, sanitize_inputs_outputs=False, **_kwargs):
-            del sanitize_inputs_outputs
-            target = tmp_path / file_path
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(
-                "Goal snapshot\n"
-                f"Goal id: {goal_id}\n"
-                "Status: active\n",
-                encoding="utf-8",
-            )
-            return f"Saved {file_path}"
-
-        def get_audit_result_payload(self, _arguments, _result):
-            return "managed local workflow executed", {"durable_run_identity": "managed-local-child"}
-
-    workflow_tool = _ManagedWorkflow()
+    # Exercise the registered governed WorkflowTool.  Observe only the final
+    # bounded filesystem transport so the real get_goals and write_file steps
+    # remain in the execution path.
     from src.agent import factory as agent_factory
+    from src.tools import filesystem_tool
     from src.workflows import manager as manager_module
+    from src.extensions.registry import default_manifest_roots_for_workspace
+    from src.skills.manager import skill_manager
 
-    monkeypatch.setattr(
-        agent_factory,
-        "get_tools",
-        lambda **_kwargs: [workflow_tool],
+    manifest_roots = default_manifest_roots_for_workspace(str(tmp_path))
+    workflow_manager = manager_module.workflow_manager
+    for attribute in (
+        "_workflows",
+        "_load_errors",
+        "_shared_manifest_errors",
+        "_workflows_dir",
+        "_manifest_roots",
+        "_config_path",
+        "_disabled",
+        "_registry",
+    ):
+        monkeypatch.setattr(workflow_manager, attribute, getattr(workflow_manager, attribute))
+    for attribute in (
+        "_skills",
+        "_load_errors",
+        "_skills_dir",
+        "_manifest_roots",
+        "_config_path",
+        "_disabled",
+        "_registry",
+    ):
+        monkeypatch.setattr(skill_manager, attribute, getattr(skill_manager, attribute))
+    workflows_dir = tmp_path / "workflows"
+    workflows_dir.mkdir(exist_ok=True)
+    workflow_manager.init(
+        str(workflows_dir),
+        manifest_roots=manifest_roots,
     )
-    monkeypatch.setattr(
-        manager_module.workflow_manager,
-        "get_workflow",
-        lambda _name: SimpleNamespace(enabled=True, tool_name=workflow_tool.name),
+    skills_dir = tmp_path / "skills"
+    skills_dir.mkdir(exist_ok=True)
+    skill_manager.init(str(skills_dir), manifest_roots=manifest_roots)
+
+    workflow = workflow_manager.get_workflow("goal-snapshot-to-file")
+    assert workflow is not None and workflow.enabled
+    registered_tools = agent_factory.get_tools(include_bound_worker=True)
+    workflow_tool = next(
+        (
+            tool
+            for tool in registered_tools
+            if getattr(tool, "name", None) == workflow.tool_name
+        ),
+        None,
     )
+    assert workflow_tool is not None
+    writes: list[tuple[str, str]] = []
+    original_write = filesystem_tool._write_workspace_text_bounded
+
+    def observed_write(path, content, **kwargs):
+        writes.append((str(path), content))
+        return original_write(path, content, **kwargs)
+
+    monkeypatch.setattr(filesystem_tool, "_write_workspace_text_bounded", observed_write)
 
     repository = WorkBoardRepository()
     async with async_db() as db:
@@ -603,6 +625,14 @@ async def _run_real_board_goal_snapshot(async_db, monkeypatch, tmp_path, *, obse
             )
         ).scalar_one()
         runs = list((await db.execute(select(WorkflowRunState))).scalars().all())
+    assert writes, (
+        "the registered WorkflowTool did not execute write_file: "
+        f"outcome={outcome!r}; task={stored_task.status}; "
+        f"block={stored_task.block_reason!r}; attempt={stored_attempt.outcome!r}; "
+        f"receipts={stored_attempt.receipt_refs_json!r}; "
+        f"runs={[(run.run_identity, run.status, run.parent_job_id, run.job_kind, run.owner_kind, run.owner_principal_id, run.service_id, run.capability_version, run.goal_id, run.goal_revision, run.operator_session_id, run.error, run.last_completed_step_id, run.metadata_json) for run in runs]!r}"
+    )
+    assert any(goal_id in content for _path, content in writes)
     return outcome, stored_task, stored_attempt, runs
 
 

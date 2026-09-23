@@ -154,6 +154,28 @@ async def test_http_typed_input_relative_path_round_trips(client):
 
 
 @pytest.mark.asyncio
+async def test_http_todo_creation_requires_capability_but_not_executor(client):
+    payload = _task_payload(key="todo-capability-gate")
+    payload["goal_id"] = await _create_goal(client)
+    payload.update(
+        {
+            "status": "todo",
+            "typed_input_ref": "workspace-json:inputs/todo.json",
+            "typed_input_digest": "d" * 64,
+        }
+    )
+
+    missing_capability = await client.post("/api/work-board/tasks", json=payload)
+    assert missing_capability.status_code == 422
+
+    payload["capability_id"] = "capability.local"
+    created = await client.post("/api/work-board/tasks", json=payload)
+    assert created.status_code == 200
+    assert created.json()["task"]["status"] == "todo"
+    assert created.json()["task"]["executor_id"] is None
+
+
+@pytest.mark.asyncio
 async def test_http_create_rejects_unsafe_origin_thread_reference(client):
     payload = _task_payload(key="unsafe-origin-thread")
     payload["goal_id"] = await _create_goal(client)

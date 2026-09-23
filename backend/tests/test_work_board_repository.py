@@ -439,6 +439,79 @@ async def test_triage_requires_typed_spec_before_promotion(async_db):
 
 
 @pytest.mark.asyncio
+async def test_todo_creation_requires_capability_but_not_executor(async_db):
+    digest = sha256(b"todo-input").hexdigest()
+    with pytest.raises(ValidationError, match="registered capability"):
+        WorkBoardTaskCreate(
+            title="Missing capability",
+            goal_id="goal-1",
+            goal_revision=1,
+            status=WorkBoardStatus.todo,
+            typed_input_ref="workspace-json:inputs/todo.json",
+            typed_input_digest=digest,
+            idempotency_key="todo-missing-capability",
+        )
+
+    valid = WorkBoardTaskCreate(
+        title="Bounded Todo",
+        goal_id="goal-1",
+        goal_revision=1,
+        status=WorkBoardStatus.todo,
+        capability_id="capability.local",
+        typed_input_ref="workspace-json:inputs/todo.json",
+        typed_input_digest=digest,
+        idempotency_key="todo-with-capability",
+    )
+    assert valid.executor_id is None
+
+    async with async_db() as db:
+        await _create(db, key="todo-goal-seed")
+        mutation = await WorkBoardRepository().create_task(db, OWNER, valid)
+        assert mutation.task.status is WorkBoardStatus.todo
+        assert mutation.task.executor_id is None
+
+
+@pytest.mark.asyncio
+async def test_triage_to_todo_requires_capability_and_allows_unassigned_executor(async_db):
+    repository = WorkBoardRepository()
+    digest = sha256(b"promotion-input").hexdigest()
+    async with async_db() as db:
+        missing_capability = await _create(db, key="promotion-missing-capability")
+        missing_capability.task.typed_input_ref = "workspace-json:inputs/promotion.json"
+        missing_capability.task.typed_input_digest = digest
+        await db.flush()
+        with pytest.raises(BoardError) as raised:
+            await repository.action_task(
+                db,
+                OWNER,
+                missing_capability.task.task_id,
+                WorkBoardActionRequest(
+                    action=WorkBoardAction.promote,
+                    expected_revision=missing_capability.task.task_revision,
+                ),
+            )
+        assert raised.value.code == "capability_required"
+        assert missing_capability.task.status is WorkBoardStatus.triage
+
+        valid = await _create(db, key="promotion-with-capability")
+        valid.task.typed_input_ref = "workspace-json:inputs/promotion.json"
+        valid.task.typed_input_digest = digest
+        valid.task.capability_id = "capability.local"
+        await db.flush()
+        promoted = await repository.action_task(
+            db,
+            OWNER,
+            valid.task.task_id,
+            WorkBoardActionRequest(
+                action=WorkBoardAction.promote,
+                expected_revision=valid.task.task_revision,
+            ),
+        )
+        assert promoted.task.status is WorkBoardStatus.todo
+        assert promoted.task.executor_id is None
+
+
+@pytest.mark.asyncio
 async def test_ready_child_is_demoted_when_new_parent_is_unfinished(async_db):
     repository = WorkBoardRepository()
     async with async_db() as db:

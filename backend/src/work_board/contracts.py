@@ -107,6 +107,8 @@ class WorkBoardTaskCreate(WorkBoardBaseModel):
         if self.status not in {WorkBoardStatus.triage, WorkBoardStatus.todo}:
             raise ValueError("new tasks may start only in triage or todo")
         if self.status is WorkBoardStatus.todo:
+            if not self.capability_id:
+                raise ValueError("todo tasks require a registered capability")
             if not self.typed_input_ref or not self.typed_input_digest:
                 raise ValueError("todo tasks require a typed input reference and digest")
         if self.typed_input_ref and not self.typed_input_digest:

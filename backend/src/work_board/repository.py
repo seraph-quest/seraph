@@ -932,6 +932,11 @@ class WorkBoardRepository:
                         "typed_spec_required",
                         "Triage must have a complete typed specification before promotion",
                     )
+                if not task.capability_id:
+                    raise BoardError(
+                        "capability_required",
+                        "Triage must name a registered capability before promotion",
+                    )
                 values["status"] = WorkBoardStatus.todo
             elif task.status is WorkBoardStatus.todo:
                 raise BoardError(

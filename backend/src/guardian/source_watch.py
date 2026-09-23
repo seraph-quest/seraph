@@ -1747,7 +1747,11 @@ class SourceWatchService:
         occurrence_id: str,
         *,
         budget: Any,
+        work_board_task_id: str | None = None,
+        work_board_attempt_id: str | None = None,
     ) -> dict[str, Any]:
+        if (work_board_task_id is None) != (work_board_attempt_id is None):
+            raise SourceWatchError("work_board_binding_invalid")
         job_id = f"source-watch:{watch.id}:{occurrence_id}"
         async with db_engine.get_session() as db:
             live_watch = (
@@ -1800,14 +1804,20 @@ class SourceWatchService:
             "delivery_surface": "cockpit_approval_queue",
             "priority": priority,
         }
+        idempotency_scope = "work-board-attempt" if work_board_task_id else "guardian-source-watch"
+        idempotency_key = (
+            f"{work_board_task_id}:{work_board_attempt_id}"
+            if work_board_task_id
+            else f"{watch.id}:{watch.plan_revision}:{occurrence_id}"
+        )
         identity = DurableJobIdentity(
             job_id=job_id,
             owner_kind="service",
             owner_principal_id=SERVICE_PRINCIPAL,
             job_kind="guardian_source_watch",
             capability_version=CAPABILITY_VERSION,
-            idempotency_scope="guardian-source-watch",
-            idempotency_key=f"{watch.id}:{watch.plan_revision}:{occurrence_id}",
+            idempotency_scope=idempotency_scope,
+            idempotency_key=idempotency_key,
         )
         admitted = await durable_job_repository.admit_job(
             DurableJobSpec(
@@ -1876,7 +1886,12 @@ class SourceWatchService:
         expected_plan_revision: int | None = None,
         expected_scheduled_job_id: str | None = None,
         expected_owner_session_id: str | None = None,
+        work_board_task_id: str | None = None,
+        work_board_attempt_id: str | None = None,
+        admit_only: bool = False,
     ) -> dict[str, Any]:
+        if (work_board_task_id is None) != (work_board_attempt_id is None):
+            return {"status": "blocked", "reason_code": "work_board_binding_invalid", "operator_visible": True}
         occurrence = occurrence_id or str(uuid.uuid4())
         job_id = f"source-watch:{watch_id}:{occurrence}"
         # Admit the durable occurrence before reserving the watch.  A crash
@@ -1950,8 +1965,27 @@ class SourceWatchService:
         packet: GuardianDecisionPacket | None = None
         expected_claim_plan_revision = int(watch.plan_revision or 0)
         try:
-            job = await self._admit_job(watch, occurrence, budget=budget)
+            job = await self._admit_job(
+                watch,
+                occurrence,
+                budget=budget,
+                work_board_task_id=work_board_task_id,
+                work_board_attempt_id=work_board_attempt_id,
+            )
             job = await self._resume_admitted_job(job)
+            if admit_only:
+                # Board dispatch uses this server-only phase to persist the
+                # durable source-watch root and link it to the pending board
+                # attempt before any source transport or watch fence effect.
+                # A later call with the same exact binding resumes this job
+                # through the normal execution path.
+                return {
+                    "status": _text(job.get("status")) or "blocked",
+                    "reason_code": None,
+                    "job_id": job_id,
+                    "job": job,
+                    "admission_only": True,
+                }
             if job.get("status") != "running":
                 receipt = job.get("receipt") if isinstance(job.get("receipt"), Mapping) else {}
                 if _text(receipt.get("status")) == "deduped":

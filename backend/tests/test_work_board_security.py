@@ -132,10 +132,13 @@ async def test_generic_unblock_requires_operator_block_and_current_goal(async_db
             WorkBoardActionRequest(
                 action=WorkBoardAction.block,
                 expected_revision=1,
-                block_kind="unknown_effect",
+                block_kind="operator",
                 reason="External effect needs reconciliation",
             ),
         )
+        blocked.task.block_kind = "unknown_effect"
+        await db.flush()
+        await db.commit()
         with pytest.raises(BoardError, match="typed recovery"):
             await repository.action_task(
                 db,
@@ -144,6 +147,7 @@ async def test_generic_unblock_requires_operator_block_and_current_goal(async_db
                 WorkBoardActionRequest(
                     action=WorkBoardAction.unblock,
                     expected_revision=blocked.task.task_revision,
+                    resolution="operator acknowledged the prerequisite change",
                 ),
             )
 
@@ -165,6 +169,7 @@ async def test_generic_unblock_requires_operator_block_and_current_goal(async_db
                 WorkBoardActionRequest(
                     action=WorkBoardAction.unblock,
                     expected_revision=2,
+                    resolution="operator acknowledged the prerequisite change",
                 ),
             )
 
@@ -203,8 +208,53 @@ async def test_generic_unblock_refuses_operator_block_with_existing_attempt(asyn
                 WorkBoardActionRequest(
                     action=WorkBoardAction.unblock,
                     expected_revision=blocked.task.task_revision,
+                    resolution="operator acknowledged the prerequisite change",
                 ),
             )
+
+
+@pytest.mark.asyncio
+async def test_http_unblock_preflight_failure_leaves_blocked_revision_unchanged(client, async_db, monkeypatch):
+    task_id = await _seed_task(async_db, OWNER, key_suffix="unblock-preflight")
+    repository = WorkBoardRepository()
+    async with async_db() as db:
+        blocked = await repository.action_task(
+            db,
+            OWNER,
+            task_id,
+            WorkBoardActionRequest(
+                action=WorkBoardAction.block,
+                expected_revision=1,
+                block_kind="operator",
+                reason="Operator must confirm the prerequisite",
+            ),
+        )
+        blocked_revision = blocked.task.task_revision
+
+    async def reject_unblock(*_args, **_kwargs):
+        raise BoardError(
+            "unblock_prerequisite",
+            "The owner session is stale",
+            status_code=409,
+            recovery_action="restore_prerequisite",
+        )
+
+    monkeypatch.setattr("src.api.work_board.dispatcher.validate_unblock", reject_unblock)
+    response = await client.post(
+        f"/api/work-board/tasks/{task_id}/actions",
+        json={
+            "action": "unblock",
+            "expected_revision": blocked_revision,
+            "resolution": "Operator confirmed the prerequisite",
+        },
+    )
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "unblock_prerequisite"
+
+    async with async_db() as db:
+        unchanged = await repository.get_task(db, OWNER, task_id)
+        assert unchanged.status.value == "blocked"
+        assert unchanged.task_revision == blocked_revision
 
 
 @pytest.mark.asyncio

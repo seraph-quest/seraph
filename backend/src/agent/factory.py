@@ -127,10 +127,18 @@ def _append_workflow_tools(base_tools: list, active_skill_names: list[str], mcp_
     return base_tools + workflow_tools
 
 
-def get_tools() -> list:
-    """Return all auto-discovered tools + MCP tools."""
+def get_tools(*, include_bound_worker: bool = False) -> list:
+    """Return governed tools, optionally including a server-bound worker host."""
     base_tools, active_skill_names, mcp_mode = get_base_tools_and_active_skills()
-    return _append_workflow_tools(base_tools, active_skill_names, mcp_mode)
+    tools = _append_workflow_tools(base_tools, active_skill_names, mcp_mode)
+    if include_bound_worker:
+        # Work-board controls are never discovered globally.  A concrete
+        # bounded adapter may opt into this path only while the dispatcher has
+        # installed a server-created task/attempt/fence context.
+        from src.tools.work_board_tools import get_bound_work_board_tools
+
+        tools.extend(get_bound_work_board_tools())
+    return tools
 
 
 def create_agent(

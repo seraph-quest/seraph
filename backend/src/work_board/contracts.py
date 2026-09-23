@@ -23,6 +23,8 @@ class WorkBoardAction(str, Enum):
     promote = "promote"
     block = "block"
     unblock = "unblock"
+    retry = "retry"
+    cancel = "cancel"
     archive = "archive"
 
 
@@ -109,13 +111,20 @@ class WorkBoardActionRequest(WorkBoardBaseModel):
     expected_revision: int = Field(ge=1)
     block_kind: str | None = Field(default=None, min_length=1, max_length=128)
     reason: str | None = Field(default=None, min_length=1, max_length=1_000)
+    resolution: str | None = Field(default=None, min_length=1, max_length=1_000)
 
     @model_validator(mode="after")
     def validate_action_fields(self) -> "WorkBoardActionRequest":
         if self.action is WorkBoardAction.block and not self.reason:
             raise ValueError("block action requires a reason")
+        if self.action is WorkBoardAction.block and self.block_kind not in {None, "operator"}:
+            raise ValueError("manual block actions must use block_kind=operator")
+        if self.action is WorkBoardAction.unblock and not self.resolution:
+            raise ValueError("unblock action requires an explicit resolution")
         if self.action is not WorkBoardAction.block and (self.block_kind or self.reason):
             raise ValueError("block fields are valid only for block action")
+        if self.action is not WorkBoardAction.unblock and self.resolution:
+            raise ValueError("resolution is valid only for unblock action")
         return self
 
 

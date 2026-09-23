@@ -7,6 +7,7 @@ import json
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query, Request
+from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
 
 from src.auth.service import AuthenticatedOperator
@@ -18,6 +19,7 @@ from src.db.models import (
     WorkBoardLink,
     WorkBoardStatus,
     WorkBoardTask,
+    Goal,
 )
 from src.scheduler.connection_manager import ws_manager
 from src.vault import redaction as vault_redaction
@@ -35,10 +37,83 @@ from src.work_board.repository import (
     BoardMutation,
     WorkBoardRepository,
 )
+from src.goals.repository import deserialize_admission_budget
+from src.work_board.dispatcher import _dispatcher
 
 
 router = APIRouter(prefix="/work-board")
 repository = WorkBoardRepository()
+# Use the same managed dispatcher instance as the scheduler so cancellation
+# can reach an inline GoalSnapshot worker admitted by the scheduler pass.
+dispatcher = _dispatcher
+
+_RECOVERY_ACTIONS = frozenset(
+    {
+        "unblock",
+        "retry",
+        "cancel",
+        "approve_existing_run",
+        "reconcile_external_effect",
+        "reconcile_admission_binding",
+        "restore_prerequisite",
+    }
+)
+
+
+def _recovery_action(
+    task: WorkBoardTask,
+    *,
+    latest_attempt: WorkBoardAttempt | None = None,
+    attempt_count: int = 0,
+) -> str | None:
+    """Derive the only operator recovery action allowed for this projection."""
+
+    status = _json_value(task.status)
+    block_kind = str(task.block_kind or "")
+    if status == WorkBoardStatus.running.value:
+        # A pending admission has no durable run to cancel.  The dispatcher
+        # must reconcile that binding first so the card never advertises a
+        # control that could guess a process or run id.
+        if (
+            latest_attempt is not None
+            and latest_attempt.workflow_run_id
+            and latest_attempt.ended_at is None
+            and latest_attempt.lease_owner
+            and latest_attempt.cancel_requested_at is None
+        ):
+            return "cancel"
+        return "reconcile_admission_binding" if latest_attempt is not None else None
+    if status != WorkBoardStatus.blocked.value:
+        return None
+    if (
+        block_kind == "operator"
+        and (latest_attempt is None or latest_attempt.ended_at is not None)
+        and str(task.block_source_status or "")
+        in {item.value for item in (WorkBoardStatus.triage, WorkBoardStatus.todo, WorkBoardStatus.ready, WorkBoardStatus.review)}
+    ):
+        return "unblock"
+    if block_kind == "reconcile_admission_binding":
+        return "reconcile_admission_binding"
+    if block_kind in {"unknown_effect", "cost_liability"}:
+        return "reconcile_external_effect"
+    if block_kind == "needs_input":
+        return "approve_existing_run"
+    if block_kind == "capability":
+        return "restore_prerequisite"
+    if block_kind in {"transient", "cancelled"} and latest_attempt is not None:
+        if latest_attempt.ended_at is None or attempt_count >= 2:
+            return None
+        refs = _decode_json_list(latest_attempt.receipt_refs_json)
+        if not refs or any(
+            not isinstance(item, dict)
+            or str(item.get("status") or "") in {"unknown", "intent", "dispatched", "unknown_external_effect", "cost_liability"}
+            or str(item.get("reason_code") or item.get("outcome") or "")
+            not in {"no_external_effect", "not_dispatched", "cancelled", "operator_cancelled", "transient"}
+            for item in refs
+        ):
+            return None
+        return "retry"
+    return None
 
 
 def _operator(request: Request) -> AuthenticatedOperator:
@@ -83,8 +158,14 @@ def _task_payload(
     task: WorkBoardTask,
     *,
     dependency_counts: tuple[int, int] | None = None,
+    latest_attempt: WorkBoardAttempt | None = None,
+    attempt_count: int = 0,
+    dispatch_rank: int | None = None,
 ) -> dict[str, Any]:
     dependency_count, completed_dependency_count = dependency_counts or (0, 0)
+    attempt_payload = _attempt_payload(latest_attempt) if latest_attempt is not None else None
+    readback_status = attempt_payload.get("readback_status") if attempt_payload else "not_started"
+    verification_status = attempt_payload.get("verification_status") if attempt_payload else "not_started"
     return {
         "task_id": task.task_id,
         "creation_sequence": task.creation_sequence,
@@ -109,13 +190,23 @@ def _task_payload(
         "block_kind": task.block_kind,
         "block_reason": task.block_reason,
         "block_source_status": task.block_source_status,
+        "cancel_requested_at": _json_value(latest_attempt.cancel_requested_at) if latest_attempt is not None else None,
         "requires_review": task.requires_review,
         "reviewer_id": task.reviewer_id,
         "dependency_count": dependency_count,
         "completed_dependency_count": completed_dependency_count,
+        "dispatch_rank": dispatch_rank,
+        "recovery_action": _recovery_action(
+            task,
+            latest_attempt=latest_attempt,
+            attempt_count=attempt_count,
+        ),
+        "readback_status": readback_status,
+        "verification_status": verification_status,
         "task_revision": task.task_revision,
         "result_refs": _decode_json_list(task.result_refs_json),
         "artifact_refs": _decode_json_list(task.artifact_refs_json),
+        "latest_attempt": attempt_payload,
         "created_at": _json_value(task.created_at),
         "updated_at": _json_value(task.updated_at),
         "completed_at": _json_value(task.completed_at),
@@ -127,14 +218,59 @@ async def _safe_task_payload(
     task: WorkBoardTask,
     *,
     dependency_counts: tuple[int, int] | None = None,
+    latest_attempt: WorkBoardAttempt | None = None,
+    attempt_count: int = 0,
+    dispatch_rank: int | None = None,
 ) -> dict[str, Any]:
-    payload = _task_payload(task, dependency_counts=dependency_counts)
+    payload = _task_payload(
+        task,
+        dependency_counts=dependency_counts,
+        latest_attempt=latest_attempt,
+        attempt_count=attempt_count,
+        dispatch_rank=dispatch_rank,
+    )
     for key in ("title", "body", "block_reason"):
         value = payload.get(key)
         if isinstance(value, str):
             payload[key] = await vault_redaction.redact_secrets_in_text(
                 value,
                 fail_closed=True,
+            )
+    if payload.get("recovery_action") == "retry":
+        # Recovery controls are an operator projection of current authority,
+        # not a cached promise from the last dispatcher pass.  Re-run the
+        # provider-free retry gates before exposing a retry button; a failed
+        # gate remains a bounded prerequisite recovery while the task stays
+        # Blocked.
+        try:
+            await dispatcher.validate_retry(
+                WorkBoardOwner(
+                    principal_id=task.owner_principal_id,
+                    session_id=task.owner_session_id,
+                ),
+                task.task_id,
+                expected_revision=task.task_revision,
+            )
+        except BoardError as exc:
+            payload["recovery_action"] = str(
+                exc.extra.get("recovery_action") or "restore_prerequisite"
+            )
+    elif payload.get("recovery_action") == "unblock":
+        # Generic unblock is only a live operator convenience for an
+        # owner-bound manual block.  Recheck the session, goal revision, and
+        # phase-specific Ready/Review evidence before advertising it.
+        try:
+            await dispatcher.validate_unblock(
+                WorkBoardOwner(
+                    principal_id=task.owner_principal_id,
+                    session_id=task.owner_session_id,
+                ),
+                task.task_id,
+                expected_revision=task.task_revision,
+            )
+        except BoardError as exc:
+            payload["recovery_action"] = str(
+                exc.extra.get("recovery_action") or "restore_prerequisite"
             )
     return payload
 
@@ -148,12 +284,51 @@ def _decode_json_list(value: str | None) -> list[Any]:
 
 
 def _attempt_payload(attempt: WorkBoardAttempt) -> dict[str, Any]:
+    receipt_refs = _decode_json_list(attempt.receipt_refs_json)
+    verified = any(
+        isinstance(item, dict)
+        and bool(item.get("verified"))
+        and str(item.get("status") or "") in {"succeeded", "read_back", "reconciled"}
+        for item in receipt_refs
+    )
+    unresolved = any(
+        isinstance(item, dict)
+        and str(item.get("status") or "") in {"unknown", "intent", "dispatched", "unknown_external_effect", "cost_liability"}
+        for item in receipt_refs
+    )
+    decisive_failure = any(
+        isinstance(item, dict)
+        and (
+            str(item.get("readback_status") or "") == "failed"
+            or str(item.get("verification_status") or "") == "failed"
+        )
+        for item in receipt_refs
+    )
+    if verified:
+        readback_status = "verified"
+        verification_status = "passed"
+    elif unresolved:
+        readback_status = "unknown"
+        verification_status = "reconciliation_required"
+    elif attempt.ended_at is None:
+        readback_status = "pending"
+        verification_status = "pending"
+    elif str(attempt.outcome or "") == "cancelled":
+        readback_status = "not_applicable"
+        verification_status = "cancelled"
+    elif decisive_failure:
+        readback_status = "failed"
+        verification_status = "failed"
+    else:
+        readback_status = "unknown"
+        verification_status = "reconciliation_required"
     return {
         "attempt_id": attempt.attempt_id,
         "task_id": attempt.task_id,
         "workflow_run_id": attempt.workflow_run_id,
         "task_revision_at_claim": attempt.task_revision_at_claim,
         "lease_owner": attempt.lease_owner,
+        "cancel_requested_at": _json_value(attempt.cancel_requested_at),
         "lease_expires_at": _json_value(attempt.lease_expires_at),
         "heartbeat_at": _json_value(attempt.heartbeat_at),
         "fencing_token": attempt.fencing_token,
@@ -161,7 +336,9 @@ def _attempt_payload(attempt: WorkBoardAttempt) -> dict[str, Any]:
         "started_at": _json_value(attempt.started_at),
         "ended_at": _json_value(attempt.ended_at),
         "outcome": attempt.outcome,
-        "receipt_refs": _decode_json_list(attempt.receipt_refs_json),
+        "receipt_refs": receipt_refs,
+        "readback_status": readback_status,
+        "verification_status": verification_status,
         "created_at": _json_value(attempt.created_at),
         "updated_at": _json_value(attempt.updated_at),
     }
@@ -232,6 +409,9 @@ async def list_work_board_tasks(
                     await _safe_task_payload(
                         task,
                         dependency_counts=page.dependency_counts.get(task.task_id),
+                        latest_attempt=page.latest_attempts.get(task.task_id),
+                        attempt_count=page.attempt_counts.get(task.task_id, 0),
+                        dispatch_rank=page.dispatch_ranks.get(task.task_id),
                     )
                     for task in page.tasks
                 ],
@@ -244,6 +424,60 @@ async def list_work_board_tasks(
         raise HTTPException(
             status_code=503,
             detail={"code": "board_storage_unavailable", "recovery": "Check the local database readiness receipt and retry."},
+        ) from exc
+
+
+@router.get("/goals/{goal_id}/execution-limits")
+async def get_work_board_execution_limits(
+    request: Request,
+    goal_id: str,
+    goal_revision: int = Query(..., ge=1),
+):
+    """Return the server-derived finite board runtime limit for one goal."""
+
+    operator = _operator(request)
+    try:
+        async with get_session() as db:
+            goal = (
+                await db.execute(
+                    select(Goal).where(
+                        Goal.id == goal_id,
+                        Goal.owner_principal_id == operator.principal.principal_id,
+                        Goal.owner_session_id == operator.session_id,
+                    )
+                )
+            ).scalar_one_or_none()
+            if goal is None:
+                raise HTTPException(status_code=404, detail={"code": "goal_not_found"})
+            current_revision = max(int(getattr(goal, "revision", 1) or 1), 1)
+            if current_revision != int(goal_revision):
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "code": "goal_revision_stale",
+                        "goal_id": goal_id,
+                        "expected_revision": int(goal_revision),
+                        "current_revision": current_revision,
+                    },
+                )
+            budget = deserialize_admission_budget(goal)
+            configured = int(budget.max_runtime_seconds) if budget is not None else 300
+            effective = min(max(configured, 1), 900)
+            return {
+                "goal_id": goal_id,
+                "goal_revision": current_revision,
+                "effective_max_runtime_seconds": effective,
+                "default_max_runtime_seconds": 300,
+                "hard_max_runtime_seconds": 900,
+                "attempt_limit": 2,
+                "limit_source": "goal_admission_budget" if budget is not None else "default",
+            }
+    except HTTPException:
+        raise
+    except SQLAlchemyError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "board_storage_unavailable", "recovery": "Retry after the workspace database is ready."},
         ) from exc
 
 
@@ -280,8 +514,14 @@ async def get_work_board_task(request: Request, task_id: str):
     try:
         async with get_session() as db:
             detail = await repository.get_detail(db, _owner(operator), task_id)
+            dispatch_rank = await repository.dispatch_rank(db, _owner(operator), detail["task"])
             return {
-                "task": await _safe_task_payload(detail["task"]),
+                "task": await _safe_task_payload(
+                    detail["task"],
+                    latest_attempt=(detail["attempts"][0] if detail["attempts"] else None),
+                    attempt_count=len(detail["attempts"]),
+                    dispatch_rank=dispatch_rank,
+                ),
                 "attempts": [_attempt_payload(item) for item in detail["attempts"]],
                 "parents": detail["parents"],
                 "children": detail["children"],
@@ -320,8 +560,48 @@ async def patch_work_board_task(request: Request, task_id: str, body: WorkBoardT
 async def action_work_board_task(request: Request, task_id: str, body: WorkBoardActionRequest):
     operator = _operator(request)
     try:
+        owner = _owner(operator)
+        if body.action.value == "cancel":
+            projection = await dispatcher.cancel_task(
+                owner,
+                task_id,
+                expected_revision=body.expected_revision,
+            )
+            payload = {
+                "task": await _safe_task_payload(
+                    projection.task,
+                    latest_attempt=projection.attempt,
+                    attempt_count=1,
+                ),
+                "attempt": _attempt_payload(projection.attempt),
+            }
+            await _broadcast(projection.event)
+            return payload
+        if body.action.value == "retry":
+            await dispatcher.validate_retry(
+                owner,
+                task_id,
+                expected_revision=body.expected_revision,
+            )
+        elif body.action.value == "unblock":
+            # Run the live owner/goal/phase preflight before opening the
+            # repository transaction.  The repository remains the final CAS
+            # authority, so a stale preflight can only fail closed.
+            await dispatcher.validate_unblock(
+                owner,
+                task_id,
+                expected_revision=body.expected_revision,
+            )
         async with get_session() as db:
-            mutation = await repository.action_task(db, _owner(operator), task_id, body)
+            if body.action.value == "retry":
+                mutation = await repository.retry_task(
+                    db,
+                    owner,
+                    task_id,
+                    expected_revision=body.expected_revision,
+                )
+            else:
+                mutation = await repository.action_task(db, owner, task_id, body)
             payload = {"task": await _safe_task_payload(mutation.task)}
         await _broadcast(mutation.event)
         return payload

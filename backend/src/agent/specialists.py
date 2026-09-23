@@ -148,6 +148,9 @@ def create_specialist(
     max_steps: int,
 ) -> ToolCallingAgent:
     """Create a specialist agent with the given tools and settings."""
+    # Board worker authority is injected only by the board dispatcher into the
+    # worker host; a delegated specialist must never inherit it.
+    tools = [tool for tool in tools if not str(getattr(tool, "name", "")).startswith("work_board_")]
     model = _create_model(temperature, runtime_path=name)
     return ToolCallingAgent(
         tools=tools,

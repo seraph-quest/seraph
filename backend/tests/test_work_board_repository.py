@@ -1,11 +1,13 @@
 """Focused persistence and transition checks for work-board M1."""
 
 from hashlib import sha256
+import json
 from unittest.mock import AsyncMock
 
 import pytest
+from sqlalchemy import select
 
-from src.db.models import Goal, WorkBoardStatus
+from src.db.models import Goal, WorkBoardAttempt, WorkBoardEvent, WorkBoardStatus
 from src.work_board.contracts import (
     WorkBoardAction,
     WorkBoardActionRequest,
@@ -162,6 +164,71 @@ async def test_ready_child_is_demoted_when_new_parent_is_unfinished(async_db):
 
 
 @pytest.mark.asyncio
+async def test_cancel_intent_is_attempt_bound_and_idempotent(async_db):
+    repository = WorkBoardRepository()
+    async with async_db() as db:
+        created = await _create(db, key="cancel-intent")
+        task = created.task
+        task.status = WorkBoardStatus.running
+        task.task_revision = 2
+        attempt = WorkBoardAttempt(
+            task_id=task.task_id,
+            task_revision_at_claim=2,
+            workflow_run_id="work-board:cancel-intent:attempt-1",
+            lease_owner="service:work-board",
+            fencing_token=7,
+            executor_id="executor.test",
+        )
+        db.add(attempt)
+        await db.flush()
+        await db.commit()
+
+        first = await repository.request_cancel(
+            db,
+            OWNER,
+            task.task_id,
+            expected_revision=2,
+            attempt_id=attempt.attempt_id,
+            board_fence=7,
+            lease_owner="service:work-board",
+            actor_principal_id="service:work-board",
+            actor_session_id="service-session:work-board",
+        )
+        first_revision = first.task.task_revision
+        assert first_revision == 3
+        assert first.event.kind == "attempt.cancel_requested"
+        metadata = json.loads(first.event.metadata_json)
+        assert metadata["cancel_key"] == f"work-board-cancel:{task.task_id}:{attempt.attempt_id}"
+        await db.commit()
+
+        second = await repository.request_cancel(
+            db,
+            OWNER,
+            task.task_id,
+            expected_revision=first_revision,
+            attempt_id=attempt.attempt_id,
+            board_fence=7,
+            lease_owner="service:work-board",
+            actor_principal_id="service:work-board",
+            actor_session_id="service-session:work-board",
+        )
+        assert second.idempotent_replay is True
+        assert second.task.task_revision == first_revision
+        assert second.event.event_id == first.event.event_id
+        events = list(
+            (
+                await db.execute(
+                    select(WorkBoardEvent).where(
+                        WorkBoardEvent.task_id == task.task_id,
+                        WorkBoardEvent.kind == "attempt.cancel_requested",
+                    )
+                )
+            ).scalars().all()
+        )
+        assert len(events) == 1
+
+
+@pytest.mark.asyncio
 async def test_blocked_authority_patch_preserves_recovery_state(async_db):
     repository = WorkBoardRepository()
     digest = sha256(b"typed-input").hexdigest()
@@ -174,10 +241,12 @@ async def test_blocked_authority_patch_preserves_recovery_state(async_db):
             WorkBoardActionRequest(
                 action=WorkBoardAction.block,
                 expected_revision=created.task.task_revision,
-                block_kind="unknown_effect",
+                block_kind="operator",
                 reason="External effect needs reconciliation",
             ),
         )
+        blocked.task.block_kind = "unknown_effect"
+        await db.flush()
         patched = await repository.patch_task(
             db,
             OWNER,

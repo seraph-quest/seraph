@@ -13,6 +13,7 @@ describe("cockpit layouts", () => {
     expect(layout.centerSingleColumn).toBe(false);
     expect(layout.paneVisibility.sessions_pane).toBe(true);
     expect(layout.paneVisibility.operator_timeline_pane).toBe(true);
+    expect(layout.paneVisibility.work_board_pane).toBe(true);
     expect(layout.paneVisibility.workflows_pane).toBe(true);
     expect(layout.paneVisibility.audit_pane).toBe(false);
     expect(layout.paneVisibility.trace_pane).toBe(false);
@@ -32,6 +33,7 @@ describe("cockpit layouts", () => {
     expect(layout.paneVisibility.guardian_state_pane).toBe(true);
     expect(layout.paneVisibility.operator_timeline_pane).toBe(true);
     expect(layout.paneVisibility.workflows_pane).toBe(false);
+    expect(layout.paneVisibility.work_board_pane).toBe(false);
     expect(layout.paneVisibility.audit_pane).toBe(false);
     expect(layout.paneVisibility.trace_pane).toBe(false);
     expect(layout.paneVisibility.inspector_pane).toBe(false);
@@ -48,6 +50,7 @@ describe("cockpit layouts", () => {
     expect(layout.paneVisibility.guardian_state_pane).toBe(false);
     expect(layout.paneVisibility.operator_timeline_pane).toBe(true);
     expect(layout.paneVisibility.workflows_pane).toBe(true);
+    expect(layout.paneVisibility.work_board_pane).toBe(true);
     expect(layout.paneVisibility.audit_pane).toBe(true);
     expect(layout.paneVisibility.trace_pane).toBe(true);
     expect(layout.paneVisibility.presence_pane).toBe(false);

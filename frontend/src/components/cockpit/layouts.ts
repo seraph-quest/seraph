@@ -7,6 +7,7 @@ export type CockpitPaneId =
   | "presence_pane"
   | "approvals_pane"
   | "operator_timeline_pane"
+  | "work_board_pane"
   | "response_pane"
   | "guardian_state_pane"
   | "workflows_pane"
@@ -42,6 +43,7 @@ export const COCKPIT_PANES: CockpitPaneDefinition[] = [
   { id: "response_pane", label: "Latest Response", group: "Guardian" },
   { id: "guardian_state_pane", label: "Guardian State", group: "Guardian" },
   { id: "operator_timeline_pane", label: "Activity Ledger", group: "Guardian" },
+  { id: "work_board_pane", label: "Work Board", group: "Operator" },
   { id: "workflows_pane", label: "Workflow Timeline", group: "Guardian" },
   { id: "interventions_pane", label: "Interventions", group: "Guardian" },
   { id: "approvals_pane", label: "Pending Approvals", group: "Operator" },
@@ -95,6 +97,7 @@ export const COCKPIT_LAYOUTS: Record<CockpitLayoutId, CockpitLayoutDefinition> =
       trace_pane: false,
       response_pane: false,
       workflows_pane: false,
+      work_board_pane: false,
       interventions_pane: false,
       inspector_pane: false,
       operator_surface_pane: false,

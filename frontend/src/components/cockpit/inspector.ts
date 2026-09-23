@@ -73,6 +73,27 @@ export interface WorkflowStepRecord {
   isRecoverable?: boolean;
 }
 
+export interface WorkflowEffectReceiptRecord {
+  receiptKind?: string | null;
+  effectType?: string | null;
+  status?: string | null;
+  safe?: boolean;
+  reconciled?: boolean;
+  reconciliationStatus?: string | null;
+  exists?: boolean;
+  operatorVisible?: boolean;
+  recordedAt?: string | null;
+  observedAt?: string | null;
+  fencingToken?: number;
+  sizeBytes?: number;
+  artifactIdDigest?: string | null;
+  effectIdDigest?: string | null;
+  stateDigest?: string | null;
+  contentSha256?: string | null;
+  targetDigest?: string | null;
+  readbackDigest?: string | null;
+}
+
 export interface WorkflowTimelineEntry {
   kind: string;
   at: string;
@@ -105,6 +126,7 @@ export interface WorkflowRunRecord {
   continuedErrorSteps: string[];
   arguments?: Record<string, unknown>;
   artifacts: ArtifactRecord[];
+  effectReceipts?: WorkflowEffectReceiptRecord[];
   riskLevel?: string;
   executionBoundaries?: string[];
   acceptsSecretRefs?: boolean;

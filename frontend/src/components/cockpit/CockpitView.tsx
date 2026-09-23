@@ -28,6 +28,7 @@ import {
   resolveWorkBoardArtifact,
   type ArtifactRecord,
   type CockpitAuditEvent,
+  type WorkflowEffectReceiptRecord,
   type WorkflowRunRecord,
   type WorkflowStepRecord,
   type WorkflowTimelineEntry,
@@ -6019,6 +6020,93 @@ function normalizeWorkflowRun(value: Record<string, unknown>): WorkflowRunRecord
   const workflowPlanRevision = readIdentityRevision("plan_revision", "planRevision");
   const workflowCriterionId = readIdentityText("criterion_id", "criterionId");
   const workflowCandidateId = readIdentityText("candidate_id", "candidateId");
+  const workflowRunId = typeof value.run_identity === "string" && value.run_identity.trim()
+    ? value.run_identity.trim()
+    : typeof value.id === "string" && value.id.trim()
+      ? value.id.trim()
+      : null;
+  const workflowSessionId = typeof value.session_id === "string" && value.session_id.trim()
+    ? value.session_id.trim()
+    : null;
+  const workflowArtifacts: ArtifactRecord[] = Array.isArray(value.artifact_registry)
+    ? value.artifact_registry.reduce<ArtifactRecord[]>((records, entry) => {
+        if (!entry || typeof entry !== "object" || Array.isArray(entry)) return records;
+        const record = entry as Record<string, unknown>;
+        const id = typeof record.artifact_id === "string" ? record.artifact_id : null;
+        const filePath = typeof record.file_path === "string" ? record.file_path : null;
+        const entrySessionId = typeof record.session_id === "string" ? record.session_id : workflowSessionId;
+        const entryRunId = typeof record.run_id === "string" ? record.run_id : workflowRunId;
+        if (
+          !id
+          || !filePath
+          || !workflowSessionId
+          || !workflowRunId
+          || entrySessionId !== workflowSessionId
+          || entryRunId !== workflowRunId
+        ) return records;
+        const digest = typeof record.content_sha256 === "string" && /^[a-f0-9]{64}$/i.test(record.content_sha256)
+          ? record.content_sha256.toLowerCase()
+          : null;
+        records.push({
+          id,
+          source: "workflow artifact registry",
+          filePath,
+          sessionId: workflowSessionId,
+          createdAt: typeof value.updated_at === "string" ? value.updated_at : String(value.started_at ?? ""),
+          summary: `Artifact receipt for ${String(value.workflow_name ?? value.tool_name ?? "workflow")}`,
+          artifactType: typeof record.artifact_type === "string" ? record.artifact_type : "workspace_file",
+          producer: typeof record.producer === "string" ? record.producer : null,
+          runId: workflowRunId,
+          contentSha256: digest,
+          sizeBytes: typeof record.size_bytes === "number" && Number.isSafeInteger(record.size_bytes) && record.size_bytes >= 0
+            ? record.size_bytes
+            : null,
+        });
+        return records;
+      }, [])
+    : [];
+  const typedReceipts = value.typed_receipts && typeof value.typed_receipts === "object" && !Array.isArray(value.typed_receipts)
+    ? value.typed_receipts as Record<string, unknown>
+    : null;
+  const durableReceipts = value.durable_receipts && typeof value.durable_receipts === "object" && !Array.isArray(value.durable_receipts)
+    ? value.durable_receipts as Record<string, unknown>
+    : null;
+  const rawEffects = Array.isArray(value.effect_receipts)
+    ? value.effect_receipts
+    : Array.isArray(durableReceipts?.effects)
+      ? durableReceipts.effects
+      : Array.isArray(typedReceipts?.effects)
+        ? typedReceipts.effects
+        : [];
+  const workflowEffectReceipts: WorkflowEffectReceiptRecord[] = rawEffects.reduce<WorkflowEffectReceiptRecord[]>((receipts, entry) => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) return receipts;
+    const record = entry as Record<string, unknown>;
+    const text = (key: string) => typeof record[key] === "string" ? record[key] as string : null;
+    const integer = (key: string) => typeof record[key] === "number" && Number.isSafeInteger(record[key]) && Number(record[key]) >= 0
+      ? Number(record[key])
+      : undefined;
+    receipts.push({
+      receiptKind: text("receipt_kind"),
+      effectType: text("effect_type"),
+      status: text("status"),
+      safe: typeof record.safe === "boolean" ? record.safe : undefined,
+      reconciled: typeof record.reconciled === "boolean" ? record.reconciled : undefined,
+      reconciliationStatus: text("reconciliation_status"),
+      exists: typeof record.exists === "boolean" ? record.exists : undefined,
+      operatorVisible: typeof record.operator_visible === "boolean" ? record.operator_visible : undefined,
+      recordedAt: text("recorded_at"),
+      observedAt: text("observed_at"),
+      fencingToken: integer("fencing_token"),
+      sizeBytes: integer("size_bytes"),
+      artifactIdDigest: text("artifact_id_digest"),
+      effectIdDigest: text("effect_id_digest"),
+      stateDigest: text("state_digest"),
+      contentSha256: text("content_sha256"),
+      targetDigest: text("target_digest"),
+      readbackDigest: text("readback_digest"),
+    });
+    return receipts;
+  }, []);
 
   return {
     id: String(value.id ?? ""),
@@ -6043,7 +6131,8 @@ function normalizeWorkflowRun(value: Record<string, unknown>): WorkflowRunRecord
     arguments: value.arguments && typeof value.arguments === "object" && !Array.isArray(value.arguments)
       ? (value.arguments as Record<string, unknown>)
       : undefined,
-    artifacts: [],
+    artifacts: workflowArtifacts,
+    effectReceipts: workflowEffectReceipts,
     riskLevel: typeof value.risk_level === "string" ? value.risk_level : undefined,
     executionBoundaries: Array.isArray(value.execution_boundaries)
       ? value.execution_boundaries.filter((item): item is string => typeof item === "string")
@@ -8753,29 +8842,83 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     if (!workflow) return;
     setSelectedInspector({ kind: "workflow", workflow: resolveWorkflowRun(workflow) });
   }
-  function inspectWorkBoardArtifact(request: WorkBoardArtifactInspectRequest) {
-    const { reference, ownerSessionId, workflowRunId } = request;
-    if (workflowRunId) {
-      const workflow = workflowRunByIdentity.get(workflowRunId)
-        ?? workflowRunById.get(workflowRunId);
-      const artifact = workflow
-        ? resolveWorkBoardArtifact(workflow.artifacts, reference, { ownerSessionId, workflowRunId })
-        : null;
-      if (artifact) {
-        setSelectedInspector({ kind: "artifact", artifact });
-        focusPane("inspector_pane");
+  function inspectWorkBoardWorkflowRun(workflowRunId: string, ownerSessionId: string | null) {
+    if (!ownerSessionId) {
+      setOperatorStatus("Task workflow evidence is unavailable because the task's canonical owner session is missing.");
+      return;
+    }
+    const workflow = workflowRunByIdentity.get(workflowRunId) ?? workflowRunById.get(workflowRunId);
+    if (workflow) {
+      if (workflow.sessionId !== ownerSessionId) {
+        setOperatorStatus("Task workflow evidence is hidden because its session does not match the task's canonical owner session.");
         return;
       }
       focusPane("workflows_pane");
-      if (workflow) inspectWorkflowRun(workflow);
-      else {
-        setOperatorStatus("Loading workflow evidence for the task's immutable run link.");
-        void loadWorkflowRuns().then((runs) => {
-          const loadedWorkflow = runs.find((run) => run.runIdentity === workflowRunId || run.id === workflowRunId);
-          if (loadedWorkflow) inspectWorkflowRun(loadedWorkflow);
-          else setOperatorStatus("The task's linked workflow run is not in the current evidence index. Refresh workflow evidence and retry.");
-        });
+      inspectWorkflowRun(workflow);
+      return;
+    }
+
+    focusPane("workflows_pane");
+    setOperatorStatus("Loading workflow evidence for the task's immutable run link.");
+    void loadWorkflowRuns().then((runs) => {
+      const loadedWorkflow = runs.find((run) => run.runIdentity === workflowRunId || run.id === workflowRunId);
+      if (!loadedWorkflow) {
+        setOperatorStatus("The task's linked workflow run is not in the current evidence index. Refresh workflow evidence and retry.");
+      } else if (loadedWorkflow.sessionId !== ownerSessionId) {
+        setOperatorStatus("Task workflow evidence is hidden because its session does not match the task's canonical owner session.");
+      } else {
+        inspectWorkflowRun(loadedWorkflow);
       }
+    }).catch(() => {
+      setOperatorStatus("Workflow evidence could not be loaded. Refresh workflow evidence and retry.");
+    });
+  }
+  function inspectWorkBoardArtifact(request: WorkBoardArtifactInspectRequest) {
+    const { reference, ownerSessionId, workflowRunId } = request;
+    if (workflowRunId) {
+      if (!ownerSessionId) {
+        setOperatorStatus("Task workflow evidence is unavailable because the task's canonical owner session is missing.");
+        return;
+      }
+      const workflow = workflowRunByIdentity.get(workflowRunId)
+        ?? workflowRunById.get(workflowRunId);
+      if (workflow && workflow.sessionId !== ownerSessionId) {
+        setOperatorStatus("Task workflow evidence is hidden because its session does not match the task's canonical owner session.");
+        return;
+      }
+      if (workflow) {
+        const artifact = resolveWorkBoardArtifact(workflow.artifacts, reference, { ownerSessionId, workflowRunId });
+        if (artifact) {
+          setSelectedInspector({ kind: "artifact", artifact });
+          focusPane("inspector_pane");
+        } else {
+          inspectWorkBoardWorkflowRun(workflowRunId, ownerSessionId);
+        }
+        return;
+      }
+
+      focusPane("workflows_pane");
+      setOperatorStatus("Loading workflow evidence for the task's immutable run link.");
+      void loadWorkflowRuns().then((runs) => {
+        const loadedWorkflow = runs.find((run) => run.runIdentity === workflowRunId || run.id === workflowRunId);
+        if (!loadedWorkflow) {
+          setOperatorStatus("The task's linked workflow run is not in the current evidence index. Refresh workflow evidence and retry.");
+          return;
+        }
+        if (loadedWorkflow.sessionId !== ownerSessionId) {
+          setOperatorStatus("Task workflow evidence is hidden because its session does not match the task's canonical owner session.");
+          return;
+        }
+        const artifact = resolveWorkBoardArtifact(loadedWorkflow.artifacts, reference, { ownerSessionId, workflowRunId });
+        if (artifact) {
+          setSelectedInspector({ kind: "artifact", artifact });
+          focusPane("inspector_pane");
+        } else {
+          inspectWorkflowRun(loadedWorkflow);
+        }
+      }).catch(() => {
+        setOperatorStatus("Workflow evidence could not be loaded. Refresh workflow evidence and retry.");
+      });
       return;
     }
 
@@ -13486,6 +13629,9 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       meta = artifact.source;
       body = artifact.summary;
       details = {
+        artifact_id: artifact.id,
+        artifact_type: artifact.artifactType ?? "n/a",
+        content_sha256: artifact.contentSha256 ?? "n/a",
         file_path: artifact.filePath,
         session_id: artifact.sessionId ?? "n/a",
         created_at: artifact.createdAt,
@@ -13820,6 +13966,26 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                 </div>
               </div>
             )}
+          </div>
+        )}
+        {selectedInspector.kind === "workflow" && selectedWorkflow && Boolean(selectedWorkflow.effectReceipts?.length) && (
+          <div className="cockpit-inspector-stack" aria-label="Workflow effect and readback receipts">
+            {selectedWorkflow.effectReceipts?.map((receipt, index) => (
+              <div key={`${selectedWorkflow.id}:effect:${receipt.effectIdDigest ?? index}`} className="cockpit-inspector-stack-row">
+                <div className="cockpit-key">{receipt.receiptKind === "readback" ? "readback receipt" : "effect receipt"}</div>
+                <div className="cockpit-value">
+                  {receipt.effectType ?? "workflow effect"} · {receipt.status ?? "status unavailable"}
+                  {receipt.reconciliationStatus ? ` · reconciliation ${receipt.reconciliationStatus}` : ""}
+                  {receipt.reconciled === true ? " · reconciled" : ""}
+                  {receipt.exists === true ? " · target exists" : receipt.exists === false ? " · target missing" : ""}
+                </div>
+                {receipt.effectIdDigest && <div className="cockpit-value">effect reference digest {receipt.effectIdDigest}</div>}
+                {receipt.targetDigest && <div className="cockpit-value">target SHA-256 {receipt.targetDigest}</div>}
+                {receipt.contentSha256 && <div className="cockpit-value">artifact SHA-256 {receipt.contentSha256}</div>}
+                {receipt.readbackDigest && <div className="cockpit-value">readback SHA-256 {receipt.readbackDigest}</div>}
+                {receipt.recordedAt && <div className="cockpit-value">recorded {formatAge(receipt.recordedAt)}</div>}
+              </div>
+            ))}
           </div>
         )}
         {selectedInspector.kind === "workflow" && selectedWorkflow && workflowStepFocusRecords(selectedWorkflow).length > 0 && (
@@ -15929,16 +16095,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
               ownerSessionId={operatorAuth.sessionId}
               onOpenApprovals={() => focusPane("approvals_pane")}
               onInspectArtifact={inspectWorkBoardArtifact}
-              onInspectWorkflowRun={(workflowRunId) => {
-                focusPane("workflows_pane");
-                const workflow = workflowRunByIdentity.get(workflowRunId) ?? workflowRunById.get(workflowRunId);
-                if (workflow) {
-                  inspectWorkflowRun(workflow);
-                } else {
-                  setOperatorStatus("Workflow evidence is not in the current timeline snapshot. Refresh the workflow pane to load it.");
-                  void loadWorkflowRuns();
-                }
-              }}
+              onInspectWorkflowRun={inspectWorkBoardWorkflowRun}
             />
           </CockpitWorkspaceWindow>
         )}

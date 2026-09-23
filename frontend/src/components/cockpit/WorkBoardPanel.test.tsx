@@ -535,10 +535,81 @@ describe("WorkBoardPanel", () => {
     expect(fetchMock.mock.calls).toHaveLength(callsBeforeUnmount);
   });
 
-  it("opens task artifact references with their source session and run context", async () => {
+  it("stops late snapshot and goal responses after unmount even when fetch ignores abort", async () => {
+    let resolveSnapshot: ((value: ReturnType<typeof response>) => void) | null = null;
+    let resolveGoals: ((value: ReturnType<typeof response>) => void) | null = null;
+    const signals: { snapshot?: AbortSignal; goals?: AbortSignal } = {};
+    fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes("/api/work-board/tasks?") && !url.match(/\/tasks\/[^?]+/)) {
+        signals.snapshot = init?.signal as AbortSignal;
+        return new Promise<ReturnType<typeof response>>((resolve) => { resolveSnapshot = resolve; });
+      }
+      if (url.endsWith("/api/goals/tree")) {
+        signals.goals = init?.signal as AbortSignal;
+        return new Promise<ReturnType<typeof response>>((resolve) => { resolveGoals = resolve; });
+      }
+      return Promise.resolve(response({ events: [], last_event_id: 0, gap: false }));
+    });
+
+    const { unmount } = render(<WorkBoardPanel />);
+    await waitFor(() => {
+      expect(resolveSnapshot).not.toBeNull();
+      expect(resolveGoals).not.toBeNull();
+    });
+    const eventCallsBeforeUnmount = fetchMock.mock.calls.filter(([input]) => String(input).includes("/api/work-board/events")).length;
+    unmount();
+    expect(signals.snapshot?.aborted).toBe(true);
+    expect(signals.goals?.aborted).toBe(true);
+
+    await act(async () => {
+      resolveSnapshot?.(response(page([task()])));
+      resolveGoals?.(response([]));
+    });
+
+    expect(fetchMock.mock.calls.filter(([input]) => String(input).includes("/api/work-board/events"))).toHaveLength(eventCallsBeforeUnmount);
+  });
+
+  it("does not continue illegal-drag recovery after unmount when the snapshot resolves late", async () => {
+    const currentTask = task({ status: "todo" });
+    let taskPageCalls = 0;
+    let resolveRefresh: ((value: ReturnType<typeof response>) => void) | null = null;
+    let eventPageCalls = 0;
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/work-board/tasks?") && !url.match(/\/tasks\/[^?]+/)) {
+        taskPageCalls += 1;
+        if (taskPageCalls === 1) return Promise.resolve(response(page([currentTask], 7)));
+        return new Promise<ReturnType<typeof response>>((resolve) => { resolveRefresh = resolve; });
+      }
+      if (url.includes("/api/work-board/events")) {
+        eventPageCalls += 1;
+        return Promise.resolve(response(events(7)));
+      }
+      if (url.endsWith("/api/goals/tree")) return Promise.resolve(response([]));
+      return Promise.resolve(response({}));
+    });
+
+    const { unmount } = render(<WorkBoardPanel />);
+    const card = await screen.findByRole("region", { name: "Todo column" });
+    fireEvent.drop(screen.getByRole("region", { name: "Done column" }), {
+      dataTransfer: { getData: () => currentTask.task_id },
+    });
+    await waitFor(() => expect(resolveRefresh).not.toBeNull());
+    unmount();
+
+    await act(async () => { resolveRefresh?.(response(page([currentTask], 7))); });
+
+    expect(card).not.toBeInTheDocument();
+    expect(eventPageCalls).toBe(1);
+  });
+
+  it("opens task artifact references with the canonical owner session and run context", async () => {
     const reference = { artifact_id: "artifact:notes/result.md", file_path: "notes/result.md", content_sha256: "b".repeat(64), verified: true };
     const currentTask = task({
       title: "Artifact task",
+      owner_session_id: "canonical-owner-session",
+      origin_session_id: "origin-session-from-another-thread",
       artifact_refs: [reference],
       result_refs: [],
     });
@@ -551,9 +622,27 @@ describe("WorkBoardPanel", () => {
 
     expect(onInspectArtifact).toHaveBeenCalledWith({
       reference,
-      ownerSessionId: "operator-session-1",
+      ownerSessionId: "canonical-owner-session",
       workflowRunId: null,
     });
+  });
+
+  it("passes the canonical owner session for linked workflow evidence", async () => {
+    const currentTask = task({
+      title: "Workflow evidence task",
+      owner_session_id: "canonical-owner-session",
+      origin_session_id: "origin-session-from-another-thread",
+      latest_attempt: endedAttempt({ workflow_run_id: "workflow-run-1" }),
+      artifact_refs: [{ workflow_run_id: "workflow-run-1" }],
+    });
+    taskResponse(fetchMock, currentTask, 7, detail(currentTask, { attempts: [currentTask.latest_attempt!] }));
+    const onInspectWorkflowRun = vi.fn();
+    render(<WorkBoardPanel onInspectWorkflowRun={onInspectWorkflowRun} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Open task Workflow evidence task" }));
+    fireEvent.click(screen.getByRole("button", { name: "Open workflow evidence" }));
+
+    expect(onInspectWorkflowRun).toHaveBeenCalledWith("workflow-run-1", "canonical-owner-session");
   });
 
   it("opens attempt receipt artifacts with their immutable workflow run context", async () => {
@@ -685,6 +774,8 @@ describe("WorkBoardPanel", () => {
     const reference = { effect_id: "effect-17", target_path: "artifacts/output.md", workflow_run_id: "workflow-run-1", readback_status: "unknown" as const };
     const currentTask = task({
       title: "Readback task",
+      owner_session_id: "canonical-owner-session",
+      origin_session_id: "origin-session-from-another-thread",
       latest_attempt: endedAttempt({ workflow_run_id: "workflow-run-1", receipt_refs: [reference] }),
     });
     taskResponse(fetchMock, currentTask, 7, detail(currentTask, { attempts: [endedAttempt({ workflow_run_id: "workflow-run-1", receipt_refs: [reference] })] }));
@@ -696,7 +787,7 @@ describe("WorkBoardPanel", () => {
 
     expect(onInspectArtifact).toHaveBeenCalledWith({
       reference,
-      ownerSessionId: "operator-session-1",
+      ownerSessionId: "canonical-owner-session",
       workflowRunId: "workflow-run-1",
     });
   });

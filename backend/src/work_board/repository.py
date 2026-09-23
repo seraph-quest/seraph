@@ -42,7 +42,7 @@ from src.work_board.contracts import (
 
 
 _SAFE_ID = re.compile(r"^[A-Za-z0-9_.:/-]{1,512}$")
-_SAFE_RECEIPT_IDENTIFIER = re.compile(r"^[A-Za-z0-9_.:-]{1,512}$")
+_SAFE_RECEIPT_IDENTIFIER = re.compile(r"^(?!\.{1,2}$)[A-Za-z0-9_.:-]{1,512}$")
 _DIGEST = re.compile(r"^[0-9a-f]{64}$")
 _EVENT_LIMIT = 100
 _TASK_LIMIT = 100

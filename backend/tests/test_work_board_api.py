@@ -289,6 +289,10 @@ def test_detail_reference_serializers_drop_unknown_private_values():
                     "verification_status": "passed",
                 },
                 {
+                    "artifact_id": ".",
+                    "effect_id": ".",
+                    "job_id": "..",
+                    "child_job_id": "..",
                     "artifact_type": "private/type",
                     "effect_type": "effects/type",
                     "status": "succeeded",

@@ -73,6 +73,9 @@ _ALLOWED_RECEIPT_STATUSES = {
 _AUTHORITY_RECONCILIATION_BLOCK_KINDS = frozenset(
     {"unknown_effect", "cost_liability", "reconcile_admission_binding"}
 )
+_SAFE_RESTORABLE_PHASES = frozenset(
+    {WorkBoardStatus.triage.value, WorkBoardStatus.todo.value, WorkBoardStatus.ready.value}
+)
 
 
 async def _begin_sqlite_immediate(db: AsyncSession) -> None:
@@ -139,6 +142,18 @@ def _validate_safe_identifier(value: str | None, *, field: str, max_length: int 
         or any(part in {"", ".", ".."} for part in normalized.split("/"))
     ):
         raise BoardError("invalid_reference", f"{field} must be a bounded safe reference")
+
+
+def _validate_opaque_identifier(
+    value: str | None,
+    *,
+    field: str,
+    max_length: int = 512,
+) -> None:
+    """Reject path-shaped values for fields that name a capability or actor."""
+    _validate_safe_identifier(value, field=field, max_length=max_length)
+    if value is not None and "/" in str(value).strip():
+        raise BoardError("invalid_reference", f"{field} must be an opaque identifier")
 
 
 def _validate_digest(value: str | None, *, field: str) -> None:
@@ -558,14 +573,14 @@ class WorkBoardRepository:
     @staticmethod
     def _validate_task_fields(request: WorkBoardTaskCreate) -> None:
         _validate_safe_identifier(request.goal_id, field="goal_id", max_length=128)
-        _validate_safe_identifier(request.capability_id, field="capability_id", max_length=128)
+        _validate_opaque_identifier(request.capability_id, field="capability_id", max_length=128)
         _validate_safe_identifier(request.typed_input_ref, field="typed_input_ref")
-        _validate_safe_identifier(request.executor_id, field="executor_id", max_length=128)
-        _validate_safe_identifier(request.assignee_id, field="assignee_id", max_length=128)
+        _validate_opaque_identifier(request.executor_id, field="executor_id", max_length=128)
+        _validate_opaque_identifier(request.assignee_id, field="assignee_id", max_length=128)
         _validate_safe_identifier(request.idempotency_scope, field="idempotency_scope", max_length=128)
         _validate_safe_identifier(request.idempotency_key, field="idempotency_key", max_length=256)
-        _validate_safe_identifier(request.reviewer_id, field="reviewer_id", max_length=128)
-        _validate_safe_identifier(request.origin_thread_id, field="origin_thread_id", max_length=256)
+        _validate_opaque_identifier(request.reviewer_id, field="reviewer_id", max_length=128)
+        _validate_opaque_identifier(request.origin_thread_id, field="origin_thread_id", max_length=256)
         _validate_digest(request.typed_input_digest, field="typed_input_digest")
 
     async def create_task(
@@ -734,10 +749,10 @@ class WorkBoardRepository:
         if status is not None:
             statement = statement.where(WorkBoardTask.status == status)
         if executor_id:
-            _validate_safe_identifier(executor_id, field="executor_id", max_length=128)
+            _validate_opaque_identifier(executor_id, field="executor_id", max_length=128)
             statement = statement.where(WorkBoardTask.executor_id == executor_id)
         if assignee_id:
-            _validate_safe_identifier(assignee_id, field="assignee_id", max_length=128)
+            _validate_opaque_identifier(assignee_id, field="assignee_id", max_length=128)
             statement = statement.where(WorkBoardTask.assignee_id == assignee_id)
         if query:
             bounded_query = str(query).strip()[:200]
@@ -822,12 +837,10 @@ class WorkBoardRepository:
             if field in {"title", "body"}:
                 safe_changes[field] = await self._safe_text(str(value))
             else:
-                if field in {"capability_id", "typed_input_ref", "executor_id", "assignee_id"}:
-                    _validate_safe_identifier(
-                        value,
-                        field=field,
-                        max_length=128 if field in {"capability_id", "executor_id", "assignee_id"} else 512,
-                    )
+                if field in {"capability_id", "executor_id", "assignee_id"}:
+                    _validate_opaque_identifier(value, field=field, max_length=128)
+                elif field == "typed_input_ref":
+                    _validate_safe_identifier(value, field=field, max_length=512)
                 elif field == "typed_input_digest":
                     _validate_digest(value, field=field)
                 safe_changes[field] = value
@@ -959,6 +972,13 @@ class WorkBoardRepository:
                     "This block requires its typed recovery path before it can be unblocked",
                     status_code=409,
                 )
+            source = task.block_source_status
+            if source not in _SAFE_RESTORABLE_PHASES:
+                raise BoardError(
+                    "invalid_recovery_phase",
+                    "The blocked task has no safe restorable prior phase",
+                    status_code=409,
+                )
             attempt_result = await db.execute(
                 select(WorkBoardAttempt.attempt_id)
                 .where(WorkBoardAttempt.task_id == task.task_id)
@@ -970,13 +990,15 @@ class WorkBoardRepository:
                     "A task with an execution attempt requires typed recovery before unblock",
                     status_code=409,
                 )
-            source = task.block_source_status
             values.update(
                 {
+                    # M1 has no capability/authority readiness resolver.  A
+                    # task previously blocked from Ready must re-enter Todo
+                    # so M2 can re-admit it against current authority.
                     "status": (
-                        WorkBoardStatus.triage
-                        if source == WorkBoardStatus.triage.value
-                        else WorkBoardStatus.todo
+                        WorkBoardStatus.todo
+                        if source == WorkBoardStatus.ready.value
+                        else WorkBoardStatus(source)
                     ),
                     "block_source_status": None,
                     "block_kind": None,

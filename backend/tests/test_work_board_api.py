@@ -106,10 +106,51 @@ async def test_http_patch_validation_returns_422_for_malformed_inputs(client):
         f"/api/work-board/tasks/{task['task_id']}",
         json={
             "expected_revision": task["task_revision"],
-            "capability_id": "/private/capability",
+            "capability_id": "guardian/research",
         },
     )
     assert unsafe_reference.status_code == 422
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "field",
+    ["capability_id", "executor_id", "assignee_id", "reviewer_id", "origin_thread_id"],
+)
+async def test_http_create_rejects_path_shaped_opaque_identifiers(client, field):
+    payload = _task_payload(key=f"invalid-create-{field}")
+    payload["goal_id"] = await _create_goal(client)
+    payload[field] = "guardian/research"
+
+    rejected = await client.post("/api/work-board/tasks", json=payload)
+    assert rejected.status_code == 422
+
+    payload[field] = "guardian.research"
+    accepted = await client.post("/api/work-board/tasks", json=payload)
+    assert accepted.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_http_typed_input_relative_path_round_trips(client):
+    payload = _task_payload(key="typed-http")
+    payload["goal_id"] = await _create_goal(client)
+    payload.update(
+        {
+            "capability_id": "guardian.research",
+            "typed_input_ref": "workspace-json:inputs/task.json",
+            "typed_input_digest": "c" * 64,
+        }
+    )
+
+    created = await client.post("/api/work-board/tasks", json=payload)
+    assert created.status_code == 200
+    task = created.json()["task"]
+    assert task["typed_input_ref"] == payload["typed_input_ref"]
+    assert task["typed_input_digest"] == payload["typed_input_digest"]
+
+    fetched = await client.get(f"/api/work-board/tasks/{task['task_id']}")
+    assert fetched.status_code == 200
+    assert fetched.json()["task"]["typed_input_ref"] == payload["typed_input_ref"]
 
 
 @pytest.mark.asyncio

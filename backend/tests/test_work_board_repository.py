@@ -212,6 +212,69 @@ def test_patch_rejects_unsafe_reference_and_digest_inputs():
         )
 
 
+@pytest.mark.parametrize("field", ["capability_id", "executor_id", "assignee_id"])
+def test_opaque_task_identifiers_reject_relative_paths(field):
+    create_values = {
+        "title": "Path-shaped identifier",
+        "goal_id": "goal-1",
+        "goal_revision": 1,
+        "idempotency_key": f"create-{field}",
+        field: "guardian/research",
+    }
+    with pytest.raises(ValidationError):
+        WorkBoardTaskCreate(**create_values)
+
+    with pytest.raises(ValidationError):
+        WorkBoardTaskPatch(expected_revision=1, **{field: "guardian/research"})
+
+
+@pytest.mark.parametrize("field", ["reviewer_id", "origin_thread_id"])
+def test_create_only_opaque_identifiers_reject_relative_paths(field):
+    with pytest.raises(ValidationError):
+        WorkBoardTaskCreate(
+            title="Path-shaped create identifier",
+            goal_id="goal-1",
+            goal_revision=1,
+            idempotency_key=f"create-only-{field}",
+            **{field: "guardian/research"},
+        )
+
+
+@pytest.mark.asyncio
+async def test_create_preserves_safe_relative_typed_input_reference(async_db):
+    digest = sha256(b"typed-create").hexdigest()
+    repository = WorkBoardRepository()
+    async with async_db() as db:
+        if await db.get(Goal, "goal-1") is None:
+            db.add(
+                Goal(
+                    id="goal-1",
+                    title="Board test goal",
+                    owner_principal_id=OWNER.principal_id,
+                    owner_session_id=OWNER.session_id,
+                    revision=1,
+                )
+            )
+            await db.flush()
+        mutation = await repository.create_task(
+            db,
+            OWNER,
+            WorkBoardTaskCreate(
+                title="Typed input task",
+                goal_id="goal-1",
+                goal_revision=1,
+                capability_id="guardian.research",
+                executor_id="executor.local",
+                assignee_id="operator.worker",
+                typed_input_ref="workspace-json:inputs/task.json",
+                typed_input_digest=digest,
+                idempotency_key="typed-create",
+            ),
+        )
+        assert mutation.task.typed_input_ref == "workspace-json:inputs/task.json"
+        assert mutation.task.typed_input_digest == digest
+
+
 @pytest.mark.asyncio
 async def test_typed_input_patch_requires_pair_and_preserves_complete_changes(async_db):
     digest = sha256(b"typed-input").hexdigest()

@@ -166,6 +166,61 @@ async def test_generic_unblock_requires_operator_block_and_current_goal(async_db
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("source", [None, "corrupt", "running", "done", "archived"])
+async def test_generic_unblock_rejects_unsafe_restorable_phase(async_db, source):
+    task_id = await _seed_task(async_db, OWNER, key_suffix=f"unsafe-phase-{source}")
+    repository = WorkBoardRepository()
+    async with async_db() as db:
+        task = await repository.get_task(db, OWNER, task_id)
+        task.status = WorkBoardStatus.blocked
+        task.block_source_status = source
+        task.block_kind = "operator"
+        task.block_reason = "Operator recovery"
+        await db.commit()
+
+    async with async_db() as db:
+        current = await repository.get_task(db, OWNER, task_id)
+        with pytest.raises(BoardError) as raised:
+            await repository.action_task(
+                db,
+                OWNER,
+                task_id,
+                WorkBoardActionRequest(
+                    action=WorkBoardAction.unblock,
+                    expected_revision=current.task_revision,
+                ),
+            )
+        assert raised.value.code == "invalid_recovery_phase"
+        assert current.status is WorkBoardStatus.blocked
+
+
+@pytest.mark.asyncio
+async def test_generic_unblock_demotes_ready_phase_for_fresh_admission(async_db):
+    task_id = await _seed_task(async_db, OWNER, key_suffix="ready-phase")
+    repository = WorkBoardRepository()
+    async with async_db() as db:
+        task = await repository.get_task(db, OWNER, task_id)
+        task.status = WorkBoardStatus.blocked
+        task.block_source_status = WorkBoardStatus.ready.value
+        task.block_kind = "operator"
+        task.block_reason = "Operator recovery"
+        await db.commit()
+
+    async with async_db() as db:
+        current = await repository.get_task(db, OWNER, task_id)
+        mutation = await repository.action_task(
+            db,
+            OWNER,
+            task_id,
+            WorkBoardActionRequest(
+                action=WorkBoardAction.unblock,
+                expected_revision=current.task_revision,
+            ),
+        )
+        assert mutation.task.status is WorkBoardStatus.todo
+
+
+@pytest.mark.asyncio
 async def test_generic_unblock_refuses_operator_block_with_existing_attempt(async_db):
     task_id = await _seed_task(async_db, OWNER)
     repository = WorkBoardRepository()

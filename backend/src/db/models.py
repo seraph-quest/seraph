@@ -517,6 +517,7 @@ class WorkBoardTask(SQLModel, table=True):
             "idempotency_key",
             unique=True,
         ),
+        {"sqlite_autoincrement": True},
     )
 
     creation_sequence: Optional[int] = Field(

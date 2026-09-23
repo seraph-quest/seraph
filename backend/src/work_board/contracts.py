@@ -49,6 +49,14 @@ def _safe_reference(value: str | None, *, field_name: str) -> str | None:
     return normalized
 
 
+def _safe_opaque_identifier(value: str | None, *, field_name: str) -> str | None:
+    """Validate an identifier that must never be interpreted as a path."""
+    normalized = _safe_reference(value, field_name=field_name)
+    if normalized is not None and "/" in normalized:
+        raise ValueError(f"{field_name} must be an opaque identifier")
+    return normalized
+
+
 class WorkBoardTaskCreate(WorkBoardBaseModel):
     title: str = Field(min_length=1, max_length=200)
     body: str = Field(default="", max_length=4_000)
@@ -70,11 +78,16 @@ class WorkBoardTaskCreate(WorkBoardBaseModel):
 
     @field_validator(
         "capability_id",
-        "typed_input_ref",
         "executor_id",
         "assignee_id",
+        "reviewer_id",
         "origin_thread_id",
     )
+    @classmethod
+    def validate_opaque_identifiers(cls, value: str | None, info) -> str | None:
+        return _safe_opaque_identifier(value, field_name=str(info.field_name))
+
+    @field_validator("typed_input_ref")
     @classmethod
     def validate_safe_references(cls, value: str | None, info) -> str | None:
         return _safe_reference(value, field_name=str(info.field_name))
@@ -117,7 +130,12 @@ class WorkBoardTaskPatch(WorkBoardBaseModel):
     assignee_id: str | None = Field(default=None, min_length=1, max_length=128)
     scheduled_at: datetime | None = None
 
-    @field_validator("capability_id", "typed_input_ref", "executor_id", "assignee_id")
+    @field_validator("capability_id", "executor_id", "assignee_id")
+    @classmethod
+    def validate_opaque_identifiers(cls, value: str | None, info) -> str | None:
+        return _safe_opaque_identifier(value, field_name=str(info.field_name))
+
+    @field_validator("typed_input_ref")
     @classmethod
     def validate_safe_references(cls, value: str | None, info) -> str | None:
         return _safe_reference(value, field_name=str(info.field_name))

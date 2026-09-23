@@ -5,7 +5,9 @@ from pathlib import Path
 
 import pytest
 from sqlalchemy import create_engine as create_sync_engine
+from sqlalchemy.dialects import sqlite
 from sqlalchemy.ext.asyncio import create_async_engine
+from sqlalchemy.schema import CreateTable
 
 from config.settings import settings
 from src.db import engine as db_engine
@@ -30,6 +32,12 @@ def test_work_board_tables_are_registered_in_canonical_metadata():
     }
     assert expected.issubset(SQLModel.metadata.tables)
     assert expected.issubset(set(OPERATOR_REQUIRED_TABLES))
+
+
+def test_work_board_task_sqlite_ddl_uses_autoincrement_sequence():
+    ddl = str(CreateTable(SQLModel.metadata.tables["work_board_tasks"]).compile(dialect=sqlite.dialect()))
+    normalized = " ".join(ddl.upper().split())
+    assert "CREATION_SEQUENCE INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT" in normalized
 
 
 def _board_workspace(tmp_path: Path):
@@ -251,6 +259,9 @@ async def test_init_db_additively_creates_board_tables_and_preserves_existing_ro
         existing = connection.execute(
             "SELECT id, title FROM goals WHERE id = 'legacy-goal'"
         ).fetchone()
+        task_ddl = connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'work_board_tasks'"
+        ).fetchone()[0]
     assert {
         "work_board_tasks",
         "work_board_attempts",
@@ -259,3 +270,4 @@ async def test_init_db_additively_creates_board_tables_and_preserves_existing_ro
         "work_board_events",
     }.issubset(tables)
     assert existing == ("legacy-goal", "Existing goal")
+    assert "AUTOINCREMENT" in task_ddl.upper()

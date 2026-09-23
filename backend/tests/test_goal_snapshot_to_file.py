@@ -12,6 +12,7 @@ from typing import Any
 import pytest
 
 from config.settings import settings
+from src.approval.runtime import reset_runtime_context, set_runtime_context
 from src.db.models import Goal
 from src.goals.contracts import GoalCandidateRequest, GoalSuccessCriterion
 from src.goals.repository import serialize_success_criterion
@@ -33,6 +34,7 @@ from src.security.authority_envelope import (
     ResourceLimits,
 )
 from src.security.trust_contract import AuthorityGrant, EgressClass, PrincipalType, TrustPrincipal
+from src.tools.goal_tools import get_goals
 
 
 class _Goals:
@@ -240,6 +242,80 @@ def _authority_policy(root: Path, request: GoalSnapshotToFileRequest, *, output_
     )
 
 
+class _ExactGoalRepository:
+    def __init__(self, goal: Goal):
+        self.goal = goal
+        self.get_ids: list[str] = []
+        self.list_called = False
+
+    async def get(self, goal_id: str) -> Goal | None:
+        self.get_ids.append(goal_id)
+        return self.goal if goal_id == self.goal.id else None
+
+    async def list_goals(self, **_kwargs):
+        self.list_called = True
+        raise AssertionError("service-scoped GoalSnapshot must not list owner goals")
+
+
+class _GoalSnapshotJobs:
+    def __init__(self, projection: dict[str, Any]):
+        self.projection = projection
+        self.job_ids: list[str] = []
+
+    async def get_job(self, job_id: str) -> dict[str, Any]:
+        self.job_ids.append(job_id)
+        return self.projection
+
+
+def _goal_snapshot_projection(
+    *,
+    goal: Goal,
+    job_id: str = "goal-snapshot-work-board:task-1:attempt-1",
+) -> dict[str, Any]:
+    service_id = "service:goal-snapshot"
+    authority = {
+        "capability_id": CAPABILITY_ID,
+        "capability_version": CAPABILITY_VERSION,
+        "principal": service_id,
+        "owner_kind": "service",
+        "owner_principal_id": service_id,
+        "service_id": service_id,
+        "session_id": goal.owner_session_id,
+        "goal_id": goal.id,
+        "goal_revision": goal.revision,
+        "goal_owner_principal_id": goal.owner_principal_id,
+        "goal_owner_session_id": goal.owner_session_id,
+    }
+    return {
+        "job_id": job_id,
+        "run_identity": job_id,
+        "status": "running",
+        "owner": {
+            "kind": "service",
+            "principal_id": service_id,
+            "service_id": service_id,
+        },
+        "job_kind": CAPABILITY_ID,
+        "capability_version": CAPABILITY_VERSION,
+        "session_id": goal.owner_session_id,
+        "operator_session_id": None,
+        "goal_id": goal.id,
+        "goal_revision": goal.revision,
+        "declared_authority": authority,
+    }
+
+
+def _goal_snapshot_service_principal(job_id: str, session_id: str) -> TrustPrincipal:
+    return TrustPrincipal(
+        principal_id="service:goal-snapshot",
+        principal_type=PrincipalType.SERVICE,
+        authenticated=True,
+        grants=(AuthorityGrant.CAPABILITY_EXECUTE,),
+        session_id=session_id,
+        job_id=job_id,
+    )
+
+
 def test_request_contract_binds_capability_owner_and_bounded_path():
     request = _request()
     assert request.file_path == "notes/goal-snapshot.md"
@@ -254,6 +330,157 @@ def test_request_contract_binds_capability_owner_and_bounded_path():
         _request(owner_principal_id="operator:user")
     with pytest.raises(ValueError, match="goal owner delegation requires both principal and session"):
         _request(goal_owner_principal_id="operator:goal-owner")
+
+
+def _patch_goal_snapshot_goal_read(monkeypatch, goal: Goal, projection: dict[str, Any]):
+    from src.tools import goal_tools
+
+    goals = _ExactGoalRepository(goal)
+    jobs = _GoalSnapshotJobs(projection)
+    monkeypatch.setattr(goal_tools, "goal_repository", goals)
+    monkeypatch.setattr(goal_tools, "durable_job_repository", jobs)
+
+    async def authenticate(_session_id: str, *, touch: bool = True):
+        assert touch is False
+        return SimpleNamespace(
+            session_id=goal.owner_session_id,
+            principal=TrustPrincipal(
+                principal_id=goal.owner_principal_id,
+                principal_type=PrincipalType.OPERATOR,
+                authenticated=True,
+                operator_session_id=goal.owner_session_id,
+                session_id=goal.owner_session_id,
+            ),
+        )
+
+    monkeypatch.setattr(goal_tools, "authenticate_session", authenticate)
+    return goals, jobs
+
+
+def test_goal_snapshot_get_goals_reads_only_the_delegated_goal(monkeypatch):
+    goal = _goal(
+        owner_principal_id="operator:single",
+        owner_session_id="operator-session:single",
+    )
+    job_id = "goal-snapshot-work-board:task-1:attempt-1"
+    projection = _goal_snapshot_projection(goal=goal, job_id=job_id)
+    goals, jobs = _patch_goal_snapshot_goal_read(monkeypatch, goal, projection)
+    tokens = set_runtime_context(
+        goal.owner_session_id,
+        "balanced",
+        trust_principal=_goal_snapshot_service_principal(job_id, goal.owner_session_id),
+    )
+    try:
+        result = get_goals.forward()
+    finally:
+        reset_runtime_context(tokens)
+
+    assert result == "- [GoalLevel.daily/GoalDomain.productivity] Keep the operator plan current (id=goal-1, active)"
+    assert jobs.job_ids == [job_id]
+    assert goals.get_ids == [goal.id]
+    assert goals.list_called is False
+
+
+@pytest.mark.parametrize(
+    "mutate_projection",
+    [
+        lambda projection: projection["owner"].update(service_id="service:other"),
+        lambda projection: projection.update(job_id="goal-snapshot-work-board:task-other:attempt-1"),
+        lambda projection: projection.update(status="accepted"),
+        lambda projection: projection.update(goal_revision=2),
+        lambda projection: projection["declared_authority"].update(
+            goal_owner_principal_id="operator:other"
+        ),
+    ],
+    ids=["wrong-service", "wrong-child", "not-running", "stale-revision", "wrong-owner"],
+)
+def test_goal_snapshot_get_goals_rejects_stale_or_mismatched_delegation(
+    monkeypatch,
+    mutate_projection,
+):
+    goal = _goal(
+        owner_principal_id="operator:single",
+        owner_session_id="operator-session:single",
+    )
+    job_id = "goal-snapshot-work-board:task-1:attempt-1"
+    projection = _goal_snapshot_projection(goal=goal, job_id=job_id)
+    mutate_projection(projection)
+    _patch_goal_snapshot_goal_read(monkeypatch, goal, projection)
+    tokens = set_runtime_context(
+        goal.owner_session_id,
+        "balanced",
+        trust_principal=_goal_snapshot_service_principal(job_id, goal.owner_session_id),
+    )
+    try:
+        with pytest.raises(PermissionError):
+            get_goals.forward()
+    finally:
+        reset_runtime_context(tokens)
+
+
+@pytest.mark.parametrize(
+    "principal",
+    [
+        None,
+        TrustPrincipal(
+            principal_id="service:other",
+            principal_type=PrincipalType.SERVICE,
+            authenticated=True,
+            grants=(AuthorityGrant.CAPABILITY_EXECUTE,),
+            session_id="operator-session:single",
+            job_id="goal-snapshot-work-board:task-1:attempt-1",
+        ),
+        TrustPrincipal(
+            principal_id="service:goal-snapshot",
+            principal_type=PrincipalType.SERVICE,
+            authenticated=True,
+            grants=(AuthorityGrant.CAPABILITY_EXECUTE,),
+            session_id="operator-session:single",
+        ),
+    ],
+    ids=["missing-principal", "wrong-service", "unbound-service"],
+)
+def test_goal_snapshot_get_goals_rejects_unbound_service_context(monkeypatch, principal):
+    goal = _goal(
+        owner_principal_id="operator:single",
+        owner_session_id="operator-session:single",
+    )
+    job_id = "goal-snapshot-work-board:task-1:attempt-1"
+    projection = _goal_snapshot_projection(goal=goal, job_id=job_id)
+    _patch_goal_snapshot_goal_read(monkeypatch, goal, projection)
+    tokens = set_runtime_context(goal.owner_session_id, "balanced", trust_principal=principal)
+    try:
+        with pytest.raises(PermissionError):
+            get_goals.forward()
+    finally:
+        reset_runtime_context(tokens)
+
+
+def test_goal_snapshot_get_goals_rejects_invalid_live_owner_session(monkeypatch):
+    goal = _goal(
+        owner_principal_id="operator:single",
+        owner_session_id="operator-session:single",
+    )
+    job_id = "goal-snapshot-work-board:task-1:attempt-1"
+    projection = _goal_snapshot_projection(goal=goal, job_id=job_id)
+    from src.tools import goal_tools
+
+    _patch_goal_snapshot_goal_read(monkeypatch, goal, projection)
+
+    async def reject_session(_session_id: str, *, touch: bool = True):
+        raise RuntimeError("session revoked")
+
+    monkeypatch.setattr(goal_tools, "authenticate_session", reject_session)
+    tokens = set_runtime_context(
+        goal.owner_session_id,
+        "balanced",
+        trust_principal=_goal_snapshot_service_principal(job_id, goal.owner_session_id),
+    )
+    try:
+        with pytest.raises(PermissionError, match="owner session"):
+            get_goals.forward()
+    finally:
+        reset_runtime_context(tokens)
 
 
 async def test_service_authority_carries_canonical_goal_owner_delegation(monkeypatch, tmp_path):

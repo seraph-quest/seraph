@@ -209,14 +209,55 @@ class WorkBoardWorkerTools:
 
     async def block(self, request: WorkBoardWorkerBlock) -> BoardAttemptProjection:
         async with self.session_provider() as db:
-            owner, task, _attempt, _workflow = await self._bound(db, request)
+            owner, task, attempt, workflow = await self._bound(db, request)
+            workflow_status = _text(workflow.get("status"))
+            if workflow_status == "succeeded":
+                raise BoardError(
+                    "workflow_already_completed",
+                    "A worker cannot block a task after the authoritative run succeeded",
+                    status_code=409,
+                )
+            if workflow_status != "blocked":
+                lease = workflow.get("lease") if isinstance(workflow.get("lease"), Mapping) else {}
+                workflow_owner = _text(lease.get("owner"))
+                workflow_fence = int(lease.get("fencing_token") or 0)
+                if not workflow_owner or workflow_fence != request.workflow_fencing_token:
+                    raise BoardError(
+                        "stale_workflow_fence",
+                        "The authoritative workflow fence is stale",
+                        status_code=409,
+                    )
+                try:
+                    reconciled = await self.jobs.transition_job(
+                        request.workflow_run_id,
+                        "blocked",
+                        owner=workflow_owner,
+                        fencing_token=workflow_fence,
+                        expected_revision=workflow.get("revision"),
+                        reason=request.block_kind,
+                        result_summary="worker requested bounded board recovery",
+                    )
+                except Exception as exc:
+                    raise BoardError(
+                        "workflow_reconcile_required",
+                        "The authoritative workflow run could not be reconciled before blocking",
+                        status_code=409,
+                        reason_code="reconcile_external_effect",
+                    ) from exc
+                if not isinstance(reconciled, Mapping) or _text(reconciled.get("status")) != "blocked":
+                    raise BoardError(
+                        "workflow_reconcile_required",
+                        "The authoritative workflow run did not enter a safe blocked state",
+                        status_code=409,
+                        reason_code="reconcile_external_effect",
+                    )
             return await self.repository.project_attempt(
                 db,
                 task.task_id,
                 request.attempt_id,
                 expected_revision=request.expected_task_revision,
                 board_fence=request.board_fencing_token,
-                lease_owner=_text(getattr(_attempt, "lease_owner", None)),
+                lease_owner=_text(getattr(attempt, "lease_owner", None)),
                 status=WorkBoardStatus.blocked,
                 outcome=request.block_kind,
                 block_kind=request.block_kind,

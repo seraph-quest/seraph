@@ -35,7 +35,7 @@ from src.work_board.dispatcher import (
     _stable_reason_code,
 )
 from src.work_board.repository import BoardMutation, BoardError, WorkBoardRepository
-from src.workflows.job_runtime import DurableJobRepository
+from src.workflows.job_runtime import DurableJobError, DurableJobRepository
 
 
 OWNER = WorkBoardOwner(principal_id="operator:dispatcher", session_id="dispatcher-session")
@@ -159,24 +159,32 @@ async def test_direct_adapter_admission_order_unit(monkeypatch):
                 "job_id": job_id,
                 "run_identity": job_id,
                 "status": "running",
-                "owner_principal_id": "service:guardian-source-watch",
-                "owner_kind": "guardian_source_watch",
-                "service_id": "guardian-source-watch",
+                "owner": {
+                    "principal_id": "service:guardian-source-watch",
+                    "kind": "service",
+                    "service_id": "guardian-source-watch",
+                },
+                "job_kind": "guardian_source_watch",
                 "operator_session_id": task.owner_session_id,
                 "session_id": task.owner_session_id,
                 "goal_id": task.goal_id,
                 "goal_revision": task.goal_revision,
-                "capability_id": task.capability_id,
                 "capability_version": "1",
+                "declared_authority": {"capability_id": task.capability_id},
                 "input_digest": WorkBoardDispatcher._direct_input_digest(
                     task, attempt, {"watch_id": "watch-1", "expected_plan_revision": 1}
                 ),
-                "run_fingerprint": WorkBoardDispatcher._direct_input_digest(
-                    task, attempt, {"watch_id": "watch-1", "expected_plan_revision": 1}
-                ),
-                "idempotency_scope": "work-board-attempt",
-                "idempotency_key": f"{task.task_id}:{attempt.attempt_id}",
+                "authority_digest": "a" * 64,
+                "run_fingerprint": "b" * 64,
+                "idempotency": {
+                    "scope": "work-board-attempt",
+                    "key": f"{task.task_id}:{attempt.attempt_id}",
+                    "binding": "binding-source-watch",
+                },
             }
+
+        async def get_by_idempotency_binding(self, **_kwargs):
+            return await self.get_job(job_id)
 
     class Repository:
         async def link_attempt_workflow_run(self, _db, *_args, **kwargs):
@@ -225,6 +233,19 @@ async def test_direct_adapter_admission_order_unit(monkeypatch):
     )
     assert phases == [(True, False), (False, True)]
     assert result == {"admitted": True, "completed": False, "blocked": True}
+
+
+@pytest.mark.asyncio
+async def test_direct_binding_lookup_unavailable_is_not_proved_absent():
+    """A missing runtime lookup cannot close a pending board claim."""
+
+    dispatcher = WorkBoardDispatcher(jobs=SimpleNamespace())
+    with pytest.raises(DurableJobError, match="lookup_unavailable"):
+        await dispatcher._lookup_direct_job_id(
+            _task("guardian.research-watch.v1"),
+            _attempt(),
+            {"watch_id": "watch-1", "expected_plan_revision": 1},
+        )
 
 
 @pytest.mark.asyncio
@@ -336,6 +357,8 @@ async def test_repeated_cancel_returns_persisted_intent_without_projection_churn
         capability_id="guardian.research-watch.v1",
         task_revision=9,
         status=WorkBoardStatus.running,
+        executor_id="executor-local",
+        priority=50,
     )
     attempt = SimpleNamespace(
         task_id=task.task_id,
@@ -352,10 +375,41 @@ async def test_repeated_cancel_returns_persisted_intent_without_projection_churn
         "events": [event],
     }
     cleanup_called = False
+    inputs = {"watch_id": "watch-1", "expected_plan_revision": 1}
+    expected_identity = WorkBoardDispatcher._direct_expected_identity(
+        task,
+        attempt,
+        inputs,
+    )
+    attempt.workflow_run_id = expected_identity["job_id"]
 
     class Jobs:
         async def get_job(self, _job_id):
-            return {"job_id": attempt.workflow_run_id, "status": "running", "lease": {}}
+            return {
+                "job_id": expected_identity["job_id"],
+                "run_identity": expected_identity["job_id"],
+                "status": "running",
+                "owner": {
+                    "principal_id": expected_identity["owner_principal_id"],
+                    "kind": expected_identity["owner_kind"],
+                    "service_id": expected_identity["service_id"],
+                },
+                "job_kind": expected_identity["job_kind"],
+                "capability_version": expected_identity["capability_version"],
+                "session_id": expected_identity["session_id"],
+                "operator_session_id": expected_identity["operator_session_id"],
+                "goal_id": expected_identity["goal_id"],
+                "goal_revision": expected_identity["goal_revision"],
+                "declared_authority": {"capability_id": expected_identity["capability_id"]},
+                "idempotency": {
+                    "scope": expected_identity["idempotency_scope"],
+                    "key": expected_identity["idempotency_key"],
+                },
+                "input_digest": expected_identity["input_digest"],
+                "authority_digest": expected_identity["authority_digest"],
+                "run_fingerprint": expected_identity["run_fingerprint"],
+                "lease": {},
+            }
 
     class Repository:
         async def get_detail(self, _db, _owner, _task_id):
@@ -376,9 +430,8 @@ async def test_repeated_cancel_returns_persisted_intent_without_projection_churn
         return 300
 
     dispatcher._effective_runtime = _runtime
-    monkeypatch.setattr("src.work_board.dispatcher._parse_typed_input", lambda _task: {"watch_id": "watch-1", "expected_plan_revision": 1})
+    monkeypatch.setattr("src.work_board.dispatcher._parse_typed_input", lambda _task: inputs)
     dispatcher._lookup_linked_binding = lambda *_args, **_kwargs: _async_value(attempt.workflow_run_id)
-    dispatcher._expected_identity_for_task = lambda *_args, **_kwargs: {}
 
     async def fail_cleanup(*_args, **_kwargs):
         nonlocal cleanup_called

@@ -1,12 +1,20 @@
 import asyncio
 import concurrent.futures
+from collections.abc import Mapping
 from typing import Optional
 
 from smolagents import tool
 
 from src.approval.runtime import get_current_session_id, get_current_trust_principal
+from src.auth.service import authenticate_session
 from src.goals.repository import GoalOwnershipConflict, goal_repository
 from src.security.trust_contract import AuthorityGrant, PrincipalType
+from src.workflows.job_runtime import durable_job_repository
+
+
+_GOAL_SNAPSHOT_SERVICE_ID = "service:goal-snapshot"
+_GOAL_SNAPSHOT_JOB_KIND = "workflow.goal-snapshot-to-file"
+_GOAL_SNAPSHOT_CAPABILITY_VERSION = "1"
 
 
 def _run(coro):
@@ -53,6 +61,159 @@ def _authenticated_goal_owner() -> tuple[str, str]:
     if principal_session and conversation_session and principal_session != conversation_session:
         raise PermissionError("goal tools runtime session is not bound to the authenticated principal")
     return principal_id, owner_session
+
+
+def _text(value: object) -> str:
+    return str(getattr(value, "value", value) or "").strip()
+
+
+def _positive_revision(value: object) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        return None
+    return value
+
+
+def _service_goal_snapshot_context() -> tuple[str, str]:
+    """Resolve the one durable child allowed to read a delegated goal.
+
+    The workflow step runs with the service principal, while the canonical goal
+    remains owned by the operator.  The child job projection is the authority
+    for that delegation; this helper only extracts the current job/session
+    identity and never substitutes an operator principal.
+    """
+
+    principal = get_current_trust_principal()
+    principal_type = getattr(principal, "principal_type", None)
+    is_service = (
+        principal_type is PrincipalType.SERVICE
+        if isinstance(principal_type, PrincipalType)
+        else _text(principal_type).lower() == PrincipalType.SERVICE.value
+    )
+    principal_id = _text(getattr(principal, "principal_id", None))
+    conversation_session = _text(get_current_session_id())
+    principal_session = _text(getattr(principal, "session_id", None))
+    operator_session = _text(getattr(principal, "operator_session_id", None))
+    job_id = _text(getattr(principal, "job_id", None))
+    grants = {
+        _text(getattr(grant, "value", grant))
+        for grant in (getattr(principal, "grants", ()) or ())
+    }
+    if not (
+        principal is not None
+        and is_service
+        and principal_id == _GOAL_SNAPSHOT_SERVICE_ID
+        and bool(getattr(principal, "authenticated", False))
+        and not bool(getattr(principal, "revoked", False))
+        and AuthorityGrant.CAPABILITY_EXECUTE.value in grants
+        and conversation_session
+        and principal_session == conversation_session
+        and job_id
+    ):
+        raise PermissionError(
+            "goal snapshot requires the authenticated service child execution context"
+        )
+    if operator_session and operator_session != conversation_session:
+        raise PermissionError("goal snapshot service session is not bound to the durable child")
+    return job_id, conversation_session
+
+
+async def _load_delegated_goal(*, job_id: str, session_id: str):
+    """Read exactly the goal delegated by the current durable child run."""
+
+    try:
+        projection = await durable_job_repository.get_job(job_id)
+    except Exception as exc:
+        raise PermissionError("goal snapshot durable child is unavailable") from exc
+    if not isinstance(projection, Mapping):
+        raise PermissionError("goal snapshot durable child is missing")
+
+    persisted_job_id = _text(projection.get("job_id") or projection.get("run_identity"))
+    owner = projection.get("owner")
+    authority = projection.get("declared_authority")
+    if not isinstance(owner, Mapping) or not isinstance(authority, Mapping):
+        raise PermissionError("goal snapshot durable delegation is incomplete")
+    if (
+        persisted_job_id != job_id
+        or _text(projection.get("status")) != "running"
+        or _text(owner.get("kind")) != "service"
+        or _text(owner.get("principal_id")) != _GOAL_SNAPSHOT_SERVICE_ID
+        or _text(owner.get("service_id")) != _GOAL_SNAPSHOT_SERVICE_ID
+        or _text(projection.get("job_kind")) != _GOAL_SNAPSHOT_JOB_KIND
+        or _text(projection.get("capability_version")) != _GOAL_SNAPSHOT_CAPABILITY_VERSION
+        or _text(projection.get("session_id")) != session_id
+    ):
+        raise PermissionError("goal snapshot durable child identity is stale or mismatched")
+    persisted_operator_session = _text(projection.get("operator_session_id"))
+    if persisted_operator_session and persisted_operator_session != session_id:
+        raise PermissionError("goal snapshot durable child operator session is stale")
+
+    goal_id = _text(projection.get("goal_id"))
+    goal_revision = _positive_revision(projection.get("goal_revision"))
+    authority_goal_id = _text(authority.get("goal_id"))
+    authority_goal_revision = _positive_revision(authority.get("goal_revision"))
+    delegated_owner = _text(authority.get("goal_owner_principal_id"))
+    delegated_session = _text(authority.get("goal_owner_session_id"))
+    if not (
+        goal_id
+        and goal_revision is not None
+        and authority_goal_id == goal_id
+        and authority_goal_revision == goal_revision
+        and _text(authority.get("capability_id")) == _GOAL_SNAPSHOT_JOB_KIND
+        and _text(authority.get("capability_version")) == _GOAL_SNAPSHOT_CAPABILITY_VERSION
+        and _text(authority.get("principal")) == _GOAL_SNAPSHOT_SERVICE_ID
+        and _text(authority.get("owner_kind")) == "service"
+        and _text(authority.get("owner_principal_id")) == _GOAL_SNAPSHOT_SERVICE_ID
+        and _text(authority.get("service_id")) == _GOAL_SNAPSHOT_SERVICE_ID
+        and _text(authority.get("session_id")) == session_id
+        and delegated_owner
+        and delegated_session
+        and delegated_session == session_id
+    ):
+        raise PermissionError("goal snapshot delegated goal binding is stale or incomplete")
+
+    try:
+        live_session = await authenticate_session(delegated_session, touch=False)
+    except Exception as exc:
+        raise PermissionError("goal snapshot owner session is not valid") from exc
+    live_principal = getattr(live_session, "principal", None)
+    live_principal_type = getattr(live_principal, "principal_type", None)
+    live_principal_id = _text(getattr(live_principal, "principal_id", None))
+    live_is_operator = (
+        live_principal_type is PrincipalType.OPERATOR
+        if isinstance(live_principal_type, PrincipalType)
+        else _text(live_principal_type).lower() == PrincipalType.OPERATOR.value
+    )
+    if not (
+        live_principal is not None
+        and live_is_operator
+        and live_principal_id == delegated_owner
+        and bool(getattr(live_principal, "authenticated", False))
+        and not bool(getattr(live_principal, "revoked", False))
+        and _text(getattr(live_session, "session_id", None))
+    ):
+        raise PermissionError("goal snapshot owner session is not authenticated")
+
+    try:
+        goal = await goal_repository.get(goal_id)
+    except Exception as exc:
+        raise PermissionError("goal snapshot canonical goal is unavailable") from exc
+    if goal is None:
+        raise PermissionError("goal snapshot canonical goal is missing")
+    canonical_revision = _positive_revision(getattr(goal, "revision", None))
+    if (
+        _text(getattr(goal, "id", None)) != goal_id
+        or _text(getattr(goal, "status", None)) != "active"
+        or canonical_revision != goal_revision
+        or _text(getattr(goal, "owner_principal_id", None)) != delegated_owner
+        or _text(getattr(goal, "owner_session_id", None)) != delegated_session
+    ):
+        raise PermissionError("goal snapshot canonical goal owner or revision is stale")
+    return goal
+
+
+def _format_goal(goal) -> str:
+    due = f" (due: {goal.due_date.strftime('%Y-%m-%d')})" if goal.due_date else ""
+    return f"- [{goal.level}/{goal.domain}] {goal.title} (id={goal.id}, {goal.status}){due}"
 
 
 @tool
@@ -164,6 +325,20 @@ def get_goals(level: str = "", domain: str = "", status: str = "active") -> str:
     Returns:
         Formatted list of goals.
     """
+    principal = get_current_trust_principal()
+    principal_type = getattr(principal, "principal_type", None)
+    is_service = (
+        principal_type is PrincipalType.SERVICE
+        if isinstance(principal_type, PrincipalType)
+        else _text(principal_type).lower() == PrincipalType.SERVICE.value
+    )
+    if is_service:
+        if level or domain or status not in {"", "active"}:
+            raise PermissionError("goal snapshot service reads only its delegated goal")
+        job_id, session_id = _service_goal_snapshot_context()
+        goal = _run(_load_delegated_goal(job_id=job_id, session_id=session_id))
+        return _format_goal(goal)
+
     owner_principal_id, owner_session_id = _authenticated_goal_owner()
     goals = _run(goal_repository.list_goals(
         level=level or None,
@@ -175,11 +350,7 @@ def get_goals(level: str = "", domain: str = "", status: str = "active") -> str:
     if not goals:
         return "No goals found matching the criteria."
 
-    lines = []
-    for g in goals:
-        due = f" (due: {g.due_date.strftime('%Y-%m-%d')})" if g.due_date else ""
-        lines.append(f"- [{g.level}/{g.domain}] {g.title} (id={g.id}, {g.status}){due}")
-    return "\n".join(lines)
+    return "\n".join(_format_goal(g) for g in goals)
 
 
 @tool

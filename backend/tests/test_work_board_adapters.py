@@ -5,8 +5,11 @@ import json
 from types import SimpleNamespace
 
 import pytest
+from sqlalchemy import select
 
 from config.settings import settings
+from src.db.models import Goal, WorkBoardAttempt, WorkBoardStatus, WorkBoardTask, WorkflowRunState
+from src.goals.contracts import CriterionVerifierKind, GoalSuccessCriterion
 from src.work_board.dispatcher import (
     GOAL_SNAPSHOT_CAPABILITY,
     TypedInputError,
@@ -15,6 +18,7 @@ from src.work_board.dispatcher import (
 )
 from src.guardian.goal_snapshot_to_file import GoalSnapshotToFileService
 from src.goals.contracts import GoalOutcomeReceipt
+from src.work_board.repository import WorkBoardRepository
 
 
 class _VerticalJobs:
@@ -196,6 +200,122 @@ def test_goal_snapshot_builds_only_the_board_wrapper_identity(monkeypatch, tmp_p
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("capability", "inputs"),
+    [
+        ("guardian.research-watch.v1", {"watch_id": "watch-identity", "expected_plan_revision": 1}),
+        (
+            "engineering.repo-change.v1",
+            {
+                "candidate_id": "candidate-identity",
+                "repository_path": "repo",
+                "patch_artifact_id": "patch-identity",
+                "patch_sha256": "a" * 64,
+                "allowed_paths": ["src/example.py"],
+                "test_args": ["python", "-m", "pytest"],
+            },
+        ),
+        (
+            "work.github-followthrough.v1",
+            {
+                "dossier_artifact_id": "dossier-identity",
+                "dossier_sha256": "b" * 64,
+                "connection_revision": 2,
+                "action": "create_issue",
+                "title": "Identity proof",
+                "body": "Identity proof body",
+            },
+        ),
+        (
+            "guardian-routine.v1",
+            {
+                "routine_id": "routine-identity",
+                "version": 1,
+                "expected_routine_revision": 1,
+                "source_watch_id": "watch-identity",
+                "expected_watch_revision": 1,
+            },
+        ),
+    ],
+)
+async def test_direct_admission_identity_uses_adapter_projection(monkeypatch, capability, inputs):
+    """Each direct adapter supplies the immutable digest envelope for linking."""
+
+    task = SimpleNamespace(
+        task_id=f"task-identity-{capability.split('.')[0]}",
+        owner_principal_id="operator:identity",
+        owner_session_id="session-identity",
+        goal_id="goal-identity",
+        goal_revision=4,
+        capability_id=capability,
+    )
+    attempt = SimpleNamespace(attempt_id="attempt-identity")
+    dispatcher = WorkBoardDispatcher()
+    job_id, owner, job_kind, service_id, binding_key = dispatcher._direct_job_identity(task, attempt, inputs)
+    projection = {
+        "job_id": job_id,
+        "run_identity": job_id,
+        "owner": {
+            "kind": "service" if service_id else "user",
+            "principal_id": owner,
+            "service_id": service_id,
+        },
+        "job_kind": job_kind,
+        "capability_version": dispatcher._direct_capability_version(task),
+        "session_id": task.owner_session_id,
+        "operator_session_id": task.owner_session_id,
+        "goal_id": task.goal_id,
+        "goal_revision": task.goal_revision,
+        "input_digest": "1" * 64,
+        "authority_digest": "2" * 64,
+        "run_fingerprint": "3" * 64,
+        "idempotency": {
+            "scope": "work-board-attempt",
+            "key": binding_key,
+            "binding": f"binding:{capability}",
+        },
+        "declared_authority": (
+            {"capability_id": capability}
+            if capability != "engineering.repo-change.v1"
+            else {}
+        ),
+    }
+    observed_lookup: dict[str, object] = {}
+
+    class _Jobs:
+        async def get_job(self, requested_job_id):
+            assert requested_job_id == job_id
+            return projection
+
+        async def get_by_idempotency_binding(self, **kwargs):
+            observed_lookup.update(kwargs)
+            return projection
+
+    async def _admission_only(*_args, admission_only, **_kwargs):
+        assert admission_only is True
+        return {"job_id": job_id, "status": "running", "admission_only": True}
+
+    dispatcher.jobs = _Jobs()
+    monkeypatch.setattr(dispatcher, "_execute_direct_adapter", _admission_only)
+    response, found, expected = await dispatcher._canonical_direct_admission(
+        task,
+        attempt,
+        inputs,
+        runtime_seconds=300,
+    )
+
+    assert response["job_id"] == job_id
+    assert found["job_id"] == job_id
+    assert expected["job_id"] == job_id
+    assert expected["input_digest"] == projection["input_digest"]
+    assert expected["authority_digest"] == projection["authority_digest"]
+    assert expected["run_fingerprint"] == projection["run_fingerprint"]
+    assert observed_lookup["job_kind"] == job_kind
+    assert observed_lookup["idempotency_key"] == binding_key
+    assert observed_lookup["input_digest"] == projection["input_digest"]
+
+
+@pytest.mark.asyncio
 async def test_goal_snapshot_board_vertical_slice_executes_real_file_and_readback(monkeypatch, tmp_path):
     """Exercise the actual bounded capability behind the board adapter seam."""
 
@@ -343,3 +463,184 @@ async def test_goal_snapshot_board_vertical_slice_executes_real_file_and_readbac
     assert jobs.artifacts and jobs.readbacks
     parent = await jobs.get_job(parent_job_id)
     assert parent["status"] == "succeeded", parent
+
+
+async def _run_real_board_goal_snapshot(async_db, monkeypatch, tmp_path, *, observe_link: bool = False):
+    """Run the board path against the real SQLite and durable job stores."""
+
+    reference, digest = _write_input(
+        tmp_path,
+        {
+            "schema_version": 1,
+            "capability_id": GOAL_SNAPSHOT_CAPABILITY,
+            "input": {"file_path": "artifacts/managed-board-snapshot.md"},
+        },
+    )
+    monkeypatch.setattr(settings, "workspace_dir", str(tmp_path))
+    goal_id = "goal-managed-board"
+    task_id = "task-managed-board"
+    criterion = GoalSuccessCriterion(
+        criterion_id="managed-snapshot",
+        description="A readable managed snapshot exists",
+        verifier_kind=CriterionVerifierKind.artifact_readback,
+        target={"file_path": "artifacts/managed-board-snapshot.md"},
+        evidence_refs=["operator:managed-local-proof"],
+    )
+    task = WorkBoardTask(
+        task_id=task_id,
+        owner_principal_id="operator:managed",
+        owner_session_id="managed-session",
+        goal_id=goal_id,
+        goal_revision=1,
+        title="Write a managed goal snapshot",
+        idempotency_key=task_id,
+        capability_id=GOAL_SNAPSHOT_CAPABILITY,
+        typed_input_ref=reference,
+        typed_input_digest=digest,
+        executor_id="executor-local",
+        priority=80,
+        status=WorkBoardStatus.ready,
+    )
+    async with async_db() as db:
+        db.add(
+            Goal(
+                id=goal_id,
+                title="Managed board goal",
+                status="active",
+                revision=1,
+                owner_principal_id="operator:managed",
+                owner_session_id="managed-session",
+                success_criterion_json=criterion.model_dump_json(),
+            )
+        )
+        db.add(task)
+        await db.commit()
+
+    class _ManagedWorkflow:
+        name = "workflow_goal_snapshot_to_file"
+
+        def get_approval_context(self, _arguments):
+            return {
+                "workflow_name": "goal-snapshot-to-file",
+                "workflow_version": "1",
+                "execution_boundaries": ["workspace_write"],
+                "step_tools": ["get_goals", "write_file"],
+            }
+
+        def __call__(self, *, file_path, sanitize_inputs_outputs=False, **_kwargs):
+            del sanitize_inputs_outputs
+            target = tmp_path / file_path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(
+                "Goal snapshot\n"
+                f"Goal id: {goal_id}\n"
+                "Status: active\n",
+                encoding="utf-8",
+            )
+            return f"Saved {file_path}"
+
+        def get_audit_result_payload(self, _arguments, _result):
+            return "managed local workflow executed", {"durable_run_identity": "managed-local-child"}
+
+    workflow_tool = _ManagedWorkflow()
+    from src.agent import factory as agent_factory
+    from src.workflows import manager as manager_module
+
+    monkeypatch.setattr(
+        agent_factory,
+        "get_tools",
+        lambda **_kwargs: [workflow_tool],
+    )
+    monkeypatch.setattr(
+        manager_module.workflow_manager,
+        "get_workflow",
+        lambda _name: SimpleNamespace(enabled=True, tool_name=workflow_tool.name),
+    )
+
+    repository = WorkBoardRepository()
+    async with async_db() as db:
+        claim = await repository.claim_ready_task(
+            db,
+            task_id,
+            expected_revision=task.task_revision,
+            lease_owner="service:work-board",
+            actor_principal_id="service:work-board",
+            actor_session_id="service:work-board:session",
+        )
+        assert claim is not None
+        await db.commit()
+
+    if observe_link:
+        original_run = GoalSnapshotToFileService.run
+
+        async def observed_run(service, request, **kwargs):
+            async with async_db() as db:
+                linked_attempt = (
+                    await db.execute(
+                        select(WorkBoardAttempt).where(
+                            WorkBoardAttempt.attempt_id == claim.attempt.attempt_id,
+                        )
+                    )
+                ).scalar_one()
+                assert linked_attempt.workflow_run_id == request.parent_job_id
+            return await original_run(service, request, **kwargs)
+
+        monkeypatch.setattr(GoalSnapshotToFileService, "run", observed_run)
+
+    dispatcher = WorkBoardDispatcher(repository=repository)
+    outcome = await dispatcher._admit_execute_project(claim)
+    async with async_db() as db:
+        stored_task = (
+            await db.execute(
+                select(WorkBoardTask).where(WorkBoardTask.task_id == task_id)
+            )
+        ).scalar_one()
+        stored_attempt = (
+            await db.execute(
+                select(WorkBoardAttempt).where(
+                    WorkBoardAttempt.attempt_id == claim.attempt.attempt_id,
+                )
+            )
+        ).scalar_one()
+        runs = list((await db.execute(select(WorkflowRunState))).scalars().all())
+    return outcome, stored_task, stored_attempt, runs
+
+
+@pytest.mark.asyncio
+async def test_goal_snapshot_executes_and_reads_back(async_db, monkeypatch, tmp_path):
+    """The board proves real durable admission, execution, artifact, and readback."""
+
+    outcome, task, attempt, runs = await _run_real_board_goal_snapshot(
+        async_db,
+        monkeypatch,
+        tmp_path,
+    )
+
+    assert outcome["admitted"] is True, outcome
+    assert outcome["completed"] is True, outcome
+    assert task.status is WorkBoardStatus.done
+    assert attempt.workflow_run_id == f"work-board:{task.task_id}:{attempt.attempt_id}"
+    assert (tmp_path / "artifacts/managed-board-snapshot.md").is_file()
+    content = (tmp_path / "artifacts/managed-board-snapshot.md").read_text(encoding="utf-8")
+    assert task.goal_id in content
+    assert len(runs) == 2
+    root = next(run for run in runs if run.run_identity == attempt.workflow_run_id)
+    child = next(run for run in runs if run.run_identity == f"goal-snapshot-work-board:{task.task_id}:{attempt.attempt_id}")
+    assert root.status == child.status == "succeeded"
+    assert child.parent_run_identity == root.run_identity
+    root_effects = json.loads(root.metadata_json or "{}") if root.metadata_json else {}
+    assert root_effects is not None
+
+
+@pytest.mark.asyncio
+async def test_attempt_run_link_persisted_before_adapter_execution(async_db, monkeypatch, tmp_path):
+    """A real registered GoalSnapshot adapter sees its immutable link first."""
+
+    outcome, task, attempt, _runs = await _run_real_board_goal_snapshot(
+        async_db,
+        monkeypatch,
+        tmp_path,
+        observe_link=True,
+    )
+    assert outcome["completed"] is True, outcome
+    assert attempt.workflow_run_id == f"work-board:{task.task_id}:{attempt.attempt_id}"

@@ -810,13 +810,21 @@ class WorkBoardDispatcher:
         binding_job_id = await self._lookup_linked_binding(task, active, inputs)
         if binding_job_id != job_id:
             raise BoardError("workflow_identity_conflict", "The durable run binding does not match this attempt")
-        expected_identity = self._expected_identity_for_task(
-            task,
-            active,
-            inputs,
-            projection,
-            runtime_seconds=await self._effective_runtime(task),
-        )
+        if _text(task.capability_id) == GOAL_SNAPSHOT_CAPABILITY:
+            expected_identity = self._expected_identity_for_task(
+                task,
+                active,
+                inputs,
+                projection,
+                runtime_seconds=await self._effective_runtime(task),
+            )
+        else:
+            expected_identity = self._canonical_identity_from_projection(
+                task,
+                active,
+                inputs,
+                projection,
+            )
         async with self.session_provider() as db:
             await self.repository.validate_attempt_binding(
                 db,
@@ -1257,10 +1265,140 @@ class WorkBoardDispatcher:
         if not _text(task.typed_input_ref) or not _text(task.typed_input_digest):
             return "typed_input_missing", "The task has no complete typed input reference"
         try:
-            _parse_typed_input(task)
+            inputs = _parse_typed_input(task)
         except TypedInputError as exc:
             return exc.code, str(exc)
-        return None, None
+        return await self._capability_preflight(task, goal, inputs)
+
+    async def _capability_preflight(
+        self,
+        task: WorkBoardTask,
+        goal: Goal,
+        inputs: Mapping[str, Any],
+    ) -> tuple[str | None, str | None]:
+        """Recheck live capability grants and configuration before claiming.
+
+        Registration and typed input validation are necessary but do not prove
+        that a capability can be admitted now.  These checks are read-only and
+        deliberately reuse each capability's existing owner, grant, budget,
+        isolation, credential, and package paths.
+        """
+
+        capability = _text(task.capability_id)
+        try:
+            if capability == GOAL_SNAPSHOT_CAPABILITY:
+                from src.agent.factory import get_tools
+                from src.workflows.manager import workflow_manager
+
+                workflow = workflow_manager.get_workflow("goal-snapshot-to-file")
+                if workflow is None or not bool(getattr(workflow, "enabled", False)):
+                    return "workflow_not_loaded_or_disabled", "The governed GoalSnapshot workflow is not currently available"
+                tool_name = _text(getattr(workflow, "tool_name", "workflow_goal_snapshot_to_file"))
+                if not any(_text(getattr(tool, "name", "")) == tool_name for tool in get_tools(include_bound_worker=True)):
+                    return "governed_workflow_tool_unavailable", "The registered GoalSnapshot workflow tool is not currently available"
+                return None, None
+
+            if capability == "guardian.research-watch.v1":
+                from src.guardian.source_watch import _goal_admission, source_watch_service
+
+                watch = await source_watch_service.get_watch(
+                    _text(inputs["watch_id"]),
+                    owner_principal_id=task.owner_principal_id,
+                    owner_session_id=task.owner_session_id,
+                )
+                if not isinstance(watch, Mapping) or _text(watch.get("state")) != "active":
+                    return "watch_not_active", "The source watch is not currently active"
+                if int(watch.get("plan_revision") or 0) != int(inputs["expected_plan_revision"]):
+                    return "watch_plan_revision_stale", "The source watch plan revision changed"
+                admitted, reason, _budget = _goal_admission(goal)
+                if not admitted:
+                    return _stable_reason_code(reason, fallback="capability"), "The source watch grant or budget is not currently admitted"
+                return None, None
+
+            if capability == "engineering.repo-change.v1":
+                from src.api.workflows import (
+                    RootlessDockerRepoSandbox,
+                    _resolve_repo_change_candidate,
+                    authenticate_repo_change_operator,
+                )
+
+                await authenticate_repo_change_operator(
+                    task.owner_session_id,
+                    owner_principal_id=task.owner_principal_id,
+                )
+                preflight = RootlessDockerRepoSandbox().preflight()
+                if not preflight.ok:
+                    return _stable_reason_code(_text(preflight.reason), fallback="isolation_unavailable"), "The repository isolation profile is not currently available"
+                await _resolve_repo_change_candidate(
+                    candidate_id=_text(inputs["candidate_id"]),
+                    goal_id=task.goal_id,
+                    goal_revision=task.goal_revision,
+                    owner_principal_id=task.owner_principal_id,
+                    owner_session_id=task.owner_session_id,
+                    evidence_refs=list(inputs.get("evidence_refs") or []),
+                )
+                return None, None
+
+            if capability == "work.github-followthrough.v1":
+                from src.extensions.github_followthrough import GitHubFollowthroughService
+
+                connection = await GitHubFollowthroughService().get_connection(task.owner_principal_id)
+                if not isinstance(connection, Mapping) or _text(connection.get("mode")) != "active":
+                    return "github_connection_not_active", "The GitHub connection is not currently active"
+                if not bool(connection.get("credential_configured")):
+                    return "credential_not_configured", "The GitHub credential is not currently configured"
+                if int(connection.get("revision") or 0) != int(inputs["connection_revision"]):
+                    return "connection_revision_stale", "The GitHub connection revision changed"
+                operator = await authenticate_session(task.owner_session_id, touch=False)
+                grants = {
+                    _text(getattr(grant, "value", grant))
+                    for grant in (getattr(getattr(operator, "principal", None), "grants", ()) or ())
+                }
+                if AuthorityGrant.EXTERNAL_MUTATION.value not in grants:
+                    return "external_mutation_grant_required", "The external mutation grant is not current"
+                return None, None
+
+            if capability == "guardian-routine.v1":
+                from src.guardian.source_watch import source_watch_service
+                from src.workflows.routines import routine_service
+
+                routine = await routine_service.read(
+                    _text(inputs["routine_id"]),
+                    owner_principal_id=task.owner_principal_id,
+                    owner_session_id=task.owner_session_id,
+                )
+                if not isinstance(routine, Mapping) or _text(routine.get("state")) != "active":
+                    return "routine_not_active", "The reusable procedure is not currently active"
+                if int(routine.get("revision") or 0) != int(inputs["expected_routine_revision"]):
+                    return "routine_revision_stale", "The reusable procedure revision changed"
+                versions = routine.get("versions") if isinstance(routine.get("versions"), list) else []
+                selected = next(
+                    (
+                        version
+                        for version in versions
+                        if isinstance(version, Mapping)
+                        and int(version.get("version") or 0) == int(inputs["version"])
+                    ),
+                    None,
+                )
+                package = routine.get("package") if isinstance(routine.get("package"), Mapping) else {}
+                if selected is None or not _text(selected.get("installed_package_digest")):
+                    return "routine_version_not_installed", "The selected procedure version is not installed"
+                if _text(package.get("status")) != "active" or _text(package.get("digest")) != _text(selected.get("installed_package_digest")):
+                    return "package_review_required", "The procedure package review is not current"
+                watch = await source_watch_service.get_watch(
+                    _text(inputs["source_watch_id"]),
+                    owner_principal_id=task.owner_principal_id,
+                    owner_session_id=task.owner_session_id,
+                )
+                if not isinstance(watch, Mapping) or int(watch.get("plan_revision") or 0) != int(inputs["expected_watch_revision"]):
+                    return "watch_plan_revision_stale", "The procedure source watch revision changed"
+                return None, None
+        except AuthFailure as exc:
+            return exc.code, "The current capability authority is not valid"
+        except Exception as exc:
+            return _safe_error_code(exc), "A current capability prerequisite is unavailable"
+        return "capability_unregistered", "The task names no supported executable capability"
 
     def _build_spec(
         self,
@@ -1355,6 +1493,7 @@ class WorkBoardDispatcher:
             result["blocked"] = True
             return result
 
+        linked_ok = False
         try:
             admission = await self.jobs.admit_job(spec)
             job_id = _text(admission.get("job_id"))
@@ -1362,7 +1501,7 @@ class WorkBoardDispatcher:
                 raise DurableJobIdempotencyConflict("board admission returned a mismatched job identity")
             result["admitted"] = True
             async with self.session_provider() as db:
-                linked = await self.repository.link_attempt_workflow_run(
+                link_mutation = await self.repository.link_attempt_workflow_run(
                     db,
                     task.task_id,
                     attempt.attempt_id,
@@ -1390,7 +1529,8 @@ class WorkBoardDispatcher:
                     actor_principal_id=self.runner_id,
                     actor_session_id=self.runner_session,
                 )
-            board_revision = linked.task.task_revision
+            linked_ok = True
+            board_revision = link_mutation.task.task_revision
             queued = await self.jobs.queue_job(
                 job_id,
                 expected_revision=admission.get("revision"),
@@ -1461,11 +1601,21 @@ class WorkBoardDispatcher:
                 result["blocked"] = True
         except (DurableJobAdmissionDenied, DurableJobIdempotencyConflict, DurableJobError, BoardError) as exc:
             logger.info("work board task %s blocked: %s", task.task_id, type(exc).__name__)
-            await self._project_blocked(claim, "admission_or_execution_blocked", type(exc).__name__)
+            if linked_ok:
+                reconciled = await self._reconcile_linked_failure(claim, job_id)
+                if not reconciled:
+                    await self._project_blocked(claim, "unknown_effect", "reconcile_admission_binding")
+            else:
+                await self._project_blocked(claim, "unknown_effect", "reconcile_admission_binding")
             result["blocked"] = True
         except Exception as exc:
             logger.exception("work board task %s failed", task.task_id)
-            await self._project_blocked(claim, "dispatcher_failure", type(exc).__name__)
+            if linked_ok:
+                reconciled = await self._reconcile_linked_failure(claim, job_id)
+                if not reconciled:
+                    await self._project_blocked(claim, "unknown_effect", "reconcile_admission_binding")
+            else:
+                await self._project_blocked(claim, "unknown_effect", "reconcile_admission_binding")
             result["blocked"] = True
         return result
 
@@ -1486,38 +1636,58 @@ class WorkBoardDispatcher:
         task, attempt = claim.task, claim.attempt
         result: dict[str, Any] = {"admitted": False, "completed": False, "blocked": False}
         adapter_result: Mapping[str, Any] = {}
+        expected: dict[str, Any] | None = None
+        adapter_error: Exception | None = None
+        lookup_error: Exception | None = None
+        linked_ok = False
         try:
-            adapter_result = await self._execute_direct_adapter(
+            adapter_result, admitted_projection, expected = await self._canonical_direct_admission(
                 task,
                 attempt,
                 inputs,
                 runtime_seconds=runtime_seconds,
-                admission_only=True,
             )
+            job_id = _text(expected.get("job_id"))
+            projection = admitted_projection
         except Exception as exc:
             # A service may fail after durable admission but before returning
             # its receipt.  Resolve the exact common binding before deciding
             # whether this claim can be discarded.
+            adapter_error = exc
             adapter_result = {"status": "blocked", "reason_code": _stable_reason_code(_safe_error_code(exc))}
-
-        job_id = self._adapter_job_id(adapter_result)
+            try:
+                job_id = await self._lookup_direct_job_id(task, attempt, inputs)
+                projection = await self.jobs.get_job(job_id)
+                if not isinstance(projection, Mapping):
+                    raise DurableJobError("durable_run_projection_missing")
+                expected = self._canonical_identity_from_projection(
+                    task,
+                    attempt,
+                    inputs,
+                    projection,
+                )
+            except Exception as lookup_exc:
+                lookup_error = lookup_exc
+                job_id = None
+                projection = None
         if not job_id:
-            job_id = await self._lookup_direct_job_id(task, attempt, inputs)
-        if not job_id:
-            await self._close_unadmitted_or_block(
-                claim,
-                _stable_reason_code(adapter_result.get("reason_code"), fallback="admission_binding_missing"),
+            # A binding lookup failure is not evidence that admission never
+            # happened.  Keep the claim for typed reconciliation instead of
+            # deleting an attempt that may own an external effect.
+            logger.info(
+                "work board direct adapter %s binding lookup requires reconciliation: %s",
+                task.task_id,
+                type(lookup_error or adapter_error or DurableJobError("binding_lookup_failed")).__name__,
             )
+            await self._project_blocked(claim, "unknown_effect", "reconcile_admission_binding")
             result["blocked"] = True
             return result
-        projection = await self.jobs.get_job(job_id)
-        if not isinstance(projection, Mapping):
+        if not isinstance(projection, Mapping) or expected is None:
             await self._project_blocked(claim, "unknown_effect", "durable_run_projection_missing")
             result["blocked"] = True
             return result
         result["admitted"] = True
         try:
-            expected = self._direct_expected_identity(task, attempt, inputs, projection)
             async with self.session_provider() as db:
                 linked = await self.repository.link_attempt_workflow_run(
                     db,
@@ -1532,6 +1702,7 @@ class WorkBoardDispatcher:
                     actor_principal_id=self.runner_id,
                     actor_session_id=self.runner_session,
                 )
+            linked_ok = True
             board_revision = linked.task.task_revision
             if adapter_result.get("admission_only") is True:
                 # The adapter has only admitted/prepared its canonical root.
@@ -1615,7 +1786,12 @@ class WorkBoardDispatcher:
             result["blocked"] = True
         except Exception as exc:
             logger.info("work board direct adapter %s reconciliation blocked: %s", task.task_id, type(exc).__name__)
-            await self._project_blocked(claim, "unknown_effect", "reconcile_admission_binding")
+            if linked_ok:
+                reconciled = await self._reconcile_linked_failure(claim, job_id)
+                if not reconciled:
+                    await self._project_blocked(claim, "unknown_effect", "reconcile_admission_binding")
+            else:
+                await self._project_blocked(claim, "unknown_effect", "reconcile_admission_binding")
             result["blocked"] = True
         return result
 
@@ -1878,34 +2054,19 @@ class WorkBoardDispatcher:
     ) -> str | None:
         lookup = getattr(self.jobs, "get_by_idempotency_binding", None)
         if lookup is None:
-            return None
-        expected_job_id, owner, job_kind, service_id, binding_key = self._direct_job_identity(
+            # An unavailable lookup cannot prove that admission was refused.
+            # Treating this as an absent binding would delete a pending claim
+            # while the durable service may already own an effect.
+            raise DurableJobError("admission_binding_lookup_unavailable")
+        _response, existing, expected = await self._canonical_direct_admission(
             task,
             attempt,
             inputs,
+            runtime_seconds=DEFAULT_RUNTIME_SECONDS,
         )
-        capability_version = REGISTERED_CAPABILITIES[_text(task.capability_id)].version
-        try:
-            existing = await lookup(
-                owner_principal_id=owner,
-                goal_id=task.goal_id,
-                goal_revision=task.goal_revision,
-                idempotency_scope="work-board-attempt",
-                idempotency_key=binding_key,
-                expected_job_id=expected_job_id,
-                owner_kind="service" if service_id else "user",
-                service_id=service_id,
-                session_id=task.owner_session_id,
-                operator_session_id=task.owner_session_id,
-                job_kind=job_kind,
-                capability_version=capability_version,
-                input_digest=self._direct_input_digest(task, attempt, inputs),
-                authority_digest=self._direct_authority_digest(task, attempt, inputs),
-                run_fingerprint=self._direct_run_fingerprint(task, attempt, inputs),
-            )
-        except DurableJobIdempotencyConflict:
-            raise
-        return _text(existing.get("job_id")) if isinstance(existing, Mapping) else None
+        if _text(existing.get("job_id") or existing.get("run_identity")) != _text(expected["job_id"]):
+            raise DurableJobIdempotencyConflict("direct adapter binding returned a different root")
+        return _text(existing.get("job_id") or existing.get("run_identity"))
 
     @staticmethod
     def _direct_expected_identity(
@@ -1920,10 +2081,13 @@ class WorkBoardDispatcher:
             inputs,
         )
         owner_kind = "service" if service_id else "user"
-        capability_version = REGISTERED_CAPABILITIES[_text(task.capability_id)].version
-        input_digest = _text((projection or {}).get("input_digest")) or WorkBoardDispatcher._direct_input_digest(task, attempt, inputs)
-        authority_digest = _text((projection or {}).get("authority_digest")) or WorkBoardDispatcher._direct_authority_digest(task, attempt, inputs)
-        run_fingerprint = _text((projection or {}).get("run_fingerprint")) or WorkBoardDispatcher._direct_run_fingerprint(task, attempt, inputs)
+        capability_version = WorkBoardDispatcher._direct_capability_version(task)
+        # Never adopt a persisted digest as the expected value.  A durable
+        # projection is evidence to compare against the live task/input
+        # contract, not an authority to redefine that contract.
+        input_digest = WorkBoardDispatcher._direct_input_digest(task, attempt, inputs)
+        authority_digest = WorkBoardDispatcher._direct_authority_digest(task, attempt, inputs)
+        run_fingerprint = WorkBoardDispatcher._direct_run_fingerprint(task, attempt, inputs)
         return {
             "owner_principal_id": owner_principal_id,
             "owner_kind": owner_kind,
@@ -1942,6 +2106,18 @@ class WorkBoardDispatcher:
             "authority_digest": authority_digest,
             "run_fingerprint": run_fingerprint,
         }
+
+    @staticmethod
+    def _direct_capability_version(task: WorkBoardTask) -> str:
+        """Return the version used by the existing capability service."""
+
+        capability = _text(task.capability_id)
+        return {
+            "guardian.research-watch.v1": "1",
+            "engineering.repo-change.v1": "engineering.repo-change.v1",
+            "work.github-followthrough.v1": "1",
+            "guardian-routine.v1": "guardian-routine.v1",
+        }.get(capability, REGISTERED_CAPABILITIES[capability].version)
 
     @staticmethod
     def _direct_authority_digest(
@@ -1974,6 +2150,163 @@ class WorkBoardDispatcher:
         # their run fingerprint when they do not provide a separate one.
         return WorkBoardDispatcher._direct_input_digest(task, attempt, inputs)
 
+    @staticmethod
+    def _canonical_identity_from_projection(
+        task: WorkBoardTask,
+        attempt: WorkBoardAttempt,
+        inputs: Mapping[str, Any],
+        projection: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Validate and return the identity emitted by the governed adapter.
+
+        Direct capabilities own their durable input and authority envelopes.
+        The board therefore does not recreate a board-shaped digest.  It
+        validates the service's admission projection against the immutable
+        task/attempt identity and carries the already admitted digests into
+        the fenced board link.
+        """
+
+        expected_job_id, expected_owner, expected_kind, expected_service, binding_key = (
+            WorkBoardDispatcher._direct_job_identity(task, attempt, inputs)
+        )
+        owner = projection.get("owner") if isinstance(projection.get("owner"), Mapping) else {}
+        authority = (
+            projection.get("declared_authority")
+            if isinstance(projection.get("declared_authority"), Mapping)
+            else {}
+        )
+        actual_job_id = _text(projection.get("job_id") or projection.get("run_identity"))
+        actual_owner = _text(owner.get("principal_id"))
+        actual_owner_kind = _text(owner.get("kind"))
+        actual_service = _text(owner.get("service_id")) or None
+        actual_job_kind = _text(projection.get("job_kind"))
+        actual_capability = _text(authority.get("capability_id")) or actual_job_kind
+        actual_session = _text(projection.get("session_id"))
+        actual_operator_session = _text(projection.get("operator_session_id")) or actual_session
+        actual_scope = _text(
+            projection.get("idempotency_scope")
+            or (projection.get("idempotency") or {}).get("scope")
+        )
+        actual_key = _text(
+            projection.get("idempotency_key")
+            or (projection.get("idempotency") or {}).get("key")
+        )
+        actual_binding = _text(
+            projection.get("idempotency_binding")
+            or (projection.get("idempotency") or {}).get("binding")
+        )
+        expected_version = WorkBoardDispatcher._direct_capability_version(task)
+        actual_version = _text(projection.get("capability_version"))
+        mismatched = (
+            actual_job_id != expected_job_id
+            or actual_owner != expected_owner
+            or actual_owner_kind != ("service" if expected_service else "user")
+            or actual_service != expected_service
+            or actual_job_kind != expected_kind
+            or actual_capability != _text(task.capability_id)
+            or _text(projection.get("goal_id")) != _text(task.goal_id)
+            or int(projection.get("goal_revision") or 0) != int(task.goal_revision)
+            or actual_session != _text(task.owner_session_id)
+            or actual_operator_session != _text(task.owner_session_id)
+            or actual_version != expected_version
+            or actual_scope != "work-board-attempt"
+            or actual_key != binding_key
+        )
+        if mismatched:
+            raise DurableJobIdempotencyConflict(
+                "adapter admission projection conflicts with the board attempt identity"
+            )
+
+        digests = {
+            "input_digest": _text(projection.get("input_digest")),
+            "authority_digest": _text(projection.get("authority_digest")),
+            "run_fingerprint": _text(projection.get("run_fingerprint")),
+        }
+        if any(len(value) != 64 or any(char not in "0123456789abcdefABCDEF" for char in value) for value in digests.values()):
+            raise DurableJobIdempotencyConflict(
+                "adapter admission projection is missing canonical immutable digests"
+            )
+        identity = {
+            "owner_principal_id": expected_owner,
+            "owner_kind": "service" if expected_service else "user",
+            "service_id": expected_service,
+            "job_id": expected_job_id,
+            "job_kind": expected_kind,
+            "goal_id": task.goal_id,
+            "goal_revision": task.goal_revision,
+            "operator_session_id": task.owner_session_id,
+            "session_id": task.owner_session_id,
+            "capability_id": task.capability_id,
+            "capability_version": expected_version,
+            "idempotency_scope": "work-board-attempt",
+            "idempotency_key": binding_key,
+            "input_digest": digests["input_digest"],
+            "authority_digest": digests["authority_digest"],
+            "run_fingerprint": digests["run_fingerprint"],
+        }
+        if actual_binding:
+            identity["idempotency_binding"] = actual_binding
+        return identity
+
+    async def _canonical_direct_admission(
+        self,
+        task: WorkBoardTask,
+        attempt: WorkBoardAttempt,
+        inputs: Mapping[str, Any],
+        *,
+        runtime_seconds: int,
+    ) -> tuple[Mapping[str, Any], Mapping[str, Any], dict[str, Any]]:
+        """Re-enter one adapter's effect-free admission path and verify it.
+
+        This is the restart/recovery seam.  Each existing service rebuilds its
+        own canonical DurableJobSpec and applies the common binding through its
+        normal admission repository.  The board only links the durable
+        projection returned by that service; it never invents service digests.
+        """
+
+        lookup = getattr(self.jobs, "get_by_idempotency_binding", None)
+        if lookup is None:
+            raise DurableJobError("admission_binding_lookup_unavailable")
+        response = await self._execute_direct_adapter(
+            task,
+            attempt,
+            inputs,
+            runtime_seconds=runtime_seconds,
+            admission_only=True,
+        )
+        job_id = self._adapter_job_id(response)
+        if not job_id:
+            raise DurableJobError("admission_binding_missing")
+        projection = await self.jobs.get_job(job_id)
+        if not isinstance(projection, Mapping):
+            candidate = response.get("job") if isinstance(response, Mapping) else None
+            projection = candidate if isinstance(candidate, Mapping) else None
+        if not isinstance(projection, Mapping):
+            raise DurableJobError("durable_run_projection_missing")
+        expected = self._canonical_identity_from_projection(task, attempt, inputs, projection)
+        found = await lookup(
+            owner_principal_id=expected["owner_principal_id"],
+            goal_id=expected["goal_id"],
+            goal_revision=expected["goal_revision"],
+            idempotency_scope=expected["idempotency_scope"],
+            idempotency_key=expected["idempotency_key"],
+            expected_job_id=expected["job_id"],
+            owner_kind=expected["owner_kind"],
+            service_id=expected["service_id"],
+            session_id=expected["session_id"],
+            operator_session_id=expected["operator_session_id"],
+            job_kind=expected["job_kind"],
+            capability_version=expected["capability_version"],
+            input_digest=expected["input_digest"],
+            authority_digest=expected["authority_digest"],
+            run_fingerprint=expected["run_fingerprint"],
+        )
+        if not isinstance(found, Mapping):
+            raise DurableJobError("admission_binding_missing")
+        if _text(found.get("job_id") or found.get("run_identity")) != expected["job_id"]:
+            raise DurableJobIdempotencyConflict("durable admission returned a different root")
+        return response, found, expected
+
     async def _close_unadmitted_or_block(self, claim: BoardDispatchClaim, reason: str) -> None:
         try:
             async with self.session_provider() as db:
@@ -1991,6 +2324,27 @@ class WorkBoardDispatcher:
                 )
         except Exception:
             await self._project_blocked(claim, reason, reason)
+
+    async def _refresh_claim(self, claim: BoardDispatchClaim) -> BoardDispatchClaim:
+        """Reload task/attempt CAS state before projecting a post-link error."""
+
+        owner = WorkBoardOwner(
+            principal_id=claim.task.owner_principal_id,
+            session_id=claim.task.owner_session_id,
+        )
+        async with self.session_provider() as db:
+            detail = await self.repository.get_detail(db, owner, claim.task.task_id)
+        current_attempt = next(
+            (
+                item
+                for item in detail.get("attempts", [])
+                if item.attempt_id == claim.attempt.attempt_id
+            ),
+            None,
+        )
+        if current_attempt is None:
+            raise BoardError("attempt_not_found", "The board attempt disappeared during recovery", status_code=409)
+        return BoardDispatchClaim(detail["task"], current_attempt, claim.event)
 
     @staticmethod
     def _direct_verified(result: Mapping[str, Any], projection: Mapping[str, Any], job_id: str) -> bool:
@@ -2028,10 +2382,10 @@ class WorkBoardDispatcher:
             session_id=task.owner_session_id,
             # The board wrapper owns the parent lease.  The governed
             # GoalSnapshot adapter binds this service principal to its exact
-            # deterministic child job when it creates the nested run.  A
-            # parent job id here would make the adapter reject that child as
-            # an authenticated identity mismatch.
-            job_id=job_id,
+            # deterministic child job when the nested durable run is
+            # admitted.  Binding the wrapper id here would make the workflow
+            # step reject its own child as an authenticated identity mismatch.
+            job_id=None,
         )
         request = GoalSnapshotToFileRequest(
             goal_id=task.goal_id,
@@ -2226,10 +2580,14 @@ class WorkBoardDispatcher:
         reason: str,
     ) -> None:
         try:
+            try:
+                current = await self._refresh_claim(claim)
+            except Exception:
+                current = claim
             await self._project(
-                claim.task,
-                claim.attempt,
-                board_revision=claim.task.task_revision,
+                current.task,
+                current.attempt,
+                board_revision=current.task.task_revision,
                 status=WorkBoardStatus.blocked,
                 outcome=_stable_reason_code(block_kind),
                 block_kind=_stable_reason_code(block_kind),
@@ -2241,6 +2599,98 @@ class WorkBoardDispatcher:
             )
         except Exception:
             logger.exception("failed to project blocked board task %s", claim.task.task_id)
+
+    async def _reconcile_linked_failure(
+        self,
+        claim: BoardDispatchClaim,
+        workflow_run_id: str,
+    ) -> bool:
+        """Reconcile a linked root before deciding what the board may show.
+
+        A durable admission can outlive the coroutine that admitted it.  A
+        caller exception therefore cannot directly turn the board attempt
+        into a terminal block: the durable root may still be queued/running or
+        may already have produced a verified terminal result.  This helper
+        reads the current root and uses the same conservative rules as restart
+        recovery before projecting a board status.
+        """
+
+        try:
+            current = await self._refresh_claim(claim)
+            projection = await self.jobs.get_job(workflow_run_id)
+            if not isinstance(projection, Mapping):
+                await self._project_blocked(current, "unknown_effect", "reconcile_admission_binding")
+                return True
+            status = _status(projection)
+            effects = projection.get("effects") if isinstance(projection.get("effects"), list) else []
+            uncertain = status in UNCERTAIN_EXTERNAL_EFFECT_STATUSES or any(
+                isinstance(effect, Mapping)
+                and _status(effect.get("status")) in {"unknown", "intent", "dispatched"}
+                for effect in effects
+            )
+            if uncertain:
+                await self._project_blocked(current, "unknown_effect", "reconcile_external_effect")
+                return True
+
+            # Accepted and queued roots are safe to leave Running on the board;
+            # the next managed pass will resume them through the exact binding.
+            if status in {"accepted", "queued"}:
+                return True
+
+            if status == "running":
+                lease = projection.get("lease") if isinstance(projection.get("lease"), Mapping) else {}
+                expires_at = lease.get("expires_at")
+                lease_expired = True
+                if expires_at:
+                    try:
+                        expiry = datetime.fromisoformat(str(expires_at).replace("Z", "+00:00"))
+                        if expiry.tzinfo is None:
+                            expiry = expiry.replace(tzinfo=timezone.utc)
+                        lease_expired = expiry <= self.now()
+                    except (TypeError, ValueError):
+                        lease_expired = True
+                if not lease_expired:
+                    # The authoritative worker still owns the run. Keep the
+                    # board Running instead of presenting a contradictory
+                    # blocked projection while that worker continues.
+                    return True
+                recover = getattr(self.jobs, "recover_stale_job", None)
+                if recover is None:
+                    await self._project_blocked(current, "unknown_effect", "reconcile_external_effect")
+                    return True
+                projection = await recover(workflow_run_id, now=self.now())
+                status = _status(projection)
+                if status in {"accepted", "queued", "running"}:
+                    return True
+
+            if status == "succeeded":
+                proof = self._workflow_readback(projection, workflow_run_id)
+                if proof is not None:
+                    target = WorkBoardStatus.review if current.task.requires_review else WorkBoardStatus.done
+                    await self._project(
+                        current.task,
+                        current.attempt,
+                        board_revision=current.task.task_revision,
+                        status=target,
+                        outcome="verified",
+                        proof=proof,
+                        result_refs=[
+                            {
+                                "job_id": workflow_run_id,
+                                "workflow_run_id": workflow_run_id,
+                                "status": "succeeded",
+                                "verified": True,
+                            }
+                        ],
+                        lease_owner=current.attempt.lease_owner or self.runner_id,
+                    )
+                    return True
+
+            await self._project_blocked(current, "unknown_effect", "reconcile_external_effect")
+            return True
+        except Exception:
+            logger.exception("linked work-board run %s could not be reconciled after adapter failure", workflow_run_id)
+            return False
 
     async def _lookup_linked_binding(
         self,
@@ -2270,16 +2720,13 @@ class WorkBoardDispatcher:
             expected_authority_digest = _safe_digest(spec.declared_authority)
             expected_run_fingerprint = spec.run_fingerprint
         else:
-            expected_job_id, owner_principal_id, job_kind, service_id, _ = self._direct_job_identity(
+            _response, projection, _expected = await self._canonical_direct_admission(
                 task,
                 attempt,
                 inputs,
+                runtime_seconds=await self._effective_runtime(task),
             )
-            owner_kind = "service" if service_id else "user"
-            capability_version = REGISTERED_CAPABILITIES[capability_id].version
-            expected_input_digest = self._direct_input_digest(task, attempt, inputs)
-            expected_authority_digest = None
-            expected_run_fingerprint = expected_input_digest
+            return _text(projection.get("job_id") or projection.get("run_identity")) or None
         try:
             projection = await lookup(
                 owner_principal_id=owner_principal_id,
@@ -2409,6 +2856,30 @@ class WorkBoardDispatcher:
                 lease = projection.get("lease") if isinstance(projection.get("lease"), Mapping) else {}
                 lease_expired = False
                 expires_at = lease.get("expires_at")
+                if status == "running" and not expires_at:
+                    # A running durable root without an expiry cannot be
+                    # fenced or safely resumed after restart.  Keep the
+                    # uncertainty visible instead of leaving the board
+                    # Running forever.
+                    await self._project(
+                        task,
+                        attempt,
+                        board_revision=task.task_revision,
+                        status=WorkBoardStatus.blocked,
+                        outcome="unknown_effect",
+                        block_kind="unknown_effect",
+                        block_reason="reconcile_external_effect",
+                        result_refs=[
+                            {
+                                "job_id": job_id,
+                                "status": "unknown",
+                                "recovery_action": "reconcile_external_effect",
+                            }
+                        ],
+                        lease_owner=attempt.lease_owner or self.runner_id,
+                    )
+                    recovered.append(job_id)
+                    continue
                 if expires_at:
                     try:
                         expiry = datetime.fromisoformat(str(expires_at).replace("Z", "+00:00"))
@@ -2612,21 +3083,7 @@ class WorkBoardDispatcher:
                 if _text(task.capability_id) != GOAL_SNAPSHOT_CAPABILITY:
                     admission = await self._lookup_direct_admission(task, attempt)
                     if admission is None:
-                        async with self.session_provider() as db:
-                            await self.repository.close_proved_absent_attempt(
-                                db,
-                                task.task_id,
-                                attempt.attempt_id,
-                                expected_revision=task.task_revision,
-                                board_fence=attempt.fencing_token,
-                                lease_owner=attempt.lease_owner or self.runner_id,
-                                absence_proven=True,
-                                actor_principal_id=self.runner_id,
-                                actor_session_id=self.runner_session,
-                                now=now or self.now(),
-                            )
-                        recovered.append(f"absent:{attempt.attempt_id}")
-                        continue
+                        raise DurableJobError("admission_binding_not_proven")
                     job_id = _text(admission.get("job_id"))
                     if not job_id:
                         raise DurableJobIdempotencyConflict("pending adapter binding has no durable run identity")
@@ -2647,7 +3104,12 @@ class WorkBoardDispatcher:
                             board_fence=attempt.fencing_token,
                             lease_owner=attempt.lease_owner or self.runner_id,
                             workflow_projection=admission,
-                            expected_identity=self._direct_expected_identity(task, attempt, admission),
+                            expected_identity=self._canonical_identity_from_projection(
+                                task,
+                                attempt,
+                                _parse_typed_input(task),
+                                admission,
+                            ),
                             actor_principal_id=self.runner_id,
                             actor_session_id=self.runner_session,
                         )
@@ -2681,24 +3143,11 @@ class WorkBoardDispatcher:
                 else:
                     raise DurableJobError("admission_binding_lookup_unavailable")
                 if admission is None:
-                    # A successful exact lookup that proves no durable row or
-                    # effect exists closes this pre-admission claim.  It must
-                    # never silently admit the same task after a restart.
-                    async with self.session_provider() as db:
-                        await self.repository.close_proved_absent_attempt(
-                            db,
-                            task.task_id,
-                            attempt.attempt_id,
-                            expected_revision=task.task_revision,
-                            board_fence=attempt.fencing_token,
-                            lease_owner=attempt.lease_owner or self.runner_id,
-                            absence_proven=True,
-                            actor_principal_id=self.runner_id,
-                            actor_session_id=self.runner_session,
-                            now=now or self.now(),
-                        )
-                    recovered.append(f"absent:{attempt.attempt_id}")
-                    continue
+                    # A lookup miss cannot distinguish a pre-admission refusal
+                    # from a commit that is still in flight.  Keep the pending
+                    # claim and expose a reconciliation action; only an
+                    # adapter-specific, effect-free refusal may close it.
+                    raise DurableJobError("admission_binding_not_proven")
                 if _text(admission.get("job_id")) != expected_job_id:
                     raise DurableJobIdempotencyConflict("pending admission identity mismatch")
                 # A persisted uncertain/cost-liable run is a recovery stop. It
@@ -2770,14 +3219,14 @@ class WorkBoardDispatcher:
         lookup = getattr(self.jobs, "get_by_idempotency_binding", None)
         if lookup is None:
             raise DurableJobError("admission_binding_lookup_unavailable")
-        owner = "service:guardian-source-watch" if _text(task.capability_id) == "guardian.research-watch.v1" else task.owner_principal_id
-        return await lookup(
-            owner_principal_id=owner,
-            goal_id=task.goal_id,
-            goal_revision=task.goal_revision,
-            idempotency_scope="work-board-attempt",
-            idempotency_key=f"{task.task_id}:{attempt.attempt_id}",
+        inputs = _parse_typed_input(task)
+        _response, admission, _expected = await self._canonical_direct_admission(
+            task,
+            attempt,
+            inputs,
+            runtime_seconds=await self._effective_runtime(task),
         )
+        return admission
 
 
 _dispatcher = WorkBoardDispatcher()

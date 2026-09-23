@@ -3021,20 +3021,23 @@ class WorkBoardRepository:
             ).scalars().all()
         )
         parent_task = aliased(WorkBoardTask)
-        parents = list(
-            (
-                await db.execute(
-                    select(WorkBoardLink.parent_task_id)
-                    .join(parent_task, parent_task.task_id == WorkBoardLink.parent_task_id)
-                    .where(
-                        WorkBoardLink.child_task_id == task.task_id,
-                        WorkBoardLink.owner_principal_id == owner.principal_id,
-                        WorkBoardLink.owner_session_id == owner.session_id,
-                        parent_task.owner_principal_id == owner.principal_id,
-                        parent_task.owner_session_id == owner.session_id,
-                    )
+        parent_rows = (
+            await db.execute(
+                select(WorkBoardLink.parent_task_id, parent_task.status)
+                .join(parent_task, parent_task.task_id == WorkBoardLink.parent_task_id)
+                .where(
+                    WorkBoardLink.child_task_id == task.task_id,
+                    WorkBoardLink.owner_principal_id == owner.principal_id,
+                    WorkBoardLink.owner_session_id == owner.session_id,
+                    parent_task.owner_principal_id == owner.principal_id,
+                    parent_task.owner_session_id == owner.session_id,
                 )
-            ).scalars().all()
+            )
+        ).all()
+        parents = [row[0] for row in parent_rows]
+        dependency_counts = (
+            len(parent_rows),
+            sum(1 for _, status in parent_rows if status == WorkBoardStatus.done),
         )
         child_task = aliased(WorkBoardTask)
         children = list(
@@ -3070,6 +3073,7 @@ class WorkBoardRepository:
             "task": task,
             "attempts": attempts,
             "parents": [str(item) for item in parents],
+            "dependency_counts": dependency_counts,
             "children": [str(item) for item in children],
             "comments": comments,
             "events": list(reversed(events)),

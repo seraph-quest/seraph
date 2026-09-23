@@ -13,7 +13,7 @@ import { useChatStore } from "../../stores/chatStore";
 import { useQuestStore } from "../../stores/questStore";
 import { useCockpitLayoutStore } from "../../stores/cockpitLayoutStore";
 import { PANEL_MIN_SIZES, usePanelLayoutStore } from "../../stores/panelLayoutStore";
-import type { ChatMessage, ConnectionStatus, GoalInfo, GoalLoopReceipt } from "../../types";
+import type { ChatMessage, ConnectionStatus, GoalInfo, GoalLoopReceipt, WorkBoardReceiptReference } from "../../types";
 import {
   buildWorkflowDraft,
   workflowAcceptsArtifact,
@@ -8751,6 +8751,30 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     if (!workflow) return;
     setSelectedInspector({ kind: "workflow", workflow: resolveWorkflowRun(workflow) });
   }
+  function inspectWorkBoardArtifact(reference: WorkBoardReceiptReference) {
+    const artifact = artifacts.find((entry) => (
+      (reference.artifact_id && entry.id === reference.artifact_id)
+      || (reference.file_path && entry.filePath === reference.file_path)
+    ));
+    if (artifact) {
+      setSelectedInspector({ kind: "artifact", artifact });
+      focusPane("inspector_pane");
+      return;
+    }
+    if (reference.workflow_run_id) {
+      focusPane("workflows_pane");
+      const workflow = workflowRunByIdentity.get(reference.workflow_run_id)
+        ?? workflowRunById.get(reference.workflow_run_id);
+      if (workflow) inspectWorkflowRun(workflow);
+      else {
+        setOperatorStatus("Artifact readback is not in the current index. Refresh workflow evidence to load the task's linked run.");
+        void loadWorkflowRuns();
+      }
+      return;
+    }
+    focusPane("inspector_pane");
+    setOperatorStatus(`Artifact ${reference.file_path ?? reference.artifact_id ?? "reference"} is not in the current evidence index. Refresh activity and workflow evidence, then inspect again.`);
+  }
   async function queueLiveWorkflowResumePlan(
     workflow: WorkflowRunRecord | null | undefined,
     options: {
@@ -15888,7 +15912,10 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
             onClose={() => closeWindowPane("work_board_pane")}
           >
             <WorkBoardPanel
+              ownerPrincipalId={operatorAuth.principalId}
+              ownerSessionId={operatorAuth.sessionId}
               onOpenApprovals={() => focusPane("approvals_pane")}
+              onInspectArtifact={inspectWorkBoardArtifact}
               onInspectWorkflowRun={(workflowRunId) => {
                 focusPane("workflows_pane");
                 const workflow = workflowRunByIdentity.get(workflowRunId) ?? workflowRunById.get(workflowRunId);

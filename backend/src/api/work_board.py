@@ -662,6 +662,7 @@ async def get_work_board_task(request: Request, task_id: str):
             return {
                 "task": await _safe_task_payload(
                     detail["task"],
+                    dependency_counts=detail["dependency_counts"],
                     latest_attempt=(detail["attempts"][0] if detail["attempts"] else None),
                     attempt_count=len(detail["attempts"]),
                     dispatch_rank=dispatch_rank,

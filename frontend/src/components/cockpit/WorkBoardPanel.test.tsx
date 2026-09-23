@@ -491,10 +491,32 @@ describe("WorkBoardPanel", () => {
     await waitFor(() => expect(resolveLateA).not.toBeNull());
 
     fireEvent.click(screen.getByRole("button", { name: "Open task Task B" }));
-    expect(await within(screen.getByRole("dialog")).findByText("Task B")).toBeInTheDocument();
+    const taskDetails = screen.getByRole("region", { name: "Task details for Task B" });
+    expect(await within(taskDetails).findByText("Task B")).toBeInTheDocument();
     await act(async () => { resolveLateA?.(response(detail({ ...taskA, title: "Stale Task A response", task_revision: 99 }))); });
-    expect(within(screen.getByRole("dialog")).getByText("Task B")).toBeInTheDocument();
+    expect(within(taskDetails).getByText("Task B")).toBeInTheDocument();
     expect(screen.queryByText("Stale Task A response")).not.toBeInTheDocument();
+  });
+
+  it("keeps task details modeless and restores focus to the opener when closed", async () => {
+    const currentTask = task({ title: "Modeless details" });
+    taskResponse(fetchMock, currentTask);
+    render(<WorkBoardPanel />);
+
+    const opener = await screen.findByRole("button", { name: "Open task Modeless details" });
+    fireEvent.click(opener);
+    const panel = await screen.findByRole("region", { name: "Task details for Modeless details" });
+
+    expect(panel).not.toHaveAttribute("aria-modal");
+    expect(document.activeElement).toBe(panel);
+    expect(opener.closest("[inert]")).toBeNull();
+
+    opener.focus();
+    expect(document.activeElement).toBe(opener);
+
+    fireEvent.click(within(panel).getByRole("button", { name: "Close task details" }));
+    await waitFor(() => expect(screen.queryByRole("region", { name: "Task details for Modeless details" })).not.toBeInTheDocument());
+    expect(document.activeElement).toBe(opener);
   });
 
   it("traps focus in the create dialog, closes on Escape, and restores focus", async () => {
@@ -573,7 +595,7 @@ describe("WorkBoardPanel", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Open task Unknown external effect" }));
 
     expect(await screen.findByText(/External effect or cost is unresolved/i)).toBeInTheDocument();
-    expect(within(screen.getByRole("dialog")).getByText("Blocked: The destination outcome cannot be proven.")).toBeInTheDocument();
+    expect(within(screen.getByRole("region", { name: "Task details for Unknown external effect" })).getByText("Blocked: The destination outcome cannot be proven.")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /Retry/ })).not.toBeInTheDocument();
   });
 

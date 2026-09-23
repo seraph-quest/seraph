@@ -1700,10 +1700,10 @@ async def test_cancel_job_tree_recovers_legacy_self_root_descendants(async_db):
         child["job_id"],
         root["job_id"],
     ]
-    assert all(
-        (await durable_job_repository.get_job(job_id))["status"] == "cancelled"
-        for job_id in (grandchild["job_id"], child["job_id"], root["job_id"])
-    )
+    for job_id in (grandchild["job_id"], child["job_id"], root["job_id"]):
+        readback = await durable_job_repository.get_job(job_id)
+        assert readback is not None
+        assert readback["status"] == "cancelled"
     other_readback = await durable_job_repository.get_job(other_root["job_id"])
     assert other_readback is not None
     assert other_readback["status"] == "running"
